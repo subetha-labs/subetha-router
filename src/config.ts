@@ -2,11 +2,19 @@
  * allowlist と上限（設計 §3 / §5）。秘密は保持せず、上流 URL も core には出さない。
  */
 
+/** 受信レグの受取先アドレス形式（x402 受信で使う）。 */
+const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+
 export interface SourceTerms {
   readonly amount: string;
   readonly asset: string;
   readonly decimals: number;
   readonly network: string;
+  /**
+   * 受信レグの受取先（Router 自身のアドレス）。**`sourceRail: "x402"` のときだけ必須**。
+   * SubEtha 受信では facilitator が challenge で `payTo` を返すので構成には持たない。
+   */
+  readonly payTo?: string;
 }
 
 /** 送信レグとして受け入れてよい offer の集合（field 単位の一致に使う）。 */
@@ -23,6 +31,11 @@ export interface RouteConfig {
   readonly canonicalPath: string;
   /** 送信レールの表示名（`x402` / `mpp`）。core は rail 名で分岐しない。 */
   readonly rail?: string;
+  /**
+   * 受信レールの表示名（`subetha` / `x402`）。**未指定は `subetha`**（既存構成を壊さない）。
+   * core は rail 名で分岐せず、合成側（`src/main.ts`）が adapter を選ぶ。
+   */
+  readonly sourceRail?: string;
   /** 受信額は Router のローカル設定が権威（上流額から導出しない／U-03）。 */
   readonly source: SourceTerms;
   readonly destination: DestinationAllow;
@@ -112,6 +125,12 @@ export interface RealRailsConfig {
   readonly subethaFacilitatorUrl: string;
   /** `routeId` → 上流 canonical URL（クエリ無しの GET 1 本）。公開応答には出さない。 */
   readonly upstreams: Readonly<Record<string, string>>;
+  /**
+   * x402 **受信**レグの facilitator（`ROUTER_X402_INBOUND_FACILITATOR_URL`）。
+   * SubEtha 受信の facilitator とは**別のキー**（専用名を流用しない）。
+   * `sourceRail: "x402"` の route があるときだけ必須。
+   */
+  readonly x402InboundFacilitatorUrl?: string;
 }
 
 export interface RuntimeConfig {
@@ -202,15 +221,31 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
   if (rail !== undefined && (typeof rail !== "string" || rail === "")) {
     throw new ConfigError(`${at}.rail must be a non-empty string when present`);
   }
+  const sourceRailRaw = value["sourceRail"];
+  if (sourceRailRaw !== undefined && sourceRailRaw !== "subetha" && sourceRailRaw !== "x402") {
+    throw new ConfigError(`${at}.sourceRail must be "subetha" or "x402" when present`);
+  }
+  const sourceRail = sourceRailRaw as string | undefined;
+  // 受信レグの受取先は x402 受信のときだけ必須（SubEtha は facilitator が返すので持たない）。
+  const sourcePayToRaw = source["payTo"];
+  if (sourcePayToRaw !== undefined && (typeof sourcePayToRaw !== "string" || !ADDRESS_PATTERN.test(sourcePayToRaw))) {
+    throw new ConfigError(`${at}.source.payTo must be a 0x address when present`);
+  }
+  const sourcePayTo = sourcePayToRaw as string | undefined;
+  if (sourceRail === "x402" && sourcePayTo === undefined) {
+    throw new ConfigError(`${at}.source.payTo is required when sourceRail is "x402"`);
+  }
   return {
     routeId,
     canonicalPath,
     ...(rail === undefined ? {} : { rail }),
+    ...(sourceRail === undefined ? {} : { sourceRail }),
     source: {
       amount: requireString(source, "amount", `${at}.source`),
       asset: requireString(source, "asset", `${at}.source`),
       decimals: requireNumber(source, "decimals", `${at}.source`),
       network: requireString(source, "network", `${at}.source`),
+      ...(sourcePayTo === undefined ? {} : { payTo: sourcePayTo }),
     },
     destination: {
       scheme: requireString(destination, "scheme", `${at}.destination`),
@@ -339,6 +374,7 @@ function parseReal(
   router: RouterConfig,
   env: Readonly<Record<string, string | undefined>>,
 ): RealRailsConfig {
+  const inboundFacilitatorUrl = env["ROUTER_X402_INBOUND_FACILITATOR_URL"];
   const facilitatorUrl = env["ROUTER_SUBETHA_FACILITATOR_URL"];
   if (facilitatorUrl === undefined || facilitatorUrl === "") {
     throw new ConfigError("ROUTER_SUBETHA_FACILITATOR_URL is required when ROUTER_ADAPTER_MODE=real");
@@ -356,6 +392,14 @@ function parseReal(
     resolved[routeId] = assertAbsoluteHttpUrl(upstream, `x402.upstreams.${routeId}`);
   }
   return {
+    ...(inboundFacilitatorUrl === undefined
+      ? {}
+      : {
+          x402InboundFacilitatorUrl: assertAbsoluteHttpUrl(
+            inboundFacilitatorUrl,
+            "ROUTER_X402_INBOUND_FACILITATOR_URL",
+          ),
+        }),
     subethaFacilitatorUrl: assertAbsoluteHttpUrl(
       facilitatorUrl,
       "ROUTER_SUBETHA_FACILITATOR_URL",

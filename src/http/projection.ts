@@ -45,7 +45,8 @@ export function quoteBody(
     routeId: quote.routeId,
     resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },
     source: {
-      rail: "subetha",
+      // 実レールを名乗る。**既定は `subetha`**（`sourceRail` 未指定の既存 route を壊さない）。
+      rail: route.sourceRail ?? "subetha",
       amount: quote.source.amount,
       asset: quote.source.asset,
       decimals: route.source.decimals,

@@ -14,12 +14,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createSubethaInbound } from "./adapters/inbound/subetha.js";
+import { createX402Inbound } from "./adapters/inbound/x402.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
-import { loadRuntimeConfig, type RuntimeConfig } from "./config.js";
+import {
+  ConfigError,
+  loadRuntimeConfig,
+  routeBindingOf,
+  type RouteConfig,
+  type RuntimeConfig,
+} from "./config.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
-import type { InboundRail } from "./ports/inbound.js";
+import type { InboundOffer, InboundRail } from "./ports/inbound.js";
 import type {
   EvmSigningCapability,
   MppTempoCapability,
@@ -83,6 +90,56 @@ function railByRoute(
   };
 }
 
+/**
+ * route ごとに受信レールを振り分けるラッパ（送信側 `railByRoute` と同形）。
+ * **core の契約は変えない**（core は単一の `InboundRail` しか知らない）。
+ *
+ * `createOffer` は `routeId` を直接持つが、残り 3 つは `offer.extra.routeBinding` しか持たない。
+ * `routeBindingOf(route)` の逆引き Map で解決し、**未知 binding は fail closed**。
+ *
+ * `preflight` は**同期**（core は await しない）。ここを async にすると全購入が落ちる。
+ */
+function inboundByRoute(
+  routes: Readonly<Record<string, RouteConfig>>,
+  rails: Readonly<Record<string, InboundRail>>,
+): InboundRail {
+  const byRoute = new Map<string, InboundRail>();
+  const byBinding = new Map<string, InboundRail>();
+  for (const route of Object.values(routes)) {
+    const sourceRail = route.sourceRail ?? "subetha";
+    // x402 受信は受取先が route ごとなので `x402:<routeId>` で引く。
+    const rail = rails[sourceRail === "x402" ? `x402:${route.routeId}` : sourceRail];
+    if (rail === undefined) {
+      throw new ConfigError(
+        `routes.${route.routeId}.sourceRail has no configured inbound rail`,
+      );
+    }
+    byRoute.set(route.routeId, rail);
+    byBinding.set(routeBindingOf(route), rail);
+  }
+  const forRoute = (routeId: string): InboundRail => {
+    const rail = byRoute.get(routeId);
+    if (rail === undefined) {
+      throw new Error("no inbound rail configured for route");
+    }
+    return rail;
+  };
+  const forOffer = (offer: InboundOffer): InboundRail => {
+    const rail = byBinding.get(offer.extra.routeBinding);
+    if (rail === undefined) {
+      // 発行していない束縛の offer は扱わない。
+      throw new Error("no inbound rail for offer route binding");
+    }
+    return rail;
+  };
+  return {
+    createOffer: (request) => forRoute(request.routeId).createOffer(request),
+    preflight: (offer, credential, nowMs) => forOffer(offer).preflight(offer, credential, nowMs),
+    verify: (offer, credential) => forOffer(offer).verify(offer, credential),
+    settle: (offer, credential) => forOffer(offer).settle(offer, credential),
+  };
+}
+
 export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
@@ -138,8 +195,35 @@ export function composeRails(
     throw new SignerNotAuthorizedError();
   }
 
+  // 受信レールも route ごとに選ぶ（既定は subetha＝既存構成をそのまま維持）。
+  const inboundRails: Record<string, InboundRail> = {
+    subetha: createSubethaInbound({ facilitatorUrl: real.subethaFacilitatorUrl }),
+  };
+  const usesX402Inbound = Object.values(config.router.routes).some(
+    (route) => route.sourceRail === "x402",
+  );
+  if (usesX402Inbound) {
+    if (real.x402InboundFacilitatorUrl === undefined) {
+      throw new ConfigError(
+        "ROUTER_X402_INBOUND_FACILITATOR_URL is required when a route uses sourceRail \"x402\"",
+      );
+    }
+    // 受取先は route ごとに違い得るので、route 単位で adapter を作る。
+    for (const route of Object.values(config.router.routes)) {
+      if (route.sourceRail !== "x402") continue;
+      const payTo = route.source.payTo;
+      if (payTo === undefined) {
+        throw new ConfigError(`routes.${route.routeId}.source.payTo is required for x402 inbound`);
+      }
+      inboundRails[`x402:${route.routeId}`] = createX402Inbound({
+        facilitatorUrl: real.x402InboundFacilitatorUrl,
+        payTo,
+      });
+    }
+  }
+
   return {
-    inbound: createSubethaInbound({ facilitatorUrl: real.subethaFacilitatorUrl }),
+    inbound: inboundByRoute(config.router.routes, inboundRails),
     outbound: railByRoute(config.router.routes, rails),
   };
 }

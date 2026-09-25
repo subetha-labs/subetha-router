@@ -243,6 +243,30 @@ Router の HTTP 層にはアクセスログが無く、上流の課金回数だ�
 `createRouterChatExecution` を実 Router に対して駆動できたという範囲にとどまり、
 chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
 
+## x402 受信 → MPP 送信（P4・達成済み）
+
+**「x402 しか持っていない人が、MPP でしか払えない Provider を使える」**を実チェーンで通した。
+
+| レグ | チェーン | 実 tx | 送金 |
+|---|---|---|---|
+| 受信（x402） | Base Sepolia | `0x6f7d60f5...125e`（block 47303606） | client → **Router** 10000 USDC base units |
+| 送信（MPP） | Tempo Moderato | `0x89cc773d...1829`（block 36903699） | Router → Provider 10000 pathUSD + 69 手数料 |
+
+- R2 の `source.rail` が **`x402`**、`destination.rail` が **`mpp`**（射影が実レールを名乗る）。
+- R4 は `delivered` / `outcome: paid` で、**両レグの txRef が残る**。
+- **2 レグは独立した支払い**。交換もブリッジも FX 変換もしない。
+- 受信レールは route の **`sourceRail`** で選ぶ。**未指定は `subetha`** なので既存構成は不変。
+
+**設計上の要点**: facilitator は `requirements.extra` の `name` / `version` から EIP-712 domain を
+再構成するため、Router はこれを**自分で発行**する。`accepted.extra` に Router 発行キー以外があれば
+**拒否**するので、payer が署名ドメインを差し込むことはできない。
+`paymentRequirements` は必ず **Router 発行の offer から**組み、`credential.accepted` は facilitator へ送らない。
+
+**この経路で到達していないもの**: **AC-4 は未達**（要件の文言は SubEtha 受信レグを指すため）。
+P3（MPP 受信→A）/ P5（同一レール）は DEFER 継続。finality・AC-7 も未達。
+なお chat 契約は `rail === 'subetha'` と `scheme === 'subetha-zerc20'` を要求するため、
+**x402 受信 route は chat からは使えない**（SubEtha route と並存させる）。
+
 ## 送信レグ A / B の実決済（T7・達成済み）
 
 **両レールとも実テストネット決済が成立している。**
