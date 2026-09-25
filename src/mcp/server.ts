@@ -17,13 +17,20 @@
  */
 
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
 import { createRouterClient } from "../client/index.js";
-import { createToolHandlers, TOOL_NAMES, type AdapterMode, type Evidence } from "./tools.js";
+import {
+  createToolHandlers,
+  TOOL_NAMES,
+  type AdapterMode,
+  type Evidence,
+  type InboundPayer,
+} from "./tools.js";
 
 /** 診断は stderr のみ（stdout を汚すとプロトコルが壊れる）。 */
 function note(message: string): void {
@@ -96,7 +103,16 @@ function asResult(body: Record<string, unknown>): {
   };
 }
 
-export async function main(): Promise<void> {
+/**
+ * 受信レグの支払い能力は**起動側から渡す**（`src/**` は鍵を持たない／env からも読まない）。
+ * 省略すると `real` モードの purchase は fail closed になる。
+ */
+export interface McpServerOptions {
+  readonly payer?: InboundPayer;
+  readonly inboundChainId?: number;
+}
+
+export async function main(options: McpServerOptions = {}): Promise<void> {
   const baseUrl = requiredEnv("ROUTER_MCP_BASE_URL");
   const principalId = requiredEnv("ROUTER_MCP_PRINCIPAL_ID");
   const token = requiredEnv("ROUTER_MCP_TOKEN");
@@ -105,7 +121,13 @@ export async function main(): Promise<void> {
   const evidence = resolveEvidence();
 
   const client = createRouterClient({ baseUrl, principalId, token });
-  const handlers = createToolHandlers({ client, mode, evidence });
+  const handlers = createToolHandlers({
+    client,
+    mode,
+    evidence,
+    ...(options.payer === undefined ? {} : { payer: options.payer }),
+    ...(options.inboundChainId === undefined ? {} : { inboundChainId: options.inboundChainId }),
+  });
 
   const server = new McpServer({ name: "subetha-router", version: "0.1.0" });
 
@@ -170,12 +192,23 @@ export async function main(): Promise<void> {
 
   note(
     `subetha-router MCP server ready (mode=${mode}, evidence=${evidence.label}, ` +
-      `verified=${String(evidence.verified)}, router=${baseUrl})`,
+      `verified=${String(evidence.verified)}, router=${baseUrl}, ` +
+      `inboundPayer=${options.payer === undefined ? "none" : options.payer.address})`,
   );
   await server.connect(new StdioServerTransport());
 }
 
-main().catch((error: unknown) => {
-  note(`subetha-router MCP server failed: ${error instanceof Error ? error.message : "unknown"}`);
-  process.exit(1);
-});
+/**
+ * **このファイルが直接の起動エントリのときだけ**自動起動する。
+ * import されたとき（`tools/` が payer を注入して `main()` を呼ぶ場合）に走ってしまうと、
+ * **能力の無いサーバが先に stdio を掴んで実決済できなくなる**。
+ */
+const invokedDirectly =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main({}).catch((error: unknown) => {
+    note(`subetha-router MCP server failed: ${error instanceof Error ? error.message : "unknown"}`);
+    process.exit(1);
+  });
+}

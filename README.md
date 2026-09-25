@@ -351,6 +351,29 @@ claude mcp add subetha-router -- npm run --silent mcp
 | MCP protocol version | SDK の `LATEST_PROTOCOL_VERSION` = `2025-11-25`（ネゴシエーションで下位も可: `2025-06-18` / `2025-03-26` / `2024-11-05` / `2024-10-07`） |
 | Node | v22（type-stripping 既定 ON） |
 
+### 2b. 実決済モードで使う（T9・検証済み）
+
+```sh
+claude mcp add subetha-router -- npm run --silent mcp:real
+```
+
+`npm run mcp` は**合成専用**（受信レグの支払い能力を注入しない）。
+実決済するときは `mcp:real` を使い、**受信レグを払う鍵を env で渡す**
+（`T9_MCP_PAYER_PRIVATE_KEY`）。`src/**` は鍵を持たず env からも読まない設計を維持しており、
+注入するのは `tools/t9-mcp-real.ts` 側。**能力が無ければ `inbound_payer_not_configured` で
+fail closed** し、偽の資格情報で代替しない。
+
+**MCP 経由の実決済を実チェーンで確認済み**:
+
+| レグ | 実 tx |
+|---|---|
+| 受信（x402 / Base Sepolia） | `0x899adf9e...ca49`（block 47304090） |
+| 送信（MPP / Tempo） | `0xcff519d3...b196`（block 36905313） |
+
+`purchase` が `delivered` を返し、`status` の射影に**両レグの txRef**が残る。
+`evidence` は `{label:"real", source:"router_listening_line", verified:true}`＝
+**Router 自身の起動行から読んだ値**で、運用者の自己申告ではない。
+
 ### 3. 公開される tool
 
 | tool | 対応 | 備考 |

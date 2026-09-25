@@ -332,7 +332,7 @@ describe("T6-mcp-nopay: Router の MCP ラッパ", () => {
   );
 
   it(
-    "設計 §3b: real モードでは支払いを始めず固定エラーを返す",
+    "設計 §3b: real モードで payer が注入されていなければ支払いを始めない",
     async () => {
       await withHarness({ mode: "real" }, async (h) => {
         const quoted = await callTool(h.client, "subetha_router_quote", {
@@ -346,7 +346,8 @@ describe("T6-mcp-nopay: Router の MCP ラッパ", () => {
           approval: subject["quoteId"],
         });
         expect(result["ok"]).toBe(false);
-        expect(result["error"]).toBe("real_settlement_not_authorized");
+        // 能力が無いときは偽の資格情報で代替せず fail closed（コード名は能力の不在を指す）。
+        expect(result["error"]).toBe("inbound_payer_not_configured");
         await expectNoUpstreamPay(h);
       });
     },

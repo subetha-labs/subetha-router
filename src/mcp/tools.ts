@@ -29,10 +29,24 @@ export interface Evidence {
   readonly verified: boolean;
 }
 
+/**
+ * 実レールで受信レグを払うための資格情報を作る能力。**製品コードは実装を持たない**
+ * （鍵を扱うのは `tools/` 側で、起動時にコードから注入する）。
+ * 注入されていない `real` モードでは purchase は fail closed になる。
+ */
+export interface InboundPayer {
+  readonly address: string;
+  credentialFor(offer: unknown, chainId: number): Promise<string>;
+}
+
 export interface ToolDeps {
   readonly client: RouterClient;
   readonly mode: AdapterMode;
   readonly evidence: Evidence;
+  /** `real` モードで受信レグを払う能力（省略時は実決済しない）。 */
+  readonly payer?: InboundPayer;
+  /** 受信レグのチェーン ID（EIP-712 署名に必要）。`payer` と対で渡す。 */
+  readonly inboundChainId?: number;
 }
 
 /** tool 名は prefix 固定（審査員の環境では他の MCP サーバと同居する）。 */
@@ -150,13 +164,29 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           detail: `先に ${TOOL_NAMES.quote} を呼んでください（サーバ再起動後は再取得が必要です）。`,
         });
       }
-      if (deps.mode !== "synthetic") {
-        // 実レールでは資格情報を組まない。推測で署名しない。
+      const offer = (quote.source as Record<string, unknown>)["offer"];
+      let credential: string;
+      if (deps.mode === "synthetic") {
+        credential = syntheticCredential(offer);
+      } else if (deps.payer !== undefined && deps.inboundChainId !== undefined) {
+        // 実レール: 注入された能力だけを使う。この層は鍵を持たない。
+        try {
+          credential = await deps.payer.credentialFor(offer, deps.inboundChainId);
+        } catch {
+          // 署名できない offer には推測で署名しない（固定の安全な失敗）。
+          return withEvidence(deps, {
+            ok: false,
+            error: "inbound_credential_unavailable",
+            detail: "受信レグの資格情報を作れませんでした。支払いは開始していません。",
+          });
+        }
+      } else {
+        // 実レールで能力が注入されていない。偽の資格情報で代替しない。
         return withEvidence(deps, {
           ok: false,
-          error: "real_settlement_not_authorized",
+          error: "inbound_payer_not_configured",
           detail:
-            "実署名能力が未実装のため実決済は未解除です。合成レール（synthetic）でのみ実行できます。",
+            "実レールで受信レグを払う能力が注入されていません。合成レールを使うか、payer を注入してください。",
         });
       }
       const result = await deps.client.execute({
@@ -166,7 +196,7 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
         // 未指定・不一致はクライアントと Router の既存拒否面に委ねる
         // （不一致なら Router が `approval_required` を返す）。
         approval: { approved: true, quoteId: input.approval ?? "" },
-        credential: syntheticCredential((quote.source as Record<string, unknown>)["offer"]),
+        credential,
       });
       return withEvidence(deps, { ok: result.outcome === "delivered", ...result });
     },

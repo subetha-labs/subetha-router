@@ -10,7 +10,8 @@
     "test": "vitest run",
     "types": "tsc --noEmit",
     "build": "tsc",
-    "mcp": "tsx src/mcp/server.ts"
+    "mcp": "tsx src/mcp/server.ts",
+    "mcp:real": "tsx tools/t9-mcp-real.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
