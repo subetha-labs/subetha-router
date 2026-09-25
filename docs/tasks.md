@@ -145,3 +145,49 @@ Router の snapshot エンベロープ（`providerId/market/dataSource/payment/f
 - D-01（自動照合・返金・再購入・`unknown` 自動解決）、D-02（外部 B のストア改善）、D-04、D-05 も作らない。
 - B-01（実決済・鍵・署名・faucet）、B-03（chat 実接続）、B-04（remote/push・公開）、B-05（A/B の fresh paid readiness）は
   未解除。本書に E2E 成功の主張はなく、ソースからの発見は互換性の検証ではない。
+
+## 6. T5 — chat 実行レイヤとの相互実装 wire テスト（無課金）
+
+入力: `docs/t5-requirements.md` v2 / `docs/t5-design.md` v2（各1回の独立レビュー反映済み）。
+ラベル `T5-crossimpl-nopay`。T1–T4 の要件・設計はやり直さない。
+
+- **allowed file set**（6ファイル。これ以外が必要になれば停止して報告）:
+  `tests/wire/chat-crossimpl.test.ts` / `tests/fixtures/market-snapshot-server.ts` /
+  `tests/fixtures/chat-router-driver.ts` / `tests/fixtures/chat-crossimpl-harness.ts` /
+  `tests/fixtures/router-calls-proxy.ts` / `README.md`
+- **変更しない**: `src/**`（製品コード）、chat worktree、既存 fixture
+  （`loopback.ts` / `upstream-server.ts` / `facilitator-server.ts` / `router-harness.ts`）、
+  既存テスト、`tsconfig.json`、`vitest.config.ts`
+
+### 内部分割（再計画不要。author 実行単位のみ）
+
+- **T5a — fixture 基盤**: `market-snapshot-server.ts`（`--provider a|b` 分岐、設計 §1.5 の厳密形、
+  `/calls` 計数口）と `router-calls-proxy.ts`（method+path 別計数、body 無改変転送、`/calls`）。
+- **T5b — 駆動基盤**: `chat-crossimpl-harness.ts`（空きポート確保 → `ROUTER_HTTP_PORT` と
+  `ROUTER_CANONICAL_BASE_URL` を proxy origin に揃えて素の `src/main.ts` を起動、
+  facilitator・上流 A/B・proxy の組み立て、`callsOf` 再利用）と
+  `chat-router-driver.ts`（argv シナリオの one-shot、chat モジュールは動的 `await import`、
+  env は ENV_ALLOWLIST 相当、全ステップを stdout JSON 行で出力）。
+- **T5c — テスト本体**: `chat-crossimpl.test.ts`。設計 §2 の表の 13 行を先に失敗させてから満たす。
+- **T5d — README**: 到達点（chat 実行レイヤとの実結合）と未達（実 UI・実決済・AC-7）の区別を更新。
+
+### 満たす振る舞い（先に失敗テストを書く）
+
+- R2 の実応答が chat `decodeQuote` を**無改変で**通る（T5-02）。
+- 否定系（未承認 / 別 quote 承認 / canonical 改変 / 期限切れ / 2回目承認）で
+  **proxy の R3 到達回数と上流 payCalls と facilitator verify/settle がすべて 0**
+  （2回目承認は R3 到達 1 回のまま）＝ T5-03a–e / T5-09。
+- spy payer で 1 回実行 → close → 別プロセス reopen で、chat journal と R4 射影が
+  同一 `paymentId` で整合（T5-04）。
+- 起動行のラベルが `T1-synthetic-nopay`（T5-05a）。payer 未注入で
+  `executionAvailability === "source_payer_unconfigured"`（T5-05b）。
+- 他 principal の 404 と chat 側 `status_unknown`（T5-07。要件 §3 分岐3 の据え置き差分）。
+- `crashBarrier` で応答直前に停止させた後も `execution_unknown` が永続し、再オープンで再送 0（T5-08）。
+- `router-contract.mjs` と `market-data.mjs` の SHA-256、`PROFILE`/`PROTOCOL` のピン留め（T5-10）。
+- journal の `0o700`/`realpathSync`/create 時空/ロック保持中の二重 open が fail-closed（T5-11）。
+
+- **依存**: T1–T4 完了。新規依存を追加しない。chat worktree は読み取りのみ。
+- **完了コマンド（計画）**: `npm run test`（全件）/ `npm run types` / `npm run build`。
+  テストのタイムアウトは `it(name, fn, timeout)` の第3引数で延長し設定ファイルを変更しない。
+- **ゲートと証拠ラベル**: `T5-crossimpl-nopay`。**AC-7 は達成しない**（支払いレグ無し）。
+  実 UI（B-03 の残り）・実決済（B-01）・Provider 実 API（B-05）・finality は未解除のまま。

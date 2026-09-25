@@ -72,6 +72,7 @@ npm run test -- tests/wire/x402-cli.test.ts        # A を実 composition 越し
 npm run test -- tests/wire/mpp-outbound.test.ts    # 送信レール B: 公式 mppx client の wire
 npm run test -- tests/wire/mpp-cli.test.ts         # B を実 composition 越しに縦貫
 npm run test -- tests/wire/client.test.ts          # 型付きクライアント（承認束縛・再オープン）
+npm run test -- tests/wire/chat-crossimpl.test.ts  # 既存 chat 実装 × 実 Router の相互実装（無課金）
 ```
 
 - **wire テストの harness（`tests/fixtures/router-harness.ts`）が `src/main.ts` を子プロセスとして
@@ -207,9 +208,39 @@ JSON 構成ファイルに置く。
 - **証拠の区別**: 上記はクライアント自身の wire テスト（`tests/wire/client.test.ts`、合成 fixture
   相手・`T4-fixture-nopay`）で確認した範囲。`examples/chat-market-data-profile.ts` は同テストから
   import して**例自身の経路**（拒否 / 承認不一致 / callback 改変の無効化 / 正常実行 / `unknown` 保持 /
-  再起動後の reopen）を確認しているだけで、**既存 chat の `ChatExecutionFactory` への drop-in 互換性は
-  示していない**（`status` の取り方など consumer 側の形に合わせる作業は実装者の担当）。実 chat UI 上の
-  因果（B-03 / U-07）、実決済・実 Provider API・finality はいずれも未検証。
+  再起動後の reopen）を確認している。
+
+## 既存 chat の実行レイヤとの相互実装テスト（T5）
+
+`tests/wire/chat-crossimpl.test.ts`（ラベル `T5-crossimpl-nopay`）は、**既存 chat 側の実実装**
+（別 worktree の `apps/chat-demo/router-execution.mts` の `createRouterChatExecution`）と
+**実 Router プロセス**（`src/main.ts`）を、どちらも実プロセスにして実 TCP で突き合わせる。
+chat 側のファイルは**読み取り専用で import するだけで、一切変更しない**。
+
+それまで両者は「同じ契約のつもり」の独立実装で、chat 側のテストは自前のスタブ Router に対して、
+こちらのテストは自前クライアントに対して緑だった。**噛み合うことは確かめられていなかった。**
+
+確認できたこと（合成 fixture・無課金）:
+
+- Router の実 R2 応答が chat 側 `decodeQuote` の厳格検証（余剰フィールドを許さない exact key set）を
+  **無改変で**通る。Provider A 形・B 形の snapshot も chat 側 `market-data.mjs` の検証を通る。
+- 承認 → 実行 → **別プロセスでの再オープン**で、chat 側 journal と Router の R4 射影が
+  同一 `paymentId` の同一結果で整合する。
+- 未承認 / 別 quote への承認 / canonical origin 相違 / 承認期限切れ では**支払いが始まらない**。
+  承認成功後の 2 回目の承認でも R3 は再送されない（at-most-once）。
+- 他 principal からは参照できない（Router が 404 で存在も明かさない）。
+- 応答バイト送出前に Router が落ちても `unknown` が残り、再オープンしても**自動再送しない**。
+
+否定系の判定は chat 側の journal だけに頼らず、**Router 到達回数を数える loopback プロキシ**
+（`tests/fixtures/router-calls-proxy.ts`）と上流・facilitator の `/calls` を独立に突き合わせている。
+Router の HTTP 層にはアクセスログが無く、上流の課金回数だけでは「Router が受けて 4xx で弾いた」
+場合と区別できないため。
+
+**この結合をもって達成しないもの**: 実 chat UI（ブラウザ）上の因果（B-03 / U-07 の残り）、
+実決済・実鍵・実署名、Provider A/B の実 API 到達、finality。
+**AC-7 も未達**（支払いレグを実行していないため）。`ChatExecutionFactory` への drop-in 互換性は、
+`createRouterChatExecution` を実 Router に対して駆動できたという範囲にとどまり、
+chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
 
 ## 出典とライセンス
 
@@ -229,7 +260,9 @@ JSON 構成ファイルに置く。
 - 受信レグ・送信レグの**実決済**、実ウォレット・鍵・署名・ブロードキャスト・faucet・実 RPC。
   公式 SDK を呼んでいることと実決済は別物で、署名境界には**署名しない spy** を入れている。
 - Provider A/B の**実 API 到達**と実 URL・実資産（SubEtha facilitator の実値を含む）。
-- 既存 chat の**実 UI 連携**と、その上での結果の再取得（クライアント越しの R4 再取得までは確認済み）。
+- 既存 chat の**実 UI 連携**（ブラウザ上の操作・`server.mts` / `ui.js`）。
+  chat の**実行レイヤ**（`createRouterChatExecution`）との実 TCP 結合と、その越しの
+  R4 再取得・再オープンまでは確認済み（T5、上記の節）。実 UI の因果は別ゲート。
 - finality の確認。テストネット支払いの実行には**別途の認可**が必要。
 - **クリーンインストールからの再現**と**手動起動手順**（用意しておらず、動いたという主張もしない）。
   Linux 未実行。
