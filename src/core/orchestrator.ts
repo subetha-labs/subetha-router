@@ -58,6 +58,8 @@ export interface PurchaseRequest {
   readonly principalId: string;
   readonly requestId: string;
   readonly quoteId: string;
+  /** R3 のパスが指す `routeId`。quote の経路と違えば別経路を実行しない。 */
+  readonly routeId?: string;
   /** 承認は `quoteId` に束縛される。 */
   readonly approval?: string;
   readonly credential?: PaymentCredential;
@@ -111,6 +113,11 @@ export interface RouterCore {
   quote(request: QuoteRequest): Promise<QuoteOutcome>;
   purchase(request: PurchaseRequest): Promise<PurchaseOutcome>;
   status(paymentId: string, principalId: string): Projection | undefined;
+  /**
+   * 資格情報なしの R3 に対して発行済み offer を再提示するための読み取り専用アクセサ。
+   * 所有 principal・経路一致・未開始の quote のときだけ返し、**journal には何も書かない**。
+   */
+  offerFor(quoteId: string, principalId: string, routeId?: string): InboundOffer | undefined;
   close(): Promise<void>;
 }
 
@@ -368,6 +375,11 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 所有 principal 以外は開始も参照もできない。
     if (intent.principalId !== request.principalId) {
       return outcomeOf("rejected", "not_owner");
+    }
+    // R3 のパスが別経路を指していたら、その quote の経路を実行しない
+    // （既存ライフサイクルの現在状態も返さない）。
+    if (request.routeId !== undefined && request.routeId !== intent.routeId) {
+      return outcomeOf("rejected", "route_mismatch");
     }
     // 別 requestId から同じ quote を買い直させない。
     if (intent.requestId !== request.requestId) {
@@ -691,6 +703,17 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         return undefined;
       }
       return projectionOf(intent);
+    },
+    offerFor(quoteId: string, principalId: string, routeId?: string): InboundOffer | undefined {
+      const intent = store.byQuoteId(quoteId);
+      if (intent === undefined || intent.principalId !== principalId) {
+        return undefined;
+      }
+      if (routeId !== undefined && intent.routeId !== routeId) {
+        return undefined;
+      }
+      // 既にライフサイクルが進んだ quote は再提示しない（二重支払いを誘わない）。
+      return intent.status === "created" ? intent.source.offer : undefined;
     },
     async close(): Promise<void> {
       await journal.close();
