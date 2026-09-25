@@ -90,12 +90,27 @@ async function start(): Promise<void> {
           },
         },
       },
-      // デモの支出上限。ここを超えると Router が止める。
+      /**
+       * 支出上限。**「運営の予算が続く限り使える」**ようにしたいので大きく取るが、
+       * **ゼロにはしない**: budget は予算管理だけでなく、
+       * 再試行ループ等のバグが暴走したときに**残高が尽きる前に止める**安全機構でもある。
+       * 既定は運営の残高（約 10^12 base units）に対して十分小さく、かつ実運用で当たらない値。
+       */
       budget: {
-        maxPurchases: Number(process.env["SUBETHA_MAX_PURCHASES"] ?? "5"),
+        maxPurchases: Number(process.env["SUBETHA_MAX_PURCHASES"] ?? "100000"),
         buckets: [
-          { network: INBOUND.network, asset: INBOUND.asset, maxTotal: "50000", maxPerPurchase: "10000" },
-          { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: "50000", maxPerPurchase: "10000" },
+          {
+            network: INBOUND.network,
+            asset: INBOUND.asset,
+            maxTotal: process.env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000",
+            maxPerPurchase: "10000",
+          },
+          {
+            network: OUTBOUND.network,
+            asset: OUTBOUND.asset,
+            maxTotal: process.env["SUBETHA_OUTBOUND_MAX_TOTAL"] ?? "1000000000",
+            maxPerPurchase: "10000",
+          },
         ],
       },
     },

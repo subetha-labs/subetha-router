@@ -101,6 +101,12 @@ function approvalSubject(quote: QuoteView): Record<string, unknown> {
       asset: source["asset"],
       network: source["network"],
       expiresAt: source["expiresAt"],
+      /**
+       * Router が**この呼び出し側に向けて発行した** offer。
+       * リモート利用では呼び出し側がこれに**自分の鍵で署名**して `credential` を作る。
+       * 秘密ではない（発行相手に返しているだけ）。EIP-712 domain もここに入る。
+       */
+      offer: source["offer"],
     },
     destination: {
       quoted: destination["quoted"],
@@ -118,6 +124,11 @@ export interface ToolHandlers {
     quoteId: string;
     requestId: string;
     approval?: string | undefined;
+    /**
+     * 呼び出し側が**自分の鍵で署名した** `X-Payment` 値（base64）。
+     * リモート運用ではこちらを使う（Router は呼び出し側の鍵を持たない）。
+     */
+    credential?: string | undefined;
   }): Promise<Record<string, unknown>>;
   status(input: { paymentId: string }): Promise<Record<string, unknown>>;
   /** テスト用: 発行済み quote の数（プロセス内保持の確認）。 */
@@ -166,7 +177,11 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
       }
       const offer = (quote.source as Record<string, unknown>)["offer"];
       let credential: string;
-      if (deps.mode === "synthetic") {
+      if (input.credential !== undefined && input.credential !== "") {
+        // 呼び出し側が署名した資格情報。**この層は鍵を持たない**ので中身を作らない。
+        // 不正なら Router の strict preflight と facilitator が拒否する。
+        credential = input.credential;
+      } else if (deps.mode === "synthetic") {
         credential = syntheticCredential(offer);
       } else if (deps.payer !== undefined && deps.inboundChainId !== undefined) {
         // 実レール: 注入された能力だけを使う。この層は鍵を持たない。

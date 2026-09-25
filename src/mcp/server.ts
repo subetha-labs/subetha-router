@@ -112,7 +112,11 @@ export interface McpServerOptions {
   readonly inboundChainId?: number;
 }
 
-export async function main(options: McpServerOptions = {}): Promise<void> {
+/**
+ * tool を登録した MCP サーバを組み立てて返す（トランスポートは呼び出し側が選ぶ）。
+ * stdio（ローカル）と Streamable HTTP（リモート）で**同じ tool 配線**を使うための分離。
+ */
+export async function buildServer(options: McpServerOptions = {}): Promise<McpServer> {
   const baseUrl = requiredEnv("ROUTER_MCP_BASE_URL");
   const principalId = requiredEnv("ROUTER_MCP_PRINCIPAL_ID");
   const token = requiredEnv("ROUTER_MCP_TOKEN");
@@ -174,6 +178,13 @@ export async function main(options: McpServerOptions = {}): Promise<void> {
           .string()
           .optional()
           .describe("人間が承認した quoteId。未指定なら Router が approval_required を返す"),
+        credential: z
+          .string()
+          .optional()
+          .describe(
+            "自分の鍵で署名した X-Payment 値（base64）。リモート利用ではこれを渡す。" +
+              "Router は呼び出し側の鍵を保持しない。",
+          ),
       },
     },
     async (args) => asResult(await handlers.purchase(args)),
@@ -195,6 +206,12 @@ export async function main(options: McpServerOptions = {}): Promise<void> {
       `verified=${String(evidence.verified)}, router=${baseUrl}, ` +
       `inboundPayer=${options.payer === undefined ? "none" : options.payer.address})`,
   );
+  return server;
+}
+
+/** stdio で待ち受ける（ローカル利用）。 */
+export async function main(options: McpServerOptions = {}): Promise<void> {
+  const server = await buildServer(options);
   await server.connect(new StdioServerTransport());
 }
 
