@@ -243,9 +243,26 @@ Router の HTTP 層にはアクセスログが無く、上流の課金回数だ�
 `createRouterChatExecution` を実 Router に対して駆動できたという範囲にとどまり、
 chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
 
-## 送信レグ A の実決済（T7・達成済み）
+## 送信レグ A / B の実決済（T7・達成済み）
 
-**Provider A（`https://provider-a.subethalabs.com`）への実テストネット決済が成立している。**
+**両レールとも実テストネット決済が成立している。**
+
+| レール | Provider | 実 tx | 額 |
+|---|---|---|---|
+| A（x402 / Base Sepolia） | `provider-a.subethalabs.com` | `0x68b9469f...f371`（block 47301621） | 10000 USDC base units |
+| B（MPP / Tempo Moderato） | `provider-b.subethalabs.com` | `0x84157b93...ea69`（block 36898398） | 10000 pathUSD base units + 69 手数料 |
+
+どちらも実 `src/main.ts` を **`mode: real` / `label: real`** で起動し R1→R2→R3→R4 を縦貫、
+R4 が `delivered` / `outcome: paid` を返し、オンチェーンで独立に検証済み。
+
+**レール A と B は送金の主体が違う**（実測）:
+- **A** は Router が**署名するだけ**で、broadcast と gas は facilitator 負担。
+  → payer の native 残高が 0 でも成立する。
+- **B** は **payer 自身が broadcast** し、**手数料も pathUSD 建て**。
+  → payer に pathUSD が必要で、**送金が有料 GET より前に起きる**ため
+  「送金済み・データ未取得」が原理的に起こりうる（その場合も再送せず `unknown` を保持する）。
+
+### Provider A の詳細
 
 | 項目 | 値 |
 |---|---|

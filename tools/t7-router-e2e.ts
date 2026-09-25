@@ -13,10 +13,18 @@ import path from "node:path";
 
 import { startListening } from "../tests/fixtures/loopback.js";
 
-const ROUTE = "md-a-eth-snapshot";
-const UPSTREAM = "https://provider-a.subethalabs.com/v1/eth/snapshot";
+/** `--rail b` で Provider B（MPP / Tempo）に切り替える。既定は A（x402）。 */
+const RAIL = process.argv.includes("--rail") ? process.argv[process.argv.indexOf("--rail") + 1] : "a";
+const IS_B = RAIL === "b";
+
+const ROUTE = IS_B ? "md-b-eth-snapshot" : "md-a-eth-snapshot";
+const UPSTREAM = IS_B
+  ? "https://provider-b.subethalabs.com/v1/eth/snapshot"
+  : "https://provider-a.subethalabs.com/v1/eth/snapshot";
 const SOURCE_TOKEN = "0x0000000000000000000000000000000000005ce7";
-const DEST_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+const DEST_ASSET = IS_B
+  ? "0x20c0000000000000000000000000000000000000"
+  : "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const DEST_PAY_TO = "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1";
 const ALICE = { id: "alice", token: "tok-alice-t7" };
 
@@ -37,9 +45,11 @@ async function main(): Promise<void> {
         [ROUTE]: {
           routeId: ROUTE,
           canonicalPath: `/v1/routes/${ROUTE}/resource`,
-          rail: "x402",
+          rail: IS_B ? "mpp" : "x402",
           source: { amount: "1500", asset: SOURCE_TOKEN, decimals: 6, network: "eip155:11155111" },
-          destination: { scheme: "exact", network: "eip155:84532", asset: DEST_ASSET, payTo: DEST_PAY_TO },
+          destination: IS_B
+            ? { scheme: "tempo/charge", network: "eip155:42431", asset: DEST_ASSET, payTo: DEST_PAY_TO }
+            : { scheme: "exact", network: "eip155:84532", asset: DEST_ASSET, payTo: DEST_PAY_TO },
         },
       },
       // 送金上限を Router 側でも強制する（1 回 10000 / 累計 40000 = 残スコープ）。
@@ -47,16 +57,17 @@ async function main(): Promise<void> {
         maxPurchases: 4,
         buckets: [
           { network: "eip155:11155111", asset: SOURCE_TOKEN, maxTotal: "100000", maxPerPurchase: "5000" },
-          { network: "eip155:84532", asset: DEST_ASSET, maxTotal: "40000", maxPerPurchase: "10000" },
+          { network: IS_B ? "eip155:42431" : "eip155:84532", asset: DEST_ASSET, maxTotal: "40000", maxPerPurchase: "10000" },
         ],
       },
     },
+    // real モードの上流マップはレール共通で `x402` キーに置く（`src/config.ts:428`）。
     x402: { upstreams: { [ROUTE]: UPSTREAM } },
   };
   const configPath = path.join(work, "router.config.json");
   await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
 
-  const router = await startListening("tools/t7-router-process.ts", [], {
+  const router = await startListening("tools/t7-router-process.ts", IS_B ? ["--rail", "b"] : [], {
     T7_PAYER_PRIVATE_KEY: process.env["T7_PAYER_PRIVATE_KEY"]!,
     ROUTER_CONFIG_PATH: configPath,
     ROUTER_JOURNAL_PATH: path.join(work, "journal.ndjson"),

@@ -6,12 +6,16 @@
 
 import { reportStartupFailure, startRouter } from "../src/main.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
+import { createRealMppCapability } from "./real-mpp-capability.js";
 
 const key = process.env["T7_PAYER_PRIVATE_KEY"];
 if (key === undefined || key === "") {
   process.stderr.write("T7_PAYER_PRIVATE_KEY is required\n");
   process.exit(2);
 }
-startRouter({ evmSigning: createRealEvmCapability(key).capability("eip155:84532") }).catch(
-  reportStartupFailure,
-);
+const isB = process.argv.includes("--rail") && process.argv[process.argv.indexOf("--rail") + 1] === "b";
+startRouter(
+  isB
+    ? { mppTempo: createRealMppCapability(key).capability() }
+    : { evmSigning: createRealEvmCapability(key).capability("eip155:84532") },
+).catch(reportStartupFailure);
