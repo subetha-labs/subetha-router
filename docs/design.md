@@ -149,6 +149,43 @@ x402 クライアントは 402 文書の `accepts[]` から自分で 1 件選ん
 本フェーズでは**ウォレットにも鍵にも触れず、署名も送金も行わない**。上記は M4/M6 の実装契約であり、
 実行は B-01 解除後のゲート。
 
+#### 4.2a 受け皿の確定（T2 / M4。インストール済み `2.27.0` の実 API を実物で確認した結果）
+
+**受け皿 A を採り、受け皿 B を最終段として併用する**（どちらか一方では足りない）。確認した公開 API は
+`@x402/fetch` が再輸出する `x402Client` / `x402HTTPClient`（実体は `@x402/core/client`）と
+`@x402/evm` の `ExactEvmScheme` / `ClientEvmSigner`、および `@x402/core/http` の
+`encodePaymentRequiredHeader` / `decodePaymentSignatureHeader` / `decodePaymentResponseHeader`。
+
+- **明示的 payload 生成**: `x402Client.createPaymentPayload(paymentRequired)`（`x402HTTPClient` にも同名の
+  委譲がある）。返る `PaymentPayload.accepted` が **SDK が選んだ requirements そのもの**なので、送信前に
+  承認値と照合できる。
+- **セレクタ**: `new x402Client(selector)` の `SelectPaymentRequirements = (x402Version, requirements[]) => requirements`。
+  Router は承認済み 1 件だけを渡し、件数と field 一致を検査する。
+- **署名前フック**: `client.onBeforePaymentCreation(ctx => …)` は scheme の署名より**先**に走り、
+  `{abort:true, reason}` で生成を止められる（`ctx.selectedRequirements` / `ctx.paymentRequired.resource.url` を検査）。
+- **SDK 側支出ガード**: `client.setSpendControls({maxAmountPerPayment:false, allowedAssets:[{network, asset,
+  maxAmountPerPayment: 承認額}]})`。既定の USD キャップではなく承認額そのものに縛る。
+- **受け皿 B（最終段）**: `ExactEvmScheme(signer)` の `signer` は `ClientEvmSigner`（`address` +
+  `signTypedData`）だけを要求する狭い境界なので、Router はそこを guarded signer で包む。EIP-3009 既定経路では
+  `primaryType:"TransferWithAuthorization"`・`domain.chainId`・`domain.verifyingContract`・`message.to` /
+  `from` / `value` を承認値（viem `getAddress` 正規化後）と照合し、外れたら注入された署名能力を呼ばない。
+  T2 で確認したのは EIP-3009 経路のみで、`permit2` 等は fail closed。
+- **wire は v2**: 402 の `PAYMENT-REQUIRED`、支払い要求の `PAYMENT-SIGNATURE`、応答の `PAYMENT-RESPONSE`
+  （`X-PAYMENT-RESPONSE` も読む）。`wrapFetchWithPayment` は**使わない**（402 受信後の自動再支払いを避け、
+  1 要求につき payload 生成 1 回・送信 1 回）。`x402HTTPClient.processResponse` は hook を発火しないため
+  自動再送が起きない。
+- **応答の解釈**: `success===true` かつ `network` が承認済み値、`transaction` が非空で、レシートが `payer` を
+  名乗る場合は注入された署名者と一致して初めて `paid`。HTTP 200 だけでは支払いの証拠にしない。JSON 本文を
+  実際に取得できなければ、決済証跡を保持したまま「支払い済み・データ未取得」として終端する（再送しない）。
+- **未知フィールド**: SDK の zod は accepts の未知トップレベル欄を落とすため、Router は `PAYMENT-REQUIRED`
+  を**生の JSON としても**読み、未知欄まで含めた完全一致で再照合する（SDK 側の件数・必須欄と突き合わせる）。
+
+実行条件: 署名能力は**起動時にコードから注入**されたものだけを使い、構成ファイル・env からは読み込まない
+（任意のプラグイン読み込みを許さない）。素の CLI（`ROUTER_ADAPTER_MODE=real`）は能力が無ければ
+`signer_not_authorized` で起動を中止し、合成レールへは落ちない。T2 の実行証拠は**非署名 spy + loopback
+fixture**による `T2-fixture-nopay` ラベルに限られ、実鍵・実署名・実決済・finality（B-01 / U-01r / U-04 /
+U-05）は未解除のゲートのまま。
+
 ## 5. journal と状態（単一プロセス・追記専用）
 
 `ROUTER_JOURNAL_PATH`（既定 `runtime/journal.ndjson`。`runtime/` は既に `.gitignore` 済みで提出物に

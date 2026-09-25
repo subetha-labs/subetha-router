@@ -48,6 +48,60 @@ function requireNumber(source: Record<string, unknown>, key: string): number {
   return value;
 }
 
+/** unix 秒・chainId のような整数欄。小数や負値は受け付けない。 */
+function requireInteger(source: Record<string, unknown>, key: string): number {
+  const value = requireNumber(source, key);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`facilitator response has a malformed ${key}`);
+  }
+  return value;
+}
+
+const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+const NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * `helper` / `deadline` は**両方あるか両方ないか**で、かつ**型も満たす**（設計 §4.1）。
+ * 片側欠落・型違反のどちらでも offer を発行しない（不整合な challenge を承認対象にしない）。
+ */
+function requireHelperPair(json: Record<string, unknown>): { helper: string; deadline: number } | undefined {
+  const helper = json["helper"];
+  const deadline = json["deadline"];
+  if (helper === undefined && deadline === undefined) {
+    return undefined;
+  }
+  if (helper === undefined || deadline === undefined) {
+    throw new Error("facilitator challenge has only one of helper/deadline");
+  }
+  if (typeof helper !== "string" || !ADDRESS_PATTERN.test(helper)) {
+    throw new Error("facilitator challenge has a malformed helper");
+  }
+  if (typeof deadline !== "number" || !Number.isInteger(deadline) || deadline <= 0) {
+    throw new Error("facilitator challenge has a malformed deadline");
+  }
+  return { helper, deadline };
+}
+
+/** `fee` は `{amount:10進文字列, bps:整数}`。型違反は offer を発行しない。 */
+function requireFee(json: Record<string, unknown>): Record<string, unknown> | undefined {
+  const fee = json["fee"];
+  if (fee === undefined) {
+    return undefined;
+  }
+  if (!isRecord(fee)) {
+    throw new Error("facilitator challenge has a malformed fee");
+  }
+  const amount = fee["amount"];
+  const bps = fee["bps"];
+  if (typeof amount !== "string" || !/^\d+$/.test(amount)) {
+    throw new Error("facilitator challenge has a malformed fee.amount");
+  }
+  if (typeof bps !== "number" || !Number.isInteger(bps) || bps < 0) {
+    throw new Error("facilitator challenge has a malformed fee.bps");
+  }
+  return fee;
+}
+
 export function createSubethaInbound(options: SubethaInboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
   const timeoutMs = options.timeoutMs ?? 5_000;
@@ -91,22 +145,21 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
         throw new Error(`facilitator challenge failed with status ${status}`);
       }
       const challengeNonce = requireString(json, "challengeNonce");
-      const expiresAt = requireNumber(json, "expiresAt");
-      const chainId = requireNumber(json, "chainId");
-      const helper = json["helper"];
-      const deadline = json["deadline"];
-      // `helper` と `deadline` は両方あるか両方ないか。不整合なら offer を発行しない。
-      if ((helper === undefined) !== (deadline === undefined)) {
-        throw new Error("facilitator challenge has only one of helper/deadline");
+      if (!NONCE_PATTERN.test(challengeNonce)) {
+        throw new Error("facilitator challenge has a malformed challengeNonce");
       }
-      const fee = json["fee"];
-      if (fee !== undefined && !isRecord(fee)) {
-        throw new Error("facilitator challenge has a malformed fee");
+      const expiresAt = requireInteger(json, "expiresAt");
+      const chainId = requireInteger(json, "chainId");
+      const token = requireString(json, "token");
+      if (!ADDRESS_PATTERN.test(token)) {
+        throw new Error("facilitator challenge has a malformed token");
       }
+      const pair = requireHelperPair(json);
+      const fee = requireFee(json);
       return {
         scheme: SUBETHA_SCHEME,
         network: `eip155:${chainId}`,
-        asset: requireString(json, "token"),
+        asset: token,
         amount: requireString(json, "amount"),
         payTo: requireString(json, "payTo"),
         maxTimeoutSeconds,
@@ -114,7 +167,7 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
           challengeNonce,
           expiresAt,
           routeBinding: request.routeBinding,
-          ...(helper === undefined ? {} : { helper, deadline }),
+          ...(pair === undefined ? {} : { helper: pair.helper, deadline: pair.deadline }),
           ...(fee === undefined ? {} : { fee }),
         },
       };

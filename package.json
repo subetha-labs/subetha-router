@@ -12,7 +12,11 @@
     "build": "tsc"
   },
   "dependencies": {
-    "fs-ext": "2.1.1"
+    "@x402/core": "2.27.0",
+    "@x402/evm": "2.27.0",
+    "@x402/fetch": "2.27.0",
+    "fs-ext": "2.1.1",
+    "viem": "2.54.0"
   },
   "devDependencies": {
     "@types/fs-ext": "2.0.3",

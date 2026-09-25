@@ -345,7 +345,10 @@ test("既定（実 adapter）構成は synthetic に落ちず fail closed で起
   });
   expect(defaultMode.code).not.toBe(0);
   expect(defaultMode.stdout).not.toContain('"listening"');
-  expect(defaultMode.stderr).toContain("adapter_not_wired");
+  // この構成には実レールの設定（facilitator URL / x402 上流）が無いので config_invalid で止まる。
+  // 「設定は揃っているが署名能力が無い → signer_not_authorized」は tests/wire/x402-cli.test.ts。
+  expect(defaultMode.stderr).toContain("config_invalid");
+  expect(defaultMode.stderr).toContain("ROUTER_SUBETHA_FACILITATOR_URL");
   expect(defaultMode.stderr).not.toContain(ALICE.token);
 
   const unknownMode = await runToExit("src/main.ts", [], {

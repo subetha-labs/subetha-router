@@ -5,6 +5,8 @@
  *
  * usage: facilitator-server.ts --token 0x… --chain-id 11155111 --pay-to 0x…
  *        [--settle ok|pending|rejected|error] [--verify ok|invalid]
+ *        [--challenge ok|helper-only|deadline-only|helper-bad-type|deadline-bad-type|fee-bad-type]
+ *        [--settle-network <caip2>]
  */
 
 import { randomBytes } from "node:crypto";
@@ -20,6 +22,33 @@ const chainId = Number(arg("chain-id", "11155111"));
 const payTo = arg("pay-to", "0x00000000000000000000000000000000000r0ute");
 const settleMode = arg("settle", "ok");
 const verifyMode = arg("verify", "ok");
+/** challenge 応答の形（`helper`/`deadline` の片側欠落・型違反の再現）。 */
+const challengeMode = arg("challenge", "ok");
+/** settle 応答の `network`（発行 offer と異なる値を返す不正応答の再現）。 */
+const settleNetwork = arg("settle-network", "");
+
+/** `helper`/`deadline`（両方あるか両方ないか）と、その型違反を作る。 */
+function challengeExtras(): Record<string, unknown> {
+  const helper = "0x0000000000000000000000000000000000001e19";
+  const deadline = Math.floor(Date.now() / 1000) + 300;
+  switch (challengeMode) {
+    case "helper-only":
+      return { helper };
+    case "deadline-only":
+      return { deadline };
+    case "helper-bad-type":
+      // 両方あるが `helper` がアドレス文字列でない（型違反）。
+      return { helper: 42, deadline };
+    case "deadline-bad-type":
+      return { helper, deadline: `${deadline}` };
+    case "fee-bad-type":
+      return { fee: { amount: 10, bps: "30" } };
+    case "both":
+      return { helper, deadline };
+    default:
+      return {};
+  }
+}
 
 /** 発行済み challenge。nonce → 発行内容。 */
 const issued = new Map<string, { amount: string; expiresAt: number }>();
@@ -66,7 +95,15 @@ const server = http.createServer((request, response) => {
       const challengeNonce = `0x${randomBytes(32).toString("hex")}`;
       const expiresAt = Math.floor(Date.now() / 1000) + 300;
       issued.set(challengeNonce, { amount, expiresAt });
-      send(response, 200, { payTo, amount, token, chainId, challengeNonce, expiresAt });
+      send(response, 200, {
+        payTo,
+        amount,
+        token,
+        chainId,
+        challengeNonce,
+        expiresAt,
+        ...challengeExtras(),
+      });
       return;
     }
 
@@ -82,7 +119,9 @@ const server = http.createServer((request, response) => {
     if (url.pathname === "/settle") {
       settleCalls += 1;
       const requirements = (body["paymentRequirements"] ?? {}) as Record<string, unknown>;
-      const network = typeof requirements["network"] === "string" ? requirements["network"] : "";
+      const requested = typeof requirements["network"] === "string" ? requirements["network"] : "";
+      // 発行 offer と異なる `network` を返す不正応答も再現できるようにする。
+      const network = settleNetwork === "" ? requested : settleNetwork;
       if (settleMode === "error") {
         send(response, 500, { error: "synthetic_facilitator_error" });
         return;

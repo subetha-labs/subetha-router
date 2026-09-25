@@ -103,6 +103,17 @@ export interface HttpConfig {
   readonly canonicalBaseUrl: string;
 }
 
+/**
+ * 実レールの接続先（設計 §4.1 / §4.2）。**値の差し替えだけで実 facilitator・実上流へ届く**
+ * 形にし、コード側に URL・資産を埋め込まない。署名能力はここではなく注入で渡す。
+ */
+export interface RealRailsConfig {
+  /** 実 SubEtha facilitator の base URL（設定 1 本だけ）。 */
+  readonly subethaFacilitatorUrl: string;
+  /** `routeId` → 上流 canonical URL（クエリ無しの GET 1 本）。公開応答には出さない。 */
+  readonly upstreams: Readonly<Record<string, string>>;
+}
+
 export interface RuntimeConfig {
   readonly router: RouterConfig;
   readonly http: HttpConfig;
@@ -111,6 +122,7 @@ export interface RuntimeConfig {
   readonly principals: ReadonlyMap<string, string>;
   readonly adapterMode: AdapterMode;
   readonly synthetic?: SyntheticRailsConfig;
+  readonly real?: RealRailsConfig;
 }
 
 /** 構成が成立しない（起動しない）。メッセージに秘密の値を載せない。 */
@@ -301,6 +313,58 @@ function parseSynthetic(raw: unknown, router: RouterConfig): SyntheticRailsConfi
   };
 }
 
+/** 実レールの接続先は絶対 http(s) URL。上流 canonical はクエリを持たない。 */
+export function assertAbsoluteHttpUrl(raw: string, at: string, allowQuery = false): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigError(`${at} must be an absolute URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new ConfigError(`${at} must use http(s)`);
+  }
+  if (!allowQuery && url.search !== "") {
+    throw new ConfigError(`${at} must not carry a query`);
+  }
+  return url.toString();
+}
+
+/**
+ * 実レールの構成（`ROUTER_ADAPTER_MODE=real`）。合成セクションは読まない。
+ * 署名能力は構成ファイルからは読み込まない（任意のプラグイン読み込みをしない）。
+ */
+function parseReal(
+  raw: unknown,
+  router: RouterConfig,
+  env: Readonly<Record<string, string | undefined>>,
+): RealRailsConfig {
+  const facilitatorUrl = env["ROUTER_SUBETHA_FACILITATOR_URL"];
+  if (facilitatorUrl === undefined || facilitatorUrl === "") {
+    throw new ConfigError("ROUTER_SUBETHA_FACILITATOR_URL is required when ROUTER_ADAPTER_MODE=real");
+  }
+  if (!isRecord(raw)) {
+    throw new ConfigError("x402 section is required when ROUTER_ADAPTER_MODE=real");
+  }
+  const upstreams = requireRecord(raw, "upstreams", "x402");
+  const resolved: Record<string, string> = {};
+  for (const routeId of Object.keys(router.routes)) {
+    const upstream = upstreams[routeId];
+    if (typeof upstream !== "string" || upstream === "") {
+      throw new ConfigError(`x402.upstreams.${routeId} is required for every route`);
+    }
+    resolved[routeId] = assertAbsoluteHttpUrl(upstream, `x402.upstreams.${routeId}`);
+  }
+  return {
+    subethaFacilitatorUrl: assertAbsoluteHttpUrl(
+      facilitatorUrl,
+      "ROUTER_SUBETHA_FACILITATOR_URL",
+      true,
+    ).replace(/\/$/, ""),
+    upstreams: resolved,
+  };
+}
+
 function parsePort(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw === "") {
     return fallback;
@@ -359,6 +423,8 @@ export function loadRuntimeConfig(
     journalPath: env["ROUTER_JOURNAL_PATH"] ?? "runtime/journal.ndjson",
     principals: parsePrincipals(env["ROUTER_PRINCIPAL_TOKENS"]),
     adapterMode: mode,
-    ...(mode === "synthetic" ? { synthetic: parseSynthetic(document["synthetic"], router) } : {}),
+    ...(mode === "synthetic"
+      ? { synthetic: parseSynthetic(document["synthetic"], router) }
+      : { real: parseReal(document["x402"], router, env) }),
   };
 }
