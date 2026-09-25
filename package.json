@@ -11,7 +11,8 @@
     "types": "tsc --noEmit",
     "build": "tsc",
     "mcp": "tsx src/mcp/server.ts",
-    "mcp:real": "tsx tools/t9-mcp-real.ts"
+    "mcp:real": "tsx tools/t9-mcp-real.ts",
+    "demo:mcp": "tsx tools/demo-mcp.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",

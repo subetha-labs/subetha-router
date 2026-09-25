@@ -311,6 +311,61 @@ R4 が `delivered` / `outcome: paid` を返し、オンチェーンで独立に�
 - 決済スコープは記録済み（`docs/t7-requirements.md` §2）。
   **公開 facilitator は連打すると nonce 衝突を起こすため、決済は数秒空ける。**
 
+## 審査員向け: 1 コマンドで試す
+
+```sh
+claude mcp add subetha-router \
+  -e SUBETHA_PAYER_PRIVATE_KEY=0x<Base Sepolia の使い捨て鍵> \
+  -- npm run --silent demo:mcp
+```
+
+これだけで Router と MCP サーバが立ち上がり、エージェントから使えるようになる。
+**Router は別途起動しなくてよい**（このコマンドが子プロセスとして 1 つだけ起動する）。
+
+### 体験できること
+
+**x402 しか持っていないのに、MPP でしか払えない Provider のデータが取れる。**
+
+1. `subetha_router_quote` — いくら払うかが返る（`decimals` 付きなので額が読める）。
+   **この時点では支払いは起きない。**
+2. **人間が承認する** — 納得したら `subetha_router_purchase` に `approval` として `quoteId` を渡す。
+   エージェントが勝手に払う作りにはなっていない。
+3. Router が **Base Sepolia の USDC を受け取り**、**Tempo の pathUSD で Provider に払って**
+   Uniswap v3 の参照価格を返す。`subetha_router_status` に**両レグの実 tx** が残る。
+
+### 用意するもの
+
+| 項目 | 内容 |
+|---|---|
+| 鍵 | **Base Sepolia の使い捨て鍵**。1 回 $0.01（10000 base units）。数回分あれば足りる |
+| USDC | Base Sepolia の USDC `0x036CbD53...CF7e` |
+| ガス | **不要**。x402 の EIP-3009 経路では facilitator が送信して gas を負担する |
+| Node | v22 以降（type-stripping 既定 ON） |
+
+**鍵は審査員のもので、Router は保持しない。** `src/**` は鍵を持たず env からも読まない設計で、
+env を読んで能力として注入するのは `tools/demo-mcp.ts` だけ。
+支出は Router の budget で機械的に上限を掛けている（既定 5 回、1 回 10000 base units）。
+
+### 実測済みの動作（この手順をそのまま実行した結果）
+
+```
+tools: subetha_router_list_routes, subetha_router_quote, subetha_router_purchase, subetha_router_status
+quote: 10000 base units (decimals 6) on eip155:84532
+purchase outcome=delivered
+inbound  tx=0x17d1ab62...8847   (Base Sepolia, block 47304257)
+outbound tx=0x78385ee1...58ce   (Tempo Moderato, block 36905875)
+```
+
+### うまくいかないとき
+
+- **`inbound_payer_not_configured`** — `SUBETHA_PAYER_PRIVATE_KEY` が渡っていない。
+  偽の資格情報で代替せず止まる設計。
+- **`resource_mismatch`** — `quote` と `purchase` で `requestId` が違う。**同じ値を使う**。
+- **`bucket_limit`** — 支出上限に達した。**止まること自体が安全機構**。
+- **`unknown`** — 送金済みかどうか確定できない状態。**自動で再送しない**（二重支払いを避けるため）。
+  `subetha_router_status` で確認する。
+- 決済は**数秒空ける**（公開 facilitator が連続実行で nonce 衝突を起こす）。
+
 ## MCP から使う（T6・審査員向けの再現手順）
 
 Router を **MCP サーバ**として Claude Code から呼べる。**フロントエンドは用意していない。**
