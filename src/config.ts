@@ -88,6 +88,12 @@ export interface SyntheticRailsConfig {
   readonly facilitatorUrl: string;
   /** `routeId` → 上流 canonical URL。**公開応答には出さない。** */
   readonly upstreams: Readonly<Record<string, string>>;
+  /**
+   * 合成専用の試験用シーム。指定すると R3 の応答バイトを出す**直前**で停止し、
+   * このパスに到達の合図を書く（応答前クラッシュの再現用）。`synthetic` セクション
+   * にしか書けないので、既定の `real` 構成では**読まれることすらない**。
+   */
+  readonly crashBarrierPath?: string;
 }
 
 export interface HttpConfig {
@@ -281,12 +287,17 @@ function parseSynthetic(raw: unknown, router: RouterConfig): SyntheticRailsConfi
     }
     resolved[routeId] = assertLoopbackUrl(upstream, `synthetic.upstreams.${routeId}`);
   }
+  const crashBarrierPath = raw["crashBarrierPath"];
+  if (crashBarrierPath !== undefined && (typeof crashBarrierPath !== "string" || crashBarrierPath === "")) {
+    throw new ConfigError("synthetic.crashBarrierPath must be a non-empty string when present");
+  }
   return {
     facilitatorUrl: assertLoopbackUrl(
       requireString(raw, "facilitatorUrl", "synthetic"),
       "synthetic.facilitatorUrl",
     ),
     upstreams: resolved,
+    ...(crashBarrierPath === undefined ? {} : { crashBarrierPath }),
   };
 }
 

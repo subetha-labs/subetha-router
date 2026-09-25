@@ -43,7 +43,7 @@ npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
 ## コマンド
 
 ```sh
-npm run test    # vitest run（unit 45 + wire 16 = 61 tests）
+npm run test    # vitest run（unit 45 + wire 20 = 65 tests）
 npm run types   # tsc --noEmit
 npm run build   # tsc
 ```
@@ -51,12 +51,15 @@ npm run build   # tsc
 wire（実 CLI・実 TCP）だけを走らせる場合:
 
 ```sh
-npm run test -- tests/wire/router-cli.test.ts     # R1→R2→R3→R4 と 3 終端・再起動
-npm run test -- tests/wire/http-contract.test.ts  # 公開契約の拒否面と canonical 束縛
+npm run test -- tests/wire/router-cli.test.ts      # R1→R2→R3→R4 と 3 終端・再起動
+npm run test -- tests/wire/http-contract.test.ts   # 公開契約の拒否面と canonical 束縛
+npm run test -- tests/wire/concurrency.test.ts     # 並行 R3（同一 quote / 別 quote）
+npm run test -- tests/wire/crash-recovery.test.ts  # 応答バイト送出前のクラッシュと再起動
 ```
 
 - **wire テストの harness（`tests/fixtures/router-harness.ts`）が `src/main.ts` を子プロセスとして
-  自動起動する**。手動で起動する手順は用意しておらず、**手動起動は検証していない**。
+  自動起動する**（`node --import tsx src/main.ts` を直接起動し、子は実アプリ 1 プロセスだけ）。
+  手動で起動する手順は用意しておらず、**手動起動は検証していない**。
 - harness は合成 facilitator fixture と合成上流 fixture もそれぞれ**別プロセス**で起動し、構成
   ファイルと使い捨て journal を `runtime/` 配下の一時ディレクトリに書く。ポートはすべて
   `127.0.0.1` のエフェメラル（`--port 0`）。
@@ -121,6 +124,14 @@ core は rail 名で分岐せず、この経路を**実 CLI・実 TCP 越しで�
   生 journal は出さず、全件ダンプの admin 口も無い。他 principal からは 404。
 - 終端は `delivered` / `paid_data_unavailable` / `unknown` の 3 つで、再起動後も R4 が同じ status と
   同じ結果を返す。同一要求を再送しても両レグとも再送しない。
+- **並行要求（T-10）**: 同一 `quoteId` への並行 R3 を実 TCP で 2 本投げても、受信 settle と送信 pay は
+  それぞれ 1 回だけで、両方の応答が同じ body・同じ `paymentId` を返す（`attempt` は 1）。別 `quoteId`
+  なら共有予算の下で独立した 2 購入として両方成立する。
+- **応答送出前のクラッシュ（T-11）**: 結果を fsync した**直後・応答バイトを 1 バイトも出す前**に
+  Router プロセスを SIGKILL しても、同じ journal で再起動した R4 が同一 status・同一結果・両レグの
+  証跡（`source.txRef` / `destination.txRef` / `receiptRef`）を返す。クライアントが同一要求を
+  出し直しても**どちらのレグも再送しない**。この停止点は `synthetic` セクションにのみ書ける
+  試験用シーム（`crashBarrierPath`）で作り、**既定（real）構成では読まれない**。
 
 ## 起動構成（env）
 
@@ -129,7 +140,7 @@ JSON 構成ファイルに置く。
 
 | キー | 既定 | 内容 |
 |---|---|---|
-| `ROUTER_CONFIG_PATH` | （必須） | `{"router":{approvalTtlMs,routes,budget},"synthetic":{facilitatorUrl,upstreams}}` の JSON |
+| `ROUTER_CONFIG_PATH` | （必須） | `{"router":{approvalTtlMs,routes,budget},"synthetic":{facilitatorUrl,upstreams,crashBarrierPath?}}` の JSON |
 | `ROUTER_PRINCIPAL_TOKENS` | （必須） | `<principalId>:<token>` のカンマ区切り。応答・ログ・journal に出さない |
 | `ROUTER_ADAPTER_MODE` | `real` | `real` または `synthetic`。**合成レールは明示指定のときだけ** |
 | `ROUTER_JOURNAL_PATH` | `runtime/journal.ndjson` | NDJSON journal（`journal.lock` は同階層） |
@@ -142,6 +153,9 @@ JSON 構成ファイルに置く。
   読み込みはしない）。接続先は **loopback のみ**に制限し、リダイレクトも追わない。
 - `routeId` はパス安全な形に限り、`canonicalPath` は実際に提供する
   `/v1/routes/{routeId}/resource` と一致しなければ**起動時に `config_invalid` で拒否**する。
+- `synthetic.crashBarrierPath` は T-11 のための**合成専用の試験用シーム**（応答バイト送出前で停止し
+  到達を書き出す）。`synthetic` セクションにしか書けないため、既定の `real` 構成では解析対象にすら
+  ならない。運用機能ではない。
 
 ## 出典とライセンス
 
@@ -152,16 +166,11 @@ JSON 構成ファイルに置く。
 
 ## まだ確認していないもの
 
-現時点の証拠は**ローカルの合成テストのみ**（unit 45 + wire 16 = 61、`types` / `build` は exit 0）で、
-レビュー合格や受け入れ完了を意味しない。
+現時点の証拠は**ローカルの合成テストのみ**（unit 45 + wire 20 = 65、`types` / `build` は exit 0）で、
+レビュー合格や受け入れ完了を意味しない。**合成 fixture に対する settle は実決済ではない。**
 
-同じ T1 の中で**未取得**のもの:
-
-- **T-10 並行 HTTP 要求**（同一 `quoteId` / 同一 `requestId` の並行 R3 で購入 1 回）。core の単体
-  テストでは確認しているが、**HTTP 越しの並行要求としては未検証**。
-- **T-11 応答直前のクラッシュ**からの再起動で R4 が同一 status と結果を返すこと。通常終了後の
-  再起動は確認済みだが、**クラッシュ証拠には数えない**。
-- 上記が残っているため、**T1 は完了・受け入れ済みではない**。
+T-10（並行 HTTP）と T-11（応答送出前クラッシュ）は上記のとおり実 TCP で取得済み。ただし
+**T1 全体の受け入れが完了したわけではない**（受け入れ判断は親とレビューの担当）。
 
 別ゲートのまま**未実施**のもの:
 

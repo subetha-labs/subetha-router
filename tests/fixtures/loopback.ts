@@ -5,14 +5,37 @@
  * - 子プロセスは自分が spawn したものだけを kill し、`close` を待ってから戻る。
  * - 子の env は明示した allowlist だけを渡す（既存の鍵・秘密を読まない）。
  * - すべて 127.0.0.1 の使い捨てポート（`--port 0`）で、無課金・無署名。
+ *
+ * **1 プロセスだけを所有する**: tsx の CLI ラッパを起動すると、実際のアプリはその**子**に
+ * なり、ラッパを kill しても実プロセスが孤児として残る（journal ロックと stdout を掴んだまま
+ * `close` が返らない）。そのためインストール済み tsx を Node の `--import` ローダとして
+ * 直接読み込み、アプリ自身を唯一の子プロセスとして起動する。
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { once } from "node:events";
 import path from "node:path";
+import type { Readable } from "node:stream";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const tsxCli = path.join(repoRoot, "node_modules/tsx/dist/cli.mjs");
+
+/** `node --import tsx <script>`。ラッパを挟まないので子は 1 つだけになる。 */
+function spawnApp(
+  script: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>>,
+): ChildProcessByStdio<null, Readable, Readable> {
+  return spawn(
+    process.execPath,
+    ["--import", "tsx", path.join(repoRoot, script), ...args],
+    {
+      // tsx はこの repoRoot の node_modules から解決する（追加ダウンロードはしない）。
+      cwd: repoRoot,
+      env: childEnv(env),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+}
 
 /** 子に渡してよい親 env のキー（これ以外は読まない・渡さない）。 */
 const ENV_ALLOWLIST = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"] as const;
@@ -41,11 +64,7 @@ export async function runToExit(
   args: readonly string[],
   env: Readonly<Record<string, string>>,
 ): Promise<RunResult> {
-  const child = spawn(process.execPath, [tsxCli, path.join(repoRoot, script), ...args], {
-    cwd: repoRoot,
-    env: childEnv(env),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawnApp(script, args, env);
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -64,6 +83,11 @@ export interface Listening {
   stderr(): string;
   /** 自分が起動した子だけを終了させ、close を待つ。 */
   stop(): Promise<void>;
+  /**
+   * 自分が起動した子**だけ**を指定シグナルで落とし、close を待つ。
+   * 応答前クラッシュの再現に使う（graceful shutdown ではない）。
+   */
+  kill(signal: NodeJS.Signals): Promise<void>;
 }
 
 export async function startListening(
@@ -71,11 +95,7 @@ export async function startListening(
   args: readonly string[],
   env: Readonly<Record<string, string>> = {},
 ): Promise<Listening> {
-  const child = spawn(process.execPath, [tsxCli, path.join(repoRoot, script), ...args], {
-    cwd: repoRoot,
-    env: childEnv(env),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawnApp(script, args, env);
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -88,7 +108,7 @@ export async function startListening(
     closed = true;
   });
 
-  const port = await new Promise<number>((resolve, reject) => {
+  const listening = new Promise<number>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`timeout waiting for listen: ${script}\n${stdout}\n${stderr}`));
     }, 20_000);
@@ -118,6 +138,18 @@ export async function startListening(
     check();
   });
 
+  let port: number;
+  try {
+    port = await listening;
+  } catch (error) {
+    // 起動できなかった子を残さない（タイムアウト時も含め、所有している子だけを落とす）。
+    if (!closed) {
+      child.kill("SIGKILL");
+      await closing;
+    }
+    throw error;
+  }
+
   return {
     port,
     baseUrl: `http://127.0.0.1:${port}`,
@@ -130,6 +162,12 @@ export async function startListening(
         const guard = setTimeout(() => child.kill("SIGKILL"), 5_000);
         await closing;
         clearTimeout(guard);
+      }
+    },
+    async kill(signal: NodeJS.Signals): Promise<void> {
+      if (!closed) {
+        child.kill(signal);
+        await closing;
       }
     },
   };

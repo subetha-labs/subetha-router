@@ -51,8 +51,18 @@ export interface Harness {
   readonly upstreamA: Listening;
   readonly upstreamB: Listening;
   router: Listening;
+  /**
+   * 応答前バリアの合図ファイル（`crashBarrier` 指定時のみ Router が書く）。
+   * 自分の workDir 配下にあり、他プロセスと共有しない。
+   */
+  readonly barrierPath: string;
   /** Router だけを止めて、同じ journal で起動し直す（再起動後の耐久性確認）。 */
   restartRouter(): Promise<void>;
+  /**
+   * 所有している Router の子プロセス**だけ**を SIGKILL する（graceful shutdown ではない）。
+   * 再起動は `restartRouter()` が担い、常にバリア無しの構成で起動する。
+   */
+  killRouter(): Promise<void>;
   stopAll(): Promise<void>;
 }
 
@@ -69,6 +79,11 @@ export interface HarnessOptions {
   readonly verify?: string;
   /** Router に渡す追加 env（既定の上書き確認に使う）。 */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * 最初の Router だけを、R3 の応答バイトを出す直前で止まる構成で起動する
+   * （`synthetic` セクションにのみ書ける合成専用の試験用シーム）。
+   */
+  readonly crashBarrier?: boolean;
 }
 
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -97,10 +112,9 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   ]);
   const upstreamB = await startListening("tests/fixtures/upstream-server.ts", ["--pay", "ok"]);
 
-  await writeFile(
-    configPath,
-    JSON.stringify(
-      {
+  const barrierPath = path.join(workDir, "crash-barrier.json");
+  const barrierConfigPath = path.join(workDir, "router.barrier.config.json");
+  const document = {
         router: {
           approvalTtlMs: 60_000,
           routes: { [ROUTE_A]: routeConfig(ROUTE_A), [ROUTE_B]: routeConfig(ROUTE_B) },
@@ -129,12 +143,20 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
             [ROUTE_B]: `${upstreamB.baseUrl}/v1/eth/snapshot`,
           },
         },
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
+  };
+  // 再起動時に使う通常構成（バリア無し）。
+  await writeFile(configPath, JSON.stringify(document, null, 2), "utf8");
+  if (options.crashBarrier === true) {
+    await writeFile(
+      barrierConfigPath,
+      JSON.stringify(
+        { ...document, synthetic: { ...document.synthetic, crashBarrierPath: barrierPath } },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  }
 
   const routerEnv = {
     ROUTER_CONFIG_PATH: configPath,
@@ -147,17 +169,37 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     ...options.env,
   };
 
+  // 最初の 1 本だけバリア構成で起動し、再起動は常に通常構成に戻す。
+  // Router が起動できなかった場合、先に起動した fixture を残さない。
+  let router: Listening;
+  try {
+    router = await startListening(
+      "src/main.ts",
+      [],
+      options.crashBarrier === true
+        ? { ...routerEnv, ROUTER_CONFIG_PATH: barrierConfigPath }
+        : routerEnv,
+    );
+  } catch (error) {
+    await Promise.all([facilitator.stop(), upstreamA.stop(), upstreamB.stop()]);
+    throw error;
+  }
+
   const harness: Harness = {
     workDir,
     journalPath,
     configPath,
+    barrierPath,
     facilitator,
     upstreamA,
     upstreamB,
-    router: await startListening("src/main.ts", [], routerEnv),
+    router,
     async restartRouter(): Promise<void> {
       await harness.router.stop();
       harness.router = await startListening("src/main.ts", [], routerEnv);
+    },
+    async killRouter(): Promise<void> {
+      await harness.router.kill("SIGKILL");
     },
     async stopAll(): Promise<void> {
       await harness.router.stop();

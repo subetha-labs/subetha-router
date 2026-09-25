@@ -18,6 +18,11 @@ export interface AppOptions {
   /** canonical URL の基点（設定値）。 */
   readonly canonicalBaseUrl: string;
   readonly principals: ReadonlyMap<string, string>;
+  /**
+   * 結果を durable 化した**後**、応答バイトを出す**前**に呼ばれる合成専用のシーム。
+   * 合成構成からのみ渡され、既定では `undefined`（通常経路に分岐は残らない）。
+   */
+  readonly beforeDeliveredResponse?: (paymentId: string) => Promise<void>;
 }
 
 /** R2 の body 上限。これを超える要求は読み切らずに切る。 */
@@ -361,6 +366,10 @@ export function createRequestListener(options: AppOptions): http.RequestListener
     if (outcome.status === "delivered") {
       // 上流 JSON をそのまま body にする（支払いメタは R4 側）。durable 化は core 側で済んでいる。
       const text = JSON.stringify(outcome.body ?? null);
+      // 合成構成でのみ渡されるシーム。ここを通る時点で結果は fsync 済み・応答は未送出。
+      if (options.beforeDeliveredResponse !== undefined) {
+        await options.beforeDeliveredResponse(outcome.paymentId ?? "");
+      }
       response.writeHead(200, {
         "content-type": outcome.contentType ?? "application/json",
         "content-length": Buffer.byteLength(text),

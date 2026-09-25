@@ -8,7 +8,7 @@
  * 組み立てる（任意のプラグイン読み込みは行わない）。
  */
 
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { createSubethaInbound } from "./adapters/inbound/subetha.js";
@@ -54,6 +54,17 @@ async function main(): Promise<void> {
     outbound: rails.outbound,
   });
 
+  // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。
+  // 到達を書き出したあとは自分からは進まない（応答バイトを出さない）。
+  const barrierPath = config.synthetic?.crashBarrierPath;
+  const beforeDeliveredResponse =
+    barrierPath === undefined
+      ? undefined
+      : async (paymentId: string): Promise<void> => {
+          writeFileSync(barrierPath, JSON.stringify({ event: "before_response", paymentId }));
+          await new Promise<never>(() => {});
+        };
+
   let server;
   try {
     server = await startHttpServer({
@@ -63,6 +74,7 @@ async function main(): Promise<void> {
       principals: config.principals,
       host: config.http.host,
       port: config.http.port,
+      ...(beforeDeliveredResponse === undefined ? {} : { beforeDeliveredResponse }),
     });
   } catch (error) {
     // listen できなければ journal ロックも解放してから落ちる。
