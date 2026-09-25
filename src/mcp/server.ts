@@ -110,6 +110,11 @@ function asResult(body: Record<string, unknown>): {
 export interface McpServerOptions {
   readonly payer?: InboundPayer;
   readonly inboundChainId?: number;
+  /**
+   * **ステートレス（リモート HTTP）運用の opt-in**。
+   * 呼び出し側が quote を持ち回る前提にする。stdio（ローカル）では渡さない。
+   */
+  readonly stateless?: boolean;
 }
 
 /**
@@ -124,7 +129,12 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     process.env["ROUTER_MCP_ADAPTER_MODE"] === "real" ? "real" : "synthetic";
   const evidence = resolveEvidence();
 
-  const client = createRouterClient({ baseUrl, principalId, token });
+  const client = createRouterClient({
+    baseUrl,
+    principalId,
+    token,
+    ...(options.stateless === true ? { allowUnissuedQuotes: true } : {}),
+  });
   const handlers = createToolHandlers({
     client,
     mode,
@@ -178,6 +188,10 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
           .string()
           .optional()
           .describe("人間が承認した quoteId。未指定なら Router が approval_required を返す"),
+        quote: z
+          .unknown()
+          .optional()
+          .describe("quote が返した quote 文書。リモート（ステートレス）利用では必須"),
         credential: z
           .string()
           .optional()

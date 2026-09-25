@@ -15,6 +15,20 @@ export interface RouterClientOptions {
   /** 差し替え可能な fetch（既定は `globalThis.fetch`）。 */
   readonly fetch?: typeof globalThis.fetch;
   readonly timeoutMs?: number;
+  /**
+   * **ステートレス運用の明示的な opt-in**（既定 `false`）。
+   *
+   * 既定では `execute()` は**この client が発行した quote だけ**を実行する
+   * （プロセス内の `issued` スナップショットと照合する）。リモート MCP のように
+   * quote と purchase が別プロセスになる構成ではこれが必ず失敗するため、
+   * **呼び出し側が quote を持ち回る**慣行（payment attaches to calls, not sessions）に合わせる。
+   *
+   * **緩むのは client 側の補助検査だけ**で、Router 側の拒否面は一切変わらない:
+   * `approval !== quoteId`（`orchestrator.ts:392`）、承認期限、発行していない nonce の拒否、
+   * offer と設定の照合、at-most-once はすべて core 側に残る。
+   * 改竄した quote を持ち込んでも、Router は自分が発行した値しか受け付けない。
+   */
+  readonly allowUnissuedQuotes?: boolean;
 }
 
 export interface ResourceRef {

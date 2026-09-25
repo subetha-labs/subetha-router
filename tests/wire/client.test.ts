@@ -930,4 +930,63 @@ test("通信例外は固定の安全な失敗になり、トークンを外へ�
   const serialized = JSON.stringify([routes, quoted, status]);
   expect(serialized).not.toContain(ALICE.token);
   expect(serialized).not.toContain("synthetic transport failure");
+
 });
+
+/**
+ * ステートレス運用（リモート MCP）の opt-in。
+ * 既定では**この client が発行した quote だけ**を実行するが、
+ * quote と purchase が別プロセスになる構成では呼び出し側が quote を持ち回る必要がある。
+ * **緩むのは client 側の補助検査だけ**で、Router 側の拒否面は変わらない。
+ */
+test("ステートレス opt-in が無ければ、発行していない quote は実行しない", async () => {
+  const harness = await startHarness();
+  try {
+    const issuer = createRouterClient({
+      baseUrl: harness.router.baseUrl,
+      principalId: ALICE.id,
+      token: ALICE.token,
+    });
+    const quoted = await issuer.quote({ routeId: ROUTE_A, requestId: "stateless-1" });
+    expect(quoted.ok).toBe(true);
+    if (!quoted.ok) return;
+    const offer = (quoted.quote.source as Record<string, unknown>)["offer"];
+
+    // 別 client（quote を発行していない）は既定で拒否される。
+    const other = createRouterClient({
+      baseUrl: harness.router.baseUrl,
+      principalId: ALICE.id,
+      token: ALICE.token,
+    });
+    const refused = await other.execute({
+      quote: quoted.quote,
+      requestId: "stateless-1",
+      approval: { approved: true, quoteId: quoted.quote.quoteId },
+      credential: paymentHeader(offer),
+    });
+    expect(refused.outcome).toBe("resource_mismatch");
+    if (refused.outcome === "resource_mismatch") {
+      expect(refused.reason).toBe("quote_not_issued_by_client");
+    }
+    // 拒否された時点で上流課金は起きていない。
+    const before = await callsOf(harness.upstreamA);
+    expect(before["payCalls"]).toBe(0);
+
+    // opt-in した client なら実行できる（Router 側の束縛は別途効いている）。
+    const stateless = createRouterClient({
+      baseUrl: harness.router.baseUrl,
+      principalId: ALICE.id,
+      token: ALICE.token,
+      allowUnissuedQuotes: true,
+    });
+    const allowed = await stateless.execute({
+      quote: quoted.quote,
+      requestId: "stateless-1",
+      approval: { approved: true, quoteId: quoted.quote.quoteId },
+      credential: paymentHeader(offer),
+    });
+    expect(allowed.outcome).toBe("delivered");
+  } finally {
+    await harness.stopAll();
+  }
+}, 60_000);

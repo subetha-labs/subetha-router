@@ -58,6 +58,7 @@ async function main(): Promise<void> {
   }
 
   // **署名は手元で作る。** 鍵はサーバへ送らない。
+  const quoteDoc = quoted["quote"];
   const offer = (subject["source"] as Record<string, unknown>)["offer"];
   if (offer === undefined) {
     process.stdout.write("quote did not expose the issued offer; cannot sign locally\n");
@@ -71,6 +72,8 @@ async function main(): Promise<void> {
     requestId,
     approval: subject["quoteId"],
     credential,
+    // ステートレス: quote 文書を持ち回る。
+    quote: quoteDoc,
   });
   process.stdout.write(`purchase outcome=${String(bought["outcome"])}\n`);
   process.stdout.write(`purchase body=${JSON.stringify(bought).slice(0, 400)}\n`);

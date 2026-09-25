@@ -318,25 +318,32 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       //    自動 re-quote も再実行もしない。
       const snapshot = issued.get(quote.quoteId);
       if (snapshot === undefined) {
-        return {
-          outcome: "resource_mismatch",
-          reason: "quote_not_issued_by_client",
-          paymentId: quote.paymentId,
-        };
-      }
-      if (bindingOf(quote) !== snapshot.binding) {
-        return {
-          outcome: "resource_mismatch",
-          reason: "quote_binding_changed",
-          paymentId: quote.paymentId,
-        };
-      }
-      if (requestId !== snapshot.requestId) {
-        return {
-          outcome: "resource_mismatch",
-          reason: "request_id_changed",
-          paymentId: quote.paymentId,
-        };
+        // ステートレス運用では quote と purchase が別プロセスになるため、
+        // 呼び出し側が持ち回った quote を受け入れる（明示的な opt-in のときだけ）。
+        // **Router 側の拒否面は変わらない**: 発行していない nonce・承認不一致・
+        // 期限切れ・offer 不一致はすべて core が拒否する。
+        if (options.allowUnissuedQuotes !== true) {
+          return {
+            outcome: "resource_mismatch",
+            reason: "quote_not_issued_by_client",
+            paymentId: quote.paymentId,
+          };
+        }
+      } else {
+        if (bindingOf(quote) !== snapshot.binding) {
+          return {
+            outcome: "resource_mismatch",
+            reason: "quote_binding_changed",
+            paymentId: quote.paymentId,
+          };
+        }
+        if (requestId !== snapshot.requestId) {
+          return {
+            outcome: "resource_mismatch",
+            reason: "request_id_changed",
+            paymentId: quote.paymentId,
+          };
+        }
       }
       if (credential === "") {
         return { outcome: "rejected", error: "credential_required", status: 0 };

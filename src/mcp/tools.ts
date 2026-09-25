@@ -129,6 +129,14 @@ export interface ToolHandlers {
      * リモート運用ではこちらを使う（Router は呼び出し側の鍵を持たない）。
      */
     credential?: string | undefined;
+    /**
+     * `quote` が返した quote 文書そのもの。**ステートレス運用で使う**。
+     * 慣行どおり「支払いはセッションではなく呼び出しに紐づく」ので、
+     * 呼び出し側が証拠を持ち回る。**束縛は緩まない**:
+     * 発行していない `challengeNonce` は Router の strict preflight が拒否し、
+     * `approval !== quoteId` は core が `approval_required` で拒否する。
+     */
+    quote?: unknown;
   }): Promise<Record<string, unknown>>;
   status(input: { paymentId: string }): Promise<Record<string, unknown>>;
   /** テスト用: 発行済み quote の数（プロセス内保持の確認）。 */
@@ -157,6 +165,11 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
       return withEvidence(deps, {
         ok: true,
         approvalRequired: true,
+        /**
+         * quote 文書そのもの。**ステートレス運用ではこれをそのまま `purchase` の
+         * `quote` 引数に渡す**（支払いはセッションではなく呼び出しに紐づく）。
+         */
+        quote: result.quote,
         // エージェントが勝手に purchase へ進まないよう、次の手順を文面で明示する。
         nextStep:
           `人間の明示承認が必要です。承認する場合は ${TOOL_NAMES.purchase} を ` +
@@ -166,13 +179,16 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
     },
 
     async purchase(input): Promise<Record<string, unknown>> {
-      const quote = issued.get(input.quoteId);
+      // ステートレス運用では呼び出し側が quote を持ち回る。
+      // プロセス内の `issued` はローカル（stdio）運用の補助でしかない。
+      const quote = (input.quote as QuoteView | undefined) ?? issued.get(input.quoteId);
       if (quote === undefined) {
         // MCP サーバを再起動すると発行元 client が消えるため必ずここに来る。
         return withEvidence(deps, {
           ok: false,
-          error: "quote_not_issued_by_this_server",
-          detail: `先に ${TOOL_NAMES.quote} を呼んでください（サーバ再起動後は再取得が必要です）。`,
+          error: "quote_required",
+          detail:
+            `先に ${TOOL_NAMES.quote} を呼び、返ってきた quote をそのまま quote 引数に渡してください。`,
         });
       }
       const offer = (quote.source as Record<string, unknown>)["offer"];

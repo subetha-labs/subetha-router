@@ -154,7 +154,8 @@ async function start(): Promise<void> {
         return;
       }
       // ステートレス。セッションを跨いで状態を持たない。
-      const mcp = await buildServer();
+      // リモートはステートレス: 呼び出し側が quote を持ち回る（慣行に合わせる）。
+      const mcp = await buildServer({ stateless: true });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         void transport.close();
