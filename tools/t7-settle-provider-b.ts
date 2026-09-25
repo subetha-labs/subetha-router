@@ -15,7 +15,7 @@ import { createMppOutbound } from "../src/adapters/outbound/mpp.js";
 import { createRealMppCapability, TEMPO_MODERATO_CHAIN_ID } from "./real-mpp-capability.js";
 
 const ROUTE_ID = "md-b-eth-snapshot";
-const UPSTREAM = "https://provider-b.subethalabs.com/v1/eth/snapshot";
+const UPSTREAM = "https://provider-mpp.subethalabs.com/v1/eth/snapshot";
 
 /** 承認してよい条件。これ以外には絶対に送金させない。 */
 const SCOPE = {

@@ -19,7 +19,7 @@ import { startListening } from "../tests/fixtures/loopback.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
 
 const ROUTE_ID = "md-a-eth-snapshot";
-const UPSTREAM = "https://provider-a.subethalabs.com/v1/eth/snapshot";
+const UPSTREAM = "https://provider-x402.subethalabs.com/v1/eth/snapshot";
 
 /** 承認してよい条件。これ以外には絶対に署名させない。 */
 const SCOPE = {

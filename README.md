@@ -252,6 +252,11 @@ chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
 | A（x402 / Base Sepolia） | `provider-a.subethalabs.com` | `0x68b9469f...f371`（block 47301621） | 10000 USDC base units |
 | B（MPP / Tempo Moderato） | `provider-b.subethalabs.com` | `0x84157b93...ea69`（block 36898398） | 10000 pathUSD base units + 69 手数料 |
 
+**URL の改称について**: 上表の Provider URL は**決済当時の事実**であり書き換えない。
+その後 `provider-a` → **`provider-x402`**、`provider-b` → **`provider-mpp`** に改称され、
+**旧 URL は削除された**（到達不能。親が確認済み）。現在の接続先は新 URL。
+`providerId`（`market-data-a` / `market-data-b`）・価格・受取先・チェーン・パスは不変。
+
 どちらも実 `src/main.ts` を **`mode: real` / `label: real`** で起動し R1→R2→R3→R4 を縦貫、
 R4 が `delivered` / `outcome: paid` を返し、オンチェーンで独立に検証済み。
 

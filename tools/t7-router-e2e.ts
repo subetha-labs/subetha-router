@@ -19,8 +19,8 @@ const IS_B = RAIL === "b";
 
 const ROUTE = IS_B ? "md-b-eth-snapshot" : "md-a-eth-snapshot";
 const UPSTREAM = IS_B
-  ? "https://provider-b.subethalabs.com/v1/eth/snapshot"
-  : "https://provider-a.subethalabs.com/v1/eth/snapshot";
+  ? "https://provider-mpp.subethalabs.com/v1/eth/snapshot"
+  : "https://provider-x402.subethalabs.com/v1/eth/snapshot";
 const SOURCE_TOKEN = "0x0000000000000000000000000000000000005ce7";
 const DEST_ASSET = IS_B
   ? "0x20c0000000000000000000000000000000000000"
