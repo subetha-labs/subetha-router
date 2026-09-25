@@ -73,6 +73,7 @@ npm run test -- tests/wire/mpp-outbound.test.ts    # 送信レール B: 公式 m
 npm run test -- tests/wire/mpp-cli.test.ts         # B を実 composition 越しに縦貫
 npm run test -- tests/wire/client.test.ts          # 型付きクライアント（承認束縛・再オープン）
 npm run test -- tests/wire/chat-crossimpl.test.ts  # 既存 chat 実装 × 実 Router の相互実装（無課金）
+# ↑ chat 実装は別リポジトリにあるため `T5_CHAT_APP_DIR` で場所を渡す。未設定なら skip する。
 npm run test -- tests/wire/mcp-server.test.ts      # MCP ラッパ（tool 公開・承認束縛・証拠）
 ```
 

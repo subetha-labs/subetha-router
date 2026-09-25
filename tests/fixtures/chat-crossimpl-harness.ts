@@ -41,17 +41,16 @@ const runtimeRoot = path.resolve(import.meta.dirname, "../../runtime");
 /**
  * chat 実装の所在。**読み取り専用**で参照するだけで、一切変更しない。
  *
- * 既定値は開発機の worktree パスだが、worktree 名に日付が入っており寿命が短いので
- * `T5_CHAT_APP_DIR` で上書きできる。存在しなければ T5 は skip する（`chatAppAvailable`）。
- * 「chat 側の契約が変わって落ちた」のと「パスが違って落ちた」のを混同しないため、
+ * chat 実装は**別リポジトリ**にあるため、場所は `T5_CHAT_APP_DIR` で渡す。
+ * 未設定・不在なら T5 は **skip** する（`chatAppAvailable`）。
+ * 「chat 側の契約が変わって落ちた」のと「パスが無くて落ちた」のを混同しないため、
  * 不在は失敗ではなく skip として扱う。
  */
-export const CHAT_APP_DIR =
-  process.env["T5_CHAT_APP_DIR"] ??
-  "/Users/peaceandwhisky/.worktrees/subetha/chat-demo-v1-20260910/apps/chat-demo";
+export const CHAT_APP_DIR = process.env["T5_CHAT_APP_DIR"] ?? "";
 
 /** chat 実装が読める場所にあるか（無い環境ではテストを skip する）。 */
 export function chatAppAvailable(): boolean {
+  if (CHAT_APP_DIR === "") return false;
   return (
     existsSync(path.join(CHAT_APP_DIR, "router-execution.mts")) &&
     existsSync(path.join(CHAT_APP_DIR, "router-contract.mjs")) &&
