@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+.claude_workflow/local/
+.claude_workflow/state.json
+.claude_workflow/*.lock
+.claude_workflow/active-writer.json
+runtime/
