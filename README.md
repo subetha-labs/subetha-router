@@ -14,12 +14,23 @@ ETHGlobal Tokyo 提出実装。AI エージェント側の支払い手段と、A
 - 2 つのレグは交換ではなく**独立した支払い**で、各レールを個別に事前資金供給（prefunded）する。
   **FX 変換もブリッジも行わない。**
 
-**現状: 耐久コア + Router の HTTP 公開契約を、実 CLI・実 TCP で合成レール相手に 1 本通した段階。**
+**現状: 耐久コア + HTTP 公開契約 + 送信レール A（x402）/ B（MPP）の公式 SDK 配線 + 型付き
+クライアントを、実 CLI・実 TCP で合成 fixture 相手に通した段階。**
 `src/main.ts` を実プロセスとして起動し、**別プロセスのテストクライアント**から実 TCP で
-R1→R2→R3→R4 を通している。ただし両レグの相手は**リポジトリ内の別プロセス合成 fixture**
-（`tests/fixtures/*`、`synthetic`・無課金・無署名・鍵なし・loopback のみ）で、**実決済ではない**。
-公式 `@x402/*` / `mppx` SDK 配線（A = T2 / B = T3）、実ウォレット・鍵・署名・送金、Provider A/B の
-実 API 到達、既存 chat 連携、finality はいずれも**未実施で別ゲート**。本 README はその範囲だけを書く。
+R1→R2→R3→R4 を通している。送信レールはインストール済みの公式 SDK（A = `@x402/fetch` +
+`@x402/evm` の `x402Client` / `ExactEvmScheme`、B = `mppx/client` の `Mppx.create` + `tempo.charge`）を
+**実際に呼ぶ**が、相手は**リポジトリ内の別プロセス合成 fixture**（`tests/fixtures/*`・loopback のみ）で、
+署名能力は**署名しない試験用 spy**を注入している。したがって**実決済ではない**
+（証拠ラベル: A = `T2-fixture-nopay` / B = `T3-fixture-nopay` / クライアント = `T4-fixture-nopay`、
+T1 の合成レールは `T1-synthetic-nopay`）。
+
+実ウォレット・鍵・署名・ブロードキャスト、Provider A/B の**実 API 到達**、既存 chat の実 UI 連携、
+finality はいずれも**未実施で別ゲート**。**クリーンインストールからの再現・手動起動・実決済・
+Provider 実 API・chat 実接続・finality を検証したという主張はしない。** 本 README はその範囲だけを書く。
+
+順序は **A（x402）→ B（MPP）**。市場データは**メインネットの参照データ**を読み、**支払いはテストネット
+限定**が目標で、その実行には**別途の認可が必要**（本書の範囲では未解除）。2 レグは交換ではなく
+**独立した支払い**で、各レールを個別に事前資金供給（prefunded）する。**ブリッジも FX 変換も行わない。**
 
 ## 検証済みの環境
 
@@ -43,7 +54,7 @@ npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
 ## コマンド
 
 ```sh
-npm run test    # vitest run（unit 45 + wire 20 = 65 tests）
+npm run test    # vitest run（tests/unit + tests/wire）
 npm run types   # tsc --noEmit
 npm run build   # tsc
 ```
@@ -51,10 +62,16 @@ npm run build   # tsc
 wire（実 CLI・実 TCP）だけを走らせる場合:
 
 ```sh
-npm run test -- tests/wire/router-cli.test.ts      # R1→R2→R3→R4 と 3 終端・再起動
+npm run test -- tests/wire/router-cli.test.ts      # R1→R2→R3→R4 と 3 終端・再起動（合成レール）
 npm run test -- tests/wire/http-contract.test.ts   # 公開契約の拒否面と canonical 束縛
 npm run test -- tests/wire/concurrency.test.ts     # 並行 R3（同一 quote / 別 quote）
 npm run test -- tests/wire/crash-recovery.test.ts  # 応答バイト送出前のクラッシュと再起動
+npm run test -- tests/wire/subetha-inbound.test.ts # 受信レール adapter の実 HTTP 契約
+npm run test -- tests/wire/x402-outbound.test.ts   # 送信レール A: 公式 x402 SDK の v2 wire
+npm run test -- tests/wire/x402-cli.test.ts        # A を実 composition 越しに縦貫
+npm run test -- tests/wire/mpp-outbound.test.ts    # 送信レール B: 公式 mppx client の wire
+npm run test -- tests/wire/mpp-cli.test.ts         # B を実 composition 越しに縦貫
+npm run test -- tests/wire/client.test.ts          # 型付きクライアント（承認束縛・再オープン）
 ```
 
 - **wire テストの harness（`tests/fixtures/router-harness.ts`）が `src/main.ts` を子プロセスとして
@@ -140,15 +157,23 @@ JSON 構成ファイルに置く。
 
 | キー | 既定 | 内容 |
 |---|---|---|
-| `ROUTER_CONFIG_PATH` | （必須） | `{"router":{approvalTtlMs,routes,budget},"synthetic":{facilitatorUrl,upstreams,crashBarrierPath?}}` の JSON |
+| `ROUTER_CONFIG_PATH` | （必須） | `{"router":{approvalTtlMs,routes,budget}, "x402":{upstreams}, "synthetic":{facilitatorUrl,upstreams,crashBarrierPath?}}` の JSON。`real` では `x402.upstreams`（`routeId` → 上流 canonical URL）が必須 |
 | `ROUTER_PRINCIPAL_TOKENS` | （必須） | `<principalId>:<token>` のカンマ区切り。応答・ログ・journal に出さない |
 | `ROUTER_ADAPTER_MODE` | `real` | `real` または `synthetic`。**合成レールは明示指定のときだけ** |
+| `ROUTER_SUBETHA_FACILITATOR_URL` | （`real` で必須） | 受信レール facilitator の base URL（設定 1 本だけ） |
 | `ROUTER_JOURNAL_PATH` | `runtime/journal.ndjson` | NDJSON journal（`journal.lock` は同階層） |
 | `ROUTER_HTTP_HOST` / `ROUTER_HTTP_PORT` | `127.0.0.1` / `8500` | 待ち受け。`0` でエフェメラル |
 | `ROUTER_CANONICAL_BASE_URL` | `http://127.0.0.1:8500` | canonical URL の基点（`Host` から導かない） |
 
-- **既定（`ROUTER_ADAPTER_MODE=real`）では実 adapter を解決できず、`adapter_not_wired` で起動を
-  中止する。合成レールへフォールバックしない。** 実 SDK 配線は T2 / T3 のゲート。
+- **既定（`ROUTER_ADAPTER_MODE=real`）では実 adapter（公式 SDK 配線）を組むが、支払い能力が
+  注入されていなければ `signer_not_authorized` で起動を中止する。合成レールへフォールバックせず、
+  偽の署名者も作らない。** 送信レールの署名・支払い能力は**起動時にコードから注入**するものだけを
+  使い、構成ファイルや env からは読み込まない（任意のプラグイン読み込みをしない）。
+  `routeId` ごとの `rail`（`x402` / `mpp`）で送信レールを解決し、そのレールの能力が無ければ起動しない。
+  **実鍵・実 RPC を伴う能力の用意は本書の範囲外で、使えるウォレット設定手順は提供していない。**
+- 実行可能な形で確認しているのは、**tests 内の署名しない spy 能力**を注入した縦貫
+  （`tests/wire/x402-cli.test.ts` / `tests/wire/mpp-cli.test.ts`）だけで、起動ログの `label` が
+  `T2-fixture-nopay` / `T3-fixture-nopay` になる。`real` 表示は実能力注入時のみ。
 - `synthetic` を明示したときだけ、リポジトリ内の既知の fixture 構成を組み立てる（任意のプラグイン
   読み込みはしない）。接続先は **loopback のみ**に制限し、リダイレクトも追わない。
 - `routeId` はパス安全な形に限り、`canonicalPath` は実際に提供する
@@ -156,6 +181,35 @@ JSON 構成ファイルに置く。
 - `synthetic.crashBarrierPath` は T-11 のための**合成専用の試験用シーム**（応答バイト送出前で停止し
   到達を書き出す）。`synthetic` セクションにしか書けないため、既定の `real` 構成では解析対象にすら
   ならない。運用機能ではない。
+
+## 既存 chat 向けの型付きクライアント（T4）
+
+`src/client/{index,types}.ts` は R1–R4 の**薄い型付きラッパ**で、`examples/chat-market-data-profile.ts`
+が「quote → **人間の明示承認** → 実行 → status / 再オープン」の呼び出し可能な例を示す。**UI は作らない。**
+
+- 承認は `quoteId` に束縛した明示値だけ。未承認・拒否・別 quote への承認・承認した canonical path 以外では
+  **Router へ要求を出さない**（合成 fixture で「両レグとも動いていない」ことを確認している）。
+- **credential は作らない・署名しない。** 承認後に呼び出し側が渡す既存の `X-Payment` 値だけを使う。
+- 要求は設定した `baseUrl` の origin に固定し、リダイレクトを追わない。quote が返す canonical URL の
+  origin が違っても、そこへ principal トークンや資格情報を送らない。
+- 自動再試行・自動再 quote・`requestId` の作り直しをしない。`unknown` と `paid_data_unavailable` は
+  別の結果として保ち、**どちらでも `paymentId` を返す**ので `status()` で突き合わせられる。
+- Router の snapshot エンベロープはそのまま渡す。**article 型へ cast せず、擬似 article も作らない。**
+- 取得した canonical URL の**改変（origin / query / hash / path）や条件の書き換えは受理しない**。
+  実行できるのは**その client インスタンス自身が発行した quote だけ**で、client を作り直したあとは
+  `status()` による参照のみ（自動 re-quote も再実行もしない）。同一 client での同一承認の再実行は
+  安全（Router 側で両レグとも 1 回だけ）。
+- R3 の成功は **`X-Router-Payment-Id` ヘッダが承認済み `paymentId` と完全一致**し、JSON body を
+  取得できたときだけ。`paid_data_unavailable` / `unknown` の明示結果は**本文の `paymentId` 一致**を
+  条件にし、上流 snapshot 内の同名フィールドを Router のメタとして読まない。欠落・不一致・矛盾は
+  **承認済み `paymentId` のまま `unknown`** にして再送しない。R4 は問い合わせた `paymentId` と
+  一致する射影だけを受理する。
+- **証拠の区別**: 上記はクライアント自身の wire テスト（`tests/wire/client.test.ts`、合成 fixture
+  相手・`T4-fixture-nopay`）で確認した範囲。`examples/chat-market-data-profile.ts` は同テストから
+  import して**例自身の経路**（拒否 / 承認不一致 / callback 改変の無効化 / 正常実行 / `unknown` 保持 /
+  再起動後の reopen）を確認しているだけで、**既存 chat の `ChatExecutionFactory` への drop-in 互換性は
+  示していない**（`status` の取り方など consumer 側の形に合わせる作業は実装者の担当）。実 chat UI 上の
+  因果（B-03 / U-07）、実決済・実 Provider API・finality はいずれも未検証。
 
 ## 出典とライセンス
 
@@ -166,16 +220,21 @@ JSON 構成ファイルに置く。
 
 ## まだ確認していないもの
 
-現時点の証拠は**ローカルの合成テストのみ**（unit 45 + wire 20 = 65、`types` / `build` は exit 0）で、
-レビュー合格や受け入れ完了を意味しない。**合成 fixture に対する settle は実決済ではない。**
-
-T-10（並行 HTTP）と T-11（応答送出前クラッシュ）は上記のとおり実 TCP で取得済み。ただし
-**T1 全体の受け入れが完了したわけではない**（受け入れ判断は親とレビューの担当）。
+現時点の証拠は**ローカルの合成 fixture に対するテストのみ**（`tests/unit` + `tests/wire`、
+`types` / `build` は exit 0）で、レビュー合格や受け入れ完了を意味しない。
+**合成 fixture に対する settle・receipt は実決済ではない。**
 
 別ゲートのまま**未実施**のもの:
 
-- 公式 SDK 配線（A = `@x402/*` / T2、B = `mppx` / T3）。SDK の import や typecheck は実決済ではない。
-- 受信レグ・送信レグの**実決済**、実ウォレット・鍵・署名・ブロードキャスト・faucet。
+- 受信レグ・送信レグの**実決済**、実ウォレット・鍵・署名・ブロードキャスト・faucet・実 RPC。
+  公式 SDK を呼んでいることと実決済は別物で、署名境界には**署名しない spy** を入れている。
 - Provider A/B の**実 API 到達**と実 URL・実資産（SubEtha facilitator の実値を含む）。
-- API 配信とクライアント受領、既存 chat との接続と結果の再取得、finality の確認。
-- 手動起動手順の検証（用意しておらず、**動いたという主張もしない**）。Linux 未実行。
+- 既存 chat の**実 UI 連携**と、その上での結果の再取得（クライアント越しの R4 再取得までは確認済み）。
+- finality の確認。テストネット支払いの実行には**別途の認可**が必要。
+- **クリーンインストールからの再現**と**手動起動手順**（用意しておらず、動いたという主張もしない）。
+  Linux 未実行。
+- MPP の `pull` モード（server 側 broadcast）は**未検証**。adapter が credential 生成前に断るのは
+  **能力が `mode: "pull"` を明示した場合だけ**で、`mode` を省略すると SDK 側の選択に委ねられ、
+  challenge の `supportedModes` と account 種別次第で `pull` が選ばれ得る。その経路は
+  **確認していない**（guard があるとは言えない）。
+- P3（MPP 受信→A）/ P4（x402 受信→B）/ P5（同一レール）は v1 の範囲外（DEFER）。
