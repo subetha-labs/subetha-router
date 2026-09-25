@@ -243,6 +243,28 @@ Router の HTTP 層にはアクセスログが無く、上流の課金回数だ�
 `createRouterChatExecution` を実 Router に対して駆動できたという範囲にとどまり、
 chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
 
+## 送信レグ A の実決済（T7・達成済み）
+
+**Provider A（`https://provider-a.subethalabs.com`）への実テストネット決済が成立している。**
+
+| 項目 | 値 |
+|---|---|
+| ネットワーク | Base Sepolia `eip155:84532` |
+| 資産 / 額 | USDC `0x036CbD53...CF7e` / **10000 base units（$0.01）** |
+| 実 tx | `0x68b9469f7081053b632d221863070de517b85ca821cff3a18a31e805a79ef371`（status `0x1` / block 47301621） |
+| 経路 | 実 `src/main.ts` を **`mode: real` / `label: real`** で起動し R1→R2→R3→R4 を縦貫 |
+| 取得データ | Hyperliquid ETH perpetual の実 snapshot |
+
+- **AC-5（送信レグ実決済）に到達。** ただし**受信レグは合成 facilitator のまま**なので **AC-4 は未達**。
+- 署名能力は**製品コードに置かない**。`tools/` 配下の起動ツールが env から鍵を受け取り、
+  **コードから注入**する（`src/**` は env・構成ファイルから鍵を読まない）。
+- 誤った宛先・額への署名は **guarded signer**（`src/adapters/outbound/x402.ts`）が拒否する。
+  その拒否面は `tests/wire/x402-guarded-signer.test.ts` で無課金で検証している。
+- x402 の EIP-3009 経路では Router はチェーンに接続せず署名するだけで、
+  **ブロードキャストと gas は facilitator 負担**（payer の ETH 残高は 0 のままで成立する）。
+- 決済スコープは記録済み（`docs/t7-requirements.md` §2）。
+  **公開 facilitator は連打すると nonce 衝突を起こすため、決済は数秒空ける。**
+
 ## MCP から使う（T6・審査員向けの再現手順）
 
 Router を **MCP サーバ**として Claude Code から呼べる。**フロントエンドは用意していない。**
@@ -337,9 +359,9 @@ claude mcp add subetha-router -- npm run --silent mcp
 
 別ゲートのまま**未実施**のもの:
 
-- 受信レグ・送信レグの**実決済**、実ウォレット・鍵・署名・ブロードキャスト・faucet・実 RPC。
-  公式 SDK を呼んでいることと実決済は別物で、署名境界には**署名しない spy** を入れている。
-- Provider A/B の**実 API 到達**と実 URL・実資産（SubEtha facilitator の実値を含む）。
+- **受信レグ（SubEtha）の実決済**。受信側は合成 facilitator のままで、実ランタイム値（U-01/U-02）が未確定。
+  → **AC-4 は未達。**
+- Provider **B**（MPP / Tempo）の実決済と実 API 到達（改修中のため対象外）。
 - 既存 chat の**実 UI 連携**（ブラウザ上の操作・`server.mts` / `ui.js`）。
   MCP 経路（上記「MCP から使う」）は用意したが、**実決済は未解除**のまま。
   chat の**実行レイヤ**（`createRouterChatExecution`）との実 TCP 結合と、その越しの
