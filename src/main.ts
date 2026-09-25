@@ -14,15 +14,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createSubethaInbound } from "./adapters/inbound/subetha.js";
+import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
 import { loadRuntimeConfig, type RuntimeConfig } from "./config.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
 import type { InboundRail } from "./ports/inbound.js";
-import type { EvmSigningCapability, OutboundRail } from "./ports/outbound.js";
+import type {
+  EvmSigningCapability,
+  MppTempoCapability,
+  OutboundRail,
+} from "./ports/outbound.js";
 
 /**
- * 送信レール A の署名能力が無い（`real` モード）。**合成には落とさず** fail closed。
+ * 経路が必要とする送信レールの支払い能力が無い（`real` モード）。**合成には落とさず** fail closed。
  * 実鍵の権限は本タスクで解除されていないため、CLI 既定はここで止まるのが正しい状態。
  */
 class SignerNotAuthorizedError extends Error {
@@ -30,9 +35,9 @@ class SignerNotAuthorizedError extends Error {
 
   constructor() {
     super(
-      "signer_not_authorized: the x402 outbound rail is wired to the official SDK, but no EVM " +
-        "signing capability was injected. Real payments need a separate credential gate; " +
-        "set ROUTER_ADAPTER_MODE=synthetic for the in-repo no-money loopback fixtures.",
+      "signer_not_authorized: the outbound rails are wired to the official SDKs, but no payment " +
+        "capability was injected for a configured route. Real payments need a separate credential " +
+        "gate; set ROUTER_ADAPTER_MODE=synthetic for the in-repo no-money loopback fixtures.",
     );
     this.name = "SignerNotAuthorizedError";
   }
@@ -45,6 +50,37 @@ class SignerNotAuthorizedError extends Error {
 export interface RouterCapabilities {
   /** 送信レール A（x402 / EVM）の署名能力。 */
   readonly evmSigning?: EvmSigningCapability;
+  /** 送信レール B（MPP / Tempo charge）の支払い能力。 */
+  readonly mppTempo?: MppTempoCapability;
+}
+
+/**
+ * `routeId` から送信レールを引く（core は rail 名で分岐しない）。allowlist は
+ * 構成の `routes[].rail` だけで、未登録の routeId はどのレールにも届かない。
+ */
+function railByRoute(
+  routes: Readonly<Record<string, { readonly rail?: string }>>,
+  rails: Readonly<Record<string, OutboundRail>>,
+): OutboundRail {
+  const byRoute = new Map<string, OutboundRail>();
+  for (const [routeId, route] of Object.entries(routes)) {
+    const rail = rails[route.rail ?? "x402"];
+    if (rail === undefined) {
+      throw new SignerNotAuthorizedError();
+    }
+    byRoute.set(routeId, rail);
+  }
+  const railFor = (routeId: string): OutboundRail => {
+    const rail = byRoute.get(routeId);
+    if (rail === undefined) {
+      throw new Error("no outbound rail configured for route");
+    }
+    return rail;
+  };
+  return {
+    readChallenge: (routeId) => railFor(routeId).readChallenge(routeId),
+    pay: (request) => railFor(request.routeId).pay(request),
+  };
 }
 
 export function composeRails(
@@ -66,15 +102,64 @@ export function composeRails(
   if (real === undefined) {
     throw new SignerNotAuthorizedError();
   }
-  const capability = capabilities.evmSigning;
-  if (capability === undefined) {
-    // 実 SDK 配線はできているが、署名能力が無い。偽の署名者で代替しない。
+
+  // 経路ごとに必要な能力だけを要求する（レール B だけの構成でも A の鍵を要求しない）。
+  const railsInUse = new Set(
+    Object.values(config.router.routes).map((route) => route.rail ?? "x402"),
+  );
+  /** そのレールが担当する経路の上流だけを渡す（A の検査を B の URL に掛けない）。 */
+  const upstreamsFor = (rail: string): Record<string, string> =>
+    Object.fromEntries(
+      Object.entries(config.router.routes)
+        .filter(([, route]) => (route.rail ?? "x402") === rail)
+        .map(([routeId]) => [routeId, real.upstreams[routeId] as string]),
+    );
+
+  const rails: Record<string, OutboundRail> = {};
+  for (const rail of railsInUse) {
+    if (rail === "x402") {
+      const capability = capabilities.evmSigning;
+      if (capability === undefined) {
+        // 実 SDK 配線はできているが、署名能力が無い。偽の署名者で代替しない。
+        throw new SignerNotAuthorizedError();
+      }
+      rails[rail] = createX402Outbound({ upstreams: upstreamsFor(rail), capability });
+      continue;
+    }
+    if (rail === "mpp") {
+      const capability = capabilities.mppTempo;
+      if (capability === undefined) {
+        throw new SignerNotAuthorizedError();
+      }
+      rails[rail] = createMppOutbound({ upstreams: upstreamsFor(rail), capability });
+      continue;
+    }
+    // 知らないレール名は合成にも落とさず起動を止める。
     throw new SignerNotAuthorizedError();
   }
+
   return {
     inbound: createSubethaInbound({ facilitatorUrl: real.subethaFacilitatorUrl }),
-    outbound: createX402Outbound({ upstreams: real.upstreams, capability }),
+    outbound: railByRoute(config.router.routes, rails),
   };
+}
+
+/**
+ * 起動ログの証拠ラベル。**署名しない fixture 能力で走っているレールを隠さない**
+ * （B だけを fixture 能力で動かしている構成を `real` と表示しない）。
+ */
+function evidenceLabelOf(config: RuntimeConfig, capabilities: RouterCapabilities): string {
+  if (config.adapterMode === "synthetic") {
+    return "T1-synthetic-nopay";
+  }
+  const labels: string[] = [];
+  if (capabilities.evmSigning?.kind === "non-signing-fixture") {
+    labels.push("T2-fixture-nopay");
+  }
+  if (capabilities.mppTempo?.kind === "non-signing-fixture") {
+    labels.push("T3-fixture-nopay");
+  }
+  return labels.length === 0 ? "real" : labels.join("+");
 }
 
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
@@ -124,12 +209,7 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
       host: config.http.host,
       mode: config.adapterMode,
       // どの証拠ラベルで走っているかを起動ログに残す（実決済を主張しない）。
-      label:
-        config.adapterMode === "synthetic"
-          ? "T1-synthetic-nopay"
-          : capabilities.evmSigning?.kind === "non-signing-fixture"
-            ? "T2-fixture-nopay"
-            : "real",
+      label: evidenceLabelOf(config, capabilities),
     })}\n`,
   );
 

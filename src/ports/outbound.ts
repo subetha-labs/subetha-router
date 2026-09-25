@@ -3,6 +3,7 @@
  */
 
 import type { ClientEvmSigner } from "@x402/evm";
+import type { Account, Client } from "viem";
 
 /**
  * 送信レール A（x402 / EVM）の**署名能力**。Router はこの中身を持たず、起動時に外から
@@ -13,6 +14,29 @@ import type { ClientEvmSigner } from "@x402/evm";
  *   adapter は loopback 以外の上流へはこの能力を使わない。
  * 能力が無いときは合成レールへ**落とさず** fail closed にする（合成を本番既定にしない）。
  */
+/**
+ * 送信レール B（MPP / Tempo charge）の**支払い能力**。Router は鍵も RPC 権限も持たず、
+ * 起動時に外から注入された account と client だけを公式 `mppx` に渡す。
+ *
+ * - `kind: "real-key"` は実鍵・実 RPC の能力（実決済ゲートが別途必要）。
+ * - `kind: "non-signing-fixture"` は**署名も broadcast もしない**試験用 spy。
+ * 能力が無いときは合成レールへ落とさず fail closed にする。
+ */
+export interface MppTempoCapability {
+  /** 支払いチェーン ID（testnet / mainnet を混同しないため明示する）。 */
+  readonly chainId: number;
+  /** 支払い元 account（viem の account。`address` は receipt 照合に使う）。 */
+  readonly account: Account;
+  /**
+   * チェーン ID から client を返す（実 RPC / 送金権限はこの外側が持つ）。
+   * adapter はこの client を 1 支払い 1 送金要求に制限する wrapper で包んで使う。
+   */
+  readonly getClient: (parameters: { chainId?: number | undefined }) => Client | Promise<Client>;
+  /** `push`（client が broadcast）/ `pull`（server が broadcast）。 */
+  readonly mode?: "push" | "pull";
+  readonly kind: "real-key" | "non-signing-fixture";
+}
+
 export interface EvmSigningCapability {
   /** CAIP-2 network。承認済み offer の `network` と一致しないと使わない。 */
   readonly network: string;

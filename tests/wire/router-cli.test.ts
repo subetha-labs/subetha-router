@@ -119,7 +119,8 @@ test("実 CLI 越しに R1→R2→R3→R4 が通り、結果は再起動後も�
   });
   expect(byOther.status).toBe(404);
   expect(await callsOf(harness.upstreamA)).toMatchObject({ payCalls: 1 });
-});
+  // 別プロセス 4 本の起動と Router 再起動を含むため、既定 5 秒では足りない（有限の余裕を明示する）。
+}, 15_000);
 
 test("上流が課金応答不明なら unknown が durable で、再起動後も再送しない", async () => {
   const harness = await boot({ pay: "error" });
