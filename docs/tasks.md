@@ -191,3 +191,51 @@ Router の snapshot エンベロープ（`providerId/market/dataSource/payment/f
   テストのタイムアウトは `it(name, fn, timeout)` の第3引数で延長し設定ファイルを変更しない。
 - **ゲートと証拠ラベル**: `T5-crossimpl-nopay`。**AC-7 は達成しない**（支払いレグ無し）。
   実 UI（B-03 の残り）・実決済（B-01）・Provider 実 API（B-05）・finality は未解除のまま。
+
+## 7. T6 — Router の MCP ラッパ（フロントエンドなし・無課金）
+
+入力: `docs/t6-requirements.md` v2（T6-01〜T6-14）/ `docs/t6-design.md` v2（各1回の独立レビュー反映済み）。
+ラベル `T6-mcp-nopay`。オーナー決定（2026-09-26）で「MCP 前提・フロントエンドなし」、
+`@modelcontextprotocol/sdk` の採用も承認済み。T1–T5 の要件・設計はやり直さない。
+
+- **allowed file set**（7ファイル。これ以外が必要になれば停止して報告）:
+  `src/mcp/server.ts` / `src/mcp/tools.ts` / `tests/wire/mcp-server.test.ts` /
+  `tests/fixtures/mcp-harness.ts` / `package.json` / `package-lock.json` / `README.md`
+  （`docs/tasks.md` は本節の追記のみ）
+- **変更しない**: `src/http/*` / `src/core/*` / `src/client/*` / `src/main.ts`（製品コード）、
+  既存 fixture（`loopback.ts` / `router-harness.ts` / 上流・facilitator）、既存テスト、
+  `tsconfig.json`、`vitest.config.ts`、chat worktree
+
+### 内部分割（再計画不要。author 実行単位のみ）
+
+- **T6a — 依存と骨格**: `@modelcontextprotocol/sdk` を**完全一致固定**で追加（`^`/`>=` 禁止。
+  インストール直前にバージョンを確認しその値を書く）。`scripts.mcp` を追加。
+  `src/mcp/server.ts` の stdio 起動と env 検証（不足なら**起動拒否**）。
+- **T6b — tool 変換**: `src/mcp/tools.ts`。既存 T4 クライアント（`src/client/*`）の上に
+  R1–R4 の 4 tool を載せる。`quoteId → QuoteView` をプロセス内保持。
+  合成モード限定の fixture credential（`synthetic: true` を隠さない）。
+  `evidence` は `{label, source, verified}`。
+- **T6c — テスト**: `tests/fixtures/mcp-harness.ts`（既存 `router-harness.ts` を読むだけで再利用し、
+  stdin/stdout をパイプする spawn を新規に持つ）と `tests/wire/mcp-server.test.ts`。
+  設計 §9 の表を先に失敗させてから満たす。
+- **T6d — README**: 審査員向け再現手順（登録 1 行・必要 env・tool 名）と未達の区別。
+
+### 満たす振る舞い（先に失敗テストを書く）
+
+- `tools/list` に `subetha_router_{list_routes,quote,purchase,status}` が出る（T6-01）。
+- `src/mcp/**` が `src/core/**` を import しない（T6-02、境界テスト）。
+- `approval` 未指定・**不一致（別 `quoteId`）**で支払いが始まらない（上流 payCalls 0）。
+  停止層を `approval_mismatch`（クライアント層。Router へ要求を出さない）に固定し、
+  **Router 自身の拒否面は公開契約を直接叩いて `approval_required` を別途確認**する
+  ＝ T6-03 / T6-03b / T6-03c。
+- 同一引数で `purchase` を 3 回反復 → **同一 `paymentId`・両レグ 1 回**（T6-05b / T6-05c）。
+- 合成モードで `purchase` が `delivered`。**`real` モードでは支払いが始まらず固定エラー**（設計 §3b）。
+- 応答にトークンが出ない。例外注入でも固定文言。**stdout は全行 JSON-RPC として parse できる**（T6-04）。
+- 全 tool 応答の `evidence` に `label`/`source`/`verified` が揃い、**値まで一致**する（T6-07）。
+- 同一 journal に 2 つ目の Router を立てると `flock` で fail closed（T6-10 の根拠）。
+
+- **依存**: T1–T5 完了。追加依存は `@modelcontextprotocol/sdk` **1 つだけ**（`@x402/mcp` は追加しない）。
+- **完了コマンド（計画）**: `npm run test` / `npm run types` / `npm run build`。
+  多段プロセス起動を含むため `it(name, fn, timeout)` の第3引数で延長し設定ファイルは変更しない。
+- **ゲートと証拠ラベル**: `T6-mcp-nopay`。**AC-7 は達成しない**（支払いレグに実決済がない）。
+  実決済（B-01）・実 Provider 到達（B-05）・finality（D-05）・実 UI は未解除のまま。

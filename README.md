@@ -73,6 +73,7 @@ npm run test -- tests/wire/mpp-outbound.test.ts    # 送信レール B: 公式 m
 npm run test -- tests/wire/mpp-cli.test.ts         # B を実 composition 越しに縦貫
 npm run test -- tests/wire/client.test.ts          # 型付きクライアント（承認束縛・再オープン）
 npm run test -- tests/wire/chat-crossimpl.test.ts  # 既存 chat 実装 × 実 Router の相互実装（無課金）
+npm run test -- tests/wire/mcp-server.test.ts      # MCP ラッパ（tool 公開・承認束縛・証拠）
 ```
 
 - **wire テストの harness（`tests/fixtures/router-harness.ts`）が `src/main.ts` を子プロセスとして
@@ -242,6 +243,85 @@ Router の HTTP 層にはアクセスログが無く、上流の課金回数だ�
 `createRouterChatExecution` を実 Router に対して駆動できたという範囲にとどまり、
 chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
 
+## MCP から使う（T6・審査員向けの再現手順）
+
+Router を **MCP サーバ**として Claude Code から呼べる。**フロントエンドは用意していない。**
+「本来支払いができず使えなかった API Provider を、Router に支払わせて使う」体験を
+**審査員自身の環境**で再現できることを狙っている。
+
+### 1. Router を起動する（MCP サーバは Router を起動しない）
+
+MCP サーバは**稼働中の Router に接続するだけ**で、Router を内蔵起動しない
+（購入の直列化はプロセス内なので、Router が増えると直列化が効かなくなるため）。
+起動出力の `{"event":"listening",...,"label":...}` 行を**ファイルに残す**と、
+証拠ラベルの出所が Router 自身になる（下記 3）。
+
+### 2. MCP サーバを登録する（1 行）
+
+```sh
+claude mcp add subetha-router -- npm run --silent mcp
+```
+
+必要な env:
+
+| env | 必須 | 内容 |
+|---|---|---|
+| `ROUTER_MCP_BASE_URL` | ✓ | 稼働中 Router の origin |
+| `ROUTER_MCP_PRINCIPAL_ID` | ✓ | principal 名 |
+| `ROUTER_MCP_TOKEN` | ✓ | principal トークン。**tool の引数では渡さない／応答にも出ない** |
+| `ROUTER_MCP_ADAPTER_MODE` | | `synthetic`（既定）/ `real` |
+| `ROUTER_MCP_EVIDENCE_FILE` | ✓ (いずれか) | Router の起動出力。`label` を**そこから読む** |
+| `ROUTER_MCP_EVIDENCE_LABEL` | ✓ (いずれか) | 運用者の自己申告（`verified: false` として出る） |
+
+**どちらも無ければ起動を拒否する**（どのレールに繋いでいるかを名乗らないまま動かさない）。
+
+検証に使ったバージョン（T6-13）:
+
+| 項目 | 値 |
+|---|---|
+| `@modelcontextprotocol/sdk` | `1.30.1`（完全一致固定） |
+| MCP protocol version | SDK の `LATEST_PROTOCOL_VERSION` = `2025-11-25`（ネゴシエーションで下位も可: `2025-06-18` / `2025-03-26` / `2024-11-05` / `2024-10-07`） |
+| Node | v22（type-stripping 既定 ON） |
+
+### 3. 公開される tool
+
+| tool | 対応 | 備考 |
+|---|---|---|
+| `subetha_router_list_routes` | R1 | 上流 Provider の URL は返らない |
+| `subetha_router_quote` | R2 | **支払いを開始しない。** 返る `subject` が人間の承認対象 |
+| `subetha_router_purchase` | R3 | `approval` に承認した `quoteId` を渡す |
+| `subetha_router_status` | R4 | 保存 → 再オープン相当 |
+
+- **明示承認を飛ばさない。** `quote` は支払いを始めず、`purchase` は `approval` が
+  `quoteId` と一致しなければ実行されない。**MCP 層は承認を判定し直さない**（渡された値を
+  そのまま束縛に使う）。拒否面は 2 層ある: **型付きクライアント層**が束縛不一致を見て
+  Router へ要求を出さずに止め（`approval_mismatch`）、**Router 自身**も承認ヘッダの無い R3 を
+  `approval_required` で拒否する（どちらもテストで固定している）。
+  **エージェントが自律的に払う形にはしていない。**
+- `subject.source.decimals` を必ず見ること。`amount` は base units なので、
+  `decimals` なしでは `10000` が 0.01 なのか 10000 なのか判断できない。
+- `requestId` は**再試行しても同じ値**を使う。変えると別の購入になり得る
+  （同一引数で反復しても購入が 1 回に潰れることをテストで固定している）。
+- **MCP サーバを再起動すると `purchase` は失敗する**（quote の発行元が消えるため。
+  `quote` を取り直す）。`status` は再起動後も参照できる。
+
+### 4. 実行証拠（`evidence`）
+
+全 tool の応答に `evidence: { label, source, verified }` が付く。
+
+- `source: "router_listening_line"` / `verified: true` … Router 自身の起動行から読んだ値
+- `source: "operator_asserted"` / `verified: false` … 運用者の自己申告（Router が名乗った値ではない）
+
+**裸のラベルを信用しないこと。** `verified: false` は「運用者がそう言っている」以上の意味を持たない。
+
+### 5. この経路で到達していないもの
+
+- **実決済は未解除。** `real` モードの `purchase` は
+  `real_settlement_not_authorized` を返して**支払いを始めない**（実署名能力が未実装）。
+  合成モードの資格情報は `synthetic: true` を含む無課金トークンで、実 x402 / MPP の支払いではない。
+- Provider A/B の**実 API 到達**、finality、**AC-7** はいずれも未達。
+  この MCP 経路は Router 側の束縛と状態提供までを示すもので、実決済デモではない。
+
 ## 出典とライセンス
 
 - 本リポジトリのソースは新規に書いたもので、過去の `subetha-payment-router` PoC のコードは
@@ -261,6 +341,7 @@ chat の UI・HTTP 層（`server.mts` / `ui.js`）は対象外。
   公式 SDK を呼んでいることと実決済は別物で、署名境界には**署名しない spy** を入れている。
 - Provider A/B の**実 API 到達**と実 URL・実資産（SubEtha facilitator の実値を含む）。
 - 既存 chat の**実 UI 連携**（ブラウザ上の操作・`server.mts` / `ui.js`）。
+  MCP 経路（上記「MCP から使う」）は用意したが、**実決済は未解除**のまま。
   chat の**実行レイヤ**（`createRouterChatExecution`）との実 TCP 結合と、その越しの
   R4 再取得・再オープンまでは確認済み（T5、上記の節）。実 UI の因果は別ゲート。
 - finality の確認。テストネット支払いの実行には**別途の認可**が必要。
