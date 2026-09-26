@@ -119,6 +119,9 @@ async function start(): Promise<void> {
       ROUTER_ADAPTER_MODE: "real",
       ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
       ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
+      // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
+      // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
+      ROUTER_X402_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
     });
   } catch (error) {
     note(`could not start the Router: ${error instanceof Error ? error.message : "unknown"}`);

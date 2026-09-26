@@ -131,6 +131,12 @@ export interface RealRailsConfig {
    * `sourceRail: "x402"` の route があるときだけ必須。
    */
   readonly x402InboundFacilitatorUrl?: string;
+  /**
+   * x402 受信 offer の有効期間（秒）。`ROUTER_X402_INBOUND_OFFER_SECONDS`。
+   * 承認期限は `min(approvalTtlMs, offerExpiry)` なので、**ここが実効的な上限**になる。
+   * 人間が承認に関与する運用では、その所要時間を賄う値にする。
+   */
+  readonly x402InboundOfferSeconds?: number;
 }
 
 export interface RuntimeConfig {
@@ -375,6 +381,15 @@ function parseReal(
   env: Readonly<Record<string, string | undefined>>,
 ): RealRailsConfig {
   const inboundFacilitatorUrl = env["ROUTER_X402_INBOUND_FACILITATOR_URL"];
+  const inboundOfferSecondsRaw = env["ROUTER_X402_INBOUND_OFFER_SECONDS"];
+  let inboundOfferSeconds: number | undefined;
+  if (inboundOfferSecondsRaw !== undefined && inboundOfferSecondsRaw !== "") {
+    const parsed = Number(inboundOfferSecondsRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 3600) {
+      throw new ConfigError("ROUTER_X402_INBOUND_OFFER_SECONDS must be an integer in 1..3600");
+    }
+    inboundOfferSeconds = parsed;
+  }
   const facilitatorUrl = env["ROUTER_SUBETHA_FACILITATOR_URL"];
   if (facilitatorUrl === undefined || facilitatorUrl === "") {
     throw new ConfigError("ROUTER_SUBETHA_FACILITATOR_URL is required when ROUTER_ADAPTER_MODE=real");
@@ -392,6 +407,7 @@ function parseReal(
     resolved[routeId] = assertAbsoluteHttpUrl(upstream, `x402.upstreams.${routeId}`);
   }
   return {
+    ...(inboundOfferSeconds === undefined ? {} : { x402InboundOfferSeconds: inboundOfferSeconds }),
     ...(inboundFacilitatorUrl === undefined
       ? {}
       : {

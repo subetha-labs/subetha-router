@@ -218,6 +218,11 @@ export function composeRails(
       inboundRails[`x402:${route.routeId}`] = createX402Inbound({
         facilitatorUrl: real.x402InboundFacilitatorUrl,
         payTo,
+        // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
+        // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
+        ...(real.x402InboundOfferSeconds === undefined
+          ? {}
+          : { maxTimeoutSeconds: real.x402InboundOfferSeconds }),
       });
     }
   }
