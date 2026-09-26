@@ -31,6 +31,34 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `PORT` | | 既定 `8787` |
 | `SUBETHA_MAX_PURCHASES` | | 既定 `100000` |
 | `SUBETHA_INBOUND_MAX_TOTAL` / `SUBETHA_OUTBOUND_MAX_TOTAL` | | 既定 `1000000000` base units |
+| `SUBETHA_MPP_INBOUND_SECRET` | | **MPP 受信**を公開する場合のみ。challenge の HMAC 束縛鍵（**32 バイト以上**）。署名鍵ではない |
+| `SUBETHA_OUTBOUND_X402_KEY` | | **MPP 受信**を公開する場合のみ。Provider A に x402 で払う鍵。**Base Sepolia USDC 残高が要る** |
+
+### MPP 受信（逆向きの経路）を公開する
+
+既定は **x402 受信 → MPP 送信** の 1 経路だけ。
+**MPP 受信 → x402 送信** も出すには、上記 2 つを**両方**渡す:
+
+```sh
+# 32 バイト以上の秘密を作る（署名鍵ではないが秘密。使い回さない）
+openssl rand -hex 32
+```
+
+```sh
+  -e SUBETHA_MPP_INBOUND_SECRET=<上で作った値> \
+  -e SUBETHA_OUTBOUND_X402_KEY=0x<Base Sepolia USDC を持つ鍵> \
+```
+
+**片方だけでは経路は増えない**（起動ログにその旨が出て、既存経路だけで動き続ける）。
+これは意図した挙動: 送信レグの資金が無い経路を公開すると、購入が受信レグの支払い後に
+失敗し得るため、**最初から出さない**。
+
+有効にすると route が 2 本になる:
+
+| routeId | 受信 | 送信 |
+|---|---|---|
+| `md-mpp-eth-snapshot` | x402（Base Sepolia USDC） | MPP（Provider B） |
+| `md-x402-eth-snapshot` | MPP（Tempo pathUSD） | x402（Provider A） |
 
 **呼び出し側（審査員）の鍵はこのコンテナに渡さない。** 受信レグの署名は呼び出し側の手元で作られ、
 サーバには**署名済みの credential だけ**が届く（`inbound payer: the caller's own key` と起動ログに出る）。
