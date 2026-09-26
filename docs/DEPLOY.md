@@ -94,16 +94,20 @@ SUBETHA_OUTBOUND_PRIVATE_KEY=0x...
 SUBETHA_ROUTER_RECEIVER=0x...
 ENVEOF
 
-# 4) 起動
-docker run -d --name subetha-router --restart unless-stopped \
+# 4) 起動（env ファイルは root 所有 600 なので **sudo が要る**）
+sudo docker run -d --name subetha-router --restart unless-stopped \
   -p 127.0.0.1:8787:8787 \
   --env-file /etc/subetha-router.env \
   subetha-router
 
 # 5) 確認
-curl -s http://127.0.0.1:8787/healthz     # → {"status":"ok","router":"up"}
-docker logs subetha-router | tail -3      # → mode=real / label=real / inboundPayer=none
+curl -s http://127.0.0.1:8787/healthz         # → {"status":"ok","router":"up"}
+sudo docker logs subetha-router | tail -3     # → mode=real / label=real / inboundPayer=none
 ```
+
+`--env-file` は **docker クライアントを実行したユーザが読む**ので、600 の root 所有ファイルには
+`sudo docker` が必要（`permission denied` はこれが原因）。
+鍵ファイルの権限を緩めるより `sudo` を付ける方が安全。以降 `docker ps` / `docker logs` も `sudo` 付きになる。
 
 `-p 127.0.0.1:8787:8787` としているので、**8787 は外から直接叩けない**（プロキシ経由のみ）。
 
