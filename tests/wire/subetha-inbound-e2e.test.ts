@@ -62,7 +62,13 @@ interface Started {
  * `ROUTER_ADAPTER_MODE=real` でなければ `sourceRail` は評価されない
  * （`synthetic` は adapter を固定してしまう）ので、real で起動して能力だけ spy にする。
  */
-async function start(options: { readonly sourceRail?: string } = {}): Promise<Started> {
+async function start(
+  options: {
+    readonly sourceRail?: string;
+    readonly sourcePayTo?: string;
+    readonly env?: Readonly<Record<string, string>>;
+  } = {},
+): Promise<Started> {
   const facilitator = await track(
     await startListening("tests/fixtures/facilitator-server.ts", [
       "--port",
@@ -103,6 +109,9 @@ async function start(options: { readonly sourceRail?: string } = {}): Promise<St
   if (options.sourceRail !== undefined) {
     route["sourceRail"] = options.sourceRail;
   }
+  if (options.sourcePayTo !== undefined) {
+    (route["source"] as Record<string, unknown>)["payTo"] = options.sourcePayTo;
+  }
 
   await writeFile(
     configPath,
@@ -138,6 +147,7 @@ async function start(options: { readonly sourceRail?: string } = {}): Promise<St
       // real でないと `sourceRail` は評価されない（合成は adapter を固定する）。
       ROUTER_ADAPTER_MODE: "real",
       ROUTER_SUBETHA_FACILITATOR_URL: facilitator.baseUrl,
+      ...(options.env ?? {}),
     }),
   );
   return { router, facilitator };
@@ -255,6 +265,62 @@ describe("subetha inbound end-to-end (real composition, unpaid)", () => {
         ROUTER_ADAPTER_MODE: "real",
         ROUTER_SUBETHA_FACILITATOR_URL: facilitator.baseUrl,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/sourceRail must be/);
+  });
+});
+
+describe("mpp inbound wiring (real composition, unpaid)", () => {
+  const SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef";
+  const MPP_PAY_TO = "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2";
+
+  it("resolves sourceRail \"mpp\" and issues an MPP offer with a real expiry", async () => {
+    const { router } = await start({
+      sourceRail: "mpp",
+      sourcePayTo: MPP_PAY_TO,
+      env: { ROUTER_MPP_INBOUND_SECRET: SECRET, ROUTER_MPP_INBOUND_OFFER_SECONDS: "600" },
+    });
+    const body = await quote(router, "p5-mpp-1");
+    const source = body["source"] as Record<string, unknown> | undefined;
+    const offer = source?.["offer"] as Record<string, unknown> | undefined;
+
+    expect(offer, JSON.stringify(body).slice(0, 400)).toBeDefined();
+    expect(offer?.["scheme"]).toBe("tempo/charge");
+    expect(offer?.["payTo"]).toBe(MPP_PAY_TO);
+    // rail 名がそのまま射影に出る（既定 subetha に潰れない）。
+    expect(source?.["rail"]).toBe("mpp");
+
+    // 失効検査が発火できる値であること（ここが 0/NaN だと期限が効かない）。
+    const extra = offer?.["extra"] as Record<string, unknown>;
+    const expiresAt = extra["expiresAt"] as number;
+    expect(Number.isInteger(expiresAt)).toBe(true);
+    expect(expiresAt * 1000).toBeGreaterThan(Date.now());
+  });
+
+  it("refuses to start when sourceRail is mpp but no secret is configured", async () => {
+    // 鍵が無いまま合成や弱い HMAC に落とさない（fail closed）。
+    // 理由まで固定する。理由を見ないと、無関係な構成エラーでも緑になってしまう
+    // （実際、budget が空のまま書いていて別の理由で落ちていたのを実測で見つけた）。
+    await expect(
+      start({ sourceRail: "mpp", sourcePayTo: MPP_PAY_TO }),
+    ).rejects.toThrow(/ROUTER_MPP_INBOUND_SECRET is required/);
+  });
+
+  it("refuses to start when sourceRail is mpp but source.payTo is missing", async () => {
+    await expect(
+      start({
+        sourceRail: "mpp",
+        env: { ROUTER_MPP_INBOUND_SECRET: SECRET },
+      }),
+    ).rejects.toThrow(/source\.payTo is required when sourceRail is "mpp"/);
+  });
+
+  it("refuses to start when the MPP secret is too short", async () => {
+    await expect(
+      start({
+        sourceRail: "mpp",
+        sourcePayTo: MPP_PAY_TO,
+        env: { ROUTER_MPP_INBOUND_SECRET: "too-short" },
+      }),
+    ).rejects.toThrow(/at least 32 bytes/);
   });
 });

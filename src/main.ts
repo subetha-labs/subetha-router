@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createSubethaInbound } from "./adapters/inbound/subetha.js";
+import { createMppInbound } from "./adapters/inbound/mpp.js";
 import { createX402Inbound } from "./adapters/inbound/x402.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
@@ -107,8 +108,13 @@ function inboundByRoute(
   const byBinding = new Map<string, InboundRail>();
   for (const route of Object.values(routes)) {
     const sourceRail = route.sourceRail ?? "subetha";
-    // x402 受信は受取先が route ごとなので `x402:<routeId>` で引く。
-    const rail = rails[sourceRail === "x402" ? `x402:${route.routeId}` : sourceRail];
+    // x402 / mpp 受信は受取先が route ごとなので `<rail>:<routeId>` で引く。
+    const rail =
+      rails[
+        sourceRail === "x402" || sourceRail === "mpp"
+          ? `${sourceRail}:${route.routeId}`
+          : sourceRail
+      ];
     if (rail === undefined) {
       throw new ConfigError(
         `routes.${route.routeId}.sourceRail has no configured inbound rail`,
@@ -223,6 +229,40 @@ export function composeRails(
         ...(real.x402InboundOfferSeconds === undefined
           ? {}
           : { maxTimeoutSeconds: real.x402InboundOfferSeconds }),
+      });
+    }
+  }
+
+  const usesMppInbound = Object.values(config.router.routes).some(
+    (route) => route.sourceRail === "mpp",
+  );
+  if (usesMppInbound) {
+    const secretKey = real.mppInboundSecret;
+    if (secretKey === undefined) {
+      throw new ConfigError(
+        'ROUTER_MPP_INBOUND_SECRET is required when a route uses sourceRail "mpp"',
+      );
+    }
+    for (const route of Object.values(config.router.routes)) {
+      if (route.sourceRail !== "mpp") continue;
+      const payTo = route.source.payTo;
+      if (payTo === undefined) {
+        throw new ConfigError(`routes.${route.routeId}.source.payTo is required for mpp inbound`);
+      }
+      // CAIP-2 の `eip155:<id>` から数値 chainId を取り出す（adapter は数値で受ける）。
+      const chainId = Number(route.source.network.replace(/^eip155:/, ""));
+      if (!Number.isInteger(chainId) || chainId <= 0) {
+        throw new ConfigError(
+          `routes.${route.routeId}.source.network must be eip155:<chainId> for mpp inbound`,
+        );
+      }
+      inboundRails[`mpp:${route.routeId}`] = createMppInbound({
+        secretKey,
+        recipient: payTo,
+        currency: route.source.asset,
+        chainId,
+        // 承認期限は `min(approvalTtlMs, offerExpiry)` で切られる。既定は x402 受信と揃える。
+        maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
       });
     }
   }

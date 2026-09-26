@@ -137,6 +137,18 @@ export interface RealRailsConfig {
    * 人間が承認に関与する運用では、その所要時間を賄う値にする。
    */
   readonly x402InboundOfferSeconds?: number;
+  /**
+   * MPP **受信**レグの challenge HMAC 束縛鍵（`ROUTER_MPP_INBOUND_SECRET`、32 バイト以上）。
+   * **署名鍵ではない**（受信側の Router は受取人なので署名しない）が秘密。
+   * `sourceRail: "mpp"` の route があるときだけ必須。
+   */
+  readonly mppInboundSecret?: string;
+  /**
+   * MPP 受信 offer の有効期間（秒）。`ROUTER_MPP_INBOUND_OFFER_SECONDS`。
+   * **必ず adapter に渡す**: mppx の challenge は `expires` が任意で、
+   * 渡さないと `expiresAt` が埋まらず失効検査が発火しない。
+   */
+  readonly mppInboundOfferSeconds?: number;
 }
 
 export interface RuntimeConfig {
@@ -228,18 +240,24 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
     throw new ConfigError(`${at}.rail must be a non-empty string when present`);
   }
   const sourceRailRaw = value["sourceRail"];
-  if (sourceRailRaw !== undefined && sourceRailRaw !== "subetha" && sourceRailRaw !== "x402") {
-    throw new ConfigError(`${at}.sourceRail must be "subetha" or "x402" when present`);
+  if (
+    sourceRailRaw !== undefined &&
+    sourceRailRaw !== "subetha" &&
+    sourceRailRaw !== "x402" &&
+    sourceRailRaw !== "mpp"
+  ) {
+    throw new ConfigError(`${at}.sourceRail must be "subetha", "x402" or "mpp" when present`);
   }
   const sourceRail = sourceRailRaw as string | undefined;
-  // 受信レグの受取先は x402 受信のときだけ必須（SubEtha は facilitator が返すので持たない）。
   const sourcePayToRaw = source["payTo"];
   if (sourcePayToRaw !== undefined && (typeof sourcePayToRaw !== "string" || !ADDRESS_PATTERN.test(sourcePayToRaw))) {
     throw new ConfigError(`${at}.source.payTo must be a 0x address when present`);
   }
   const sourcePayTo = sourcePayToRaw as string | undefined;
-  if (sourceRail === "x402" && sourcePayTo === undefined) {
-    throw new ConfigError(`${at}.source.payTo is required when sourceRail is "x402"`);
+  // 受取先が構成に要るのは Router が自分で offer を作るレール（x402 / mpp）。
+  // SubEtha は facilitator が challenge で payTo を返すので持たない。
+  if ((sourceRail === "x402" || sourceRail === "mpp") && sourcePayTo === undefined) {
+    throw new ConfigError(`${at}.source.payTo is required when sourceRail is "${sourceRail}"`);
   }
   return {
     routeId,
@@ -381,14 +399,22 @@ function parseReal(
   env: Readonly<Record<string, string | undefined>>,
 ): RealRailsConfig {
   const inboundFacilitatorUrl = env["ROUTER_X402_INBOUND_FACILITATOR_URL"];
-  const inboundOfferSecondsRaw = env["ROUTER_X402_INBOUND_OFFER_SECONDS"];
-  let inboundOfferSeconds: number | undefined;
-  if (inboundOfferSecondsRaw !== undefined && inboundOfferSecondsRaw !== "") {
-    const parsed = Number(inboundOfferSecondsRaw);
-    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 3600) {
-      throw new ConfigError("ROUTER_X402_INBOUND_OFFER_SECONDS must be an integer in 1..3600");
+  const inboundOfferSeconds = parseOfferSeconds(
+    env["ROUTER_X402_INBOUND_OFFER_SECONDS"],
+    "ROUTER_X402_INBOUND_OFFER_SECONDS",
+  );
+  const mppInboundOfferSeconds = parseOfferSeconds(
+    env["ROUTER_MPP_INBOUND_OFFER_SECONDS"],
+    "ROUTER_MPP_INBOUND_OFFER_SECONDS",
+  );
+  const mppInboundSecretRaw = env["ROUTER_MPP_INBOUND_SECRET"];
+  let mppInboundSecret: string | undefined;
+  if (mppInboundSecretRaw !== undefined && mppInboundSecretRaw !== "") {
+    // SDK の要求。短い鍵で HMAC 束縛が弱いまま起動させない。
+    if (mppInboundSecretRaw.length < 32) {
+      throw new ConfigError("ROUTER_MPP_INBOUND_SECRET must be at least 32 bytes");
     }
-    inboundOfferSeconds = parsed;
+    mppInboundSecret = mppInboundSecretRaw;
   }
   const facilitatorUrl = env["ROUTER_SUBETHA_FACILITATOR_URL"];
   if (facilitatorUrl === undefined || facilitatorUrl === "") {
@@ -408,6 +434,8 @@ function parseReal(
   }
   return {
     ...(inboundOfferSeconds === undefined ? {} : { x402InboundOfferSeconds: inboundOfferSeconds }),
+    ...(mppInboundOfferSeconds === undefined ? {} : { mppInboundOfferSeconds }),
+    ...(mppInboundSecret === undefined ? {} : { mppInboundSecret }),
     ...(inboundFacilitatorUrl === undefined
       ? {}
       : {
@@ -423,6 +451,16 @@ function parseReal(
     ).replace(/\/$/, ""),
     upstreams: resolved,
   };
+}
+
+/** 受信 offer の有効期間（秒）。1..3600 の整数だけを受ける。 */
+function parseOfferSeconds(raw: string | undefined, name: string): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 3600) {
+    throw new ConfigError(`${name} must be an integer in 1..3600`);
+  }
+  return parsed;
 }
 
 function parsePort(raw: string | undefined, fallback: number): number {
