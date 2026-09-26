@@ -1,36 +1,74 @@
 # SubEtha Router
 
-ETHGlobal Tokyo 提出実装。AI エージェント側の支払い手段と、API プロバイダ側が要求する
-支払い手段をつなぐ Router を作る。
+ETHGlobal Tokyo 提出実装。**エージェント側が持っている支払い手段**と、**API プロバイダ側が要求する
+支払い手段**が違っていても使えるようにする Router。
 
-最初に通すのは **SubEtha 受信 → Router → x402 Provider A**。次に**同じ受信口から MPP Provider B**へ
-（`routeId` の解決先を差し替えるだけで、core はレール名で分岐しない）。
+**x402 しか持っていない人が、MPP でしか払えない Provider を使える。**
 
-- Provider A: Hyperliquid の ETH マーケットスナップショット、Base Sepolia の x402 exact。
-- Provider B: Uniswap v3 プールの参照価格、Tempo の MPP charge。
-- A/B はいずれも**自前でホストしているプロバイダ**であり、Hyperliquid や Uniswap がこれらの
-  支払い方式に対応しているという主張ではない。
-- 市場データは**メインネットの参照データ**を読むが、**支払いはテストネット限定**が目標。
-- 2 つのレグは交換ではなく**独立した支払い**で、各レールを個別に事前資金供給（prefunded）する。
-  **FX 変換もブリッジも行わない。**
+```
+呼び出し側 ──①x402 / Base Sepolia USDC──> Router ──②MPP / Tempo pathUSD──> Provider
+```
 
-**現状: 耐久コア + HTTP 公開契約 + 送信レール A（x402）/ B（MPP）の公式 SDK 配線 + 型付き
-クライアントを、実 CLI・実 TCP で合成 fixture 相手に通した段階。**
-`src/main.ts` を実プロセスとして起動し、**別プロセスのテストクライアント**から実 TCP で
-R1→R2→R3→R4 を通している。送信レールはインストール済みの公式 SDK（A = `@x402/fetch` +
-`@x402/evm` の `x402Client` / `ExactEvmScheme`、B = `mppx/client` の `Mppx.create` + `tempo.charge`）を
-**実際に呼ぶ**が、相手は**リポジトリ内の別プロセス合成 fixture**（`tests/fixtures/*`・loopback のみ）で、
-署名能力は**署名しない試験用 spy**を注入している。したがって**実決済ではない**
-（証拠ラベル: A = `T2-fixture-nopay` / B = `T3-fixture-nopay` / クライアント = `T4-fixture-nopay`、
-T1 の合成レールは `T1-synthetic-nopay`）。
+2 レグは**交換でもブリッジでもなく独立した支払い**。FX 変換もしない。
 
-実ウォレット・鍵・署名・ブロードキャスト、Provider A/B の**実 API 到達**、既存 chat の実 UI 連携、
-finality はいずれも**未実施で別ゲート**。**クリーンインストールからの再現・手動起動・実決済・
-Provider 実 API・chat 実接続・finality を検証したという主張はしない。** 本 README はその範囲だけを書く。
+## 今すぐ試す
 
-順序は **A（x402）→ B（MPP）**。市場データは**メインネットの参照データ**を読み、**支払いはテストネット
-限定**が目標で、その実行には**別途の認可が必要**（本書の範囲では未解除）。2 レグは交換ではなく
-**独立した支払い**で、各レールを個別に事前資金供給（prefunded）する。**ブリッジも FX 変換も行わない。**
+```sh
+claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
+```
+
+clone も `npm install` も不要。**支払いは呼び出し側自身の鍵**で、
+**署名は手元で作られる**（Router は呼び出し側の鍵を持たない）。
+
+用意するもの:
+
+| 項目 | 内容 |
+|---|---|
+| USDC | **Base Sepolia**、1 回 `10000` base units（$0.01）。数回分あれば足りる |
+| ガス | **不要**。x402 の EIP-3009 経路では facilitator が送信して gas を負担する |
+
+使い方:
+
+1. `subetha_router_quote` — 払う額が返る（`decimals` 付きなので額が読める）
+2. `subetha_router_purchase` — 返ってきた `quote` と、自分の鍵で署名した `credential` を渡す
+3. `subetha_router_status` — 両レグの実 tx が残る
+
+**実測済み**（この URL に対して外部から実行した結果）:
+
+| レグ | 実 tx |
+|---|---|
+| 受信（x402 / Base Sepolia） | `0x67993aa7...52bd`（block 47307713） |
+| 送信（MPP / Tempo Moderato） | `0x930b7d73...2e0c`（block 36917428） |
+
+### 注意
+
+- **決済は数秒空ける。** 公開 x402 facilitator は連続実行で nonce 衝突を起こす
+  （実測: 0ms 間隔で 2/20 失敗、3 秒空けて 0/15）。
+- **`paid_data_unavailable` が返ることがある。** 支払いは成立したがデータ取得に失敗した状態で、
+  **資金は動いている**。Router は**自動再送しない**（二重支払いを避けるため）。再試行すれば通る。
+  本番検証でも 1 回目がこれで、2 回目は成功した（Provider 側の RPC レート制限に起因する間欠障害）。
+- **`bucket_limit` で止まったら上限到達。** 止まること自体が安全機構。
+
+## 何が動いているか
+
+| 項目 | 状態 |
+|---|---|
+| x402 受信 → MPP 送信（P4） | **実チェーンで決済済み** |
+| 送信レグ A（x402 / Base Sepolia） | **実決済済み** |
+| 送信レグ B（MPP / Tempo） | **実決済済み** |
+| MCP（ローカル stdio / リモート HTTP） | **両方で実決済済み** |
+| Provider A/B の実 API 到達 | **到達済み**（実データ取得） |
+
+**まだ確認していないもの**:
+
+- **SubEtha 受信レグの実決済**（合成 facilitator のまま）。→ **AC-4 は未達**
+- P3（MPP 受信 → A）/ P5（同一レール）は **DEFER**
+- finality（mined/canonical の判定）
+- 既存 chat の**実 UI 連携**（実行レイヤとの結合までは確認済み。T5）
+
+支払いは**テストネット限定**。市場データはメインネットの参照値を読むが、**約定可能な気配値ではない**。
+Provider A/B は**自前でホストしている**ものであり、Hyperliquid や Uniswap がこれらの支払い方式に
+対応しているという主張ではない。
 
 ## 検証済みの環境
 
@@ -312,162 +350,67 @@ R4 が `delivered` / `outcome: paid` を返し、オンチェーンで独立に�
 - 決済スコープは記録済み（`docs/t7-requirements.md` §2）。
   **公開 facilitator は連打すると nonce 衝突を起こすため、決済は数秒空ける。**
 
-## 審査員向け: 1 コマンドで試す
+## ローカルで動かす（clone する場合）
+
+ホスト版（冒頭「今すぐ試す」）で足りるが、自分の環境で全部動かしたい場合はこちら。
 
 ```sh
+git clone https://github.com/subetha-labs/subetha-router-egt.git
+cd subetha-router-egt
+npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
+
 claude mcp add subetha-router \
   -e SUBETHA_PAYER_PRIVATE_KEY=0x<Base Sepolia の使い捨て鍵> \
   -- npm run --silent demo:mcp
 ```
 
-これだけで Router と MCP サーバが立ち上がり、エージェントから使えるようになる。
-**Router は別途起動しなくてよい**（このコマンドが子プロセスとして 1 つだけ起動する）。
+`demo:mcp` は **Router を子プロセスとして 1 つだけ起動**し、その上に MCP サーバを立てる。
+ホスト版と違い、**受信レグの鍵をこのプロセスに渡す**形になる（自分のマシンなので手元に閉じる）。
 
-### 体験できること
-
-**x402 しか持っていないのに、MPP でしか払えない Provider のデータが取れる。**
-
-1. `subetha_router_quote` — いくら払うかが返る（`decimals` 付きなので額が読める）。
-   **この時点では支払いは起きない。**
-2. **人間が承認する** — 納得したら `subetha_router_purchase` に `approval` として `quoteId` を渡す。
-   エージェントが勝手に払う作りにはなっていない。
-3. Router が **Base Sepolia の USDC を受け取り**、**Tempo の pathUSD で Provider に払って**
-   Uniswap v3 の参照価格を返す。`subetha_router_status` に**両レグの実 tx** が残る。
-
-### 用意するもの
-
-| 項目 | 内容 |
-|---|---|
-| 鍵 | **Base Sepolia の使い捨て鍵**。1 回 $0.01（10000 base units）。数回分あれば足りる |
-| USDC | Base Sepolia の USDC `0x036CbD53...CF7e` |
-| ガス | **不要**。x402 の EIP-3009 経路では facilitator が送信して gas を負担する |
-| Node | v22 以降（type-stripping 既定 ON） |
-
-**鍵は審査員のもので、Router は保持しない。** `src/**` は鍵を持たず env からも読まない設計で、
-env を読んで能力として注入するのは `tools/demo-mcp.ts` だけ。
-支出は Router の budget で機械的に上限を掛けている（既定 5 回、1 回 10000 base units）。
-
-### 実測済みの動作（この手順をそのまま実行した結果）
-
+実測済み:
 ```
-tools: subetha_router_list_routes, subetha_router_quote, subetha_router_purchase, subetha_router_status
 quote: 10000 base units (decimals 6) on eip155:84532
 purchase outcome=delivered
 inbound  tx=0x17d1ab62...8847   (Base Sepolia, block 47304257)
 outbound tx=0x78385ee1...58ce   (Tempo Moderato, block 36905875)
 ```
 
-### うまくいかないとき
+デプロイ（EC2 + Docker + TLS）の手順は [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
-- **`inbound_payer_not_configured`** — `SUBETHA_PAYER_PRIVATE_KEY` が渡っていない。
-  偽の資格情報で代替せず止まる設計。
-- **`resource_mismatch`** — `quote` と `purchase` で `requestId` が違う。**同じ値を使う**。
-- **`bucket_limit`** — 支出上限に達した。**止まること自体が安全機構**。
-- **`unknown`** — 送金済みかどうか確定できない状態。**自動で再送しない**（二重支払いを避けるため）。
-  `subetha_router_status` で確認する。
-- 決済は**数秒空ける**（公開 facilitator が連続実行で nonce 衝突を起こす）。
+## MCP の詳細（tool・証拠・到達範囲）
 
-## MCP から使う（T6・審査員向けの再現手順）
-
-Router を **MCP サーバ**として Claude Code から呼べる。**フロントエンドは用意していない。**
-「本来支払いができず使えなかった API Provider を、Router に支払わせて使う」体験を
-**審査員自身の環境**で再現できることを狙っている。
-
-### 1. Router を起動する（MCP サーバは Router を起動しない）
-
-MCP サーバは**稼働中の Router に接続するだけ**で、Router を内蔵起動しない
-（購入の直列化はプロセス内なので、Router が増えると直列化が効かなくなるため）。
-起動出力の `{"event":"listening",...,"label":...}` 行を**ファイルに残す**と、
-証拠ラベルの出所が Router 自身になる（下記 3）。
-
-### 2. MCP サーバを登録する（1 行）
-
-```sh
-claude mcp add subetha-router -- npm run --silent mcp
-```
-
-必要な env:
-
-| env | 必須 | 内容 |
-|---|---|---|
-| `ROUTER_MCP_BASE_URL` | ✓ | 稼働中 Router の origin |
-| `ROUTER_MCP_PRINCIPAL_ID` | ✓ | principal 名 |
-| `ROUTER_MCP_TOKEN` | ✓ | principal トークン。**tool の引数では渡さない／応答にも出ない** |
-| `ROUTER_MCP_ADAPTER_MODE` | | `synthetic`（既定）/ `real` |
-| `ROUTER_MCP_EVIDENCE_FILE` | ✓ (いずれか) | Router の起動出力。`label` を**そこから読む** |
-| `ROUTER_MCP_EVIDENCE_LABEL` | ✓ (いずれか) | 運用者の自己申告（`verified: false` として出る） |
-
-**どちらも無ければ起動を拒否する**（どのレールに繋いでいるかを名乗らないまま動かさない）。
-
-検証に使ったバージョン（T6-13）:
-
-| 項目 | 値 |
-|---|---|
-| `@modelcontextprotocol/sdk` | `1.30.1`（完全一致固定） |
-| MCP protocol version | SDK の `LATEST_PROTOCOL_VERSION` = `2025-11-25`（ネゴシエーションで下位も可: `2025-06-18` / `2025-03-26` / `2024-11-05` / `2024-10-07`） |
-| Node | v22（type-stripping 既定 ON） |
-
-### 2b. 実決済モードで使う（T9・検証済み）
-
-```sh
-claude mcp add subetha-router -- npm run --silent mcp:real
-```
-
-`npm run mcp` は**合成専用**（受信レグの支払い能力を注入しない）。
-実決済するときは `mcp:real` を使い、**受信レグを払う鍵を env で渡す**
-（`T9_MCP_PAYER_PRIVATE_KEY`）。`src/**` は鍵を持たず env からも読まない設計を維持しており、
-注入するのは `tools/t9-mcp-real.ts` 側。**能力が無ければ `inbound_payer_not_configured` で
-fail closed** し、偽の資格情報で代替しない。
-
-**MCP 経由の実決済を実チェーンで確認済み**:
-
-| レグ | 実 tx |
-|---|---|
-| 受信（x402 / Base Sepolia） | `0x899adf9e...ca49`（block 47304090） |
-| 送信（MPP / Tempo） | `0xcff519d3...b196`（block 36905313） |
-
-`purchase` が `delivered` を返し、`status` の射影に**両レグの txRef**が残る。
-`evidence` は `{label:"real", source:"router_listening_line", verified:true}`＝
-**Router 自身の起動行から読んだ値**で、運用者の自己申告ではない。
-
-### 3. 公開される tool
+### 公開される tool
 
 | tool | 対応 | 備考 |
 |---|---|---|
 | `subetha_router_list_routes` | R1 | 上流 Provider の URL は返らない |
-| `subetha_router_quote` | R2 | **支払いを開始しない。** 返る `subject` が人間の承認対象 |
-| `subetha_router_purchase` | R3 | `approval` に承認した `quoteId` を渡す |
-| `subetha_router_status` | R4 | 保存 → 再オープン相当 |
+| `subetha_router_quote` | R2 | **支払いを開始しない。** 返る `subject` が承認対象、`quote` をそのまま持ち回る |
+| `subetha_router_purchase` | R3 | `quote` と、自分の鍵で署名した `credential` を渡す |
+| `subetha_router_status` | R4 | 保存 → 再オープン相当。両レグの txRef が残る |
 
-- **明示承認を飛ばさない。** `quote` は支払いを始めず、`purchase` は `approval` が
-  `quoteId` と一致しなければ実行されない。**MCP 層は承認を判定し直さない**（渡された値を
-  そのまま束縛に使う）。拒否面は 2 層ある: **型付きクライアント層**が束縛不一致を見て
-  Router へ要求を出さずに止め（`approval_mismatch`）、**Router 自身**も承認ヘッダの無い R3 を
-  `approval_required` で拒否する（どちらもテストで固定している）。
-  **エージェントが自律的に払う形にはしていない。**
-- `subject.source.decimals` を必ず見ること。`amount` は base units なので、
+`tools/list` と `quote` は**無料**、`purchase` が**有料**（支払い付き MCP の慣行に合わせている）。
+支払いは**セッションではなく呼び出しに紐づく**ので、リモートは**ステートレス**で動く。
+
+- `subject.source.decimals` を必ず見ること。`amount` は base units で、
   `decimals` なしでは `10000` が 0.01 なのか 10000 なのか判断できない。
-- `requestId` は**再試行しても同じ値**を使う。変えると別の購入になり得る
-  （同一引数で反復しても購入が 1 回に潰れることをテストで固定している）。
-- **MCP サーバを再起動すると `purchase` は失敗する**（quote の発行元が消えるため。
-  `quote` を取り直す）。`status` は再起動後も参照できる。
+- `requestId` は `quote` と `purchase` で**同じ値**を使う。変えると別の購入になる。
+- **Router は呼び出し側の鍵を持たない。** `src/**` に秘密鍵の参照は 0 件で、env からも読まない。
 
-### 4. 実行証拠（`evidence`）
+### 実行証拠（`evidence`）
 
 全 tool の応答に `evidence: { label, source, verified }` が付く。
 
-- `source: "router_listening_line"` / `verified: true` … Router 自身の起動行から読んだ値
+- `source: "router_listening_line"` / `verified: true` … **Router 自身の起動行**から読んだ値
 - `source: "operator_asserted"` / `verified: false` … 運用者の自己申告（Router が名乗った値ではない）
 
 **裸のラベルを信用しないこと。** `verified: false` は「運用者がそう言っている」以上の意味を持たない。
 
-### 5. この経路で到達していないもの
+### この経路で到達していないもの
 
-- **実決済は未解除。** `real` モードの `purchase` は
-  `real_settlement_not_authorized` を返して**支払いを始めない**（実署名能力が未実装）。
-  合成モードの資格情報は `synthetic: true` を含む無課金トークンで、実 x402 / MPP の支払いではない。
-- Provider A/B の**実 API 到達**、finality、**AC-7** はいずれも未達。
-  この MCP 経路は Router 側の束縛と状態提供までを示すもので、実決済デモではない。
+- **SubEtha 受信レグ**は合成のまま。→ **AC-4 は未達**
+- Provider A/B の実 API 到達・実決済は**到達済み**（上記の各節）
+- finality は未確認
 
 ## 出典とライセンス
 
@@ -478,22 +421,20 @@ fail closed** し、偽の資格情報で代替しない。
 
 ## まだ確認していないもの
 
-現時点の証拠は**ローカルの合成 fixture に対するテストのみ**（`tests/unit` + `tests/wire`、
-`types` / `build` は exit 0）で、レビュー合格や受け入れ完了を意味しない。
-**合成 fixture に対する settle・receipt は実決済ではない。**
+**実決済は x402 受信 / x402 送信 / MPP 送信のいずれも到達済み**で、オンチェーンで独立に検証している
+（各節の tx を参照）。ただし**テストネット限定**であり、以下は別ゲートのまま**未実施**。
 
-別ゲートのまま**未実施**のもの:
-
-- **受信レグ（SubEtha）の実決済**。受信側は合成 facilitator のままで、実ランタイム値（U-01/U-02）が未確定。
-  → **AC-4 は未達。**
-- Provider **B**（MPP / Tempo）の実決済と実 API 到達（改修中のため対象外）。
+- **SubEtha 受信レグの実決済**。受信側は合成 facilitator のままで、実 facilitator は
+  ローカル（anvil chainId 31337）でしか動かせる状態にない。→ **AC-4 は未達。**
+  なお U-01/U-02（スキーマ・フィールド名）は実装ソースから確定済みで、
+  **残る障害はスキーマではなく公開テストネットへのデプロイ**。
 - 既存 chat の**実 UI 連携**（ブラウザ上の操作・`server.mts` / `ui.js`）。
-  MCP 経路（上記「MCP から使う」）は用意したが、**実決済は未解除**のまま。
   chat の**実行レイヤ**（`createRouterChatExecution`）との実 TCP 結合と、その越しの
-  R4 再取得・再オープンまでは確認済み（T5、上記の節）。実 UI の因果は別ゲート。
-- finality の確認。テストネット支払いの実行には**別途の認可**が必要。
-- **クリーンインストールからの再現**と**手動起動手順**（用意しておらず、動いたという主張もしない）。
-  Linux 未実行。
+  R4 再取得・再オープンまでは確認済み（T5）。実 UI の因果は別ゲート。
+  なお chat 契約は `rail === 'subetha'` を要求するため、**x402 受信 route は chat からは使えない**。
+- **finality の確認**（mined / canonical の判定）。
+- **クリーンインストールからの再現**。EC2 上での clone → build → 起動は実施済みだが、
+  他環境（Linux 以外・別アーキテクチャ）は未検証。
 - MPP の `pull` モード（server 側 broadcast）は**未検証**。adapter が credential 生成前に断るのは
   **能力が `mode: "pull"` を明示した場合だけ**で、`mode` を省略すると SDK 側の選択に委ねられ、
   challenge の `supportedModes` と account 種別次第で `pull` が選ばれ得る。その経路は
