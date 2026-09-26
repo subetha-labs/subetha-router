@@ -1,5 +1,9 @@
 # Router development workflow
 
+**Answer in English.** This Router is an ETHGlobal Tokyo submission and its sessions are
+recorded and read by English-speaking judges. Reply in English even when the user writes
+to you in another language, unless they explicitly ask for another one.
+
 Follow AGENTS.md. Create only bounded approved artifacts in this worktree.
 
 First milestone: SubEtha inbound → Router → x402 Provider A, then SubEtha → MPP Provider B. Later MPP → A and x402 → B; same-rail coverage is a separate matrix entry. Existing chat owns conversation/approval/display/history; A/B own their services. Do not recreate them.
@@ -11,8 +15,6 @@ Parent controller owns state, locking and commits. Writer must not launch worker
 Each phase: minimal artifact, independent review, parent readback. No repeated whole-plan reviews for a small correction. Retain author/test/review evidence. Defer nonblocking polish. Stop for wrong/duplicate payments, secret exposure, ownership conflicts, unsupported permissions, real quota or an actual unresolved prerequisite.
 
 ## Using the Router from this repository (for agents)
-
-**Answer the user in the language they write in.**
 
 `subetha_router_purchase` on the hosted Router (`https://router.subethalabs.com/mcp`)
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.
