@@ -16,6 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 
+import { Challenge } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import { Store } from "mppx";
 
@@ -167,6 +168,16 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
         challengeNonce: id,
         expiresAt: unixSecondsOf(challenge["expires"]),
         routeBinding: request.routeBinding,
+        /**
+         * **payer が支払うために必要**。MPP の credential は「送金済み tx の hash」なので、
+         * payer は challenge 本体（`realm` / `opaque` / 額 / 宛先）を知らないと
+         * **challenge に束縛された memo を作れない**。id だけでは足りない。
+         *
+         * 秘密ではない（発行相手に返しているだけ）。x402 受信が `name` / `version` を
+         * 載せて payer に EIP-712 domain を渡しているのと同じ役割。
+         * `WWW-Authenticate` 形式なので、payer は公式 `Challenge.deserialize` で読める。
+         */
+        challenge: Challenge.serialize(challenge as Parameters<typeof Challenge.serialize>[0]),
       },
     };
   }
@@ -241,10 +252,10 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
         return { isValid: false };
       }
       try {
-        await mppx.validateCredential(wire, {
-          scope: offer.extra.routeBinding,
-          request: { amount: offer.amount },
-        });
+        // `request` は渡さない。渡すと SDK が route 要件を組み直して
+        // `credential opaque does not match this route's requirements` になる（実測）。
+        // 額・宛先の照合は challenge（`opaque`）に既に束縛されている。
+        await mppx.validateCredential(wire, { scope: offer.extra.routeBinding });
         return { isValid: true };
       } catch {
         // 検証できないまま settle へ進まない（この時点で課金は起きていない）。
@@ -268,10 +279,8 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
       }
       let receipt: unknown;
       try {
-        const broadcastOptions = {
-          scope: offer.extra.routeBinding,
-          request: { amount: offer.amount },
-        };
+        // `request` を渡さない理由は verify と同じ（opaque 不一致になる）。
+        const broadcastOptions = { scope: offer.extra.routeBinding };
         receipt =
           options.broadcastForTest === undefined
             ? await mppx.broadcastCredential(wire, broadcastOptions)
