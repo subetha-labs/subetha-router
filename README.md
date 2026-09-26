@@ -92,7 +92,20 @@ Router は呼び出し側の鍵を持たないので、署名能力は手元に�
 | 経路 | 受信 tx | 送信 tx |
 |---|---|---|
 | x402 → MPP | `0x239b6019…74a2`（block 47309247） | `0xe4477dfa…d491`（block 36922546） |
-| **MPP → x402** | `0xb6507960…1883`（block 36964883） | `0xf0c16b3a…094e`（block 47321957） |
+| **MPP → x402** | `0xcbe845e4…d698`（block 36967307） | `0xb7ba21dc…b381`（block 47322681） |
+
+どちらも**ホスト版**（`router.subethalabs.com`）に対する実決済で、送信レグは
+**運営ウォレットが自分の資金で**払っている。ホスト版の route は 2 本:
+
+| routeId | 受信 | 送信 |
+|---|---|---|
+| `md-mpp-eth-snapshot` | x402（Base Sepolia USDC） | MPP（Provider B） |
+| `md-x402-eth-snapshot` | MPP（Tempo pathUSD） | x402（Provider A） |
+
+**MPP で払う場合の注意**: x402 は facilitator が送信して gas を負担するが、
+**MPP は呼び出し側が自分で broadcast し、手数料も払う**。実測で支払額 10000 に対し
+手数料は **2283〜23370**（振れる）。**broadcast 後に失敗した支払いは戻らない。**
+1 回試すだけなら x402 のほうが簡単。
 
 **まだ確認していないもの**:
 
