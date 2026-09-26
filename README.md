@@ -62,6 +62,15 @@ Router は呼び出し側の鍵を持たないので、署名能力は手元に�
   quote を保持しない。`quoteId` だけでは `quote_required` になる。
   渡すのは `quoteId` / `requestId` / `approval` / `quote` / `credential` の **5 つ**
   （`approval` に承認した `quoteId` を入れないと `approval_required` で止まる）。
+- **`credential` は `npm run sign` で作る。手で組まない。** リモート利用でも同じ。
+  手で組むと `invalid_payment_header` で止まる（`accepted` と `payload.challengeNonce` の
+  両方が要る）。形は下記のとおりだが、**署名は手元の鍵で作る必要がある**ので
+  結局このツールを通すのが速い:
+
+  ```
+  { x402Version: 2, accepted: <quote の source.offer をそのまま>,
+    payload: { challengeNonce, signature, authorization } }
+  ```
 - **quote の有効期限は 10 分。** 切れたら取り直して**改めて承認**する。
 - **`bucket_limit` で止まったら上限到達。** 止まること自体が安全機構。
 
