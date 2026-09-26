@@ -25,17 +25,43 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { buildServer } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 
+/**
+ * 経路 1（既存・変更しない）: **x402 で払って MPP の Provider B に届く**。
+ * routeId は既に公開済みなので**改名しない**（審査員の手元の手順が壊れる）。
+ */
 const ROUTE = "md-mpp-eth-snapshot";
 const UPSTREAM = "https://provider-mpp.subethalabs.com/v1/eth/snapshot";
+
+/**
+ * 経路 2（新規）: **MPP で払って x402 の Provider A に届く**。逆向きの主張。
+ * 送信レグに Base Sepolia USDC が要るので、その鍵が無い構成では**登録しない**。
+ */
+const ROUTE_MPP_IN = "md-x402-eth-snapshot";
+const UPSTREAM_X402 = "https://provider-x402.subethalabs.com/v1/eth/snapshot";
+
+/** x402 受信（Base Sepolia USDC）。 */
 const INBOUND = {
   network: "eip155:84532",
   asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   amount: "10000",
   facilitator: "https://www.x402.org/facilitator",
 } as const;
+/** MPP 受信（Tempo pathUSD）。 */
+const INBOUND_MPP = {
+  network: "eip155:42431",
+  asset: "0x20c0000000000000000000000000000000000000",
+  amount: "10000",
+} as const;
+/** MPP 送信（Provider B）。 */
 const OUTBOUND = {
   network: "eip155:42431",
   asset: "0x20c0000000000000000000000000000000000000",
+  payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+} as const;
+/** x402 送信（Provider A）。 */
+const OUTBOUND_X402 = {
+  network: "eip155:84532",
+  asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
 } as const;
 
@@ -56,6 +82,21 @@ async function start(): Promise<void> {
   // 送信レグ（Provider への支払い）は運営の資金。受信レグの鍵はここには無い。
   const outboundKey = required("SUBETHA_OUTBOUND_PRIVATE_KEY");
   const receiver = required("SUBETHA_ROUTER_RECEIVER");
+  /**
+   * MPP 受信を公開するかどうか。**両方そろって初めて有効**:
+   * - `SUBETHA_MPP_INBOUND_SECRET`: challenge の HMAC 束縛鍵（32 バイト以上）
+   * - `SUBETHA_OUTBOUND_X402_KEY`: x402 送信（Provider A）に払う鍵。**USDC 残高が要る**
+   * 片方だけだと起動が fail closed で止まるので、**両方ある時だけ route を足す**。
+   */
+  const mppInboundSecret = process.env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
+  const x402OutboundKey = process.env["SUBETHA_OUTBOUND_X402_KEY"] ?? "";
+  const mppInboundEnabled = mppInboundSecret !== "" && x402OutboundKey !== "";
+  if (mppInboundSecret !== "" && x402OutboundKey === "") {
+    note(
+      "SUBETHA_MPP_INBOUND_SECRET is set but SUBETHA_OUTBOUND_X402_KEY is not; " +
+        "MPP inbound needs an x402 outbound leg. Not registering that route.",
+    );
+  }
   const port = Number(process.env["PORT"] ?? "8787");
 
   const work = await mkdtemp(path.join(path.resolve("runtime"), "remote-"));
@@ -82,8 +123,34 @@ async function start(): Promise<void> {
             payTo: OUTBOUND.payTo,
           },
         },
+        // 逆向きの経路。鍵と秘密がそろっているときだけ公開する。
+        ...(mppInboundEnabled
+          ? {
+              [ROUTE_MPP_IN]: {
+                routeId: ROUTE_MPP_IN,
+                canonicalPath: `/v1/routes/${ROUTE_MPP_IN}/resource`,
+                rail: "x402",
+                sourceRail: "mpp",
+                source: {
+                  amount: INBOUND_MPP.amount,
+                  asset: INBOUND_MPP.asset,
+                  decimals: 6,
+                  network: INBOUND_MPP.network,
+                  payTo: receiver,
+                },
+                destination: {
+                  scheme: "exact",
+                  network: OUTBOUND_X402.network,
+                  asset: OUTBOUND_X402.asset,
+                  payTo: OUTBOUND_X402.payTo,
+                },
+              },
+            }
+          : {}),
       },
       // 「予算の続く限り」使えるように大きく取るが、暴走時に止まるようゼロにはしない。
+      // bucket は (network, asset) 単位。2 経路は同じ 2 組を向きだけ変えて使うので、
+      // この 2 本で両方をカバーする（経路ごとに増やす必要はない）。
       budget: {
         maxPurchases: Number(process.env["SUBETHA_MAX_PURCHASES"] ?? "100000"),
         buckets: [
@@ -102,15 +169,24 @@ async function start(): Promise<void> {
         ],
       },
     },
-    x402: { upstreams: { [ROUTE]: UPSTREAM } },
+    // 上流の節は rail に関係なく `x402` という名前（`src/config.ts`）。全 route 分が要る。
+    x402: {
+      upstreams: {
+        [ROUTE]: UPSTREAM,
+        ...(mppInboundEnabled ? { [ROUTE_MPP_IN]: UPSTREAM_X402 } : {}),
+      },
+    },
   };
   const configPath = path.join(work, "router.config.json");
   await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
 
   let router: Listening;
   try {
-    router = await startListening("tools/t7-router-process.ts", ["--rail", "b"], {
-      T7_PAYER_PRIVATE_KEY: outboundKey,
+    router = await startListening("tools/remote-router-process.ts", [], {
+      // MPP 送信（Provider B）。既存経路。
+      SUBETHA_OUTBOUND_MPP_KEY: outboundKey,
+      // x402 送信（Provider A）。MPP 受信経路を出すときだけ要る。
+      ...(mppInboundEnabled ? { SUBETHA_OUTBOUND_X402_KEY: x402OutboundKey } : {}),
       ROUTER_CONFIG_PATH: configPath,
       ROUTER_JOURNAL_PATH: path.join(work, "journal.ndjson"),
       ROUTER_HTTP_PORT: "0",
@@ -122,6 +198,12 @@ async function start(): Promise<void> {
       // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
       // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
       ROUTER_X402_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
+      ...(mppInboundEnabled
+        ? {
+            ROUTER_MPP_INBOUND_SECRET: mppInboundSecret,
+            ROUTER_MPP_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
+          }
+        : {}),
     });
   } catch (error) {
     note(`could not start the Router: ${error instanceof Error ? error.message : "unknown"}`);
