@@ -6,6 +6,16 @@
  *
  * 出力は base64 の 1 行。それを `subetha_router_purchase` の `credential` に渡す。
  *
+ * **受信レールは offer の `scheme` で判定する**（呼び出し側が指定しない）:
+ *
+ * | scheme | レール | 性質 |
+ * |---|---|---|
+ * | `exact` | x402 / Base Sepolia | **署名するだけ**。送信と gas は facilitator 負担 |
+ * | `tempo/charge` | MPP / Tempo | **この場でチェーンに送金する**。手数料も自分持ち |
+ *
+ * **MPP は署名ではなく送金**である点に注意。このコマンドを実行した時点で
+ * **資金が動き、失敗しても戻らない**。だから実行前に必ず人間の承認を取ること。
+ *
  * **鍵はこのマシンから出ない。** Router に送るのは**署名済みの credential だけ**で、
  * 秘密鍵そのものは送信されない（Router 側も鍵を保持しない設計）。
  *
@@ -14,9 +24,12 @@
 
 import { readFileSync } from "node:fs";
 
+import { createMppPayer } from "./mpp-payer.js";
 import { createX402Payer } from "./x402-payer.js";
 
 const BASE_SEPOLIA = 84532;
+/** 1 回の受信レグで払ってよい上限（base units）。これを超える offer には署名・送金しない。 */
+const MAX_AMOUNT = 10_000n;
 
 function payerKey(): string {
   const fromEnv = process.env["SUBETHA_PAYER_PRIVATE_KEY"];
@@ -60,8 +73,57 @@ if (offer === undefined) {
   process.exit(2);
 }
 
-const payer = createX402Payer(payerKey());
-const credential = await payer.credentialFor(offer as never, BASE_SEPOLIA);
+const offerRecord = offer as Record<string, unknown>;
+const scheme = offerRecord["scheme"];
+const network = String(offerRecord["network"] ?? "");
+const amount = String(offerRecord["amount"] ?? "0");
+const payTo = String(offerRecord["payTo"] ?? "");
 
-process.stderr.write(`signed by ${payer.address} (鍵は送信されません)\n`);
-process.stdout.write(`${credential}\n`);
+if (BigInt(amount) > MAX_AMOUNT) {
+  process.stderr.write(`offer の額が上限を超えています: ${amount} > ${MAX_AMOUNT}\n`);
+  process.exit(2);
+}
+
+if (scheme === "tempo/charge") {
+  // ---- MPP 受信。**ここで実際に送金する。** ----
+  const chainId = Number(network.replace(/^eip155:/, ""));
+  if (!Number.isInteger(chainId) || chainId <= 0) {
+    process.stderr.write(`offer の network を読めません: ${network}\n`);
+    process.exit(2);
+  }
+  const asset = String(offerRecord["asset"] ?? "");
+  const payer = createMppPayer(payerKey(), {
+    chainId,
+    asset,
+    payTo,
+    maxAmount: MAX_AMOUNT,
+  });
+  process.stderr.write(
+    `MPP: これから ${amount} を ${payTo} へ送金します（${network}）。\n` +
+      `     **送金は取り消せません。** 人間の承認を得てから実行してください。\n`,
+  );
+  const { credential, txRef } = await payer.payAndCredential(offerRecord as never);
+  /**
+   * **両レールで出力の形を揃える。** x402 側は payer が Router の封筒
+   * （`x402Version` / `accepted` / `payload.challengeNonce`）まで組んで base64 を返すが、
+   * MPP 側が返すのは mppx の wire 文字列なので、ここで同じ封筒に入れる。
+   * 揃えておかないと、呼び出し側がレールごとに扱いを変える羽目になる。
+   */
+  const extra = offerRecord["extra"] as Record<string, unknown> | undefined;
+  const envelope = Buffer.from(
+    JSON.stringify({
+      x402Version: 2,
+      accepted: offerRecord,
+      payload: { challengeNonce: extra?.["challengeNonce"], credential },
+    }),
+    "utf8",
+  ).toString("base64");
+  process.stderr.write(`paid by ${payer.address} / tx ${txRef} (鍵は送信されません)\n`);
+  process.stdout.write(`${envelope}\n`);
+} else {
+  // ---- x402 受信。署名するだけで、資金はまだ動かない。 ----
+  const payer = createX402Payer(payerKey());
+  const credential = await payer.credentialFor(offer as never, BASE_SEPOLIA);
+  process.stderr.write(`signed by ${payer.address} (鍵は送信されません)\n`);
+  process.stdout.write(`${credential}\n`);
+}
