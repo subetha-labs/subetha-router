@@ -22,6 +22,17 @@ import { createRealMppCapability } from "./real-mpp-capability.js";
 const evmKey = process.env["SUBETHA_OUTBOUND_X402_KEY"];
 /** MPP 送信用の鍵。無ければ MPP 送信 route を設定してはいけない。 */
 const mppKey = process.env["SUBETHA_OUTBOUND_MPP_KEY"];
+/**
+ * Tempo の RPC。**認証付きを強く推奨**。
+ *
+ * 既定は公開エンドポイント（`rpc.moderato.tempo.xyz`）だが、Cloudflare のような
+ * 共有 egress IP から叩くと**レート制限を受けやすい**。Router は送金の前に
+ * chainId / nonce / 見積りを読むので、ここで詰まると送信レグが不安定になる。
+ * 認証付き RPC の URL を渡せば、その経路を避けられる。
+ *
+ * **URL 自体が資格情報を含むことがある**（API キー入りのパス）。ログに出さない。
+ */
+const mppRpcUrl = process.env["SUBETHA_TEMPO_RPC_URL"];
 
 if ((evmKey === undefined || evmKey === "") && (mppKey === undefined || mppKey === "")) {
   process.stderr.write(
@@ -36,7 +47,18 @@ const capabilities: RouterCapabilities = {
     : { evmSigning: createRealEvmCapability(evmKey).capability("eip155:84532") }),
   ...(mppKey === undefined || mppKey === ""
     ? {}
-    : { mppTempo: createRealMppCapability(mppKey).capability() }),
+    : {
+        mppTempo: createRealMppCapability(mppKey, {
+          ...(mppRpcUrl === undefined || mppRpcUrl === "" ? {} : { rpcUrl: mppRpcUrl }),
+        }).capability(),
+      }),
 };
+
+// どちらの RPC を使っているかだけ示す。**URL は出さない**（キーを含み得る）。
+if (mppKey !== undefined && mppKey !== "") {
+  process.stderr.write(
+    `tempo rpc: ${mppRpcUrl === undefined || mppRpcUrl === "" ? "public (rate-limited from shared egress IPs)" : "configured"}\n`,
+  );
+}
 
 startRouter(capabilities).catch(reportStartupFailure);

@@ -33,6 +33,22 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_INBOUND_MAX_TOTAL` / `SUBETHA_OUTBOUND_MAX_TOTAL` | | 既定 `1000000000` base units |
 | `SUBETHA_MPP_INBOUND_SECRET` | | **MPP 受信**を公開する場合のみ。challenge の HMAC 束縛鍵（**32 バイト以上**）。署名鍵ではない |
 | `SUBETHA_OUTBOUND_X402_KEY` | | x402 送信に別ウォレットを使う場合のみ。既定は `SUBETHA_OUTBOUND_PRIVATE_KEY` を流用 |
+| `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい** |
+
+### Tempo の RPC を認証付きにする（推奨）
+
+Router は送金の前に chainId / nonce / 見積りをチェーンから読む。公開エンドポイント
+（`rpc.moderato.tempo.xyz`）を Cloudflare のような共有 egress IP から叩くと
+**レート制限に当たりやすく**、送信レグが不安定になる。
+
+```sh
+  -e SUBETHA_TEMPO_RPC_URL=https://<network>.g.alchemy.com/v2/<key> \
+```
+
+**URL 自体が資格情報**（パスに API キーを含む）。起動ログには
+`tempo rpc: configured` / `public (...)` としか出さず、**URL は出力しない**。
+
+未設定でも起動して動作する（既定の公開 RPC を使う）。
 
 ### MPP 受信（逆向きの経路）を公開する
 
