@@ -1,9 +1,9 @@
 # SubEtha Router
 
-ETHGlobal Tokyo submission implementation. A Router that lets you get through even when **the payment
-method the agent has** differs from **the payment method the API provider requires**.
+ETHGlobal Tokyo submission. A Router for when **the payment method an agent holds** does not match
+**the payment method an API provider demands**.
 
-**Someone who only has x402 can use a Provider that only accepts MPP.**
+**Hold only x402? You can still use a provider that accepts only MPP.**
 
 ```
 caller ──(1) x402 / Base Sepolia USDC──> Router ──(2) MPP / Tempo pathUSD──> Provider
@@ -147,9 +147,9 @@ Uniswap support these payment methods.
 
 ## Not verified yet
 
-**Real settlement is reached for x402 inbound, x402 outbound and MPP outbound**, and it has been verified
-independently on chain (see the txs in each section). However, it is **testnet only**, and the following remain
-behind separate gates, **not done**.
+**Real settlement is reached for all four legs in use** -- x402 inbound, MPP inbound, x402 outbound and MPP
+outbound -- and each has been verified independently on chain (see the txs above). However, it is
+**testnet only**, and the following remain behind separate gates, **not done**.
 
 - **Real settlement of the SubEtha inbound leg.** The inbound side is still the synthetic facilitator, and the
   real facilitator is only in a state where it can be run locally (anvil chainId 31337). -> **AC-4 is not met.**
@@ -166,9 +166,8 @@ behind separate gates, **not done**.
   **only when the capability explicitly states `mode: "pull"`**; if `mode` is omitted, the choice is left to the
   SDK, and depending on the challenge's `supportedModes` and the account type, `pull` can be chosen. That path is
   **not confirmed** (it cannot be said that there is a guard).
-- **SubEtha inbound with a real facilitator** is out of scope for v1 (DEFER); the SubEtha inbound adapter
-  runs against a synthetic facilitator only. Same-rail coverage (x402 -> x402 / MPP -> MPP) is **not verified**.
-  Both cross-rail directions are settled on a real chain -- see the table above.
+- **Same-rail coverage** (x402 -> x402 / MPP -> MPP) is **not verified**. Both *cross*-rail directions are
+  settled on a real chain -- see the table above.
 
 ## Where the detail went
 
