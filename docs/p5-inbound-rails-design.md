@@ -271,3 +271,46 @@ ROUTER_MPP_INBOUND_OFFER_SECONDS      # 既定 600。createOffer の expires に
   `quoteId` 基準で credential を鍵にしていない
 - MPP 受信は**実チェーンに対して一度も実行していない**。
   `broadcastCredential` の実挙動・手数料・確定待ちは未確認
+
+## 9. 実装レビューで見つかった致命的な 2 件（訂正 3）
+
+実装後の独立レビューで、**値が壊れる**バグが 2 件見つかった。どちらも実 SDK で実測確認した。
+
+| # | 症状 | 原因 |
+|---|---|---|
+| 1 | offer は `eip155:42431`（testnet）と名乗るのに、**HMAC には 4217（mainnet）が焼き付く** | `chainId` を `tempo.charge()` の **factory 引数**に渡すと**黙って無視される**。challenge 呼び出し側に渡す必要がある |
+| 2 | 人間に `10000` と見せて、**束縛は `10000000000`（10^6 倍）** | SDK が `parseUnits(amount, decimals)` を掛ける。`decimals` の既定は 6。Router の `amount` は既に base units なので `decimals: 0` が要る |
+
+```
+configured chainId : 42431     bound chainId : 4217
+requested amount   : 1000      bound amount  : 1000000000
+```
+
+**どちらもテストで捕まらなかった。** `amount` と `network` を 1 行も assert していなかったため。
+
+### 取った対策（呼び出し方の修正だけで終わらせない）
+
+呼び出し方を直すだけだと、SDK 側の仕様が変わったときに**また黙って壊れる**。
+そこで `offerOf` に「**SDK が実際に束縛した値**（`challenge.request`）と、
+**これから payer に見せる値**が一致するか」の照合を入れ、
+食い違ったら **offer を発行せず例外**にした。実測で両方の不一致がここで止まることを確認:
+
+```
+Error: mppx bound a different amount than offered (offered 10000, bound 10000000000)
+Error: mppx bound a different chain than offered (offered 42431, bound 4217)
+```
+
+### settle テストが「見せかけ」だった件
+
+`receiptOutcome` という**adapter のロジックを写したローカル関数**を比較していただけで、
+`rail.settle` を呼んでいなかった。レビュアーが post-broadcast の分岐を**全部 `rejected` に
+反転しても 14/14 緑のまま**であることを実証した。
+
+adapter に `broadcastForTest`（注入可能な継ぎ目）を足し、テストは `rail.settle` を
+実際に通すようにした。同じ反転で**落ちる**ことを確認済み。
+
+### 教訓
+
+「実物を叩いて確認した」と書いたが、**叩いた object の中身を最後まで見ていなかった**。
+`amount` を 1 回 assert していれば 2 件とも防げた。
+**出力を print するだけでなく、期待値と突き合わせる。**
