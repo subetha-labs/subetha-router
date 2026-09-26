@@ -38,7 +38,12 @@ Permission to run `npm run sign` is in `.claude/settings.json` (included in the 
 
 Then start Claude Code **in this directory** and ask it something like:
 
-> Get the ETH price with subetha-router
+> I only have Base Sepolia USDC. What's the reference price of ETH?
+
+**Say what you hold, not which tool to use.** The agent reads the routes and works out that
+the provider it needs takes only pathUSD on Tempo, which you do not have — and that the
+Router will bridge it. Naming the tool works too, but then you have made the interesting
+decision for it.
 
 The agent takes a quote, **asks for approval**, creates a signature from your local key with
 `npm run sign`, and proceeds through purchase (the steps are written in `CLAUDE.md`).
