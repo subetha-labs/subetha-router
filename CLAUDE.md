@@ -66,6 +66,16 @@ that the payment was already sent, and stop.
   receive an already-expired quote while believing you took a fresh one.
   If a quote comes back expired, suspect **a reused `requestId`**, not clock skew
 
+### Reading the result
+
+`fetchedAt` is **UTC** (it ends in `Z`). Convert before judging freshness: a snapshot
+taken minutes ago can carry yesterday's UTC date when the local clock is ahead of UTC.
+**Do not call the data stale from the date alone** — compare the instants, or just
+report `fetchedAt` as returned.
+
+`data.priceUsdcPerWeth` is a **Uniswap v3 pool spot reference**, and the provider says so
+in `data.disclaimer`. Report it as a reference price, never as a tradable quote.
+
 No key yet? `npm run wallet:new`. Base Sepolia USDC balance: `npm run wallet:balance`.
 **That command does not show pathUSD** (needed only when paying over MPP).
 
