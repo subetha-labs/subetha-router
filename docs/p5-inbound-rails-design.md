@@ -227,3 +227,47 @@ ROUTER_MPP_INBOUND_OFFER_SECONDS      # 既定 600。createOffer の expires に
    が**固定集合の理由**で返ること
 5. `settle` の不確定が `unknown` に落ちること（`rejected` にしない）
 6. `expires` 未指定で `expiresAt` が欠落しないこと（失効検査が実際に発火すること）
+
+## 8. 実装結果（2026-09-26）
+
+### 到達点
+
+| 項目 | 状態 |
+|---|---|
+| `sourceRail` 解決の無課金テスト | **追加**（従来は実決済ツールでしか踏めなかった） |
+| SubEtha 受信の composition 経由検証 | **通過** |
+| MPP 受信 adapter（`src/adapters/inbound/mpp.ts`） | **実装・配線済み** |
+| MPP 受信の**実決済** | **未実施**（範囲外のまま） |
+| 実 SubEtha facilitator 接続 | **未実施**（URL 未確定のまま） |
+| 回帰 | テスト 211 件 pass、x402 受信・chat 相互運用とも影響なし |
+
+### 実物を叩いて分かったこと（型だけでは分からなかった）
+
+1. **`Challenge.expires` は ISO 文字列で optional。** 変換しないと `expiresAt` が
+   埋まらず、`preflight` の失効検査が**一度も発火しない**。明示変換し、
+   失敗時は 0 に落とさず例外にした。
+2. **`challenge.id` は内容の HMAC なので同一ミリ秒に衝突する。** 実測で確認
+   （`same-instant nonces equal? true`）。`meta` に UUID を混ぜて解消し、テストで固定。
+3. **`validateCredential` は replay 防止をしない。** `tryClaim` はすべて
+   `broadcast` 側にある。`verify` の通過を受領の根拠にしない。
+
+### テストの検証（sabotage）
+
+緑が「正しい理由で緑か」を確かめるため、意図的に壊して落ちることを確認した:
+
+| 壊した箇所 | 落ちたテスト |
+|---|---|
+| `rail: route.sourceRail ?? "subetha"` の既定を除去 | 射影テスト |
+| 受信 adapter 解決を x402 固定に | 5 件中 4 件 |
+| `stableJson` の完全一致検査を除去 | offer 改変テスト |
+| `expiresAt` を 0 固定 | 5 件 |
+
+また、fail-closed テスト 3 件が**無関係な理由（budget 空）で緑になっていた**のを
+実測で発見し、理由文字列を固定するよう修正した。
+
+### 残る制約（実決済の前に解消が要る）
+
+- **replay 状態がプロセス内**。再起動で消える。Router 自身の at-most-once は
+  `quoteId` 基準で credential を鍵にしていない
+- MPP 受信は**実チェーンに対して一度も実行していない**。
+  `broadcastCredential` の実挙動・手数料・確定待ちは未確認
