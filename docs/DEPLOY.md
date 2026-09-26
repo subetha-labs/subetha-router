@@ -43,10 +43,17 @@ docker run -d --name subetha-router --restart unless-stopped \
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
 **過去の paymentId が 404 になり、その主張が成立しない**。
 
+**`-v` を使うなら、先にディレクトリを作って `chown` すること。順序が逆だと起動しない。**
+
 ```sh
 sudo mkdir -p /var/lib/subetha-router
 sudo chown 10001:10001 /var/lib/subetha-router   # コンテナの非 root uid
+ls -ld /var/lib/subetha-router                   # 10001 10001 になっていること
 ```
+
+**`chown` を飛ばすと Docker が root 所有で自動作成し、コンテナ内の uid 10001 が
+journal を書けずに落ちる**（`/healthz` が無応答になる。実際に踏んだ）。
+その場合は `chown` してから `docker restart` すれば復旧する。
 
 `-v` を付けずに起動すると、**コンテナを作り直した時点で全記録が消える**。
 （以前は起動側が `mkdtemp` で毎回別ディレクトリを作っていたため、
@@ -100,6 +107,22 @@ openssl rand -hex 32
 
 **呼び出し側（審査員）の鍵はこのコンテナに渡さない。** 受信レグの署名は呼び出し側の手元で作られ、
 サーバには**署名済みの credential だけ**が届く（`inbound payer: the caller's own key` と起動ログに出る）。
+
+### journal が効いているか確かめる
+
+起動しただけでは足りない。**決済を 1 回通してからファイルを見る。**
+
+```sh
+ls -la /var/lib/subetha-router/     # journal.ndjson にサイズがあること
+wc -l /var/lib/subetha-router/journal.ndjson
+```
+
+`journal.ndjson` が 0 バイトのままなら、Router は別の場所に書いている。
+`remote-XXXXXX` というディレクトリが増えるのは**正常**（config と証拠ログ用の
+使い捨て領域で、journal はそこには置かない）。
+
+最終確認は **`docker restart` してから同じ paymentId を R4 で読む**こと。
+読めれば成立、404 なら経路がどこかで切れている。
 
 ## 3. 動作確認
 
