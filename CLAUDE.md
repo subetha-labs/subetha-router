@@ -59,4 +59,15 @@ Router は **2 つの route** を公開している。**どちらで払うかは
 - `requestId` を quote と purchase で変える（別の購入になる）
 
 鍵が無いときは `npm run wallet:new`、Base Sepolia USDC の残高は `npm run wallet:balance`。
+
+### 実行許可について
+
+`.claude/settings.json` で `npm run sign` / `wallet:new` / `wallet:balance` を許可済み。
+これが無いと `npm run sign` が実行時に止まる（資金を扱うコマンドとして分類されるため）。
+
+**許可しているのは署名の作成だけで、承認の判断ではない。**
+`sign` を実行してよいのは**人間が quote を承認した後**で、その判断は
+このファイルの手順3が定めている。x402 経路では `sign` は署名するだけで資金は動かず、
+動くのは `purchase` のとき。MPP 経路では `sign` の時点で送金が起きる
+（`subject.fundsMoveOnCredential` が true なら後者）。
 **pathUSD（MPP で払う場合）の残高はこのコマンドでは見られない。**

@@ -33,6 +33,9 @@ npm run wallet:balance   # 10000 base units（0.01 USDC）×回数分あれば�
 claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
 ```
 
+`npm run sign` の実行許可は `.claude/settings.json` に入っている（clone に同梱）。
+**無いとエージェントが署名の段階で止まる**ので、消さないこと。
+
 あとは Claude Code を**このディレクトリで**起動して、こう頼む:
 
 > subetha-router で ETH の価格を取ってきて
