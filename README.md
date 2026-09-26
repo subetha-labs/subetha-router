@@ -13,32 +13,43 @@ ETHGlobal Tokyo 提出実装。**エージェント側が持っている支払�
 
 ## 今すぐ試す
 
+リモートの Router に、**自分の鍵で**払って使う。
+
 ```sh
+git clone https://github.com/subetha-labs/subetha-router-egt.git
+cd subetha-router-egt
+npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
+
+# 1) 使い捨てウォレットを作る
+npm run wallet:new
+#    → 表示された鍵を .env.local に保存し、アドレスに Base Sepolia の USDC を入れる
+#      https://faucet.circle.com （ネットワーク: Base Sepolia / トークン: USDC）
+#      **ガス（ETH）は不要** — EIP-3009 では facilitator が送信して gas を負担する
+
+npm run wallet:balance   # 10000 base units（0.01 USDC）×回数分あればよい
+
+# 2) リモート Router を登録する
 claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
 ```
 
-clone も `npm install` も不要。**支払いは呼び出し側自身の鍵**で、
-**署名は手元で作られる**（Router は呼び出し側の鍵を持たない）。
+あとは Claude Code を**このディレクトリで**起動して、こう頼む:
 
-用意するもの:
+> subetha-router で ETH の価格を取ってきて
 
-| 項目 | 内容 |
-|---|---|
-| USDC | **Base Sepolia**、1 回 `10000` base units（$0.01）。数回分あれば足りる |
-| ガス | **不要**。x402 の EIP-3009 経路では facilitator が送信して gas を負担する |
+エージェントが quote を取り、**承認を求め**、`npm run sign` で手元の鍵から署名を作り、
+purchase まで進める（手順は `CLAUDE.md` に書いてある）。
 
-使い方:
+**なぜ clone が要るのか**: 受信レグの署名を**自分のマシンで**作るため。
+Router は呼び出し側の鍵を持たないので、署名能力は手元に要る。
+**鍵はネットワークに出ない**（出るのは署名済みの `credential` だけ）。
 
-1. `subetha_router_quote` — 払う額が返る（`decimals` 付きなので額が読める）
-2. `subetha_router_purchase` — 返ってきた `quote` と、自分の鍵で署名した `credential` を渡す
-3. `subetha_router_status` — 両レグの実 tx が残る
-
-**実測済み**（この URL に対して外部から実行した結果）:
+**実測済み**（この手順で本番エンドポイントに対して実行した結果）:
 
 | レグ | 実 tx |
 |---|---|
-| 受信（x402 / Base Sepolia） | `0x67993aa7...52bd`（block 47307713） |
-| 送信（MPP / Tempo Moderato） | `0x930b7d73...2e0c`（block 36917428） |
+| 受信（x402 / Base Sepolia） | `0x61434be7...4a3a`（block 47308787） |
+| 送信（MPP / Tempo Moderato） | `0x703ea3c0...a582` |
 
 ### 注意
 
@@ -46,7 +57,7 @@ clone も `npm install` も不要。**支払いは呼び出し側自身の鍵**�
   （実測: 0ms 間隔で 2/20 失敗、3 秒空けて 0/15）。
 - **`paid_data_unavailable` が返ることがある。** 支払いは成立したがデータ取得に失敗した状態で、
   **資金は動いている**。Router は**自動再送しない**（二重支払いを避けるため）。再試行すれば通る。
-  本番検証でも 1 回目がこれで、2 回目は成功した（Provider 側の RPC レート制限に起因する間欠障害）。
+- **quote の有効期限は 10 分。** 切れたら取り直して**改めて承認**する。
 - **`bucket_limit` で止まったら上限到達。** 止まること自体が安全機構。
 
 ## 何が動いているか

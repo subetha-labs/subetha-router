@@ -12,3 +12,4 @@ coverage/
 .claude_workflow/*.lock
 .claude_workflow/active-writer.json
 runtime/
+.env.local

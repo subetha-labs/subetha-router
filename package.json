@@ -12,7 +12,10 @@
     "build": "tsc",
     "mcp": "tsx src/mcp/server.ts",
     "mcp:real": "tsx tools/t9-mcp-real.ts",
-    "demo:mcp": "tsx tools/demo-mcp.ts"
+    "demo:mcp": "tsx tools/demo-mcp.ts",
+    "wallet:new": "tsx tools/wallet-new.ts",
+    "wallet:balance": "tsx tools/wallet-balance.ts",
+    "sign": "tsx tools/sign-payment.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
