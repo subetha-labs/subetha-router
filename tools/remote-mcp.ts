@@ -89,14 +89,13 @@ async function start(): Promise<void> {
    * 片方だけだと起動が fail closed で止まるので、**両方ある時だけ route を足す**。
    */
   const mppInboundSecret = process.env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
-  const x402OutboundKey = process.env["SUBETHA_OUTBOUND_X402_KEY"] ?? "";
-  const mppInboundEnabled = mppInboundSecret !== "" && x402OutboundKey !== "";
-  if (mppInboundSecret !== "" && x402OutboundKey === "") {
-    note(
-      "SUBETHA_MPP_INBOUND_SECRET is set but SUBETHA_OUTBOUND_X402_KEY is not; " +
-        "MPP inbound needs an x402 outbound leg. Not registering that route.",
-    );
-  }
+  /**
+   * x402 送信の鍵。**既定は送信レグの鍵を流用**する（同じ運営ウォレットが両レグを払う
+   * 構成が普通で、env を 2 本に増やす理由がない）。別ウォレットにしたいときだけ上書きする。
+   * どちらにせよ **Base Sepolia USDC の残高が要る**。
+   */
+  const x402OutboundKey = process.env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey;
+  const mppInboundEnabled = mppInboundSecret !== "";
   const port = Number(process.env["PORT"] ?? "8787");
 
   const work = await mkdtemp(path.join(path.resolve("runtime"), "remote-"));

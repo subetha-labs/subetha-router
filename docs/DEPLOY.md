@@ -32,12 +32,13 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_MAX_PURCHASES` | | 既定 `100000` |
 | `SUBETHA_INBOUND_MAX_TOTAL` / `SUBETHA_OUTBOUND_MAX_TOTAL` | | 既定 `1000000000` base units |
 | `SUBETHA_MPP_INBOUND_SECRET` | | **MPP 受信**を公開する場合のみ。challenge の HMAC 束縛鍵（**32 バイト以上**）。署名鍵ではない |
-| `SUBETHA_OUTBOUND_X402_KEY` | | **MPP 受信**を公開する場合のみ。Provider A に x402 で払う鍵。**Base Sepolia USDC 残高が要る** |
+| `SUBETHA_OUTBOUND_X402_KEY` | | x402 送信に別ウォレットを使う場合のみ。既定は `SUBETHA_OUTBOUND_PRIVATE_KEY` を流用 |
 
 ### MPP 受信（逆向きの経路）を公開する
 
 既定は **x402 受信 → MPP 送信** の 1 経路だけ。
-**MPP 受信 → x402 送信** も出すには、上記 2 つを**両方**渡す:
+**MPP 受信 → x402 送信** も出すには、秘密を 1 本足すだけでよい
+（x402 送信は既定で `SUBETHA_OUTBOUND_PRIVATE_KEY` を流用する）:
 
 ```sh
 # 32 バイト以上の秘密を作る（署名鍵ではないが秘密。使い回さない）
