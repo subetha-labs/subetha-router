@@ -87,6 +87,17 @@ function syntheticCredential(offer: unknown): string {
  * **`decimals` は必須**: `amount` は base units なので、これが無いと
  * `10000` が 0.01 なのか 10000 なのか判断できない。
  */
+/**
+ * この経路は **credential を作る時点で**資金が動くか。
+ * MPP（`tempo/charge`）は payer 自身が broadcast するので真。
+ * x402（`exact`）は署名するだけで、送金は facilitator が後段で行う。
+ */
+function fundsMoveBeforePurchase(quote: QuoteView): boolean {
+  const source = quote.source as Record<string, unknown>;
+  const offer = source["offer"];
+  return isRecord(offer) && offer["scheme"] === "tempo/charge";
+}
+
 function approvalSubject(quote: QuoteView): Record<string, unknown> {
   const source = quote.source as Record<string, unknown>;
   const destination = quote.destination as Record<string, unknown>;
@@ -114,6 +125,11 @@ function approvalSubject(quote: QuoteView): Record<string, unknown> {
       network: destination["network"],
     },
     approval: quote.approval,
+    /**
+     * **承認者に効く一行。** 文面だけだと読み飛ばされるので構造化して返す。
+     * true なら「承認＝支払い」で、取り消せない。
+     */
+    fundsMoveOnCredential: fundsMoveBeforePurchase(quote),
   };
 }
 
@@ -171,9 +187,19 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
          */
         quote: result.quote,
         // エージェントが勝手に purchase へ進まないよう、次の手順を文面で明示する。
-        nextStep:
-          `人間の明示承認が必要です。承認する場合は ${TOOL_NAMES.purchase} を ` +
-          `approval に この quoteId を渡して呼んでください。承認しない場合は呼ばないでください。`,
+        /**
+         * **レールで「いつ金が動くか」が違う**ので、それを文面に載せる。
+         * x402 は署名しても資金は動かず、Router が決済する段で動く。
+         * MPP は**呼び出し側が自分で broadcast する**ので、credential を作った時点で
+         * 送金が完了していて、purchase が失敗しても戻らない。
+         * これを言わないと「準備の工程」として承認され得る。
+         */
+        nextStep: fundsMoveBeforePurchase(result.quote)
+          ? `人間の明示承認が必要です。**この経路（MPP）は credential を作る時点で送金が起き、` +
+            `取り消せません。** ${TOOL_NAMES.purchase} を呼ぶ前に資金が出ます。` +
+            `承認を得てから credential を作ってください。承認しない場合は作らないでください。`
+          : `人間の明示承認が必要です。承認する場合は ${TOOL_NAMES.purchase} を ` +
+            `approval に この quoteId を渡して呼んでください。承認しない場合は呼ばないでください。`,
         subject: approvalSubject(result.quote),
       });
     },

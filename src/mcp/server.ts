@@ -162,7 +162,10 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
       description:
         "経路の見積りを取る。返る subject が人間の承認対象そのもの（額は base units、" +
         "decimals つき）。**この tool は支払いを開始しない。** 承認は人間が行い、" +
-        `承認する場合だけ ${TOOL_NAMES.purchase} を呼ぶこと。エージェントが自分で承認してはならない。`,
+        `承認する場合だけ ${TOOL_NAMES.purchase} を呼ぶこと。エージェントが自分で承認してはならない。` +
+        " **資金がいつ動くかはレールで違う。** 応答の `subject.fundsMoveOnCredential` が true の" +
+        " 経路（MPP）では、credential を作った時点で送金が完了し、取り消せない。" +
+        " その場合は**credential を作る前に**承認を得ること（purchase の前では遅い）。",
       inputSchema: {
         routeId: z.string().min(1),
         requestId: z
@@ -180,6 +183,8 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
       description:
         "人間が明示承認した quote を 1 回だけ実行する。approval には承認した quoteId を渡す。" +
         "未指定・不一致なら Router が拒否する（この層では承認を判定しない）。" +
+        "**MPP 経路ではこの呼び出しの前に既に送金が済んでいる。** 失敗しても資金は戻らないので、" +
+        "勝手に再試行せず、送金済みである旨を報告して止まること。" +
         "requestId は quote と同じ値を使うこと。サーバ再起動後は quote を取り直す必要がある。",
       inputSchema: {
         quoteId: z.string().min(1),
