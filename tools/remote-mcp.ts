@@ -17,7 +17,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -98,7 +98,23 @@ async function start(): Promise<void> {
   const mppInboundEnabled = mppInboundSecret !== "";
   const port = Number(process.env["PORT"] ?? "8787");
 
+  /**
+   * 使い捨ての作業領域。**config と証拠ログだけ**を置く（起動ごとに新しくてよい）。
+   * journal は**ここに置かない**（下記）。
+   */
   const work = await mkdtemp(path.join(path.resolve("runtime"), "remote-"));
+  /**
+   * journal は**固定パス**。ここを `work` の下に置くと、`mkdtemp` が起動ごとに
+   * 別ディレクトリを作るため**再起動のたびに全記録を見失う**（実測: 過去の paymentId が
+   * 4 件とも R4 で 404 になった）。Router 自身は fsync 付き write-ahead で再起動に
+   * 耐える設計なので、**壊していたのは起動側のパスの与え方だけ**だった。
+   *
+   * コンテナで動かす場合は、このディレクトリを**ボリュームとして外に出す**こと
+   * （`docs/DEPLOY.md`）。出さないとコンテナ作り直しで消える。
+   */
+  const journalPath =
+    process.env["SUBETHA_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "journal.ndjson");
+  await mkdir(path.dirname(journalPath), { recursive: true });
   const config = {
     router: {
       /**
@@ -193,7 +209,7 @@ async function start(): Promise<void> {
       // x402 送信（Provider A）。MPP 受信経路を出すときだけ要る。
       ...(mppInboundEnabled ? { SUBETHA_OUTBOUND_X402_KEY: x402OutboundKey } : {}),
       ROUTER_CONFIG_PATH: configPath,
-      ROUTER_JOURNAL_PATH: path.join(work, "journal.ndjson"),
+      ROUTER_JOURNAL_PATH: journalPath,
       ROUTER_HTTP_PORT: "0",
       ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
       ROUTER_PRINCIPAL_TOKENS: "judge:public",
