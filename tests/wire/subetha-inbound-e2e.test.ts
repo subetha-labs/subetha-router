@@ -66,6 +66,8 @@ async function start(
   options: {
     readonly sourceRail?: string;
     readonly sourcePayTo?: string;
+    readonly sourceNetwork?: string;
+    readonly sourceAsset?: string;
     readonly env?: Readonly<Record<string, string>>;
   } = {},
 ): Promise<Started> {
@@ -112,6 +114,12 @@ async function start(
   if (options.sourcePayTo !== undefined) {
     (route["source"] as Record<string, unknown>)["payTo"] = options.sourcePayTo;
   }
+  if (options.sourceNetwork !== undefined) {
+    (route["source"] as Record<string, unknown>)["network"] = options.sourceNetwork;
+  }
+  if (options.sourceAsset !== undefined) {
+    (route["source"] as Record<string, unknown>)["asset"] = options.sourceAsset;
+  }
 
   await writeFile(
     configPath,
@@ -124,6 +132,13 @@ async function start(
             maxPurchases: 4,
             buckets: [
               { network: SOURCE_NETWORK, asset: SOURCE_TOKEN, maxTotal: "10000", maxPerPurchase: "5000" },
+              // MPP 受信の route は別チェーンを使うので、そのバケットも要る。
+              {
+                network: options.sourceNetwork ?? SOURCE_NETWORK,
+                asset: options.sourceAsset ?? SOURCE_TOKEN,
+                maxTotal: "10000",
+                maxPerPurchase: "5000",
+              },
               { network: DEST_NETWORK, asset: DEST_ASSET, maxTotal: "10000", maxPerPurchase: "5000" },
             ],
           },
@@ -274,9 +289,13 @@ describe("mpp inbound wiring (real composition, unpaid)", () => {
   const MPP_PAY_TO = "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2";
 
   it("resolves sourceRail \"mpp\" and issues an MPP offer with a real expiry", async () => {
+    // 受信を MPP にする route は、mppx が解決できるチェーンでなければならない
+    // （既定の Sepolia では `No client configured with chainId` で起動後に失敗する）。
     const { router } = await start({
       sourceRail: "mpp",
       sourcePayTo: MPP_PAY_TO,
+      sourceNetwork: DEST_NETWORK,
+      sourceAsset: DEST_ASSET,
       env: { ROUTER_MPP_INBOUND_SECRET: SECRET, ROUTER_MPP_INBOUND_OFFER_SECONDS: "600" },
     });
     const body = await quote(router, "p5-mpp-1");
@@ -288,6 +307,12 @@ describe("mpp inbound wiring (real composition, unpaid)", () => {
     expect(offer?.["payTo"]).toBe(MPP_PAY_TO);
     // rail 名がそのまま射影に出る（既定 subetha に潰れない）。
     expect(source?.["rail"]).toBe("mpp");
+
+    // **額とチェーンを必ず見る。** ここを見ていなかったために、SDK が 10^6 倍した額と
+    // mainnet に束縛していたのを取り逃がした（レビュー指摘）。
+    expect(offer?.["amount"]).toBe("1000");
+    expect(offer?.["network"]).toBe(DEST_NETWORK);
+    expect(source?.["amount"]).toBe("1000");
 
     // 失効検査が発火できる値であること（ここが 0/NaN だと期限が効かない）。
     const extra = offer?.["extra"] as Record<string, unknown>;

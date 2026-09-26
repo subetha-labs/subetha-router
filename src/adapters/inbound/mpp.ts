@@ -52,6 +52,13 @@ export interface MppInboundOptions {
   readonly maxTimeoutSeconds: number;
   /** realm（challenge の HMAC 入力に入る）。 */
   readonly realm?: string;
+  /**
+   * **テスト用の継ぎ目。** `broadcastCredential` を差し替える。
+   * 実 SDK には任意のレシート（証跡なしの成功など）を返させられないため、
+   * `settle` の分岐を実際に走らせるにはここを置き換えるしかない。
+   * **本番では渡さない**（省略時は実 SDK を呼ぶ）。
+   */
+  readonly broadcastForTest?: (credential: string, options: unknown) => Promise<unknown>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,7 +107,14 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
       tempo.charge({
         recipient: options.recipient as `0x${string}`,
         currency: options.currency,
-        chainId: options.chainId,
+        /**
+         * **`decimals: 0` は必須。** SDK は challenge の `amount` に
+         * `parseUnits(amount, decimals)` を掛け、`decimals` の既定は 6
+         * （`mppx/dist/tempo/internal/defaults.js`）。Router が扱う `amount` は
+         * **既に base units** なので、既定のままだと HMAC に 10^6 倍の額が焼き付き、
+         * **人間が承認した額と束縛された額が食い違う**（実測: 1000 → 1000000000）。
+         */
+        decimals: 0,
         // **push 固定**: payer が broadcast 済みの credential だけを受ける。
         supportedModes: ["push"],
         store,
@@ -117,6 +131,30 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
     const id = challenge["id"];
     if (typeof id !== "string" || id === "") {
       throw new Error("mppx challenge has no id");
+    }
+    /**
+     * **SDK が実際に束縛した値と、これから payer に見せる値が一致するか確かめる。**
+     *
+     * 型では守れない。`tempo.charge()` の factory に `chainId` を渡しても**黙って無視され**、
+     * `amount` は `decimals` 既定 6 で **10^6 倍**される。どちらも実測で踏んだ。
+     * 食い違ったまま offer を出すと、**人間が承認した額・チェーンと、HMAC に焼き付いた
+     * 額・チェーンが別物**になる。offer を発行せず止める。
+     */
+    const bound = challenge["request"];
+    if (!isRecord(bound)) {
+      throw new Error("mppx challenge has no request to verify against");
+    }
+    if (bound["amount"] !== amount) {
+      throw new Error(
+        `mppx bound a different amount than offered (offered ${amount}, bound ${String(bound["amount"])})`,
+      );
+    }
+    const details = bound["methodDetails"];
+    const boundChainId = isRecord(details) ? details["chainId"] : undefined;
+    if (boundChainId !== options.chainId) {
+      throw new Error(
+        `mppx bound a different chain than offered (offered ${options.chainId}, bound ${String(boundChainId)})`,
+      );
     }
     return {
       scheme: MPP_INBOUND_SCHEME,
@@ -148,6 +186,12 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
        */
       const challenge: unknown = await mppx.challenge.tempo.charge({
         amount: request.amount,
+        /**
+         * **chainId は challenge 呼び出し側で渡す。** `tempo.charge()` の factory 引数に
+         * 渡しても**黙って無視され**、mainnet 4217 に落ちる（実測）。
+         * offer が名乗る network と HMAC 束縛が食い違うと、**別チェーンの支払い**になる。
+         */
+        chainId: options.chainId,
         expires,
         scope: request.routeBinding,
         meta: {
@@ -224,10 +268,14 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
       }
       let receipt: unknown;
       try {
-        receipt = await mppx.broadcastCredential(wire, {
+        const broadcastOptions = {
           scope: offer.extra.routeBinding,
           request: { amount: offer.amount },
-        });
+        };
+        receipt =
+          options.broadcastForTest === undefined
+            ? await mppx.broadcastCredential(wire, broadcastOptions)
+            : await options.broadcastForTest(wire, broadcastOptions);
       } catch {
         // 例外は成否不明。自動再 settle はしない。
         return { outcome: "unknown", reason: "source_settle_unknown" };
@@ -235,8 +283,10 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
       if (!isRecord(receipt)) {
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }
+      // `Receipt.status` は `z.literal("success")`（失敗は 402 + Problem Details の
+      // **例外**として来る）。それでも値を信じずに確認する: 契約違反の応答を
+      // `settled` に通さないため。
       if (receipt["status"] !== "success") {
-        // 明示的な失敗でも、payer 側が送金済みの可能性を否定できない。
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }
       // mppx のレシートは txHash を `reference` に載せる（`payload.hash` ではない）。

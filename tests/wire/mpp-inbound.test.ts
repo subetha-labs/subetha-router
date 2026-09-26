@@ -25,8 +25,16 @@ const ROUTE_BINDING = [ROUTE_ID, "GET", `/v1/routes/${ROUTE_ID}/resource`]
   .map(encodeURIComponent)
   .join("|");
 
-function railOf(overrides: { readonly maxTimeoutSeconds?: number } = {}) {
+function railOf(
+  overrides: {
+    readonly maxTimeoutSeconds?: number;
+    readonly broadcastForTest?: (credential: string, options: unknown) => Promise<unknown>;
+  } = {},
+) {
   return createMppInbound({
+    ...(overrides.broadcastForTest === undefined
+      ? {}
+      : { broadcastForTest: overrides.broadcastForTest }),
     secretKey: SECRET,
     recipient: RECIPIENT,
     currency: CURRENCY,
@@ -59,21 +67,6 @@ function credentialFor(offer: InboundOffer, wire = "synthetic-wire"): PaymentCre
   };
 }
 
-/**
- * adapter の receipt 判定と**同じ分岐**をテスト側に写したもの。
- * 実 SDK に「失敗レシート」を返させられないため、分岐の網羅だけをここで固定する。
- * **adapter 本体を変えたらここも落ちる**ように、期待値は adapter と同じ語彙で書く。
- */
-function receiptOutcome(receipt: unknown): string {
-  const isRec = typeof receipt === "object" && receipt !== null && !Array.isArray(receipt);
-  if (!isRec) return "unknown";
-  const r = receipt as Record<string, unknown>;
-  if (r["status"] !== "success") return "unknown";
-  const reference = r["reference"];
-  if (typeof reference !== "string" || reference === "") return "unknown";
-  return "settled";
-}
-
 describe("mpp inbound adapter", () => {
   it("issues an offer carrying a usable expiry (the expiry check must be able to fire)", async () => {
     // `Challenge.expires` は ISO 文字列で **optional**。unix 秒に変換できないと
@@ -88,6 +81,33 @@ describe("mpp inbound adapter", () => {
     expect(offer.extra.expiresAt).toBeGreaterThan(Math.floor(now / 1000));
     // 600 秒指定なので概ね 600 秒後（±5 秒）。
     expect(Math.abs(offer.extra.expiresAt - Math.floor(now / 1000) - 600)).toBeLessThanOrEqual(5);
+  });
+
+  it("offers exactly the amount it was asked for (no decimal rescaling)", async () => {
+    // SDK は `parseUnits(amount, decimals)` を掛け、`decimals` 既定は 6。
+    // 放置すると payer に 10000 と見せて HMAC には 10000000000 を焼き付ける。
+    const offer = await issue(railOf());
+    expect(offer.amount).toBe("10000");
+  });
+
+  it("binds the configured chain, not the SDK default", async () => {
+    // `tempo.charge()` の factory に chainId を渡すと**黙って無視され** mainnet 4217 になる。
+    // offer が名乗る network と束縛が食い違うと別チェーンの支払いになる。
+    const offer = await issue(railOf());
+    expect(offer.network).toBe(`eip155:${CHAIN_ID}`);
+  });
+
+  it("rejects a chain the SDK cannot resolve rather than guessing one", async () => {
+    // 設定ミスを黙って既定チェーンに落とさない。
+    const rail = createMppInbound({
+      secretKey: SECRET,
+      recipient: RECIPIENT,
+      currency: CURRENCY,
+      chainId: 999_999,
+      maxTimeoutSeconds: 600,
+      realm: "router-test",
+    });
+    await expect(issue(rail)).rejects.toThrow(/No client configured with chainId/);
   });
 
   it("does not reuse a challenge nonce for two offers minted in the same millisecond", async () => {
@@ -191,25 +211,35 @@ describe("mpp inbound adapter", () => {
       expect(result).toMatchObject({ reason: "source_settle_unknown" });
     });
 
-    it("maps a failed-status receipt to unknown, not rejected", async () => {
-      // **本命。** broadcast が到達して「失敗」を名乗った場合でも、push mode では
-      // payer が既に送金している可能性を否定できない。`rejected` にすると core が
-      // `awaiting_payment`（＝未払い）を公言する（`orchestrator.ts:530-539`）。
-      // SDK を実際に落とせないので、adapter の判定分岐だけを差し替えて確かめる。
-      const rail = railOf();
-      const offer = await issue(rail);
-      const seen: unknown[] = [];
-      for (const receipt of [
+    it("maps every non-provable broadcast outcome to unknown via the real adapter", async () => {
+      // **adapter を実際に呼ぶ。** 以前ここは adapter のロジックを写した
+      // ローカル関数を比較するだけで、post-broadcast の分岐を全部 `rejected` に
+      // 反転しても 14/14 緑のままだった（レビューで sabotage により指摘）。
+      // SDK に任意のレシートを返させられないので、`broadcastCredential` を差し替える。
+      const receipts: unknown[] = [
         { status: "failed", reference: "0xabc" },
         { status: "success" }, // 成功を名乗るが証跡が無い
         { status: "success", reference: "" },
         undefined,
         "not-an-object",
-      ]) {
-        seen.push(receiptOutcome(receipt));
+      ];
+      for (const receipt of receipts) {
+        const patched = railOf({ broadcastForTest: async () => receipt });
+        const patchedOffer = await issue(patched);
+        const result = await patched.settle(patchedOffer, credentialFor(patchedOffer));
+        expect(result.outcome, `receipt=${JSON.stringify(receipt)}`).toBe("unknown");
       }
-      // どれ 1 つとして `rejected` になってはならない。
-      expect(seen).toEqual(["unknown", "unknown", "unknown", "unknown", "unknown"]);
+    });
+
+    it("returns settled only with a real reference", async () => {
+      const patched = railOf({
+        broadcastForTest: async () => ({ status: "success", reference: "0xdeadbeef" }),
+      });
+      const offer = await issue(patched);
+      expect(await patched.settle(offer, credentialFor(offer))).toEqual({
+        outcome: "settled",
+        txRef: "0xdeadbeef",
+      });
     });
 
     it("rejects only when the credential is structurally absent (no charge can have happened)", async () => {
