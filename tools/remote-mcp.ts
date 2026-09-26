@@ -101,7 +101,13 @@ async function start(): Promise<void> {
   const work = await mkdtemp(path.join(path.resolve("runtime"), "remote-"));
   const config = {
     router: {
-      approvalTtlMs: 300_000,
+      /**
+       * 承認期限。**実効期限は `min(approvalTtlMs, offerExpiry)`** なので、
+       * offer 側（既定 600 秒）より短いとこちらが先に切れる。
+       * 人間が承認を挟む運用（収録・審査員のデモ）では、読み上げや確認で数分使うため
+       * 5 分だと**承認前に失効する**ことが実測で起きた。既定を offer と揃える。
+       */
+      approvalTtlMs: Number(process.env["SUBETHA_APPROVAL_TTL_SECONDS"] ?? "600") * 1000,
       routes: {
         [ROUTE]: {
           routeId: ROUTE,

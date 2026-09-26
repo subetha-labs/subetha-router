@@ -34,6 +34,11 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_MPP_INBOUND_SECRET` | | **MPP 受信**を公開する場合のみ。challenge の HMAC 束縛鍵（**32 バイト以上**）。署名鍵ではない |
 | `SUBETHA_OUTBOUND_X402_KEY` | | x402 送信に別ウォレットを使う場合のみ。既定は `SUBETHA_OUTBOUND_PRIVATE_KEY` を流用 |
 | `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい** |
+| `SUBETHA_APPROVAL_TTL_SECONDS` | | 承認期限（秒）。既定 `600`。**`SUBETHA_OFFER_SECONDS` と揃える**こと |
+
+**承認期限と offer 期限は短いほうが効く**（`min(approvalTtlMs, offerExpiry)`）。
+片方だけ伸ばしても実効期限は変わらない。人間が承認を挟む運用では、
+読み上げや確認で数分かかるため**5 分では承認前に失効する**（実測）。既定はどちらも 600 秒。
 
 ### Tempo の RPC を認証付きにする（推奨）
 

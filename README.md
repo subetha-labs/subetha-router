@@ -74,7 +74,7 @@ Router は呼び出し側の鍵を持たないので、署名能力は手元に�
   { x402Version: 2, accepted: <quote の source.offer をそのまま>,
     payload: { challengeNonce, signature, authorization } }
   ```
-- **quote の有効期限は 10 分。** 切れたら取り直して**改めて承認**する。
+- **quote の有効期限は 10 分。** 承認期限も 10 分で、**短いほうが効く**。切れたら取り直して**改めて承認**する。
 - **`bucket_limit` で止まったら上限到達。** 止まること自体が安全機構。
 
 ## 何が動いているか
