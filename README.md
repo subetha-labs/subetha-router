@@ -57,6 +57,11 @@ Router は呼び出し側の鍵を持たないので、署名能力は手元に�
   （実測: 0ms 間隔で 2/20 失敗、3 秒空けて 0/15）。
 - **`paid_data_unavailable` が返ることがある。** 支払いは成立したがデータ取得に失敗した状態で、
   **資金は動いている**。Router は**自動再送しない**（二重支払いを避けるため）。再試行すれば通る。
+  **稀ではない**: 別環境からの実決済で**初回がこれだった**実例がある（再試行で `delivered`）。
+- **`quote` オブジェクトを purchase に渡し直すこと。** リモート Router は**ステートレス**で
+  quote を保持しない。`quoteId` だけでは `quote_required` になる。
+  渡すのは `quoteId` / `requestId` / `approval` / `quote` / `credential` の **5 つ**
+  （`approval` に承認した `quoteId` を入れないと `approval_required` で止まる）。
 - **quote の有効期限は 10 分。** 切れたら取り直して**改めて承認**する。
 - **`bucket_limit` で止まったら上限到達。** 止まること自体が安全機構。
 
