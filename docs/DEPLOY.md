@@ -50,7 +50,91 @@ claude mcp add --transport http subetha-router https://<domain>/mcp
 
 clone も `npm install` も不要。**支払いは審査員自身の鍵**で、署名は手元で作られる。
 
-## 5. EC2 側で必要なこと（このリポジトリの範囲外）
+## 5. EC2 の具体的な構成
+
+### インスタンス
+
+| 項目 | 推奨 | 理由 |
+|---|---|---|
+| タイプ | **t4g.small**（arm64 / 2 vCPU / 2 GiB） | 実測でコンテナは**アイドル約 192 MiB・CPU 0.1%**。2 GiB あればビルドも通る |
+| AMI | **Amazon Linux 2023（arm64）** | t4g は Graviton = arm64 |
+| ストレージ | **gp3 20 GiB** | イメージ 638 MB + `node_modules` 198 MB + 余裕 |
+| リージョン | `ap-northeast-1` 等、どこでも可 | |
+
+**x86 を使う場合は `t3.small` + x86_64 AMI**。どちらでも動くが、**AMI とインスタンスの
+アーキテクチャを揃えること**（`docker build` はインスタンス上で行うので、そこで合う）。
+
+### セキュリティグループ
+
+| 方向 | ポート | ソース | 用途 |
+|---|---|---|---|
+| inbound | **443** | `0.0.0.0/0` | 審査員がここに繋ぐ |
+| inbound | 22 | **自分の IP のみ** | SSH |
+| outbound | all | — | facilitator / RPC / Provider に出る |
+
+**8787 は開けない。** TLS 終端の背後に置く。
+
+## 6. デプロイ手順（インスタンスに SSH して実行）
+
+```sh
+# 1) Docker
+sudo dnf install -y docker git
+sudo systemctl enable --now docker
+sudo usermod -aG docker ec2-user && exec sudo su - ec2-user   # グループ反映
+
+# 2) 取得してビルド（インスタンス上でビルドするのでアーキテクチャは自動で合う）
+git clone https://github.com/subetha-labs/subetha-router-egt.git
+cd subetha-router-egt
+docker build -t subetha-router .
+
+# 3) 鍵を EnvironmentFile に置く（シェル履歴とプロセス一覧に残さない）
+sudo install -m 600 /dev/null /etc/subetha-router.env
+sudo tee /etc/subetha-router.env >/dev/null <<'ENVEOF'
+SUBETHA_OUTBOUND_PRIVATE_KEY=0x...
+SUBETHA_ROUTER_RECEIVER=0x...
+ENVEOF
+
+# 4) 起動
+docker run -d --name subetha-router --restart unless-stopped \
+  -p 127.0.0.1:8787:8787 \
+  --env-file /etc/subetha-router.env \
+  subetha-router
+
+# 5) 確認
+curl -s http://127.0.0.1:8787/healthz     # → {"status":"ok","router":"up"}
+docker logs subetha-router | tail -3      # → mode=real / label=real / inboundPayer=none
+```
+
+`-p 127.0.0.1:8787:8787` としているので、**8787 は外から直接叩けない**（プロキシ経由のみ）。
+
+## 7. TLS とドメイン（Caddy が最短）
+
+```sh
+sudo dnf install -y caddy    # 無ければ https://caddyserver.com/docs/install
+sudo tee /etc/caddy/Caddyfile >/dev/null <<'CADDYEOF'
+router.subethalabs.com {
+    reverse_proxy 127.0.0.1:8787
+}
+CADDYEOF
+sudo systemctl enable --now caddy
+```
+
+Caddy が **Let's Encrypt の証明書を自動取得**する。事前に DNS の **A レコード**を
+`router.subethalabs.com` → インスタンスの **Elastic IP** に向けておくこと
+（Elastic IP を割り当てないと再起動で IP が変わる）。
+
+確認:
+```sh
+curl -s https://router.subethalabs.com/healthz
+```
+
+## 8. 審査員への案内
+
+```sh
+claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
+```
+
+## 9. EC2 側で必要なこと（このリポジトリの範囲外）
 
 - インスタンス作成（`ap-northeast-1` 等）、Docker のインストール
 - セキュリティグループ: **443 のみ公開**。8787 は直接公開せずリバースプロキシ経由にする
