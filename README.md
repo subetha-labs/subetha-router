@@ -109,7 +109,7 @@ facilitator が送信して gas を負担するため。**実際に払ったア�
 
 | routeId | 受信 | 送信 |
 |---|---|---|
-| `md-mpp-eth-snapshot` | x402（Base Sepolia USDC） | MPP（Provider B） |
+| `md-mpp-eth-snapshot` | x402（Base Sepolia USDC） | MPP（`subetha-provider-mpp`） |
 | `md-x402-eth-snapshot` | MPP（Tempo pathUSD） | x402（Provider A） |
 
 **MPP で払う場合の注意**: x402 は facilitator が送信して gas を負担するが、
