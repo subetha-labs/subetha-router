@@ -195,11 +195,12 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
          * これを言わないと「準備の工程」として承認され得る。
          */
         nextStep: fundsMoveBeforePurchase(result.quote)
-          ? `人間の明示承認が必要です。**この経路（MPP）は credential を作る時点で送金が起き、` +
-            `取り消せません。** ${TOOL_NAMES.purchase} を呼ぶ前に資金が出ます。` +
-            `承認を得てから credential を作ってください。承認しない場合は作らないでください。`
-          : `人間の明示承認が必要です。承認する場合は ${TOOL_NAMES.purchase} を ` +
-            `approval に この quoteId を渡して呼んでください。承認しない場合は呼ばないでください。`,
+          ? "Explicit human approval is required. **On this route (MPP) the transfer happens " +
+            "when the credential is built, and it cannot be undone.** Funds leave before " +
+            `${TOOL_NAMES.purchase} is called. Get approval first, then build the credential. ` +
+            "If the human does not approve, do not build it."
+          : "Explicit human approval is required. If the human approves, call " +
+            `${TOOL_NAMES.purchase} with this quoteId as \`approval\`. If not, do not call it.`,
         subject: approvalSubject(result.quote),
       });
     },
@@ -214,7 +215,7 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           ok: false,
           error: "quote_required",
           detail:
-            `先に ${TOOL_NAMES.quote} を呼び、返ってきた quote をそのまま quote 引数に渡してください。`,
+            `Call ${TOOL_NAMES.quote} first and pass the quote it returns as the \`quote\` argument.`,
         });
       }
       const offer = (quote.source as Record<string, unknown>)["offer"];
@@ -234,7 +235,7 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           return withEvidence(deps, {
             ok: false,
             error: "inbound_credential_unavailable",
-            detail: "受信レグの資格情報を作れませんでした。支払いは開始していません。",
+            detail: "Could not build the inbound credential. No payment was started.",
           });
         }
       } else {
@@ -243,7 +244,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           ok: false,
           error: "inbound_payer_not_configured",
           detail:
-            "実レールで受信レグを払う能力が注入されていません。合成レールを使うか、payer を注入してください。",
+            "No inbound payment capability is configured for a real rail. Use the synthetic " +
+            "rail, or inject a payer.",
         });
       }
       const result = await deps.client.execute({

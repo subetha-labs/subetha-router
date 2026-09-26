@@ -1,5 +1,6 @@
 /**
  * 支払い用ウォレットの Base Sepolia USDC 残高を見る。**製品コードではない。**
+ * 出力は審査員の画面に出るので**英語**。コメントは日本語のままでよい。
  *
  *   npm run wallet:balance
  *
@@ -44,8 +45,9 @@ process.stdout.write(`address : ${address}\n`);
 process.stdout.write(`USDC    : ${units} base units (${Number(units) / 1e6} USDC)\n`);
 if (units < 10_000n) {
   process.stdout.write(
-    `\n残高が 1 回分（10000 base units）に足りません。\nhttps://faucet.circle.com で Base Sepolia の USDC を入れてください。\n`,
+    "\nNot enough for one purchase (10000 base units).\n" +
+      "Get Base Sepolia USDC at https://faucet.circle.com\n",
   );
 } else {
-  process.stdout.write(`\n約 ${units / 10_000n} 回分あります。\n`);
+  process.stdout.write(`\nEnough for about ${units / 10_000n} purchases.\n`);
 }

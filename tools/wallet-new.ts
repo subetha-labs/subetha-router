@@ -16,25 +16,26 @@ const key = generatePrivateKey();
 const account = privateKeyToAccount(key);
 
 process.stdout.write(`
-使い捨てウォレットを作りました。
+Created a disposable wallet.
 
   address : ${account.address}
   key     : ${key}
 
-次の 2 つをやってください。
+Two things to do next.
 
-1) 鍵を保存する（このリポジトリの .env.local は gitignore 済み）
+1) Save the key (.env.local in this repo is already gitignored)
 
    echo 'SUBETHA_PAYER_PRIVATE_KEY=${key}' >> .env.local
 
-2) 上の address に **Base Sepolia の USDC** を入れる（1 回 0.01 USDC・数回分で足ります）
+2) Fund that address with **Base Sepolia USDC** (0.01 USDC per call; a few is plenty)
 
    https://faucet.circle.com
 
-   ネットワークは **Base Sepolia**、トークンは **USDC** を選びます。
-   **ETH（ガス）は不要**です。x402 の EIP-3009 経路では facilitator が送信して gas を負担します。
+   Pick network **Base Sepolia** and token **USDC**.
+   **You do not need ETH for gas.** On the x402 EIP-3009 route the facilitator
+   broadcasts and pays the gas.
 
-残高の確認:
+Check the balance:
 
    npm run wallet:balance
 

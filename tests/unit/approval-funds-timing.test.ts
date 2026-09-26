@@ -53,8 +53,8 @@ describe("approval must say when funds move", () => {
 
     expect(subject["fundsMoveOnCredential"]).toBe(true);
     // 文面にも「取り消せない」ことと、purchase より前だということが出る。
-    expect(String(body["nextStep"])).toMatch(/取り消せません/);
-    expect(String(body["nextStep"])).toMatch(/前に資金が出ます/);
+    expect(String(body["nextStep"])).toMatch(/cannot be undone/);
+    expect(String(body["nextStep"])).toMatch(/Funds leave before/);
   });
 
   it("does not flag the x402 rail, where signing moves nothing", async () => {
@@ -63,14 +63,14 @@ describe("approval must say when funds move", () => {
 
     expect(subject["fundsMoveOnCredential"]).toBe(false);
     // x402 の文面に取り消し不可の警告を出さない（出すと狼少年になる）。
-    expect(String(body["nextStep"])).not.toMatch(/取り消せません/);
+    expect(String(body["nextStep"])).not.toMatch(/cannot be undone/);
   });
 
   it("still requires human approval on both rails", async () => {
     for (const scheme of ["tempo/charge", "exact"]) {
       const body = await handlersFor(scheme).quote({ routeId: "r1", requestId: "x" });
       expect(body["approvalRequired"], scheme).toBe(true);
-      expect(String(body["nextStep"]), scheme).toMatch(/人間の明示承認が必要です/);
+      expect(String(body["nextStep"]), scheme).toMatch(/Explicit human approval is required/);
     }
   });
 });

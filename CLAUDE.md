@@ -10,69 +10,71 @@ Parent controller owns state, locking and commits. Writer must not launch worker
 
 Each phase: minimal artifact, independent review, parent readback. No repeated whole-plan reviews for a small correction. Retain author/test/review evidence. Defer nonblocking polish. Stop for wrong/duplicate payments, secret exposure, ownership conflicts, unsupported permissions, real quota or an actual unresolved prerequisite.
 
-## このリポジトリから Router を使うとき（エージェント向け）
+## Using the Router from this repository (for agents)
 
-リモート Router（`https://router.subethalabs.com/mcp`）の `subetha_router_purchase` は
-**`credential`（呼び出し側が自分の鍵で署名した `X-Payment`）を必須**とする。
-**Router は呼び出し側の鍵を持たない**設計なので、署名は**この環境で**作る。
+**Answer the user in the language they write in.**
 
-Router は **2 つの route** を公開している。**どちらで払うかは手持ちの資産で選ぶ**:
+`subetha_router_purchase` on the hosted Router (`https://router.subethalabs.com/mcp`)
+**requires `credential`** — an `X-Payment` value signed with the caller's own key.
+**The Router never holds your key**, so the signature is produced here.
 
-| routeId | 払う側（あなた） | 届く先 |
+The Router exposes **two routes**. **Pick the one you can pay with what you hold**:
+
+| routeId | you pay with | reaches |
 |---|---|---|
-| `md-mpp-eth-snapshot` | **Base Sepolia の USDC**（x402） | MPP しか受けない Provider |
-| `md-x402-eth-snapshot` | **Tempo の pathUSD**（MPP） | x402 しか受けない Provider |
+| `md-mpp-eth-snapshot` | **Base Sepolia USDC** (x402) | a provider that only accepts MPP |
+| `md-x402-eth-snapshot` | **Tempo pathUSD** (MPP) | a provider that only accepts x402 |
 
-手順:
+Steps:
 
-1. `subetha_router_list_routes` で route を確認し、**手持ちの資産で払えるほうを選ぶ**
-2. `subetha_router_quote` を呼ぶ。**`requestId` は購入ごとに新しい値**にする
-   （例: 用途 + タイムスタンプ）。**同じ購入の中では quote と purchase で同じ値を使う**
-3. **人間に承認を求める。** 返ってきた `subject`（額・`decimals`・宛先・期限）を提示する。
-   **MPP で払う場合は「実行した瞬間に送金され、取り消せない」ことも伝える**（下記）
-4. 承認されたら、`quote` フィールドをそのまま渡す:
+1. Call `subetha_router_list_routes` and **choose the route you can actually pay for**
+2. Call `subetha_router_quote`. **Use a fresh `requestId` for each purchase**
+   (e.g. purpose + timestamp). **Within one purchase, use the same value for quote and purchase**
+3. **Ask the human to approve.** Show the returned `subject`: amount, `decimals`,
+   recipient, deadline. **If paying over MPP, also say that running the next step sends
+   the funds immediately and cannot be undone** (see below)
+4. Once approved, pass the `quote` field through unchanged:
 
    ```sh
-   npm run sign -- '<quote 応答の quote フィールドの JSON>'
+   npm run sign -- '<the quote field from the quote response, as JSON>'
    ```
 
-   標準出力の base64 が `credential`。**レールは offer から自動判定される**ので指定不要。
-   **鍵は送信されない。**
+   The base64 on stdout is the `credential`. **The rail is detected from the offer**, so
+   you do not specify it. **Your key is never sent.**
 
-5. `subetha_router_purchase` を呼ぶ。渡すのは
-   `quoteId` / `requestId`（手順2と同じ）/ `approval`（承認された `quoteId`）/
-   `quote`（応答の `quote` をそのまま）/ `credential`（手順4の出力）
+5. Call `subetha_router_purchase` with
+   `quoteId` / `requestId` (same as step 2) / `approval` (the approved `quoteId`) /
+   `quote` (the response's `quote`, unchanged) / `credential` (step 4's output)
 
-### レールによって手順4の意味が違う
+### Step 4 means different things on different rails
 
-| 受信レール | `npm run sign` が何をするか |
+| inbound rail | what `npm run sign` does |
 |---|---|
-| **x402**（`md-mpp-eth-snapshot`） | **署名するだけ。** この時点では資金は動かない。送信と gas は facilitator 負担 |
-| **MPP**（`md-x402-eth-snapshot`） | **その場でチェーンに送金する。** 手数料も自分持ち。**失敗しても戻らない** |
+| **x402** (`md-mpp-eth-snapshot`) | **Only signs.** No funds move yet; the facilitator broadcasts and pays gas |
+| **MPP** (`md-x402-eth-snapshot`) | **Sends the transfer right now.** You pay the fee, and **it cannot be undone** |
 
-**MPP の場合、手順4の実行前に必ず人間の承認を得ること。** 承認前に走らせると、
-本人が同意していない送金が起きる。手順5が失敗しても送金は取り消せないので、
-その場合は**勝手に再試行せず、送金済みである旨を報告して止まる**。
+**On MPP, get human approval before running step 4.** Running it first would move money
+the person never agreed to. If step 5 then fails, **do not retry on your own** — report
+that the payment was already sent, and stop.
 
-**やってはいけないこと**:
-- `credential` を推測で組み立てる（署名できないなら**止まって報告する**）
-- 期限切れの quote を使い回す（取り直して**改めて承認を得る**）
-- `requestId` を quote と purchase で変える（別の購入になる）
-- **前の購入の `requestId` を使い回す。** quote は `requestId` ごとに**冪等**なので、
-  使い回すと**前回の quote がそのまま返る**（期限も当時のまま）。
-  取り直したつもりで**発行済みの期限切れ quote を受け取る**ことになる。
-  「期限切れが返ってきた」ときは時計のずれではなく、**`requestId` の使い回しを疑う**
+**Never**:
+- Build a `credential` by guessing (**stop and report** if you cannot sign)
+- Reuse an expired quote (take a new one and **ask for approval again**)
+- Change `requestId` between quote and purchase (that becomes a different purchase)
+- **Reuse a previous purchase's `requestId`.** Quotes are **idempotent per `requestId`**,
+  so reusing one **returns the earlier quote**, original deadline and all. You would
+  receive an already-expired quote while believing you took a fresh one.
+  If a quote comes back expired, suspect **a reused `requestId`**, not clock skew
 
-鍵が無いときは `npm run wallet:new`、Base Sepolia USDC の残高は `npm run wallet:balance`。
+No key yet? `npm run wallet:new`. Base Sepolia USDC balance: `npm run wallet:balance`.
+**That command does not show pathUSD** (needed only when paying over MPP).
 
-### 実行許可について
+### Execution permission
 
-`.claude/settings.json` で `npm run sign` / `wallet:new` / `wallet:balance` を許可済み。
-これが無いと `npm run sign` が実行時に止まる（資金を扱うコマンドとして分類されるため）。
+`.claude/settings.json` already allows `npm run sign` / `wallet:new` / `wallet:balance`.
+Without it, `npm run sign` is blocked at runtime as a funds-handling command.
 
-**許可しているのは署名の作成だけで、承認の判断ではない。**
-`sign` を実行してよいのは**人間が quote を承認した後**で、その判断は
-このファイルの手順3が定めている。x402 経路では `sign` は署名するだけで資金は動かず、
-動くのは `purchase` のとき。MPP 経路では `sign` の時点で送金が起きる
-（`subject.fundsMoveOnCredential` が true なら後者）。
-**pathUSD（MPP で払う場合）の残高はこのコマンドでは見られない。**
+**What is allowed is producing a signature, not deciding to pay.** `sign` may be run only
+**after a human approves the quote**, which step 3 defines. On the x402 rail `sign` moves
+nothing — funds move at `purchase`. On the MPP rail funds move at `sign`
+(true when `subject.fundsMoveOnCredential` is true).

@@ -149,8 +149,8 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     TOOL_NAMES.listRoutes,
     {
       description:
-        "Router が公開している経路（routeId・canonical URL・両レグの資産メタ）を一覧する。" +
-        "上流 Provider の URL は返らない。",
+        "List the routes this Router exposes (routeId, canonical URL, and the asset " +
+        "metadata for both legs). Upstream provider URLs are never returned.",
       inputSchema: {},
     },
     async () => asResult(await handlers.listRoutes()),
@@ -160,18 +160,19 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     TOOL_NAMES.quote,
     {
       description:
-        "経路の見積りを取る。返る subject が人間の承認対象そのもの（額は base units、" +
-        "decimals つき）。**この tool は支払いを開始しない。** 承認は人間が行い、" +
-        `承認する場合だけ ${TOOL_NAMES.purchase} を呼ぶこと。エージェントが自分で承認してはならない。` +
-        " **資金がいつ動くかはレールで違う。** 応答の `subject.fundsMoveOnCredential` が true の" +
-        " 経路（MPP）では、credential を作った時点で送金が完了し、取り消せない。" +
-        " その場合は**credential を作る前に**承認を得ること（purchase の前では遅い）。",
+        "Quote a route. The returned `subject` is exactly what a human approves " +
+        "(amounts are base units and carry `decimals`). **This tool starts no payment.** " +
+        `A human approves; call ${TOOL_NAMES.purchase} only if they do. ` +
+        "An agent must never approve on the human's behalf. " +
+        "**When funds move depends on the rail.** If `subject.fundsMoveOnCredential` is true " +
+        "(the MPP rail), the transfer completes the moment the credential is built and cannot " +
+        "be undone — get approval BEFORE building the credential, not before purchase.",
       inputSchema: {
         routeId: z.string().min(1),
         requestId: z
           .string()
           .min(1)
-          .describe("再試行しても同じ値を使うこと（変えると別の購入になり得る）"),
+          .describe("Keep the same value across retries; changing it can become a different purchase"),
       },
     },
     async (args) => asResult(await handlers.quote(args)),
@@ -181,28 +182,29 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     TOOL_NAMES.purchase,
     {
       description:
-        "人間が明示承認した quote を 1 回だけ実行する。approval には承認した quoteId を渡す。" +
-        "未指定・不一致なら Router が拒否する（この層では承認を判定しない）。" +
-        "**MPP 経路ではこの呼び出しの前に既に送金が済んでいる。** 失敗しても資金は戻らないので、" +
-        "勝手に再試行せず、送金済みである旨を報告して止まること。" +
-        "requestId は quote と同じ値を使うこと。サーバ再起動後は quote を取り直す必要がある。",
+        "Execute a human-approved quote exactly once. Pass the approved quoteId as " +
+        "`approval`; the Router rejects a missing or mismatched value (this layer does not " +
+        "judge approval itself). **On the MPP rail the transfer already happened before this " +
+        "call** — a failure here does not return the funds, so do not retry on your own: " +
+        "report that payment was already sent and stop. Use the same `requestId` as the quote. " +
+        "After a server restart the quote must be taken again.",
       inputSchema: {
         quoteId: z.string().min(1),
         requestId: z.string().min(1),
         approval: z
           .string()
           .optional()
-          .describe("人間が承認した quoteId。未指定なら Router が approval_required を返す"),
+          .describe("The quoteId the human approved. Without it the Router returns approval_required"),
         quote: z
           .unknown()
           .optional()
-          .describe("quote が返した quote 文書。リモート（ステートレス）利用では必須"),
+          .describe("The quote document returned by quote. Required for remote (stateless) use"),
         credential: z
           .string()
           .optional()
           .describe(
-            "自分の鍵で署名した X-Payment 値（base64）。リモート利用ではこれを渡す。" +
-              "Router は呼び出し側の鍵を保持しない。",
+            "The X-Payment value (base64) signed with your own key. Pass this for remote use; " +
+              "the Router never holds the caller's key.",
           ),
       },
     },
@@ -213,8 +215,8 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     TOOL_NAMES.status,
     {
       description:
-        "paymentId の公開射影を取得する（保存 → 再オープン相当）。" +
-        "サーバを再起動しても参照できる。",
+        "Fetch the public projection for a paymentId (equivalent to saving and reopening). " +
+        "Readable after a server restart, and reading it costs nothing.",
       inputSchema: { paymentId: z.string().min(1) },
     },
     async (args) => asResult(await handlers.status(args)),
