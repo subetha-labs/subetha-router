@@ -26,7 +26,8 @@ Router は **2 つの route** を公開している。**どちらで払うかは
 手順:
 
 1. `subetha_router_list_routes` で route を確認し、**手持ちの資産で払えるほうを選ぶ**
-2. `subetha_router_quote` を呼ぶ（`requestId` を決める。**purchase でも同じ値を使う**）
+2. `subetha_router_quote` を呼ぶ。**`requestId` は購入ごとに新しい値**にする
+   （例: 用途 + タイムスタンプ）。**同じ購入の中では quote と purchase で同じ値を使う**
 3. **人間に承認を求める。** 返ってきた `subject`（額・`decimals`・宛先・期限）を提示する。
    **MPP で払う場合は「実行した瞬間に送金され、取り消せない」ことも伝える**（下記）
 4. 承認されたら、`quote` フィールドをそのまま渡す:
@@ -57,6 +58,10 @@ Router は **2 つの route** を公開している。**どちらで払うかは
 - `credential` を推測で組み立てる（署名できないなら**止まって報告する**）
 - 期限切れの quote を使い回す（取り直して**改めて承認を得る**）
 - `requestId` を quote と purchase で変える（別の購入になる）
+- **前の購入の `requestId` を使い回す。** quote は `requestId` ごとに**冪等**なので、
+  使い回すと**前回の quote がそのまま返る**（期限も当時のまま）。
+  取り直したつもりで**発行済みの期限切れ quote を受け取る**ことになる。
+  「期限切れが返ってきた」ときは時計のずれではなく、**`requestId` の使い回しを疑う**
 
 鍵が無いときは `npm run wallet:new`、Base Sepolia USDC の残高は `npm run wallet:balance`。
 
