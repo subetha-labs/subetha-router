@@ -7,14 +7,23 @@
 
 ## 1. 結論（先に）
 
-**アーキテクチャ上は適合する。ただし無条件ではない。**
+**対応可能。ただし最大の障害は Router 側ではなく「参照実装がまだ無い」こと。**
 
-- **受信（inbound）**: `InboundRail` の 4 メソッドは Lightning に**そのまま対応づけられる**。
-  ただし**資金移動のタイミングの申告**に既存のハードコードがあり、そこは直す必要がある（§4.1）。
-- **送信（outbound）**: `src/core/orchestrator.ts` の**送金直前ガードが Lightning を構造的に拒否する**（§4.2）。
-  これは adapter の追加では解決せず、**core の変更が必要**。P5 設計の「core は触らない」方針と衝突する。
+仕様は **2026-09-23 にマージ済み**（`scheme_exact_lnbtc.md`、Block の Bitcoin 部門 Spiral の
+エンジニアが著者）。私が直接取得して内容を確認した（§5.1）。
 
-したがって「adapter を 1 本書けば済む」話ではない。**受信のみなら現実的、送信は core の設計変更を伴う。**
+Router 側の適合性:
+
+- **受信（inbound）**: `InboundRail` の 4 メソッドに**そのまま対応づく**。
+  資金移動タイミングの申告にハードコードがあり、そこは直す必要がある（§4.1）
+- **送信（outbound）**: `src/core/orchestrator.ts` の送金直前ガードが**現状は Lightning を拒否する**（§4.2）。
+  ただし**仕様側は「同等なら通す」設計**であり（§5.2）、修正は core の設計意図と一致する
+- **Lightning は U-01r で諦めた「結果照会」を持つ**（§5.3）。
+  `network:payment_hash` で確定的に再照会でき、**応答喪失からの回復が安全に実装できる**。
+  SubEtha・MPP の両レールに無い利点
+
+**推奨: 今は実装しない。仕様の理解として記録し、参照実装の出現を待つ。**
+理由は §6.2。
 
 ## 2. Router 側の前提（コードで確認済み）
 
@@ -102,36 +111,119 @@ async function readAndMatchDestination(intent: Intent): Promise<boolean> {
 「core は rail を知らない」という設計意図に対して**実は特定レールの前提を埋め込んでいる**。
 Lightning はその前提を可視化しただけであり、修正は設計の一貫性を高める。
 
-## 5. 未確認（外部情報に依存）
+## 5. 仕様は実在し、マージ済み（一次資料で確認）
 
-以下は本メモでは**確定させない**。Block 社の仕様が出るまで推測で設計しない
-（U-01r で「未確定は未確定として残す」とした方針と同じ）。
+### 5.1 確認した一次資料
 
-- Block / Spiral / Proto の x402 Lightning 対応が**実在するか**、仕様・SDK の有無
-- 402 応答に載るのが BOLT-11 / BOLT-12 / LNURL / Lightning Address のどれか
-- **credential が何になるか**（preimage か、署名か、out-of-band 決済後の証明か）
-- facilitator 相当の概念があるか（＝ Router が Lightning ノードを持つ必要があるか）
-- **hold invoice が使えるか**——使えるなら「検証してから確定」が可能になり、
-  x402 の EIP-3009 に近い「署名では動かない」モデルに寄せられる。
-  使えないなら MPP と同じ「払った瞬間に不可逆」になる
-- invoice の失効時間（一般に**分単位**で、オンチェーンの承認窓より短い）。
-  `maxTimeoutSeconds` や `approvalTtlMs`（既定 60s）との整合を確認する必要がある
-- 失敗・スタックした HTLC の扱い、返金可能性
-- payment hash で**後から結果を照会できるか**——できるなら
-  U-01r-a（§10）で「SubEtha には無い」と結論した**結果照会 API が Lightning には存在する**ことになり、
-  `unknown` からの回復が**Lightning では安全に実装できる**可能性がある。これは重要な差
+| 対象 | 内容 |
+|---|---|
+| Block の発表 | `block.xyz/inside/block-joins-the-x402-foundation-to-advance-open-agentic-commerce`（2026-09-24）。「Block has contributed Bitcoin Lightning payments to the x402 protocol」 |
+| **仕様（本体）** | `specs/schemes/exact/scheme_exact_lnbtc.md`（PR #2861、**2026-09-23 マージ**）。著者 `benthecarman`（GitHub の company が `@spiralxyz`＝Block の Bitcoin 部門 Spiral） |
 
-## 6. 見積り（暫定）
+**私が直接取得して確認した**（`raw.githubusercontent.com` から 42,076 バイト、HTTP 200）。
+以下の引用は**すべて実ファイルの行番号付きで確認済み**であり、伝聞ではない。
+
+### 5.2 §4.1 の予想は当たり、しかし §4.2 の予想は**外れていた**
+
+**資金移動タイミング（`lnbtc.md:602`）**:
+
+> Settlement does not move funds. The Lightning payment completed before the client
+> received the preimage.
+
+**予想どおり MPP 側**である。credential（preimage）が存在する時点で**既に不可逆に支払われている**。
+`/verify` は**呼ばれない**（`:61` "It MUST NOT call `/verify` for this flow"、`:545`）。
+返金は**無い**（`:114-115` "provides no refund path … MUST NOT assume a refund is available"）。
+
+**しかし結果照会について、私の §4.2 の懸念は Lightning には当てはまらない（`lnbtc.md:212`）**:
+
+> An unused proof MUST be accepted for another challenge with the same request
+> binding and payment terms if all validation rules pass.
+
+つまり **未使用の preimage は「別の challenge」に対して再提示できる**。
+`extra.invoice` は *dynamic* フィールドとされ、サーバは challenge ごとの payment hash を
+追跡する必要すらない。**invoice が毎回変わることは問題にならない**——
+照合対象は invoice の同一性ではなく **request binding と支払い条件**である。
+
+これは §4.2 で「Lightning 送信は `stableJson` 一致で 100% 拒否される」と書いた見立てを
+**部分的に覆す**。拒否されるのは事実だが、原因は Lightning の欠陥ではなく
+**core が「同等性」ではなく「同一性」を要求していること**であり、
+仕様側は最初から「同等なら通す」設計になっている。§4.2 の対処案 1（照合を adapter に委譲）が
+**仕様の意図と一致する**ことが裏付けられた。
+
+### 5.3 U-01r で「無い」と結論した結果照会が、Lightning には**ある**
+
+replay 保護キーは **`network + ":" + payment_hash`**（`:604`）で、
+**restart-durable な store への atomic insert が必須**（`:616`、
+`:739` "An in-memory replay store is not compliant because a restart loses consumed keys"）。
+重複は `duplicate_settlement` になる。
+
+したがって**応答を失っても、同じ preimage を再提示すれば
+「リソースが返る」か「`duplicate_settlement`」のどちらかが確定的に得られる**。
+U-01r-a（§10）で SubEtha について「nonce 単位の結果参照が無いので `unknown` から回復できない」と
+結論したが、**Lightning では回復が安全に実装できる**。レール間で最も大きな差である。
+
+### 5.4 その他の確定事項
+
+| 項目 | 内容 |
+|---|---|
+| 402 に載るもの | **BOLT-11 invoice のみ**（`extra.invoice`）。BOLT-12 / LNURL / Lightning Address は**対象外**（将来課題としても言及なし） |
+| credential | `payload.preimage`（32 バイト）。**bearer proof**。preimage を返せない payer adapter は使用禁止 |
+| 単位 | **millisatoshi** の 10 進文字列。`"1000"` = 1 sat。`"21"` を sat と解釈するのは禁止 |
+| 手数料 | **payer が routing fee を上乗せ負担**（amount には含まれない） |
+| network | 新 CAIP-2 namespace `lnbtc:`（mainnet `lnbtc:000000000019d6689c085ae165831e93`） |
+| `payTo` | 受信ノードの**圧縮 secp256k1 pubkey**（66 hex）。`0x` アドレスではない → §4 の `config.ts:253` 制約に該当 |
+| 失効 | **`maxTimeoutSeconds` は BOLT11 expiry と完全一致必須**（余裕なし）。仕様の test vector は **300 秒**。clock skew 既定 60 秒 |
+| request binding | BOLT11 の `description_hash` に `SHA-256(JCS(binding))` を埋める。**`mcp:1` プロファイルは MCP `tools/call` 用**で、JSON-RPC `id` と `progressToken` を binding から除外（＝再試行が安全） |
+| facilitator | **Lightning ノード不要**。検証は完全にローカル（BOLT11 デコード + `SHA-256`）。ただし**共有・永続・atomic な replay store が必須**（EVM facilitator より stateful） |
+| 受信側の制約 | **受信ノードの invoice 発行権限を排他的に持つ必要がある**。マルチテナント custodial ノードは**非対応**（他テナントが自分で払った preimage を流用できるため） |
+
+### 5.5 最大の実務的障害: **参照実装がまだ無い**
+
+サブエージェントの調査によると、x402 リポジトリに含まれる lnbtc 関連ファイルは
+**この仕様 markdown 1 本だけ**で、TypeScript / Python / Go の実装コードは**マージされていない**。
+実装 PR は #1873（Python、open）、#2262（TypeScript、**旧 `bip122` 設計**が対象で古い）が未マージ。
+
+**この点は私自身では未検証**（GitHub の code search API が認証を要求したため）。
+ただし仕様ディレクトリの一覧は取得でき、`scheme_exact_lnbtc.md` の存在は確認した。
+
+したがって Block の発表にある「try the Lightning implementation」は、
+**現時点で公式リポジトリからは満たせない**可能性が高い。採用するなら
+**我々が最初の実装者になる**。これは §6 の見積りを大きく変える。
+
+## 6. 見積りと推奨
+
+### 6.1 作業規模
 
 | 作業 | 規模 | 備考 |
 |---|---|---|
-| `src/adapters/inbound/lightning.ts` | 中 | 既存 3 本の adapter と同形 |
-| 資金移動タイミングの脱ハードコード（§4.1） | **小** | Lightning 抜きでも直す価値がある |
-| `source.payTo` の書式制約緩和（`config.ts:253`） | 小 | rail ごとに条件を分ける |
-| 送信側の照合委譲（§4.2） | **大** | **core の interface 変更**。独立レビュー必須 |
-| 合成 fixture + wire テスト | 中 | ノード不要の形にする |
+| `src/adapters/inbound/lightning.ts` | 中 | 既存 3 本と同形。BOLT11 デコード + `SHA-256` 検証 |
+| 資金移動タイミングの脱ハードコード（§4.1） | **小** | **Lightning 抜きでも直す価値がある**（今の実装は誤った承認を招く） |
+| `source.payTo` の書式制約緩和（`config.ts:253`） | 小 | Lightning の `payTo` は secp256k1 pubkey で `0x` ではない |
+| 送信側の照合を adapter に委譲（§4.2） | **大** | **core の interface 変更**。独立レビュー必須 |
+| **restart-durable な replay store** | 中 | 仕様が**必須**とする（in-memory は非準拠）。既存 journal と統合できる可能性 |
+| BOLT11 のパーサ/検証 | 中〜大 | 自前実装は避けたい。ライブラリ選定が必要 |
+| 合成 fixture + wire テスト | 中 | ノード不要で組める（facilitator 検証がローカルなので有利） |
 
-**受信のみ**なら既存パターンの延長で収まる。**送信を含める**なら core の設計変更になる。
+### 6.2 なぜ「今は実装しない」を推すか
+
+1. **参照実装が無い**（§5.5）。最初の実装者になると、
+   仕様解釈の誤りを自分で発見しなければならない。U-01r で経験した通り、
+   **実物と合成 fixture の差は独立レビューでしか見つからない**ことがある
+2. **受信側の排他的 invoice 発行権限**（§5.4）が運用要件として重い。
+   Lightning ノードの運用か、テナント分離を保証する custodial 事業者の選定が必要
+3. **仕様がまだ動く可能性**。preimage を返せない payer 向けの
+   `invoice` asset transfer method（PR #3571/#3572）が議論中で、
+   これが入ると payer 側の前提が変わる
+4. **Router の現在の価値は cross-rail であり、レール数ではない**。
+   SubEtha ⇄ x402 ⇄ MPP が実決済で動いた直後に 4 本目を足すより、
+   既存の穴（同一レール行列の未検証、§P5）を埋める方が実証価値が高い
+
+### 6.3 ただし今やる価値がある 1 件
+
+**§4.1 の脱ハードコード**は Lightning とは独立に直すべきである。
+`fundsMoveBeforePurchase` が `"tempo/charge"` だけを見ている現状は、
+**レールを足すたびに人間への警告が静かに壊れる**構造になっている。
+Lightning はその脆さを可視化した。
 
 ## 7. 本メモで決めていないこと
 
