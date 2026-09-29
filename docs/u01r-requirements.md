@@ -483,3 +483,60 @@ owner 承認: 2026-09-29。「テストネットなので無制限に実行し�
 - `unknown` 終端に到達したとき（§10.5 の通り**再送しない**）
 - keystore の復号に失敗したとき（**推測による復号を試みない**）
 - `latestProvedIndex` が停滞し finalize が完了しないとき
+
+## 14. S1 調査結果: 実 Sepolia スタックは**残っていない**
+
+owner の示唆（「Docker に残っていないか」「過去の E2E を参考に」）に沿って調査した結果を記録する。
+**資金は動かしていない。**
+
+### 14.1 Docker には無い
+
+`docker ps -a` の全コンテナは Tempo / chat 系のみで、**zERC20 の pg は 1 つも無い**
+（`zerc20-pg-indexer` / `zerc20-pg-decider` は未作成）。volume も同様。
+唯一稼働中の `tempo-mpp-e2e` は MPP レール用で本件と無関係。
+
+### 14.2 プロセスは生きているが、**実体が死んでいる**
+
+`:8080` に `zerc20-tree-indexer`（pid 52831）、`:8081` に `zerc20-decider-prover`（pid 59432）が
+**2026-08-30 13:45 から起動したまま**残っている。しかし:
+
+| 観測 | 結果 |
+|---|---|
+| 作業ディレクトリ | `/private/tmp/zerc20-stack` → **既に削除されている**（`tokens.json` も消失） |
+| pg (:5432) | **CLOSED**（接続不可） |
+| indexer の TCP | LISTEN と CLOSE_WAIT のみ。**pg への接続を 1 本も持たない** |
+| `/status` | **空応答**（HTTP 000） |
+
+つまり**設定ファイルと DB を失ったまま listen だけ続けているゾンビ**である。
+`/events` は生きているが `chain_id` + `token_address` + `to` を要求する参照 API で、
+設定を読み出せない（どのチェーン向けだったかは応答から判定できない）。
+
+**ポートも食い違う**: 稼働中の indexer は `:8080`。`.env.testnet.local` は **`:8082`** を指す。
+過去 E2E がこのプロセス群を使っていた可能性は低い。
+
+### 14.3 過去 E2E から判明した要件（`apps/demo-official/src/live-testnet-e2e.ts`）
+
+読んだ結果、**ローカル indexer / decider は必須**である（外部サービス直叩きではない）。
+さらに起動前検査があり、`verifyIndexerDeployment()`（同 :36-68）は
+indexer の `/status` に **Sepolia zETH のエントリ（`chain_id=11155111` かつ当該 token）が
+含まれること**を要求し、無ければ
+`indexer is not configured for Sepolia zETH` で停止する。
+
+**したがって §13 で挙げた `tokens.json` の問題は本物である**:
+`$ZERC20_WORK/config/tokens.json` は `label:"localnet"` / `chain_id:31337` /
+`rpc_urls:["http://127.0.0.1:8545"]` のみを持ち、Sepolia のエントリを持たない。
+Sepolia の定義は `config/deployed/testnet/tokens.zeth.testnet.json` に**別ファイルとして存在**する。
+
+### 14.4 未解決（owner 判断が必要）
+
+| # | 内容 |
+|---|---|
+| 1 | `tokens.json` を Sepolia 版に切り替える正規手順（差し替え / symlink / 環境変数のどれか） |
+| 2 | `ROOT_SUBMITTER_PRIVATE_KEY` が **anvil 公開鍵 `0xac0974…`**。Sepolia でルート提出するなら資金のある別鍵が必要 |
+| 3 | 残存ゾンビプロセス（52831 / 59432）を停止して良いか。**他セッションの所有物である可能性があるため停止しない** |
+
+### 14.5 有効な前提（再掲）
+
+`Verifier.latestProvedIndex()` = **433** は Sepolia 上の実測値であり、
+**ルートは過去に提出されている**（＝ 14.4 #2 は過去に解決されていた）。
+ただしその提出を行った主体は本ホストのゾンビプロセスではない可能性が高い（14.2）。
