@@ -540,3 +540,55 @@ Sepolia の定義は `config/deployed/testnet/tokens.zeth.testnet.json` に**別
 `Verifier.latestProvedIndex()` = **433** は Sepolia 上の実測値であり、
 **ルートは過去に提出されている**（＝ 14.4 #2 は過去に解決されていた）。
 ただしその提出を行った主体は本ホストのゾンビプロセスではない可能性が高い（14.2）。
+
+## 15. 使い捨てアカウントの用意（owner 承認: 毎回の支払い許可は不要）
+
+owner 承認 2026-09-29: 「テストネットのアセットなので毎回実行のために許可を取らなくて良い」。
+以降、**テストネット上の支払いは個別承認を取らずに実行する**（§13.4 の S3 も都度報告を待たない）。
+実チェーン・実資産・本番鍵への拡張は**この承認に含まれない**。
+
+### 15.1 作成したアカウント
+
+| 項目 | 値 |
+|---|---|
+| アドレス | **`0xEd5F079F5332879B9F1e35Ba36fE487360db06C4`** |
+| 用途 | Sepolia（`11155111`）での SubEtha 受信レグ検証のみ |
+| 鍵の保管 | `.env.sepolia-disposable.local`（mode 600、`.gitignore:5` の `.env.*` で無視。`git check-ignore` で確認済み） |
+| 既存 keystore | **一切触っていない**（`~/.foundry/keystores/testnet` は未読・未復号） |
+
+新規生成なので、**owner の既存ウォレットとは無関係**であり、失っても影響がない。
+
+### 15.2 残高（実測）と、資金供給の問題
+
+| 資産 | 残高 |
+|---|---|
+| Sepolia ETH（ガス） | **0** |
+| zETH | **0** |
+
+**私は資金を供給できない。** `docs/TUTORIAL.md:57-58` が明言している:
+
+> The payer account must be pre-funded with zERC20
+> (**there is no faucet / `mintForDemo`**)
+
+つまり zETH は faucet で入手できない。ローカル deploy では初期 mint で配るが、
+**Sepolia にはその経路が無い**。
+
+一方 `LiquidityManager`（`0x5a09Cc328fA6bB32f3d6fC54906106ddD49a2D7c`）は
+**Sepolia 上にコードが存在する**（`cast code` で確認）。`docs/TUTORIAL.md:228` は
+「ローカルには未デプロイなので pre-minted を使う」と書いており、**Sepolia では `wrap` 経路が
+使える可能性がある**。ただし wrap にも **Sepolia ETH（ガス）が必要**で、
+使い捨てアカウントはそれも 0 である。
+
+### 15.3 したがって必要なもの（どちらか）
+
+1. **使い捨てアドレスへの送金**: Sepolia ETH（ガス分、0.01 程度）と zETH（支払い額分）。
+   zETH は owner の既存 payer から送るか、`LiquidityManager.wrap` で作る
+2. **既存 payer をそのまま使う**: `PAYER_KEYSTORE_ID` の鍵で実行する。
+   その場合 keystore のパスワードが必要で、**使い捨てアカウントは不要になる**
+
+### 15.4 なお §14 のスタック問題は未解決のまま
+
+使い捨てアカウントは**支払い承認の摩擦**を解消するが、§14 の 3 点
+（`tokens.json` が localnet 向け / ルート提出鍵が anvil 公開鍵 / ゾンビプロセス）は
+そのまま残る。資金が入っても、indexer が Sepolia zETH を serve しなければ
+過去 E2E の起動前検査が `indexer is not configured for Sepolia zETH` で止まる。
