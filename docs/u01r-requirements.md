@@ -648,3 +648,50 @@ owner が使い捨てアカウントへ **0.005 Sepolia ETH** を送金（実測
 
 ただし §14.5 の通り `Verifier.latestProvedIndex()` = 433 は**実測値**であり、
 ルート提出は誰かが実施できている。1 が最優先。
+
+## 17. S1 進捗: pg まで完了、プロセス起動で権限により停止
+
+### 17.1 完了したこと
+
+| # | 作業 | 結果 |
+|---|---|---|
+| 1 | `config/tokens.json` のバックアップ | `config/tokens.json.bak-20260929-u01r`（原本は untracked なので repo の tracked 状態は汚していない） |
+| 2 | Sepolia 用 tokens 設定の作成 | `config/tokens.sepolia-u01r.json`（**原本は上書きしていない**） |
+| 3 | pg × 2 起動 | `zerc20-pg-indexer` (:5432) / `zerc20-pg-decider` (:5433) 稼働中 |
+| 4 | indexer マイグレーション | **5 本すべて OK** |
+
+**tokens 設定の作り方**: `config/deployed/testnet/tokens.zeth.testnet.json` から
+**Sepolia（11155111）のエントリだけ**を抜き、`rpc_urls` を Alchemy 1 本に絞った。
+arb/op-sepolia を落としたのは、`expand_env_vars`（`client-common/src/tokens.rs:238`）が
+**未定義の環境変数でエラーになる**仕様で、`INFURA_KEY` を持っていないため。
+`ALCHEMY_KEY` は `.env.testnet.local` の `RPC_URL` から供給できる（Alchemy endpoint、キー 33 文字）。
+
+### 17.2 停止した理由（権限）
+
+残存プロセス（`zerc20-tree-indexer` pid 52831 / `zerc20-decider-prover` pid 59432）の
+**停止が環境の安全機構により拒否された**（`Interfere With Workloads`）。
+続けて `config/decider.env` の読み取りも同じ理由で拒否されたため、**この方向の作業を中止した**。
+迂回はしない。
+
+停止が必要だった根拠（拒否前に実測済み）:
+- 両プロセスの cwd は `/private/tmp/zerc20-stack` で、**このディレクトリは削除されている**
+  （`tokens.json` も失われている）
+- 新しく起動した pg (:5432/:5433) への接続を**両者とも 0 本**しか持たない
+- 設定ファイルを失っているため、**再起動しない限り新しい設定を読めない**
+- `:8080` を占有しているため、正しく設定した indexer を同じポートで起動できない
+
+つまり「古い設定で動いていたゾンビを止めて、Sepolia 設定で起動し直す」必要があった。
+
+### 17.3 owner に依頼したいこと（どちらか）
+
+1. **プロセス停止の許可**、または owner 自身による `kill 52831 59432`
+2. **別ポートでの起動を許可**（ゾンビはそのまま放置し、indexer を `:8082`＝
+   `.env.testnet.local` が既に指しているポートで起動する）。
+   この場合 decider のポートが `:8081` で衝突するため、decider 側も別ポートが必要
+
+`.env.testnet.local` が indexer に **`:8082`** を指定していることから、
+**2 が本来の想定構成**である可能性が高い（過去 E2E も `:8082` を前提にしている）。
+
+### 17.4 資金は準備済み（§16）
+
+zETH `1e15` / Sepolia ETH `0.0039` を使い捨てアカウントが保持。**資金面の待ちは無い。**
