@@ -122,19 +122,21 @@ FR-a6 の前提を **Router リポジトリ内**で確認した時点の結果:
 **訂正（owner の指摘により実 facilitator 実装を確認）**: 上記は Router リポジトリ内の話であり、
 「照会 API が存在しない」という結論は**誤りだった**。実 facilitator の実装を読んだ結果を §9 に記す。
 
-### 独立レビュー（未実施 — 実行環境の制約）
+### 独立レビュー（**この節は §10 / §12 により解消済み**）
 
-CLAUDE.md は各フェーズ後に Codex CLI / GPT-5.6 による独立レビューを求めているが、
-**本書はそのレビューを受けていない**。理由は以下（モデルの黙示的な代替はしない方針に従い記録する）:
+> **追記 2026-09-29**: 以下は §9 執筆時点の状況である。その後 Codex が利用可能になり、
+> **要件レビュー（§10）と実装レビュー（§12）の 2 本を実施した**。本書は独立レビュー済みである。
+> 経緯を残すため当時の記録は削除しない。
 
-- `codex-cli 0.157.1` + 当該 ChatGPT アカウントの組み合わせで、以下は全て拒否された:
-  `gpt-5.2-codex` / `gpt-5.1-codex` / `gpt-5.6` / `gpt-5.6-codex` / `gpt-5-codex` / `gpt-5.3-codex`
-  → いずれも `"not supported when using Codex with a ChatGPT account"`
-- `~/.codex/config.toml` の既定 `gpt-6-astra` は
-  `"requires a newer version of Codex"` で拒否（CLI の更新が必要）
+当時の制約: `codex-cli 0.157.1` + 当該 ChatGPT アカウントで以下が全て拒否された
+（`gpt-5.2-codex` / `gpt-5.1-codex` / `gpt-5.6` / `gpt-5.6-codex` / `gpt-5-codex` /
+`gpt-5.3-codex` → `"not supported when using Codex with a ChatGPT account"`）。
+`~/.codex/config.toml` の既定 `gpt-6-astra` も一時的に
+`"requires a newer version of Codex"` を返していた。
 
-**本書は単独著者の成果物であり、独立レビュー済みの artifact ではない。**
-実装に進む前にレビューを通すには、Codex CLI の更新か、利用可能なモデルの確定が必要。
+**レビュー基準モデルの確定**: GPT-5.6 は当該アカウントで利用できないため、
+owner 判断で **`gpt-6-astra`** を本プロジェクトのレビュー基準モデルとする（2026-09-29 承認）。
+**MCP 経由では拒否されるため、CLI（`codex exec --sandbox read-only`）で実行する。**
 
 ## 9. 実 facilitator 実装からの確定（owner 指摘に基づく調査）
 
@@ -243,9 +245,10 @@ AC-a2 / AC-a3 / AC-a4 は**そのまま有効**（合成 fixture で無課金検
 ## 10. 独立レビュー結果: **REJECT**（§9 の中核主張は誤り）
 
 レビュー実施: 2026-09-29、Codex CLI 0.157.1、モデル **`gpt-6-astra`**（自己申告 "GPT-6"）、
-`--sandbox read-only`。**CLAUDE.md が指定する GPT-5.6 は当該アカウントで引き続き拒否される**
-（`gpt-5.6` / `gpt-5.6-codex` ともに `"not supported when using Codex with a ChatGPT account"`）。
-方針に従い、代替した実モデルを記録する。
+`--sandbox read-only`。GPT-5.6 は当該 ChatGPT アカウントで利用できないため
+（`"not supported when using Codex with a ChatGPT account"`）、
+**owner 判断により `gpt-6-astra` を本プロジェクトのレビュー基準モデルとする**（2026-09-29 承認）。
+なお MCP 経由ではこのモデルが拒否されるため、**CLI（`codex exec`）で実行する**。
 
 ### 10.1 却下された主張と、その検証
 
