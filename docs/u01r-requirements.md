@@ -1195,3 +1195,63 @@ CLAUDE.md の最初のマイルストーン「**SubEtha inbound → Router → x
 合成 fixture ではなく**実 facilitator・実チェーン・実プロバイダ**で成立した。
 コア（`src/core/*`）は一切変更していない——受信 adapter が SubEtha、送信 adapter が x402 という
 **ports and adapters の組み合わせだけ**で両方向が動くことの実証でもある。
+
+## 27. 稼働させたままにしたサービス（owner 指示: テスト継続のため）
+
+owner 指示により停止していない（2026-09-30）。**次に触る人向けの接続情報**。
+
+### 27.1 私が起動したもの
+
+| サービス | 待ち受け | 備考 |
+|---|---|---|
+| `zerc20-decider-prover` | `127.0.0.1:8091` | 起動に ~110 秒（3.9GB のパラメータロード） |
+| `zerc20-tree-indexer` | `127.0.0.1:8082` | `--tokens config/tokens.sepolia-u01r.json` |
+| SubEtha facilitator | `127.0.0.1:4042` | 設定は scratchpad の `fac/fac.toml`（mode 600） |
+| Router | `127.0.0.1:8510` | `sourceRail:"subetha"` → `rail:"x402"` |
+| `zerc20-pg-indexer` | `127.0.0.1:5432` | Docker |
+| `zerc20-pg-decider` | `127.0.0.1:5433` | Docker |
+
+**触っていないもの**（他セッション・他作業の所有物）:
+`:8080`/`:8081` の残存プロセス、`:4032` の facilitator（2026-08-29 起動）、`tempo-mpp-e2e`。
+
+### 27.2 Router を叩くには
+
+```sh
+# 認証は 2 ヘッダとも必須（片方だけは unauthenticated）
+H='-H "x-router-principal: demo" -H "authorization: Bearer u01r-secret-token"'
+
+# 1) route 一覧
+curl -s -H 'x-router-principal: demo' -H 'authorization: Bearer u01r-secret-token' \
+  http://127.0.0.1:8510/v1/routes
+
+# 2) 見積り（requestId は毎回新しく）
+curl -s -X POST http://127.0.0.1:8510/v1/quotes \
+  -H 'x-router-principal: demo' -H 'authorization: Bearer u01r-secret-token' \
+  -H 'content-type: application/json' \
+  -d '{"routeId":"u01r-live","requestId":"<fresh>"}'
+
+# 3) 購入は GET /v1/routes/{id}/resource に x-payment を付ける（POST /v1/purchases は無い）
+```
+
+`tools/u01r-s3-both.ts` が 1)〜3) を通す。環境変数は
+`ROUTER_URL` / `ROUTER_TOKEN` / `REQUEST_ID` / `RPC_URL` / `SEPOLIA_DISPOSABLE_PK`。
+
+### 27.3 残高（テスト継続の目安）
+
+| 資産 | 残高 | 1 回あたり |
+|---|---|---|
+| Sepolia zETH | 999999999997530 | 1234（あと ~8 億回分） |
+| Base Sepolia USDC | 19990000 | 10000（**あと 1999 回分**） |
+| Sepolia ETH（burn のガス） | ~0.0039 | 少量 |
+
+送信レグの上限は**予算設定**でも縛っている: `maxPurchases: 3`、
+Base Sepolia USDC バケットの `maxTotal: 50000`（= 5 回分）。
+それ以上テストするなら scratchpad の `router/router.config.json` を広げて Router を再起動する。
+
+### 27.4 ディスクに関する注意（§18 の再発防止）
+
+`RUST_LOG` は**必ずクレート単位で絞る**（`zerc20_decider_prover=info,warn`）。
+`RUST_LOG=info` は arkworks の回路ログを全開にし、**26GB/数分**でホストを枯渇させ、
+Colima VM のファイルシステムまで壊す。ログは `head -c` で上限を付けて受ける。
+
+現状: 私のログ合計 **24K**、Colima VM は 38G 中 17G 使用（22G 空き）。
