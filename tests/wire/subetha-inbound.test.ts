@@ -170,6 +170,68 @@ describe("subetha inbound over real local HTTP", () => {
     });
   });
 
+  /**
+   * 実 facilitator は burn 未確定を HTTP 200 + `success:false` + `errorReason:"pending_burn"` で
+   * 返し、**`extra.phase` を付けない**（`apps/facilitator/src/server.ts:121`）。
+   * これを `rejected` に丸めると、未確定の支払いが `awaiting_payment` として確定してしまう。
+   */
+  it("settle の success:false + errorReason:pending_burn は unknown（rejected にしない）", async () => {
+    const fixture = await startFacilitator(["--settle", "pending-burn"]);
+    const inbound = inboundOf(fixture);
+    const offer = await issueOffer(fixture);
+
+    expect(await inbound.settle(offer, credentialFor(offer))).toEqual({
+      outcome: "unknown",
+      reason: "source_settle_unknown",
+    });
+    // 自動再 settle をしない（未確定を確定させようとして叩き直さない）。
+    expect((await callCounts(fixture)).settleCalls).toBe(1);
+  });
+
+  /** rate limit は「支払いが失敗した」ではない。受領済みの settle でも返り得る。 */
+  it("settle の 429 は unknown（rejected にしない）", async () => {
+    const fixture = await startFacilitator(["--settle", "rate-limited"]);
+    const inbound = inboundOf(fixture);
+    const offer = await issueOffer(fixture);
+
+    expect(await inbound.settle(offer, credentialFor(offer))).toEqual({
+      outcome: "unknown",
+      reason: "source_settle_unknown",
+    });
+    expect((await callCounts(fixture)).settleCalls).toBe(1);
+  });
+
+  /**
+   * `state=accepted` は**支払いが成立している**ことを意味する
+   * （`packages/zerc20-backend/src/index.ts:1311-1313`、成功時に `1838` で `accepted` になる）。
+   * `rejected` に落とすと**課金済みの購入が `awaiting_payment` として再提示される**。
+   */
+  it("受領済み challenge（state=accepted）への再 settle は unknown（rejected にしない）", async () => {
+    const fixture = await startFacilitator(["--settle", "accepted-replay"]);
+    const inbound = inboundOf(fixture);
+    const offer = await issueOffer(fixture);
+
+    expect(await inbound.settle(offer, credentialFor(offer))).toEqual({
+      outcome: "unknown",
+      reason: "source_settle_unknown",
+    });
+  });
+
+  /**
+   * **対照**: 200 + `success:false` でも、理由が確定的なら `rejected` のままでなければならない。
+   * これが無いと「200 の `success:false` を一律 `unknown` にする」実装が通ってしまう。
+   */
+  it("settle の 200 + success:false + 確定的な理由は rejected のまま", async () => {
+    const fixture = await startFacilitator(["--settle", "rejected-200"]);
+    const inbound = inboundOf(fixture);
+    const offer = await issueOffer(fixture);
+
+    expect(await inbound.settle(offer, credentialFor(offer))).toEqual({
+      outcome: "rejected",
+      reason: "source_rejected",
+    });
+  });
+
   it("settle 応答の network が発行 offer と違えば settled と扱わない", async () => {
     const fixture = await startFacilitator(["--settle-network", "eip155:1"]);
     const inbound = inboundOf(fixture);
