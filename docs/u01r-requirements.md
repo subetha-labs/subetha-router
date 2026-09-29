@@ -1077,3 +1077,55 @@ URL は `http://127.0.0.1:4042`、資産・チェーンは上記の実測値。
 | U-01r-a（settle 再送の安全条件） | **解決済**（§10.5: 再送しない。`unknown` 終端を維持） |
 | U-01r-b（実 URL・実資産/チェーン） | **解決済**（§23、§24 で実測） |
 | U-01r-c（実決済） | **次**（S3） |
+
+## 25. **U-01r-c 達成: 実 Sepolia zETH 決済が Router の受信レグを通った**
+
+`tools/u01r-s3-inbound.ts`（新規）で、**Router 本体の `createSubethaInbound`** を通して
+実 Sepolia の zETH を実際に支払った。owner 承認済み（テストネットは個別承認不要、§15）。
+
+### 25.1 実行結果（すべて実測）
+
+| 段 | 値 |
+|---|---|
+| payer | `0xEd5F079F5332879B9F1e35Ba36fE487360db06C4`（使い捨て） |
+| offer の `payTo` | `0x3347ff75fdd0bb3127fcdf14255aa10dbd099073`（一回限りの burn アドレス） |
+| `challengeNonce` | `0x3980a4032d4b93bd12f629874d9f61a21bb420782f2fcb7abe1d25398b9bb8b3` |
+| **burn tx** | **`0x6bb14f57d56526769327af4c767a06f74416e2180ec63a6a3291b9666ba3b22b`** |
+| burn 結果 | **success**、block **11810205** |
+| preflight | ok |
+| verify | `isValid=true` |
+| **settle** | **`{"outcome":"settled","txRef":"0x6bb14f57…"}`** |
+| zETH 残高 | 1000000000000000 → 999999999998766（**差分ちょうど 1234**） |
+
+### 25.2 二相プロトコルが設計どおり動いた
+
+settle 直後の facilitator:
+
+```
+/healthz       → {"status":"ok","pending":1,"finalized":0,"failed":0}
+/admin/pending → {"pending":1,"finalized":0,"failed":0,...}
+journal        → {"type":"pending","challengeNonce":"0x3980a403…",
+                  "amount":"1234","burnTxHash":"0x6bb14f57…",
+                  "burnAddress":"0x3347ff75…"}
+```
+
+**`accepted`（burn 確定＝リソース提供可）と `finalized`（proof 経由の mint）が分離**している
+（`docs/PROTOCOL.md` の two-phase）。settle の時点で `pending:1` なのは正常であり、
+mint は finalize ループ（15 秒間隔）が担う。
+
+### 25.3 支払い経路は self-transfer だった
+
+offer に `helper` が無いため（`permit_burner` 未設定）、**payer 自身が burn を broadcast** した。
+`CollectInput = {challengeNonce, burnTxHash}` の素直な形であり、
+§12 のレビューが「permit 経路とは安全性が異なる」と指摘した分岐の**安全側**である。
+
+### 25.4 U-01r 完了
+
+| 項目 | 状態 |
+|---|---|
+| U-01r-a（settle 再送の安全条件） | **解決**（§10.5: 再送しない。`unknown` 終端を維持） |
+| U-01r-b（実 URL・実資産/チェーン） | **解決**（§23-24: 実測） |
+| U-01r-c（実決済） | **解決**（本節: burn tx `0x6bb14f57…`、`settled`） |
+
+**設計 §12 の U-01r は閉じた。** SubEtha 受信レグは合成 fixture ではなく
+**実 facilitator・実チェーン・実資産**で動作することを確認した。
