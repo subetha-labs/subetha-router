@@ -882,3 +882,72 @@ Error: database error: could not open file "global/pg_filenode.map": Input/outpu
 
 Docker が復旧すれば、残るのは pg 再作成 → マイグレーション再適用 → decider/indexer 起動 →
 facilitator 起動 → Router 接続（S2）→ 実決済（S3）である。
+
+## 22. Docker 復旧 → スタック起動成功（§14 の #1 解消）
+
+### 22.1 破損の真因（§20 の診断を訂正）
+
+Docker は **Docker Desktop ではなく Colima**（`docker context ls` で `colima *`）。
+
+| 項目 | 値 |
+|---|---|
+| Colima VM のディスク | 40GiB（仮想） |
+| sparse image の実体 | 16G（`~/.colima/_lima/colima/diffdisk`） |
+| 破損時のホスト空き | **118Mi** |
+
+26GB のログは**ホストの `/tmp`** に書かれた（VM 内ではない）。しかし**ホストが枯渇したため
+VM が sparse image を拡張できず**、VM 内部の書き込みが失敗してファイルシステムが壊れた。
+VM から見ると「容量はあるはずなのに書けない」状態になり、`/bin/bash` すら
+`Input/output error` を返した。
+
+**`docker rm` が失敗したのは owner の操作ミスではない**: コンテナ削除は
+containerd のメタデータ DB への**書き込み**であり、壊れているのはその DB だった。
+順序として VM 再起動が先に必要だった（`colima stop --force` → `colima start`）。
+
+### 22.2 復旧結果（実測）
+
+| 対象 | 状態 |
+|---|---|
+| Docker ランタイム | **正常**（`docker run` 成功） |
+| VM 内ディスク | 38G 中 16G 使用、**22G 空き** |
+| **`tempo-mpp-e2e`（owner の別作業）** | **`healthy` に復帰**——恒久的な被害は無かった |
+| pg × 2 | 再作成済み、`pg_isready` OK |
+| indexer マイグレーション | **5 本すべて再適用 OK** |
+
+### 22.3 スタック起動成功
+
+| サービス | ポート | 状態 |
+|---|---|---|
+| `zerc20-decider-prover` | **:8091** | LISTEN（pid 10443）。パラメータロード ~110s |
+| `zerc20-tree-indexer` | **:8082** | LISTEN（pid 16708） |
+
+ゾンビ 2 本（:8080 / :8081）は**触っていない**（B 方針どおり別ポートを使用）。
+ログは `head -c` で上限を付け、両方 **0 バイト**（暴走なし）。ホスト空き 29Gi。
+
+### 22.4 **`/status` が Sepolia zETH を申告した**（これが目標だった）
+
+```json
+[{"label":"sepolia","chain_id":11155111,
+  "token_address":"0xADAb5CaB352fb1eBF24CD951de224f9e952C82Ed",
+  "verifier_address":"0xD19b79cE0C2821158aDBDEf9cC8c8D858c9ef0Cc",
+  "onchain_reserved_index":434,"onchain_proved_index":434,
+  "events_synced_index":433,"tree_synced_index":434,"ivc_generated_index":null}]
+```
+
+過去 E2E の起動前検査（`verifyIndexerDeployment()`、`live-testnet-e2e.ts:36-68`）は
+**`chain_id === 11155111` かつ当該 token** を要求する。**この条件を満たしている。**
+`indexer is not configured for Sepolia zETH` はもう出ない。
+
+さらに `onchain_proved_index: 434` は**実チェーン上でルートが証明済み**であることを示す
+（§13.2 の `latestProvedIndex=433` から 1 進んでいる）。
+つまり**ルート提出は他のどこかで継続しており、§14 #2 は実務上の障害ではない**。
+
+### 22.5 §14 の 3 点の最終状態
+
+| # | 項目 | 状態 |
+|---|---|---|
+| 1 | `tokens.json` が localnet 向け | **解消**（`tokens.sepolia-u01r.json` で Sepolia を serve） |
+| 2 | root 提出鍵が anvil 公開鍵 | **障害にならない**（提出は外部で進行中。`proved_index` が前進） |
+| 3 | ゾンビプロセス | **不要**（別ポートで回避、停止せず） |
+
+次は facilitator 起動 → Router 接続（S2、無課金）→ 実決済（S3）。
