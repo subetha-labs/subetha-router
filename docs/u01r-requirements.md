@@ -592,3 +592,59 @@ owner 承認 2026-09-29: 「テストネットのアセットなので毎回実�
 （`tokens.json` が localnet 向け / ルート提出鍵が anvil 公開鍵 / ゾンビプロセス）は
 そのまま残る。資金が入っても、indexer が Sepolia zETH を serve しなければ
 過去 E2E の起動前検査が `indexer is not configured for Sepolia zETH` で止まる。
+
+## 16. 資金供給は解決した — `wrap` で zETH を入手できる
+
+> **§15.2 の訂正**: 「zETH は faucet が無いので私は供給できない」と書いたが、**不正確だった**。
+> faucet が無いのは事実だが、**Sepolia には `LiquidityManager` があり `wrap` で入手できる**。
+> ローカルスタックに LiquidityManager が無いという記述（`docs/TUTORIAL.md:228`）を
+> Sepolia にも当てはめてしまったのが誤りだった。
+
+### 16.1 判明した経路
+
+`LiquidityManager` `0x5a09Cc328fA6bB32f3d6fC54906106ddD49a2D7c`（Sepolia）の
+`underlyingToken()` は **`0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`** を返す。
+これは SDK の `NATIVE_TOKEN` センチネル（`sdk/src/operations/liquidityManager.ts:72-73`）であり、
+**underlying が native ETH** であることを意味する。
+
+SDK の実装（同 :73-96）では native の場合:
+- ERC-20 approve を**行わない**（`if (!isNative)` で分岐）
+- `wrap(amount, receiver)` を **`value: amount` 付き**で呼ぶ
+
+つまり **Sepolia ETH さえあれば zETH を作れる**。
+
+### 16.2 実行結果（実課金・成功）
+
+owner が使い捨てアカウントへ **0.005 Sepolia ETH** を送金（実測確認済み）。
+そのうち 0.001 ETH を wrap した。
+
+| 項目 | 値 |
+|---|---|
+| tx | **`0xc4d18909159b746f1ef49603ae3fe8f7fb47e4e5820cdecc1dabf00ef5622ba5`** |
+| status | **1 (success)** |
+| block | 11806842 |
+| gasUsed | 95,758 |
+| 受領 | zETH **1e15**（`0x0` からの Transfer イベントを確認） |
+
+実行前に `cast call`（eth_call）で**シミュレーションして成功を確認してから** `cast send` した。
+
+### 16.3 現在の残高（実測）
+
+| 資産 | 残高 |
+|---|---|
+| zETH | **1,000,000,000,000,000**（1e15） |
+| Sepolia ETH | **0.003903142302296428**（ガス用） |
+
+`config/testnet.env.example` の `PRICE=1234` を基準にすると、1e15 は**十分すぎる**額である。
+追加の wrap が必要になれば残 ETH から作れる。
+
+### 16.4 残る壁は §14 のスタック問題のみ
+
+資金（§15.3）は解決した。**未解決は §14 の 3 点だけ**:
+
+1. `$ZERC20_WORK/config/tokens.json` が **localnet（31337）向け**で Sepolia エントリを持たない
+2. `indexer.env` の `ROOT_SUBMITTER_PRIVATE_KEY` が **anvil 公開鍵**
+3. ゾンビプロセス 2 本（52831 / 59432）の停止判断
+
+ただし §14.5 の通り `Verifier.latestProvedIndex()` = 433 は**実測値**であり、
+ルート提出は誰かが実施できている。1 が最優先。
