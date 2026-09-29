@@ -4,7 +4,8 @@
  * 返す `transaction` は `synthetic-` 接頭辞付きの無課金ラベルで実決済の証拠にならない。
  *
  * usage: facilitator-server.ts --token 0x… --chain-id 11155111 --pay-to 0x…
- *        [--settle ok|pending|rejected|error] [--verify ok|invalid]
+ *        [--settle ok|pending|pending-burn|accepted-replay|rejected|rejected-200|rate-limited|error]
+ *        [--verify ok|invalid]
  *        [--challenge ok|helper-only|deadline-only|helper-bad-type|deadline-bad-type|fee-bad-type]
  *        [--settle-network <caip2>]
  */
@@ -128,6 +129,54 @@ const server = http.createServer((request, response) => {
       }
       if (settleMode === "rejected") {
         send(response, 400, { success: false, transaction: "", network });
+        return;
+      }
+      /**
+       * **実 facilitator の pending 応答**（`apps/facilitator/src/server.ts:121`）。
+       * HTTP 200 + `success:false` + `errorReason:"pending_burn"` で、
+       * adapter が `unknown` の目印にしている `extra.phase` を**持たない**。
+       * 課金の有無が未確定な応答であり、`rejected` に丸めてはならない。
+       */
+      if (settleMode === "pending-burn") {
+        send(response, 200, {
+          success: false,
+          errorReason: "pending_burn",
+          transaction: "",
+          network,
+        });
+        return;
+      }
+      /** 実 facilitator の rate limit（`apps/facilitator/src/http.ts:41-44`）。 */
+      if (settleMode === "rate-limited") {
+        send(response, 429, { error: "rate limited — retry shortly" });
+        return;
+      }
+      /**
+       * **受領済み challenge への再 settle**（`packages/zerc20-backend/src/index.ts:1311-1313`）。
+       * `rec.state === "accepted"` は**支払いが成立している**ことを意味するが、
+       * 応答は `success:false` で返る。ここを `rejected` にすると課金済みが未払いとして提示される。
+       */
+      if (settleMode === "accepted-replay") {
+        send(response, 200, {
+          success: false,
+          errorReason: "challenge not open (state=accepted)",
+          transaction: "",
+          network,
+        });
+        return;
+      }
+      /**
+       * 実 facilitator の**本物の拒否**（HTTP 200 + `success:false` + 確定的な理由）。
+       * `pending_burn` などの未確定応答と同じ 200 番台・同じ `success:false` で返るため、
+       * 「200 の `success:false` を一律 `unknown` にする」実装を**落とすための対照**。
+       */
+      if (settleMode === "rejected-200") {
+        send(response, 200, {
+          success: false,
+          errorReason: "burn tx reverted",
+          transaction: "",
+          network,
+        });
         return;
       }
       if (settleMode === "pending") {

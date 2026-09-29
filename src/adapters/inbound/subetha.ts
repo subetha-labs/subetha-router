@@ -61,6 +61,39 @@ const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 /**
+ * settle の `errorReason` のうち、**「課金されていない」ことを意味しない**もの。
+ * これらは `rejected`（＝ `awaiting_payment` として再提示）ではなく `unknown` に落とす。
+ *
+ * - `pending_burn`: burn 未確定。facilitator 側の定義が "retryable"（終端でない）
+ * - `state=accepted`: **支払いは成立している**。challenge が受領済みなので再 settle が弾かれた形
+ * - `state=accepting`: 別の collect が進行中で、結果が未確定
+ * - challenge の不在（`unknown challenge` / `already-used` / `burn address already used`）:
+ *   facilitator は受領済み challenge を猶予期間後に削除するため、
+ *   **記録が無いことは未払いの証拠にならない**（再照会は "unknown" を返すのが正しいと
+ *   facilitator 側のコメントも明言している）
+ *
+ * 判定は**部分一致**にする。`challenge not open (state=accepted)` のように
+ * 状態名が文中に埋め込まれて返るため。
+ */
+const UNDETERMINED_SETTLE_REASONS = [
+  "pending_burn",
+  "state=accepted",
+  "state=accepting",
+  "unknown challenge",
+  "already-used challenge",
+  "burn address already used",
+] as const;
+
+/** `errorReason` が未課金を意味しないなら true（型でなく実際の値として検査する）。 */
+function undetermined(reason: unknown): boolean {
+  if (typeof reason !== "string") {
+    return false;
+  }
+  const lowered = reason.toLowerCase();
+  return UNDETERMINED_SETTLE_REASONS.some((marker) => lowered.includes(marker));
+}
+
+/**
  * `helper` / `deadline` は**両方あるか両方ないか**で、かつ**型も満たす**（設計 §4.1）。
  * 片側欠落・型違反のどちらでも offer を発行しない（不整合な challenge を承認対象にしない）。
  */
@@ -218,6 +251,15 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
       if (status >= 500) {
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }
+      /**
+       * **429 は `rejected` ではない。** 実 facilitator は `/settle` の**手前**に limiter を置く
+       * （`apps/facilitator/src/http.ts:41-44`）。429 は「この呼び出しが決済処理に到達しなかった」
+       * ことしか意味せず、**先行する呼び出しや payer 自身の burn について何も否定しない**。
+       * `rejected` に丸めると、課金済みが `awaiting_payment` として再提示される。
+       */
+      if (status === 429) {
+        return { outcome: "unknown", reason: "source_settle_unknown" };
+      }
       if (status >= 400) {
         return { outcome: "rejected", reason: "source_rejected" };
       }
@@ -235,6 +277,14 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
       const transaction = json["transaction"];
       if (json["success"] === true && typeof transaction === "string" && transaction !== "") {
         return { outcome: "settled", txRef: transaction };
+      }
+      /**
+       * **`success:false` は一律 `rejected` ではない。** 未課金を意味しない応答を
+       * `rejected` に丸めると、**課金済みの購入が `awaiting_payment` として提示される**
+       * （`src/core/orchestrator.ts` の `rejected` 分岐）。それは二重支払いの誘導になる。
+       */
+      if (undetermined(json["errorReason"])) {
+        return { outcome: "unknown", reason: "source_settle_unknown" };
       }
       if (json["success"] === false) {
         return { outcome: "rejected", reason: "source_rejected" };
