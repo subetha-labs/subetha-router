@@ -1129,3 +1129,69 @@ offer に `helper` が無いため（`permit_burner` 未設定）、**payer 自�
 
 **設計 §12 の U-01r は閉じた。** SubEtha 受信レグは合成 fixture ではなく
 **実 facilitator・実チェーン・実資産**で動作することを確認した。
+
+## 26. **両レグ完走: SubEtha 受信 → x402 送信（実決済・実チェーン 2 本）**
+
+owner 指定の Provider A（`https://provider-x402.subethalabs.com`）を上流に、
+Router を **`sourceRail:"subetha"` → `rail:"x402"`** で構成して HTTP 越しに完走させた。
+owner が Base Sepolia USDC を faucet 済み（20 USDC 着金を実測）。
+
+### 26.1 Provider A の実オファー（`payment-required` ヘッダを base64 デコード）
+
+```json
+{"scheme":"exact","network":"eip155:84532","amount":"10000",
+ "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+ "payTo":"0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+ "maxTimeoutSeconds":60,"extra":{"name":"USDC","version":"2"}}
+```
+
+**402 の本文は `{}` で、オファーは `payment-required` ヘッダに入る**（body を見ても分からない）。
+
+### 26.2 購入口は `GET /v1/routes/{routeId}/resource`
+
+`POST /v1/purchases` は**存在しない**（404）。`/v1/purchases/{paymentId}` は**状態参照専用**。
+支払いは x402 流儀で、**資格情報を付けてリソースを再取得**する:
+
+| ヘッダ | 値 |
+|---|---|
+| `x-router-principal` + `authorization: Bearer …` | **2 本とも必須**（`src/http/auth.ts`。片方だけは `unauthenticated`） |
+| `x-router-quote-id` | quote の `quoteId` |
+| `x-router-request-id` | quote と**同一**の `requestId` |
+| `x-router-approval` | 承認した `quoteId` |
+| `x-payment` | base64 の `{x402Version,accepted,payload}` |
+
+### 26.3 実行結果（`tools/u01r-s3-both.ts`）
+
+| 段 | 値 |
+|---|---|
+| quote | 受信 1234 zETH / 送信 **10000 USDC**（Provider A の実価格を読んでいる） |
+| `quoteFingerprint` | `sha256:14e15c56a9d97cbf…`（承認後の offer 変化を検出するための指紋） |
+| **受信 burn tx**（Sepolia） | **`0x294e80c30810a7d914c9c16580002163d263e06a5ddda9c46f073a2775b8203f`** |
+| **送信 tx**（Base Sepolia） | **`0xb14fd836e1e5cf1bc5c6fcd57beb068916b2c37f1ca71eefa561c81c489b298c`** |
+| 送信 `attempt` / `outcome` | **1 / `paid`**（再試行なしで 1 回） |
+| **最終状態** | **`status: "delivered"`** |
+
+配信された実データ（Provider A → Router → 呼び出し側）:
+
+```json
+{"providerId":"market-data-a","dataSource":{"name":"hyperliquid"},
+ "payment":{"protocol":"x402","network":"eip155:84532"},
+ "fetchedAt":"2026-09-29T21:50:04.025Z",
+ "data":{"markPx":"2679.16","change24h":{"percent":"0.1667"}}}
+```
+
+### 26.4 残高で裏付け（実測）
+
+| 資産 | 変化 |
+|---|---|
+| Sepolia zETH | 1000000000000000 → **999999999997530**（差分 2468 = 1234 × 2 回。§25 と本節） |
+| Base Sepolia USDC | 20000000 → **19990000**（差分 **ちょうど 10000** = Provider A の価格） |
+
+**2 つの異なるチェーン・2 つの異なるプロトコルで、実際に資金が動いた。**
+
+### 26.5 これが示すこと
+
+CLAUDE.md の最初のマイルストーン「**SubEtha inbound → Router → x402 Provider A**」が、
+合成 fixture ではなく**実 facilitator・実チェーン・実プロバイダ**で成立した。
+コア（`src/core/*`）は一切変更していない——受信 adapter が SubEtha、送信 adapter が x402 という
+**ports and adapters の組み合わせだけ**で両方向が動くことの実証でもある。
