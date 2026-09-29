@@ -140,7 +140,7 @@ owner 判断で **`gpt-6-astra`** を本プロジェクトのレビュー基準�
 
 ## 9. 実 facilitator 実装からの確定（owner 指摘に基づく調査）
 
-出典: `~/.worktrees/subetha/live-testnet-e2e`（branch `subetha/live-testnet-e2e`）。
+出典: SubEtha 実装リポジトリのワークツリー（branch `subetha/live-testnet-e2e`）。パスは `.claude_workflow/local/` に記録。
 **読み取りのみ。コードは複製せず、当該ワークツリーは編集していない**（AGENTS.md の PoC 保護）。
 
 ### 9.1 実チェーン・実資産（U-01r-c の値が実在した）
@@ -502,7 +502,7 @@ owner の示唆（「Docker に残っていないか」「過去の E2E を参�
 
 | 観測 | 結果 |
 |---|---|
-| 作業ディレクトリ | `/private/tmp/zerc20-stack` → **既に削除されている**（`tokens.json` も消失） |
+| 作業ディレクトリ | 一時ディレクトリ配下 → **既に削除されている**（`tokens.json` も消失） |
 | pg (:5432) | **CLOSED**（接続不可） |
 | indexer の TCP | LISTEN と CLOSE_WAIT のみ。**pg への接続を 1 本も持たない** |
 | `/status` | **空応答**（HTTP 000） |
@@ -674,7 +674,7 @@ arb/op-sepolia を落としたのは、`expand_env_vars`（`client-common/src/to
 迂回はしない。
 
 停止が必要だった根拠（拒否前に実測済み）:
-- 両プロセスの cwd は `/private/tmp/zerc20-stack` で、**このディレクトリは削除されている**
+- 両プロセスの cwd は一時ディレクトリ配下にあり、**そのディレクトリは削除されている**
   （`tokens.json` も失われている）
 - 新しく起動した pg (:5432/:5433) への接続を**両者とも 0 本**しか持たない
 - 設定ファイルを失っているため、**再起動しない限り新しい設定を読めない**
