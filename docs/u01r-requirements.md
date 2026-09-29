@@ -431,3 +431,55 @@ JSON 側の拒否分岐を踏んでいなかった。
 - `npm run types` → エラーなし
 - `npm test` → **Test Files 19 passed | 1 skipped、Tests 222 passed | 14 skipped**
   （skip は既存の `chat-crossimpl.test.ts` 条件付き skip）
+
+## 13. 実決済スコープの記録（AGENTS.md「Record concrete testnet payment scope before live payment」）
+
+owner 承認: 2026-09-29。「テストネットなので無制限に実行して良い」との回答を得た。
+ただし AGENTS.md は**額ではなく範囲の記録**を要求しているため、実行前に以下を確定する。
+上限を設けるのは権限の縮小ではなく、**1 件ずつ結果を確認して報告するため**である。
+
+### 13.1 対象ネットワーク・資産（実測で確認済み）
+
+| 項目 | 値 | 確認方法 |
+|---|---|---|
+| 支払いチェーン | **Sepolia** `chain_id: 11155111` | owner 決定。`.env.testnet.local` と `config/deployed/testnet/tokens.zeth.testnet.json` が一致 |
+| 資産 | **zETH** `0xADAb5CaB352fb1eBF24CD951de224f9e952C82Ed` | 同上。過去 tx `0xec90bc35…` の送信先と一致 |
+| Verifier | `0xD19b79cE0C2821158aDBDEf9cC8c8D858c9ef0Cc` | 同上。過去 tx `0x1892c477…` の送信先と一致 |
+| Hub | `0xD18b503B335656C05dC516366C0C8FD6e3b13856`（Base Sepolia `84532`） | `.env.testnet.local` |
+| `InboundOffer.network` | **`eip155:11155111`** | facilitator 応答の `chainId` が権威（§12 指摘 6） |
+
+### 13.2 オンチェーン前提条件（実測で確認済み）
+
+- `Verifier.latestProvedIndex()` = **433**（`cast call` で実測）。
+  `>= 1` なので finalize は完了し得る（`apps/facilitator/src/check.ts:85-92` の要件を満たす）。
+
+### 13.3 スタックの実在（確認済み）
+
+| 要素 | 状態 |
+|---|---|
+| `zerc20-tree-indexer` / `zerc20-decider-prover` | **ビルド済みバイナリが存在**（`$ZERC20_WORK/target/release/`） |
+| Nova artifacts | **存在**（11G） |
+| `config/{indexer,decider}.env` / `tokens.json` | 存在 |
+| Docker | 稼働中（pg コンテナは**未作成**。起動が必要） |
+| keystore（payer / treasury / relayer） | **3 つとも存在**（`~/.foundry/keystores/testnet`、暗号化済み） |
+
+**ローカル URL は例ファイルと異なる**: `.env.testnet.local` は indexer を **`:8082`**
+（例ファイルの `:8080` ではない）、decider を `:8081` に置く。
+
+### 13.4 実行段階と、各段の課金
+
+| 段 | 内容 | 課金 |
+|---|---|---|
+| S1 | pg × 2 起動、decider・indexer 起動、facilitator 起動、`check` 通過 | **なし** |
+| S2 | Router を実 facilitator に向け、`/challenge` を 1 件取得（AC-a5） | **なし** |
+| S3 | zETH の burn → `/settle` → finalize を **1 件**通す | **あり**（zETH + ガス） |
+| S4 | 結果を報告し、追加実行の要否を owner が判断 | — |
+
+**S3 は 1 件ずつ実行し、都度報告する。** 成功しても自動で次を始めない。
+
+### 13.5 停止条件
+
+- 同一 `requestId` / `challengeNonce` の重複課金の疑い
+- `unknown` 終端に到達したとき（§10.5 の通り**再送しない**）
+- keystore の復号に失敗したとき（**推測による復号を試みない**）
+- `latestProvedIndex` が停滞し finalize が完了しないとき
