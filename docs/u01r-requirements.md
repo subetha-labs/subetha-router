@@ -951,3 +951,77 @@ containerd のメタデータ DB への**書き込み**であり、壊れてい�
 | 3 | ゾンビプロセス | **不要**（別ポートで回避、停止せず） |
 
 次は facilitator 起動 → Router 接続（S2、無課金）→ 実決済（S3）。
+
+## 23. facilitator 起動成功 — 実 challenge を取得（U-01r-b 解消）
+
+### 23.1 構成
+
+| 項目 | 値 |
+|---|---|
+| 設定 | scratchpad の `fac/fac.toml`（mode 600、**秘密は環境変数のみ**。リポジトリには置かない） |
+| listen | **127.0.0.1:4042** |
+| indexer / decider | `:8082` / `:8091`（§22 で起動したもの） |
+| treasury / relayer | 使い捨てアカウント `0xEd5F…06C4` |
+| fee | **設定しない**（`[fee]` テーブルを省略＝手数料なし） |
+
+**ポート 4042 を選んだ理由**: 既定の `4032` は **2026-08-29 起動の別 facilitator**
+（`ghq/.../subetha` の別チェックアウト）が占有していた。他セッションの所有物なので**停止しない**
+（ゾンビ 2 本と同じ方針）。
+
+### 23.2 `check` のバグを発見（設定の誤りではない）
+
+`check` は hub の検証で**必ず失敗する**:
+
+```
+✗ network.hub 0xD18b5… has no code on chain 11155111
+```
+
+原因は `apps/facilitator/src/check.ts`:
+- `:44` で `publicClient` を **`config.network.rpcUrl`（= Sepolia）**から作る
+- `:71,77` で hub をその client で `getCode` する
+
+しかし hub は **Base Sepolia（84532）**にあり、設定は `hub_rpc_url` / `hub_chain_id` を
+**正しくサポートしている**（`config.ts:192-193`）。`check.ts` がそれを**使っていない**。
+
+**ランタイムは正しい**: `packages/zerc20-backend/src/config.ts:58` は hub エントリの
+`rpcUrls` に `hubRpcUrl` を使う。よってこれは**precheck 限定の欠陥**であり、
+`check` の失敗を理由に起動を止める必要はない（実際 `start` は正常に動いた）。
+
+**二チェーン構成（支払い Sepolia / hub Base Sepolia）では `check` は常に赤くなる。**
+SubEtha 側にフィードバックする価値のある発見。
+
+### 23.3 起動後の実測（すべて実 facilitator）
+
+```
+GET /healthz   → {"status":"ok","pending":0,"finalized":0,"failed":0}
+GET /supported → {"kinds":[{"x402Version":2,"scheme":"subetha-zerc20",
+                            "network":"eip155:11155111"}],...}
+```
+
+`/supported` が **`subetha-zerc20` / `eip155:11155111`** を申告している。
+これは §13.1 で owner が決定した network と**完全に一致**する。
+
+### 23.4 実 challenge の取得（無課金）
+
+```
+POST /challenge {"amount":"1234"}
+→ {"payTo":"0x3e5fe3842d05f27ca72ef6a15352bdec4a6ce115",
+   "amount":"1234",
+   "token":"0xADAb5CaB352fb1eBF24CD951de224f9e952C82Ed",
+   "chainId":11155111,
+   "challengeNonce":"0x02c5babde59bc95feec35c2acc06e8669325d59147da67fab9bebb2b979c7f85",
+   "expiresAt":1790716281}
+```
+
+- `payTo` は**一回限りの burn アドレス**（treasury ではない＝設計どおり）
+- `chainId: 11155111`、`token` は Sepolia zETH
+- `challengeNonce` は 32 バイト（Router の `NONCE_PATTERN` を満たす）
+- `helper` / `deadline` は**無い**（`permit_burner` 未設定＝**self-transfer 経路**。§12.1 参照）
+
+**U-01r-b（facilitator の実 URL・実資産/チェーン）は解消した。**
+URL は `http://127.0.0.1:4042`、資産・チェーンは上記の実測値。
+
+### 23.5 次: S2（Router 接続、無課金）
+
+`ROUTER_SUBETHA_FACILITATOR_URL=http://127.0.0.1:4042` で Router を起動し、
+`createOffer` が上記と同じ形の offer を作れることを確認する。
