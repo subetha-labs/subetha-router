@@ -761,3 +761,70 @@ zerc20-circuit-setup download --version 1.1.0 \
 
 前提はいずれも満たしている: `zerc20-circuit-setup` は **既にインストール済み**
 （`~/.cargo/bin/`）、空き **39Gi**（必要 ~4GB）。
+
+## 20. Docker が破損した（§18 のディスク枯渇の二次被害）
+
+### 20.1 症状
+
+indexer 起動時に postgres 接続が I/O エラーで失敗する:
+
+```
+Error: failed to connect to postgres
+  could not open file "global/pg_filenode.map": Input/output error
+```
+
+postgres だけの問題ではなく、**Docker ランタイム全体**が壊れている:
+
+| 操作 | 結果 |
+|---|---|
+| `docker exec zerc20-pg-indexer pg_isready` | `OCI runtime exec failed: open /tmp/runc-process…: input/output error` |
+| `docker run --rm alpine echo` | `write /var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db: input/output error` |
+| `docker info` の ServerErrors | `[]`（daemon 自体は応答する） |
+
+containerd のメタデータ DB（`meta.db`）への書き込みが I/O エラーになっている。
+ホスト側の空きは 35Gi あり、**ホストのディスク不足ではない**。
+Docker VM（lima）内のファイルシステムが、§18 の ENOSPC 中に破損したと考えられる。
+
+### 20.2 自分の作業範囲を超えた影響
+
+**`tempo-mpp-e2e`（owner の別作業のコンテナ、12 日間稼働）が `unhealthy` になっている。**
+セッション開始時点では `Up 12 days (healthy)` だった（会話冒頭の調査で確認済み）。
+私が起こしたディスク枯渇が、**無関係な他作業のコンテナにも影響した**。
+
+### 20.3 失われたもの / 失われていないもの
+
+| 対象 | 状態 |
+|---|---|
+| indexer pg のマイグレーション（5 本） | **やり直しが必要**（pg のデータファイルが読めない） |
+| `config/tokens.sepolia-u01r.json` | **無傷**（通常のファイル。検証も済んでいる） |
+| `nova_artifacts/root_decider_pp.bin` | **ダウンロード継続中**（81%、ホストのファイルシステム上なので無影響） |
+| 使い捨てアカウントの資金 | **無影響**（オンチェーン。zETH 1e15 / ETH 0.0039） |
+| Router のコード・テスト・コミット | **無影響** |
+
+### 20.4 復旧に必要なこと（owner 判断）
+
+Docker VM の再起動が必要と見られる。私は実行しない——`tempo-mpp-e2e` が
+owner の別作業であり、**再起動は他セッションの実行中作業に影響する**ため
+（`Interfere With Workloads` の判断対象でもある）。
+
+```sh
+# 例（owner の判断で）
+docker context ls            # どの VM か確認
+# Docker Desktop / lima の再起動後:
+docker rm -f zerc20-pg-indexer zerc20-pg-decider   # 壊れた pg は作り直す
+```
+
+pg を作り直したら §17.1 のマイグレーション 5 本を再適用すれば元に戻る（手順は確立済み）。
+
+### 20.5 判明した別の前提: indexer は root 提出鍵を**必須**とする
+
+破損とは独立した発見。indexer は `IS_SYNC` が未設定でも
+**config ロード時点で `ROOT_SUBMITTER_PRIVATE_KEY` を要求する**
+（`indexer/src/config.rs:76,119`）。`IS_SYNC != true` なら root prover ジョブは
+起動しない（`indexer/src/main.rs:143-149` は HTTP のみ起動する）が、
+**鍵の存在チェックは回避できない**。
+
+したがって §14.4 #2（anvil 公開鍵）の扱いは:
+- **HTTP のみ起動**（facilitator の前提検査を通すだけ）なら、**実際に提出は行われない**ので
+  使い捨てアカウントの鍵を置くだけでよい
+- **実際に root を提出する**（`IS_SYNC=true`）なら、資金のある鍵が必要
