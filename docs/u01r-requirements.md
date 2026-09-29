@@ -1255,3 +1255,45 @@ Base Sepolia USDC バケットの `maxTotal: 50000`（= 5 回分）。
 Colima VM のファイルシステムまで壊す。ログは `head -c` で上限を付けて受ける。
 
 現状: 私のログ合計 **24K**、Colima VM は 38G 中 17G 使用（22G 空き）。
+
+## 28. §23.2 の `check` バグ報告を撤回 — **上流で既に修正済み**
+
+SubEtha 本体へ報告する前に上流を確認したところ、**報告すべきものが無かった**。
+
+### 28.1 調査
+
+| 対象 | 状態 |
+|---|---|
+| 私が読んだワークツリー（`subetha/live-testnet-e2e`） | `check.ts` は単一 client で hub を検査（＝§23.2 の症状が出る） |
+| ローカルの `develop` | `hub_rpc_url` 自体が**存在しない**（バグではなく未実装） |
+| **`origin/develop`** | **修正済み** |
+
+ローカル `develop` は `origin/develop` から **14 commits 遅れ**ており、その中に
+**`5d4ac94 feat(facilitator): separate Hub RPC for testnet`**（2026-08-19）があった。
+この commit は `check.ts` / `config.ts` / `daemon.ts` / `zerc20-backend/src/config.ts` などを変更している。
+
+### 28.2 上流の `check.ts` は正しい
+
+```
+81: const publicClient    = createPublicClient({ transport: http(config.network.rpcUrl) });
+82: const hubPublicClient = createPublicClient({ transport: http(config.network.hubRpcUrl ?? config.network.rpcUrl) });
+98: const expectedHubChainId = config.network.hubChainId ?? config.network.chainId;
+123: if (hubRpcUp) contracts.push(["network.hub", config.network.hub, hubPublicClient]);
+```
+
+**hub 用の client を別に作り、hub の chainId も検証している。** 私が提案しようとしていた修正と同じ。
+URL の資格情報の redact（`redactUrlCredentials`）まで入っている。
+
+### 28.3 結論と教訓
+
+§23.2 の「SubEtha 側にフィードバックする価値のある発見」は**誤り**であり、撤回する。
+観測（私の環境で `check` が hub 検証に失敗した）自体は正しいが、原因は
+**上流の欠陥ではなく、私が読んでいたワークツリーが古かったこと**である。
+
+**教訓**: 他プロジェクトの欠陥を報告する前に、**その修正が既に上流にあるかを確認する**。
+今回は「バグを見つけた」と報告していたら、相手の時間を奪ったうえに
+こちらの調査が浅いことを示すだけだった。
+
+なお本セッションの Router 側の作業はこれに影響されない——
+`hub_rpc_url` / `hub_chain_id` を設定に足して `start` した手順（§23.1）はそのまま有効で、
+`check` の失敗を無視した判断も結果的に正しかった（ランタイムは正常に動いた）。
