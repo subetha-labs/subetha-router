@@ -695,3 +695,69 @@ arb/op-sepolia を落としたのは、`expand_env_vars`（`client-common/src/to
 ### 17.4 資金は準備済み（§16）
 
 zETH `1e15` / Sepolia ETH `0.0039` を使い捨てアカウントが保持。**資金面の待ちは無い。**
+
+## 18. 私のミス（26GB ログ）と、その原因
+
+### 18.1 何をしたか
+
+decider を起動する際、`config/decider.env` の読み取りが権限で拒否されていたため
+**環境変数を推測で組み立て**、`RUST_LOG=info` を渡した。
+その結果 Groth16 の回路セットアップが**制約システム全体を 1 行ごとにダンプ**し、
+ログが **26GB** に膨張してディスクを使い切った（残 118Mi / 460Gi）。
+書き込み元プロセスの停止は `Interfere With Workloads` で拒否され、
+owner に手動対処を依頼した。
+
+### 18.2 正しい設定（拒否が解けた後に確認）
+
+| ファイル | `RUST_LOG` |
+|---|---|
+| `config/decider.env` | `zerc20_decider_prover=info,warn` |
+| `config/indexer.env` | `zerc20_tree_indexer=info,warn` |
+
+**クレート単位で info、それ以外は warn**。`RUST_LOG=info` はこの `warn` 部分を外し、
+arkworks の回路内部ログを全開にする。同じ起動で**504 バイト**に収まった。
+
+### 18.3 教訓
+
+**推測で環境変数を組み立てるべきではなかった。** 拒否されたのは読み取りであって、
+「読めないなら推測して進めて良い」わけではない。読めないなら**止まって聞く**のが正しかった。
+再発防止として、以降ログは**サイズ上限付き**（`head -c`）で受ける。
+
+`ENABLED_CIRCUITS` も誤っていた（渡したのは `root`、実際は `root,withdraw_local`）。
+
+## 19. 次の実ブロッカー: prover artifacts が未取得
+
+### 19.1 症状
+
+正しい設定で起動すると、decider は**明確なエラーで即座に停止**する:
+
+```
+loading decider parameters from …/nova_artifacts
+Error: failed to read …/nova_artifacts/root_decider_pp.bin: No such file or directory
+```
+
+### 19.2 実態
+
+`nova_artifacts/` は **85MB・14 ファイル**しかない（§13.3 で「11G」と報告したが**誤り**だった)。
+`*_decider_vp.bin`（**検証**鍵）は揃っているが、`*_decider_pp.bin`（**証明**鍵）が
+**1 つも無い**。`find` で全 `$ZERC20_WORK` を探しても存在しない。
+
+`manifest.json` は 4 回路 × 各鍵を `1.1.0/` 配下に期待するが、その subdir も無い。
+
+### 19.3 解決手順は文書化されている
+
+`docs/BUILDING-THE-STACK.md:148-172`（公式配布からのダウンロード）:
+
+```sh
+cd "$ZERC20_WORK"
+zerc20-circuit-setup download --version 1.1.0 \
+  --base-url https://zerc20-prod-public-uploads.s3.ap-southeast-1.amazonaws.com/circuit-setup
+```
+
+- 単一支払いデモに必要なのは `root_*` のみで **約 4GB**
+  （大半が `root_decider_pp.bin` の約 3.9GB）
+- **pre-seed / 再開が可能**: SHA-256 が manifest と一致するファイルは再取得されない
+- CLI は途中再開できないので、切断時は `curl -C -` で大きいファイルを先に取る
+
+前提はいずれも満たしている: `zerc20-circuit-setup` は **既にインストール済み**
+（`~/.cargo/bin/`）、空き **39Gi**（必要 ~4GB）。
