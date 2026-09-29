@@ -828,3 +828,57 @@ pg を作り直したら §17.1 のマイグレーション 5 本を再適用す
 - **HTTP のみ起動**（facilitator の前提検査を通すだけ）なら、**実際に提出は行われない**ので
   使い捨てアカウントの鍵を置くだけでよい
 - **実際に root を提出する**（`IS_SYNC=true`）なら、資金のある鍵が必要
+
+## 21. prover artifact は取得・検証・動作確認まで完了
+
+### 21.1 取得
+
+| 項目 | 値 |
+|---|---|
+| ファイル | `nova_artifacts/root_decider_pp.bin` |
+| サイズ | **4,192,302,392 バイト**（HEAD の `Content-Length` と一致） |
+| SHA-256 | `39489c9f42d80c12b1465420eb4caeb33b8a205c6d27734745419795cb91d01c` |
+| manifest の期待値 | **同一（一致を実測確認）** |
+| 取得元 | `…/circuit-setup/1.1.0/root_decider_pp.bin`（公式配布、`docs/BUILDING-THE-STACK.md:153-156`） |
+
+CLI は回路を絞れない（`--version` / `--base-url` のみ）ため、3 つ欠けていた `decider_pp` の中から
+**単一支払いデモに必要な `root_` のみ**を `curl -C -` で取得した（ドキュメント推奨の pre-seed 方式）。
+`withdraw_global` / `withdraw_local` の `decider_pp`（各約 3.7GB）は**取得していない**——
+単一支払いには不要で、バッチデモを行う場合にのみ必要。
+
+### 21.2 §19 のブロッカーは解消した（実証済み）
+
+artifact 配置後に decider を起動すると:
+
+```
+loading decider parameters from …/nova_artifacts
+loaded decider parameters from …/nova_artifacts in 98.09s   ← 成功
+```
+
+**§19.1 のエラー（`No such file or directory`）は消えた。** ロードに 98 秒かかるのは
+3.9GB のパラメータを読むためで、異常ではない。
+
+### 21.3 残る障害は Docker 破損のみ
+
+decider は artifact ロード成功**後**に、§20 と同じ postgres の I/O エラーで停止する:
+
+```
+Error: database error: could not open file "global/pg_filenode.map": Input/output error
+```
+
+つまり**スタック起動を妨げているのは、もはや設定でも artifact でもなく §20 の Docker 破損だけ**である。
+
+### 21.4 現在の状態まとめ
+
+| 要素 | 状態 |
+|---|---|
+| Sepolia tokens 設定 | **完了**（`config/tokens.sepolia-u01r.json`、展開検証済み） |
+| prover artifact | **完了**（SHA-256 一致、ロード成功を実証） |
+| 資金 | **完了**（zETH 1e15 / ETH 0.0039、オンチェーン） |
+| Router 側の修正 | **完了**（`17b2de8`、222 tests passing） |
+| indexer pg | **要再作成**（§20。マイグレーション手順は確立済み） |
+| decider pg | **要再作成**（同上） |
+| Docker VM | **要復旧**（owner 判断。`tempo-mpp-e2e` への影響があるため私は実行しない） |
+
+Docker が復旧すれば、残るのは pg 再作成 → マイグレーション再適用 → decider/indexer 起動 →
+facilitator 起動 → Router 接続（S2）→ 実決済（S3）である。
