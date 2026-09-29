@@ -1025,3 +1025,55 @@ URL は `http://127.0.0.1:4042`、資産・チェーンは上記の実測値。
 
 `ROUTER_SUBETHA_FACILITATOR_URL=http://127.0.0.1:4042` で Router を起動し、
 `createOffer` が上記と同じ形の offer を作れることを確認する。
+
+## 24. S2 合格 — Router の adapter が実 facilitator から offer を作れた（無課金）
+
+`tools/u01r-s2-probe.ts`（新規）で、**Router 本体の `createSubethaInbound`** を
+実 Sepolia facilitator（`:4042`）に当てた。`settle` は呼ばない（無課金）。
+
+### 24.1 生成された offer（実測）
+
+```json
+{
+  "scheme": "subetha-zerc20",
+  "network": "eip155:11155111",
+  "asset": "0xADAb5CaB352fb1eBF24CD951de224f9e952C82Ed",
+  "amount": "1234",
+  "payTo": "0x270b35e2ad48ee11727d9cbb5c08ecac863514a0",
+  "maxTimeoutSeconds": 120,
+  "extra": {
+    "challengeNonce": "0x56fbcc924b304297f9a5f08ab2a0b3c6f9c495095d19273720efff33e346b216",
+    "expiresAt": 1790717276,
+    "routeBinding": "u01r-live|GET|%2Fv1%2Froutes%2Fu01r-live%2Fresource"
+  }
+}
+```
+
+### 24.2 検証（10 項目すべて OK）
+
+| 検証 | 結果 |
+|---|---|
+| scheme が `subetha-zerc20` | OK |
+| network が `eip155:11155111`（Sepolia） | OK |
+| asset が Sepolia zETH | OK |
+| `payTo` が**毎回新しい burn アドレス**（treasury ではない） | OK（§23.4 の値とも異なる） |
+| `challengeNonce` が 32 バイト | OK |
+| 失効時刻が未来 | OK |
+| `routeBinding` が保持される | OK |
+| **`helper` が無い＝self-transfer 経路** | OK |
+| preflight が nonce 不一致を**拒否**（`nonce_mismatch`） | OK |
+| preflight が発行 offer と完全一致を**受理** | OK |
+
+最後の 2 項目が重要で、**受理と拒否の両方**を実 offer に対して確認している
+（片方だけなら「常に受理する」実装でも通ってしまう）。
+
+`helper` が無いことは §12.1 の観点で意味がある: permit 経路ではなく **self-transfer 経路**なので、
+`CollectInput = {challengeNonce, burnTxHash}` の素直な形になる。
+
+### 24.3 U-01r の残り
+
+| 項目 | 状態 |
+|---|---|
+| U-01r-a（settle 再送の安全条件） | **解決済**（§10.5: 再送しない。`unknown` 終端を維持） |
+| U-01r-b（実 URL・実資産/チェーン） | **解決済**（§23、§24 で実測） |
+| U-01r-c（実決済） | **次**（S3） |
