@@ -243,3 +243,88 @@ fixture を実際のタイミングを申告する形に更新し、
 レビューは選択肢 **1（fixture を更新）＋ 申告欠落の回帰テストを別途追加**を支持した。
 ただし前提が変わった: SubEtha が `true` になるため、
 **fixture の更新は「実際のタイミングを書く」ことになり、実装に合わせた改変ではない。**
+
+## 9. 限定レビュー結果: APPROVE WITH CHANGES → 確定要件
+
+レビュー実施: 2026-09-30、`gpt-6-astra`、`--sandbox read-only`、**§8 のみを対象**。
+判定 **APPROVE WITH CHANGES**（実装の土台として承認、境界付き修正 5 件）。
+
+### 9.1 FR-3 最終版: SubEtha は**常に** `true`
+
+§8.1 は self-transfer だけを根拠にしていたが**不十分**だった。
+
+- `helper` / `deadline` は**能力の広告**であり、payer が選ぶ経路ではない。
+  helper 付き offer でも payer は self-transfer を選べる（`docs/u01r-requirements.md:298`）
+- `createOffer()` は**どちらで払うか知り得ない**（`src/adapters/inbound/subetha.ts:175`）
+
+→ **SubEtha は常に `true` を申告する。**
+permit 経路では「署名が支出する」という主張ではなく**保守的な既定**である。
+「credential を作るには払うしかない」という説明は **self-transfer に限定**して書く。
+将来「非支出の経路に束縛された offer」が定義されたときに限り `false` を検討する。
+
+### 9.2 FR-7 最終版: payer を**非支出に制約する**（承認順序の変更はしない）
+
+`client.execute()` は**既に作られた credential** を受け取り、承認・quote 束縛の検査は
+その**後**で行う（`src/client/index.ts:266-335`）。支出する payer を安全に扱うには
+検査の前倒しか credential 生成の遅延が必要で、**本スライスの範囲を超える**。
+`purchase()` が呼び出し側の quote を受け取る（`src/mcp/tools.ts:211`）ため、
+「承認文字列の存在確認」だけでは不十分。
+
+→ **`InboundPayer` を「署名のみ・非支出」に明示的に制約する**。
+これを契約として文書化し、テストで固定する。**承認検査の前倒しはしない。**
+
+→ さらに: `"No payment was started"`（`src/mcp/tools.ts:238`）は
+**この非支出契約の下でのみ**許される。支出する payer は broadcast 後に throw し得るため、
+承認の前倒しだけでは этот 文面を正当化できない。契約を破る payer を注入した場合は
+**文面ごと成立しない**ことを記録する。
+
+### 9.3 x402 の `ISSUED_EXTRA_KEYS` に追加が必須（**見落としていた罠**）
+
+`src/adapters/inbound/x402.ts:44` の allowlist に無いキーが `extra` にあると、
+preflight が `offer_mismatch` で**拒否する**（同 `:183-186`）。
+
+したがって x402 offer に `fundsMoveOnCredential` を載せるなら、
+**`ISSUED_EXTRA_KEYS` にも追加しなければ、正直な payer の支払いが全部落ちる**
+（`tests/wire/x402-inbound.test.ts:100,119` の成功アサーションが失敗する）。
+
+→ **allowlist と完全一致検査の両方に追加する。厳格比較を緩めて解決してはならない。**
+
+### 9.4 データ経路は boolean を保つ（確認済み・懸念は解消）
+
+adapter → `projection.ts:56` → `JSON.stringify`（`app.ts:32`）→ `JSON.parse`
+→ `structuredClone`/freeze（`client/index.ts:47,114,208,261`）→ MCP。
+**boolean が文字列化されたり `false` が落ちたりしない。** リテラル比較で十分。
+
+**payer による偽造も不可能**: MCP は `quote.source.offer`（Router 発行）を読み、
+payer 提供の `credential.accepted` は読まない。
+`accepted` の改変は `stableJson` の型保存比較で弾かれる。
+→ **この境界を保つ改ざんテストを追加する。**
+
+### 9.5 テスト移行の確定仕様
+
+`tests/unit/approval-funds-timing.test.ts` に **SubEtha ケースは存在しない**
+（＝ SubEtha の反転だけでは既存テストは落ちない。§8.9 の前提は不正確だった）。
+
+| 対象 | 変更 |
+|---|---|
+| MPP / x402 fixture | 明示的な `true` / `false` 申告を足す。`:54` `:64` の boolean 検査は**保持** |
+| `:57` の `/Funds leave before/` | 条件付きの「purchase 前に支出し得る」表現に置換。**不可逆の警告は保持** |
+| `:66` の警告不在検査 | **明示申告された** signing-only x402 に限って保持。**未申告 x402 は保守的警告を受ける** |
+| 新規 | SubEtha（helper 有り／無し）、**未知スキーム**、不正・欠落申告 |
+| `:72-73` | `approvalRequired === true` と人間承認の検査を**弱めない**。SubEtha にも拡張 |
+
+### 9.6 指摘 5（私の説明の誤り）
+
+§8.2 で「`"false"` は truthy なので危険側に倒れない」と書いたが**逆**だった。
+`Boolean("false") === true` は**保守的な側**である。危険なのは
+`null` / `0` / `""` / `undefined` が `false` になる方向。
+**厳格比較の要件は正しいが、理由の説明が間違っていた。**
+
+### 9.7 実装対象（確定）
+
+1. 3 adapter が `extra.fundsMoveOnCredential` を申告（x402 `false` / SubEtha `true` / MPP `true`）
+2. x402 の `ISSUED_EXTRA_KEYS` に追加（§9.3）
+3. `fundsMoveBeforePurchase` を厳格リテラル判定に置換（`=== false` のみ許可）
+4. `nextStep` とツール説明文 2 箇所を保守的表現に（`src/mcp/tools.ts:91,130,193`、`server.ts:167,187`）
+5. `InboundPayer` の非支出契約を文書化（§9.2）
+6. テスト（§9.5）＋ 改ざんテスト（§9.4）
