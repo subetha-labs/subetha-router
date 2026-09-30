@@ -47,6 +47,9 @@ const ISSUED_EXTRA_KEYS = [
   "challengeNonce",
   "expiresAt",
   "routeBinding",
+  // 資金移動タイミングの申告。**allowlist に入れないと**、正直な payer が
+  // 発行 offer をそのまま写しただけで `offer_mismatch` になる（`:183-186` の未知キー検査）。
+  "fundsMoveOnCredential",
 ] as const;
 
 export interface X402InboundOptions {
@@ -144,6 +147,11 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
           challengeNonce,
           expiresAt: Math.floor(request.nowMs / 1000) + maxTimeoutSeconds,
           routeBinding: request.routeBinding,
+          /**
+           * **署名だけでは資金が動かない**（EIP-3009）。送金は後段で facilitator が
+           * settle するときに起きるので、承認は purchase の前で間に合う。
+           */
+          fundsMoveOnCredential: false,
         },
       };
     },

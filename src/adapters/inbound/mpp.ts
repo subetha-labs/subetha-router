@@ -169,6 +169,11 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
         expiresAt: unixSecondsOf(challenge["expires"]),
         routeBinding: request.routeBinding,
         /**
+         * **`true`。** MPP の credential は「送金済み tx の hash」なので、
+         * payer は**先に broadcast しないと credential を作れない**。取り消せない。
+         */
+        fundsMoveOnCredential: true,
+        /**
          * **payer が支払うために必要**。MPP の credential は「送金済み tx の hash」なので、
          * payer は challenge 本体（`realm` / `opaque` / 額 / 宛先）を知らないと
          * **challenge に束縛された memo を作れない**。id だけでは足りない。

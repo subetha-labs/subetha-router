@@ -83,6 +83,16 @@ describe("mpp inbound adapter", () => {
     expect(Math.abs(offer.extra.expiresAt - Math.floor(now / 1000) - 600)).toBeLessThanOrEqual(5);
   });
 
+  /**
+   * **申告値そのものを固定する。** MPP の credential は送金済み tx の hash なので、
+   * payer は先に broadcast しないと credential を作れない。`false` にすると
+   * 「まだ払っていない」と人間に伝わり、承認前の不可逆支出を招く。
+   */
+  it("declares that funds move when the credential is built", async () => {
+    const offer = await issue(railOf({ maxTimeoutSeconds: 600 }));
+    expect(offer.extra["fundsMoveOnCredential"]).toBe(true);
+  });
+
   it("offers exactly the amount it was asked for (no decimal rescaling)", async () => {
     // SDK は `parseUnits(amount, decimals)` を掛け、`decimals` 既定は 6。
     // 放置すると payer に 10000 と見せて HMAC には 10000000000 を焼き付ける。

@@ -164,9 +164,11 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "(amounts are base units and carry `decimals`). **This tool starts no payment.** " +
         `A human approves; call ${TOOL_NAMES.purchase} only if they do. ` +
         "An agent must never approve on the human's behalf. " +
-        "**When funds move depends on the rail.** If `subject.fundsMoveOnCredential` is true " +
-        "(the MPP rail), the transfer completes the moment the credential is built and cannot " +
-        "be undone — get approval BEFORE building the credential, not before purchase.",
+        "**When funds move depends on the route.** If `subject.fundsMoveOnCredential` is true, " +
+        "building the credential may already spend the funds and that cannot be undone — get " +
+        "approval BEFORE building the credential, not before purchase. The flag is conservative: " +
+        "it is also true when the timing is not declared, so treat it as \"may spend\", not as " +
+        "proof that a payment completed.",
       inputSchema: {
         routeId: z.string().min(1),
         requestId: z
@@ -184,9 +186,10 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
       description:
         "Execute a human-approved quote exactly once. Pass the approved quoteId as " +
         "`approval`; the Router rejects a missing or mismatched value (this layer does not " +
-        "judge approval itself). **On the MPP rail the transfer already happened before this " +
-        "call** — a failure here does not return the funds, so do not retry on your own: " +
-        "report that payment was already sent and stop. Use the same `requestId` as the quote. " +
+        "judge approval itself). **If the quote said `fundsMoveOnCredential`, the money may " +
+        "already have left before this call** — a failure here does not return it, so do not " +
+        "retry on your own: report that payment may already have been sent and stop. " +
+        "Use the same `requestId` as the quote. " +
         "After a server restart the quote must be taken again.",
       inputSchema: {
         quoteId: z.string().min(1),

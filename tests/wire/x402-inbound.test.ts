@@ -134,6 +134,46 @@ describe("x402 受信レール", () => {
     });
   });
 
+  /**
+   * 資金移動タイミングの申告は **Router が発行する**。payer がこれを裏返せると
+   * 「まだ払っていない」と人間に誤って伝わり、承認前の不可逆支出を招く。
+   * 完全一致検査で弾かれることを固定する（型を変える改竄も含む）。
+   */
+  it.each([
+    ["flipped to true", true],
+    ["stringified", "false"],
+    ["nulled", null],
+    ["removed", undefined],
+  ])(
+    "【security】accepted.extra.fundsMoveOnCredential の改竄（%s）は拒否する",
+    async (_label, value) => {
+      const fixture = await startFacilitator();
+      const rail = railOf(fixture);
+      const offer = await issue(fixture);
+      const extra: Record<string, unknown> = { ...offer.extra };
+      if (value === undefined) {
+        delete extra["fundsMoveOnCredential"];
+      } else {
+        extra["fundsMoveOnCredential"] = value;
+      }
+
+      expect(rail.preflight(offer, credentialFor(offer, { extra }), Date.now())).toEqual({
+        ok: false,
+        reason: "offer_mismatch",
+      });
+    },
+  );
+
+  /** 正直な payer（発行 offer をそのまま写す）は通る＝ allowlist に入っている。 */
+  it("発行 offer をそのまま写した accepted は通る（申告キーが allowlist にある）", async () => {
+    const fixture = await startFacilitator();
+    const rail = railOf(fixture);
+    const offer = await issue(fixture);
+
+    expect(offer.extra["fundsMoveOnCredential"]).toBe(false);
+    expect(rail.preflight(offer, credentialFor(offer), Date.now())).toEqual({ ok: true });
+  });
+
   it.each([
     ["amount", { amount: "999999" }],
     ["payTo", { payTo: "0x000000000000000000000000000000000000dead" }],
