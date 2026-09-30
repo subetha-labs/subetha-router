@@ -57,6 +57,12 @@ Router 側の適合性:
 
 ### 4.1 受信: 資金移動タイミングの申告がハードコード
 
+> **解決済み（2026-09-30）**: 本節が指摘したハードコードは
+> `docs/fundsmove-requirements.md` のスライスで**修正された**。
+> 現在は各 adapter が `extra.fundsMoveOnCredential` を申告し、MCP 層は読むだけである。
+> Lightning adapter を書く場合は **`true` を申告する**だけでよく、
+> 本節の「対処」は不要。以下は当時の記録として残す。
+
 `src/mcp/tools.ts:95-99`:
 
 ```ts

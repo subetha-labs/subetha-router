@@ -2,10 +2,14 @@
  * 承認者に「**いつ資金が動き得るか**」が伝わるかを固定する。**無課金**。
  *
  * なぜ必要か: レールによって「credential を作る」操作の意味が違う。
- * MPP / SubEtha では payer が先に送金してからでないと credential を作れない
- * （credential が送金済み tx の hash を内包する）ので、**purchase を呼ぶ前に
- * 支出が済んでいて取り消せない**。x402（EIP-3009）は署名するだけで、
- * 送金は後段で facilitator が行う。
+ * MPP と SubEtha の **self-transfer 経路**では、payer が先に送金してからでないと
+ * credential を作れない（credential が送金済み tx の hash を内包する）ので、
+ * **purchase を呼ぶ前に支出が済んでいて取り消せない**。
+ * x402（EIP-3009）は署名するだけで、送金は後段で facilitator が行う。
+ *
+ * SubEtha の **permit 経路**では facilitator が broadcast するため署名のみのこともあるが、
+ * `createOffer` の時点でどちらになるか知り得ないので**保守的に危険側**を申告する。
+ * したがって `true` は「支出し得る」であり、「支払い済み」の断定ではない。
  *
  * この違いを伝えないと、承認者は署名を「準備の工程」と読んで承認し、
  * **実際には支払いを承認していた**ことになる。文面は読み飛ばされ得るので、
@@ -68,7 +72,11 @@ async function expectFlag(
   expect(subject["fundsMoveOnCredential"], `${scheme} ${JSON.stringify(extra)}`).toBe(expected);
   if (expected) {
     expect(String(body["nextStep"])).toMatch(/cannot be undone/);
-    expect(String(body["nextStep"])).toMatch(/before/);
+    // 「purchase の前に承認を取れ」だけでは**危険側の指示として不足**。
+    // 「purchase より前に金が出得る」と「credential を作る前に承認を取れ」の両方を要求する。
+    expect(String(body["nextStep"])).toMatch(/may already spend/);
+    expect(String(body["nextStep"])).toMatch(/Money can leave before/);
+    expect(String(body["nextStep"])).toMatch(/approval FIRST, then build the credential/);
   } else {
     // 申告が `false` のときだけ警告を出さない（出すと狼少年になる）。
     expect(String(body["nextStep"])).not.toMatch(/cannot be undone/);
@@ -110,9 +118,32 @@ describe("approval must say when funds move", () => {
   /** 申告が無い・壊れている場合は**危険側**に倒す（fail safe）。 */
   it("treats a missing or malformed declaration as dangerous", async () => {
     await expectFlag("exact", {}, true); // 申告なし
-    for (const bad of [null, 0, "", "false", "true", undefined, {}, []]) {
+    // `new Boolean(false)` は truthy なオブジェクト。リテラル比較なので危険側に倒れる。
+    for (const bad of [null, 0, "", "false", "true", undefined, {}, [], new Boolean(false)]) {
       await expectFlag("exact", { fundsMoveOnCredential: bad }, true);
     }
+  });
+
+  it.each([
+    ["offer missing", undefined],
+    ["offer null", null],
+    ["offer not an object", "nope"],
+    ["extra null", { scheme: "exact", extra: null }],
+    ["extra an array", { scheme: "exact", extra: [] }],
+    ["extra not an object", { scheme: "exact", extra: 7 }],
+  ])("treats a malformed offer/extra (%s) as dangerous", async (_label, badOffer) => {
+    const client = {
+      async quote() {
+        const q = quoteWith("exact", {});
+        (q.source as unknown as Record<string, unknown>)["offer"] = badOffer;
+        return { ok: true as const, quote: q };
+      },
+    } as unknown as RouterClient;
+    const body = await createToolHandlers({ client, mode: "synthetic", evidence: EVIDENCE }).quote({
+      routeId: "r1",
+      requestId: "x",
+    });
+    expect((body["subject"] as Record<string, unknown>)["fundsMoveOnCredential"]).toBe(true);
   });
 
   it("treats a missing or malformed extra/offer as dangerous", async () => {
@@ -121,6 +152,30 @@ describe("approval must say when funds move", () => {
         const q = quoteWith("exact", {});
         // `extra` 自体が無い offer。
         (q.source as unknown as Record<string, unknown>)["offer"] = { scheme: "exact" };
+        return { ok: true as const, quote: q };
+      },
+    } as unknown as RouterClient;
+    const body = await createToolHandlers({ client, mode: "synthetic", evidence: EVIDENCE }).quote({
+      routeId: "r1",
+      requestId: "x",
+    });
+    expect((body["subject"] as Record<string, unknown>)["fundsMoveOnCredential"]).toBe(true);
+  });
+
+  /** 継承した申告は信用しない（自身のプロパティだけを見る）。 */
+  it("does not trust a declaration inherited from a prototype", async () => {
+    const client = {
+      async quote() {
+        const q = quoteWith("exact", {});
+        const inherited = Object.create({ fundsMoveOnCredential: false }) as Record<
+          string,
+          unknown
+        >;
+        inherited["challengeNonce"] = "n1";
+        (q.source as unknown as Record<string, unknown>)["offer"] = {
+          scheme: "exact",
+          extra: inherited,
+        };
         return { ok: true as const, quote: q };
       },
     } as unknown as RouterClient;

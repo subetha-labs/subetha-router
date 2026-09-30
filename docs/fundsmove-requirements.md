@@ -371,3 +371,55 @@ unit テストは手書き fixture を使うため、**adapter の実際の申�
 
 → `tests/wire/{subetha,mpp}-inbound.test.ts` に申告値を固定するテストを追加した。
 **green を信じず壊して確かめたから見つかった穴**である。
+
+## 11. 実装レビュー結果: APPROVE WITH CHANGES → 反映済み
+
+レビュー実施: 2026-09-30、`gpt-6-astra`、`--sandbox read-only`、対象 `a1bfc48`。
+**「本番の reader と adapter の申告は正しい。未申告の offer が `false` と読まれる
+到達可能な経路は無い」**と確認され、5 件の修正を受けた。**全件反映した。**
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| 1 | §9.2 の**非支出 payer 契約が未実装** | `InboundPayer` に契約を明記し、`tests/unit/inbound-payer-contract.test.ts` を新規追加 |
+| 2 | **アサーションが弱くなっていた**（`/Funds leave before/` → `/before/`） | 3 本に強化（`may already spend` / `Money can leave before` / `approval FIRST, then build the credential`） |
+| 3 | 不正形状の網羅が宣伝より狭い | `offer` が `undefined`/`null`/非オブジェクト、`extra` が `null`/配列/数値の 6 ケース、および `new Boolean(false)` を追加 |
+| 4 | 継承した申告を信用する | **自身のプロパティのみ**を見るよう変更（`hasOwnProperty`）＋テスト追加 |
+| 5 | コメントが依然タイミングを断定 | `tools.ts` / `subetha-inbound.test.ts` / unit テスト冒頭を「self-transfer に限る」「支出し得る」に修正 |
+
+### 11.1 指摘 2 が重要だった
+
+私は `/Funds leave before/` を `/before/` に**弱めていた**。
+`/before/` は「purchase の前に承認を取れ」という**危険側では誤った指示**でも通ってしまう。
+危険側の経路で必要なのは「**credential を作る前**に承認を取れ」である。
+テストを書き換えた際に、守っていた性質を落としていた。
+
+### 11.2 追加の sabotage（2 種）
+
+| 壊した箇所 | 結果 |
+|---|---|
+| `hasOwnProperty` 検査を削除 | 継承申告のテストが失敗 |
+| `nextStep` の "may already spend" を "will spend" に | **4 件が失敗**（断定表現を禁じるアサーションが機能） |
+
+### 11.3 検証（最終）
+
+- `npm run types` → エラーなし
+- `npm test` → **244 passed / 14 skipped**（着手前 222 → **+22**）
+- sabotage **計 6 種**、いずれも対応するテストが失敗
+
+### 11.4 レビューが指摘した残存事項（対応済み・記録）
+
+- `docs/lightning-feasibility.md` §4.1 が**既に存在しない分類器**を説明していた
+  → **解決済みの注記**を追加
+- `tests/unit/lifecycle.test.ts:76` の試験用 adapter は申告を持たない
+  → **fail safe により `true`** になるので安全。意図的に変更しない
+- README / CLAUDE.md の x402・MPP のタイミング記述は
+  **当該 2 route については今も正確**（ホスト Router に SubEtha inbound route は無い）
+  → 変更しない。ただし `fundsMoveOnCredential` が true でも
+  「支払い済みの証明」ではない点は §11 の文面修正で担保した
+
+### 11.5 レビューの留保（そのまま記録）
+
+> The reported test/sabotage results remain author-reported evidence, not
+> independently reproduced results.
+
+テスト実行と sabotage は**私が実行した結果**であり、レビュー側は再現していない。

@@ -36,6 +36,20 @@ export interface Evidence {
  */
 export interface InboundPayer {
   readonly address: string;
+  /**
+   * **契約: 署名だけを行い、資金を動かしてはならない（broadcast 禁止）。**
+   *
+   * この層は `credentialFor()` を**承認の検査より前に**呼ぶ
+   * （承認と quote 束縛の検査は `client.execute()` の中で後から行われる）。
+   * したがって**支出する実装を注入すると、承認前に資金が出る**。
+   * 同じ理由で、失敗時の `"No payment was started."` が真であることも
+   * **この契約が守られている場合に限る**（支出する実装は broadcast 後に throw し得る）。
+   *
+   * 資金が動く受信レール（MPP / SubEtha の self-transfer）は
+   * **この経路では扱わない**。payer は自分で送金を済ませたうえで、
+   * その tx hash を含む credential を `purchase` に渡す
+   * （＝ `subject.fundsMoveOnCredential` が true の経路は人間の承認が先に必要）。
+   */
   credentialFor(offer: unknown, chainId: number): Promise<string>;
 }
 
@@ -90,6 +104,9 @@ function syntheticCredential(offer: unknown): string {
 /**
  * この経路は **credential を作る時点で**資金が動き得るか。
  * 判定は offer の申告に委ねる（下の `fundsMoveBeforePurchase` を参照）。
+ *
+ * **`true` は「支出し得る」であり「支払い済み」ではない。** 申告が無いだけの offer にも
+ * 保守的に `true` が付くため、断定すると嘘になり得る。
  */
 /**
  * **credential を得るために支出が必要か**を、offer 自身の申告から読む。
@@ -112,6 +129,12 @@ function fundsMoveBeforePurchase(quote: QuoteView): boolean {
   }
   const extra = offer["extra"];
   if (!isRecord(extra)) {
+    return true;
+  }
+  // **自身のプロパティだけを見る。** 継承した `false` を安全と読まない
+  // （実運用の JSON → clone → freeze 経路では prototype は落ちるが、
+  // 注入された `RouterClient` から任意のオブジェクトが来る余地を残さない）。
+  if (!Object.prototype.hasOwnProperty.call(extra, "fundsMoveOnCredential")) {
     return true;
   }
   return extra["fundsMoveOnCredential"] !== false;

@@ -84,8 +84,9 @@ describe("subetha inbound over real local HTTP", () => {
   });
 
   /**
-   * **申告値そのものを固定する。** SubEtha は payer が先に burn してからでないと
-   * credential（`burnTxHash` を内包）を作れないので、`true` でなければならない。
+   * **申告値そのものを固定する。** self-transfer 経路では payer が先に burn してからでないと
+   * credential（`burnTxHash` を内包）を作れない。permit 経路は署名のみのこともあるが、
+   * `createOffer` の時点で経路を知り得ないため**保守的に `true`**でなければならない。
    * ここを `false` にすると「まだ払っていない」と人間に伝わり、
    * 承認前の不可逆支出を招く。helper の有無で変えてはいけない
    * （helper は能力の広告であり、payer が選ぶ経路ではない）。
