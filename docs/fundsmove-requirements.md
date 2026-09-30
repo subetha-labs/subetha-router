@@ -328,3 +328,46 @@ payer 提供の `credential.accepted` は読まない。
 4. `nextStep` とツール説明文 2 箇所を保守的表現に（`src/mcp/tools.ts:91,130,193`、`server.ts:167,187`）
 5. `InboundPayer` の非支出契約を文書化（§9.2）
 6. テスト（§9.5）＋ 改ざんテスト（§9.4）
+
+## 10. 実装記録
+
+### 10.1 変更点
+
+| ファイル | 変更 |
+|---|---|
+| `src/adapters/inbound/x402.ts` | `fundsMoveOnCredential: false` を申告。**`ISSUED_EXTRA_KEYS` にも追加**（§9.3） |
+| `src/adapters/inbound/subetha.ts` | `true` を申告（**常に**。helper の有無に依らない） |
+| `src/adapters/inbound/mpp.ts` | `true` を申告 |
+| `src/mcp/tools.ts` | 判定をレール名 → **offer の申告の厳格リテラル比較**に置換。`nextStep` を保守的表現に |
+| `src/mcp/server.ts` | ツール説明 2 箇所からレール名を除去し、「支出し得る」表現に |
+| `tests/unit/approval-funds-timing.test.ts` | 全面改訂（§9.5）。**未知スキーム**・不正申告・SubEtha を追加 |
+| `tests/wire/x402-inbound.test.ts` | 申告の改竄テスト 4 種 + allowlist の正常系 |
+| `tests/wire/subetha-inbound.test.ts` | **申告値を固定**（helper 有無の両方） |
+| `tests/wire/mpp-inbound.test.ts` | **申告値を固定** |
+
+### 10.2 検証
+
+- `npm run types` → エラーなし
+- `npm test` → **235 passed / 14 skipped**（変更前 222 → **+13**）
+  skip は既存の `chat-crossimpl.test.ts` 条件付き skip
+
+### 10.3 sabotage 検証（4 種すべて対応するテストが落ちた）
+
+| 壊した箇所 | 結果 |
+|---|---|
+| fail safe を `=== true` に（欠落時 `false`） | 「欠落・不正は危険側」「完了と断定しない」の **2 件が失敗** |
+| **x402 の allowlist から申告キーを削除** | **正常系を含む 4 件が失敗**（§9.3 の罠を実証） |
+| SubEtha の申告を `false` に | 申告値固定テストが失敗 |
+| MPP の申告を `false` に | 同 |
+
+**2 件目が最も価値がある**: レビュー指摘 3 を反映していなければ、
+**正直な payer の x402 支払いが全部落ちていた**。
+
+### 10.4 sabotage で見つかった穴（その場で修正）
+
+初回の sabotage で **SubEtha / MPP の申告値を `false` に変えてもテストが落ちなかった**。
+unit テストは手書き fixture を使うため、**adapter の実際の申告値を誰も固定していなかった**——
+つまり「本スライスが直そうとしている欠陥そのもの」を検出できない状態だった。
+
+→ `tests/wire/{subetha,mpp}-inbound.test.ts` に申告値を固定するテストを追加した。
+**green を信じず壊して確かめたから見つかった穴**である。

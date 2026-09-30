@@ -200,6 +200,16 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
           challengeNonce,
           expiresAt,
           routeBinding: request.routeBinding,
+          /**
+           * **常に `true`。** self-transfer 経路では payer 自身が burn を broadcast し、
+           * credential はその `burnTxHash` を内包するので、**払わないと credential を作れない**。
+           *
+           * permit 経路（facilitator が broadcast）では署名のみのこともあるが、
+           * **`helper` は能力の広告であって payer が選ぶ経路ではない**——helper 付き offer でも
+           * payer は self-transfer を選べる。`createOffer` の時点でどちらになるか知り得ないため、
+           * **保守的に `true` を申告する**（署名が支出すると主張しているのではない）。
+           */
+          fundsMoveOnCredential: true,
           ...(pair === undefined ? {} : { helper: pair.helper, deadline: pair.deadline }),
           ...(fee === undefined ? {} : { fee }),
         },

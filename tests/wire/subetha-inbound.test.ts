@@ -83,6 +83,23 @@ describe("subetha inbound over real local HTTP", () => {
     expect(offer.extra.challengeNonce).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
+  /**
+   * **申告値そのものを固定する。** SubEtha は payer が先に burn してからでないと
+   * credential（`burnTxHash` を内包）を作れないので、`true` でなければならない。
+   * ここを `false` にすると「まだ払っていない」と人間に伝わり、
+   * 承認前の不可逆支出を招く。helper の有無で変えてはいけない
+   * （helper は能力の広告であり、payer が選ぶ経路ではない）。
+   */
+  it("資金移動タイミングを true と申告する（helper の有無に依らない）", async () => {
+    const plain = await startFacilitator();
+    expect((await issueOffer(plain)).extra["fundsMoveOnCredential"]).toBe(true);
+
+    const withHelper = await startFacilitator(["--challenge", "both"]);
+    const offer = await issueOffer(withHelper);
+    expect(offer.extra["helper"]).toBeDefined();
+    expect(offer.extra["fundsMoveOnCredential"]).toBe(true);
+  });
+
   it("helper/deadline が両方揃っていれば offer に載せる", async () => {
     const fixture = await startFacilitator(["--challenge", "both"]);
     const offer = await issueOffer(fixture);

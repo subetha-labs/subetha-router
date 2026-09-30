@@ -88,14 +88,33 @@ function syntheticCredential(offer: unknown): string {
  * `10000` が 0.01 なのか 10000 なのか判断できない。
  */
 /**
- * この経路は **credential を作る時点で**資金が動くか。
- * MPP（`tempo/charge`）は payer 自身が broadcast するので真。
- * x402（`exact`）は署名するだけで、送金は facilitator が後段で行う。
+ * この経路は **credential を作る時点で**資金が動き得るか。
+ * 判定は offer の申告に委ねる（下の `fundsMoveBeforePurchase` を参照）。
+ */
+/**
+ * **credential を得るために支出が必要か**を、offer 自身の申告から読む。
+ * レール名では判定しない（レールを足すたびに編集が必要な設計は、
+ * 編集を忘れたときに**警告が静かに壊れる**）。
+ *
+ * **リテラルの `false` だけ**が「支出は後段」を意味する。欠落・型違い・
+ * `null` / `0` / `""` / `"false"` はすべて**危険側（`true`）**に倒す。
+ * truthy 変換を使わないのは、`null` や `0` が `false` に落ちて
+ * 「まだ払っていない」と誤って報告されるのを防ぐため。
+ *
+ * 読むのは **Router 自身が発行した `quote.source.offer`** であり、
+ * payer 提供の `credential.accepted` ではない（payer に申告を偽造させない）。
  */
 function fundsMoveBeforePurchase(quote: QuoteView): boolean {
   const source = quote.source as Record<string, unknown>;
   const offer = source["offer"];
-  return isRecord(offer) && offer["scheme"] === "tempo/charge";
+  if (!isRecord(offer)) {
+    return true;
+  }
+  const extra = offer["extra"];
+  if (!isRecord(extra)) {
+    return true;
+  }
+  return extra["fundsMoveOnCredential"] !== false;
 }
 
 function approvalSubject(quote: QuoteView): Record<string, unknown> {
@@ -189,15 +208,17 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
         // エージェントが勝手に purchase へ進まないよう、次の手順を文面で明示する。
         /**
          * **レールで「いつ金が動くか」が違う**ので、それを文面に載せる。
-         * x402 は署名しても資金は動かず、Router が決済する段で動く。
-         * MPP は**呼び出し側が自分で broadcast する**ので、credential を作った時点で
-         * 送金が完了していて、purchase が失敗しても戻らない。
-         * これを言わないと「準備の工程」として承認され得る。
+         * 申告が `false` の経路（例: x402 の EIP-3009）は署名しても資金は動かず、
+         * Router が決済する段で動く。それ以外は credential を作る時点で
+         * **支出し得る**（不可逆になり得る）。
+         *
+         * **「支払いが完了した」と断定しない。** 申告が無いだけの offer にも
+         * 保守的に警告を出すため、断定すると嘘になり得る。
          */
         nextStep: fundsMoveBeforePurchase(result.quote)
-          ? "Explicit human approval is required. **On this route (MPP) the transfer happens " +
-            "when the credential is built, and it cannot be undone.** Funds leave before " +
-            `${TOOL_NAMES.purchase} is called. Get approval first, then build the credential. ` +
+          ? "Explicit human approval is required. **On this route, building the credential " +
+            "may already spend the funds, and that cannot be undone.** Money can leave before " +
+            `${TOOL_NAMES.purchase} is called. Get approval FIRST, then build the credential. ` +
             "If the human does not approve, do not build it."
           : "Explicit human approval is required. If the human approves, call " +
             `${TOOL_NAMES.purchase} with this quoteId as \`approval\`. If not, do not call it.`,
