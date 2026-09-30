@@ -16,7 +16,11 @@ import { describe, expect, it } from "vitest";
 
 import { createX402Payer } from "../../tools/x402-payer.js";
 
-/** テスト専用の使い捨て鍵（資金なし・どのチェーンにも紐づかない）。 */
+/**
+ * **Anvil / Hardhat の公知の開発鍵（account #1）**。世界中の README に載っている値で、
+ * 秘密ではない。ここでは「署名だけなら RPC も資金も不要」を示すためだけに使う。
+ * 実資金を入れてはならない。
+ */
 const THROWAWAY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 const offer = {
