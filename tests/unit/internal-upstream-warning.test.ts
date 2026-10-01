@@ -33,8 +33,18 @@ describe("internal upstream warning", () => {
     ["public host", "https://provider-x402.subethalabs.com/v1/eth/snapshot"],
     ["public v4", "http://93.184.216.34/x"],
     ["172.32 is public", "http://172.32.0.1/x"],
+    // IPv6 の ULA 判定をホスト名に当てると、これらを**誤検知**する（自己検証で発見）。
+    ["public host starting fc", "https://fcm.googleapis.com/x"],
+    ["public host starting fd", "https://fd-cdn.example.com/x"],
   ])("stays quiet for %s", (_label, url) => {
     expect(warningsFor({ r1: url })).toHaveLength(0);
+  });
+
+  it.each([
+    ["ULA fd00::/8", "http://[fd00::1]/x"],
+    ["link-local fe80::/10", "http://[fe80::1]/x"],
+  ])("still warns for %s", (_label, url) => {
+    expect(warningsFor({ r1: url })).toHaveLength(1);
   });
 
   it("names the route but never the URL or host", () => {

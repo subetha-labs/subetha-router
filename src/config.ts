@@ -426,7 +426,9 @@ export function assertAbsoluteHttpUrl(raw: string, at: string, allowQuery = fals
     throw new ConfigError(`${at} must not carry userinfo`);
   }
   // fragment はサーバへ送られないので、設定値に書かれていれば設定ミス。
-  if (url.hash !== "") {
+  // **空の fragment（末尾 `#`）は `url.hash` が空文字**になるため、
+  // パース結果ではなく**生の文字列に区切り子があるか**で見る（レビュー指摘4）。
+  if (url.hash !== "" || raw.includes("#")) {
     throw new ConfigError(`${at} must not carry a fragment`);
   }
   return url.toString();

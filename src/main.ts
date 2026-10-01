@@ -301,6 +301,10 @@ function evidenceLabelOf(config: RuntimeConfig, capabilities: RouterCapabilities
  * 守っているのは**運用者の設定ミス**であり、検出と可視化で足りる。
  * 攻撃者が URL を選べる構成に進むときは、DNS 解決後・接続時の強制を別途設計する。
  *
+ * **アドレスの prefix 判定は IP リテラルにだけ当てる。** ホスト名に当てると
+ * `10.example.com` や `fcm.googleapis.com` のような**正当な公開ホストを誤検知**する
+ * （レビューと自己検証の両方で発見）。DNS 名は suffix 規則で別に見る。
+ *
  * 判定はホスト名の文字列のみ。**DNS は引かない**ので、
  * 公開名が内部アドレスに解決する場合は検出できない（既知の限界）。
  */
@@ -315,21 +319,32 @@ export function warnIfInternalUpstream(
     } catch {
       continue; // 形が壊れた URL は設定検証が別途弾く。
     }
-    const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-    const internal =
-      bare === "localhost" ||
-      bare.endsWith(".localhost") ||
-      bare.endsWith(".internal") ||
-      bare === "::1" ||
-      bare.startsWith("127.") ||
-      bare.startsWith("10.") ||
-      bare.startsWith("192.168.") ||
-      bare.startsWith("169.254.") ||
-      bare.startsWith("fe80:") ||
-      bare.startsWith("fc") ||
-      bare.startsWith("fd") ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(bare);
-    if (internal) {
+    // `new URL()` は IPv6 を角括弧付きで返す。中身だけを見る。
+    const bracketed = host.startsWith("[") && host.endsWith("]");
+    const bare = bracketed ? host.slice(1, -1) : host;
+
+    // IPv4 リテラル（4 オクテット）だけを prefix 判定の対象にする。
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
+    const privateV4 =
+      v4 !== null &&
+      ((): boolean => {
+        const [a, b] = [Number(v4[1]), Number(v4[2])];
+        return (
+          a === 127 || a === 10 || (a === 192 && b === 168) || (a === 169 && b === 254) ||
+          (a === 172 && b >= 16 && b <= 31)
+        );
+      })();
+
+    // IPv6 リテラルは**コロンを含む形**だけで判定する。
+    const privateV6 =
+      bare.includes(":") &&
+      (bare === "::1" || bare.startsWith("fe80:") || /^f[cd][0-9a-f]{0,2}:/.test(bare));
+
+    // DNS 名は suffix 規則で別に見る（prefix は使わない）。
+    const internalName =
+      bare === "localhost" || bare.endsWith(".localhost") || bare.endsWith(".internal");
+
+    if (privateV4 || privateV6 || internalName) {
       // **URL もホスト名も出さない**（`docs/DEPLOY.md` の方針）。route だけ示す。
       write(`warning: upstream for route ${routeId} points at an internal address\n`);
     }

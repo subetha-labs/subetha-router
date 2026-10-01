@@ -32,8 +32,12 @@ describe("upstream URL rules", () => {
     expect(() => assertAbsoluteHttpUrl(raw, "at")).toThrow(/userinfo/);
   });
 
-  it("rejects a fragment", () => {
-    expect(() => assertAbsoluteHttpUrl("https://example.com/x#frag", "at")).toThrow(/fragment/);
+  it.each([
+    ["named fragment", "https://example.com/x#frag"],
+    // 末尾 `#` は `URL.hash` が空文字になるので、パース結果だけ見ると漏れる。
+    ["empty fragment", "https://example.com/x#"],
+  ])("rejects a %s", (_label, raw) => {
+    expect(() => assertAbsoluteHttpUrl(raw, "at")).toThrow(/fragment/);
   });
 
   it("still rejects a query when allowQuery is false", () => {
