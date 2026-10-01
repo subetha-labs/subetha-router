@@ -1,5 +1,5 @@
 #!/bin/bash
-# subetha-egress-verify: run the acceptance protocol of docs/ssrf-egress-design.md §23 on the
+# subetha-egress-verify: run the acceptance protocol of docs/ssrf-egress-design.md §25 on the
 # host and print evidence for every item. Exit status is non-zero if any item fails, including
 # a failed restoration at the end. Every required observation is a gate: instrumentation that
 # fails to start, a setup step that fails, a command whose status cannot be read, or an observer
@@ -135,7 +135,13 @@ hobs_start() { hobs_stop; : > /var/tmp/egress-verify-hobs.log
   echo $! > /var/tmp/egress-verify-hobs.pid
   for i in $(seq 1 50); do HSESSION=$(obs_health "$(hobs_url)") && [ -n "$HSESSION" ] && return 0; sleep 0.2; done
   echo "host observer did not become ready (/health)" >&2; return 1; }
-hobs_stop() { [ -f /var/tmp/egress-verify-hobs.pid ] && { kill "$(cat /var/tmp/egress-verify-hobs.pid)" 2>/dev/null; rm -f /var/tmp/egress-verify-hobs.pid; }; return 0; }
+HOBS_PID=""
+hobs_stop() { # terminate the host observer and prove it is gone (bounded wait); non-zero if it survives
+  [ -f /var/tmp/egress-verify-hobs.pid ] || return 0
+  local pid i; pid=$(cat /var/tmp/egress-verify-hobs.pid); HOBS_PID=$pid; rm -f /var/tmp/egress-verify-hobs.pid
+  kill "$pid" 2>/dev/null
+  for i in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || { HOBS_PID=""; return 0; }; sleep 0.2; done
+  echo "host observer pid $pid still alive after SIGTERM" >&2; return 1; }
 hobs_seq() { obs_field "$(hobs_url)" seq_last "$HSESSION"; }
 hobs_accepts() { obs_count "$(hobs_url)" "$1" "$HSESSION" accept; }
 hobs_lines() { obs_count "$(hobs_url)" "$1" "$HSESSION" line "${2:-}"; }
@@ -279,13 +285,26 @@ host_addresses() {
   done
   obs_settle "$(hobs_url)" "$HSESSION" >/dev/null || ng V7-2 "host observer did not settle"
   zero_accepts V7-2 "host observer during the host-address probes" "$(hobs_url)" "$s0" "$HSESSION" && control_after V7-2 "host observer control" "$(hobs_url)" "$ZA_SEQ" "$HSESSION" "http://127.0.0.1:$OBS_PORT/"
-  local tok pub; tok=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)
-  if [ -n "$tok" ]; then
-    pub=$(curl -s -m 2 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
-    if [ -n "$pub" ]; then echo " $(env_value HOST_ADDRS4) " | grep -q " $pub " && ok V7-2 "public IPv4 $pub is in HOST_ADDRS4" || ng V7-2 "public IPv4 $pub is NOT in HOST_ADDRS4 (hairpin via the gateway stays open)"
-    else note V7-2 "instance has no public IPv4"; fi
-  else [ "${ALLOW_NO_IMDS:-0}" = 1 ] && note V7-2 "IMDS not reachable from the host: public-address inventory not verifiable here (waived by ALLOW_NO_IMDS=1, test environments only)" || ng V7-2 "IMDS not reachable from the host: the public-address inventory cannot be verified (on EC2 this must succeed; set HttpTokens=required, not the endpoint disabled)"; fi
-  obs_save "$(hobs_url)" host-addresses; hobs_stop
+  # public-address inventory: both IMDSv2 requests must succeed at the transport and HTTP level;
+  # 404 on public-ipv4 is the only positive proof of "no public address"; any other outcome is a
+  # lookup failure. The waiver covers only a host where the token request itself cannot reach IMDS.
+  imds() { # $1 path, [$2 token] -> "<http code> <body>" or "ERR <reason>"
+    local out code; if [ -n "${2:-}" ]; then out=$(curl -s -m 3 -w '\n%{http_code}' -H "X-aws-ec2-metadata-token: $2" "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }
+    else out=$(curl -s -m 3 -w '\n%{http_code}' -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }; fi
+    code=$(printf '%s' "$out" | tail -n1); printf '%s %s' "$code" "$(printf '%s' "$out" | sed '$d')"; }
+  local tr tok pr; tr=$(imds api/token)
+  case "$tr" in
+    "200 "?*) tok=${tr#200 }; pr=$(imds meta-data/public-ipv4 "$tok")
+      case "$pr" in
+        "200 "?*) local pub=${pr#200 }; python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$pub" 2>/dev/null || { ng V7-2 "IMDS returned a public-ipv4 that is not an IPv4 address: '$pub'"; pub=""; }
+          [ -n "$pub" ] && { echo " $(env_value HOST_ADDRS4) " | grep -q " $pub " && ok V7-2 "public IPv4 $pub (IMDS, HTTP 200) is in HOST_ADDRS4" || ng V7-2 "public IPv4 $pub (IMDS) is NOT in HOST_ADDRS4 (hairpin via the gateway stays open)"; } ;;
+        "404 "*|404) [ "$(env_value HOST_ADDRS4)" = none ] && ok V7-2 "IMDS says this instance has no public IPv4 (HTTP 404) and HOST_ADDRS4=none" || note V7-2 "IMDS says no public IPv4 (HTTP 404); HOST_ADDRS4 lists $(env_value HOST_ADDRS4) (extra entries are harmless)" ;;
+        *) ng V7-2 "IMDS public-ipv4 lookup failed after a successful token ($pr): the public-address inventory cannot be verified" ;;
+      esac ;;
+    "ERR transport") [ "${ALLOW_NO_IMDS:-0}" = 1 ] && note V7-2 "IMDS not reachable from the host: public-address inventory not verifiable here (waived by ALLOW_NO_IMDS=1, test environments only)" || ng V7-2 "IMDS not reachable from the host: the public-address inventory cannot be verified (on EC2 this must succeed)" ;;
+    *) ng V7-2 "IMDS token request failed ($tr): the public-address inventory cannot be verified" ;;
+  esac
+  obs_save "$(hobs_url)" host-addresses; hobs_stop || ng V7-2 "host observer did not terminate"
   local h; h=$(curlx "$HEALTH_URL" 3)
   [ "${h#* }" = 200 ] && ok V7-16 "loopback $HEALTH_URL from inside the namespace: 200 (namespace-local; A's scope)" || note V7-16 "loopback from inside the namespace: '$h' (HEALTH_URL=$HEALTH_URL)"
 }
@@ -341,7 +360,7 @@ atomicity() {
   [ "$inloop" -ge 50 ] && ok V7-10 "$inloop SYNs from the namespace were on the veth within the reapply loop interval [$l0, $l1] (inclusive, host clock, fractional seconds; membership in the interval, not per-commit overlap)" || ng V7-10 "only $inloop SYNs fell inside the reapply loop window (hammer and loop did not overlap)"
   obs_settle "$(hobs_url)" "$HSESSION" >/dev/null || ng V7-10 "host observer did not settle"
   zero_accepts V7-10 "host observer during the reapplies" "$(hobs_url)" "$s0" "$HSESSION" && control_after V7-10 "host observer control after the hammer" "$(hobs_url)" "$ZA_SEQ" "$HSESSION" "http://127.0.0.1:$OBS_PORT/"
-  obs_save "$(hobs_url)" atomicity; hobs_stop
+  obs_save "$(hobs_url)" atomicity; hobs_stop || ng V7-10 "host observer did not terminate"
   echo "== V7-14 IPv6 =="
   local d; d=$(docker exec "$NS" cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6 2>/dev/null)
   [ "$d" = 1 ] && ok V7-14 "IPv6 disabled inside the namespace (disable_ipv6=1): no IPv6 traffic can originate" || ng V7-14 "IPv6 enabled inside the namespace (disable_ipv6=$d): IPv6 enforcement is not covered by this runner"
@@ -360,13 +379,13 @@ adv_cleanup() { # restore everything the adversarial mode may have altered; ever
   while read -r r; do [ -n "$r" ] || continue; iptables -t nat ${r/-A/-D} || bad=1; done <<< "$(printf '%s\n' "$rules" | grep -- "-d $A/32")"
   ip -4 -o addr show dev "$UPLINK" 2>/dev/null | grep -q "$A/32" && { ip addr del $A/32 dev "$UPLINK" || bad=1; }
   local c; for c in egress-verify-target egress-verify-stream egress-verify-hammer egress-verify-standin; do docker rm -f "$c" >/dev/null 2>&1; done
-  rm -rf "$SHIM"; hobs_stop
+  rm -rf "$SHIM"; hobs_stop || bad=1
   "$SCRIPT" apply >/dev/null 2>&1 || bad=1; "$SCRIPT" check >/dev/null 2>&1 || bad=1
   guard_resume || bad=1; [ "$(systemctl is-active subetha-egress-guard.timer)" = active ] || bad=1
   rules=$(iptables -t nat -S PREROUTING) || bad=1; printf '%s\n' "$rules" | grep -q -- "-d $A/32" && bad=1
   addrs=$(ip -4 -o addr show dev "$UPLINK") || bad=1; printf '%s\n' "$addrs" | grep -q "$A/32" && bad=1
   names=$(docker ps -a --format '{{.Names}}') || bad=1; printf '%s\n' "$names" | grep -qE '^egress-verify-' && bad=1
-  [ -e "$SHIM" ] && bad=1; [ -f /var/tmp/egress-verify-hobs.pid ] && bad=1
+  [ -e "$SHIM" ] && bad=1; [ -f /var/tmp/egress-verify-hobs.pid ] && bad=1; [ -n "$HOBS_PID" ] && kill -0 "$HOBS_PID" 2>/dev/null && bad=1
   local mg; mg=$(iptables -t mangle -S) || bad=1; printf '%s\n' "$mg" | grep -qE 'SUBETHA-EGRESS-BYPASS|--dport 6500[01] ' && bad=1
   [ "$bad" = 0 ] && ok V7-17 "restoration verified by fresh queries: env restored, no nat rule or alias for $A, no egress-verify-* container, shim dir and host observer gone, no sabotage rule or look-alike chain, policy verified, timer active" || ng V7-17 "restoration after the adversarial items incomplete; inspect the host"
 }
@@ -444,10 +463,21 @@ adversarial() {
   echo "-- V7-17 regression: an accept slipped between a zero verdict and its control must be detected"
   hobs_start || ng V7-17 "host observer not ready"
   s0=$(hobs_seq); if zero_accepts V7-17 "host observer (regression baseline)" "$(hobs_url)" "$s0" "$HSESSION"; then
-    curl -s -m 2 -o /dev/null "http://127.0.0.1:$OBS_PORT/"   # the slipped, unmarked accept
-    local f0=$fail; control_after V7-17 "regression control" "$(hobs_url)" "$ZA_SEQ" "$HSESSION" "http://127.0.0.1:$OBS_PORT/" >/dev/null
-    if [ "$fail" -gt "$f0" ]; then fail=$f0; ok V7-17 "regression: the control gate rejected the window with an unmarked accept slipped in (2 accepts since the verdict's seq)"; else ng V7-17 "regression: the control gate did not detect an accept slipped between verdict and control"; fi; fi
-  hobs_stop
+    local b=$ZA_SEQ sl ctl rv
+    sl=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OBS_PORT/")                      # the slipped, unmarked accept
+    ctl=$(curl -s -m 2 -o /dev/null -w '%{http_code}' -H 'X-Control: host' "http://127.0.0.1:$OBS_PORT/"); sleep 0.5
+    rv=$(obs_verdict "$(hobs_url)" "$b" "$HSESSION" X-Control)
+    case "$rv" in ERR*) ng V7-17 "regression: instrumentation failure ($rv)" ;;
+      *) [ "$sl" = 200 ] && [ "$ctl" = 200 ] && [ "$(vf "$rv" accepts)" = 2 ] && [ "$(vf "$rv" marked)" -ge 1 ] && ok V7-17 "regression: with an unmarked accept slipped in, one report since the verdict's seq $b shows 2 accepts (1 marked); the control predicate (exactly 1) rejects this window" || ng V7-17 "regression: injected=$sl control=$ctl report=$rv" ;; esac; fi
+  hobs_stop || ng V7-17 "host observer did not terminate after the regression"
+  echo "-- V7-17 cleanup-failure injection: a process that ignores SIGTERM must make the observer teardown fail"
+  rm -f /var/tmp/egress-verify-zombie.ready
+  python3 -c 'import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path("/var/tmp/egress-verify-zombie.ready").touch(); time.sleep(120)' & local zp=$!
+  local zi; for zi in $(seq 1 50); do [ -f /var/tmp/egress-verify-zombie.ready ] && break; sleep 0.1; done   # handler installed before the signal is sent
+  if [ -f /var/tmp/egress-verify-zombie.ready ]; then echo "$zp" > /var/tmp/egress-verify-hobs.pid
+    if hobs_stop 2>/dev/null; then ng V7-17 "cleanup injection: teardown reported success although the process ignored SIGTERM"; else ok V7-17 "cleanup injection: teardown reports failure when the process survives SIGTERM (pid $zp)"; fi
+  else ng V7-17 "cleanup injection: stand-in process never became ready"; fi
+  kill -9 "$zp" 2>/dev/null; wait "$zp" 2>/dev/null; HOBS_PID=""; rm -f /var/tmp/egress-verify-zombie.ready
   echo "-- V7-3 host alias $A (outside every deny range) and V7-4 same-bridge hairpin"
   hobs_start || ng V7-3 "host observer not ready"   # stays up through V7-9
   iptables -t mangle -D SUBETHA-EGRESS -d $A/32 -j DROP 2>/dev/null
@@ -488,7 +518,7 @@ adversarial() {
   ct=$(printf '%s\n' "$ctl" | grep "src=$rip " | grep -c "dport=$OBS_PORT ")
   docker rm -f egress-verify-stream >/dev/null 2>&1
   [ "$before" -ge 2 ] && [ "$after" = 0 ] && [ "$ct" -ge 1 ] && ok V7-9 "existing flow: $before ticks arrived before apply, 0 after; its conntrack entry is still present ($ct) -- ORIGINAL-direction packets are dropped regardless of state" || ng V7-9 "existing flow: ticks before=$before after=$after conntrack=$ct"
-  obs_save "$(hobs_url)" adversarial; hobs_stop
+  obs_save "$(hobs_url)" adversarial; hobs_stop || ng V7-9 "host observer did not terminate"
   echo "-- V7-13 guard recovery (best effort; the policy is absent until the timer fires)"
   guard_resume; iptables -t mangle -F SUBETHA-EGRESS; local tg; tg=$(date +%s)
   while ! "$SCRIPT" check >/dev/null 2>&1; do sleep 2; [ $(( $(date +%s) - tg )) -gt 90 ] && break; done

@@ -1078,10 +1078,10 @@ v7 の 5 件のうち 1・3・5 は構造的に解決、2 は主要経路が解�
 | 1 | hammer と host-address 試験は `zero_accepts` の report を捨て、**別の report** から制御カーソルを取る。その間に入った accept は数えられない（mock で再現: 2 PASS / 0 FAIL） | **正しい** | `zero_accepts` が判定に使った report の `seq` を `ZA_SEQ` に出し、`control_after` は**その seq 以降**に「accept がちょうど 1 件で `X-Control` 付き」を要求。post-boot も同じ契約。**regression** を adversarial に追加: 判定と制御の間に無印の accept を 1 件入れると gate が拒否することを確認 | 63 |
 | 2 | post-boot は `host` 宛て probe の結果を一切 assert していない（`host 3 000` でも 3 PASS）。probe 生成時の `$(gateway_ip)` を検査していない | **正しい** | prepare で gateway を IPv4 として検証し、両 target を記録。post-boot は **deny と host の両方**について「最初の試行が 28、全試行が 28、成功 0、その他の status 0（計測器故障）、試行 ≥1」を要求 | 66 |
 | 3 | observer の backlog が同一ポートの別 listener（IPv6 等）の行を拾い得る | 正しい（non-blocking） | `ss -4` で IPv4 に限定し、LISTEN 行が**ちょうど 1**でなければ `unsupported`（曖昧）として扱う | — |
-| 4 | cleanup の主張が検査より広い（一部操作の status を捨てる、shim/observer/sabotage 規則の最終確認が無い） | 正しい（non-blocking） | 最終 inventory に shim ディレクトリ・observer プロセス・sabotage 規則（`--dport 6500x`）・look-alike chain の不在を追加し、文言を検査した内容に限定。注入した cleanup 失敗の試験は未実施（残余） | — |
+| 4 | cleanup の主張が検査より広い（一部操作の status を捨てる、shim/observer/sabotage 規則の最終確認が無い） | 正しい（non-blocking） | 最終 inventory に shim ディレクトリ・sabotage 規則（`--dport 6500x`）・look-alike chain の不在と observer の **pid ファイル**の不在を追加し、文言を検査した内容に限定。**observer プロセスの終了自体は v9 では確認していない**（レビュー #9 が指摘 → v10 で bounded wait + 注入試験） | — → v10 |
 | 5 | §20 の #5 と reboot cleanup の参照が実測 60（python の引用符の件）を指していた（正しくは 61）。#4 の記述が完了を過大評価 | 正しい | §20 を訂正 | — |
 
-non-blocking で取り込んだもの: IMDS 不達は FAIL（`ALLOW_NO_IMDS=1` は試験環境専用）、probe の identity 取得時に `Running=true` も要求。
+non-blocking で取り込んだもの: IMDS **不達**は FAIL（`ALLOW_NO_IMDS=1` は試験環境専用）、probe の identity 取得時に `Running=true` も要求。**ただし v9 は token 取得後の public-ipv4 取得失敗を「公開 IP 無し」と解釈していた**（レビュー #9 の blocking → v10）。
 レビュアの結論: 「文書化した前提の下で、`apply`/`check`/`guard` が弱い policy のまま成功を報告する新たな経路は見つからなかった」。
 
 ## 23. 設計 v9（現行。§21 のうち以下で言い直した部分を置き換える）
@@ -1124,4 +1124,56 @@ non-blocking で取り込んだもの: IMDS 不達は FAIL（`ALLOW_NO_IMDS=1` �
 ### 23.4 成果物
 
 `deploy/egress/`: `subetha-egress`（v8）、`subetha-egress-verify`（v7）、`egress-observer.py`（v5）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
+`subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
+
+## 24. 設計レビュー #9（v9、`41d039b`）: **REJECT** → v10 で応答
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。blocking 1 件、non-blocking 2 件。v8 の 2 件の blocking（制御カーソル、host target）は**構造的に解決**、backlog の束縛も解決。
+
+| # | 指摘（要約） | 判定 | v10 での応答 | 実測 |
+|---|---|---|---|---|
+| 1 | IMDS の両要求が curl の transport/HTTP status を捨てる。token 取得成功後に `public-ipv4` が timeout すると「公開 IP 無し」の INFO になり、`HOST_ADDRS4=none` が未掲載の公開 IP を持つ host で通る（mock で再現） | **正しい**（blocking） | 両要求で transport と HTTP status を検査。`public-ipv4` は **HTTP 200 + IPv4 として妥当**なら目録と照合、**HTTP 404 だけ**を「公開 IP 無し」の証明とし、それ以外は FAIL。`ALLOW_NO_IMDS=1` は **token 要求自体が到達不能**な場合（非 EC2）だけを INFO にし、token 成功後の失敗は免除しない | 68 |
+| 2 | regression が「`fail` が増えた」ことを検出成功と解釈し、`obs_verdict` が `ERR` でも PASS になる | 正しい（non-blocking） | 注入接続と制御接続の HTTP 200 を要求し、**1 つの session 束縛 report** から「accept ちょうど 2 件・うち marked ≥1」を直接 assert。`ERR` は FAIL のまま | 69 |
+| 3 | `hobs_stop` が `kill` の失敗を無視し pid ファイルを消すので、「observer gone」が証明されない | 正しい（non-blocking） | `hobs_stop` は pid を保持して **終了を bounded wait（5 秒）で確認**、生き残れば非 0。最終 inventory は pid への `kill -0` 失敗を要求。**注入試験**: SIGTERM を無視するプロセスを observer として登録し、teardown が失敗を報告することを確認 | 69 |
+
+AL2023 の受け入れ条件は変わらず（全モード、Linux の外部 observer + `ss`、免除なし、証拠と設置物の記録）。
+
+## 25. 設計 v10（現行。§23 のうち以下で言い直した部分を置き換える）
+
+> 成果物は `deploy/egress/` の v10（スクリプト v8 のまま、runner v8、observer v5 のまま）。実測 67〜71 は runner v8 の出力。
+
+### 25.1 差分
+
+| 項目 | v10 |
+|---|---|
+| 公開アドレス目録（IMDS） | token と `public-ipv4` の両要求で transport と HTTP status を検査。`200` + IPv4 として妥当 → `HOST_ADDRS4` と照合。**`404` のみ**「公開 IP 無し」の証明。それ以外（timeout、他の status、不正な本文）は FAIL。`ALLOW_NO_IMDS=1` は token 要求が**到達不能**な場合だけ INFO（非 EC2 の試験環境） |
+| regression | 注入接続と制御接続の HTTP 200 を要求し、**1 つの session 束縛 report** から「accept 2 件・marked ≥1」を直接 assert。`ERR` は FAIL |
+| observer の終了 | `hobs_stop` は pid を保持し、SIGTERM 後 5 秒以内の終了を `kill -0` で確認。生き残れば非 0（呼び出し側は FAIL）。最終 inventory は保持した pid への `kill -0` 失敗を要求 |
+| cleanup 失敗の注入試験 | SIGTERM を無視するプロセス（ハンドラ設置を ready ファイルで同期）を observer として登録し、teardown が失敗を報告することを確認 |
+
+### 25.2 実測 67〜71
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 67 | runner v8 既定モード | **64 PASS / 0 FAIL / 5 INFO**。IMDS は token 要求が到達不能 → `ALLOW_NO_IMDS=1` で INFO（VM には IMDS が無い） |
+| 68 | IMDS gate の分岐（コード） | `200`+IPv4 / `404` / それ以外 / token 不達、の 4 分岐。本番 host での実測は AL2023 受け入れ時 |
+| 69 | runner v8 `--adversarial`（1 回目） | 63/1: cleanup 注入試験が**競合**で失敗（python がハンドラを設置する前に SIGTERM が届き、普通に終了した）→ ready ファイルで同期 |
+| 70 | runner v8 `--adversarial`（修正後）、`--fail-closed` | **64 PASS / 0 FAIL / 2 INFO**（regression は 1 report で accept 2・marked 1、cleanup 注入は teardown が失敗を報告）、fail-closed **3 PASS**。終了後に observer プロセス残存 0（自分の ssh を除外した pgrep） |
+| 71 | reboot（runner v8、`colima restart`） | **post-boot 20 PASS / 0 FAIL / 2 INFO、cleanup 1 PASS**。boot id 変化、設定一致、外部 session 不変（カーソル seq 21）、host observer 1 invocation、捕捉 1 invocation。monotonic: observers 2.54/2.76 s → `applied` **2.90 s** → `Loading containers` **2.97 s**。**deny 52/52、host 52/52 が timeout**、成功 0、その他 0。1 report で外部 accept 0（backlog は Mac で `ss` 無し → INFO）、host accept 0・backlog 0。conntrack 0。boot〜静止の probe ポート SYN 0。制御は最終 report のカーソル以降に 1 SYN ↔ 1 accept（`X-Control`）、host observer も 1。終了時の identity 不変。cleanup は fresh query で検証 |
+
+### 25.3 残余
+
+- **AL2023 は未実測**。受け入れは本番 host で runner v8 の全モード `failed 0`、**`ALLOW_NO_BACKLOG` / `ALLOW_NO_IMDS` なし**（外部 observer は VPC 内の Linux host、`ss` あり。IMDS は token 取得と `public-ipv4` の `200`/`404` が実測される）。証拠ディレクトリと設置した成果物・設定を保存する
+- DNS の出所は Docker 28.3.3 で実測。V7-8 が稼働版で再測定する
+- boot 時の tcpdump EACCES（§13.6）は原因未特定（`-Z root` で回避）
+- `userland-proxy=false`、IPv6 有効化、`iptables` 以外の backend、任意名 bridge は runner が FAIL にする
+- guard の窓は閉じない（運用条件「Router 稼働中に firewall を触らない」）
+- hammer の「重なり」はループ区間内の SYN の存在であり、各コミットとの重なりではない
+- accept 数と backlog は「socket 層に受理された接続」の証拠であり、packet の到達履歴ではない。届いて応答されなかった SYN は host 側の捕捉（往路のみ）と conntrack 不在（snapshot）で見る
+- `remove` の「不在」判定は `No chain` という診断文字列に依存する（ロケールで異なれば保守的に失敗する）
+- 注入した cleanup 失敗の試験は observer の teardown についてのみ（他の cleanup 操作は最終 inventory で担保）
+
+### 25.4 成果物
+
+`deploy/egress/`: `subetha-egress`（v8）、`subetha-egress-verify`（v8）、`egress-observer.py`（v5）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
 `subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
