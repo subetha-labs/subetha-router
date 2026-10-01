@@ -1,0 +1,128 @@
+# 設計: SSRF 防御 B（インフラ側 egress 制御）
+
+> 2026-10-01。要件は `ssrf-requirements.md` §8（限定レビューで承認）。
+> 実現手段 B（インフラ側）を採る。**Router のコードは変更しない。**
+> 成果物は `DEPLOY.md` の手順と、§8.2 の受け入れ不変条件を満たす**検証手順**。
+
+## 1. 実測に基づく前提（ローカル Docker 28.3.3 / iptables backend / Ubuntu 24.04）
+
+設計を文書の引用ではなく実測に置く。本番と同じ backend（`Firewall Backend: iptables`）で確認した。
+
+| # | 実測 | 結果 | 設計への含意 |
+|---|---|---|---|
+| 1 | `DOCKER-USER` に DROP を置き、コンテナから**転送される**宛先へ接続 | カウンタ **0 → 3〜4 pkts**（SYN 再送） | **`DOCKER-USER` は転送トラフィックを確実に止める** |
+| 2 | 同じ DROP を **host 自身**（`172.17.0.1`）宛てに置く | 「Connection refused」、**カウンタ 0** | **host 宛ては `FORWARD` を通らない**。`INPUT` で別に止める必要がある |
+| 3 | 経路の無い宛先（`10.255.255.1`）へ接続 | 即時失敗、**規則に到達しない** | 経路が無い宛先はカーネルが落とす。**規則の試験には転送される宛先を使う** |
+| 4 | DROP / REJECT(icmp-admin-prohibited) / 規則なし を `curl` で計時 | DROP **4s timeout** / REJECT **4s timeout** / なし **0.0006s refused** | **コンテナ内から DROP と REJECT は区別できない**。ICMP が戻らない。→ FR-C1' を実証: Router は遮断を報告できず、**証拠はカウンタだけ** |
+| 5 | bridge の IPv6 | `EnableIPv6: false` | 既定では IPv6 egress が無い。**有効化したら ip6tables 側も同じ規則が要る** |
+
+実測 4 は要件 §8.4 の「drop はタイムアウトに見える」を**裏付けた**。
+REJECT にしても改善しないので、**DROP で統一**する（REJECT は余計な ICMP を生むだけ）。
+
+## 2. 方針: 禁止リスト（deny）であって許可リストではない
+
+| 方式 | 内容 | 判断 |
+|---|---|---|
+| **deny（採用）** | 内部・特殊用途の宛先だけを落とし、それ以外は通す | INV-1 が求めるのはこれ。新しい Provider を足しても規則を触らない |
+| allow（不採用・将来） | Alchemy / Tempo RPC / 各 Provider だけを許す | 強いが、**Provider を足すたびに規則が要る**。Provider の IP は CDN で変動する |
+
+deny を採る根拠: 脅威は「内部に到達される」ことであり、「外部のどこへ行くか」ではない（要件 §7.1 の訂正「未認可の到達が違反」）。
+**allow は将来の強化として記録**し、今は採らない。
+
+## 3. 規則（iptables backend）
+
+### 3.1 転送トラフィック（`DOCKER-USER`）
+
+```sh
+# 冪等: 自前チェーンを作り DOCKER-USER から 1 回だけ呼ぶ
+sudo iptables -N SUBETHA-EGRESS 2>/dev/null || sudo iptables -F SUBETHA-EGRESS
+sudo iptables -C DOCKER-USER -j SUBETHA-EGRESS 2>/dev/null || sudo iptables -I DOCKER-USER 1 -j SUBETHA-EGRESS
+
+# 対象はコンテナ発の転送（docker0 から出るもの）に限る。戻りパケットは通す
+sudo iptables -A SUBETHA-EGRESS ! -i docker0 -j RETURN
+sudo iptables -A SUBETHA-EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+# 禁止宛先（要件 FR-A1 の IPv4 部分。未掲載の special-purpose は既定で拒否 = ここに足す）
+for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 \
+           172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 \
+           224.0.0.0/4 240.0.0.0/4; do
+  sudo iptables -A SUBETHA-EGRESS -d "$net" -j DROP
+done
+sudo iptables -A SUBETHA-EGRESS -j RETURN
+```
+
+**`169.254.0.0/16` に IMDS（`169.254.169.254`）が含まれる。** 段階 0 がトークン取得を止め、
+この規則が**到達そのもの**を止める。二重になるが、守る層が違う（段階 0 は IMDS 固有、これは経路）。
+
+### 3.2 host 宛て（`INPUT`）— 実測 2 で必要と確定
+
+```sh
+# コンテナからホスト自身への到達を止める（docker0 から INPUT に入るもの）
+# ただし DNS（ホストの resolver を使う場合）は通す — INV-1 の唯一の例外
+sudo iptables -N SUBETHA-FROM-CONTAINER 2>/dev/null || sudo iptables -F SUBETHA-FROM-CONTAINER
+sudo iptables -C INPUT -i docker0 -j SUBETHA-FROM-CONTAINER 2>/dev/null || \
+  sudo iptables -I INPUT 1 -i docker0 -j SUBETHA-FROM-CONTAINER
+sudo iptables -A SUBETHA-FROM-CONTAINER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+sudo iptables -A SUBETHA-FROM-CONTAINER -p udp --dport 53 -j RETURN   # 承認済みリゾルバ（ホスト）への DNS
+sudo iptables -A SUBETHA-FROM-CONTAINER -p tcp --dport 53 -j RETURN
+sudo iptables -A SUBETHA-FROM-CONTAINER -j DROP
+```
+
+**注意**: Caddy はホスト上で動き、`127.0.0.1:8787` の Router へは**ホスト → コンテナ**方向（`-p 127.0.0.1:8787:8787`）。
+この規則は**コンテナ → ホスト**方向だけを止めるので、Caddy からの到達は影響を受けない。
+**実測で確認する項目**（§5）。
+
+### 3.3 IPv6
+
+bridge の IPv6 は既定で無効（実測 5）。**有効にする場合のみ**、`ip6tables` に同じ構造で
+`::1/128`、`fc00::/7`、`fe80::/10`、`::ffff:0:0/96`、`64:ff9b::/96`、`ff00::/8` を置く。
+手順書には「IPv6 を有効化したら必須」と明記し、既定では入れない。
+
+### 3.4 永続化
+
+`iptables` の規則は再起動で消える。**Docker が起動する前に適用される必要はない**
+（`DOCKER-USER` は Docker が作るので、**Docker 起動後**に入れる）。
+→ systemd の `docker.service` に **`ExecStartPost`** で上記スクリプトを呼ぶ drop-in を置く。
+`iptables-persistent` は Docker の規則と順序が競合するので**使わない**。
+
+## 4. nftables backend の場合
+
+**`DOCKER-USER` は存在しない**（要件 §8.2）。本番が nftables なら、
+`inet` テーブルに `forward` hook（priority を Docker より前）で同等の deny を置く。
+**本設計は iptables backend を実測した**。nftables は未実測なので、
+手順書には「backend を先に確認し、nftables なら本節は適用できない。別途設計する」と書く。
+
+確認コマンド: `docker info --format '{{.FirewallBackend}}'`（28.x）。
+
+## 5. 検証手順（要件 §8.2 の受け入れ不変条件）
+
+「`curl` が失敗した」では証拠にならない（実測 4: DROP も到達不能も同じに見える）。
+**証拠はカウンタ**。各項目で「接続試行 → 対応する DROP 規則の pkts が増えた」を確認する。
+
+| ID | 検証 | 期待 | 証拠 |
+|---|---|---|---|
+| V-1 | コンテナから `169.254.169.254` へ | 失敗 | `SUBETHA-EGRESS` の `169.254.0.0/16` 行の pkts **増加** |
+| V-2 | コンテナから `10.0.0.1`（VPC 内の別ホスト等、**転送される**宛先）へ | 失敗 | 対応行の pkts 増加 |
+| V-3 | コンテナからホスト `172.17.0.1:<任意>` へ | 失敗 | `SUBETHA-FROM-CONTAINER` の DROP の pkts 増加 |
+| V-4 | コンテナからホストの DNS（`172.17.0.1:53`）へ | **成功** | `dport 53` の RETURN 行の pkts 増加 |
+| V-5 | コンテナから Alchemy / Tempo RPC / Provider へ | **成功** | Router の `healthz` と quote が通る |
+| V-6 | Caddy → Router（`127.0.0.1:8787`） | **成功** | `curl https://router.subethalabs.com/healthz` |
+| V-7 | **再起動後**に V-1〜V-6 を再実行 | 同じ | 永続化の証明 |
+| V-8 | DNS rebinding の模擬: 公開名を内部 IP に解決させて接続 | 失敗 | 宛先 IP の行の pkts 増加（**名前でなくアドレスで落ちる**ことの証明） |
+
+V-8 が B の存在理由（rebinding を名前解決と無関係に止める）。
+V-5 と V-6 が「止めすぎていない」ことの証明で、**V-1〜V-3 と同じ重みで必須**。
+
+## 6. やらないこと
+
+- Router のコード変更（A は別設計）
+- allow リスト（§2）
+- nftables の実装（§4。未実測のまま手順を書かない）
+- `destination_blocked` の報告（実測 4 により不可能。`transport_failed` のまま）
+- 本番への適用（**手順書の作成まで**。適用は owner が実行する。このマシンに AWS 認証情報は無い）
+
+## 7. 未解決
+
+- **U-1** 本番の backend。`docker info` で確認するまで §3 か §4 かが決まらない
+- **U-2** ホストの resolver を使っているか（`/etc/resolv.conf` が `172.17.0.1` か外部か）。外部ならV-4 と `INPUT` の DNS 例外は不要になる
+- **U-3** VPC 内に Router が正当に到達すべき private アドレスがあるか（例: 同一 VPC の RPC ノード）。あれば `10.0.0.0/8` 一括 DROP が壊す。**展開固有のポリシー**として owner 確認
