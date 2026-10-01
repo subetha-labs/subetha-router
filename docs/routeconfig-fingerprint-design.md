@@ -215,3 +215,124 @@ API キーがクエリに入る運用は**そもそも現在も不可**。
 **警告出力の注意**: `DEPLOY.md:77` が「起動ログに URL を出さない」方針を定めている。
 → §3.2 の警告は**ホスト名も出さない**。「上流 URL が内部アドレスを指している」という
 事実のみを出力する（どの route かは `routeId` で示す）。
+
+## 8. 設計レビュー: **REJECT** — 設計を修正する
+
+レビュー実施: 2026-10-01、`gpt-6-astra`。**致命的 2 件**。両方とも実ソースで確認した。
+
+### 8.1 指摘1（blocking）: **設計が機能しない** — `store.ts` の変更が必須
+
+`intentFromCreated`（`store.ts:30-50`）は**フィールドを明示列挙**し、`patch` を spread しない。
+
+→ **`routeFingerprint` を journal に書いても Intent に復元されない。**
+さらに `store.ts:236` が **append 直後にこの再構築を呼ぶ**ので、
+**再起動を待たず作成直後に消える**。
+→ **全 intent が grandfather 経路に落ち、検査が一切機能しない。**
+
+§2.3 の「`store.ts` は変更しない」は**誤り**。
+
+**修正**:
+- `intentFromCreated` に `routeFingerprint` の**明示的な復元**を追加する
+- **欠落（legacy）と「存在するが不正」を区別する**。
+  不正値を silently legacy に落とさない（`journal.ts:188` は `patch` がオブジェクトかしか見ない）
+- **指紋は認証ではない**: 鍵無しハッシュなので journal を改変できる者には無意味。
+  journal 改変は**本機能の保証範囲外**（flock と単一 writer が別に守る）と明記する
+
+### 8.2 指摘2（high）: **grandfather は FR-17 の目的を壊す**
+
+**要件 §17.1 は「grandfather しない」と明記していた**のに、設計 §2.4 で勝手に覆していた。
+
+レビューが示した具体的な失敗:
+
+```
+quote(payTo=A) → 設定を payTo=B に変更 → 再起動 → 旧 quote で purchase
+  照合1 readAndMatchDestination: journal の A と上流の accepts を比較 → 上流がまだ A を出していれば一致
+  照合2 adapter 側の offer 比較: A 同士 → 一致
+→ 設定が B なのに A に払える
+```
+
+**私の「拒否しても保護は増えない」という主張は誤り**だった。
+既存の照合は**どちらも journal の A を基準にする**ので、設定変更を検出できない。
+
+**修正**: legacy intent（指紋欄が無い）に対しては、
+**復元可能な条件を現在の設定と照合する**:
+
+```
+legacy intent の purchase 時:
+  intent.destination.{scheme, network, asset} と selectedOffer.payTo を
+  現在の route.destination と比較する
+  → 不一致なら拒否
+```
+
+`Intent` には `destination.{quoted, asset, network, selectedOffer}` が復元されており
+（`store.ts:46-50`）、`selectedOffer.payTo` も含まれる。
+**指紋が無くても、設定との照合は可能**である。
+
+→ **「指紋があれば指紋で照合、無ければ復元可能な欄で照合」**とする。
+**無条件に通すことはしない。**
+
+### 8.3 指摘3: 「最大 60 秒」は誤り
+
+`approvalTtlMs` は**設定可能**（`config.ts:317`）で、
+offer の有効期間も 60 秒を超え得る（**MPP の既定は 600 秒**、`main.ts:265`）。
+再起動は**元の絶対期限を保持する**。
+
+→ §2.4 の「最大 60 秒待てば塞がる」を**撤回**。
+「設定変更後に未処理 quote を待つ」を緩和策とするなら、
+**その間 purchase を無効化する**必要がある（単に待つだけでは窓が開いたまま）。
+
+### 8.4 指摘4: 上流 URL 除外の論拠が不正確
+
+x402 の offer は `accepts[]` 由来で、**`resource.url` は offer に含まれない**
+（`x402.ts:309,316` は**現在の設定 URL** と照合する）。
+→ **完全に同一の `accepts` を出す別 Provider なら `stableJson` も一致する。**
+
+**ただし**: 同一 offer なら**受取先も金額も同じ**なので、
+**資金の宛先は変わらない**。
+→ **destination 条件に限定した FR-17 としては URL 除外は妥当**だが、
+**「Provider 差し替えを検出する」保護ではない**。この境界を明記する。
+
+「公開 URL の秘匿」は**非公開の指紋から除外する理由にならない**（論拠として不適切だった）。
+
+### 8.5 指摘6: 運用診断を潰す必要は無い
+
+既存の `quote_changed` は**受信成立後**に `terminalReason` として使われ（`orchestrator.ts:586`）、
+受信前のドリフトは `offer_changed`（`:445`）。
+→ `awaiting_payment` + `code: quote_changed` は**status と欄で区別可能**なので再利用は妥当。
+
+**ただし**: 値や URL を含まない固定文（例: `route configuration mismatch`）を
+**ログに出す**のは運用上有益で、設定を公開しない。
+→ **公開応答は `quote_changed`、ログは固定診断文**とする。
+
+### 8.6 レビューが確認した（修正不要）
+
+- **検査位置は正しい**（preflight は `:413`、上流読取 `:428`、verify `:474`、settle `:515`）。
+  代替の支払い入口は無い。
+  ただし「資金が動く前」は **Router 側の話**と限定すべき
+  （SubEtha の credential は**外部で既に broadcast された支払い**を表し得る、`subetha.ts:203`）
+- `canonicalPath` / `decimals` の除外は**妥当**
+- URL 検証は 3 呼び出し元と**互換**。**SubEtha の `allowQuery=true` は維持**すること
+- ホスト名のみの警告は**助言的検出として妥当**。DNS による false negative を明記する
+
+### 8.7 テスト計画の追加（指摘5）
+
+| 追加 | 内容 |
+|---|---|
+| T-1 | quote → **journal を閉じて再開** → `payTo` 変更 → 上流は旧 offer を出す → **拒否**。かつ **preflight / 上流読取 / verify / settle / pay の呼び出しが 0** |
+| T-2 | 同じ再起動で**設定不変**なら成立。**指紋が再構築を生き残る**ことを確認 |
+| T-3 | **legacy（指紋なし）× 設定変更** → 拒否 / **legacy × 設定不変** → 成立 |
+| T-4 | **指紋が不正値**（文字列でない等）→ legacy に落とさず拒否 |
+| T-5 | 指紋対象の**各欄**を個別に変更して拒否を確認（両レール） |
+| T-6 | **U-A**: `source.payTo` 不在（SubEtha）で**シリアライズ往復後も安定**。かつ destination 変更は拒否。x402/MPP の `source.payTo` 変更も個別に試験 |
+| T-7 | **同一 offer の Provider 差し替え** → 期待挙動（§8.4 の境界）を明示的に固定 |
+
+**sabotage 修正**:
+- 2 は **destination の `payTo`** を指定する
+- **3 を差し替え**: 「legacy を無条件に通す」改変を入れて T-3 が落ちることを確認
+- **4 を追加**: `intentFromCreated` から指紋の復元を削除して T-2 が落ちることを確認
+
+### 8.8 未検出の限界（明記する）
+
+**SubEtha は facilitator が `payTo` を発行する**ため（`subetha.ts:197`）、
+**設定由来の指紋では受取先の変化を検出できない**。
+FR-17 が守るのは**設定で宛先を固定しているレール**（x402 / MPP 送信）である。
