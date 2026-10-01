@@ -1270,3 +1270,18 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 80 | **改訂した移行スクリプト verbatim**（VM、現行ソースの image）。bind mount の旧 Router に対し sabotage A〜G、mount 無しの旧 Router（journal をコンテナ内に `docker cp -a`）に対し H、それぞれ本番相当の実行 | A `$DEST` が通常ファイル: `mkdir` で停止。B `cp` shim が複製を切り詰め: `cmp: EOF` で停止。C `remote-legacy/journal.ndjson` を置く: `legacy layout` で停止。D `{"seq":3}` を追記: `line 3 is not a Router record` で停止。E 改行無しの末尾行: `no terminating newline` で停止。F journal を削除: `no journal at` で停止。G 新コンテナの env に別の `SUBETHA_JOURNAL_PATH`: 停止、**旧 Router は止めてもいない**（running）。H 2 回目の `docker cp` を shim で失敗: 停止。A〜H すべて exit 1、旧コンテナ残存。本番相当（bind）: exit 0、2 行、R4 200、未知 id 404、flock `fd:01:<inode>` の保持 PID が `docker top` に出る、`docker stop` で保持者が消える（対照）、元の bind は手付かず。本番相当（mount 無し）: `no mount` 分岐を通り、同じ確認がすべて通る。`failed 0` |
+
+### 26.6 実装レビュー #4（`76634e9`）: **REJECT** → 移行スクリプトを再々改訂
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#3 の 3 件のうち、mount 無し分岐の比較と flock の同定は**解決**。journal の所在は「狭まったが blocking」で、
+新たに 2 件が blocking。レビュアは抜き出した `case` 文と python の検査器を実際に動かして反例を示した。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | 手順 1 は `/app/runtime` ちょうどの mount しか見ない。`/app/runtime/journal.ndjson` に別の bind があると、隠れた空ファイルを写して比べ、旧コンテナを消し、第 2 の mount 無しで作り直す。health・hash・flock は通り、R4 は省かれ、全購入が届かないまま完了を宣言できる。prefix 判定は `runtime/../elsewhere/journal.ndjson` を通す | **正しい**（blocking） | mount 配置を全部読み、`/app/runtime` と重なる mount（親・子・`/`）や bind / ボリューム以外の型があれば**止める前に**止まる。`SUBETHA_JOURNAL_PATH` は `normpath` で正規化してから `/app/runtime/` の下であることを判定（新旧とも）。mount 元と複製の中の symlink は対象外。さらに、候補 journal の最後の購入を**動いている旧 Router の R4 が返す**ことを止める前に確かめる（候補が旧 Router の使っている journal である証拠）。replay の結果の最後の購入が、覗いた候補のそれと一致することも確認 |
+| 2 | 削除前の python 検査器は Router の replay より緩い: `at` 欠落、空の `event`、`seq: true`（python は `True == 1`）、`NaN`（python の JSON は受け、`JSON.parse` は拒む）を通し、作り直した Router が replay で落ちるのは**旧コンテナを消した後** | **正しい**（blocking） | 検査器を捨て、**Router 自身の replay**を使う: 新 image の中で `openJournal`（`src/core/journal.ts`）を複製に対して実行し（`docker run --rm -v $DEST:/app/runtime ... tsx`）、記録数と最後の `created` を得る。Router が拒むものはそのまま止まる。新 image が動くことの確認も兼ねる |
+| 3 | 旧配置の走査が `if find \| grep -q` の条件式なので、`find` の失敗や `grep -q` の早期終了（SIGPIPE）が「旧配置なし」に化ける | **正しい**（blocking） | `LEGACY=$(find ...)` の代入（失敗は `-e` で止まる）にしてから結果を検査。他の `grep -q` パイプも、変数への取り込み後の判定か `grep ... >/dev/null`（入力を読み切る）に改めた |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 81 | **再々改訂した移行スクリプト verbatim**（VM、現行ソースの image）。bind mount の旧 Router に A〜G・K1・K2・L・M、別構成の旧 Router に I（`/app/runtime/journal.ndjson` に第 2 の bind、空の囮の上）と J（`SUBETHA_JOURNAL_PATH=runtime/../elsewhere/journal.ndjson`）、mount 無しの旧 Router に H。それぞれ本番相当の実行 | A `mkdir` で停止。B `cmp: EOF`。C `legacy layout: .../remote-legacy/journal.ndjson`。D `{"seq":3}` → **Router の replay** が `at must be a non-empty string`。E `truncated_tail`。F `no journal at`（旧 Router は止めていない）。G env 不一致（止めていない）。K1 `seq: true` → replay が `seq must be a positive integer`。K2 `NaN` → replay が `invalid_json`。L `find` shim の失敗 → 停止。M 旧 Router が返さない `created` 行 → `does not serve ...`（止めていない）。I 隠れた journal を旧 Router が R4 200 で返すことを先に確認したうえで、`a mount at /app/runtime/journal.ndjson overlaps /app/runtime` で停止（止めていない）。J `is outside /app/runtime` で停止。H 2 回目の `docker cp` の失敗で停止。14 件すべて exit 1、旧コンテナ残存、完了を宣言しない。本番相当（bind・mount 無し）: exit 0、replay が削除前に 2 行、R4 200 が止める前（候補の照合）と後の 2 回、未知 id 404、flock の保持 PID が `docker top` に出る、`docker stop` で消える。`failed 0` |
