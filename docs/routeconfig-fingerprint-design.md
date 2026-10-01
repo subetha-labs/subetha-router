@@ -164,3 +164,54 @@ url.hash !== ""                              → ConfigError
 **U-A**: `source.payTo` は SubEtha では設定に無い（facilitator が返す）。
 指紋では**存在する場合のみ含める**。SubEtha route では欄が無いので影響しない
 （指摘6 の「受取先が config 権威とは言えない」への対応）。
+
+## 7. 自己検証（設計レビュー待機中）
+
+### 7.1 検査位置: バイパス経路は無い（確認済み）
+
+`purchase()` の入口（`orchestrator.ts:371-392`）を辿った:
+
+```
+:372 unknown_quote        → 支払わない
+:377 not_owner            → 支払わない
+:382 route_mismatch       → 支払わない
+:386 request_id_conflict  → 支払わない
+:390 status !== "created" → currentOutcome（既存状態を返すだけ。新規支払い無し）
+:392 approval !== quoteId → 支払わない
+     ↑ FR-17 の検査をここに挿入する
+```
+
+`status !== "created"` の分岐は `currentOutcome`（`:675`）で**既存の状態を返すだけ**であり、
+支払いを再開しない。`source_settled` は public status `"paid"`（`intent.ts:36`）。
+→ **再開経路から支払いに到達するパスは無い。**
+
+### 7.2 設計の限界（記録する）
+
+**受信が成立した後（`source_settled`）に設定を変更しても、送信レグは止められない。**
+
+FR-17 が守るのは「**まだ受信していない quote**」だけである。
+受信済みで送信前の intent は、journal の `selectedOffer` に従って送信される。
+
+これは FR-17 の欠陥ではなく、**at-most-once と two-leg の設計そのもの**から来る:
+受信した資金に対して上流への支払い義務が既に発生しているため、
+設定変更で一方的に取り消すと**支払人の資金を預かったまま配信しない**ことになる。
+
+→ **意図的に守らない。** 運用上は「設定変更前に未処理 intent の終端を待つ」で塞ぐ。
+
+### 7.3 `userinfo` 拒否は既存運用と衝突しない（確認済み）
+
+`assertAbsoluteHttpUrl` の呼び出し元は 3 箇所（`config.ts:433,442,447`）で、
+いずれも設定値の検証。
+
+**懸念**: facilitator URL に認証情報を入れる運用があるか。
+→ `DEPLOY.md:76` は「**URL 自体が資格情報（パスに API キーを含む）**」と明記している。
+つまり**資格情報はパスに入る**運用であり、`userinfo`（`user:pass@host`）形式ではない。
+
+→ **`userinfo` 拒否は既存運用を壊さない。**
+ただし **`fragment` 拒否も同様に安全**だが、
+**クエリは既に拒否されている**（`allowQuery=false`）ので、
+API キーがクエリに入る運用は**そもそも現在も不可**。
+
+**警告出力の注意**: `DEPLOY.md:77` が「起動ログに URL を出さない」方針を定めている。
+→ §3.2 の警告は**ホスト名も出さない**。「上流 URL が内部アドレスを指している」という
+事実のみを出力する（どの route かは `routeId` で示す）。
