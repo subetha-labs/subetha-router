@@ -338,7 +338,11 @@ export function warnIfInternalUpstream(
     // IPv6 リテラルは**コロンを含む形**だけで判定する。
     const privateV6 =
       bare.includes(":") &&
-      (bare === "::1" || bare.startsWith("fe80:") || /^f[cd][0-9a-f]{0,2}:/.test(bare));
+      (bare === "::1" ||
+        bare.startsWith("fe80:") ||
+        // ULA は fc00::/7。**ヘクステットは 4 桁**なので、先頭 2 桁が `fc`/`fd` でも
+        // `fc::1`（= 00fc:…）や `fc0::1` は範囲外。桁数を 2 に固定して誤検知を避ける。
+        /^f[cd][0-9a-f]{2}:/.test(bare));
 
     // DNS 名は suffix 規則で別に見る（prefix は使わない）。
     const internalName =

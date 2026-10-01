@@ -36,6 +36,13 @@ describe("internal upstream warning", () => {
     // IPv6 の ULA 判定をホスト名に当てると、これらを**誤検知**する（自己検証で発見）。
     ["public host starting fc", "https://fcm.googleapis.com/x"],
     ["public host starting fd", "https://fd-cdn.example.com/x"],
+    // IPv4 の prefix 判定をホスト名に当てると、これらを誤検知する。
+    ["public host starting 10.", "https://10.example.com/x"],
+    ["public host starting 127.", "https://127.example.org/x"],
+    ["public host starting 192.168.", "https://192.168.example.com/x"],
+    // ULA は fc00::/7。これらは第 1 ヘクステットが範囲外。
+    ["fc::1 is outside fc00::/7", "http://[fc::1]/x"],
+    ["fc0::1 is outside fc00::/7", "http://[fc0::1]/x"],
   ])("stays quiet for %s", (_label, url) => {
     expect(warningsFor({ r1: url })).toHaveLength(0);
   });
