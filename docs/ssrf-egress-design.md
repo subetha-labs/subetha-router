@@ -565,7 +565,7 @@ COMMIT
 | v4 許可 | `192.31.196/24` `192.52.193/24` `192.175.48/24`（True） | — |
 | v6 | `::/128` `::1/128` `::ffff:0:0/96` `64:ff9b:1::/48` `100::/64` `100:0:0:1::/64` `2001::/23` `2001:db8::/32` `3fff::/20` `5f00::/16` `fc00::/7` `fe80::/10` | Globally Reachable = **False** の全件（`2001:2::/48` は `2001::/23` に含まれる。`2001:db8::/32` は**含まれない**ので別掲） |
 | v6 | `ff00::/8` | multicast |
-| v6 **保守的除外** | `2001::/23` ごと（内側の True: `2001:1::1-3/128`、`2001:3::/32`、`2001:4:112::/48`、`2001:20::/28` ORCHIDv2、`2001:30::/28` DETs、Teredo `2001::/32`）、`64:ff9b::/96`（NAT64 well-known、True だが翻訳無し）、`2002::/16`（6to4、N/A）、`fec0::/10`（非推奨 site-local、レジストリ外） | Router に用は無い |
+| v6 **保守的除外** | `2001::/23` ごと（内側の True: `2001:1::1-3/128`、`2001:3::/32`、`2001:4:112::/48`、`2001:20::/28` ORCHIDv2、`2001:30::/28` DETs。Teredo `2001::/32` は N/A）、`64:ff9b::/96`（NAT64 well-known、True だが翻訳無し）、`2002::/16`（6to4、N/A）、`fec0::/10`（非推奨 site-local、レジストリ外） | Router に用は無い |
 | v6 許可 | `2620:4f:8000::/48`（True） | — |
 
 **IPv4-mapped**: `::ffff:a.b.c.d` は socket API 上の表現で、**ワイヤ上は IPv4 パケット**になり v4 規則で分類される。
@@ -650,3 +650,132 @@ uplink は正の対照（host 自身の同宛先接続）が**同じフィルタ
 
 `deploy/egress/subetha-egress`、`deploy/egress/10-subetha-egress.conf`、`deploy/egress/subetha-egress-guard.{service,timer}`、
 `deploy/egress/subetha-egress-verify`（V3-1〜16 を実行し証拠を出す。検証補助 unit を含む）、`DEPLOY.md`。
+
+## 12. 設計レビュー #3（v3、`5dd1748`）: **REJECT** → v4 で応答
+
+レビュー実施: 2026-10-01、`gpt-6-astra`。blocking 6 件。v2 の 5 件は「部分的に解決・絞り込み」。
+レビュアはスクリプトを **mock した firewall コマンドでユニット実行**し、制御フローの欠陥を実証した。
+
+| # | 指摘（要約） | 判定 | v4 での応答 | 実測 |
+|---|---|---|---|---|
+| 1 | `check`/`guard` は弱体化した policy を受け入れる（DROP 行数 ≥15 と jump の存在しか見ない。目録行の削除、早い RETURN、jump の上の規則、目録の陳腐化、`guard` が validate を呼ばない） | **正しい** | `check` を**完全一致**に変えた: いま render した policy を scratch chain に載せてカーネルの正規形で読み出し、live chain と**行単位で比較**。各 hook の**先頭 N 行が自分の jump** であることも要求。`guard` は validate → check → apply → check | 36（5 通りの sabotage すべてを `check` が拒否、無効 env を `guard` が拒否） |
+| 2 | 検証・目録収集が成功しても意図した保護が入らない（`IFACES="   "`、`HOST_ADDRS4=` 空、`999.999.999.999/99`、`ip` 失敗が空の目録になる、`scope global` の狭さ、引用符の片側剥がし） | **正しい** | 文法を定義し強制（§13.5）。interface トークン検査、`HOST_ADDRS4` 非空必須、IPv4 のオクテット/プレフィクス検査、`ip` 失敗は fatal、全 scope を収集、引用符は両側必須。両 family を **`iptables-restore --test` で dry-run してから**コミット | ローカルで 5 通り、36 |
+| 3 | DNS 条件が出所と分類を取り違えている。Docker 28.3.3 は `HostLoopback = !NSOverride`: **継承した** nameserver は host namespace、**上書きした** nameserver はコンテナ namespace。実測 25 は出所とアドレスを同時に変えていた | **正しい** | 4 通りを分離して実測（継承 stub / 継承 non-loopback / 上書き loopback / 上書き non-loopback）。条件を「**上書き無し**」に改め、検証は `HostConfig.Dns*` 空・daemon.json に `dns` 無し・resolv.conf が `127.0.0.11`・未キャッシュ名の解決中に veth の port 53 が 0 | **35** |
+| 4 | 検証行列の矛盾（同 bridge 隣接の期待が `br_netfilter` 無しと矛盾、既存接続は conntrack が残る、UDP/ICMP の証拠未定義、attachment set、27c に正の対照が無い、rebinding/proxy の扱い） | **正しい** | 期待をトポロジと sysctl に**条件付け**（`bridge-nf-call-iptables=1` なら dropped、無ければ **reachable** を期待し singleton を必須に）。既存接続は別クラス。UDP/ICMP は veth の往路あり・復路なし + カウンタ。attachment set は `NetworkSettings.Networks` 全体。DNAT の正の対照は **bridge 外の宛先**（同 bridge 宛先は SYN-ACK が host を迂回し成立しない）。rebinding は「禁止アドレスに解決される名前」で試験、proxy は要件で対象外を明示 | 36（runner 全項目）、37 |
+| 5 | boot 時の観測 unit は `Type=simple` で readiness を保証しない。`eth0`・宛先・180 秒が固定 | **正しい** | `ExecStartPost` で readiness を待つ（tcpdump の `listening on`、listener への HTTP 応答）。uplink・フィルタ・寿命は runner が展開から導出して置換。試験中だけ `docker.service` に `Requires=` の drop-in を入れ、観測が無ければ Docker を上げない | 37 |
+| 6 | guard の「30 秒上限」は保証ではない。初回導入は Router 稼働中。`remove` が Router/timer と協調しない。`Restart=always` の再試行を観測していない | **正しい** | guard は **best-effort の復旧**と言い直す（`AccuracySec=1s`）。導入・破壊試験は Router 停止中に行う手順を書く。`remove` は timer 稼働中・Router 稼働中は拒否（`FORCE=1` は検証専用）。fail-closed 試験は 20 秒待って dockerd と containerd-shim の不在を見る | 36、37 |
+
+non-blocking: hook と REPLY 例外は妥当、transaction の主張は適切に限定済み、deny 一覧はスナップショットを網羅
+（Teredo は N/A — §11.4 を訂正）、A/B 分担と release gate は妥当、AL2023 は展開ゲート。
+
+## 13. 設計 v4（現行。§11 のうち規則表以外を置き換える）
+
+> 実測 35〜38 は §9 と同じローカル VM。v4 の成果物は `deploy/egress/`（スクリプト、drop-in、guard unit、
+> 検証補助 unit、検証 runner）で、**本節の実測はすべてその runner で取った**。
+
+### 13.1 v3 からの変更
+
+| 変更 | §12 の指摘 | 実測 |
+|---|---|---|
+| `check` = いま render した policy とカーネル正規形で**完全一致**、各 hook の先頭 N 行が自分の jump | 1 | 36 |
+| `guard` = validate → check → apply → check | 1 | 36 |
+| 設定文法の強制、`HOST_ADDRS4` 非空必須、IPv4 の意味検査、`ip` 失敗は fatal、両 family を `--test` してからコミット | 2 | 36 |
+| 目録は link-local を除く**全 scope**（veth の fe80 で policy が揺れるのを防ぐ。link-local はレジストリ行が落とす） | 2 | 36（churn 下で `check` 安定） |
+| DNS 条件 = **上書き無し**（出所で決まる） | 3 | 35 |
+| 検証の期待クラスをトポロジ・sysctl に条件付け、DNAT の正の対照は bridge 外の宛先、Docker raw による drop を帰属 | 4 | 36 |
+| 観測 unit に readiness（`ExecStartPost`）、試験中だけ `docker.service` に `Requires=` | 5 | 37 |
+| guard は best-effort、`AccuracySec=1s`、`remove` は timer/Router 稼働中は拒否、fail-closed は再試行期間を観測 | 6 | 36、38 |
+
+### 13.2 守る範囲
+
+§11.2 のとおり。B の不変条件は「禁止宛先に**届く**接続試行パケットが 0」。namespace 内は A。
+
+### 13.3 トポロジと DNS
+
+- Router は専用 user-defined bridge `subetha0` に**単独**（§11.3）。
+- **DNS 条件: Router の DNS を上書きしない。** Docker 28.3.3 の埋め込み resolver は、host から**継承した**
+  nameserver へは host の namespace から、`--dns` / daemon `dns` で**上書きした** nameserver へは
+  コンテナの namespace から問い合わせる（`HostLoopback = !NSOverride`）。loopback かどうかは無関係。
+
+| 実測 35 | host の nameserver | 上書き | veth 上の DNS | 解決 |
+|---|---|---|---|---|
+| (a) | `127.0.0.53`（stub、継承） | なし | **0** | 成功 |
+| (b) | `192.168.5.2`（非 loopback、継承。host の resolv.conf を一時的に差し替え） | なし | **0** | 成功 |
+| (c) | — | `--dns 127.0.0.53` | 0（コンテナ内 loopback で死ぬ） | **失敗** |
+| (d) | — | `--dns 192.168.5.2` / daemon `dns` | **6**（`172.30.0.x → 192.168.5.2:53`、全て DROP） | **失敗** |
+
+  → 展開条件は「`HostConfig.Dns*` が空、daemon.json に `dns` が無い、コンテナの resolv.conf が `127.0.0.11`」で、
+  AL2023 が systemd-resolved かどうかに**依存しない**。検証は未キャッシュの実在名（`<random>.1.1.1.1.nip.io`）の
+  解決中に Router の veth で port 53 が 0 であること、および上流 resolver の 53 番への HTTP が落ちること。
+
+### 13.4 規則
+
+§11.4 の表のとおり（Teredo は N/A に訂正済み）。目録行は `apply` 時点の host の全アドレス（link-local 除く）+
+`HOST_ADDRS4`（公開/Elastic IP。**必須**、無ければ `none`）+ `EXTRA_DENY*`。
+この VM では v4 **21 行**（REPLY 1 + 目録 4 + レジストリ 15 + RETURN 1）、v6 **19 行**（1 + 1 + 16 + 1）。
+**起動直後**は bridge の gateway アドレスが未生成なので v4 は 19 行で入り、guard の初回（≤30 秒）で 21 行になる。
+その間 gateway アドレスは `172.16/12` 行が落とす（実測 37）。
+
+### 13.5 スクリプトの契約（`deploy/egress/subetha-egress`）
+
+| 項目 | 契約 |
+|---|---|
+| 設定文法 | 空行と `#` 始まりの行のみ無視（行内コメント無し）。`KEY=value` または `KEY="value"`（引用符は両側）。キーは 5 つ、未知・重複・不正行・片側引用符・空の `IFACES`・未設定/空の `HOST_ADDRS4`・不正アドレスは **exit 65** |
+| `apply` | validate → 両 family を render → **両方を `--test`** → 両方をコミット（family ごとに 1 トランザクション）→ jump を `-C || -I`。失敗時は非 0 で ExecStartPre を落とす |
+| `check` | validate → render（新しい目録）→ scratch chain に載せて `-S` で正規形に → live chain と**行単位で一致** → 各 hook の先頭 N 行に自分の jump が全部ある。差分は stderr に `diff` |
+| `guard` | validate（失敗なら触らず exit 65）→ check → 不一致なら apply → check |
+| `remove` | `subetha-egress-guard.timer` 稼働中、または `ROUTER_CONTAINER`（既定 `subetha-router`）稼働中は拒否。`FORCE=1` は検証専用 |
+| 目録 | `ip -4/-6 -o addr show` の全アドレスから `scope link` を除く。`ip` が失敗したら fatal |
+
+### 13.6 ライフサイクル
+
+- **投入**: `docker.service` の `ExecStartPre`（§11.5）。**実 reboot で 2 回**確認（実測 34、37）。
+- **前提**（runner が検証し、満たさなければ FAIL）: `LiveRestoreEnabled=false`、firewalld 不在/無効、`userland-proxy` 既定、
+  `ExecStartPre` の存在、guard timer 稼働、Router の attachment set が `{subetha-router-net}` のみで `NetworkMode` も同じ、
+  network の Containers が Router のみ、bridge 名が `subetha0` で `IFACES` に含まれる、`EnableIPv6=false`、DNS 上書き無し。
+- **guard** は **best-effort の復旧**であって保証ではない（実測 36: flush 後 31 秒で復旧。その間は到達可）。
+  **Router 稼働中に firewall を触らない**ことが運用条件。保守は Router 停止中に行い、`check` が通ってから再開する。
+- **導入と移行**（Router 停止中）: ファイル配置 → env（`HOST_ADDRS4` に公開 IP）→ `apply` → `check` → network 作成 →
+  Router を `--network subetha-router-net` で作り直す → runner（standard → adversarial → fail-closed → reboot）→ 稼働。
+- **fail-closed**: env が不正なら `docker.service` は `Restart=always` の再試行を含めて上がらない（実測 38: 20 秒観測で dockerd 0、containerd-shim 0）。
+- **boot 時の観測 unit**（検証専用）: `ExecStartPost` で readiness（tcpdump の `listening on`、listener の HTTP 応答）を待ってから
+  "Started" になるので、`Before=docker.service` が「観測が開いてから Docker」を意味する。試験中は
+  `99-egress-verify.conf` が `docker.service` に `Requires=` を足し、観測が無ければ Docker を上げない。
+  tcpdump は `-Z root`（実測 37 の 1 回目で、boot 時だけ非特権ユーザが pcap を作れず EACCES で死んだ。再現せず原因未特定）。
+
+### 13.7 検証プロトコル v4（`deploy/egress/subetha-egress-verify`）
+
+| モード | 内容 | 破壊性 |
+|---|---|---|
+| （既定） | 前提と事実、V4-1 行列（TCP 13 件 + multicast + loopback + UDP/ICMP + DNS 由来の private 宛先 + observer）、V4-2 host 全アドレス + 公開 IP（IMDS から読み `HOST_ADDRS4` と照合）、V4-7 対照、V4-8 DNS、V4-10 原子性 + hammer、V4-14 IPv6、V4-16 loopback | なし |
+| `--adversarial` | + V4-17 `check` の sabotage 5 通りと無効 env、V4-3 別名アドレスの gap/修復、V4-4 hairpin、V4-5 DNAT 再判定 + **正の対照**、V4-6 隣接（sysctl で期待を切替）、V4-9 既存接続、V4-13 guard | 別名アドレス追加、一時コンテナ、policy の除去/再適用。**Router 停止中に** |
+| `--fail-closed` | V4-12 | Docker 停止 |
+| `--reboot-prepare` → reboot → `--post-boot` → `--reboot-cleanup` | V4-11 | probe コンテナと観測 unit、試験用 drop-in |
+
+**期待クラス**: firewall-dropped（veth に往路あり・復路なし、カウンタ増、conntrack 無し、uplink/宛先で 0）、kernel-rejected、
+namespace-local（A）、allowed-control、**dropped-by-Docker**（raw の DROP が先に効いた。届かないが自分の証拠ではない）。
+隣接は `bridge-nf-call-iptables=1` なら firewall-dropped、無ければ **reachable** を期待し（§11.3 の根拠）、singleton を必須にする。
+
+### 13.8 実測 35〜38
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 35 | DNS の出所 4 通り（§13.3） | 継承 → host namespace、上書き → コンテナ namespace |
+| 36 | runner `--adversarial`（OBSERVER = Mac） | **70 PASS / 0 FAIL**。`check` は目録行削除・早い RETURN・v6 行削除・jump 上の規則・目録陳腐化を全て拒否、`guard` は無効 env を拒否。別名 `11.22.33.44`: 目録無しで **404 到達**、apply 後 28。hairpin 28。DNAT（`11.22.33.44:18001 → 192.168.5.2:19999`）: `FORWARD` 再判定で `192.168/16` **+2**、jump 除去で **200**（observer に到達記録）。同 bridge 隣接は `bridge-nf-call-iptables` 無しで **200**（期待通り）、docker0 隣接は **Docker の raw DROP** が先（+2）。既存接続は apply 時刻に tick が止まる。guard 31 秒。veth churn 下で `check` ok×3 |
+| 37 | 実 reboot ×2（readiness 付き観測 unit、`Requires=` drop-in、probe `--restart unless-stopped`） | 1 回目: tcpdump が boot 直後に EACCES（§13.6）。2 回目: observers 10:47:42.442/.666 → `applied` **.725** → `Loading containers` **.792** → 復元後最初の試行 **:44.098 `deny 28`**。成功した禁止試行 0、公開対照到達、boot 捕捉に probe 発 0（host 発 935 が対照）、host listener 0、`check` は guard 初回後に ok |
+| 38 | `--fail-closed` | 不正 `HOST_ADDRS4`: 20 秒の再試行後 dockerd 0・shim 0。未知キー: 失敗。復旧後 `check` ok、Router 稼働 |
+
+### 13.9 未解決・残余
+
+- **AL2023 は未実測**。runner の全モードを本番 host で通すことが受け入れ。transfer できない事実: Docker のチェーン構成、`userland-proxy`、resolver の出所、backend、`br_netfilter`、復元タイミング、公開 IP の hairpin、IPv6
+- nftables backend との共存は未実測。`userland-proxy=false`（Docker が DNAT を使う経路）は未実測（runner は FAIL にする）
+- IPv6 は「bridge で無効」を確認するのみ。有効化した場合の強制は**未実証**（runner は FAIL にする）
+- boot 時の tcpdump EACCES の原因は未特定（`-Z root` で回避）
+- guard の窓は閉じない。任意名の bridge は jump の対象外（attachment assertion で検出）
+- V4-9 の OBSERVER は**行を記録する TCP listener** が要る（HTTP server では tick が記録されない）
+
+### 13.10 成果物
+
+`deploy/egress/subetha-egress`、`10-subetha-egress.conf`、`subetha-egress-guard.{service,timer}`、
+`egress-host-observer.service`、`egress-boot-capture.service`、`99-egress-verify.conf`、`subetha-egress-verify`。
+`DEPLOY.md` の手順は実装フェーズで書く（設置、env、network、移行順、runner の実行順、保守規則）。

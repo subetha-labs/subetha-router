@@ -2,9 +2,11 @@
 Description=SubEtha Router egress policy guard timer
 
 [Timer]
+# Best-effort recovery from external mutation, not a security bound: the policy can be absent
+# for the timer period plus repair time. Never mutate the firewall while the Router serves.
 OnBootSec=30s
 OnUnitActiveSec=30s
-AccuracySec=5s
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

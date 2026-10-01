@@ -1,10 +1,12 @@
 # Verification aid (not part of the policy): a listener on the host that logs every arrival.
+# "Started" only after the socket answers (ExecStartPost), so Before=docker.service means ready.
 [Unit]
 Description=egress verification: host-side arrival observer
 Before=docker.service
 
 [Service]
 ExecStart=/usr/bin/python3 -m http.server 19998 --bind 0.0.0.0 --directory /var/empty
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:19998/ && exit 0; sleep 0.2; done; exit 1'
 StandardOutput=append:/var/tmp/host-observer.log
 StandardError=append:/var/tmp/host-observer.log
 

@@ -1,5 +1,7 @@
-# Verification aid (not part of the policy): capture on the uplink from before Docker starts,
-# so the window between container restore and rule installation cannot hide from the test.
+# Verification aid (not part of the policy): capture on the uplink from before Docker starts.
+# "Started" only once tcpdump reports "listening on" (ExecStartPost), so Before=docker.service
+# means the capture socket is open before any container is restored. @UPLINK@, @FILTER@ and
+# @SECONDS@ are substituted by `subetha-egress-verify --reboot-prepare`.
 [Unit]
 Description=egress verification: boot-ordered uplink capture
 Before=docker.service
@@ -7,7 +9,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/timeout 180 /usr/bin/tcpdump -i eth0 -w /var/tmp/boot-capture.pcap -U dst host 192.168.5.2 and tcp dst port 19999
+ExecStart=/usr/bin/timeout @SECONDS@ /usr/bin/tcpdump -Z root -i @UPLINK@ -w /var/tmp/boot-capture.pcap -U @FILTER@
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do grep -q "listening on" /var/tmp/boot-capture.log 2>/dev/null && exit 0; sleep 0.2; done; exit 1'
+SuccessExitStatus=124
 StandardError=append:/var/tmp/boot-capture.log
 
 [Install]
