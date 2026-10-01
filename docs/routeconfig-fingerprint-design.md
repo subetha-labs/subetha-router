@@ -414,3 +414,52 @@ purchase 時（orchestrator.ts:392 の直後）:
 - 上流 URL の指紋への組み込み（§8.4）
 - SubEtha の facilitator 発行 `payTo` の変化検出（**§8.8 の限界として受容**）
 - 新しいイベント種別・新しい公開理由コード
+
+## 10. 自己検証（§9 のレビュー待機中）
+
+### 10.1 `stableJson` の undefined 扱いは**安全**（最大の懸念が解消）
+
+`intent.ts:125` が `.filter(([, nested]) => nested !== undefined)` で
+**undefined の欄を除外**している。
+
+→ `{a:1}` と `{a:1, payTo: undefined}` は**同一文字列**になる。
+**SubEtha（`source.payTo` 不在）でも指紋は安定し、全購入が拒否される事故は起きない。**
+
+私が最も危険視していたバグは、**既存実装が既に防いでいた**。
+`§9.2` の「存在する場合のみ含める」は、実装上は
+**単に `payTo: route.source.payTo` と書けばよい**（undefined なら自動的に除外される）。
+
+### 10.2 `route` は purchase 時に参照できる（確認済み）
+
+`orchestrator.ts:246` が `const config: RouterConfig = structuredClone(options.config)`
+としてクロージャに保持している。**不変コピー**なので purchase 時にも同じ値が見える。
+
+→ **指紋の再計算は可能。** 追加の配線は不要。
+
+### 10.3 **設計の抜け: route が削除された場合**（自己発見）
+
+`quote` 時は `resolveRoute` が `undefined` を返せば `unknown_route` で拒否する（`:283-286`）。
+しかし **purchase 時に route が設定から消えていた場合**の扱いを §9 は定義していない。
+
+これは**「設定変更」の一形態**であり、FR-17 が扱うべきケース。
+
+→ **§9.1 に 4 つ目の分岐を追加する**:
+
+```
+purchase 時:
+  route = resolveRoute(config, intent.routeId)
+  route === undefined → **拒否**（設定から消えた route では払わない）
+```
+
+公開応答は同じ `quote_changed`（削除されたことを外に出さない）。
+ログは `route configuration mismatch` + `routeId`（§9.4 と同じ）。
+
+**根拠**: route を削除する行為は「この経路での支払いをやめる」という運用判断であり、
+**未処理 quote を通すのは意図に反する**。
+また削除後は指紋の再計算もできないので、**legacy 照合も不可能**。
+
+### 10.4 §9.5 の補足: SubEtha facilitator の `allowQuery`
+
+`config.ts:447` の SubEtha facilitator は `allowQuery=true` で呼ばれている（レビュー指摘）。
+→ **`userinfo` / `fragment` 拒否は `allowQuery` と独立**に実装する。
+`allowQuery` の既存挙動は変えない。
