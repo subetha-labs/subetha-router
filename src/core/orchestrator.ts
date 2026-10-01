@@ -5,7 +5,13 @@
 
 import { randomUUID } from "node:crypto";
 
-import { resolveRoute, routeBindingOf, type RouteConfig, type RouterConfig } from "../config.js";
+import {
+  authoritativeTermsOf,
+  resolveRoute,
+  routeBindingOf,
+  type RouteConfig,
+  type RouterConfig,
+} from "../config.js";
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
 import type { DestinationOffer, OutboundRail } from "../ports/outbound.js";
 import { Budget } from "./budget.js";
@@ -107,6 +113,12 @@ export interface RouterCoreOptions {
   readonly now?: () => number;
   /** 決定的な id 生成（テストはカウンタを注入する）。 */
   readonly nextPaymentId?: () => string;
+  /**
+   * 運用者向けの固定診断文。**値・URL・ホスト名・秘密は渡さない**
+   * （`docs/DEPLOY.md` の「起動ログに URL を出さない」方針に合わせる）。
+   * 省略時は何も出さない（core は I/O 先を知らない）。
+   */
+  readonly note?: (message: string) => void;
 }
 
 export interface RouterCore {
@@ -351,6 +363,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           selectedOffer,
         },
         quoteFingerprint: fingerprintOf(selectedOffer),
+        // 設定側の指紋（FR-17）。purchase 時に再計算して照合する。
+        routeFingerprint: fingerprintOf(authoritativeTermsOf(route)),
         approvalDeadlineMs,
       });
     } catch (error) {
@@ -391,6 +405,46 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     }
     if (request.approval !== intent.quoteId) {
       return { paymentId: intent.paymentId, status: "rejected", code: "approval_required" };
+    }
+    /**
+     * **設定変更の検出（FR-17）。** 送金前・credential を触る前・上流へ出る前に行う。
+     *
+     * 既存の照合（`readAndMatchDestination`）は **journal 保存済みの offer** を基準にするので、
+     * 運用者が設定の `payTo` を変えても**旧受取先に払えてしまう**。ここで塞ぐ。
+     *
+     * 公開する理由は既存の `quote_changed` に寄せる（設定が変わったのか上流が変わったのかを
+     * 外に出さない）。運用者向けには固定文をログに出す——値・URL・ホスト名は出さない。
+     */
+    const currentRoute = resolveRoute(config, intent.routeId);
+    /**
+     * 拒否の判定は**1 本の不等号**で足りる:
+     * - 設定が変わった    → 指紋が合わない
+     * - legacy（欄なし）  → `undefined !== "sha256:…"` は真
+     * - 壊れた値          → store が `undefined` にするので上と同じ
+     *
+     * 明示的な分岐を重ねないのは、**二重に書くと片方を消してもテストが落ちず、
+     * 何がこの性質を守っているのか追えなくなる**ため（sabotage 検証で発見）。
+     * `routeFingerprintInvalid` は**判定には使わず、診断の区別だけに使う**。
+     */
+    const routeMismatch =
+      currentRoute === undefined ||
+      intent.routeFingerprint !== fingerprintOf(authoritativeTermsOf(currentRoute));
+    if (routeMismatch) {
+      const why =
+        currentRoute === undefined
+          ? "route removed"
+          : intent.routeFingerprintInvalid === true
+            ? "unreadable quote fingerprint"
+            : intent.routeFingerprint === undefined
+              ? "quote predates this check"
+              : "route configuration changed";
+      // 固定文のみ。値・URL・ホスト名は出さない（`docs/DEPLOY.md` の方針）。
+      options.note?.(`route configuration mismatch (routeId=${intent.routeId}, why=${why})`);
+      return {
+        paymentId: intent.paymentId,
+        status: "awaiting_payment",
+        code: "quote_changed",
+      };
     }
     // 承認期限は quote 時に確定して journal に載せた絶対時刻。期限と等しい時刻は期限切れ。
     if (intent.approvalDeadlineMs <= 0 || now() >= intent.approvalDeadlineMs) {

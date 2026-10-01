@@ -575,3 +575,61 @@ typeof raw === "string" && raw.startsWith("sha256:")  → 採用
 3. legacy を**通す**ように変更 → T-3' が落ちる
 4. `intentFromCreated` の復元を削除 → T-2 が落ちる
 5. route 解決の分岐を削除 → T-8 が落ちる
+
+## 12. 実装記録
+
+### 12.1 変更点
+
+| ファイル | 変更 |
+|---|---|
+| `src/config.ts` | `authoritativeTermsOf` 追加。`assertAbsoluteHttpUrl` に `userinfo` / `fragment` 拒否（`allowQuery` は不変） |
+| `src/core/intent.ts` | `Intent` に `routeFingerprint?` / `routeFingerprintInvalid?` |
+| `src/core/store.ts` | `routeFingerprintOf(patch)` を追加し、**`intentFromCreated` で明示的に復元** |
+| `src/core/orchestrator.ts` | `RouterCoreOptions.note` 追加。quote 時に指紋記録、purchase 時に route 解決＋指紋照合 |
+| `src/main.ts` | `warnIfInternalUpstream` 追加（`real` モードのみ）。`note` を stderr に配線 |
+| `tests/unit/lifecycle.test.ts` | FR-17 の 8 ケース |
+| `tests/unit/upstream-url-rules.test.ts`（新規） | URL 規則 9 ケース |
+| `tests/unit/internal-upstream-warning.test.ts`（新規） | 警告 13 ケース |
+
+### 12.2 検証
+
+- `npm run types` → エラーなし
+- `npm test` → **274 passed / 14 skipped**（着手前 244 → **+30**）
+  - skip は既存の `chat-crossimpl.test.ts` 条件付き skip（chat 実装が本ワークツリーに無い）
+
+### 12.3 sabotage 検証（7 種、すべて検出）
+
+| 壊した箇所 | 失敗数 |
+|---|---|
+| 指紋比較を無効化 | **5** |
+| **`store.ts` の復元を削除** | **29**（レビュー指摘1 の致命性を実証） |
+| 指紋から `destination.payTo` を除く | 2 |
+| `route` 解決の分岐を削除 | 1 |
+| 診断の区別を潰す | 1 |
+| 内部アドレス警告を出さなくする | 10 |
+| `userinfo` 拒否を外す | 2 |
+
+**2 件目が最も重要**: レビューが指摘した通り、復元を忘れると
+**既存テスト 29 件が落ちる**。指紋が append 直後に消え、全購入が失敗する。
+
+### 12.4 sabotage で見つけて直したこと（2 件）
+
+**(a) 冗長な分岐があった。** 当初 `intent.routeFingerprint === undefined` を
+明示的に書いていたが、**これを消してもテストが落ちなかった**。
+原因は後続の不等号比較（`undefined !== "sha256:…"`）が同じケースを捕まえていたこと。
+
+→ **判定を 1 本の不等号に統合した。**
+二重に書くと「片方を消してもテストが落ちない」= **何が性質を守っているのか追えなくなる**。
+
+**(b) 診断の区別を守るテストが無かった。**
+`routeFingerprintInvalid` を判定から外した結果、**診断専用**になった
+（`route removed` / `unreadable quote fingerprint` / `quote predates this check` /
+`route configuration changed` を区別してログに出す）。
+当初はこれを守るテストが無く、区別を潰しても落ちなかったので追加した。
+
+### 12.5 設計との差分
+
+設計 §11.3 は不正値を `routeFingerprintInvalid` で**判定**する想定だったが、
+実装では**判定は不等号 1 本**に集約し、フラグは**診断のみ**に使う形にした。
+拒否の結果は同じ（不正値も `undefined` 扱いで比較に落ちる）。
+**理由**: 判定経路を 1 本にすると、sabotage で「何が守っているか」が一意に分かる。

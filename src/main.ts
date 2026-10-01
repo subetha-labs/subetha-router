@@ -291,16 +291,67 @@ function evidenceLabelOf(config: RuntimeConfig, capabilities: RouterCapabilities
   return labels.length === 0 ? "real" : labels.join("+");
 }
 
+/**
+ * 内部アドレスを指す上流を**警告する**（起動は止めない。設計 §3.2）。
+ *
+ * **止めない理由**: 合成 fixture は loopback を要するし、
+ * ローカルで実 facilitator を立てる構成も正当。ここで塞ぐと試験と実験が動かない。
+ *
+ * **これは SSRF 対策ではない**: 上流 URL は設定値で、攻撃者が注入する経路は無い。
+ * 守っているのは**運用者の設定ミス**であり、検出と可視化で足りる。
+ * 攻撃者が URL を選べる構成に進むときは、DNS 解決後・接続時の強制を別途設計する。
+ *
+ * 判定はホスト名の文字列のみ。**DNS は引かない**ので、
+ * 公開名が内部アドレスに解決する場合は検出できない（既知の限界）。
+ */
+export function warnIfInternalUpstream(
+  upstreams: Readonly<Record<string, string>>,
+  write: (message: string) => void,
+): void {
+  for (const [routeId, raw] of Object.entries(upstreams)) {
+    let host: string;
+    try {
+      host = new URL(raw).hostname.toLowerCase();
+    } catch {
+      continue; // 形が壊れた URL は設定検証が別途弾く。
+    }
+    const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+    const internal =
+      bare === "localhost" ||
+      bare.endsWith(".localhost") ||
+      bare.endsWith(".internal") ||
+      bare === "::1" ||
+      bare.startsWith("127.") ||
+      bare.startsWith("10.") ||
+      bare.startsWith("192.168.") ||
+      bare.startsWith("169.254.") ||
+      bare.startsWith("fe80:") ||
+      bare.startsWith("fc") ||
+      bare.startsWith("fd") ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(bare);
+    if (internal) {
+      // **URL もホスト名も出さない**（`docs/DEPLOY.md` の方針）。route だけ示す。
+      write(`warning: upstream for route ${routeId} points at an internal address\n`);
+    }
+  }
+}
+
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
   const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"));
   const rails = composeRails(config, capabilities);
 
   mkdirSync(path.dirname(path.resolve(config.journalPath)), { recursive: true });
+  if (config.adapterMode === "real" && config.real !== undefined) {
+    warnIfInternalUpstream(config.real.upstreams, (m) => process.stderr.write(m));
+  }
+
   const core = await createRouterCore({
     journalPath: config.journalPath,
     config: config.router,
     inbound: rails.inbound,
     outbound: rails.outbound,
+    // 拒否の理由を運用者に伝える（固定文のみ。値は渡さない）。
+    note: (message) => process.stderr.write(`${message}\n`),
   });
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。

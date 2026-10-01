@@ -106,6 +106,14 @@ export interface Intent {
   readonly source: IntentSource;
   readonly destination: IntentDestination;
   readonly quoteFingerprint: string;
+  /**
+   * quote 時点の **route 設定**の指紋（FR-17）。`quoteFingerprint` は上流 offer の指紋であり、
+   * こちらは**設定側**。両方が必要なのは、守る対象が違うため
+   * （上流の提示変化 vs 運用者による設定変更）。
+   */
+  readonly routeFingerprint?: string;
+  /** 指紋欄が存在するが読めない形だった。legacy と区別する（設計 §11.3）。 */
+  readonly routeFingerprintInvalid?: boolean;
   /** 承認の絶対期限（ミリ秒）。発行 offer の失効時刻で上限を切る。 */
   readonly approvalDeadlineMs: number;
   readonly result?: IntentResult;
