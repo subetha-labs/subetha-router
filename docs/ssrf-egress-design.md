@@ -1209,3 +1209,21 @@ AL2023 の受け入れ条件（変更なし）: 全モード、実 reboot、Linu
 | 74 | `--fail-closed` | **3 PASS** |
 
 reboot モードは runner v9 で変更していない経路（`hobs_start` は post-boot では使わない）なので再実行していない（実測 71 が現行の証拠）。
+
+### 26.3 実装レビュー #1（`b4d2e06`）: **REJECT** → 手順を改訂
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。runner の変更は承認どおりと判定。**手順（DEPLOY.md）**に blocking 4 件、non-blocking 4 件。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | `sudo -E` + 「`failed 0`」だけでは試験用の免除（`ALLOW_NO_BACKLOG`/`ALLOW_NO_IMDS`）が通る | **正しい** | 受け入れ条件に「両方を **unset**」「外部 observer は Linux + `ss`」「証拠ディレクトリ・成果物の commit・env の保存」を明記。手順の最初に `unset` |
+| 2 | 設置手順の IMDS 読み出しが runner で直した曖昧さを再現（`${PUB:-none}` が失敗を none に変える） | **正しい** | runner に `--public-ipv4` モードを追加（runner と同じ判定: token → 200 + IPv4 / 404 → none / それ以外は失敗）。手順は失敗で**止める**。既定値で埋めない |
+| 3 | 移行手順の `docker rm -f` が journal を消す（§6 の `docker run` に `-v` が無かった） | **正しい** | §6 手順 4 に `mkdir/chown` と `-v /var/lib/subetha-router:/app/runtime` を入れ、移行手順は `docker inspect` で mount を確認し、無ければ `docker cp` で journal を取り出してから削除 |
+| 4 | 保守手順が guard を再開せず、アドレス変更の順序も無い | **正しい** | 順序を明記: Router 停止 → timer と service 停止 → 作業（アドレス変更を含む）→ `apply`（check 含む）→ timer 再開と確認 → Router 起動。Router 稼働中のアドレス変更を禁止 |
+| 5 | reboot の手順が環境変数を失い、900 秒の期限が無い。`ROUTER`/`HEALTH_URL` の意味 | 正しい | 再起動前後に分け、再接続後の再設定、外部 observer を止めないこと、期限（`CAPTURE_SECONDS` 既定 900 秒）、`ROUTER` はコンテナ名、`HEALTH_URL` は内外から同じ URL の health endpoint（Caddy の TLS ではない）を明記 |
+| 6 | 依存パッケージの導入と preflight が無い。network を 2 か所で作る | 正しい | `dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux curl` と `command -v` の preflight。network は §6 手順 4 だけで作り（存在すれば作らない）、§8b.3 は確認のみ |
+| 7 | journal の確認が boot 全体から先頭 2 件を取る | 正しい | `_SYSTEMD_INVOCATION_ID` で**その再起動の invocation だけ**を見て、両方のメッセージの順序を確認 |
+| 8 | regression が保存するのは評価した report ではなく 2 回目の取得 | 正しい | 1 回だけ取得し、その JSON を保存してから同じ JSON で verdict を導く。保存失敗は FAIL |
+
+実測 75〜77（runner v10）: `--public-ipv4` は IMDS 不達で `IMDS token request failed (ERR transport)`・exit 1（既定値を出さない）。
+既定 **64/0**、adversarial **65/0**（保存した verdict `accepts=2 seq=11 backlog=0 listening=True marked=1` が評価した report と一致）、fail-closed **3/0**。

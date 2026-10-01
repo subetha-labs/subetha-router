@@ -42,11 +42,10 @@ MSGID_STARTED=39f53479d3a045ac8e11786248231fbf   # systemd: "Started <unit>"
 MODE=standard
 for a in "$@"; do case "$a" in
   --adversarial) MODE=adversarial ;; --fail-closed) MODE=fail-closed ;; --reboot-prepare) MODE=reboot-prepare ;;
-  --post-boot) MODE=post-boot ;; --reboot-cleanup) MODE=reboot-cleanup ;;
+  --post-boot) MODE=post-boot ;; --reboot-cleanup) MODE=reboot-cleanup ;; --public-ipv4) MODE=public-ipv4 ;;
   *) echo "unknown option $a" >&2; exit 64 ;; esac; done
-EVID=/var/tmp/egress-verify-$(date -u +%Y%m%dT%H%M%SZ)-$MODE; mkdir -p "$EVID"
-exec > >(tee -a "$EVID/runner.log") 2>&1
-echo "== subetha-egress-verify $MODE; evidence in $EVID =="
+EVID=/var/tmp/egress-verify-$(date -u +%Y%m%dT%H%M%SZ)-$MODE; [ "$MODE" = public-ipv4 ] || mkdir -p "$EVID"
+if [ "$MODE" != public-ipv4 ]; then exec > >(tee -a "$EVID/runner.log") 2>&1; echo "== subetha-egress-verify $MODE; evidence in $EVID =="; fi
 
 pass=0; fail=0; info=0
 ok()   { pass=$((pass+1)); printf 'PASS %-6s %s\n' "$1" "$2"; }
@@ -170,6 +169,24 @@ pkts()   { [ -s "$1" ] || { echo ERR; return; }; local o; o=$(tcpdump -nn -r "$1
 guard_pause()  { systemctl stop subetha-egress-guard.timer subetha-egress-guard.service || return 1
   local u st; for u in subetha-egress-guard.timer subetha-egress-guard.service; do st=$(systemctl is-active "$u"); [ $? = 3 ] && [ "$st" = inactive ] || return 1; done; }
 guard_resume() { systemctl start subetha-egress-guard.timer; }
+
+# ---- IMDSv2 (shared by the host-address item and --public-ipv4): both requests must succeed at the
+# transport and HTTP level; -q ignores ~/.curlrc and --noproxy ignores proxy settings, so the answer
+# comes from IMDS itself. 404 on public-ipv4 is the only positive proof of "no public address".
+imds() { # $1 path, [$2 token] -> "<http code> <body>" or "ERR <reason>"
+  local out code; if [ -n "${2:-}" ]; then out=$(curl -q -s -m 3 --noproxy '*' -w '\n%{http_code}' -H "X-aws-ec2-metadata-token: $2" "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }
+  else out=$(curl -q -s -m 3 --noproxy '*' -w '\n%{http_code}' -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }; fi
+  code=$(printf '%s' "$out" | tail -n1); printf '%s %s' "$code" "$(printf '%s' "$out" | sed '$d')"; }
+public_ipv4() { # prints the public IPv4, or "none" (IMDS 404); exit 1 on any lookup failure (never guess)
+  local tr tok pr pub; tr=$(imds api/token)
+  case "$tr" in "200 "?*) tok=${tr#200 } ;; *) echo "IMDS token request failed ($tr)" >&2; return 1 ;; esac
+  pr=$(imds meta-data/public-ipv4 "$tok")
+  case "$pr" in
+    "200 "?*) pub=${pr#200 }; python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$pub" 2>/dev/null || { echo "IMDS returned a public-ipv4 that is not an IPv4 address: '$pub'" >&2; return 1; }; echo "$pub" ;;
+    "404 "*|404) echo none ;;
+    *) echo "IMDS public-ipv4 lookup failed after a successful token ($pr)" >&2; return 1 ;;
+  esac; }
+[ "$MODE" = public-ipv4 ] && { trap - EXIT; public_ipv4; exit $?; }
 
 DENY_FILTER='(dst net 0.0.0.0/8 or dst net 10.0.0.0/8 or dst net 100.64.0.0/10 or dst net 127.0.0.0/8 or dst net 169.254.0.0/16 or dst net 172.16.0.0/12 or dst net 192.0.0.0/24 or dst net 192.0.2.0/24 or dst net 192.88.99.0/24 or dst net 192.168.0.0/16 or dst net 198.18.0.0/15 or dst net 198.51.100.0/24 or dst net 203.0.113.0/24 or dst net 224.0.0.0/4 or dst net 240.0.0.0/4)'
 SRC_FILTER='(src net 0.0.0.0/8 or src net 10.0.0.0/8 or src net 100.64.0.0/10 or src net 127.0.0.0/8 or src net 169.254.0.0/16 or src net 172.16.0.0/12 or src net 192.0.0.0/24 or src net 192.0.2.0/24 or src net 192.88.99.0/24 or src net 192.168.0.0/16 or src net 198.18.0.0/15 or src net 198.51.100.0/24 or src net 203.0.113.0/24 or src net 224.0.0.0/4 or src net 240.0.0.0/4)'
@@ -295,11 +312,6 @@ host_addresses() {
   # public-address inventory: both IMDSv2 requests must succeed at the transport and HTTP level;
   # 404 on public-ipv4 is the only positive proof of "no public address"; any other outcome is a
   # lookup failure. The waiver covers only a host where the token request itself cannot reach IMDS.
-  imds() { # $1 path, [$2 token] -> "<http code> <body>" or "ERR <reason>"
-    # -q ignores ~/.curlrc, --noproxy '*' ignores proxy environment: the answer must come from IMDS itself
-    local out code; if [ -n "${2:-}" ]; then out=$(curl -q -s -m 3 --noproxy '*' -w '\n%{http_code}' -H "X-aws-ec2-metadata-token: $2" "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }
-    else out=$(curl -q -s -m 3 --noproxy '*' -w '\n%{http_code}' -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }; fi
-    code=$(printf '%s' "$out" | tail -n1); printf '%s %s' "$code" "$(printf '%s' "$out" | sed '$d')"; }
   local tr tok pr; tr=$(imds api/token)
   case "$tr" in
     "200 "?*) tok=${tr#200 }; pr=$(imds meta-data/public-ipv4 "$tok")
@@ -474,10 +486,17 @@ adversarial() {
     local b=$ZA_SEQ sl ctl rv
     sl=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OBS_PORT/")                      # the slipped, unmarked accept
     ctl=$(curl -s -m 2 -o /dev/null -w '%{http_code}' -H 'X-Control: host' "http://127.0.0.1:$OBS_PORT/"); sleep 0.5
-    rv=$(obs_verdict "$(hobs_url)" "$b" "$HSESSION" X-Control); obs_get "$(hobs_url)" "$b" "$HSESSION" > "$EVID/regression-report.json"; echo "$rv" > "$EVID/regression-verdict.txt"
+    local rj; rj=$(obs_get "$(hobs_url)" "$b" "$HSESSION")
+    case "$rj" in ERR*) rv=$rj ;; *) printf '%s\n' "$rj" > "$EVID/regression-report.json" || { ng V7-17 "regression: cannot save the report"; rj="ERR persist"; }
+      rv=$(printf '%s' "$rj" | python3 -c 'import json,sys
+d=json.load(sys.stdin); b=d.get("backlog") or {}
+acc=sum(1 for r in d["rows"] if r["kind"]=="accept"); lines=sum(1 for r in d["rows"] if r["kind"]=="line" and "X-Control" in r.get("data",""))
+bl=str(b.get("value")) if b.get("supported") else "unsupported:"+str(b.get("error"))
+print("accepts=%d seq=%d backlog=%s listening=%s marked=%d" % (acc, d["seq_last"], bl, d.get("listening"), lines))' 2>/dev/null) || rv="ERR verdict"
+      printf '%s\n' "$rv" > "$EVID/regression-verdict.txt" || ng V7-17 "regression: cannot save the verdict" ;; esac
     case "$rv" in ERR*) ng V7-17 "regression: instrumentation failure ($rv)" ;;
       *) if [ "$sl" = 200 ] && [ "$ctl" = 200 ] && [ "$(vf "$rv" accepts)" = 2 ] && [ "$(vf "$rv" marked)" -ge 1 ]; then
-           control_ok "$rv" && ng V7-17 "regression: the production control predicate ACCEPTED a window with a slipped accept ($rv)" || ok V7-17 "regression: with an unmarked accept slipped in, one report since the verdict's seq $b shows 2 accepts (1 marked) and the production control predicate rejects it (report saved)"
+           control_ok "$rv" && ng V7-17 "regression: the production control predicate ACCEPTED a window with a slipped accept ($rv)" || ok V7-17 "regression: with an unmarked accept slipped in, the one report fetched since the verdict's seq $b shows 2 accepts (1 marked) and the production control predicate rejects it (that exact report and its verdict are saved)"
          else ng V7-17 "regression: injected=$sl control=$ctl report=$rv"; fi ;; esac; fi
   hobs_stop || ng V7-17 "host observer did not terminate after the regression"
   echo "-- V7-17 cleanup-failure injection: a process that ignores SIGTERM must make the observer teardown fail"

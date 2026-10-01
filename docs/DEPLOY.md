@@ -184,11 +184,15 @@ SUBETHA_ROUTER_RECEIVER=0x...
 ENVEOF
 
 # 4) 起動（env ファイルは root 所有 600 なので **sudo が要る**）。
-#    先に §8b の egress 制御を設置してから。Router は専用 network に**単独**で置く（§8b.1 の前提）
-sudo docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
+#    先に §8b.2 の egress 制御を設置してから。Router は専用 network に**単独**で置く（§8b.1 の前提）。
+#    journal は §2 のとおりボリュームに置く（`-v` が無いとコンテナ削除で全記録が消える）
+sudo mkdir -p /var/lib/subetha-router && sudo chown 10001:10001 /var/lib/subetha-router
+sudo docker network inspect subetha-router-net >/dev/null 2>&1 || \
+  sudo docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
 sudo docker run -d --name subetha-router --restart unless-stopped \
   --network subetha-router-net \
   -p 127.0.0.1:8787:8787 \
+  -v /var/lib/subetha-router:/app/runtime \
   --env-file /etc/subetha-router.env \
   subetha-router
 
@@ -243,14 +247,21 @@ B と A の両方が通るまで出さない。
 - `docker info --format '{{.LiveRestoreEnabled}}'` が `false`（既定）。firewalld が無いか無効。`userland-proxy` を daemon.json で `false` にしない
 - **Router の DNS を上書きしない**（`--dns` を付けない、daemon.json に `dns` を書かない）。
   埋め込み resolver は host から継承した nameserver へ **host の namespace から**問い合わせる（上書きするとコンテナ側から出て落ちる）
-- Router は専用 network `subetha-router-net`（bridge `subetha0`）に**単独**で置く。他のコンテナを同じ network に付けない
+- Router は専用 network `subetha-router-net`（bridge `subetha0`、RFC1918 の subnet）に**単独**で置く。他のコンテナを同じ network に付けない
 - IPv6 は bridge で無効（既定）。有効化は本手順の対象外（runner が FAIL にする）
 - **host が応答する全アドレス**のうちインタフェースに無いもの（EC2 の公開 IPv4 / Elastic IP）を `HOST_ADDRS4` に書く。
-  インタフェース上のアドレスは `apply` が毎回自動で集める
+  インタフェース上のアドレスは `apply` が毎回自動で集める。公開 IPv4 は **IMDS から読み、読めなければ設置を中止する**（推測しない）
+- 検証に使う **外部 observer**: VPC 内の別 host（RFC1918 アドレス、**Linux、`ss` あり**）で `deploy/egress/egress-observer.py` を動かす。
+  Router host からその両ポートに届くこと（SG）
 
 ### 8b.2 設置（Router 停止中に。初回は Router を作る前に）
 
 ```sh
+# 0) 依存（runner と補助 unit が使う）と preflight
+sudo dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux curl
+for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss; do command -v $t >/dev/null || echo "MISSING: $t"; done
+
+# 1) 成果物
 cd subetha-router-egt
 sudo install -m 755 deploy/egress/subetha-egress deploy/egress/subetha-egress-verify /usr/local/sbin/
 sudo mkdir -p /usr/local/lib/subetha-egress /etc/systemd/system/docker.service.d
@@ -259,64 +270,93 @@ sudo install -m 644 deploy/egress/egress-observer.py deploy/egress/egress-host-o
 sudo install -m 644 deploy/egress/subetha-egress-guard.service deploy/egress/subetha-egress-guard.timer /etc/systemd/system/
 sudo install -m 644 deploy/egress/10-subetha-egress.conf /etc/systemd/system/docker.service.d/
 
-# 公開 IPv4 はインタフェースに無い。IMDSv2 で読む（無ければ none）
-TOKEN=$(curl -s -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)
-PUB=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+# 2) 公開 IPv4 を IMDS から読む。runner と同じ判定（token 取得 → 200 + IPv4 なら採用、404 なら none、それ以外は失敗）。
+#    失敗したら**ここで止める**。既定値で埋めない
+PUB=$(sudo subetha-egress-verify --public-ipv4) || { echo "IMDS lookup failed: do not continue"; false; }
+echo "public IPv4: $PUB"
 sudo tee /etc/subetha-egress.env >/dev/null <<ENV
 IFACES="subetha0 docker0 br+"
-HOST_ADDRS4="${PUB:-none}"
+HOST_ADDRS4="$PUB"
 ENV
 
+# 3) 適用と確認（apply は最後に check を走らせ、通らなければ失敗する）
 sudo systemctl daemon-reload
-sudo subetha-egress apply && echo "policy ok"        # apply は最後に check を走らせ、通らなければ失敗する
-sudo systemctl enable --now subetha-egress-guard.timer
+sudo subetha-egress apply && echo "policy ok"
+sudo systemctl enable --now subetha-egress-guard.timer && systemctl is-active subetha-egress-guard.timer
+
+# 4) ExecStartPre が効くことを、**この再起動の invocation だけ**で確認する
 sudo systemctl restart docker
-# journal で "subetha-egress: applied" が "Loading containers: start" より前にあること
-sudo journalctl -b -u docker.service -o cat | grep -E 'subetha-egress: applied|Loading containers: start' | head -2
+sudo journalctl _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value docker.service) -o cat \
+  | grep -E 'subetha-egress: applied|Loading containers: start'
+# 期待: "subetha-egress: applied (...)" が先、"Loading containers: start." が後。両方無ければ失敗
 ```
 
 `/etc/subetha-egress.env` は `KEY=value`（空白を含む値は二重引用符。行内コメント不可）。未知のキー・重複・
 不正なアドレス・空の `IFACES`・未設定の `HOST_ADDRS4` は **`apply` が失敗し、Docker が上がらない**（fail-closed）。
 意図した挙動なので、`journalctl -u docker` の `subetha-egress:` 行を読んで直す。
 
-### 8b.3 Router の network
+### 8b.3 Router の network と、既存 Router の移行
+
+network は §6 の手順 4 で作る（既にあれば `docker network inspect subetha-router-net` で bridge 名が `subetha0`、
+subnet が RFC1918 であることを確認する）。
+
+既に既定 bridge（docker0）で動いている Router を移す場合（**journal を失わない順序**）:
 
 ```sh
-sudo docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
+sudo docker inspect subetha-router --format '{{json .Mounts}}'            # /app/runtime がボリュームか確認
+# ボリューム無しで動いていたら、先に journal を取り出す（削除すると消える）
+sudo docker cp subetha-router:/app/runtime /var/lib/subetha-router-backup-$(date +%s)
+sudo docker stop subetha-router && sudo docker rm subetha-router
+# §6 の手順 4 で作り直す（`-v /var/lib/subetha-router:/app/runtime` と `--network subetha-router-net`）。
+# 取り出した journal はボリュームに移してから起動する（所有者 10001:10001）
 ```
 
-§6 の `docker run` に **`--network subetha-router-net`** を付ける。既に既定 bridge で動いている Router は
-`sudo docker rm -f subetha-router` してから作り直す（journal は `-v` のボリュームに残る）。
+### 8b.4 検証（稼働前に全モード。証拠を保存する）
 
-### 8b.4 検証（稼働前に全モード。出力を保存する）
+受け入れ条件: **全モードで `failed 0`、かつ `ALLOW_NO_BACKLOG` と `ALLOW_NO_IMDS` を設定しない**。
+この 2 つは試験環境専用の免除で、設定すると不足した証拠が INFO になる。本番では**必ず unset** する。
+runner の出力と証拠ディレクトリ（`/var/tmp/egress-verify-<時刻>-<mode>/`）、設置した成果物の commit と
+`/etc/subetha-egress.env` の内容を保存する。
 
-**外部 observer が要る**: VPC 内の別 host（RFC1918 アドレス）で `deploy/egress/egress-observer.py` を動かす
-（`python3 egress-observer.py --port 19999 --report-port 19996`。到達した接続と行を記録し、JSON で返す）。
-Router host からその両ポートに届くこと（SG）。runner は observer の記録を**自分で読んで判定**する。
+環境変数: `ROUTER` は Router の**コンテナ名**（既定 `subetha-router`）、`HEALTH_URL` は Router の health endpoint で
+**コンテナの中からも外からも同じ URL で届くもの**（既定 `http://127.0.0.1:8787/healthz`。Caddy の TLS endpoint ではない）、
+`OBSERVER=<observer ip>:19999`、`OBSERVER_REPORT=<observer ip>:19996`（外部 observer は
+`python3 egress-observer.py --port 19999 --report-port 19996`。**検証の全期間、再起動せずに**動かし続ける。
+runner は observer の記録を自分で読み、session が変わると FAIL にする）。
 
 ```sh
+unset ALLOW_NO_BACKLOG ALLOW_NO_IMDS
 export OBSERVER=<observer ip>:19999 OBSERVER_REPORT=<observer ip>:19996
-sudo -E subetha-egress-verify                        # 非破壊（Router 稼働中）: 前提、行列、host 全アドレス、対照、DNS、原子性、IPv6
-sudo docker stop subetha-router                      # 以下は Router を止めて
-sudo -E subetha-egress-verify --adversarial          # 代役コンテナを同じ network に置き: check の sabotage、別名アドレス、hairpin、DNAT 両経路、隣接、既存接続、guard
+sudo -E subetha-egress-verify                        # 非破壊（Router 稼働中）
+sudo docker stop subetha-router                      # 以下 2 つは Router を止めて
+sudo -E subetha-egress-verify --adversarial          # 代役コンテナを同じ network に置き、policy の除去/再適用と check の sabotage を行う
 sudo -E subetha-egress-verify --fail-closed          # Docker を止め env を壊し、再試行を含めて上がらないことを journal で見る
 sudo docker start subetha-router
-sudo -E subetha-egress-verify --reboot-prepare && sudo reboot
-sudo -E subetha-egress-verify --post-boot && sudo -E subetha-egress-verify --reboot-cleanup
+sudo -E subetha-egress-verify --reboot-prepare       # probe と boot 時の観測 unit を入れる（捕捉の寿命は既定 900 秒）
+sudo reboot
 ```
 
-**全モードで `failed 0` が受け入れ条件。** 既定の環境変数: `ROUTER=subetha-router`、`NET=subetha-router-net`、
-`HEALTH_URL=http://127.0.0.1:8787/healthz`。runner は Router（または代役）の netns から試行し、veth（双方向）・
-uplink・conntrack・host/外部 observer の記録で「届いていない」を見る。観測が立ち上がらなければその項目は FAIL になる。
+再起動後（**900 秒以内**に。超えたら `--reboot-cleanup` して `--reboot-prepare` からやり直す）:
+
+```sh
+unset ALLOW_NO_BACKLOG ALLOW_NO_IMDS
+export OBSERVER=<observer ip>:19999 OBSERVER_REPORT=<observer ip>:19996   # 再接続した shell で同じ値を再設定
+sudo -E subetha-egress-verify --post-boot
+sudo -E subetha-egress-verify --reboot-cleanup
+```
+
+`--adversarial` は Router が止まっていることを**成功した query で確認**し、確認できなければ拒否して非 0 で終わる。
+観測が立ち上がらない・observer の session が変わる・捕捉が読めない、はすべて FAIL になる。
 
 ### 8b.5 運用規則
 
-- **Router 稼働中に firewall を触らない**（`iptables -F`、firewalld の導入、他の管理ツール）。
-  guard timer は 30 秒毎に復旧するが、**その間は開く**。保証ではない
-- 再適用は `sudo subetha-egress apply`（原子的、数十 ms）。Docker の再起動は不要
-- 保守で外すとき（`subetha-egress remove`）は timer を止め、Router を止めてから。再開前に `sudo subetha-egress check`
+- **Router 稼働中に firewall と host のアドレスを触らない**（`iptables -F`、firewalld の導入、他の管理ツール、
+  Elastic IP の付け替え、インタフェースへのアドレス追加）。guard timer は 30 秒毎に復旧するが**その間は開く**。保証ではない
+- 保守とアドレス変更は次の順序で: `docker stop subetha-router` → `systemctl stop subetha-egress-guard.timer subetha-egress-guard.service`
+  → 作業（`subetha-egress remove` を含む保守、アドレス変更なら `HOST_ADDRS4` の更新）→ `sudo subetha-egress apply`（check を含む）
+  → `systemctl start subetha-egress-guard.timer` と `systemctl is-active subetha-egress-guard.timer` → `docker start subetha-router`
+- 再適用だけなら `sudo subetha-egress apply`（原子的、数十 ms）。Docker の再起動は不要
 - 状態は `sudo subetha-egress status`。`check` が非 0 なら差分が stderr に出る
-- host にアドレスを足した/付け替えた（Elastic IP 等）ら `HOST_ADDRS4` を直して `apply`
 - IANA の special-purpose レジストリが更新されたら（runner が検出して FAIL にする）`DENY4` / `DENY6` を見直す
 - 起動直後、guard の初回実行までは bridge の gateway アドレスが目録に無い（network の subnet が RFC1918 なので
   レジストリ行が落とす。runner はそれを前提として検査する）。`check` はその間だけ差分を報告する
