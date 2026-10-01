@@ -15,6 +15,8 @@
 | 3 | 経路の無い宛先（`10.255.255.1`）へ接続 | 即時失敗、**規則に到達しない** | 経路が無い宛先はカーネルが落とす。**規則の試験には転送される宛先を使う** |
 | 4 | DROP / REJECT(icmp-admin-prohibited) / 規則なし を `curl` で計時 | DROP **4s timeout** / REJECT **4s timeout** / なし **0.0006s refused** | **コンテナ内から DROP と REJECT は区別できない**。ICMP が戻らない。→ FR-C1' を実証: Router は遮断を報告できず、**証拠はカウンタだけ** |
 | 5 | bridge の IPv6 | `EnableIPv6: false` | 既定では IPv6 egress が無い。**有効化したら ip6tables 側も同じ規則が要る** |
+| 7 | 実測 6 の修正（resolver 例外）を **host の `/etc/resolv.conf`** から取って適用 | **まだ `exit=6`**。host の値は `127.0.0.53`（systemd-resolved stub）、コンテナの値は `192.168.5.2` | **resolver はコンテナの中から読む**。host の stub はコンテナから到達不能で、Docker がその理由でコンテナ側を書き換えている |
+| 8 | コンテナ側 resolver で例外を張って再検証 | 公開 HTTPS **`exit=0` 0.07s**、禁止宛先 **`exit=28`**。UDP 53 RETURN **2 pkts**、`192.168/16` DROP **4 pkts** | **修正版は正しく動く**。例外と DROP が port で正しく分岐している証拠がカウンタに出る |
 | 6 | **§3.1 の規則をそのまま適用**し、公開 HTTPS へ接続 | **`curl exit=6`（名前解決失敗）**。`192.168.0.0/16` の DROP が **4 pkts** | **deny 一覧が resolver（`192.168.5.2`）を落とし、DNS が死んだ**。EC2 でも resolver は `169.254.169.253` か `10.x` で**同じく deny 範囲内**。→ DNS 例外を DROP より前に置く（§3.1 に追加）。コンテナ間（172.17.x）は生きていた |
 
 実測 4 は要件 §8.4 の「drop はタイムアウトに見える」を**裏付けた**。
@@ -46,7 +48,10 @@ sudo iptables -A SUBETHA-EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j RE
 # **DNS の例外を DROP より前に置く**（INV-1 の唯一の例外）。実測 6: これが無いと名前解決が死ぬ。
 # RESOLVER は展開先の resolver（EC2 なら VPC の 169.254.169.253 か VPC DNS の 10.x。
 # どちらも下の deny 範囲に入る）。承認済みリゾルバ **1 つだけ**を許し、53 番の他宛ては落とす
-RESOLVER="$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)"
+# **host の /etc/resolv.conf を読んではならない**（実測 7）。systemd-resolved 環境では stub の
+# 127.0.0.53 が入っており、コンテナからは到達不能。Docker はそのためにコンテナ側の resolv.conf を
+# 書き換えている。**コンテナの中から読む**のが唯一正しい出所
+RESOLVER="$(sudo docker run --rm alpine:latest awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)"
 sudo iptables -A SUBETHA-EGRESS -d "$RESOLVER" -p udp --dport 53 -j RETURN
 sudo iptables -A SUBETHA-EGRESS -d "$RESOLVER" -p tcp --dport 53 -j RETURN
 
