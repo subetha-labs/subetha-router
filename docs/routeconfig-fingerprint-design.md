@@ -463,3 +463,115 @@ purchase 時:
 `config.ts:447` の SubEtha facilitator は `allowQuery=true` で呼ばれている（レビュー指摘）。
 → **`userinfo` / `fragment` 拒否は `allowQuery` と独立**に実装する。
 `allowQuery` の既存挙動は変えない。
+
+## 11. 設計レビュー（APPROVE WITH CHANGES）→ **最終設計**
+
+レビュー実施: 2026-10-01、`gpt-6-astra`。**判定: APPROVE WITH CHANGES**。
+「§9 は元の payTo A→B 脆弱性を閉じており、懸念した `stableJson` のバグは存在しない」。
+修正 2 件（1 件は §10.3 で自力発見済み）。
+
+### 11.1 指摘1: legacy の照合は**指紋と同等にできない** → 方針を変える
+
+レビューの指摘を検証した:
+
+| 欄 | legacy で復元できるか |
+|---|---|
+| `destination.{scheme, network, asset, payTo}` | **できる**（`selectedOffer` 経由） |
+| `source.{amount, asset, network}` | **できる** |
+| `source.payTo`（x402/MPP） | **できる**（`intent.source.offer.payTo`。§9.3 は漏らしていた） |
+| **`rail` / `sourceRail`** | **できない**。**journal に保存されていない**（自分で確認: `grep` で 0 件） |
+
+→ **`rail` の変更は legacy intent では検出できない。**
+「省略された既定値か明示指定か」も復元できない。
+
+**したがって「legacy を照合して通す」は、指紋と同等の保護を与えられない。**
+§9.3 の表は**同等性を主張していたが誤り**だった。
+
+**修正: legacy intent は照合せず、一律で拒否する。**
+
+```
+purchase 時:
+  指紋あり        → 現在の設定と照合。不一致なら拒否
+  指紋が不正値    → 拒否
+  **指紋なし（legacy）→ 拒否**（「再 quote してください」）
+```
+
+**根拠**:
+1. **部分的な照合は、守れない欄があることを隠す**。
+   `rail` を変えても通る照合は、運用者に誤った安心を与える
+2. legacy intent は**この変更をデプロイする前に発行されたもの**であり、
+   **存在するのはデプロイ直後の最大 `approvalTtlMs`（既定 60 秒、MPP は offer 600 秒）だけ**
+3. **拒否のコストは「再 quote」**であり、資金の損失ではない
+4. §8.2 で「拒否は可用性の破壊」と書いたが、**あれは「恒久的に旧 quote が死ぬ」と誤解していた**。
+   実際は**デプロイ直後の短い窓だけ**であり、しかも**再 quote で回復する**
+
+**デプロイ手順に記載する**: 本変更のデプロイ直後、
+**未処理 quote は再 quote が必要**（最大で offer 有効期間ぶん）。
+
+### 11.2 指摘2: route 解決と削除時の扱い（§10.3 と同一）
+
+**確定**:
+
+```
+purchaseLocked:
+  :372 unknown_quote
+  :377 not_owner
+  :382 route_mismatch
+  :386 request_id_conflict
+  :390 status !== "created" → currentOutcome
+  :392 approval !== quoteId
+  ↓ ここに追加
+  route = resolveRoute(config, intent.routeId)   ← config.ts:66
+  route === undefined → 拒否（quote_changed）
+  指紋の照合                                      ← §11.1
+  ↓ 以降は既存（preflight :413 / 上流読取 :428 / verify :474 / settle :515）
+```
+
+**`resolveRoute` は既存関数**（`config.ts:66`）。新規実装は不要。
+
+### 11.3 不正値の判定（レビューの補足を反映）
+
+`asString`（`store.ts:13`）は**非文字列に fallback を返す**（coerce も throw もしない）。
+
+→ **`asString` を使う前に、生のプロパティの有無と型を見る**:
+
+```
+raw = patch["routeFingerprint"]
+raw === undefined                                → legacy
+typeof raw === "string" && raw.startsWith("sha256:")  → 採用
+それ以外                                          → 不正値
+```
+
+**両方のフィールド（`routeFingerprint` / `routeFingerprintInvalid`）を
+この生の値だけから導出する。**
+
+なお「`sha256:` で始まるゴミ」は採用されるが、
+**purchase 時の digest 比較で落ちる**（レビューの指摘通り）。
+
+### 11.4 最終的な変更ファイル
+
+| ファイル | 変更 |
+|---|---|
+| `src/config.ts` | `authoritativeTermsOf` / `routeFingerprintOf` を追加。`assertAbsoluteHttpUrl` に `userinfo` / `fragment` 拒否（`allowQuery` は不変） |
+| `src/core/intent.ts` | `Intent` に `routeFingerprint?: string` / `routeFingerprintInvalid?: boolean` |
+| `src/core/store.ts` | `intentFromCreated` に**生の値からの明示的な復元**（§11.3） |
+| `src/core/orchestrator.ts` | quote 時に記録。purchase 時に **route 解決 → 指紋照合**（§11.2） |
+| `src/main.ts` | `real` モードの上流が内部アドレスなら**警告** |
+
+### 11.5 テスト（最終）
+
+§8.7 の T-1〜T-7 に加えて:
+
+| ID | 内容 |
+|---|---|
+| **T-3'（差し替え）** | **legacy（指紋なし）は設定不変でも拒否される**（§11.1 の方針） |
+| T-8 | **route 削除後の purchase が拒否される** |
+| T-9 | `sha256:` で始まるが内容が違う指紋 → **digest 比較で拒否** |
+| T-10 | `routeFingerprint` が数値・null・空文字 → **不正値として拒否**（legacy に落ちない） |
+
+**sabotage（最終）**:
+1. 指紋の照合を常に true → T-1 が落ちる
+2. 指紋から **destination の `payTo`** を除く → T-1 が落ちる
+3. legacy を**通す**ように変更 → T-3' が落ちる
+4. `intentFromCreated` の復元を削除 → T-2 が落ちる
+5. route 解決の分岐を削除 → T-8 が落ちる
