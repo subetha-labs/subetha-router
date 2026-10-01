@@ -234,28 +234,38 @@ claude mcp add --transport http subetha-router https://router.subethalabs.com/mc
 - TLS 終端（Caddy / nginx / ALB のいずれか）とドメイン（`subethalabs`）の DNS
 - **鍵の配置**: env を直接書かず、systemd の `EnvironmentFile`（mode 600）か
   AWS Secrets Manager 等を使う。**シェル履歴とプロセス一覧に鍵を残さない**
-- **インスタンスメタデータ（IMDS）を塞ぐ**: Router は上流 URL を `fetch` する。
+- **IMDS のトークン取得を塞ぐ**: Router は上流 URL を `fetch` する。
   コンテナは既定の bridge ネットワークで動くため、`169.254.169.254` に**到達できる**。
-  Router 自身は IMDS を使わないので、**IMDSv2 を必須にし hop limit を 1 にする**。
-  hop limit 1 なら、ホストから 1 hop 先のコンテナにはメタデータが届かない。
-  これで、上流 URL の扱いが将来どう変わっても **IAM 認証情報は標的から外れる**。
+  Router 自身は IMDS を使わないので、**IMDSv2 を必須にし PUT 応答の hop limit を 1 にする**。
+  bridge 経由のコンテナはホストから 1 hop 先なので、トークン応答が届かず**新規のトークンを取れない**。
+  **両方が必要**: v1 を許したままでは PUT 不要なので hop limit だけでは効かない。
+
+  **守る範囲を正確に言う**: これは「bridge トポロジのコンテナが IMDS から**自力でトークンを得る**」ことを
+  止める。`169.254.169.254` への到達そのものは止めないし、ホスト側で得たトークンの中継も、
+  `--network host` で動かした場合も防がない。他のリンクローカル宛て（DNS `169.254.169.253` 等）にも効かない。
+  それでも、**最も価値の高い標的（IAM 認証情報）を、アプリ側の対策より先に外せる**。
 
   ```sh
-  # 現在値を読む（HttpTokens が optional なら v1 が許可されている）
+  # 現在値（HttpTokens が optional なら v1 が許可されている）
   aws ec2 describe-instances --instance-ids <id> \
     --query 'Reservations[].Instances[].MetadataOptions' --output table
 
-  # v2 必須 + hop limit 1
+  # v2 必須 + hop limit 1。--http-endpoint は指定しない（既に disabled なら再有効化してしまう）
   aws ec2 modify-instance-metadata-options --instance-id <id> \
-    --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled
+    --http-tokens required --http-put-response-hop-limit 1
 
-  # 反映確認（HttpTokens=required, HttpPutResponseHopLimit=1 であること）
+  # 反映確認。稼働中のインスタンスでは State が pending → applied に変わるまで待つ。
+  # HttpTokens=required, HttpPutResponseHopLimit=1, **State=applied** の 3 つを確認する
   aws ec2 describe-instances --instance-ids <id> \
     --query 'Reservations[].Instances[].MetadataOptions' --output table
   ```
 
-  **これは SSRF 対策の全部ではない**。到達そのものを止める層（fetch 前のアドレス検査）は
-  `docs/ssrf-requirements.md` の段階 1・2 で、**AI が上流 URL を指定できる構成に進むときに必須**になる。
+  ホスト上の他のエージェントも IMDS を使わないなら、`--http-endpoint disabled` で
+  エンドポイントごと閉じる方が強い。Router が使わないことだけでは、その判断の根拠にならない。
+
+  **到達そのものを止める層は別**で、`docs/ssrf-requirements.md` に段階として定めている。
+  **アプリ側（fetch 前の検査 + 接続固定）か、インフラ側（`DOCKER-USER` の egress 規則か
+  迂回不能な forward proxy）のどちらか**で満たす。**AI が上流 URL を指定できる構成に進む前に**要る。
 
 ### 単一インスタンス前提
 Router は journal を `flock(2)` で排他する。**同一ホストで 2 つ起動すると 2 つ目は起動に失敗する**
