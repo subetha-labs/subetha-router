@@ -870,3 +870,85 @@ IANA レジストリ日付、DNS 上書き無し（container・daemon config・c
 
 `deploy/egress/`: `subetha-egress`、`subetha-egress-verify`、`egress-observer.py`、`10-subetha-egress.conf`、`99-egress-verify.conf`、
 `subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
+
+## 16. 設計レビュー #5（v5、`8938253`）: **REJECT** → v6 で応答
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。blocking 6 件、non-blocking 3 件。
+レビュアは mock で「挿入失敗後の削除」「状態不明での remove」「scratch 読み出し失敗の無視」「前提の文字列解析」を再現した。
+
+| # | 指摘（要約） | 判定 | v6 での応答 | 実測 |
+|---|---|---|---|---|
+| 1 | `place_jumps` は挿入が 1 つでも失敗しても下の jump を削除し、**生き残っていた保護を消す** | **正しい** | 全 jump の挿入が成功し、かつ先頭 N 行が自分の jump であることを**読み直して確認してから**しか削除しない。失敗時は何も削除せず非 0。runner が fault injection（`iptables` の shim で 1 本の挿入を拒否）で確認 | 45 |
+| 2 | `remove` は `docker inspect` の**あらゆる失敗**を「存在しない」と解釈して進む。runner の「Router 停止」判定も `true` 以外を通す | **正しい** | inspect が成功して `false` のときだけ、または inspect 失敗時に `docker ps -a` が**成功して**名前が無いときだけ進む。timer と guard service の状態も判定不能なら拒否。runner も同じ判定（`router_stopped`）。daemon 不達を shim して remove が拒否することを確認 | 45 |
+| 3 | reboot の捕捉評価が 1 秒解像度で、probe が制御接続後も走り続け、制御と leak を区別していない。observer の時刻と host の時刻を比べている | **正しい** | 制御接続の前に **probe を停止**し、boot から静止までの区間で probe ポートへの SYN が 0 であることを epoch（小数）で判定。制御後の SYN は**ちょうど 1 本**で、外部 observer の accept **ちょうど 1 件**（`X-Control` 行付き）と対応付ける。observer は時刻ではなく **seq カーソル**（prepare 時に記録）で読む | 48 |
+| 4 | observer は report ポートだけで readiness を名乗り、観測ポートの bind 失敗を伝えない。再起動で記録が消える。accept 前の backlog を見ていない | **正しい** | 観測ポートを**同期的に bind** してから report を開始（失敗は exit 1 → unit 失敗 → `Requires=` で Docker が上がらない）。`session`（起動時刻-pid）と単調 `seq` を返し、runner は prepare 時の session と一致・`listening` を要求、host observer は `NRestarts=0` を要求。`backlog`（`ss` の Recv-Q）を返し 0 を要求 | 48 |
+| 5 | runner の空の gate（hammer の実行確認なし、conntrack の失敗が 0 に化ける、fail-closed の回数の数え方、未知キーの診断未要求、hairpin の宛先 readiness、DNS の veth 失敗が無言） | **正しい** | hammer は開始/終了時刻と exit を記録し再適用ループと**重なった**ことを要求。`conntrack -L` の失敗は FAIL。fail-closed は journal の**policy 診断行が ≥2 回**（試行ごとに出る）を要求、未知キーも診断行を要求。hairpin 宛先は host から 200 を確認してから。veth 失敗は FAIL | 44、46 |
+| 6 | 前提の解析が弱い（gateway 文字列で subnet を判定、daemon.json の grep、ExecStartPre の前方一致、backend は印字のみ、読み出し失敗が「無し」になる） | **正しい** | IPAM の**全 subnet** を `ipaddress` で拒否範囲に包含判定。daemon.json は JSON として解析（不在/不正を区別）。dockerd の cmdline は読めなければ FAIL。ExecStartPre は `argv[]=/usr/local/sbin/subetha-egress apply ; ignore_errors=no` と一致。backend が `iptables` でなければ FAIL。firewalld は exit code で判定 | 44 |
+
+non-blocking: scratch 読み出しと hook 一覧は**出力を受けてから**変換する（status が sed のものにならない）。guard は check から修復まで
+**同じ lock を保持**（`apply_unlocked`）。runner に cleanup trap（env・別名・DNAT・コンテナ・policy・timer を復元）。
+IANA は v4/v6 両方の日付を見る。「Caddy path」→「host→Router（Caddy の upstream 経路）」、strace は「IPv4 chain の restore」と表記。
+証拠（pcap、observer JSON、journal 抜粋、runner 出力）は `/var/tmp/egress-verify-<時刻>-<mode>/` に残す。
+
+## 17. 設計 v6（現行。§15 のうち以下で言い直した部分を置き換える）
+
+> 成果物は `deploy/egress/` の v6。実測 44〜49 は runner v4 の出力（証拠ディレクトリ `/var/tmp/egress-verify-<時刻>-<mode>/`）。
+
+### 17.1 スクリプト契約の差分（§15.2 に対して）
+
+| 項目 | v6 |
+|---|---|
+| `place_jumps` | 先頭 N 行が期待集合なら何もしない。違えば全 jump を位置 1 に新規挿入し、**全部成功し、かつ先頭 N 行が期待集合だと読み直して確認できた場合に限り**、N 行目より下の自分の jump を行番号の大きい順に削除。挿入が 1 つでも失敗したら**何も削除せず**非 0（既存の保護はそのまま） |
+| `apply` | `apply_unlocked`（validate → render ×2 → `--test` ×2 → commit ×2 → place_jumps ×2 → check）を lock の下で。`guard` は **同じ lock を保持したまま** check → apply_unlocked |
+| `check` | scratch chain の `-S` と hook の `-S` は**出力を受けてから**変換する（status が `sed`/`head` のものにならない）。scratch の後始末失敗も FAIL |
+| `remove` | `docker inspect` が**成功して `false`** のときだけ、または inspect 失敗時に `docker ps -a` が**成功して**名前が無いときだけ進む。timer と guard service は `is-active` の exit code で判定し、判定不能なら拒否。`FORCE=1` は検証専用 |
+| 設定 | `IFACES` の重複トークンを拒否（§15.2 と同じ） |
+
+### 17.2 観測プログラム（`egress-observer.py` v2）
+
+- 観測ポートを **main で同期的に bind/listen** してから report サーバを開始。bind 失敗は exit 1（unit が失敗し、試験用 `Requires=` で Docker が上がらない）
+- `GET /health` は観測ソケットが listen 中のときだけ 200（unit の `ExecStartPost` と runner の readiness はこれを使う。**引用符を含まない**ので systemd の unquoting に壊されない）
+- `GET /?since_seq=<n>` は `{session, listening, seq_last, backlog, rows[{seq,t,kind,src,sport,data}]}`。`session` = 起動時刻-pid（再起動検出）、`seq` は単調（カーソル）、`backlog` は `ss` の Recv-Q（accept 待ちの接続。無ければ null）
+
+### 17.3 runner v4 の gate（§15.3 に対して）
+
+| 項目 | v6 |
+|---|---|
+| 前提 | IPAM の全 subnet を `ipaddress` で拒否範囲に包含判定。daemon config を JSON 解析（不在/不正を区別）、dockerd の cmdline（`--config-file` も解決）を読めなければ FAIL。`ExecStartPre` は `argv[]=/usr/local/sbin/subetha-egress apply ; ignore_errors=no` と一致。backend が `iptables` でなければ FAIL。firewalld は `is-active` の exit code。IANA は v4/v6 両方の更新日 |
+| adversarial の前提 | **Router が停止していることを成功した query で確認**（`router_stopped`）。guard timer と service を止めて非 active を確認。cleanup trap で env・別名・DNAT・コンテナ・policy・timer を復元 |
+| sabotage | §15.3 の 10 通り + **fault injection**（`iptables` の shim で 1 本の挿入を拒否 → `apply` は失敗し、既存の jump は残る）+ `remove` が daemon 不達で拒否 |
+| hammer | 開始/終了時刻と exit を記録し、再適用ループと**重なった**ことを要求 |
+| conntrack | `conntrack -L` の失敗は FAIL |
+| fail-closed | journal の policy 診断行（試行ごと）が **≥2**、未知キーの診断行を要求 |
+| hairpin | 宛先が host から 200 を返す（readiness）ことを確認してから |
+| DNS | veth が見つからなければ FAIL |
+| reboot | prepare で外部 observer の `session` と `seq` カーソルを記録。post-boot は: 順序、捕捉稼働中、**捕捉の連続性**（Started 1 回、NRestarts 0）、docker の起動回数を記録、外部 observer の session 不変 + listening、host observer listening + NRestarts 0、`check`、**probe を停止**してから boot〜静止の区間を評価（成功 0、外部 accept 0 since カーソル、host accept 0、backlog 0）、t0（小数 epoch）後に制御接続 ×2 → **稼働中の捕捉のコピー**を解析: t0 前の probe ポート SYN **0**、t0 後は**ちょうど 1 本**で外部 observer の accept **1 件**（`X-Control` 行付き）と対応、host observer も制御 1 件 |
+| cleanup | 試験用 drop-in を削除して **`daemon-reload` してから** 補助 unit を止める（先に止めると `Requires=` で docker.service が止まり、socket activation で両方が再起動して捕捉が切り詰められる。実測 49 で踏んだ） |
+| 証拠 | pcap、observer JSON、journal 抜粋、runner 出力を `/var/tmp/egress-verify-<時刻>-<mode>/` に残す |
+
+### 17.4 実測 44〜49
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 44 | runner v4 既定モード（Router 稼働） | **62 PASS / 0 FAIL**。前提の構造解析（subnet 包含、daemon config JSON、ExecStartPre 完全一致、backend）、hammer は再適用ループと重なって exit 0 |
+| 45 | runner v4 `--adversarial`（Router 停止を確認、代役） | **57 PASS / 0 FAIL**。fault injection: 挿入失敗で `apply` が失敗し `subetha0` の jump は残る（2 → 3 本）。daemon 不達で `remove` 拒否。DNAT は INPUT（host observer、目録行 `172.30.0.1` +2 / jump 除去で 200 + accept 1）と FORWARD（外部 observer、`192.168/16` +2 / jump 除去で 200 + accept 1）。既存接続 tick 4 → 0 |
+| 46 | `--fail-closed` | **3 PASS**。不正 `HOST_ADDRS4`: 3 回の起動試行がいずれも policy の診断行で失敗、dockerd 0・shim 0。未知キー: 診断行あり |
+| 47 | observer unit の readiness が systemd の unquoting で壊れていた（`\"listening\": true` → `grep "listening": true`）→ unit 失敗 → 試験用 `Requires=` が Docker を止め、docker CLI は socket activation で永久待ち | **設計どおりの fail-closed**（観測が無いと Docker が上がらない）が、原因は計測器。`/health` に変更 |
+| 48 | runner の INPUT DNAT 試験が registry 行（`172.16/12`）を読んでいた | 落としたのは目録行（`172.30.0.1`）。修正 |
+| 49 | reboot（v6 初回）: post-boot が捕捉 unit を止めた瞬間に `Requires=` で docker.service が止まり、socket activation で docker と捕捉が再起動、`-w` が pcap を切り詰めた（24 バイト）。`systemctl restart docker` 単体では捕捉 unit は再起動しない（MainPID 不変）ことを実測 | 捕捉は止めずにコピーを解析、連続性を assert、cleanup は drop-in 削除 + daemon-reload を先に。**再実行の結果は下記** |
+
+| 50 | reboot（v6、修正後。`colima restart`、Colima が boot +7 秒で docker を 1 回再起動する環境） | **15 PASS / 0 FAIL / 2 INFO**。observers 20:45:43.77/44.00 → `applied` **44.12** → `Loading containers` **44.20** → 復元後最初の試行 **45.50 `28`**。捕捉は Started 1 回・NRestarts 0。docker は 2 回起動（INFO、各回 ExecStartPre）。外部 observer session 不変、カーソル以降 accept 0、host observer accept 0。boot〜静止の probe ポート SYN **0**。制御: t0 後の SYN **1** ↔ 外部 observer accept **1**（`X-Control`）、host observer 制御 1。backlog は Mac（`ss` 無し）で null → INFO |
+
+### 17.5 残余
+
+- **AL2023 は未実測**。受け入れは本番 host で runner v4 の全モード `failed 0`（外部 observer は VPC 内の別 host で `egress-observer.py`。`ss` があれば backlog も gate になる）
+- DNS の出所は Docker 28.3.3 で実測。V6-8 が稼働版で再測定する
+- boot 時の tcpdump EACCES（§13.6）は原因未特定（`-Z root` で回避）
+- `userland-proxy=false`、IPv6 有効化、`iptables` 以外の backend、任意名 bridge は runner が FAIL にする
+- guard の窓は閉じない（運用条件「Router 稼働中に firewall を触らない」）
+- 本番 host が reboot 後に docker を再起動する運用（AL2023 では通常無い）は INFO として記録される。各起動で ExecStartPre が規則を入れ直す
+
+### 17.6 成果物
+
+`deploy/egress/`: `subetha-egress`（v6）、`subetha-egress-verify`（v4）、`egress-observer.py`（v2）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
+`subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。

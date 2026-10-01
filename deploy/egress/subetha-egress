@@ -1,6 +1,6 @@
 #!/bin/sh
 # subetha-egress: host-side egress control for the SubEtha Router container.
-# Design: docs/ssrf-egress-design.md (v5). Runs as root from docker.service's ExecStartPre
+# Design: docs/ssrf-egress-design.md (v6). Runs as root from docker.service's ExecStartPre
 # and every 30 s from subetha-egress-guard.timer.
 #
 #   subetha-egress apply        validate, dry-run both families, commit each in one transaction,
@@ -137,27 +137,33 @@ lock() { exec 9>"$LOCK" && flock 9 || fail "cannot take $LOCK"; }
 # ---------------------------------------------------------------- commands
 # Put our jumps at the head of every hook without a window. Fast path: the first N rules are
 # already exactly our N jumps. Otherwise insert a fresh copy of every jump at position 1 (so the
-# first N rules become ours, above whatever displaced them), then delete our copies that now sit
-# beyond position N. Foreign rules are never deleted. Returns non-zero on any iptables failure.
+# first N rules become ours, above whatever displaced them); only when every insertion succeeded
+# AND the head now reads back as exactly our jumps are the old copies below position N deleted,
+# by rule number, highest first. On any insertion failure nothing is deleted: the pre-existing
+# protection is left exactly as it was. Foreign rules are never deleted.
 place_jumps() {
   tools "$1"; n=$(nifaces); rc=0
   for h in $HOOKS; do
-    top=$("$ipt" -t mangle -S "$h" 2>/dev/null | grep -v '^-P' | head -n "$n" | sort) || { err "$ipt: cannot list $h"; return 1; }
+    list=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; return 1; }
+    top=$(printf '%s\n' "$list" | grep -v '^-P' | head -n "$n" | sort)
     [ "$top" = "$(expected_jumps "$h")" ] && continue
+    inserted=0
     for i in $IFACES; do
-      "$ipt" -t mangle -I "$h" 1 -i "$i" -j "$CHAIN" || { err "$ipt: cannot insert the $h jump for $i"; rc=1; }
+      if "$ipt" -t mangle -I "$h" 1 -i "$i" -j "$CHAIN"; then inserted=$((inserted+1)); else err "$ipt: cannot insert the $h jump for $i"; fi
     done
-    # delete by rule number, highest first: `-D <spec>` would remove the first match, i.e. the
-    # fresh copy just inserted rather than the displaced one below
-    for num in $("$ipt" -t mangle -S "$h" | grep -v '^-P' | awk -v n="$n" -v c="$CHAIN" 'NR>n && $(NF-1)=="-j" && $NF==c {print NR}' | sort -rn); do
+    [ "$inserted" -eq "$n" ] || { err "$ipt $h: $inserted of $n jumps inserted; leaving existing rules untouched"; rc=1; continue; }
+    list=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot re-list $h"; rc=1; continue; }
+    top=$(printf '%s\n' "$list" | grep -v '^-P' | head -n "$n" | sort)
+    [ "$top" = "$(expected_jumps "$h")" ] || { err "$ipt $h: head is not our jumps after insertion; leaving old copies in place"; rc=1; continue; }
+    for num in $(printf '%s\n' "$list" | grep -v '^-P' | awk -v n="$n" -v c="$CHAIN" 'NR>n && $(NF-1)=="-j" && $NF==c {print NR}' | sort -rn); do
       "$ipt" -t mangle -D "$h" "$num" || { err "$ipt: cannot delete displaced $h rule $num"; rc=1; }
     done
   done
   return $rc
 }
 
-apply() {
-  lock; validate
+apply_unlocked() {
+  validate
   r4=$(render 4) || fail "IPv4 policy could not be rendered (host inventory unreadable?)"
   r6=$(render 6) || fail "IPv6 policy could not be rendered (host inventory unreadable?)"
   # Dry-run both families against the real parser before committing either.
@@ -182,7 +188,8 @@ check_unlocked() {
     live=$("$ipt" -t mangle -S "$CHAIN" 2>/dev/null) || { err "$ipt chain $CHAIN missing"; rc=1; continue; }
     src=$(render "$v") || { err "$ipt: expected policy could not be rendered (host inventory unreadable?)"; rc=1; continue; }
     printf '%s\n' "$src" | sed "s/$CHAIN/$CHK/g" | "$restore" --noflush || { err "$ipt: cannot load the expected policy into $CHK"; rc=1; continue; }
-    want=$("$ipt" -t mangle -S "$CHK" 2>/dev/null | sed "s/$CHK/$CHAIN/g") || { err "$ipt: cannot read $CHK back"; rc=1; }
+    raw=$("$ipt" -t mangle -S "$CHK" 2>/dev/null) || { err "$ipt: cannot read $CHK back"; rc=1; "$ipt" -t mangle -F "$CHK" 2>/dev/null; "$ipt" -t mangle -X "$CHK" 2>/dev/null; continue; }
+    want=$(printf '%s\n' "$raw" | sed "s/$CHK/$CHAIN/g")
     "$ipt" -t mangle -F "$CHK" && "$ipt" -t mangle -X "$CHK" || { err "$ipt: cannot remove the scratch chain $CHK"; rc=1; }
     if [ "$live" != "$want" ]; then
       err "$ipt chain $CHAIN differs from the expected policy:"
@@ -191,19 +198,22 @@ check_unlocked() {
       rm -f "/run/subetha-egress.live.$$" "/run/subetha-egress.want.$$"; rc=1
     fi
     for h in $HOOKS; do
-      top=$("$ipt" -t mangle -S "$h" 2>/dev/null | grep -v '^-P' | head -n "$n" | sort) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      hl=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      top=$(printf '%s\n' "$hl" | grep -v '^-P' | head -n "$n" | sort)
       [ "$top" = "$(expected_jumps "$h")" ] || { err "$ipt $h: the first $n rules are not exactly our jumps"; printf '%s\n' "$top" | sed 's/^/    /' >&2; rc=1; }
     done
   done
   return $rc
 }
+apply() { lock; apply_unlocked; }
 check() { lock; check_unlocked; }
 
+# One critical section: the lock is held from the check through the repair.
 guard() {
   lock; validate
   if check_unlocked 2>/dev/null; then exit 0; fi
   err "policy differs or is detached, re-applying"
-  flock -u 9; apply
+  apply_unlocked
 }
 
 status() {
@@ -217,13 +227,19 @@ remove() {
   lock
   if [ "${FORCE:-0}" != 1 ]; then
     command -v systemctl >/dev/null 2>&1 || fail "cannot determine the guard timer state (no systemctl); set FORCE=1 to override"
-    case "$(systemctl is-active subetha-egress-guard.timer 2>/dev/null)" in
-      inactive|failed) ;; active|activating) fail "subetha-egress-guard.timer is active and would re-apply; stop it first" ;;
-      *) fail "cannot determine the guard timer state; set FORCE=1 to override" ;; esac
+    for u in subetha-egress-guard.timer subetha-egress-guard.service; do
+      st=$(systemctl is-active "$u" 2>/dev/null); x=$?
+      case "$x:$st" in 3:inactive|3:failed|4:*) ;; 0:*) fail "$u is $st and would re-apply; stop it first" ;;
+        *) fail "cannot determine the state of $u (exit $x, '$st'); set FORCE=1 to override" ;; esac
+    done
     command -v docker >/dev/null 2>&1 || fail "cannot determine whether $ROUTER_CONTAINER runs (no docker); set FORCE=1 to override"
-    running=$(docker inspect -f '{{.State.Running}}' "$ROUTER_CONTAINER" 2>/dev/null) || running=absent
-    case "$running" in false|absent) ;; true) fail "$ROUTER_CONTAINER is running; stop it before removing the policy" ;;
-      *) fail "cannot determine whether $ROUTER_CONTAINER runs; set FORCE=1 to override" ;; esac
+    if running=$(docker inspect -f '{{.State.Running}}' "$ROUTER_CONTAINER" 2>/dev/null); then
+      [ "$running" = false ] || fail "$ROUTER_CONTAINER is running (State.Running=$running); stop it before removing the policy"
+    else
+      # inspect failed: absence is only established by a successful listing that does not contain it
+      names=$(docker ps -a --format '{{.Names}}' 2>/dev/null) || fail "cannot query the Docker daemon; set FORCE=1 to override"
+      printf '%s\n' "$names" | grep -qx "$ROUTER_CONTAINER" && fail "cannot determine whether $ROUTER_CONTAINER runs; set FORCE=1 to override"
+    fi
   fi
   for v in 4 6; do tools "$v"
     for h in $HOOKS; do
