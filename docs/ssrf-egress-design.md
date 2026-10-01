@@ -1236,8 +1236,8 @@ reboot モードは runner v9 で変更していない経路（`hobs_start` は 
 | # | 指摘（要約） | 判定 | 改訂 |
 |---|---|---|---|
 | 3 | 移行手順: `docker cp` の失敗が次の `rm` を止めない。コピーが停止より前（停止までの追記を取りこぼす）。`/app/runtime` の mount 元が `/var/lib/subetha-router` とは限らない | **正しい**（blocking） | 順序を **`bash -e` + `pipefail` のスクリプト**として明記: mount 元を特定（bind / 名前付きボリューム / mount 無し）→ 停止して確認 → **停止後に**実体から `$DEST` へ写す（失敗で終了）→ `$DEST` の journal が元と**同じバイト列**（`cmp`）で所有者が 10001:10001 → 行数と最後の `created` の `paymentId` / `principalId` を記録 → ここで初めて `rm`、§6 手順 4 と同じコマンドで作り直す → `/healthz` が `router: up`、mount 元が `$DEST`、元の行の sha256 が不変、コンテナ内の Router が `journal.ndjson` を open している、最後の購入をコンテナ内 loopback の R4（`GET /v1/purchases/<id>`、`judge` principal）で引いて 200。コンテナの 8787 は MCP と `/healthz` だけなので、host から R4 は叩けない（最初の案はそこを誤っていた） |
-| 2 | 設置手順の `|| { ...; false; }` は対話シェルを止めない | 正しい | 設置ブロック全体を**ファイルに保存して `sudo bash -e` で実行**する形に。失敗はそこで終わる |
-| 6 | preflight が `echo` するだけで止まらない | 正しい | `command -v ... || { echo MISSING; exit 1; }` |
+| 2 | 設置手順の `\|\| { ...; false; }` は対話シェルを止めない | 正しい | 設置ブロック全体を**ファイルに保存して `sudo bash -e` で実行**する形に。失敗はそこで終わる |
+| 6 | preflight が `echo` するだけで止まらない | 正しい | `command -v ... \|\| { echo MISSING; exit 1; }` |
 | 新 | §9 の「IMDS endpoint を閉じる方が強い」が、B の設置と受け入れ（host から IMDSv2 を使う）と矛盾 | 正しい（non-blocking） | §9 を「endpoint は閉じない。token 必須 + hop limit 1 で足りる」に改めた |
 
 journal 確認（手順 4）は手動の目視ではなく、invocation 内の 1 行目が `applied`、2 行目が `Loading containers` であることを `grep` で assert する形に改めた。
@@ -1254,3 +1254,19 @@ journal 確認（手順 4）は手動の目視ではなく、invocation 内の 1
 R4 の確認が空でないことの傍証になったので残す。コンテナ内の `/proc/<pid>/fd` 列挙は Yama `ptrace_scope=1` の VM では
 0 件だった（読めない）ので、新コンテナが journal を開いている証拠は host の `/proc/locks`（`journal.lock` の `FLOCK WRITE`）に替えた。
 環境メモ: restart policy の無い代役コンテナは T3 の `systemctl restart docker` で止まったまま（`LiveRestoreEnabled=false` の帰結。Router は `unless-stopped`）。
+
+### 26.5 実装レビュー #3（`b23ac96`）: **REJECT** → 移行スクリプトを再改訂
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#2 の 4 件のうち IMDS・preflight・§9 は**解決**、journal の件は「狭まったが blocking」。
+レビュアは両スクリプトを `bash -n` にかけ、docker/journalctl 等を stub した read-only の probe で、IMDS と preflight の失敗が止まること、
+journal 欠落と archive 読み出し失敗が削除境界まで到達することを確かめた。R4 のポートと principal の導出は正しいと確認。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | 所在不明の journal が「購入 0 件」になる。mount 元に journal が無くても通り、読めない・崩れた行は `ROWS=0`、空のハッシュ、`LAST=none` に化けて削除に進む。21155eb より前の image（journal が `runtime/remote-*/` の下）では、コピーは残るが新 image は空の journal を開き、R4 は省かれ、完了を宣言できる | **正しい**（blocking） | 削除前に所在を確定する: mount 元 + コンテナの `SUBETHA_JOURNAL_PATH`（既定 `runtime/journal.ndjson`。`/app/runtime` の外なら対象外で止まる）、新コンテナの env と一致しなければ止まる、mount 元に無ければ止まる（起動した Router は空でも作る）、`remote-*/` の下に journal があれば旧配置として止まる、行は Router の replay と同じ基準（改行終端、JSON、`seq` 連番、`paymentId` 非空）で検査し崩れていれば止まる。`ROWS`/`SUM`/`LAST` は検証済みの複製から取り、検査の失敗は `-e` で止まる（`2>/dev/null \|\| echo none` を廃止） |
+| 2 | mount 無しの分岐で `docker cp \| tar` を `elif` の条件に置いたため、失敗しても `-e` が止めず `cmp` が飛ばされる。後段のハッシュは複製を自分と比べているだけで代わりにならない | **正しい**（blocking） | 条件式から外して独立した命令に: 全体を `docker cp` → journal だけ **2 回目の独立した読み出し**で `/tmp/journal.verify` へ（無ければここで失敗）→ `cmp`。両分岐とも `cmp` を必須にした |
+| 3 | flock の確認が inode だけで、device と保持 PID を見ない（別 FS の同じ inode 番号や他プロセスのロックを受け入れる） | 正しい（non-blocking） | `/proc/locks` の `maj:min:inode` を python の `os.major/os.minor` で作った鍵と一致させ、保持 PID が `docker top` に出る新コンテナのプロセスであることを確認 |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 80 | **改訂した移行スクリプト verbatim**（VM、現行ソースの image）。bind mount の旧 Router に対し sabotage A〜G、mount 無しの旧 Router（journal をコンテナ内に `docker cp -a`）に対し H、それぞれ本番相当の実行 | A `$DEST` が通常ファイル: `mkdir` で停止。B `cp` shim が複製を切り詰め: `cmp: EOF` で停止。C `remote-legacy/journal.ndjson` を置く: `legacy layout` で停止。D `{"seq":3}` を追記: `line 3 is not a Router record` で停止。E 改行無しの末尾行: `no terminating newline` で停止。F journal を削除: `no journal at` で停止。G 新コンテナの env に別の `SUBETHA_JOURNAL_PATH`: 停止、**旧 Router は止めてもいない**（running）。H 2 回目の `docker cp` を shim で失敗: 停止。A〜H すべて exit 1、旧コンテナ残存。本番相当（bind）: exit 0、2 行、R4 200、未知 id 404、flock `fd:01:<inode>` の保持 PID が `docker top` に出る、`docker stop` で保持者が消える（対照）、元の bind は手付かず。本番相当（mount 無し）: `no mount` 分岐を通り、同じ確認がすべて通る。`failed 0` |
