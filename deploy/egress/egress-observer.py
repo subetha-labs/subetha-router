@@ -95,23 +95,23 @@ def accept_loop(sock):
 
 
 def backlog(port):
-    """The observed port's accept queue (Recv-Q of the LISTEN socket) via `ss`, with status."""
+    """The observed IPv4 listener's accept queue (Recv-Q) via `ss -4`, with status. Exactly one
+    LISTEN row must match; any other listener on the same port makes the result ambiguous."""
     try:
-        r = subprocess.run(["ss", "-Hltn", f"sport = :{port}"], capture_output=True, text=True, timeout=2)
+        r = subprocess.run(["ss", "-Hltn4", f"sport = :{port}"], capture_output=True, text=True, timeout=2)
     except FileNotFoundError:
         return {"supported": False, "value": None, "error": "ss not installed"}
     except Exception as exc:
         return {"supported": False, "value": None, "error": f"ss failed: {exc}"}
     if r.returncode != 0:
         return {"supported": False, "value": None, "error": f"ss exit {r.returncode}: {r.stderr.strip()[:120]}"}
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] == "LISTEN":
-            try:
-                return {"supported": True, "value": int(parts[1]), "error": None}
-            except ValueError:
-                break
-    return {"supported": False, "value": None, "error": "ss output not parsed"}
+    rows = [ln.split() for ln in r.stdout.splitlines() if ln.split() and ln.split()[0] == "LISTEN"]
+    if len(rows) != 1:
+        return {"supported": False, "value": None, "error": f"{len(rows)} IPv4 LISTEN sockets on :{port} (expected exactly our own)"}
+    try:
+        return {"supported": True, "value": int(rows[0][1]), "error": None}
+    except (ValueError, IndexError):
+        return {"supported": False, "value": None, "error": "ss output not parsed"}
 
 
 class Report(BaseHTTPRequestHandler):
