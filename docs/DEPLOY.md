@@ -234,6 +234,28 @@ claude mcp add --transport http subetha-router https://router.subethalabs.com/mc
 - TLS 終端（Caddy / nginx / ALB のいずれか）とドメイン（`subethalabs`）の DNS
 - **鍵の配置**: env を直接書かず、systemd の `EnvironmentFile`（mode 600）か
   AWS Secrets Manager 等を使う。**シェル履歴とプロセス一覧に鍵を残さない**
+- **インスタンスメタデータ（IMDS）を塞ぐ**: Router は上流 URL を `fetch` する。
+  コンテナは既定の bridge ネットワークで動くため、`169.254.169.254` に**到達できる**。
+  Router 自身は IMDS を使わないので、**IMDSv2 を必須にし hop limit を 1 にする**。
+  hop limit 1 なら、ホストから 1 hop 先のコンテナにはメタデータが届かない。
+  これで、上流 URL の扱いが将来どう変わっても **IAM 認証情報は標的から外れる**。
+
+  ```sh
+  # 現在値を読む（HttpTokens が optional なら v1 が許可されている）
+  aws ec2 describe-instances --instance-ids <id> \
+    --query 'Reservations[].Instances[].MetadataOptions' --output table
+
+  # v2 必須 + hop limit 1
+  aws ec2 modify-instance-metadata-options --instance-id <id> \
+    --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled
+
+  # 反映確認（HttpTokens=required, HttpPutResponseHopLimit=1 であること）
+  aws ec2 describe-instances --instance-ids <id> \
+    --query 'Reservations[].Instances[].MetadataOptions' --output table
+  ```
+
+  **これは SSRF 対策の全部ではない**。到達そのものを止める層（fetch 前のアドレス検査）は
+  `docs/ssrf-requirements.md` の段階 1・2 で、**AI が上流 URL を指定できる構成に進むときに必須**になる。
 
 ### 単一インスタンス前提
 Router は journal を `flock(2)` で排他する。**同一ホストで 2 つ起動すると 2 つ目は起動に失敗する**
