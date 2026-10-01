@@ -15,6 +15,7 @@
 | 3 | 経路の無い宛先（`10.255.255.1`）へ接続 | 即時失敗、**規則に到達しない** | 経路が無い宛先はカーネルが落とす。**規則の試験には転送される宛先を使う** |
 | 4 | DROP / REJECT(icmp-admin-prohibited) / 規則なし を `curl` で計時 | DROP **4s timeout** / REJECT **4s timeout** / なし **0.0006s refused** | **コンテナ内から DROP と REJECT は区別できない**。ICMP が戻らない。→ FR-C1' を実証: Router は遮断を報告できず、**証拠はカウンタだけ** |
 | 5 | bridge の IPv6 | `EnableIPv6: false` | 既定では IPv6 egress が無い。**有効化したら ip6tables 側も同じ規則が要る** |
+| 6 | **§3.1 の規則をそのまま適用**し、公開 HTTPS へ接続 | **`curl exit=6`（名前解決失敗）**。`192.168.0.0/16` の DROP が **4 pkts** | **deny 一覧が resolver（`192.168.5.2`）を落とし、DNS が死んだ**。EC2 でも resolver は `169.254.169.253` か `10.x` で**同じく deny 範囲内**。→ DNS 例外を DROP より前に置く（§3.1 に追加）。コンテナ間（172.17.x）は生きていた |
 
 実測 4 は要件 §8.4 の「drop はタイムアウトに見える」を**裏付けた**。
 REJECT にしても改善しないので、**DROP で統一**する（REJECT は余計な ICMP を生むだけ）。
@@ -41,6 +42,13 @@ sudo iptables -C DOCKER-USER -j SUBETHA-EGRESS 2>/dev/null || sudo iptables -I D
 # 対象はコンテナ発の転送（docker0 から出るもの）に限る。戻りパケットは通す
 sudo iptables -A SUBETHA-EGRESS ! -i docker0 -j RETURN
 sudo iptables -A SUBETHA-EGRESS -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+# **DNS の例外を DROP より前に置く**（INV-1 の唯一の例外）。実測 6: これが無いと名前解決が死ぬ。
+# RESOLVER は展開先の resolver（EC2 なら VPC の 169.254.169.253 か VPC DNS の 10.x。
+# どちらも下の deny 範囲に入る）。承認済みリゾルバ **1 つだけ**を許し、53 番の他宛ては落とす
+RESOLVER="$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)"
+sudo iptables -A SUBETHA-EGRESS -d "$RESOLVER" -p udp --dport 53 -j RETURN
+sudo iptables -A SUBETHA-EGRESS -d "$RESOLVER" -p tcp --dport 53 -j RETURN
 
 # 禁止宛先（要件 FR-A1 の IPv4 部分。未掲載の special-purpose は既定で拒否 = ここに足す）
 for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 \
@@ -104,7 +112,8 @@ bridge の IPv6 は既定で無効（実測 5）。**有効にする場合のみ
 | V-1 | コンテナから `169.254.169.254` へ | 失敗 | `SUBETHA-EGRESS` の `169.254.0.0/16` 行の pkts **増加** |
 | V-2 | コンテナから `10.0.0.1`（VPC 内の別ホスト等、**転送される**宛先）へ | 失敗 | 対応行の pkts 増加 |
 | V-3 | コンテナからホスト `172.17.0.1:<任意>` へ | 失敗 | `SUBETHA-FROM-CONTAINER` の DROP の pkts 増加 |
-| V-4 | コンテナからホストの DNS（`172.17.0.1:53`）へ | **成功** | `dport 53` の RETURN 行の pkts 増加 |
+| V-4 | コンテナから**承認済み resolver**の 53 へ（`/etc/resolv.conf` の値。host か VPC DNS か展開次第） | **成功** | `SUBETHA-EGRESS` の `dport 53` RETURN 行の pkts 増加 |
+| V-4b | コンテナから**承認外**の DNS（例 `8.8.8.8:53`、deny 範囲外の公開 resolver） | **成功**（deny 範囲外なので通る） | — 。これは INV-1 の対象外。**resolver を 1 つに絞る目的は「deny 範囲内の宛先を 53 番で抜ける」穴を塞ぐこと**であり、公開 resolver への DNS を止めることではない |
 | V-5 | コンテナから Alchemy / Tempo RPC / Provider へ | **成功** | Router の `healthz` と quote が通る |
 | V-6 | Caddy → Router（`127.0.0.1:8787`） | **成功** | `curl https://router.subethalabs.com/healthz` |
 | V-7 | **再起動後**に V-1〜V-6 を再実行 | 同じ | 永続化の証明 |
@@ -124,5 +133,5 @@ V-5 と V-6 が「止めすぎていない」ことの証明で、**V-1〜V-3 �
 ## 7. 未解決
 
 - **U-1** 本番の backend。`docker info` で確認するまで §3 か §4 かが決まらない
-- **U-2** ホストの resolver を使っているか（`/etc/resolv.conf` が `172.17.0.1` か外部か）。外部ならV-4 と `INPUT` の DNS 例外は不要になる
+- **U-2** 本番の resolver アドレス。ローカルでは gateway（`192.168.5.2`）だった。EC2 では VPC DNS（`169.254.169.253` または VPC CIDR の `.2`）が既定で、**いずれも deny 範囲内**。§3.1 の `RESOLVER` はこれを `/etc/resolv.conf` から取る。**host が resolver でなければ §3.2 の DNS 例外は不要**（残しても無害）
 - **U-3** VPC 内に Router が正当に到達すべき private アドレスがあるか（例: 同一 VPC の RPC ノード）。あれば `10.0.0.0/8` 一括 DROP が壊す。**展開固有のポリシー**として owner 確認
