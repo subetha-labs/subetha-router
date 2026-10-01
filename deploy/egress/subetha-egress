@@ -1,0 +1,155 @@
+#!/bin/sh
+# subetha-egress: host-side egress control for the SubEtha Router container.
+# Design: docs/ssrf-egress-design.md (v3). Runs as root from docker.service's ExecStartPre
+# and every 30 s from subetha-egress-guard.timer.
+#
+#   subetha-egress apply        build both chains atomically and attach them (idempotent)
+#   subetha-egress check        exit 0 iff both chains exist and every hook jump is attached
+#   subetha-egress guard        check; on failure apply and report the repair (timer)
+#   subetha-egress render [4|6] print the iptables-restore input
+#   subetha-egress status       show hooks and chains with packet counters
+#   subetha-egress remove       maintenance only; the Router must be stopped first
+#
+# Policy: a packet entering the host from a container bridge is dropped when its destination
+# is (1) one of this host's own addresses or an address listed in HOST_ADDRS*, (2) not globally
+# reachable per the IANA special-purpose registries (snapshot 2025-10-09, plus the conservative
+# exclusions listed below), or (3) listed in EXTRA_DENY*. The only exemption is the reply
+# direction of connections opened towards the container (Caddy -> Router). There is no DNS
+# exception: the Router's network resolves through Docker's embedded DNS, whose upstream must
+# be a host-loopback resolver so that queries leave from the host's own namespace.
+set -eu
+
+CHAIN=SUBETHA-EGRESS
+# PREROUTING judges the pre-DNAT destination; FORWARD and INPUT judge it again after DNAT.
+HOOKS="PREROUTING FORWARD INPUT"
+
+# --- configuration: /etc/subetha-egress.env, KEY=value, optional double quotes, # comments ---
+# Not sourced: an unquoted value with a space would be executed as a command. Unknown and
+# duplicate keys are refused so that a typo cannot silently narrow the policy.
+IFACES="subetha0 docker0 br+"
+HOST_ADDRS4=__unset__   # required: every IPv4 address this host is reachable by (public/elastic
+                        # addresses that are NAT'd at the gateway are not on any interface), or "none"
+HOST_ADDRS6=
+EXTRA_DENY4=            # deployment-specific: internal services on globally routable addresses
+EXTRA_DENY6=
+ENV_FILE="${SUBETHA_EGRESS_ENV:-/etc/subetha-egress.env}"
+seen=
+if [ -r "$ENV_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) echo "subetha-egress: not KEY=value: '$line'" >&2; exit 65 ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$key" in IFACES|HOST_ADDRS4|HOST_ADDRS6|EXTRA_DENY4|EXTRA_DENY6) ;;
+      *) echo "subetha-egress: unknown key '$key' in $ENV_FILE" >&2; exit 65 ;; esac
+    case " $seen " in *" $key "*) echo "subetha-egress: duplicate key '$key'" >&2; exit 65 ;; esac
+    seen="$seen $key"
+    val="${val#\"}"; val="${val%\"}"
+    eval "$key=\"\$val\""
+  done < "$ENV_FILE"
+fi
+
+# IANA IPv4 Special-Purpose Address Registry: every block with Globally Reachable = False,
+# plus 192.88.99.0/24 (deprecated 6to4 relay, unmarked), multicast and the reserved class E
+# block (which contains 255.255.255.255). Conservative exclusion: the whole of 192.0.0.0/24,
+# including the globally reachable anycast hosts 192.0.0.9 and 192.0.0.10.
+DENY4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12
+192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24
+203.0.113.0/24 224.0.0.0/4 240.0.0.0/4"
+# IANA IPv6 Special-Purpose Address Registry, Globally Reachable = False, plus multicast.
+# Conservative exclusions: the whole of 2001::/23 (its reachable anycast sub-blocks, Teredo,
+# ORCHIDv2, DETs); 64:ff9b::/96 and 2002::/16 (no NAT64 / 6to4 in this deployment);
+# fec0::/10 (deprecated site-local). 2001:db8::/32 lies outside 2001::/23 and is listed.
+DENY6="::/128 ::1/128 ::ffff:0:0/96 64:ff9b::/96 64:ff9b:1::/48 100::/64 100:0:0:1::/64
+2001::/23 2001:db8::/32 2002::/16 3fff::/20 5f00::/16 fc00::/7 fe80::/10 fec0::/10 ff00::/8"
+
+fail() { echo "subetha-egress: $*" >&2; exit 65; }
+is_addr4() { printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'; }
+is_addr6() { printf '%s' "$1" | grep -Eq '^[0-9a-fA-F:]*:[0-9a-fA-F:.]*(/[0-9]{1,3})?$'; }
+
+validate() {
+  [ -n "$IFACES" ] || fail "IFACES is empty"
+  [ "$HOST_ADDRS4" != "__unset__" ] || fail "HOST_ADDRS4 is required (every IPv4 address this host is reachable by, or 'none')"
+  for a in $(list4 HOST_ADDRS4) $EXTRA_DENY4; do is_addr4 "$a" || fail "not an IPv4 address/CIDR: '$a'"; done
+  for a in $(list6 HOST_ADDRS6) $EXTRA_DENY6; do is_addr6 "$a" || fail "not an IPv6 address/CIDR: '$a'"; done
+}
+list4() { eval "v=\$$1"; [ "$v" = none ] || printf '%s' "$v"; }
+list6() { eval "v=\$$1"; [ "$v" = none ] || printf '%s' "$v"; }
+# Addresses configured on this host's interfaces, read at apply time (bridge gateways included).
+host_ifaddrs() { ip "-$1" -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1; }
+
+render() {
+  if [ "${1:-4}" = 6 ]; then deny="$DENY6"; hosts="$(list6 HOST_ADDRS6) $(host_ifaddrs 6)"; extra="$EXTRA_DENY6"
+  else deny="$DENY4"; hosts="$(list4 HOST_ADDRS4) $(host_ifaddrs 4)"; extra="$EXTRA_DENY4"; fi
+  printf '*mangle\n:%s - [0:0]\n' "$CHAIN"
+  # replies to connections opened towards the container (Caddy -> Router)
+  printf -- '-A %s -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN\n' "$CHAIN"
+  for n in $hosts; do printf -- '-A %s -d %s -j DROP\n' "$CHAIN" "$n"; done
+  for n in $deny; do printf -- '-A %s -d %s -j DROP\n' "$CHAIN" "$n"; done
+  for n in $extra; do printf -- '-A %s -d %s -j DROP\n' "$CHAIN" "$n"; done
+  printf -- '-A %s -j RETURN\nCOMMIT\n' "$CHAIN"
+}
+
+tools() { if [ "$1" = 6 ]; then ipt=ip6tables; restore=ip6tables-restore; else ipt=iptables; restore=iptables-restore; fi; }
+
+apply() {
+  validate
+  for v in 4 6; do
+    tools "$v"
+    # One transaction per family: the chain is flushed and rebuilt inside a single commit, so an
+    # attached chain is never empty. The jumps are added afterwards and persist across reapplies.
+    render "$v" | "$restore" --noflush
+    for h in $HOOKS; do for i in $IFACES; do
+      "$ipt" -t mangle -C "$h" -i "$i" -j "$CHAIN" 2>/dev/null || "$ipt" -t mangle -I "$h" 1 -i "$i" -j "$CHAIN"
+    done; done
+  done
+  echo "subetha-egress: applied ($(iptables -t mangle -S "$CHAIN" | grep -c '^-A') IPv4 rules, $(ip6tables -t mangle -S "$CHAIN" | grep -c '^-A') IPv6 rules) on $(echo $IFACES) at $(echo $HOOKS)"
+}
+
+check() {
+  rc=0
+  for v in 4 6; do
+    tools "$v"
+    "$ipt" -t mangle -S "$CHAIN" >/dev/null 2>&1 || { echo "subetha-egress: $ipt chain $CHAIN missing" >&2; rc=1; continue; }
+    [ "$("$ipt" -t mangle -S "$CHAIN" | grep -c -- '-j DROP')" -ge 15 ] || { echo "subetha-egress: $ipt chain $CHAIN has too few rules" >&2; rc=1; }
+    for h in $HOOKS; do for i in $IFACES; do
+      "$ipt" -t mangle -C "$h" -i "$i" -j "$CHAIN" 2>/dev/null || { echo "subetha-egress: $ipt $h -i $i not attached" >&2; rc=1; }
+    done; done
+  done
+  return $rc
+}
+
+guard() {
+  if check 2>/dev/null; then exit 0; fi
+  echo "subetha-egress: policy missing or detached, re-applying" >&2
+  apply
+}
+
+status() {
+  for v in 4 6; do
+    tools "$v"; echo "== $ipt =="
+    for h in $HOOKS; do "$ipt" -t mangle -S "$h" | grep -- "-j $CHAIN" | sed "s/^-A/  /" || true; done
+    "$ipt" -t mangle -L "$CHAIN" -n -v --line-numbers 2>/dev/null || echo "  (no chain)"
+  done
+}
+
+remove() {
+  for v in 4 6; do
+    tools "$v"
+    for h in $HOOKS; do
+      "$ipt" -t mangle -S "$h" | grep -- "-j $CHAIN" | sed 's/^-A/-D/' |
+        while read -r rule; do "$ipt" -t mangle $rule; done
+    done
+    "$ipt" -t mangle -F "$CHAIN" 2>/dev/null || true
+    "$ipt" -t mangle -X "$CHAIN" 2>/dev/null || true
+  done
+}
+
+case "${1:-}" in
+  apply) apply ;;
+  check) check ;;
+  guard) guard ;;
+  render) validate; render "${2:-4}" ;;
+  status) status ;;
+  remove) remove ;;
+  *) echo "usage: subetha-egress apply|check|guard|render [4|6]|status|remove" >&2; exit 64 ;;
+esac

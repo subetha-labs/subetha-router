@@ -1,0 +1,10 @@
+[Unit]
+Description=SubEtha Router egress policy guard timer
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

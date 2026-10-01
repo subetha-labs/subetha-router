@@ -1,0 +1,12 @@
+# Verification aid (not part of the policy): a listener on the host that logs every arrival.
+[Unit]
+Description=egress verification: host-side arrival observer
+Before=docker.service
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server 19998 --bind 0.0.0.0 --directory /var/empty
+StandardOutput=append:/var/tmp/host-observer.log
+StandardError=append:/var/tmp/host-observer.log
+
+[Install]
+WantedBy=multi-user.target

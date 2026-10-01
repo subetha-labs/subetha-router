@@ -1,0 +1,7 @@
+[Unit]
+Description=SubEtha Router egress policy guard (re-applies if detached)
+# Runs every 30 s from subetha-egress-guard.timer. apply is idempotent and atomic.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/subetha-egress guard

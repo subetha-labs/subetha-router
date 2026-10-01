@@ -1,0 +1,14 @@
+# Verification aid (not part of the policy): capture on the uplink from before Docker starts,
+# so the window between container restore and rule installation cannot hide from the test.
+[Unit]
+Description=egress verification: boot-ordered uplink capture
+Before=docker.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/timeout 180 /usr/bin/tcpdump -i eth0 -w /var/tmp/boot-capture.pcap -U dst host 192.168.5.2 and tcp dst port 19999
+StandardError=append:/var/tmp/boot-capture.log
+
+[Install]
+WantedBy=multi-user.target
