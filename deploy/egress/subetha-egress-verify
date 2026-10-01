@@ -1,22 +1,22 @@
 #!/bin/bash
-# subetha-egress-verify: run the acceptance protocol of docs/ssrf-egress-design.md §17 on the
-# host and print evidence for every item. Exit status is non-zero if any item fails. Every
-# required observation is a gate: instrumentation that fails to start, a setup step that fails,
-# or a command whose status cannot be read fails the item. Raw evidence (captures, observer
-# reports, journal excerpts, this output) is kept under /var/tmp/egress-verify-<timestamp>/.
+# subetha-egress-verify: run the acceptance protocol of docs/ssrf-egress-design.md §19 on the
+# host and print evidence for every item. Exit status is non-zero if any item fails, including
+# a failed restoration at the end. Every required observation is a gate: instrumentation that
+# fails to start, a setup step that fails, a command whose status cannot be read, or an observer
+# whose session changed, fails the item. Raw evidence (captures, observer reports, journal
+# excerpts, shim logs, this output) is kept under /var/tmp/egress-verify-<timestamp>-<mode>/.
 #
 #   sudo subetha-egress-verify                  non-disruptive items + preconditions (Router running)
-#   sudo subetha-egress-verify --adversarial    Router STOPPED (verified): a stand-in container on the
-#                                               Router's network takes its place; temporary host alias
-#                                               and containers, policy removal/re-apply, sabotage of
-#                                               `check` and fault injection, both DNAT paths, guard
-#                                               recovery. Requires OBSERVER/OBSERVER_REPORT.
-#   sudo subetha-egress-verify --fail-closed    stops Docker, breaks the env file, proves Docker stays
-#                                               down through its restart retries (journal), restores.
-#   sudo subetha-egress-verify --reboot-prepare installs the probe container and the boot-ordered
-#                                               observer units (plus a test-only docker drop-in),
-#                                               records the external observer's session and cursor.
-#                                               Requires OBSERVER/OBSERVER_REPORT. Then reboot.
+#   sudo subetha-egress-verify --adversarial    Router STOPPED (verified by a successful query): a stand-in
+#                                               container on the Router's network takes its place; temporary
+#                                               host alias and containers, policy removal/re-apply, sabotage
+#                                               of `check`, attributable fault injection, both DNAT paths,
+#                                               guard recovery. Requires OBSERVER/OBSERVER_REPORT.
+#   sudo subetha-egress-verify --fail-closed    stops Docker, breaks the env file, proves Docker stays down
+#                                               through its restart retries (journal diagnostics), restores.
+#   sudo subetha-egress-verify --reboot-prepare installs the probe container and the boot-ordered observer
+#                                               units (plus a test-only docker drop-in); records the boot id,
+#                                               the observer configuration, session and cursor. Then reboot.
 #   sudo subetha-egress-verify --post-boot      reads the boot-ordered evidence after the reboot.
 #   sudo subetha-egress-verify --reboot-cleanup removes the probe container, observers and the drop-in.
 #
@@ -24,13 +24,13 @@
 # (default subetha0), UPLINK (default: default-route interface), HEALTH_URL (default
 # http://127.0.0.1:8787/healthz; must be the same URL inside and outside the container),
 # OBSERVER=<rfc1918 ip>:<port> and OBSERVER_REPORT=<ip>:<port>: an external host you control running
-# deploy/egress/egress-observer.py (--port / --report-port). The host-side observer is started by
-# this runner (standard/adversarial) or by egress-host-observer.service (reboot).
+# deploy/egress/egress-observer.py (--port / --report-port). ALLOW_NO_BACKLOG=1 downgrades a missing
+# `ss` on an observer from FAIL to INFO (test environments only; production observers run Linux).
 set -u
 ROUTER=${ROUTER:-subetha-router}; NET=${NET:-subetha-router-net}; BRIDGE=${BRIDGE:-subetha0}
 UPLINK=${UPLINK:-$(ip -4 route show default | awk '{print $5; exit}')}
 HEALTH_URL=${HEALTH_URL:-http://127.0.0.1:8787/healthz}
-OBSERVER=${OBSERVER:-}; OBSERVER_REPORT=${OBSERVER_REPORT:-}
+OBSERVER=${OBSERVER:-}; OBSERVER_REPORT=${OBSERVER_REPORT:-}; ALLOW_NO_BACKLOG=${ALLOW_NO_BACKLOG:-0}
 ENV_FILE=${SUBETHA_EGRESS_ENV:-/etc/subetha-egress.env}
 PROBE_IMAGE=${PROBE_IMAGE:-curlimages/curl:latest}; ALPINE_IMAGE=${ALPINE_IMAGE:-alpine:latest}; PY_IMAGE=${PY_IMAGE:-python:3-alpine}
 SCRIPT=${SCRIPT:-/usr/local/sbin/subetha-egress}
@@ -38,6 +38,7 @@ UNIT_DIR=${UNIT_DIR:-/usr/local/lib/subetha-egress}
 OBS_PORT=19998; OBS_REPORT=19997        # host-side observer ports
 REGISTRY_DATE=2025-10-09; CAPTURE_SECONDS=${CAPTURE_SECONDS:-900}
 PREP=/var/tmp/egress-verify-prepared
+MSGID_STARTED=39f53479d3a045ac8e11786248231fbf   # systemd: "Started <unit>"
 MODE=standard
 for a in "$@"; do case "$a" in
   --adversarial) MODE=adversarial ;; --fail-closed) MODE=fail-closed ;; --reboot-prepare) MODE=reboot-prepare ;;
@@ -55,9 +56,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing tool: $1" >&2; exit 
 for t in docker iptables ip6tables tcpdump conntrack curl python3 ip awk flock; do need "$t"; done
 [ -r "$UNIT_DIR/egress-observer.py" ] || { echo "missing $UNIT_DIR/egress-observer.py" >&2; exit 69; }
 
-# NS is the container whose network namespace the probes join: the Router (standard) or the
-# stand-in (adversarial, with the Router stopped).
-NS=$ROUTER
+NS=$ROUTER   # the container whose network namespace the probes join (the stand-in in adversarial mode)
 probe()  { docker run --rm --network "container:$NS" --entrypoint sh "$PROBE_IMAGE" -c "$1" 2>/dev/null; }
 alp()    { docker run --rm --network "container:$NS" "$ALPINE_IMAGE" sh -c "$1" 2>/dev/null; }
 curlx()  { probe "curl -s -o /dev/null -m ${2:-2} -w '%{exitcode} %{http_code}' '$1'"; }
@@ -72,46 +71,71 @@ host_addrs4() { ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -v '^
 env_value() { awk -F= -v k="$1" '$1==k{v=$2; gsub(/"/,"",v); print v}' "$ENV_FILE" 2>/dev/null; }
 now()    { date +%s.%N; }
 isnum()  { [ "$1" -ge 0 ] 2>/dev/null; }
-# ---- observers (egress-observer.py): JSON {session, listening, seq_last, backlog, rows[{seq,t,kind,src,sport,data}]}
-obs_get() { curl -s -m 5 "http://$1/?since_seq=${2:-0}" 2>/dev/null || echo ERR; }
-obs_field() { obs_get "$1" "${3:-0}" | python3 -c 'import json,sys
-try: d=json.load(sys.stdin); v=d.get(sys.argv[1]); print("null" if v is None else v)
-except Exception: print("ERR")' "$2"; }
-obs_count() { # $1 url, $2 since_seq, $3 kind, $4 substring of data (optional)
-  obs_get "$1" "$2" | python3 -c 'import json,sys
-kind=sys.argv[1]; pat=sys.argv[2]
-try: d=json.load(sys.stdin); print(sum(1 for r in d["rows"] if r["kind"]==kind and (not pat or pat in r.get("data",""))))
-except Exception: print("ERR")' "$3" "${4:-}"; }
-obs_save() { obs_get "$1" 0 > "$EVID/observer-$2.json"; }
+unit_prop() { systemctl show "$1" -p "$2" --value 2>/dev/null; }
+unit_starts() { journalctl -q -b -u "$1" -o json "MESSAGE_ID=$MSGID_STARTED" 2>/dev/null | grep -c '"MESSAGE_ID"'; }
+
+# ---- observers (egress-observer.py v3). Every report used for a verdict is bound to the expected session.
+XSESSION=""; HSESSION=""
+obs_get() { # $1 url, $2 since_seq, $3 expected session ("" = unbound) -> JSON or "ERR ..."
+  local body; body=$(curl -s -m 5 "http://$1/?since_seq=${2:-0}" 2>/dev/null) || { echo "ERR unreachable"; return; }
+  printf '%s' "$body" | python3 -c 'import json,sys
+exp=sys.argv[1]
+try: d=json.load(sys.stdin)
+except Exception: print("ERR not json"); sys.exit(0)
+if exp and d.get("session")!=exp: print("ERR session "+str(d.get("session"))+" != "+exp); sys.exit(0)
+if not isinstance(d.get("seq_last"),int): print("ERR seq"); sys.exit(0)
+print(json.dumps(d))' "$3"; }
+obs_field() { # $1 url, $2 field, $3 session
+  local j; j=$(obs_get "$1" 0 "$3"); case "$j" in ERR*) echo "$j"; return;; esac
+  printf '%s' "$j" | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get(sys.argv[1]); print("null" if v is None else (json.dumps(v) if isinstance(v,(dict,list)) else v))' "$2"; }
+obs_count() { # $1 url, $2 since_seq, $3 session, $4 kind, $5 substring
+  local j; j=$(obs_get "$1" "$2" "$3"); case "$j" in ERR*) echo "$j"; return;; esac
+  printf '%s' "$j" | python3 -c 'import json,sys
+kind=sys.argv[1]; pat=sys.argv[2]; d=json.load(sys.stdin)
+print(sum(1 for r in d["rows"] if r["kind"]==kind and (not pat or pat in r.get("data",""))))' "$4" "${5:-}"; }
+obs_settle() { # $1 url, $2 session: seq_last unchanged for 1 s (no accept in flight) -> prints seq_last, or ERR
+  local a b; a=$(obs_field "$1" seq_last "$2"); case "$a" in ERR*) echo "$a"; return 1;; esac
+  for i in 1 2 3 4 5; do sleep 1; b=$(obs_field "$1" seq_last "$2"); [ "$a" = "$b" ] && { echo "$b"; return 0; }; a=$b; done; echo "ERR unsettled"; return 1; }
+obs_backlog() { # $1 url, $2 session -> "0" when supported and empty, "N" when pending, "unsupported:<err>", or ERR
+  local bl; bl=$(obs_field "$1" backlog "$2"); case "$bl" in ERR*) echo "$bl"; return;; esac
+  printf '%s' "$bl" | python3 -c 'import json,sys
+b=json.load(sys.stdin)
+print(b["value"] if b.get("supported") else "unsupported:"+str(b.get("error")))'; }
+obs_health() { curl -sf -m 3 "http://$1/health" 2>/dev/null; }   # prints the session id on 200
+obs_save() { obs_get "$1" 0 "" > "$EVID/observer-$2.json"; }
 hobs_url() { echo "127.0.0.1:$OBS_REPORT"; }
 hobs_start() { hobs_stop; : > /var/tmp/egress-verify-hobs.log
   nohup python3 "$UNIT_DIR/egress-observer.py" --port "$OBS_PORT" --report-port "$OBS_REPORT" >> /var/tmp/egress-verify-hobs.log 2>&1 &
   echo $! > /var/tmp/egress-verify-hobs.pid
-  for i in $(seq 1 50); do curl -sf -m 1 -o /dev/null "http://$(hobs_url)/health" && return 0; sleep 0.2; done
+  for i in $(seq 1 50); do HSESSION=$(obs_health "$(hobs_url)") && [ -n "$HSESSION" ] && return 0; sleep 0.2; done
   echo "host observer did not become ready (/health)" >&2; return 1; }
 hobs_stop() { [ -f /var/tmp/egress-verify-hobs.pid ] && { kill "$(cat /var/tmp/egress-verify-hobs.pid)" 2>/dev/null; rm -f /var/tmp/egress-verify-hobs.pid; }; return 0; }
-hobs_seq() { obs_field "$(hobs_url)" seq_last; }
-hobs_accepts() { obs_count "$(hobs_url)" "$1" accept; }
-hobs_lines() { obs_count "$(hobs_url)" "$1" line "${2:-}"; }
-xobs_seq() { obs_field "$OBSERVER_REPORT" seq_last; }
-xobs_accepts() { obs_count "$OBSERVER_REPORT" "$1" accept; }
-xobs_lines() { obs_count "$OBSERVER_REPORT" "$1" line "${2:-}"; }
+hobs_seq() { obs_field "$(hobs_url)" seq_last "$HSESSION"; }
+hobs_accepts() { obs_count "$(hobs_url)" "$1" "$HSESSION" accept; }
+hobs_lines() { obs_count "$(hobs_url)" "$1" "$HSESSION" line "${2:-}"; }
+xobs_seq() { obs_field "$OBSERVER_REPORT" seq_last "$XSESSION"; }
+xobs_accepts() { obs_count "$OBSERVER_REPORT" "$1" "$XSESSION" accept; }
+xobs_lines() { obs_count "$OBSERVER_REPORT" "$1" "$XSESSION" line "${2:-}"; }
 require_observer() { [ -n "$OBSERVER" ] && [ -n "$OBSERVER_REPORT" ] || { echo "OBSERVER=<rfc1918 ip:port> and OBSERVER_REPORT=<ip:port> (egress-observer.py on a host you control) are required for this mode" >&2; exit 64; }
-  curl -sf -m 3 -o /dev/null "http://$OBSERVER_REPORT/health" || { echo "external observer at $OBSERVER_REPORT is not reachable from the host or not listening (/health)" >&2; exit 69; }; }
+  XSESSION=$(obs_health "$OBSERVER_REPORT") && [ -n "$XSESSION" ] || { echo "external observer at $OBSERVER_REPORT is not reachable from the host or not listening (/health)" >&2; exit 69; }; }
+backlog_gate() { # $1 item, $2 label, $3 url, $4 session
+  local b; b=$(obs_backlog "$3" "$4")
+  case "$b" in 0) ok "$1" "$2 backlog 0 (no connection waiting unaccepted)" ;;
+    unsupported:*) [ "$ALLOW_NO_BACKLOG" = 1 ] && note "$1" "$2 cannot report its backlog ($b); accept counts are userspace counts (ALLOW_NO_BACKLOG=1)" || ng "$1" "$2 cannot report its backlog ($b): run the observer on Linux with ss" ;;
+    *) ng "$1" "$2 backlog '$b'" ;; esac; }
 # ---- captures: readiness is mandatory, unreadable captures are errors
 capture_start() { rm -f "$3"; tcpdump -Z root -i "$1" -w "$3" -U "$2" >/dev/null 2>"$3.err" & echo $! > "$3.pid"
   for i in $(seq 1 30); do grep -q 'listening on' "$3.err" 2>/dev/null && return 0; sleep 0.1; done; echo "capture on $1 not ready" >&2; return 1; }
 capture_stop() { kill -INT "$(cat "$1.pid")" 2>/dev/null; wait "$(cat "$1.pid")" 2>/dev/null; rm -f "$1.pid"; sleep 1; cp -f "$1" "$EVID/" 2>/dev/null; }
 pkts()   { [ -s "$1" ] || { echo ERR; return; }; local o; o=$(tcpdump -nn -r "$1" ${2:+"$2"} 2>/dev/null) || { echo ERR; return; }; printf '%s' "$o" | grep -c .; }
-guard_pause()  { systemctl stop subetha-egress-guard.timer subetha-egress-guard.service 2>/dev/null
-  [ "$(systemctl is-active subetha-egress-guard.timer)" != active ] && [ "$(systemctl is-active subetha-egress-guard.service)" != active ] && [ "$(systemctl is-active subetha-egress-guard.service)" != activating ]; }
-guard_resume() { systemctl start subetha-egress-guard.timer 2>/dev/null; }
+guard_pause()  { systemctl stop subetha-egress-guard.timer subetha-egress-guard.service || return 1
+  local u st; for u in subetha-egress-guard.timer subetha-egress-guard.service; do st=$(systemctl is-active "$u"); [ $? = 3 ] && [ "$st" = inactive ] || return 1; done; }
+guard_resume() { systemctl start subetha-egress-guard.timer; }
 
 DENY_FILTER='(dst net 0.0.0.0/8 or dst net 10.0.0.0/8 or dst net 100.64.0.0/10 or dst net 127.0.0.0/8 or dst net 169.254.0.0/16 or dst net 172.16.0.0/12 or dst net 192.0.0.0/24 or dst net 192.0.2.0/24 or dst net 192.88.99.0/24 or dst net 192.168.0.0/16 or dst net 198.18.0.0/15 or dst net 198.51.100.0/24 or dst net 203.0.113.0/24 or dst net 224.0.0.0/4 or dst net 240.0.0.0/4)'
 SRC_FILTER='(src net 0.0.0.0/8 or src net 10.0.0.0/8 or src net 100.64.0.0/10 or src net 127.0.0.0/8 or src net 169.254.0.0/16 or src net 172.16.0.0/12 or src net 192.0.0.0/24 or src net 192.0.2.0/24 or src net 192.88.99.0/24 or src net 192.168.0.0/16 or src net 198.18.0.0/15 or src net 198.51.100.0/24 or src net 203.0.113.0/24 or src net 224.0.0.0/4 or src net 240.0.0.0/4)'
 MATRIX_RE='dst=(0\.1\.2\.3|10\.0\.0\.1|100\.64\.0\.1|169\.254\.169\.254|172\.16\.0\.1|192\.0\.0\.1|192\.0\.2\.1|192\.88\.99\.1|192\.168\.0\.1|198\.18\.0\.1|198\.51\.100\.1|203\.0\.113\.1|240\.0\.0\.1) '
 DENY_RANGES="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4"
-# the deny line (as printed by iptables -L) that contains address or network $1, or empty
 deny_line_of() { python3 -c 'import ipaddress,sys
 a=sys.argv[1]; ranges=sys.argv[2].split()
 try:
@@ -124,8 +148,7 @@ except Exception: pass' "$1" "$DENY_RANGES"; }
 dockerd_pid() { pidof dockerd | awk '{print $1}'; }
 dockerd_cmdline() { tr '\0' ' ' < "/proc/$(dockerd_pid)/cmdline"; }
 daemon_json_path() { local f; f=$(dockerd_cmdline 2>/dev/null | grep -o -- '--config-file[= ][^ ]*' | sed 's/--config-file[= ]//'); echo "${f:-/etc/docker/daemon.json}"; }
-daemon_cfg() { # prints "<key>=<json value>" for the keys we care about, "absent" if no file, ERR if unreadable/invalid
-  python3 -c 'import json,sys,os
+daemon_cfg() { python3 -c 'import json,sys,os
 p=sys.argv[1]
 if not os.path.exists(p): print("absent"); sys.exit(0)
 try:
@@ -133,128 +156,127 @@ try:
     for k in ("userland-proxy","dns","firewall-backend","live-restore"): print(f"{k}={json.dumps(d.get(k))}")
 except Exception as e: print("ERR "+str(e))' "$(daemon_json_path)"; }
 preconditions() {
-  echo "== preconditions and facts (V6-0 / V6-15) =="
-  "$SCRIPT" check >/dev/null 2>&1 && ok V6-0 "policy equals the rendered policy and the first rules of every hook are exactly our jumps (subetha-egress check)" || ng V6-0 "subetha-egress check failed: $("$SCRIPT" check 2>&1 | head -3 | tr '\n' ' ')"
-  local running; running=$(docker inspect "$ROUTER" --format '{{.State.Running}}' 2>/dev/null) && [ "$running" = true ] && ok V6-0 "$ROUTER is running" || ng V6-0 "$ROUTER not running or not inspectable"
+  echo "== preconditions and facts (V7-0 / V7-15) =="
+  "$SCRIPT" check >/dev/null 2>&1 && ok V7-0 "policy equals the rendered policy and the first rules of every hook are exactly our jumps (subetha-egress check)" || ng V7-0 "subetha-egress check failed: $("$SCRIPT" check 2>&1 | head -3 | tr '\n' ' ')"
+  local running; running=$(docker inspect "$ROUTER" --format '{{.State.Running}}' 2>/dev/null) && [ "$running" = true ] && ok V7-0 "$ROUTER is running" || ng V7-0 "$ROUTER not running or not inspectable"
   local nets mode members
   nets=$(docker inspect "$ROUTER" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null)
   mode=$(docker inspect "$ROUTER" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
-  [ "$(echo $nets)" = "$NET" ] && [ "$mode" = "$NET" ] && ok V6-6 "complete attachment set is {$NET} (NetworkMode=$mode)" || ng V6-6 "attachment set '$nets' NetworkMode '$mode' (expected only $NET)"
+  [ "$(echo $nets)" = "$NET" ] && [ "$mode" = "$NET" ] && ok V7-6 "complete attachment set is {$NET} (NetworkMode=$mode)" || ng V7-6 "attachment set '$nets' NetworkMode '$mode' (expected only $NET)"
   members=$(docker network inspect "$NET" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)
-  [ "$(echo $members)" = "$ROUTER" ] && ok V6-6 "$NET contains only $ROUTER (singleton topology)" || ng V6-6 "$NET members: '$members' (expected only $ROUTER)"
-  [ "$(docker network inspect "$NET" --format '{{index .Options "com.docker.network.bridge.name"}}')" = "$BRIDGE" ] && ok V6-0 "bridge name is $BRIDGE" || ng V6-0 "bridge name is not $BRIDGE"
-  echo " $(env_value IFACES) " | grep -q " $BRIDGE " && ok V6-0 "IFACES covers $BRIDGE" || ng V6-0 "IFACES '$(env_value IFACES)' does not list $BRIDGE"
-  # every IPAM subnet of the Router network must lie inside a denied range (covers the post-boot inventory lag)
+  [ "$(echo $members)" = "$ROUTER" ] && ok V7-6 "$NET contains only $ROUTER (singleton topology)" || ng V7-6 "$NET members: '$members' (expected only $ROUTER)"
+  [ "$(docker network inspect "$NET" --format '{{index .Options "com.docker.network.bridge.name"}}')" = "$BRIDGE" ] && ok V7-0 "bridge name is $BRIDGE" || ng V7-0 "bridge name is not $BRIDGE"
+  echo " $(env_value IFACES) " | grep -q " $BRIDGE " && ok V7-0 "IFACES covers $BRIDGE" || ng V7-0 "IFACES '$(env_value IFACES)' does not list $BRIDGE"
   local subs bad=0; subs=$(docker network inspect "$NET" --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)
-  [ -n "$(echo $subs)" ] || { ng V6-0 "$NET has no IPAM subnet"; bad=1; }
-  for sn in $subs; do [ -n "$(deny_line_of "$sn")" ] || { ng V6-0 "$NET subnet $sn is not inside a denied range: its gateway would be reachable until the first inventory refresh"; bad=1; }; done
-  [ "$bad" = 0 ] && ok V6-0 "every $NET subnet ($(echo $subs)) lies inside a denied range"
-  [ "$(docker network inspect "$NET" --format '{{.EnableIPv6}}')" = false ] && ok V6-14 "$NET has IPv6 disabled" || ng V6-14 "$NET has IPv6 enabled: IPv6 enforcement is not covered by this runner"
-  [ "$(docker info --format '{{.LiveRestoreEnabled}}')" = false ] && ok V6-15 "LiveRestoreEnabled=false (docker info)" || ng V6-15 "LiveRestoreEnabled=true: containers survive daemon stop; fail-closed does not hold"
-  local fb; fb=$(docker info --format '{{.FirewallBackend.Driver}}' 2>/dev/null); [ "$fb" = iptables ] && ok V6-15 "docker firewall backend is iptables" || ng V6-15 "docker firewall backend is '$fb' (only iptables is designed and measured)"
+  [ -n "$(echo $subs)" ] || { ng V7-0 "$NET has no IPAM subnet"; bad=1; }
+  for sn in $subs; do [ -n "$(deny_line_of "$sn")" ] || { ng V7-0 "$NET subnet $sn is not inside a denied range: its gateway would be reachable until the first inventory refresh"; bad=1; }; done
+  [ "$bad" = 0 ] && ok V7-0 "every $NET subnet ($(echo $subs)) lies inside a denied range"
+  [ "$(docker network inspect "$NET" --format '{{.EnableIPv6}}')" = false ] && ok V7-14 "$NET has IPv6 disabled" || ng V7-14 "$NET has IPv6 enabled: IPv6 enforcement is not covered by this runner"
+  [ "$(docker info --format '{{.LiveRestoreEnabled}}')" = false ] && ok V7-15 "LiveRestoreEnabled=false (docker info)" || ng V7-15 "LiveRestoreEnabled=true: containers survive daemon stop; fail-closed does not hold"
+  local fb; fb=$(docker info --format '{{.FirewallBackend.Driver}}' 2>/dev/null); [ "$fb" = iptables ] && ok V7-15 "docker firewall backend is iptables" || ng V7-15 "docker firewall backend is '$fb' (only iptables is designed and measured)"
   local fa fx; fa=$(systemctl is-active firewalld 2>/dev/null); fx=$?
-  case "$fx:$fa" in 0:*) ng V6-15 "firewalld is $fa (reloads flush mangle; disable it)" ;; 3:inactive|3:failed|4:*) ok V6-15 "firewalld absent or inactive ($fa)" ;; *) ng V6-15 "firewalld state undetermined (exit $fx '$fa')" ;; esac
-  local cmd; cmd=$(dockerd_cmdline 2>/dev/null) || { ng V6-15 "cannot read dockerd's command line"; cmd=ERR; }
+  case "$fx:$fa" in 0:*) ng V7-15 "firewalld is $fa (reloads flush mangle; disable it)" ;; 3:inactive|3:failed|4:*) ok V7-15 "firewalld absent or inactive ($fa)" ;; *) ng V7-15 "firewalld state undetermined (exit $fx '$fa')" ;; esac
+  local cmd; cmd=$(dockerd_cmdline 2>/dev/null) || { ng V7-15 "cannot read dockerd's command line"; cmd=ERR; }
   local cfg; cfg=$(daemon_cfg)
-  case "$cfg" in ERR*) ng V6-15 "daemon config $(daemon_json_path) unreadable or invalid: $cfg" ;;
-    absent) note V6-15 "no daemon config file at $(daemon_json_path) (defaults)" ;; esac
-  if [ "$cmd" != ERR ] && ! echo "$cmd" | grep -q -- '--userland-proxy=false' && ! echo "$cfg" | grep -q '^userland-proxy=false$'; then ok V6-15 "userland-proxy default (cmdline and config parsed)"; else ng V6-15 "userland-proxy=false or undetermined: hairpin uses DNAT, a path this runner does not validate"; fi
-  local esp; esp=$(systemctl show docker.service -p ExecStartPre --value)
-  echo "$esp" | grep -q 'argv\[\]=/usr/local/sbin/subetha-egress apply ; ignore_errors=no' && ok V6-15 "docker.service ExecStartPre is exactly '/usr/local/sbin/subetha-egress apply' with ignore_errors=no" || ng V6-15 "docker.service ExecStartPre is not exactly 'subetha-egress apply' (ignore_errors=no): $(echo "$esp" | head -c 200)"
-  [ "$(systemctl is-active subetha-egress-guard.timer)" = active ] && ok V6-15 "guard timer active" || ng V6-15 "guard timer not active"
-  note V6-15 "kernel $(uname -r); docker $(docker version --format '{{.Server.Version}}') (DNS provenance measured on 28.3.3; V6-8 re-measures here); $(iptables -V); bridge-nf-call-iptables=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo absent)"
-  note V6-15 "docker raw rules: $(iptables -t raw -S 2>/dev/null | grep -c -- '^-A'); nat DOCKER returns for bridges: $(iptables -t nat -S DOCKER 2>/dev/null | grep -c -- '-j RETURN'); docker mangle rules: $(iptables -t mangle -S 2>/dev/null | grep -v SUBETHA | grep -c -- '^-A')"
+  case "$cfg" in ERR*) ng V7-15 "daemon config $(daemon_json_path) unreadable or invalid: $cfg" ;; absent) note V7-15 "no daemon config file at $(daemon_json_path) (defaults)" ;; esac
+  if [ "$cmd" != ERR ] && ! echo "$cmd" | grep -q -- '--userland-proxy=false' && ! echo "$cfg" | grep -q '^userland-proxy=false$'; then ok V7-15 "userland-proxy default (cmdline and config parsed)"; else ng V7-15 "userland-proxy=false or undetermined: hairpin uses DNAT, a path this runner does not validate"; fi
+  local esp; esp=$(unit_prop docker.service ExecStartPre)
+  echo "$esp" | grep -q 'argv\[\]=/usr/local/sbin/subetha-egress apply ; ignore_errors=no' && ok V7-15 "docker.service ExecStartPre is exactly '/usr/local/sbin/subetha-egress apply' with ignore_errors=no" || ng V7-15 "docker.service ExecStartPre is not exactly 'subetha-egress apply' (ignore_errors=no): $(echo "$esp" | head -c 200)"
+  [ "$(systemctl is-active subetha-egress-guard.timer)" = active ] && ok V7-15 "guard timer active" || ng V7-15 "guard timer not active"
+  note V7-15 "kernel $(uname -r); docker $(docker version --format '{{.Server.Version}}') (DNS provenance measured on 28.3.3; V7-8 re-measures here); $(iptables -V); bridge-nf-call-iptables=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo absent)"
+  note V7-15 "docker raw rules: $(iptables -t raw -S 2>/dev/null | grep -c -- '^-A'); nat DOCKER returns for bridges: $(iptables -t nat -S DOCKER 2>/dev/null | grep -c -- '-j RETURN'); docker mangle rules: $(iptables -t mangle -S 2>/dev/null | grep -v SUBETHA | grep -c -- '^-A')"
   for fam in ipv4 ipv6; do local upd; upd=$(curl -s -m 10 "https://www.iana.org/assignments/iana-$fam-special-registry/iana-$fam-special-registry.xml" | grep -o '<updated>[^<]*</updated>' | head -1 | sed 's/<[^>]*>//g')
-    if [ -z "$upd" ]; then ng V6-15 "IANA $fam registry date not fetched: cannot confirm the snapshot is current"; elif [ "$upd" \> "$REGISTRY_DATE" ]; then ng V6-15 "IANA $fam registry updated $upd > snapshot $REGISTRY_DATE: review the deny list"; else ok V6-15 "IANA $fam registry snapshot $REGISTRY_DATE is current ($upd)"; fi; done
-  # DNS provenance: no override anywhere (container, daemon config, dockerd command line), embedded resolver in use
-  [ "$(docker inspect "$ROUTER" --format '{{len .HostConfig.Dns}}{{len .HostConfig.DnsOptions}}{{len .HostConfig.DnsSearch}}')" = 000 ] && ok V6-8 "$ROUTER has no --dns/--dns-opt/--dns-search override" || ng V6-8 "$ROUTER overrides DNS (HostConfig.Dns*): the embedded resolver would forward from the container namespace"
-  if [ "$cmd" != ERR ] && ! echo "$cmd" | grep -q -- '--dns[= ]' && ! echo "$cfg" | grep -q '^dns=\[' ; then ok V6-8 "no daemon dns override (cmdline and config parsed)"; else ng V6-8 "daemon dns override or undetermined: the embedded resolver would forward from the container namespace"; fi
+    if [ -z "$upd" ]; then ng V7-15 "IANA $fam registry date not fetched: cannot confirm the snapshot is current"; elif [ "$upd" \> "$REGISTRY_DATE" ]; then ng V7-15 "IANA $fam registry updated $upd > snapshot $REGISTRY_DATE: review the deny list"; else ok V7-15 "IANA $fam registry snapshot $REGISTRY_DATE is current ($upd)"; fi; done
+  [ "$(docker inspect "$ROUTER" --format '{{len .HostConfig.Dns}}{{len .HostConfig.DnsOptions}}{{len .HostConfig.DnsSearch}}')" = 000 ] && ok V7-8 "$ROUTER has no --dns/--dns-opt/--dns-search override" || ng V7-8 "$ROUTER overrides DNS (HostConfig.Dns*): the embedded resolver would forward from the container namespace"
+  if [ "$cmd" != ERR ] && ! echo "$cmd" | grep -q -- '--dns[= ]' && ! echo "$cfg" | grep -q '^dns=\[' ; then ok V7-8 "no daemon dns override (cmdline and config parsed)"; else ng V7-8 "daemon dns override or undetermined: the embedded resolver would forward from the container namespace"; fi
   local resolv; resolv=$(docker exec "$ROUTER" cat /etc/resolv.conf 2>/dev/null | awk '/^nameserver/{print $2; exit}')
-  [ "$resolv" = 127.0.0.11 ] && ok V6-8 "container resolver is the embedded DNS (127.0.0.11)" || ng V6-8 "container resolver is $resolv, not the embedded DNS"
-  note V6-8 "host nameservers (inherited by the embedded resolver): $(awk '/^nameserver/{print $2}' /etc/resolv.conf | tr '\n' ' ')"
+  [ "$resolv" = 127.0.0.11 ] && ok V7-8 "container resolver is the embedded DNS (127.0.0.11)" || ng V7-8 "container resolver is $resolv, not the embedded DNS"
+  note V7-8 "host nameservers (inherited by the embedded resolver): $(awk '/^nameserver/{print $2}' /etc/resolv.conf | tr '\n' ' ')"
   { echo "cmdline: $cmd"; echo "config: $cfg"; echo "ExecStartPre: $esp"; docker info 2>/dev/null; } > "$EVID/docker-facts.txt"
 }
 
 # ---------------------------------------------------------------- matrix
 matrix() {
-  echo "== V6-1 matrix from the namespace of $NS (TCP; UDP; ICMP; captures both ways) =="
-  local V; V=$(veth_of "$NS") || { ng V6-1 "cannot find the veth of $NS"; return; }
-  capture_start "$UPLINK" "$DENY_FILTER" /var/tmp/ev-uplink.pcap || { ng V6-1 "uplink capture not ready"; return; }
-  capture_start "$V" "(src net $(subnet) and $DENY_FILTER) or (dst net $(subnet) and $SRC_FILTER)" /var/tmp/ev-veth.pcap || { ng V6-1 "veth capture not ready"; capture_stop /var/tmp/ev-uplink.pcap; return; }
+  echo "== V7-1 matrix from the namespace of $NS (TCP; UDP; ICMP; captures both ways) =="
+  local V; V=$(veth_of "$NS") || { ng V7-1 "cannot find the veth of $NS"; return; }
+  capture_start "$UPLINK" "$DENY_FILTER" /var/tmp/ev-uplink.pcap || { ng V7-1 "uplink capture not ready"; return; }
+  capture_start "$V" "(src net $(subnet) and $DENY_FILTER) or (dst net $(subnet) and $SRC_FILTER)" /var/tmp/ev-veth.pcap || { ng V7-1 "veth capture not ready"; capture_stop /var/tmp/ev-uplink.pcap; return; }
   for t in 0.1.2.3:0.0.0.0/8 10.0.0.1:10.0.0.0/8 100.64.0.1:100.64.0.0/10 169.254.169.254:169.254.0.0/16 172.16.0.1:172.16.0.0/12 192.0.0.1:192.0.0.0/24 192.0.2.1:192.0.2.0/24 192.88.99.1:192.88.99.0/24 192.168.0.1:192.168.0.0/16 198.18.0.1:198.18.0.0/15 198.51.100.1:198.51.100.0/24 203.0.113.1:203.0.113.0/24 240.0.0.1:240.0.0.0/4; do
     local ip=${t%%:*} range=${t#*:} c0 c1 r
     c0=$(cnt "$range"); r=$(curlx "http://$ip:80/" 2); c1=$(cnt "$range")
-    if [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ]; then ok V6-1 "$ip TCP firewall-dropped (curl 28, $range +$((c1-c0)))"; else ng V6-1 "$ip: curl '$r', counter $c0->$c1"; fi
+    if [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ]; then ok V7-1 "$ip TCP firewall-dropped (curl 28, $range +$((c1-c0)))"; else ng V7-1 "$ip: curl '$r', counter $c0->$c1"; fi
   done
   local c0 c1 r
   c0=$(cnt '224.0.0.0/4'); r=$(curlx "http://224.0.0.1:80/" 2); c1=$(cnt '224.0.0.0/4')
-  [ "${r%% *}" = 7 ] && [ "$c1" -eq "$c0" ] && ok V6-1 "224.0.0.1 TCP kernel-rejected (curl 7, nothing sent)" || ng V6-1 "224.0.0.1 TCP: curl '$r', counter $c0->$c1"
+  [ "${r%% *}" = 7 ] && [ "$c1" -eq "$c0" ] && ok V7-1 "224.0.0.1 TCP kernel-rejected (curl 7, nothing sent)" || ng V7-1 "224.0.0.1 TCP: curl '$r', counter $c0->$c1"
   c0=$(cnt '224.0.0.0/4'); alp "echo x | nc -u -w 1 224.0.0.1 9" >/dev/null; c1=$(cnt '224.0.0.0/4')
-  [ "$c1" -gt "$c0" ] && ok V6-1 "224.0.0.1 UDP firewall-dropped (+$((c1-c0)))" || ng V6-1 "224.0.0.1 UDP: counter $c0->$c1"
+  [ "$c1" -gt "$c0" ] && ok V7-1 "224.0.0.1 UDP firewall-dropped (+$((c1-c0)))" || ng V7-1 "224.0.0.1 UDP: counter $c0->$c1"
   c0=$(cnt '127.0.0.0/8'); r=$(curlx "http://127.1.2.3:80/" 2); c1=$(cnt '127.0.0.0/8')
-  [ "$c1" -eq "$c0" ] && ok V6-16 "127.1.2.3 namespace-local: never reached the host chain (curl ${r%% *}); A's scope" || ng V6-16 "127.1.2.3 hit the host chain?"
-  capture_start "$V" "host 10.0.0.1 and udp" /var/tmp/ev-udp.pcap || ng V6-1 "udp capture not ready"
+  [ "$c1" -eq "$c0" ] && ok V7-16 "127.1.2.3 namespace-local: never reached the host chain (curl ${r%% *}); A's scope" || ng V7-16 "127.1.2.3 hit the host chain?"
+  capture_start "$V" "host 10.0.0.1 and udp" /var/tmp/ev-udp.pcap || ng V7-1 "udp capture not ready"
   c0=$(cnt '10.0.0.0/8'); alp "echo x | nc -u -w 1 10.0.0.1 9" >/dev/null; c1=$(cnt '10.0.0.0/8'); capture_stop /var/tmp/ev-udp.pcap
   local out back; out=$(pkts /var/tmp/ev-udp.pcap "src net $(subnet)"); back=$(pkts /var/tmp/ev-udp.pcap "dst net $(subnet)")
-  [ "$c1" -ge $((c0+1)) ] && [ "$out" = 1 ] && [ "$back" = 0 ] && ok V6-1 "UDP to 10.0.0.1:9 firewall-dropped (+$((c1-c0)); 1 datagram out, 0 back)" || ng V6-1 "UDP to 10.0.0.1: counter $c0->$c1, veth out=$out back=$back"
-  capture_start "$V" "host 10.0.0.1 and icmp" /var/tmp/ev-icmp.pcap || ng V6-1 "icmp capture not ready"
+  [ "$c1" -ge $((c0+1)) ] && [ "$out" = 1 ] && [ "$back" = 0 ] && ok V7-1 "UDP to 10.0.0.1:9 firewall-dropped (+$((c1-c0)); 1 datagram out, 0 back)" || ng V7-1 "UDP to 10.0.0.1: counter $c0->$c1, veth out=$out back=$back"
+  capture_start "$V" "host 10.0.0.1 and icmp" /var/tmp/ev-icmp.pcap || ng V7-1 "icmp capture not ready"
   c0=$(cnt '10.0.0.0/8'); alp "ping -c 1 -W 1 10.0.0.1 >/dev/null 2>&1" >/dev/null; c1=$(cnt '10.0.0.0/8'); capture_stop /var/tmp/ev-icmp.pcap
   out=$(pkts /var/tmp/ev-icmp.pcap "src net $(subnet)"); back=$(pkts /var/tmp/ev-icmp.pcap "dst net $(subnet)")
-  [ "$c1" -ge $((c0+1)) ] && [ "$out" = 1 ] && [ "$back" = 0 ] && ok V6-1 "ICMP echo to 10.0.0.1 firewall-dropped (+$((c1-c0)); 1 request out, 0 replies)" || ng V6-1 "ICMP to 10.0.0.1: counter $c0->$c1, veth out=$out back=$back"
+  [ "$c1" -ge $((c0+1)) ] && [ "$out" = 1 ] && [ "$back" = 0 ] && ok V7-1 "ICMP echo to 10.0.0.1 firewall-dropped (+$((c1-c0)); 1 request out, 0 replies)" || ng V7-1 "ICMP to 10.0.0.1: counter $c0->$c1, veth out=$out back=$back"
   if [ -n "$OBSERVER" ]; then local s0; s0=$(xobs_seq); r=$(curlx "http://$OBSERVER/" 2)
-    [ "${r%% *}" = 28 ] && [ "$(xobs_accepts "$s0")" = 0 ] && ok V6-1 "external observer $OBSERVER firewall-dropped (curl 28, 0 accepts recorded there since seq $s0)" || ng V6-1 "external observer $OBSERVER: curl '$r', accepts=$(xobs_accepts "$s0")"; fi
+    [ "${r%% *}" = 28 ] && [ "$(xobs_accepts "$s0")" = 0 ] && ok V7-1 "external observer $OBSERVER firewall-dropped (curl 28, 0 accepts recorded there since seq $s0, session-bound)" || ng V7-1 "external observer $OBSERVER: curl '$r', accepts=$(xobs_accepts "$s0")"; fi
   local ans; ans=$(alp "nslookup 10.0.0.1.nip.io 2>/dev/null | awk '/^Address/{print \$2}' | grep -v '#' | tail -1")
   c0=$(cnt '10.0.0.0/8'); r=$(curlx "http://10.0.0.1.nip.io/" 3); c1=$(cnt '10.0.0.0/8')
-  [ "$ans" = 10.0.0.1 ] && [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && ok V6-1 "name resolving to a private address (10.0.0.1.nip.io -> $ans) firewall-dropped (+$((c1-c0)))" || ng V6-1 "DNS-derived private destination: answer '$ans', curl '$r', counter $c0->$c1"
+  [ "$ans" = 10.0.0.1 ] && [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && ok V7-1 "name resolving to a private address (10.0.0.1.nip.io -> $ans) firewall-dropped (+$((c1-c0)))" || ng V7-1 "DNS-derived private destination: answer '$ans', curl '$r', counter $c0->$c1"
   capture_stop /var/tmp/ev-veth.pcap; capture_stop /var/tmp/ev-uplink.pcap
   local a u probe_pkts other_pkts obsport synack; a=$(pkts /var/tmp/ev-veth.pcap "src net $(subnet)"); u=$(pkts /var/tmp/ev-uplink.pcap); obsport=${OBSERVER#*:}
-  isnum "$a" && isnum "$u" || { ng V6-1 "captures unreadable (veth=$a uplink=$u)"; return; }
+  isnum "$a" && isnum "$u" || { ng V7-1 "captures unreadable (veth=$a uplink=$u)"; return; }
   probe_pkts=$(pkts /var/tmp/ev-uplink.pcap "dst port 80 or dst port 9 or icmp or dst port $OBS_PORT${obsport:+ or dst port $obsport}"); other_pkts=$((u - probe_pkts))
-  [ "$a" -ge 16 ] && ok V6-1 "attempts seen on the veth: $a packets" || ng V6-1 "only $a attempt packets on the veth"
-  [ "$probe_pkts" = 0 ] && [ "$other_pkts" -ge 1 ] && ok V6-1 "uplink $UPLINK: 0 probe packets to deny ranges; $other_pkts host-originated packets to those ranges prove the capture was live" || ng V6-1 "uplink $UPLINK: probe packets=$probe_pkts, other=$other_pkts (a live capture must see some host traffic to those ranges)"
+  [ "$a" -ge 16 ] && ok V7-1 "attempts seen on the veth: $a packets" || ng V7-1 "only $a attempt packets on the veth"
+  [ "$probe_pkts" = 0 ] && [ "$other_pkts" -ge 1 ] && ok V7-1 "uplink $UPLINK: 0 probe packets to deny ranges; $other_pkts host-originated packets to those ranges prove the capture was live" || ng V7-1 "uplink $UPLINK: probe packets=$probe_pkts, other=$other_pkts (a live capture must see some host traffic to those ranges)"
   synack=$(pkts /var/tmp/ev-veth.pcap "dst net $(subnet) and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)")
-  [ "$synack" = 0 ] && ok V6-1 "no SYN-ACK from any denied source returned to the namespace (capture includes the return direction)" || ng V6-1 "$synack SYN-ACKs from denied sources seen on the veth"
-  local ctl; ctl=$(conntrack -L 2>/dev/null) || { ng V6-1 "conntrack -L failed"; return; }
+  [ "$synack" = 0 ] && ok V7-1 "no SYN-ACK from any denied source returned to the namespace (capture includes the return direction)" || ng V7-1 "$synack SYN-ACKs from denied sources seen on the veth"
+  local ctl; ctl=$(conntrack -L 2>/dev/null) || { ng V7-1 "conntrack -L failed"; return; }
   local ct; ct=$(printf '%s\n' "$ctl" | grep "src=$(ns_ip) " | grep -c -E "$MATRIX_RE")
-  [ "${ct:-0}" -eq 0 ] && ok V6-1 "no conntrack entries for the new dropped flows (unconfirmed entries are discarded on drop)" || ng V6-1 "$ct conntrack entries exist for matrix destinations"
+  [ "${ct:-0}" -eq 0 ] && ok V7-1 "no conntrack entries for the new dropped flows (unconfirmed entries are discarded on drop)" || ng V7-1 "$ct conntrack entries exist for matrix destinations"
 }
 
 # ---------------------------------------------------------------- host addresses, loopback
 host_addresses() {
-  echo "== V6-2 host addresses =="
-  hobs_start || { ng V6-2 "host observer not ready"; return; }
+  echo "== V7-2 host addresses =="
+  hobs_start || { ng V7-2 "host observer not ready"; return; }
   local s0; s0=$(hobs_seq)
   for a in $(host_addrs4) $(env_value HOST_ADDRS4 | tr ' ' '\n' | grep -v '^none$'); do
     case "$a" in 127.*) continue ;; esac
-    local c0 c1 r; c0=$(cnt "$a"); [ -z "$c0" ] && { ng V6-2 "$a has no inventory line in the chain"; continue; }
+    local c0 c1 r; c0=$(cnt "$a"); [ -z "$c0" ] && { ng V7-2 "$a has no inventory line in the chain"; continue; }
     r=$(curlx "http://$a:$OBS_PORT/" 2); c1=$(cnt "$a")
-    [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && ok V6-2 "$a firewall-dropped (inventory +$((c1-c0)))" || ng V6-2 "$a: curl '$r', counter $c0->$c1"
+    [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && ok V7-2 "$a firewall-dropped (inventory +$((c1-c0)))" || ng V7-2 "$a: curl '$r', counter $c0->$c1"
   done
-  [ "$(hobs_accepts "$s0")" = 0 ] && ok V6-2 "host observer accepted 0 connections during the host-address probes (since seq $s0)" || ng V6-2 "host observer accepted $(hobs_accepts "$s0") connections"
+  obs_settle "$(hobs_url)" "$HSESSION" >/dev/null || ng V7-2 "host observer did not settle"
+  [ "$(hobs_accepts "$s0")" = 0 ] && ok V7-2 "host observer accepted 0 connections during the host-address probes (since seq $s0, session-bound)" || ng V7-2 "host observer accepted $(hobs_accepts "$s0") connections"
+  backlog_gate V7-2 "host observer" "$(hobs_url)" "$HSESSION"
   local s1; s1=$(hobs_seq); curl -s -m 2 -o /dev/null -H 'X-Control: host' "http://127.0.0.1:$OBS_PORT/"
-  [ "$(hobs_lines "$s1" X-Control)" -ge 1 ] && ok V6-2 "host observer records a control connection (it was working)" || ng V6-2 "host observer did not record the control connection"
+  [ "$(hobs_lines "$s1" X-Control)" -ge 1 ] && ok V7-2 "host observer records a control connection (it was working)" || ng V7-2 "host observer did not record the control connection"
   local tok pub; tok=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)
   if [ -n "$tok" ]; then
     pub=$(curl -s -m 2 -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)
-    if [ -n "$pub" ]; then echo " $(env_value HOST_ADDRS4) " | grep -q " $pub " && ok V6-2 "public IPv4 $pub is in HOST_ADDRS4" || ng V6-2 "public IPv4 $pub is NOT in HOST_ADDRS4 (hairpin via the gateway stays open)"
-    else note V6-2 "instance has no public IPv4"; fi
-  else note V6-2 "IMDS not reachable from the host (not EC2, or endpoint disabled): the public address must be listed in HOST_ADDRS4 by hand"; fi
+    if [ -n "$pub" ]; then echo " $(env_value HOST_ADDRS4) " | grep -q " $pub " && ok V7-2 "public IPv4 $pub is in HOST_ADDRS4" || ng V7-2 "public IPv4 $pub is NOT in HOST_ADDRS4 (hairpin via the gateway stays open)"
+    else note V7-2 "instance has no public IPv4"; fi
+  else note V7-2 "IMDS not reachable from the host (not EC2, or endpoint disabled): the public address must be listed in HOST_ADDRS4 by hand"; fi
   obs_save "$(hobs_url)" host-addresses; hobs_stop
   local h; h=$(curlx "$HEALTH_URL" 3)
-  [ "${h#* }" = 200 ] && ok V6-16 "loopback $HEALTH_URL from inside the namespace: 200 (namespace-local; A's scope)" || note V6-16 "loopback from inside the namespace: '$h' (HEALTH_URL=$HEALTH_URL)"
+  [ "${h#* }" = 200 ] && ok V7-16 "loopback $HEALTH_URL from inside the namespace: 200 (namespace-local; A's scope)" || note V7-16 "loopback from inside the namespace: '$h' (HEALTH_URL=$HEALTH_URL)"
 }
 
 # ---------------------------------------------------------------- controls, DNS
 controls() {
-  echo "== V6-7 controls =="
+  echo "== V7-7 controls =="
   local h r; h=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$HEALTH_URL")
-  [ "$h" = 200 ] && ok V6-7 "host -> Router $HEALTH_URL: 200 (the path Caddy uses as its upstream)" || ng V6-7 "host -> Router $HEALTH_URL: $h"
+  [ "$h" = 200 ] && ok V7-7 "host -> Router $HEALTH_URL: 200 (the path Caddy uses as its upstream; not end-to-end TLS)" || ng V7-7 "host -> Router $HEALTH_URL: $h"
   local c0 c1; c0=$(cnt_reply); curl -s -o /dev/null -m 3 "$HEALTH_URL"; c1=$(cnt_reply)
-  [ "$c1" -gt "$c0" ] && ok V6-7 "reply-direction exemption counted (+$((c1-c0)))" || ng V6-7 "reply exemption line did not count"
-  r=$(curlx "https://example.com/" 6); [ "${r%% *}" = 0 ] && ok V6-7 "namespace -> public HTTPS: ${r#* }" || ng V6-7 "namespace -> public HTTPS: '$r'"
-  dns_check V6-8
+  [ "$c1" -gt "$c0" ] && ok V7-7 "reply-direction exemption counted (+$((c1-c0)))" || ng V7-7 "reply exemption line did not count"
+  r=$(curlx "https://example.com/" 6); [ "${r%% *}" = 0 ] && ok V7-7 "namespace -> public HTTPS: ${r#* }" || ng V7-7 "namespace -> public HTTPS: '$r'"
+  dns_check V7-8
 }
-dns_check() { # $1 item id; the uncached-name DNS test against the current namespace
+dns_check() {
   echo "== $1 DNS =="
   local V r; V=$(veth_of "$NS") || { ng "$1" "cannot find the veth of $NS"; return; }
   capture_start "$V" "port 53" /var/tmp/ev-dns.pcap || { ng "$1" "DNS capture not ready"; return; }
@@ -274,261 +296,298 @@ dns_check() { # $1 item id; the uncached-name DNS test against the current names
 
 # ---------------------------------------------------------------- atomicity, IPv6
 atomicity() {
-  echo "== V6-10 reapply atomicity =="
+  echo "== V7-10 reapply atomicity (packet-level evidence from the measured invocation) =="
   if command -v strace >/dev/null 2>&1; then
     local n; n=$(strace -f -e trace=sendmsg -o "$EVID/strace-restore.txt" sh -c "$SCRIPT render 4 | iptables-restore --noflush" 2>/dev/null; grep -c 'sendmsg(' "$EVID/strace-restore.txt")
-    [ "$n" -eq 1 ] && ok V6-10 "one IPv4 chain restore = 1 netlink sendmsg (single batch; jump placement is a separate step)" || ng V6-10 "restore issued $n sendmsg calls"
-  else ng V6-10 "strace not installed: the single-batch property is not measured on this host"; fi
-  hobs_start || { ng V6-10 "host observer not ready"; return; }
-  local gw c0 c1 s0; gw=$(gateway_ip)
-  hammer() { docker run --rm --name egress-verify-hammer --network "container:$NS" --entrypoint sh "$PROBE_IMAGE" -c "echo start \$(date +%s); for i in \$(seq 1 200); do curl -s -o /dev/null -m 0.5 http://$gw:$OBS_PORT/ & done; wait; echo end \$(date +%s)"; }
-  c0=$(cnt "$gw"); hammer > "$EVID/hammer-sanity.txt" 2>&1; c1=$(cnt "$gw")
-  [ "$c1" -ge $((c0+100)) ] && ok V6-10 "hammer sanity: 200 concurrent SYNs raised the inventory counter by $((c1-c0))" || ng V6-10 "hammer sanity: counter only +$((c1-c0))"
-  s0=$(hobs_seq); ( sleep 0.3; hammer > "$EVID/hammer-reapply.txt" 2>&1 ) & local hp=$!
-  local l0 l1; l0=$(date +%s); for i in $(seq 1 20); do "$SCRIPT" apply >/dev/null || ng V6-10 "apply failed during the reapply loop"; done; l1=$(date +%s)
-  wait $hp; local hx=$?; sleep 1
-  local hs he; hs=$(awk '/^start/{print $2}' "$EVID/hammer-reapply.txt"); he=$(awk '/^end/{print $2}' "$EVID/hammer-reapply.txt")
-  isnum "$hs" && isnum "$he" && [ "$hx" = 0 ] && [ "$hs" -le "$l1" ] && [ "$he" -ge "$l0" ] && ok V6-10 "hammer ran (exit 0) during the reapply loop (hammer $hs-$he, loop $l0-$l1)" || ng V6-10 "hammer did not overlap the reapply loop (exit $hx, hammer '$hs'-'$he', loop $l0-$l1)"
-  [ "$(hobs_accepts "$s0")" = 0 ] && ok V6-10 "200 concurrent SYNs during 20 reapplies: 0 connections accepted by the host observer" || ng V6-10 "$(hobs_accepts "$s0") connections accepted during reapply"
+    [ "$n" -eq 1 ] && ok V7-10 "one IPv4 chain restore = 1 netlink sendmsg (single batch; jump placement is a separate step)" || ng V7-10 "restore issued $n sendmsg calls"
+  else ng V7-10 "strace not installed: the single-batch property is not measured on this host"; fi
+  hobs_start || { ng V7-10 "host observer not ready"; return; }
+  local gw V s0; gw=$(gateway_ip); V=$(veth_of "$NS") || { ng V7-10 "cannot find the veth of $NS"; hobs_stop; return; }
+  # SYNs from the namespace to the gateway's observer port, timestamped on the host clock
+  capture_start "$V" "dst host $gw and tcp dst port $OBS_PORT and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0" /var/tmp/ev-hammer.pcap || { ng V7-10 "hammer capture not ready"; hobs_stop; return; }
+  s0=$(hobs_seq)
+  # the hammer records every curl's exit code; the loop runs while the hammer is firing
+  docker run --rm --name egress-verify-hammer --network "container:$NS" --entrypoint sh "$PROBE_IMAGE" -c "sleep 0.5; for i in \$(seq 1 200); do (curl -s -o /dev/null -m 0.5 http://$gw:$OBS_PORT/; echo exit=\$?) & done; wait" > "$EVID/hammer.txt" 2>&1 & local hp=$!
+  sleep 0.6; local l0 l1; l0=$(now); for i in $(seq 1 20); do "$SCRIPT" apply >/dev/null || ng V7-10 "apply failed during the reapply loop"; done; l1=$(now)
+  wait $hp; local hx=$?; sleep 1; capture_stop /var/tmp/ev-hammer.pcap
+  local total dropped leaked other inloop
+  total=$(grep -c '^exit=' "$EVID/hammer.txt"); dropped=$(grep -c '^exit=28$' "$EVID/hammer.txt"); leaked=$(grep -c '^exit=0$' "$EVID/hammer.txt"); other=$((total - dropped - leaked))
+  inloop=$(tcpdump -nn -tt -r /var/tmp/ev-hammer.pcap 2>/dev/null | awk -v a="$l0" -v b="$l1" '$1 >= a && $1 <= b' | wc -l)
+  [ "$hx" = 0 ] && [ "$total" = 200 ] && [ "$leaked" = 0 ] && [ "$other" = 0 ] && ok V7-10 "hammer: 200/200 curls ran from the measured invocation, all timed out (dropped), none accepted, none failed otherwise" || ng V7-10 "hammer: exit=$hx total=$total dropped=$dropped leaked=$leaked other=$other"
+  [ "$inloop" -ge 50 ] && ok V7-10 "$inloop SYNs from the namespace were on the veth strictly inside the reapply loop window [$l0, $l1] (host clock, fractional seconds)" || ng V7-10 "only $inloop SYNs fell inside the reapply loop window (hammer and loop did not overlap)"
+  obs_settle "$(hobs_url)" "$HSESSION" >/dev/null || ng V7-10 "host observer did not settle"
+  [ "$(hobs_accepts "$s0")" = 0 ] && ok V7-10 "0 connections accepted by the host observer during the reapplies (session-bound)" || ng V7-10 "$(hobs_accepts "$s0") connections accepted during reapply"
   obs_save "$(hobs_url)" atomicity; hobs_stop
-  echo "== V6-14 IPv6 =="
+  echo "== V7-14 IPv6 =="
   local d; d=$(docker exec "$NS" cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6 2>/dev/null)
-  [ "$d" = 1 ] && ok V6-14 "IPv6 disabled inside the namespace (disable_ipv6=1): no IPv6 traffic can originate" || ng V6-14 "IPv6 enabled inside the namespace (disable_ipv6=$d): IPv6 enforcement is not covered by this runner"
-  [ "$(ip6tables -t mangle -S SUBETHA-EGRESS 2>/dev/null | grep -c -- '-j DROP')" -ge 16 ] && ok V6-14 "ip6tables chain has $(ip6tables -t mangle -S SUBETHA-EGRESS | grep -c -- '-j DROP') DROP rules (installed, not exercised)" || ng V6-14 "ip6tables chain incomplete"
+  [ "$d" = 1 ] && ok V7-14 "IPv6 disabled inside the namespace (disable_ipv6=1): no IPv6 traffic can originate" || ng V7-14 "IPv6 enabled inside the namespace (disable_ipv6=$d): IPv6 enforcement is not covered by this runner"
+  [ "$(ip6tables -t mangle -S SUBETHA-EGRESS 2>/dev/null | grep -c -- '-j DROP')" -ge 16 ] && ok V7-14 "ip6tables chain has $(ip6tables -t mangle -S SUBETHA-EGRESS | grep -c -- '-j DROP') DROP rules (installed, not exercised)" || ng V7-14 "ip6tables chain incomplete"
   local r; r=$(alp "wget -q -T 2 -O /dev/null 'http://[fe80::1%eth0]:$OBS_PORT/' 2>&1 | head -1")
-  echo "$r" | grep -qi 'unreachable\|bad address\|can.t connect' && ok V6-14 "link-local IPv6 attempt kernel-rejected ($r)" || ng V6-14 "link-local IPv6 attempt: '$r'"
+  echo "$r" | grep -qi 'unreachable\|bad address\|can.t connect' && ok V7-14 "link-local IPv6 attempt kernel-rejected ($r)" || ng V7-14 "link-local IPv6 attempt: '$r'"
 }
 
 # ---------------------------------------------------------------- adversarial (Router stopped, stand-in on its network)
-ADV_ACTIVE=0; A=11.22.33.44
-adv_cleanup() { # restore everything the adversarial mode may have altered (also on interruption)
-  [ "$ADV_ACTIVE" = 1 ] || return 0; ADV_ACTIVE=0
-  [ -f /var/tmp/egress-verify-env.bak ] && cp /var/tmp/egress-verify-env.bak "$ENV_FILE"
-  iptables -t nat -S PREROUTING 2>/dev/null | grep -- "-d $A/32" | sed 's/^-A/-D/' | while read -r rule; do iptables -t nat $rule; done
-  ip addr del $A/32 dev "$UPLINK" 2>/dev/null
-  docker rm -f egress-verify-target egress-verify-stream egress-verify-hammer egress-verify-standin >/dev/null 2>&1
-  rm -rf /var/tmp/egress-verify-fakebin; hobs_stop
-  "$SCRIPT" apply >/dev/null 2>&1; guard_resume
+ADV_ACTIVE=0; A=11.22.33.44; SHIM=/var/tmp/egress-verify-fakebin; SHIMLOG=/var/tmp/egress-verify-shim.log
+adv_cleanup() { # restore everything the adversarial mode may have altered; failures count
+  [ "$ADV_ACTIVE" = 1 ] || return 0; ADV_ACTIVE=0; local bad=0
+  if [ -f /var/tmp/egress-verify-env.bak ]; then cp /var/tmp/egress-verify-env.bak "$ENV_FILE" || bad=1; fi
+  iptables -t nat -S PREROUTING 2>/dev/null | grep -- "-d $A/32" | sed 's/^-A/-D/' | while read -r rule; do iptables -t nat $rule || echo "cleanup: cannot delete nat rule: $rule"; done
+  ip -4 -o addr show dev "$UPLINK" | grep -q "$A/32" && { ip addr del $A/32 dev "$UPLINK" || bad=1; }
+  for c in egress-verify-target egress-verify-stream egress-verify-hammer egress-verify-standin; do docker inspect "$c" >/dev/null 2>&1 && { docker rm -f "$c" >/dev/null 2>&1 || bad=1; }; done
+  rm -rf "$SHIM"; hobs_stop
+  "$SCRIPT" apply >/dev/null 2>&1 || bad=1; "$SCRIPT" check >/dev/null 2>&1 || bad=1
+  guard_resume || bad=1; [ "$(systemctl is-active subetha-egress-guard.timer)" = active ] || bad=1
+  [ "$bad" = 0 ] && ok V7-17 "restoration after the adversarial items verified (env, alias, nat, containers, policy, timer)" || ng V7-17 "restoration after the adversarial items incomplete; inspect the host"
 }
-trap adv_cleanup EXIT
-sab() { "$@" >/dev/null 2>&1 || { ng V6-17 "sabotage setup failed: $*"; return 1; }; }
-router_stopped() { # succeeds only when a successful query says the Router is not running (or absent)
-  local st; if st=$(docker inspect -f '{{.State.Running}}' "$ROUTER" 2>/dev/null); then [ "$st" = false ]; else
+trap 'adv_cleanup; echo "== summary: $pass passed, $fail failed, $info notes; evidence: $EVID =="; exit $(( fail > 0 ))' EXIT
+sab() { "$@" >/dev/null 2>&1 || { ng V7-17 "sabotage setup failed: $*"; return 1; }; }
+router_stopped() { local st; if st=$(docker inspect -f '{{.State.Running}}' "$ROUTER" 2>/dev/null); then [ "$st" = false ]; else
     local names; names=$(docker ps -a --format '{{.Names}}' 2>/dev/null) || return 1; ! printf '%s\n' "$names" | grep -qx "$ROUTER"; fi; }
+shim_install() { # $1 tool name; the shim logs every invocation and rejects the configured argv pattern
+  mkdir -p "$SHIM"; : > "$SHIMLOG"
+  cat > "$SHIM/$1" <<'SHIMEOF'
+#!/bin/sh
+echo "CALL $(basename "$0") $*" >> "$EGRESS_SHIM_LOG"
+case "$*" in *"$EGRESS_SHIM_REJECT"*) echo "REJECT $(basename "$0") $*" >> "$EGRESS_SHIM_LOG"; echo "$(basename "$0"): simulated failure" >&2; exit 4 ;; esac
+exec "$EGRESS_SHIM_REAL" "$@"
+SHIMEOF
+  chmod 755 "$SHIM/$1"; }
 adversarial() {
   echo "== adversarial items: Router stopped (verified), stand-in container on $NET, external observer $OBSERVER =="
-  router_stopped || { echo "cannot establish that $ROUTER is stopped (inspection must succeed with Running=false): refusing to remove the policy" >&2; exit 64; }
-  ADV_ACTIVE=1; cp "$ENV_FILE" /var/tmp/egress-verify-env.bak
-  guard_pause || { ng V6-17 "guard timer/service could not be stopped"; return; }
+  router_stopped || { echo "cannot establish that $ROUTER is stopped (a successful query must say Running=false): refusing to remove the policy" >&2; exit 64; }
+  cp "$ENV_FILE" /var/tmp/egress-verify-env.bak || { ng V7-17 "cannot back up $ENV_FILE"; return; }
+  ADV_ACTIVE=1
+  guard_pause && ok V7-17 "guard timer and service stopped (both report inactive)" || { ng V7-17 "guard timer/service could not be stopped or state undetermined"; return; }
   docker rm -f egress-verify-standin >/dev/null 2>&1
-  docker run -d --name egress-verify-standin --network "$NET" "$PY_IMAGE" python3 -m http.server 8787 --bind 0.0.0.0 --directory /tmp >/dev/null 2>&1 || { ng V6-17 "cannot start the stand-in container"; return; }
+  docker run -d --name egress-verify-standin --network "$NET" "$PY_IMAGE" python3 -m http.server 8787 --bind 0.0.0.0 --directory /tmp >/dev/null 2>&1 || { ng V7-17 "cannot start the stand-in container"; return; }
   NS=egress-verify-standin; sleep 2
   local rip c0 c1 r T s0; rip=$(ns_ip)
-  matrix; dns_check V6-8s
-  echo "-- V6-17 check must reject a weakened policy (sabotage; every setup step is itself checked)"
-  "$SCRIPT" check >/dev/null 2>&1 || ng V6-17 "check fails before sabotage"
-  sab iptables -t mangle -D SUBETHA-EGRESS -d "$(gateway_ip)/32" -j DROP && { "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted a deleted inventory rule" || ok V6-17 "check rejects a deleted inventory rule"; }
-  "$SCRIPT" apply >/dev/null || ng V6-17 "apply failed"
-  sab iptables -t mangle -I SUBETHA-EGRESS 2 -j RETURN && { "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted an early RETURN" || ok V6-17 "check rejects an early RETURN"; }
-  "$SCRIPT" apply >/dev/null || ng V6-17 "apply failed"
-  sab ip6tables -t mangle -D SUBETHA-EGRESS -d fc00::/7 -j DROP && { "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted a deleted IPv6 rule" || ok V6-17 "check rejects a deleted IPv6 rule"; }
-  "$SCRIPT" apply >/dev/null || ng V6-17 "apply failed"
-  sab iptables -t mangle -I PREROUTING 1 -i "$BRIDGE" -p tcp --dport 65000 -j RETURN && { "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted a rule placed above the jumps" || ok V6-17 "check rejects a rule placed above the jumps"
-    "$SCRIPT" apply >/dev/null 2>&1 && "$SCRIPT" check >/dev/null 2>&1 && ok V6-17 "apply repairs the displaced jumps (re-inserted above the foreign rule) and verifies" || ng V6-17 "apply did not repair displaced jumps"
+  matrix; dns_check V7-8s
+  echo "-- V7-17 check must reject a weakened policy (sabotage; every setup step is itself checked)"
+  "$SCRIPT" check >/dev/null 2>&1 || ng V7-17 "check fails before sabotage"
+  sab iptables -t mangle -D SUBETHA-EGRESS -d "$(gateway_ip)/32" -j DROP && { "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted a deleted inventory rule" || ok V7-17 "check rejects a deleted inventory rule"; }
+  "$SCRIPT" apply >/dev/null || ng V7-17 "apply failed"
+  sab iptables -t mangle -I SUBETHA-EGRESS 2 -j RETURN && { "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted an early RETURN" || ok V7-17 "check rejects an early RETURN"; }
+  "$SCRIPT" apply >/dev/null || ng V7-17 "apply failed"
+  sab ip6tables -t mangle -D SUBETHA-EGRESS -d fc00::/7 -j DROP && { "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted a deleted IPv6 rule" || ok V7-17 "check rejects a deleted IPv6 rule"; }
+  "$SCRIPT" apply >/dev/null || ng V7-17 "apply failed"
+  sab iptables -t mangle -I PREROUTING 1 -i "$BRIDGE" -p tcp --dport 65000 -j RETURN && { "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted a rule placed above the jumps" || ok V7-17 "check rejects a rule placed above the jumps"
+    "$SCRIPT" apply >/dev/null 2>&1 && "$SCRIPT" check >/dev/null 2>&1 && ok V7-17 "apply repairs the displaced jumps (re-inserted above the foreign rule) and verifies" || ng V7-17 "apply did not repair displaced jumps"
     iptables -t mangle -S PREROUTING | grep -q -- '--dport 65000' && iptables -t mangle -D PREROUTING -i "$BRIDGE" -p tcp --dport 65000 -j RETURN; }
-  "$SCRIPT" apply >/dev/null || ng V6-17 "apply failed"
-  # fault injection: an insertion that fails must not delete the surviving jumps
-  mkdir -p /var/tmp/egress-verify-fakebin
-  cat > /var/tmp/egress-verify-fakebin/iptables <<'SHIM'
-#!/bin/sh
-# refuse exactly one insertion (the PREROUTING jump for the Router bridge); pass everything else through
-case "$*" in *"-I PREROUTING 1 -i ${EGRESS_SHIM_IFACE} -j SUBETHA-EGRESS"*) echo "iptables: simulated insertion failure" >&2; exit 4 ;; esac
-exec /usr/sbin/iptables "$@"
-SHIM
-  chmod 755 /var/tmp/egress-verify-fakebin/iptables
+  "$SCRIPT" apply >/dev/null || ng V7-17 "apply failed"
+  # attributable fault injection: one insertion is rejected by a logging shim; apply must fail with that diagnostic and delete nothing
+  shim_install iptables
   sab iptables -t mangle -I PREROUTING 1 -i "$BRIDGE" -p tcp --dport 65001 -j RETURN && {
-    local before after; before=$(iptables -t mangle -S PREROUTING | grep -c -- "-j SUBETHA-EGRESS$")
-    EGRESS_SHIM_IFACE="$BRIDGE" PATH="/var/tmp/egress-verify-fakebin:$PATH" "$SCRIPT" apply >/dev/null 2>&1 && ng V6-17 "apply reported success despite a failed jump insertion" || ok V6-17 "apply fails when a jump insertion fails"
-    after=$(iptables -t mangle -S PREROUTING | grep -c -- "-j SUBETHA-EGRESS$")
-    iptables -t mangle -S PREROUTING | grep -q -- "-A PREROUTING -i $BRIDGE -j SUBETHA-EGRESS" && [ "$after" -ge "$before" ] && ok V6-17 "a failed insertion deletes nothing: the pre-existing $BRIDGE jump survives ($before -> $after jumps)" || ng V6-17 "a failed insertion weakened the hook ($before -> $after jumps)"
+    local before after; before=$(iptables -t mangle -S PREROUTING | awk '$(NF-1)=="-j" && $NF=="SUBETHA-EGRESS"' | wc -l)
+    EGRESS_SHIM_LOG="$SHIMLOG" EGRESS_SHIM_REAL=/usr/sbin/iptables EGRESS_SHIM_REJECT="-I PREROUTING 1 -i $BRIDGE -j SUBETHA-EGRESS" PATH="$SHIM:$PATH" "$SCRIPT" apply >/dev/null 2>"$EVID/fault-apply.err"; local ax=$?
+    cp "$SHIMLOG" "$EVID/fault-shim.log"
+    after=$(iptables -t mangle -S PREROUTING | awk '$(NF-1)=="-j" && $NF=="SUBETHA-EGRESS"' | wc -l)
+    [ "$ax" != 0 ] && grep -q "^REJECT iptables -t mangle -I PREROUTING 1 -i $BRIDGE -j SUBETHA-EGRESS" "$SHIMLOG" && grep -q "cannot insert the PREROUTING jump for $BRIDGE" "$EVID/fault-apply.err" && ok V7-17 "fault injection reached the injected rejection (shim log) and apply failed with the expected diagnostic (exit $ax)" || ng V7-17 "fault injection not attributable: exit $ax, shim rejected=$(grep -c ^REJECT "$SHIMLOG"), diagnostic=$(grep -c 'cannot insert' "$EVID/fault-apply.err")"
+    iptables -t mangle -S PREROUTING | grep -q -- "-A PREROUTING -i $BRIDGE -j SUBETHA-EGRESS" && [ "$after" -ge "$before" ] && ok V7-17 "a failed insertion deletes nothing: the pre-existing $BRIDGE jump survives ($before -> $after jumps)" || ng V7-17 "a failed insertion weakened the hook ($before -> $after jumps)"
     iptables -t mangle -D PREROUTING -i "$BRIDGE" -p tcp --dport 65001 -j RETURN; }
-  rm -rf /var/tmp/egress-verify-fakebin; "$SCRIPT" apply >/dev/null || ng V6-17 "apply failed after fault injection"
-  sab iptables -t mangle -N SUBETHA-EGRESS-BYPASS && sab iptables -t mangle -I PREROUTING 1 -i "$BRIDGE" -j SUBETHA-EGRESS-BYPASS && { "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted a look-alike chain name above the jumps" || ok V6-17 "check rejects a look-alike chain (SUBETHA-EGRESS-BYPASS) above the jumps"
+  rm -rf "$SHIM"; "$SCRIPT" apply >/dev/null || ng V7-17 "apply failed after fault injection"
+  sab iptables -t mangle -N SUBETHA-EGRESS-BYPASS && sab iptables -t mangle -I PREROUTING 1 -i "$BRIDGE" -j SUBETHA-EGRESS-BYPASS && { "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted a look-alike chain name above the jumps" || ok V7-17 "check rejects a look-alike chain (SUBETHA-EGRESS-BYPASS) above the jumps"
     iptables -t mangle -D PREROUTING -i "$BRIDGE" -j SUBETHA-EGRESS-BYPASS; iptables -t mangle -X SUBETHA-EGRESS-BYPASS; }
-  "$SCRIPT" apply >/dev/null || ng V6-17 "apply failed"
-  sab ip addr add $A/32 dev "$UPLINK" && { "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted a stale inventory (new host address)" || ok V6-17 "check rejects a stale inventory (new host address $A)"; }
-  "$SCRIPT" apply >/dev/null && "$SCRIPT" check >/dev/null 2>&1 && ok V6-17 "check passes again after apply" || ng V6-17 "check fails after apply"
+  "$SCRIPT" apply >/dev/null || ng V7-17 "apply failed"
+  sab ip addr add $A/32 dev "$UPLINK" && { "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted a stale inventory (new host address)" || ok V7-17 "check rejects a stale inventory (new host address $A)"; }
+  "$SCRIPT" apply >/dev/null && "$SCRIPT" check >/dev/null 2>&1 && ok V7-17 "check passes again after apply" || ng V7-17 "check fails after apply"
   printf 'EXTRA_DENY4="bad value"\n' >> "$ENV_FILE"
-  "$SCRIPT" guard >/dev/null 2>&1 && ng V6-17 "guard accepted an invalid env" || ok V6-17 "guard refuses an invalid env ($("$SCRIPT" guard 2>&1 | head -1))"
+  "$SCRIPT" guard >/dev/null 2>&1 && ng V7-17 "guard accepted an invalid env" || ok V7-17 "guard refuses an invalid env ($("$SCRIPT" guard 2>&1 | head -1))"
   cp /var/tmp/egress-verify-env.bak "$ENV_FILE"
   printf 'IFACES="%s %s"\nHOST_ADDRS4="%s"\n' "$BRIDGE" "$BRIDGE" "$(env_value HOST_ADDRS4)" > "$ENV_FILE"
-  "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check accepted duplicate IFACES tokens" || ok V6-17 "check rejects duplicate IFACES tokens"
+  "$SCRIPT" check >/dev/null 2>&1 && ng V7-17 "check accepted duplicate IFACES tokens" || ok V7-17 "check rejects duplicate IFACES tokens"
   cp /var/tmp/egress-verify-env.bak "$ENV_FILE"
-  mkdir -p /var/tmp/egress-verify-fakebin; printf '#!/bin/sh\necho "ip: simulated failure" >&2; exit 1\n' > /var/tmp/egress-verify-fakebin/ip; chmod 755 /var/tmp/egress-verify-fakebin/ip
-  PATH="/var/tmp/egress-verify-fakebin:$PATH" "$SCRIPT" check >/dev/null 2>&1 && ng V6-17 "check passed with an unreadable inventory" || ok V6-17 "check fails when the host inventory cannot be read"
-  PATH="/var/tmp/egress-verify-fakebin:$PATH" "$SCRIPT" guard >/dev/null 2>&1 && ng V6-17 "guard succeeded with an unreadable inventory" || ok V6-17 "guard fails when the host inventory cannot be read (no weaker policy applied)"
-  rm -rf /var/tmp/egress-verify-fakebin; "$SCRIPT" check >/dev/null 2>&1 && ok V6-17 "policy intact after the inventory-failure test" || ng V6-17 "policy not intact after the inventory-failure test"
-  # remove() must refuse when the Router state cannot be determined
-  mkdir -p /var/tmp/egress-verify-fakebin; printf '#!/bin/sh\necho "Cannot connect to the Docker daemon (simulated)" >&2; exit 1\n' > /var/tmp/egress-verify-fakebin/docker; chmod 755 /var/tmp/egress-verify-fakebin/docker
-  PATH="/var/tmp/egress-verify-fakebin:$PATH" "$SCRIPT" remove >/dev/null 2>&1 && ng V6-17 "remove proceeded although the Router state could not be determined" || ok V6-17 "remove refuses when the Docker daemon cannot be queried"
-  rm -rf /var/tmp/egress-verify-fakebin; "$SCRIPT" check >/dev/null 2>&1 && ok V6-17 "policy intact after the remove-refusal test" || ng V6-17 "policy not intact after the remove-refusal test"
-  echo "-- V6-3 host alias $A (outside every deny range) and V6-4 same-bridge hairpin"
-  hobs_start || ng V6-3 "host observer not ready"   # stays up through V6-9
+  shim_install ip
+  EGRESS_SHIM_LOG="$SHIMLOG" EGRESS_SHIM_REAL=/usr/sbin/ip EGRESS_SHIM_REJECT="-4 -o addr show" PATH="$SHIM:$PATH" "$SCRIPT" check >/dev/null 2>"$EVID/fault-check.err"; local cx=$?
+  EGRESS_SHIM_LOG="$SHIMLOG" EGRESS_SHIM_REAL=/usr/sbin/ip EGRESS_SHIM_REJECT="-4 -o addr show" PATH="$SHIM:$PATH" "$SCRIPT" guard >/dev/null 2>"$EVID/fault-guard.err"; local gx=$?
+  cp "$SHIMLOG" "$EVID/fault-ip-shim.log"
+  [ "$cx" != 0 ] && [ "$gx" != 0 ] && grep -q '^REJECT ip ' "$SHIMLOG" && grep -q 'cannot read host addresses' "$EVID/fault-check.err" && ok V7-17 "an unreadable host inventory (injected, shim log) fails both check and guard with the expected diagnostic" || ng V7-17 "inventory failure not attributable: check=$cx guard=$gx rejected=$(grep -c ^REJECT "$SHIMLOG")"
+  rm -rf "$SHIM"; "$SCRIPT" check >/dev/null 2>&1 && ok V7-17 "policy intact after the inventory-failure test (no weaker policy applied)" || ng V7-17 "policy not intact after the inventory-failure test"
+  # remove must refuse when the daemon cannot be queried at all: the shim rejects every docker call
+  # (an empty pattern matches all), and the Router name under test is passed explicitly
+  shim_install docker
+  EGRESS_SHIM_LOG="$SHIMLOG" EGRESS_SHIM_REAL="$(command -v docker)" EGRESS_SHIM_REJECT="" PATH="$SHIM:$PATH" ROUTER_CONTAINER="$ROUTER" "$SCRIPT" remove >/dev/null 2>"$EVID/fault-remove.err"; local rx=$?
+  cp "$SHIMLOG" "$EVID/fault-docker-shim.log"
+  [ "$rx" != 0 ] && [ "$(grep -c '^REJECT docker' "$SHIMLOG")" -ge 2 ] && grep -q 'cannot query the Docker daemon' "$EVID/fault-remove.err" && ok V7-17 "remove refuses when the Docker daemon cannot be queried (both inspect and ps rejected by the shim; refusal came from the Docker gate)" || ng V7-17 "remove refusal not attributable: exit $rx, rejected=$(grep -c ^REJECT "$SHIMLOG"), diagnostic: $(head -1 "$EVID/fault-remove.err")"
+  rm -rf "$SHIM"; "$SCRIPT" check >/dev/null 2>&1 && ok V7-17 "policy intact after the remove-refusal test" || ng V7-17 "policy not intact after the remove-refusal test"
+  echo "-- V7-3 host alias $A (outside every deny range) and V7-4 same-bridge hairpin"
+  hobs_start || ng V7-3 "host observer not ready"   # stays up through V7-9
   iptables -t mangle -D SUBETHA-EGRESS -d $A/32 -j DROP 2>/dev/null
   s0=$(hobs_seq); r=$(curlx "http://$A:$OBS_PORT/" 2)
-  [ "${r%% *}" = 0 ] && [ "$(hobs_accepts "$s0")" -ge 1 ] && ok V6-3 "alias $A without its inventory rule: reachable (http ${r#* }, observer accepted) -- the gap an unlisted host address opens" || ng V6-3 "alias $A without its inventory rule: '$r' accepts=$(hobs_accepts "$s0")"
+  [ "${r%% *}" = 0 ] && [ "$(hobs_accepts "$s0")" -ge 1 ] && ok V7-3 "alias $A without its inventory rule: reachable (http ${r#* }, observer accepted) -- the gap an unlisted host address opens" || ng V7-3 "alias $A without its inventory rule: '$r' accepts=$(hobs_accepts "$s0")"
   "$SCRIPT" apply >/dev/null; c0=$(cnt "$A"); s0=$(hobs_seq); r=$(curlx "http://$A:$OBS_PORT/" 2); c1=$(cnt "$A")
-  [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && [ "$(hobs_accepts "$s0")" = 0 ] && ok V6-3 "alias $A after apply: firewall-dropped (+$((c1-c0)), 0 accepts)" || ng V6-3 "alias $A after apply: '$r' $c0->$c1 accepts=$(hobs_accepts "$s0")"
+  [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && [ "$(hobs_accepts "$s0")" = 0 ] && ok V7-3 "alias $A after apply: firewall-dropped (+$((c1-c0)), 0 accepts)" || ng V7-3 "alias $A after apply: '$r' $c0->$c1 accepts=$(hobs_accepts "$s0")"
   docker rm -f egress-verify-target >/dev/null 2>&1
-  docker run -d --name egress-verify-target --network "$NET" -p "$A:18000:8000" "$PY_IMAGE" python3 -m http.server 8000 --bind 0.0.0.0 --directory /tmp >/dev/null 2>&1 || ng V6-4 "cannot start the hairpin target"
+  docker run -d --name egress-verify-target --network "$NET" -p "$A:18000:8000" "$PY_IMAGE" python3 -m http.server 8000 --bind 0.0.0.0 --directory /tmp >/dev/null 2>&1 || ng V7-4 "cannot start the hairpin target"
   local ready=0; for i in $(seq 1 30); do [ "$(curl -s -m 1 -o /dev/null -w '%{http_code}' "http://$A:18000/")" = 200 ] && { ready=1; break; }; sleep 0.5; done
-  [ "$ready" = 1 ] && ok V6-4 "hairpin target is serving on $A:18000 (checked from the host)" || ng V6-4 "hairpin target never became ready on $A:18000"
+  [ "$ready" = 1 ] && ok V7-4 "hairpin target is serving on $A:18000 (checked from the host)" || ng V7-4 "hairpin target never became ready on $A:18000"
   T=$(docker inspect egress-verify-target --format "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}")
-  r=$(curlx "http://$A:18000/" 2); [ "$ready" = 1 ] && [ "${r%% *}" = 28 ] && ok V6-4 "same-bridge hairpin $A:18000 (docker-proxy, host-destined) firewall-dropped by the inventory" || ng V6-4 "hairpin $A:18000: '$r' (ready=$ready)"
-  echo "-- V6-5 post-DNAT re-check: INPUT path (host observer) and FORWARD path (external observer), each with a positive control"
-  # the host-destined translation is dropped by the gateway's own inventory line (listed before the registry ranges)
+  r=$(curlx "http://$A:18000/" 2); [ "$ready" = 1 ] && [ "${r%% *}" = 28 ] && ok V7-4 "same-bridge hairpin $A:18000 (docker-proxy, host-destined) firewall-dropped by the inventory" || ng V7-4 "hairpin $A:18000: '$r' (ready=$ready)"
+  echo "-- V7-5 post-DNAT re-check: INPUT path (host observer) and FORWARD path (external observer), each with a positive control"
   dnat_path INPUT "$(gateway_ip):$OBS_PORT" "$(gateway_ip)" hobs_seq hobs_accepts 18001
   dnat_path FORWARD "$OBSERVER" "$(deny_line_of "${OBSERVER%%:*}")" xobs_seq xobs_accepts 18002
-  echo "-- V6-6 adjacency (temporary adversarial topology; expectation depends on bridge-nf-call-iptables)"
+  echo "-- V7-6 adjacency (temporary adversarial topology; expectation depends on bridge-nf-call-iptables)"
   local nf; nf=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo absent)
   r=$(curlx "http://$T:8000/" 2)
-  if [ "$nf" = 1 ]; then [ "${r%% *}" = 28 ] && ok V6-6 "same-bridge neighbor $T firewall-dropped (bridge-nf-call-iptables=1)" || ng V6-6 "same-bridge neighbor $T: '$r' with bridge-nf-call-iptables=1"
-  else [ "${r#* }" = 200 ] && ok V6-6 "same-bridge neighbor $T REACHABLE (bridge-nf-call-iptables=$nf): L2-bridged traffic bypasses the rules, which is why the singleton topology is mandatory" || ng V6-6 "same-bridge neighbor $T: '$r' (bridge-nf-call-iptables=$nf)"; fi
+  if [ "$nf" = 1 ]; then [ "${r%% *}" = 28 ] && ok V7-6 "same-bridge neighbor $T firewall-dropped (bridge-nf-call-iptables=1)" || ng V7-6 "same-bridge neighbor $T: '$r' with bridge-nf-call-iptables=1"
+  else [ "${r#* }" = 200 ] && ok V7-6 "same-bridge neighbor $T REACHABLE (bridge-nf-call-iptables=$nf): L2-bridged traffic bypasses the rules, which is why the singleton topology is mandatory" || ng V7-6 "same-bridge neighbor $T: '$r' (bridge-nf-call-iptables=$nf)"; fi
   docker rm -f egress-verify-target >/dev/null 2>&1
   docker run -d --name egress-verify-target "$PY_IMAGE" python3 -m http.server 8000 --bind 0.0.0.0 --directory /tmp >/dev/null 2>&1; sleep 2
   T=$(docker inspect egress-verify-target --format '{{(index .NetworkSettings.Networks "bridge").IPAddress}}')
   local raw0 raw1; rawcnt() { iptables -t raw -L PREROUTING -n -v -x 2>/dev/null | awk -v n="$1" '$9==n {s+=$1} END{print s+0}'; }
   c0=$(cnt '172.16.0.0/12'); raw0=$(rawcnt "$T"); r=$(curlx "http://$T:8000/" 2); c1=$(cnt '172.16.0.0/12'); raw1=$(rawcnt "$T")
-  if [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ]; then ok V6-6 "docker0 neighbor $T firewall-dropped by our chain (+$((c1-c0)))"
-  elif [ "${r%% *}" = 28 ] && [ "$raw1" -gt "$raw0" ]; then ok V6-6 "docker0 neighbor $T dropped by Docker's own raw PREROUTING rule (+$((raw1-raw0))) before our chain: not delivered, but not our evidence"
-  else ng V6-6 "docker0 neighbor $T: '$r' (ours +$((c1-c0)), docker raw +$((raw1-raw0)))"; fi
+  if [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ]; then ok V7-6 "docker0 neighbor $T firewall-dropped by our chain (+$((c1-c0)))"
+  elif [ "${r%% *}" = 28 ] && [ "$raw1" -gt "$raw0" ]; then ok V7-6 "docker0 neighbor $T dropped by Docker's own raw PREROUTING rule (+$((raw1-raw0))) before our chain: not delivered, but not our evidence"
+  else ng V7-6 "docker0 neighbor $T: '$r' (ours +$((c1-c0)), docker raw +$((raw1-raw0)))"; fi
   docker rm -f egress-verify-target >/dev/null 2>&1
   ip addr del $A/32 dev "$UPLINK" 2>/dev/null; "$SCRIPT" apply >/dev/null
-  echo "-- V6-9 pre-existing flow to the host observer (allowed while the policy is removed, cut by apply)"
-  FORCE=1 "$SCRIPT" remove; docker rm -f egress-verify-stream >/dev/null 2>&1; sleep 0.5; s0=$(hobs_seq)
+  echo "-- V7-9 pre-existing flow to the host observer (allowed while the policy is removed, cut by apply)"
+  FORCE=1 "$SCRIPT" remove >/dev/null 2>&1 || ng V7-9 "forced remove failed"; docker rm -f egress-verify-stream >/dev/null 2>&1; sleep 0.5; s0=$(hobs_seq)
   docker run -d --name egress-verify-stream --network "container:$NS" "$ALPINE_IMAGE" sh -c "i=0; while true; do i=\$((i+1)); echo tick \$i; sleep 1; done | nc $(gateway_ip) $OBS_PORT" >/dev/null 2>&1
   sleep 3.5; local before after s1; before=$(hobs_lines "$s0" tick); "$SCRIPT" apply >/dev/null; s1=$(hobs_seq); sleep 4; after=$(hobs_lines "$s1" tick)
-  local ctl ct; ctl=$(conntrack -L 2>/dev/null) || ctl=""; ct=$(printf '%s\n' "$ctl" | grep "src=$rip " | grep -c "dport=$OBS_PORT ")
+  local ctl ct; ctl=$(conntrack -L 2>/dev/null) || { ng V7-9 "conntrack -L failed"; ctl=""; }
+  ct=$(printf '%s\n' "$ctl" | grep "src=$rip " | grep -c "dport=$OBS_PORT ")
   docker rm -f egress-verify-stream >/dev/null 2>&1
-  [ "$before" -ge 2 ] && [ "$after" = 0 ] && ok V6-9 "existing flow: $before ticks arrived before apply, 0 after (conntrack entry still present: $ct) -- ORIGINAL-direction packets are dropped" || ng V6-9 "existing flow: ticks before=$before after=$after"
+  [ "$before" -ge 2 ] && [ "$after" = 0 ] && [ "$ct" -ge 1 ] && ok V7-9 "existing flow: $before ticks arrived before apply, 0 after; its conntrack entry is still present ($ct) -- ORIGINAL-direction packets are dropped regardless of state" || ng V7-9 "existing flow: ticks before=$before after=$after conntrack=$ct"
   obs_save "$(hobs_url)" adversarial; hobs_stop
-  echo "-- V6-13 guard recovery (best effort; the policy is absent until the timer fires)"
+  echo "-- V7-13 guard recovery (best effort; the policy is absent until the timer fires)"
   guard_resume; iptables -t mangle -F SUBETHA-EGRESS; local tg; tg=$(date +%s)
   while ! "$SCRIPT" check >/dev/null 2>&1; do sleep 2; [ $(( $(date +%s) - tg )) -gt 90 ] && break; done
-  "$SCRIPT" check >/dev/null 2>&1 && ok V6-13 "guard restored the full policy $(( $(date +%s) - tg )) s after a flush (recovery, not a bound)" || { ng V6-13 "guard did not restore within 90 s"; "$SCRIPT" apply >/dev/null; }
-  docker rm -f egress-verify-standin >/dev/null 2>&1; NS=$ROUTER; ADV_ACTIVE=0; rm -f /var/tmp/egress-verify-env.bak
-  "$SCRIPT" check >/dev/null 2>&1 && ok V6-17 "final policy check after cleanup" || ng V6-17 "policy does not verify after cleanup"
+  "$SCRIPT" check >/dev/null 2>&1 && ok V7-13 "guard restored the full policy $(( $(date +%s) - tg )) s after a flush (recovery, not a bound)" || { ng V7-13 "guard did not restore within 90 s"; "$SCRIPT" apply >/dev/null; }
+  docker rm -f egress-verify-standin >/dev/null 2>&1; NS=$ROUTER
+  adv_cleanup; rm -f /var/tmp/egress-verify-env.bak
 }
 dnat_path() { # $1 hook, $2 target ip:port, $3 counter line, $4 seq fn, $5 accept-count fn, $6 alias port
   local hook=$1 target=$2 line=$3 seqfn=$4 countfn=$5 port=$6 c0 c1 r s0
-  [ -n "$line" ] || { ng V6-5 "$hook path: target $target is not inside a denied range; choose an RFC1918 observer"; return; }
+  [ -n "$line" ] || { ng V7-5 "$hook path: target $target is not inside a denied range; choose an RFC1918 observer"; return; }
   sab iptables -t nat -I PREROUTING 1 -i "$BRIDGE" -d $A/32 -p tcp --dport "$port" -j DNAT --to-destination "$target" || return
   iptables -t mangle -D SUBETHA-EGRESS -d $A/32 -j DROP 2>/dev/null
   c0=$(cnt "$line"); s0=$($seqfn); r=$(curlx "http://$A:$port/" 2); c1=$(cnt "$line")
-  [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && [ "$($countfn "$s0")" = 0 ] && ok V6-5 "DNAT $A:$port -> $target: post-DNAT destination firewall-dropped in $hook (+$((c1-c0)) on $line, 0 accepts at the target)" || ng V6-5 "$hook path with re-check: '$r' $c0->$c1 accepts=$($countfn "$s0")"
+  [ "${r%% *}" = 28 ] && [ "$c1" -gt "$c0" ] && [ "$($countfn "$s0")" = 0 ] && ok V7-5 "DNAT $A:$port -> $target: post-DNAT destination firewall-dropped in $hook (+$((c1-c0)) on $line, 0 accepts at the target)" || ng V7-5 "$hook path with re-check: '$r' $c0->$c1 accepts=$($countfn "$s0")"
   iptables -t mangle -D "$hook" -i "$BRIDGE" -j SUBETHA-EGRESS
   s0=$($seqfn); r=$(curlx "http://$A:$port/" 3)
-  [ "${r%% *}" = 0 ] && [ "$($countfn "$s0")" -ge 1 ] && ok V6-5 "positive control: without the $hook jump the translated connection reaches $target (http ${r#* }, $($countfn "$s0") accept recorded at the target)" || ng V6-5 "positive control on $hook: '$r' accepts=$($countfn "$s0")"
+  [ "${r%% *}" = 0 ] && [ "$($countfn "$s0")" -ge 1 ] && ok V7-5 "positive control: without the $hook jump the translated connection reaches $target (http ${r#* }, $($countfn "$s0") accept recorded at the target)" || ng V7-5 "positive control on $hook: '$r' accepts=$($countfn "$s0")"
   iptables -t nat -D PREROUTING -i "$BRIDGE" -d $A/32 -p tcp --dport "$port" -j DNAT --to-destination "$target"
-  "$SCRIPT" apply >/dev/null || ng V6-5 "apply failed after the $hook DNAT test"
+  "$SCRIPT" apply >/dev/null || ng V7-5 "apply failed after the $hook DNAT test"
 }
 
 fail_closed() {
-  echo "== V6-12 fail-closed (stops Docker; observed through the restart retries in the journal) =="
-  cp "$ENV_FILE" /var/tmp/egress-verify-env.bak
-  systemctl stop docker.socket docker.service
+  echo "== V7-12 fail-closed (stops Docker; observed through the restart retries in the journal) =="
+  cp "$ENV_FILE" /var/tmp/egress-verify-env.bak || { ng V7-12 "cannot back up $ENV_FILE"; return; }
+  systemctl stop docker.socket docker.service || { ng V7-12 "cannot stop docker"; return; }
   local t0; t0=$(date -u +%Y-%m-%dT%H:%M:%S)
   printf 'IFACES="%s"\nHOST_ADDRS4="not-an-address"\n' "$(env_value IFACES)" > "$ENV_FILE"
   systemctl start docker.service >/dev/null 2>&1; sleep 20
   local jl attempts; jl=$(TZ=UTC journalctl -q -S "$t0" -u docker.service -o cat); printf '%s\n' "$jl" > "$EVID/journal-failclosed-1.txt"
   attempts=$(printf '%s\n' "$jl" | grep -c "subetha-egress: not an IPv4 address/CIDR: 'not-an-address'")
-  [ "$(pgrep -c dockerd)" -eq 0 ] && [ "$(pgrep -c containerd-shim)" -eq 0 ] && [ "$attempts" -ge 2 ] && ok V6-12 "bad HOST_ADDRS4: 0 dockerd and 0 container shims after 20 s; $attempts start attempts each failed in the policy with the expected diagnostic" || ng V6-12 "dockerd=$(pgrep -c dockerd) shims=$(pgrep -c containerd-shim) diagnostic attempts=$attempts"
+  [ "$(pgrep -c dockerd)" -eq 0 ] && [ "$(pgrep -c containerd-shim)" -eq 0 ] && [ "$attempts" -ge 2 ] && ok V7-12 "bad HOST_ADDRS4: 0 dockerd and 0 container shims after 20 s; $attempts start attempts each failed in the policy with the expected diagnostic" || ng V7-12 "dockerd=$(pgrep -c dockerd) shims=$(pgrep -c containerd-shim) diagnostic attempts=$attempts"
   printf 'TYPO_KEY=1\n' >> "$ENV_FILE"; systemctl reset-failed docker.service; t0=$(date -u +%Y-%m-%dT%H:%M:%S); systemctl start docker.service >/dev/null 2>&1; sleep 10
   jl=$(TZ=UTC journalctl -q -S "$t0" -u docker.service -o cat); printf '%s\n' "$jl" > "$EVID/journal-failclosed-2.txt"
-  [ "$(pgrep -c dockerd)" -eq 0 ] && printf '%s\n' "$jl" | grep -q "unknown key 'TYPO_KEY'" && ok V6-12 "unknown key: docker.service failed with the expected diagnostic (unknown key 'TYPO_KEY')" || ng V6-12 "unknown key: dockerd=$(pgrep -c dockerd), diagnostic present: $(printf '%s\n' "$jl" | grep -c 'unknown key')"
-  cp /var/tmp/egress-verify-env.bak "$ENV_FILE"; rm -f /var/tmp/egress-verify-env.bak; systemctl reset-failed docker.service; systemctl start docker.service; sleep 8
+  [ "$(pgrep -c dockerd)" -eq 0 ] && printf '%s\n' "$jl" | grep -q "unknown key 'TYPO_KEY'" && ok V7-12 "unknown key: docker.service failed with the expected diagnostic (unknown key 'TYPO_KEY')" || ng V7-12 "unknown key: dockerd=$(pgrep -c dockerd), diagnostic present: $(printf '%s\n' "$jl" | grep -c 'unknown key')"
+  cp /var/tmp/egress-verify-env.bak "$ENV_FILE" || ng V7-12 "cannot restore $ENV_FILE"; rm -f /var/tmp/egress-verify-env.bak; systemctl reset-failed docker.service; systemctl start docker.service || ng V7-12 "docker did not start after restoring the env"; sleep 8
   docker start "$ROUTER" >/dev/null 2>&1   # a production Router restores itself (--restart unless-stopped)
   "$SCRIPT" guard >/dev/null 2>&1          # refresh the inventory (bridge addresses appear after dockerd starts)
-  "$SCRIPT" check >/dev/null 2>&1 && [ "$(docker inspect "$ROUTER" --format '{{.State.Running}}' 2>/dev/null)" = true ] && ok V6-12 "restored: docker up, policy verified, $ROUTER running" || ng V6-12 "restore failed: check Docker and $ROUTER"
+  "$SCRIPT" check >/dev/null 2>&1 && [ "$(docker inspect "$ROUTER" --format '{{.State.Running}}' 2>/dev/null)" = true ] && ok V7-12 "restored: docker up, policy verified, $ROUTER running" || ng V7-12 "restore failed: check Docker and $ROUTER"
 }
 
 reboot_prepare() {
   require_observer
-  echo "== V6-11 prepare: probe container, boot-ordered observers, test-only docker dependency, observer cursor =="
+  echo "== V7-11 prepare: probe container, boot-ordered observers, test-only docker dependency, boot id and observer cursor =="
   docker rm -f subetha-egress-probe >/dev/null 2>&1
-  docker run -d --name subetha-egress-probe --restart unless-stopped --network "$NET" --entrypoint sh "$PROBE_IMAGE" -c "while true; do for t in \"deny http://$OBSERVER/\" \"host http://$(gateway_ip):$OBS_PORT/\" \"pub http://1.1.1.1/\"; do set -- \$t; r=\$(curl -s -o /dev/null -m 1 -w \"%{exitcode} %{http_code}\" \$2 2>/dev/null); echo \"\$1 \$r\"; done; sleep 0.2; done" >/dev/null
+  docker run -d --name subetha-egress-probe --restart unless-stopped --network "$NET" --entrypoint sh "$PROBE_IMAGE" -c "while true; do for t in \"deny http://$OBSERVER/\" \"host http://$(gateway_ip):$OBS_PORT/\" \"pub http://1.1.1.1/\"; do set -- \$t; r=\$(curl -s -o /dev/null -m 1 -w \"%{exitcode} %{http_code}\" \$2 2>/dev/null); echo \"\$1 \$r\"; done; sleep 0.2; done" >/dev/null || { ng V7-11 "cannot start the probe container"; return; }
   local filter="dst host ${OBSERVER%%:*}"
   sed "s|@UPLINK@|$UPLINK|; s|@FILTER@|$filter|; s|@SECONDS@|$CAPTURE_SECONDS|" "$UNIT_DIR/egress-boot-capture.service" > /etc/systemd/system/egress-boot-capture.service
   sed "s|@UNIT_DIR@|$UNIT_DIR|; s|@PORT@|$OBS_PORT|; s|@REPORT@|$OBS_REPORT|" "$UNIT_DIR/egress-host-observer.service" > /etc/systemd/system/egress-host-observer.service
   mkdir -p /etc/systemd/system/docker.service.d; cp "$UNIT_DIR/99-egress-verify.conf" /etc/systemd/system/docker.service.d/
   rm -f /var/tmp/host-observer.log /var/tmp/boot-capture.pcap /var/tmp/boot-capture.log
   systemctl daemon-reload; systemctl enable egress-host-observer.service egress-boot-capture.service >/dev/null 2>&1
-  local xs xq; xs=$(obs_field "$OBSERVER_REPORT" session); xq=$(xobs_seq)
-  printf 'prepared=%s\nxsession=%s\nxseq=%s\nobserver=%s\n' "$(date +%s)" "$xs" "$xq" "$OBSERVER" > "$PREP"
-  note V6-11 "prepared (capture lifetime ${CAPTURE_SECONDS}s; external observer $OBSERVER session $xs, cursor seq $xq). Now: sudo reboot; within that lifetime: sudo OBSERVER=... OBSERVER_REPORT=... subetha-egress-verify --post-boot"
+  local xq; xq=$(xobs_seq); case "$xq" in ERR*) ng V7-11 "cannot read the external observer cursor: $xq"; return;; esac
+  printf 'prepared=%s\nboot_id=%s\nobserver=%s\nobserver_report=%s\nxsession=%s\nxseq=%s\n' "$(date +%s)" "$(cat /proc/sys/kernel/random/boot_id)" "$OBSERVER" "$OBSERVER_REPORT" "$XSESSION" "$xq" > "$PREP"
+  note V7-11 "prepared (capture lifetime ${CAPTURE_SECONDS}s; boot id $(cat /proc/sys/kernel/random/boot_id); external observer $OBSERVER session $XSESSION, cursor seq $xq). Now: sudo reboot; within that lifetime: sudo OBSERVER=... OBSERVER_REPORT=... subetha-egress-verify --post-boot"
 }
 
+prep_value() { awk -F= -v k="$1" '$1==k{print $2}' "$PREP"; }
+mono_of_message() { # $1 unit, $2 substring -> __MONOTONIC_TIMESTAMP (us) of the first journal message containing it this boot
+  journalctl -q -b -u "$1" -o json 2>/dev/null | python3 -c 'import json,sys
+pat=sys.argv[1]
+for line in sys.stdin:
+    try: d=json.loads(line)
+    except Exception: continue
+    m=d.get("MESSAGE"); m=m if isinstance(m,str) else ""
+    if pat in m: print(d.get("__MONOTONIC_TIMESTAMP","")); break' "$2"; }
 post_boot() {
   require_observer
-  echo "== V6-11 post-boot evidence =="
-  [ -r "$PREP" ] || { ng V6-11 "no --reboot-prepare record at $PREP"; return; }
-  local xs0 xq0; xs0=$(awk -F= '$1=="xsession"{print $2}' "$PREP"); xq0=$(awk -F= '$1=="xseq"{print $2}' "$PREP")
-  local j; j=$(TZ=UTC journalctl -q -b -o short-precise -u egress-boot-capture.service -u egress-host-observer.service -u docker.service 2>/dev/null | sed -E 's/^[A-Za-z]{3} [0-9]{2} //'); printf '%s\n' "$j" > "$EVID/journal-boot.txt"
-  j=$(printf '%s\n' "$j" | grep -E 'Started egress|Starting docker|subetha-egress: applied|Loading containers: start|Started docker' | head -6); echo "$j" | sed 's/^/  /'
-  local tc to ta tl; tc=$(echo "$j" | grep 'Started egress-boot' | awk '{print $1}'); to=$(echo "$j" | grep 'Started egress-host' | awk '{print $1}')
-  ta=$(echo "$j" | grep 'applied' | awk '{print $1}'); tl=$(echo "$j" | grep 'Loading containers' | awk '{print $1}')
-  [ -n "$tc" ] && [ -n "$to" ] && [ -n "$ta" ] && [ "$tc" \< "$ta" ] && [ "$to" \< "$ta" ] && ok V6-11 "observers ready ($tc, $to) before the rules ($ta)" || ng V6-11 "observer readiness not proven before the rules"
-  [ -n "$ta" ] && [ -n "$tl" ] && [ "$ta" \< "$tl" ] && ok V6-11 "rules applied ($ta) before container restore ($tl)" || ng V6-11 "ordering not proven from the journal"
-  [ "$(systemctl is-active egress-boot-capture)" = active ] && ok V6-11 "boot capture still running (lifetime not exceeded)" || ng V6-11 "boot capture is not running ($(TZ=UTC journalctl -q -b -u egress-boot-capture.service -o cat | grep -m1 -i 'exited\|denied\|error')): the window is not covered"
-  # continuity: the capture must have run once, uninterrupted, since before docker; docker restarts are reported
-  local cstarts dstarts; cstarts=$(TZ=UTC journalctl -q -b -u egress-boot-capture.service -o cat | grep -c '^Started '); dstarts=$(TZ=UTC journalctl -q -b -u docker.service -o cat | grep -c '^Started docker')
-  [ "$cstarts" = 1 ] && [ "$(systemctl show egress-boot-capture.service -p NRestarts --value)" = 0 ] && ok V6-11 "boot capture ran continuously (started once, 0 restarts)" || ng V6-11 "boot capture was started $cstarts times (restarts=$(systemctl show egress-boot-capture.service -p NRestarts --value)): a restart truncates the capture; the window is not continuously covered"
-  [ "$dstarts" = 1 ] && note V6-11 "docker.service started once since boot" || note V6-11 "docker.service started $dstarts times since boot (ExecStartPre ran each time; the probe log covers every restore)"
-  # observer continuity: external session unchanged since prepare; host observer not restarted since boot, both listening
-  local xs; xs=$(obs_field "$OBSERVER_REPORT" session)
-  [ "$xs" = "$xs0" ] && [ "$(obs_field "$OBSERVER_REPORT" listening)" = True ] && ok V6-11 "external observer ran continuously (session $xs unchanged since prepare, listening)" || ng V6-11 "external observer session changed or not listening (prepare $xs0, now $xs)"
-  [ "$(obs_field "$(hobs_url)" listening)" = True ] && [ "$(systemctl show egress-host-observer.service -p NRestarts --value)" = 0 ] && ok V6-11 "host observer listening since boot with 0 restarts" || ng V6-11 "host observer not listening or restarted (NRestarts=$(systemctl show egress-host-observer.service -p NRestarts --value))"
+  echo "== V7-11 post-boot evidence =="
+  [ -r "$PREP" ] || { ng V7-11 "no --reboot-prepare record at $PREP"; return; }
+  # boundaries: a new boot, the same observer configuration, the same external observer session
+  [ "$(cat /proc/sys/kernel/random/boot_id)" != "$(prep_value boot_id)" ] && ok V7-11 "boot id changed since prepare (a reboot happened)" || ng V7-11 "boot id unchanged since prepare: no reboot"
+  [ "$OBSERVER" = "$(prep_value observer)" ] && [ "$OBSERVER_REPORT" = "$(prep_value observer_report)" ] && ok V7-11 "observer configuration matches the prepare record" || ng V7-11 "observer configuration differs from the prepare record"
+  [ "$XSESSION" = "$(prep_value xsession)" ] && ok V7-11 "external observer session $XSESSION unchanged since prepare (every report below is bound to it)" || { ng V7-11 "external observer session changed since prepare ($(prep_value xsession) -> $XSESSION): its log does not cover the reboot"; return; }
+  local xq0; xq0=$(prep_value xseq)
+  # host observer: exactly one invocation since boot, bound to the process answering the report
+  HSESSION=$(obs_health "$(hobs_url)") || HSESSION=""
+  local hpid hinv0 cinv0; hpid=$(obs_field "$(hobs_url)" pid "$HSESSION"); hinv0=$(unit_prop egress-host-observer.service InvocationID); cinv0=$(unit_prop egress-boot-capture.service InvocationID)
+  [ -n "$HSESSION" ] && [ "$(unit_starts egress-host-observer.service)" = 1 ] && [ "$hpid" = "$(unit_prop egress-host-observer.service MainPID)" ] && ok V7-11 "host observer: one invocation since boot, report bound to its MainPID $hpid (session $HSESSION)" || ng V7-11 "host observer continuity not established (starts=$(unit_starts egress-host-observer.service), pid=$hpid, MainPID=$(unit_prop egress-host-observer.service MainPID))"
+  [ "$(unit_starts egress-boot-capture.service)" = 1 ] && [ "$(systemctl is-active egress-boot-capture)" = active ] && ok V7-11 "boot capture: one invocation since boot, still running" || ng V7-11 "boot capture not continuous (starts=$(unit_starts egress-boot-capture.service), state=$(systemctl is-active egress-boot-capture))"
+  # ordering from structured timestamps: aid units active (after their readiness probes) < rules applied < containers loading
+  local cap_us obs_us app_us load_us
+  cap_us=$(unit_prop egress-boot-capture.service ActiveEnterTimestampMonotonic); obs_us=$(unit_prop egress-host-observer.service ActiveEnterTimestampMonotonic)
+  app_us=$(mono_of_message docker.service "subetha-egress: applied"); load_us=$(mono_of_message docker.service "Loading containers: start")
+  isnum "$cap_us" && isnum "$obs_us" && isnum "$app_us" && isnum "$load_us" && [ "$cap_us" -lt "$app_us" ] && [ "$obs_us" -lt "$app_us" ] && ok V7-11 "observers active (monotonic ${cap_us}us, ${obs_us}us) before the rules (${app_us}us)" || ng V7-11 "observer readiness not proven before the rules (cap=$cap_us obs=$obs_us applied=$app_us)"
+  isnum "$app_us" && isnum "$load_us" && [ "$app_us" -lt "$load_us" ] && ok V7-11 "rules applied (${app_us}us) before container restore (${load_us}us)" || ng V7-11 "ordering not proven (applied=$app_us loading=$load_us)"
+  journalctl -q -b -u egress-boot-capture.service -u egress-host-observer.service -u docker.service -o json > "$EVID/journal-boot.json" 2>/dev/null
+  local dstarts; dstarts=$(unit_starts docker.service); [ "$dstarts" = 1 ] && note V7-11 "docker.service started once since boot" || note V7-11 "docker.service started $dstarts times since boot (ExecStartPre ran each time; the probe log covers every restore)"
   local tw=0; while ! "$SCRIPT" check >/dev/null 2>&1 && [ $tw -lt 60 ]; do sleep 2; tw=$((tw+2)); done
-  "$SCRIPT" check >/dev/null 2>&1 && ok V6-11 "policy verified after boot (inventory refreshed by the guard within ${tw}s; the gateway lay inside a denied range meanwhile)" || ng V6-11 "policy does not verify 60 s after boot: $("$SCRIPT" check 2>&1 | head -2 | tr '\n' ' ')"
-  # quiesce the probe, then evaluate the whole interval from boot to now
-  docker stop subetha-egress-probe >/dev/null 2>&1; sleep 2
+  "$SCRIPT" check >/dev/null 2>&1 && ok V7-11 "policy verified after boot (inventory refreshed by the guard within ${tw}s; the gateway lay inside a denied range meanwhile)" || ng V7-11 "policy does not verify 60 s after boot: $("$SCRIPT" check 2>&1 | head -2 | tr '\n' ' ')"
+  # quiesce the probe (verified), let the observers settle, then evaluate the whole interval
+  docker stop subetha-egress-probe >/dev/null 2>&1 || ng V7-11 "docker stop of the probe failed"
+  [ "$(docker inspect -f '{{.State.Running}}' subetha-egress-probe 2>/dev/null)" = false ] && ok V7-11 "probe container stopped (inspection confirms Running=false)" || { ng V7-11 "probe not confirmed stopped"; return; }
+  obs_settle "$OBSERVER_REPORT" "$XSESSION" >/dev/null || ng V7-11 "external observer did not settle"; obs_settle "$(hobs_url)" "$HSESSION" >/dev/null || ng V7-11 "host observer did not settle"
   local bootep boot; bootep=$(( $(date +%s) - $(cut -d. -f1 /proc/uptime) )); boot=$(TZ=UTC date -d "@$bootep" +%Y-%m-%dT%H:%M:%S)
   docker logs -t subetha-egress-probe > "$EVID/probe.log" 2>&1
   local first; first=$(awk -v b="$boot" '$1 > b && $2=="deny"' "$EVID/probe.log" | head -1)
   echo "  boot at $boot UTC; first probe attempt after boot: $first"
-  echo "$first" | grep -q ' 28 ' && ok V6-11 "first restored attempt to the external observer timed out (dropped)" || ng V6-11 "first restored attempt: '$first'"
+  echo "$first" | grep -q ' 28 ' && ok V7-11 "first restored attempt to the external observer timed out (dropped)" || ng V7-11 "first restored attempt: '$first'"
   local n; n=$(awk -v b="$boot" '$1 > b && $2=="deny" && $3=="0"' "$EVID/probe.log" | wc -l)
-  [ "$n" -eq 0 ] && ok V6-11 "0 successful prohibited attempts since boot" || ng V6-11 "$n successful prohibited attempts since boot"
-  [ "$(awk -v b="$boot" '$1 > b && $2=="pub" && $3=="0"' "$EVID/probe.log" | wc -l)" -gt 0 ] && ok V6-11 "probe reached the public control after boot (it was alive)" || ng V6-11 "probe never reached the public control"
-  local xa ha xb; xa=$(xobs_accepts "$xq0"); ha=$(hobs_accepts 0); xb=$(obs_field "$OBSERVER_REPORT" backlog)
-  [ "$xa" = 0 ] && ok V6-11 "external observer accepted 0 connections since the prepare cursor (seq $xq0) through the quiesced probe" || ng V6-11 "external observer accepted $xa connections since prepare"
-  [ "$ha" = 0 ] && ok V6-11 "host observer accepted 0 connections since boot" || ng V6-11 "host observer accepted $ha connections since boot"
-  case "$xb" in 0) ok V6-11 "external observer backlog 0 (no connection waiting unaccepted)" ;; null) note V6-11 "external observer cannot report its backlog (no ss); accept counts are userspace counts" ;; *) ng V6-11 "external observer backlog $xb" ;; esac
+  [ "$n" -eq 0 ] && ok V7-11 "0 successful prohibited attempts since boot" || ng V7-11 "$n successful prohibited attempts since boot"
+  [ "$(awk -v b="$boot" '$1 > b && $2=="pub" && $3=="0"' "$EVID/probe.log" | wc -l)" -gt 0 ] && ok V7-11 "probe reached the public control after boot (it was alive)" || ng V7-11 "probe never reached the public control"
+  local xa ha; xa=$(xobs_accepts "$xq0"); ha=$(hobs_accepts 0)
+  [ "$xa" = 0 ] && ok V7-11 "external observer accepted 0 connections since the prepare cursor (seq $xq0) through the quiesced probe (session-bound)" || ng V7-11 "external observer accepts since prepare: $xa"
+  [ "$ha" = 0 ] && ok V7-11 "host observer accepted 0 connections since boot (session-bound)" || ng V7-11 "host observer accepts since boot: $ha"
+  backlog_gate V7-11 "external observer" "$OBSERVER_REPORT" "$XSESSION"; backlog_gate V7-11 "host observer" "$(hobs_url)" "$HSESSION"
+  local ctl; ctl=$(conntrack -L 2>/dev/null) || { ng V7-11 "conntrack -L failed"; ctl=""; }
+  local pip; pip=$(docker inspect subetha-egress-probe --format "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}")
+  [ "$(printf '%s\n' "$ctl" | grep "src=$pip " | grep -c -E "dport=(${OBSERVER#*:}|$OBS_PORT) ")" = 0 ] && ok V7-11 "no conntrack entries for the probe's prohibited flows (no attempt was delivered to a host socket or forwarded)" || ng V7-11 "conntrack entries exist for the probe's prohibited flows"
   # positive controls through the still-running capture and both observers (the probe is stopped, so all traffic after t0 is ours)
   local t0 xq1 hq1; t0=$(now); xq1=$(xobs_seq); hq1=$(hobs_seq)
   curl -s -o /dev/null -m 3 -H 'X-Control: host' "http://$OBSERVER/"; curl -s -o /dev/null -m 3 -H 'X-Control: host' "http://127.0.0.1:$OBS_PORT/"; sleep 2
-  # The capture keeps running (-U writes each packet at once): analyse a copy. Stopping the unit here
-  # would stop docker.service through the test-only Requires= and relaunch both, truncating the file.
-  cp -f /var/tmp/boot-capture.pcap "$EVID/boot-capture.pcap" || { ng V6-11 "cannot copy the boot capture"; return; }
+  cp -f /var/tmp/boot-capture.pcap "$EVID/boot-capture.pcap" || { ng V7-11 "cannot copy the boot capture"; return; }
   local pc="$EVID/boot-capture.pcap" probe_port=${OBSERVER#*:} syn_before syn_after
-  [ -s "$pc" ] && tcpdump -nn -r "$pc" >/dev/null 2>&1 || { ng V6-11 "boot capture unreadable"; return; }
+  [ -s "$pc" ] && tcpdump -nn -r "$pc" >/dev/null 2>&1 || { ng V7-11 "boot capture unreadable"; return; }
   syn_before=$(tcpdump -nn -tt -r "$pc" "tcp dst port $probe_port and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0" 2>/dev/null | awk -v t="$t0" '$1 < t' | wc -l)
   syn_after=$(tcpdump -nn -tt -r "$pc" "tcp dst port $probe_port and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0" 2>/dev/null | awk -v t="$t0" '$1 >= t' | wc -l)
-  [ "$syn_before" = 0 ] && ok V6-11 "boot capture: 0 SYNs to the probe port on $UPLINK from boot until the probe was quiesced (nothing escaped during or after restore)" || ng V6-11 "boot capture: $syn_before SYNs to the probe port before the control"
-  local xa1 xl1; xa1=$(xobs_accepts "$xq1"); xl1=$(xobs_lines "$xq1" X-Control)
-  [ "$syn_after" = 1 ] && [ "$xa1" = 1 ] && [ "$xl1" -ge 1 ] && ok V6-11 "positive control correlated: exactly 1 SYN after t0 on the capture, exactly 1 accept at the external observer carrying X-Control" || ng V6-11 "positive control not correlated (SYNs after t0=$syn_after, observer accepts=$xa1, control lines=$xl1)"
-  [ "$(hobs_accepts "$hq1")" = 1 ] && [ "$(hobs_lines "$hq1" X-Control)" -ge 1 ] && ok V6-11 "host observer recorded exactly its control connection" || ng V6-11 "host observer control not recorded as expected"
+  [ "$syn_before" = 0 ] && ok V7-11 "boot capture: 0 SYNs to the probe port on $UPLINK from boot until the probe was quiesced (nothing escaped during or after restore)" || ng V7-11 "boot capture: $syn_before SYNs to the probe port before the control"
+  obs_settle "$OBSERVER_REPORT" "$XSESSION" >/dev/null; local xa1 xl1; xa1=$(xobs_accepts "$xq1"); xl1=$(xobs_lines "$xq1" X-Control)
+  [ "$syn_after" = 1 ] && [ "$xa1" = 1 ] && [ "$xl1" -ge 1 ] && ok V7-11 "positive control correlated: exactly 1 SYN after t0 on the capture, exactly 1 accept at the external observer carrying X-Control" || ng V7-11 "positive control not correlated (SYNs after t0=$syn_after, observer accepts=$xa1, control lines=$xl1)"
+  [ "$(hobs_accepts "$hq1")" = 1 ] && [ "$(hobs_lines "$hq1" X-Control)" -ge 1 ] && ok V7-11 "host observer recorded exactly its control connection" || ng V7-11 "host observer control not recorded as expected"
+  # identities at the end: nothing restarted while the verdicts above were taken
+  [ "$(unit_prop egress-host-observer.service InvocationID)" = "$hinv0" ] && [ "$(unit_prop egress-boot-capture.service InvocationID)" = "$cinv0" ] && [ "$(obs_health "$OBSERVER_REPORT")" = "$XSESSION" ] && [ "$(obs_health "$(hobs_url)")" = "$HSESSION" ] && ok V7-11 "identities unchanged at the end (aid unit invocations, both observer sessions)" || ng V7-11 "an aid unit or observer changed identity during the evaluation"
   obs_save "$OBSERVER_REPORT" external-postboot; obs_save "$(hobs_url)" host-postboot
 }
 
 reboot_cleanup() {
-  docker rm -f subetha-egress-probe >/dev/null 2>&1
-  # drop the test-only Requires= first (and reload), otherwise stopping the aid units stops docker.service
-  rm -f /etc/systemd/system/docker.service.d/99-egress-verify.conf "$PREP"; systemctl daemon-reload
-  systemctl disable --now egress-host-observer.service egress-boot-capture.service >/dev/null 2>&1
-  rm -f /etc/systemd/system/egress-host-observer.service /etc/systemd/system/egress-boot-capture.service; systemctl daemon-reload
-  "$SCRIPT" check >/dev/null 2>&1 && ok V6-11 "policy verified after cleanup" || ng V6-11 "policy does not verify after cleanup"
-  note V6-11 "probe container, observers and the test-only docker dependency removed"
+  local bad=0
+  docker inspect subetha-egress-probe >/dev/null 2>&1 && { docker rm -f subetha-egress-probe >/dev/null 2>&1 || { ng V7-11 "cannot remove the probe container"; bad=1; }; }
+  # drop the test-only Requires= first and reload; only then may the aid units be stopped
+  rm -f /etc/systemd/system/docker.service.d/99-egress-verify.conf "$PREP" || bad=1
+  systemctl daemon-reload || { ng V7-11 "daemon-reload failed; aid units left running to avoid stopping docker.service"; return; }
+  unit_prop docker.service Requires | grep -q egress && { ng V7-11 "docker.service still requires the aid units after reload; aid units left running"; return; }
+  systemctl disable --now egress-host-observer.service egress-boot-capture.service >/dev/null 2>&1 || bad=1
+  rm -f /etc/systemd/system/egress-host-observer.service /etc/systemd/system/egress-boot-capture.service; systemctl daemon-reload || bad=1
+  local u; for u in egress-host-observer.service egress-boot-capture.service; do [ "$(systemctl is-active "$u" 2>/dev/null)" = inactive ] || [ $? = 4 ] || bad=1; done
+  [ "$(systemctl is-active docker.service)" = active ] || { ng V7-11 "docker.service is not active after cleanup"; bad=1; }
+  "$SCRIPT" check >/dev/null 2>&1 || { ng V7-11 "policy does not verify after cleanup"; bad=1; }
+  [ "$bad" = 0 ] && ok V7-11 "cleanup verified: probe removed, test dependency gone, aid units inactive, docker active, policy verified" || ng V7-11 "cleanup incomplete; inspect the host"
 }
 
 case "$MODE" in
@@ -539,5 +598,3 @@ case "$MODE" in
   post-boot)      post_boot ;;
   reboot-cleanup) reboot_cleanup ;;
 esac
-echo "== summary: $pass passed, $fail failed, $info notes; evidence: $EVID =="
-[ "$fail" -eq 0 ]

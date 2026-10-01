@@ -1,6 +1,7 @@
 [Unit]
 Description=SubEtha Router egress policy guard (re-applies if detached)
-# Runs every 30 s from subetha-egress-guard.timer. apply is idempotent and atomic.
+# Runs every 30 s from subetha-egress-guard.timer. apply is idempotent; each family's chain is
+# replaced in one transaction and the run ends with a full check.
 
 [Service]
 Type=oneshot

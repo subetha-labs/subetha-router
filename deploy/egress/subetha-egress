@@ -1,6 +1,6 @@
 #!/bin/sh
 # subetha-egress: host-side egress control for the SubEtha Router container.
-# Design: docs/ssrf-egress-design.md (v6). Runs as root from docker.service's ExecStartPre
+# Design: docs/ssrf-egress-design.md (v7). Runs as root from docker.service's ExecStartPre
 # and every 30 s from subetha-egress-guard.timer.
 #
 #   subetha-egress apply        validate, dry-run both families, commit each in one transaction,
@@ -241,14 +241,23 @@ remove() {
       printf '%s\n' "$names" | grep -qx "$ROUTER_CONTAINER" && fail "cannot determine whether $ROUTER_CONTAINER runs; set FORCE=1 to override"
     fi
   fi
+  rc=0
   for v in 4 6; do tools "$v"
     for h in $HOOKS; do
-      "$ipt" -t mangle -S "$h" | grep -F -- "-j $CHAIN" | grep -vF -- "-j $CHAIN-" | sed 's/^-A/-D/' |
-        while read -r rule; do [ -n "$rule" ] && "$ipt" -t mangle $rule; done
+      hl=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      for num in $(printf '%s\n' "$hl" | grep -v '^-P' | awk -v c="$CHAIN" '$(NF-1)=="-j" && $NF==c {print NR}' | sort -rn); do
+        "$ipt" -t mangle -D "$h" "$num" || { err "$ipt: cannot delete $h rule $num"; rc=1; }
+      done
     done
-    "$ipt" -t mangle -F "$CHAIN" 2>/dev/null || true
-    "$ipt" -t mangle -X "$CHAIN" 2>/dev/null || true
+    if "$ipt" -t mangle -S "$CHAIN" >/dev/null 2>&1; then
+      "$ipt" -t mangle -F "$CHAIN" || { err "$ipt: cannot flush $CHAIN"; rc=1; }
+      "$ipt" -t mangle -X "$CHAIN" || { err "$ipt: cannot delete $CHAIN"; rc=1; }
+    fi
+    "$ipt" -t mangle -S "$CHAIN" >/dev/null 2>&1 && { err "$ipt: $CHAIN still present"; rc=1; }
+    for h in $HOOKS; do "$ipt" -t mangle -S "$h" 2>/dev/null | awk -v c="$CHAIN" '$(NF-1)=="-j" && $NF==c {f=1} END{exit f?0:1}' && { err "$ipt: a $h jump to $CHAIN remains"; rc=1; }; done
   done
+  [ "$rc" = 0 ] && echo "subetha-egress: removed"
+  return $rc
 }
 
 case "${1:-}" in

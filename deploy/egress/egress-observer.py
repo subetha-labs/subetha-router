@@ -6,18 +6,23 @@ waits for the report endpoint cannot see "ready" while the observed socket is ab
 every accepted TCP connection and every received line with a monotonic sequence number, prints
 each record to stdout, and serves them on --report-port:
 
-    GET /?since_seq=<n>     -> {"session": "<start>-<pid>", "listening": bool, "seq_last": n,
-                                "backlog": <pending connections or null>, "rows": [...]}
     GET /health             -> 200 with the session id while the observed socket is listening, else 503
+    GET /?since_seq=<n>     -> {"session": "<start>-<pid>", "pid": n, "listening": bool, "seq_last": n,
+                                "backlog": {"supported": bool, "value": int|null, "error": str|null},
+                                "rows": [{"seq","t","kind","src","sport","data"}, ...]}
 
-`session` changes whenever the process restarts, so a runner can prove the observer ran
-continuously across a measurement; `seq` lets it reason with cursors instead of clocks.
+A connection is accepted and recorded under one lock (the socket is polled first, so accept()
+never blocks while the lock is held); a report snapshot takes the same lock, so it can never
+see a connection that was accepted but not yet recorded. `session` changes whenever the process
+restarts; `seq` lets a runner reason with cursors instead of clocks. `backlog` is the kernel's
+accept queue for the observed port as reported by `ss` (Linux), with the query status exposed.
 Run it on the Router host (host-side observer) and on another host you control in the VPC
 (external observer). It is not part of the policy.
 """
 import argparse
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -27,16 +32,20 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 LOG = []
-LOCK = threading.Lock()
-STATE = {"session": "", "listening": False, "port": 0, "seq": 0}
+LOCK = threading.Lock()          # guards LOG, STATE and the accept+record critical section
+STATE = {"session": "", "pid": os.getpid(), "listening": False, "port": 0, "seq": 0}
+
+
+def _record_locked(kind, addr, data=""):
+    STATE["seq"] += 1
+    row = {"seq": STATE["seq"], "t": time.time(), "kind": kind, "src": addr[0], "sport": addr[1], "data": data}
+    LOG.append(row)
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["t"])), row["seq"], kind, addr[0], addr[1], data, flush=True)
 
 
 def record(kind, addr, data=""):
     with LOCK:
-        STATE["seq"] += 1
-        row = {"seq": STATE["seq"], "t": time.time(), "kind": kind, "src": addr[0], "sport": addr[1], "data": data}
-        LOG.append(row)
-    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["t"])), row["seq"], kind, addr[0], addr[1], data, flush=True)
+        _record_locked(kind, addr, data)
 
 
 def handle(conn, addr):
@@ -68,8 +77,10 @@ def handle(conn, addr):
 def accept_loop(sock):
     try:
         while True:
-            conn, addr = sock.accept()
-            record("accept", addr)
+            select.select([sock], [], [])
+            with LOCK:
+                conn, addr = sock.accept()   # ready, so this does not block under the lock
+                _record_locked("accept", addr)
             threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
     except OSError as exc:
         with LOCK:
@@ -78,22 +89,28 @@ def accept_loop(sock):
 
 
 def backlog(port):
-    """Connections accepted by the kernel but not yet by accept() (Linux `ss`), else None."""
+    """The observed port's accept queue (Recv-Q of the LISTEN socket) via `ss`, with status."""
     try:
-        out = subprocess.run(["ss", "-Hltn", f"sport = :{port}"], capture_output=True, text=True, timeout=2).stdout
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and parts[0] == "LISTEN":
-                return int(parts[1])
-    except Exception:
-        return None
-    return None
+        r = subprocess.run(["ss", "-Hltn", f"sport = :{port}"], capture_output=True, text=True, timeout=2)
+    except FileNotFoundError:
+        return {"supported": False, "value": None, "error": "ss not installed"}
+    except Exception as exc:
+        return {"supported": False, "value": None, "error": f"ss failed: {exc}"}
+    if r.returncode != 0:
+        return {"supported": False, "value": None, "error": f"ss exit {r.returncode}: {r.stderr.strip()[:120]}"}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "LISTEN":
+            try:
+                return {"supported": True, "value": int(parts[1]), "error": None}
+            except ValueError:
+                break
+    return {"supported": False, "value": None, "error": "ss output not parsed"}
 
 
 class Report(BaseHTTPRequestHandler):
     def do_GET(self):
         if urlparse(self.path).path == "/health":
-            # readiness probe for units and runners: 200 only while the observed socket is listening
             with LOCK:
                 ready = STATE["listening"]
             body = (STATE["session"] if ready else "not listening").encode()
@@ -106,10 +123,11 @@ class Report(BaseHTTPRequestHandler):
         q = parse_qs(urlparse(self.path).query)
         since_seq = int(q.get("since_seq", ["0"])[0])
         since = float(q.get("since", ["0"])[0])
+        bl = backlog(STATE["port"])
         with LOCK:
             rows = [r for r in LOG if r["seq"] > since_seq and r["t"] >= since]
-            body = json.dumps({"session": STATE["session"], "listening": STATE["listening"],
-                               "seq_last": STATE["seq"], "backlog": backlog(STATE["port"]), "rows": rows}).encode()
+            body = json.dumps({"session": STATE["session"], "pid": STATE["pid"], "listening": STATE["listening"],
+                               "seq_last": STATE["seq"], "backlog": bl, "rows": rows}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

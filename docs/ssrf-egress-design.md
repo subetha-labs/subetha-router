@@ -952,3 +952,57 @@ IANA は v4/v6 両方の日付を見る。「Caddy path」→「host→Router（
 
 `deploy/egress/`: `subetha-egress`（v6）、`subetha-egress-verify`（v4）、`egress-observer.py`（v2）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
 `subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
+
+## 18. 設計レビュー #6（v6、`9f8cdf4`）: **REJECT** → v7 で応答
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。blocking 6 件、non-blocking 2 件。
+**policy スクリプトについては「修復後の policy が弱いまま成功を報告する経路は再現できなかった」**。残った指摘はすべて runner/observer の証拠の妥当性。
+
+| # | 指摘（要約） | 判定 | v7 での応答 | 実測 |
+|---|---|---|---|---|
+| 1 | hammer は exit だけで「curl が走った」ことを示せない（mock で全 curl が 127 でも exit 0）。重なりの判定が整数秒・閉区間で空になり得る | **正しい** | hammer は **curl ごとの exit を記録**（200 本すべて、28 = drop のみ許容、0 = leak と 7/127 = 計測器故障は FAIL）。重なりは **veth 捕捉の SYN の epoch（小数）が再適用ループの [l0, l1] に入っている本数 ≥50** で判定（host の時計、同一 invocation） | 51 |
+| 2 | observer の継続性が不十分（host observer は `NRestarts` だけ、外部 observer の session は最初に 1 回しか見ない） | **正しい** | **判定に使う全 report を session に束縛**（`obs_get` は期待 session と違えば ERR）。host observer は boot 以来 **1 invocation**（`MESSAGE_ID` の Started を数える）+ report の `pid` が `MainPID` と一致。評価の**最後に**両 observer の session と両 unit の `InvocationID` を再確認 | 55 |
+| 3 | backlog が optional で、`ss` 失敗が null になり、accept() と record() の間に snapshot の競合がある。host observer の backlog を見ていない | **正しい** | observer v3: `backlog` は `{supported, value, error}`、`ss` の失敗を区別。**accept と record を同じ lock の下で**（`select` してから accept するので lock 中に block しない）、report の snapshot は同じ lock を取る。runner は両 observer の backlog 0 を要求（`ss` 無しは `ALLOW_NO_BACKLOG=1` のときだけ INFO。本番は Linux observer）。静止後に **settle**（seq が 1 秒不変）してから数える。probe の禁止フローの conntrack エントリ無しも要求 | 55 |
+| 4 | `guard_pause` と cleanup がコマンド失敗を成功扱い | **正しい** | `systemctl stop` の成功 + 両 unit が **exit 3 かつ `inactive`** を要求。cleanup は drop-in 削除 → `daemon-reload` → docker の `Requires` に補助 unit が無いことを確認してから unit を止め、最終状態（unit inactive、docker active、probe 無し、`check`）を assert。復元失敗は runner の exit に反映（trap） | 52、55 |
+| 5 | post-boot が静止と再起動境界を検証しない | **正しい** | `docker stop` の成功 + inspect で `Running=false`。prepare で **boot id・observer 設定・session・カーソル**を記録し、post-boot で boot id の変化と設定の一致を要求。順序は `journalctl -o json` の `__MONOTONIC_TIMESTAMP` と `ActiveEnterTimestampMonotonic` で判定（人間向け文字列に依存しない） | 55 |
+| 6 | fault injection の失敗が注入した故障に帰属できない | **正しい** | shim は**全呼び出しと拒否を記録**し、runner は「shim が拒否した」「apply の stderr に期待の診断がある」「jump 数が減っていない」を同時に要求。remove の拒否は docker の**全呼び出し**を拒否して「cannot query the Docker daemon」を要求 | 53 |
+
+non-blocking: `remove` は削除/flush の失敗を伝播し、chain と jump の不在を確認してから成功を報告。既存接続試験は `conntrack -L` の成功と**エントリ ≥1** を要求。
+「Caddy path」は「Caddy の upstream 経路（end-to-end ではない）」、unit コメントの「atomic」は「family ごとの置換」に改めた。
+
+## 19. 設計 v7（現行。§17 のうち以下で言い直した部分を置き換える）
+
+> 成果物は `deploy/egress/` の v7（スクリプト v7、runner v5、observer v3）。実測 51〜55 は runner v5 の出力。
+
+### 19.1 差分
+
+| 項目 | v7 |
+|---|---|
+| `subetha-egress remove` | 行番号で削除し、失敗を伝播、chain と全 hook の jump の不在を確認してから `removed` |
+| observer v3 | 同期 bind、`/health`、`session`/`pid`/`seq`、`backlog{supported,value,error}`、**accept+record を 1 つの lock で**（`select` → accept → record） |
+| runner v5 | session 束縛の report、settle、backlog gate、構造化 journal、boot id、invocation 再確認、hammer の packet-level 証拠、attributable fault injection（shim log）、stop/cleanup の明示的 status、trap で復元失敗を exit に反映、証拠ディレクトリ |
+| 運用 | `ALLOW_NO_BACKLOG=1` は試験環境専用（本番 observer は Linux + `ss`） |
+
+### 19.2 実測 51〜55
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 51 | runner v5 既定モード | **63 PASS / 0 FAIL**。hammer 200/200 curl が走り全て 28、**134 SYN** が再適用ループ窓 [l0, l1] 内（小数秒）、accept 0、host observer backlog 0 |
+| 52 | runner v5 `--adversarial`（1 回目） | 55/2: remove 拒否試験が **inspect だけ**を拒否していたため、実 `docker ps -a` が既定名 `subetha-router` の不在を正しく証明して policy を外した（契約どおり、試験が誤り）→ 全 docker 呼び出しを拒否し `ROUTER_CONTAINER` を渡すよう修正 |
+| 53 | runner v5 `--adversarial`（修正後） | **57 PASS / 0 FAIL**。fault injection は shim log の REJECT + 診断行 + jump 数不減で帰属。remove は inspect/ps とも拒否で「cannot query the Docker daemon」。guard 停止は両 unit inactive を確認。復元検証 PASS |
+| 54 | `--fail-closed` | **3 PASS**（3 回の試行が policy 診断で失敗、未知キー診断あり、復旧） |
+| 55 | reboot（runner v5、`colima restart`） | **post-boot 20 PASS / 0 FAIL / 2 INFO、cleanup 1 PASS**。boot id 変化、observer 設定一致、外部 session 不変（カーソル seq 16）、host observer 1 invocation・`pid`=`MainPID`、捕捉 1 invocation。monotonic: observers 3.07/3.30 s → `applied` **3.43 s** → `Loading containers` **3.51 s**。docker は 2 回起動（Colima、INFO）。probe 停止を inspect で確認、settle 後: 外部 accept 0、host accept 0、host backlog 0（外部は `ss` 無し → INFO）、probe フローの conntrack 0、boot〜静止の probe ポート SYN **0**、制御 1 SYN ↔ 1 accept（`X-Control`）、終了時に invocation と session が不変。cleanup: drop-in 削除 → reload → `Requires` 無しを確認 → unit 停止 → 最終状態 PASS |
+
+### 19.3 残余
+
+- **AL2023 は未実測**。受け入れは本番 host で runner v5 の全モード `failed 0`（外部 observer は VPC 内の Linux host で `egress-observer.py`、`ss` あり。`ALLOW_NO_BACKLOG` は使わない）
+- DNS の出所は Docker 28.3.3 で実測。V7-8 が稼働版で再測定する
+- boot 時の tcpdump EACCES（§13.6）は原因未特定（`-Z root` で回避）
+- `userland-proxy=false`、IPv6 有効化、`iptables` 以外の backend、任意名 bridge は runner が FAIL にする
+- guard の窓は閉じない（運用条件「Router 稼働中に firewall を触らない」）
+- userspace の accept 数と kernel の accept queue（backlog）は「socket 層に受理された接続」の証拠。SYN が届いたが応答されなかったケースは host 側の捕捉（veth の往路のみ・復路なし）と conntrack 不在で見る
+
+### 19.4 成果物
+
+`deploy/egress/`: `subetha-egress`（v7）、`subetha-egress-verify`（v5）、`egress-observer.py`（v3）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
+`subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
