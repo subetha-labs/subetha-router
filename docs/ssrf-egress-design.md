@@ -779,3 +779,94 @@ namespace-local（A）、allowed-control、**dropped-by-Docker**（raw の DROP 
 `deploy/egress/subetha-egress`、`10-subetha-egress.conf`、`subetha-egress-guard.{service,timer}`、
 `egress-host-observer.service`、`egress-boot-capture.service`、`99-egress-verify.conf`、`subetha-egress-verify`。
 `DEPLOY.md` の手順は実装フェーズで書く（設置、env、network、移行順、runner の実行順、保守規則）。
+
+## 14. 設計レビュー #4（v4、`92c146b`）: **REJECT** → v5 で応答
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。blocking 5 件。v3 の 6 件は「部分的に解決」。
+レビュアは再び mock した firewall コマンドでスクリプトを実行し、**偽の成功**になる経路を実証した。
+
+| # | 指摘（要約） | 判定 | v5 での応答 | 実測 |
+|---|---|---|---|---|
+| 1 | `check` の hook 検査が部分一致（`-j SUBETHA-EGRESS-BYPASS` が通る）。`IFACES` の重複トークンで先頭 N 行検査が破れる。`apply` は jump の**存在**しか見ず、押し下げられた jump を直さない | **正しい** | 先頭 N 行を期待集合と**完全一致**で比較。重複トークンは validate で拒否。`place_jumps` が全 jump を先頭に入れ直してから下の自分の jump を**行番号で**削除（新しい方を先に入れるので窓が無い）。`apply` は最後に `check` を走らせ、通らなければ失敗する（ExecStartPre が落ちる） | 40（look-alike chain、重複トークン、押し下げ、いずれも検出。押し下げは `apply` が修復） |
+| 2 | 目録の読み出し失敗が `check`/`guard` で fatal にならない（`$(...)` の中の exit、pipeline、`if check` による errexit 抑止） | **正しい** | `set -e` に依存しない。`host_ifaddrs` は非 0 を返し、`render` → `apply`/`check` の各段で**明示的に**状態を見る。`guard` は validate → check → apply(→ check) | 40（偽の `ip` で `check`・`guard` とも失敗、policy は無傷） |
+| 3 | reboot の捕捉は **MASQUERADE 後**の送信元で probe を探していた（必ず 0 になる）。正の対照が gate でない。OBSERVER 無しでは uplink を通らない。HTTP ログは accept を全部記録しない。捕捉の読み出し失敗が 0 になる | **正しい** | 外部 observer を**必須**にし、uplink 捕捉は observer 宛て全パケット。帰属は**宛先ポート + epoch 時刻**（probe ポートへの SYN が制御接続より前に 1 つでもあれば leak）。正の対照は同じ捕捉経路で**必ず 1 以上**。observer は accept 単位で記録し JSON で返す。読めない捕捉は FAIL | 42 |
+| 4 | runner の空の assertion（SYN-ACK 検査が復路を捕捉していない、DNS 捕捉の起動失敗、resolver への HTTP の判定、既存接続が INFO、listener の readiness、sabotage の setup 失敗、UDP/ICMP の混同、DNAT は片経路） | **正しい** | veth は**双方向**捕捉。観測が立たなければ FAIL。resolver HTTP は `exit=28` + 行カウンタ増。既存接続は host observer の行記録で assert。sabotage の各 setup を検査。UDP/ICMP を分離。DNAT は INPUT（host observer）と FORWARD（外部 observer）の**両経路**、正の対照付き | 39、40 |
+| 5 | 前提の検査が不完全（firewalld の is-active、daemon の cmdline/config-file、ExecStartPre の内容、subnet が RFC1918 である前提、破壊試験中の Router の扱い） | **正しい** | `is-active` も見る。dockerd の cmdline と `--config-file` を解決して見る。ExecStartPre は `subetha-egress apply` と完全一致。network の subnet が拒否範囲内であることを前提として検査。adversarial は **Router 停止中**に同 network の代役コンテナで行う（runner が Router 稼働中なら拒否） | 40 |
+
+non-blocking で取り込んだもの: `flock` で apply/check/guard/remove を直列化、scratch chain の後始末を検査、`remove` は状態不明なら拒否、
+link-local は **範囲**で除外（`169.254/16`、`fe80::/10`）、「≤30 秒」の表現を削除、fail-closed は journal の再試行記録を見る、
+実測 35 は runner ではなく個別コマンドで取ったと明記、Docker 版依存（DNS）は runner が稼働版で再測定。
+
+## 15. 設計 v5（現行。§13 のうち以下で言い直した部分を置き換える）
+
+> 成果物: `deploy/egress/subetha-egress`（policy）、`subetha-egress-verify`（runner）、`egress-observer.py`（観測）、
+> unit 6 つ。実測 39〜43 は runner の出力。実測 35（DNS の出所）は個別コマンドによる（§13.3）。
+
+### 15.1 観測の仕組み
+
+- **observer**（`egress-observer.py`）: 指定ポートで accept した接続と受信した行をすべて記録し（HTTP 要求にはヘッダを記録してから応答）、
+  別ポートで `GET /?since=<epoch>` に JSON で返す。host 上（`egress-host-observer.service`、runner が起動/停止）と、
+  **VPC 内の別 host**（外部 observer。RFC1918 アドレス、`OBSERVER` / `OBSERVER_REPORT`）で動かす。
+- runner は observer の記録を**読んで判定**する: 禁止宛先への試行中は accept 0、正の対照（`X-Control` ヘッダ付きの host 自身の接続）は記録あり。
+- uplink の帰属: probe は MASQUERADE 後に host のアドレスで出るので、**宛先ポートと epoch 時刻**で見る（probe ポートへの SYN が制御接続より前に 0）。
+- 捕捉は readiness（`listening on`）を待ってから試行し、読めない捕捉は FAIL。veth は双方向（復路の SYN-ACK を数える）。
+
+### 15.2 スクリプト契約（§13.5 の差分）
+
+| 項目 | v5 |
+|---|---|
+| hook の検査 | 各 hook の先頭 N 行（N = IFACES 数）が期待集合（`-A HOOK -i IF -j SUBETHA-EGRESS` × N）と**文字列として完全一致** |
+| `IFACES` | トークンの重複を拒否 |
+| `place_jumps` | 先頭 N 行が期待集合なら何もしない。違えば全 jump を位置 1 に**新規挿入**し、N 行目より下にある自分の jump を**行番号の大きい順に削除**（`-D <spec>` は新しい方を消してしまう） |
+| `apply` | validate → render ×2（目録失敗は fail）→ `--test` ×2 → commit ×2 → place_jumps ×2 → **check**。どこかで失敗すれば非 0 |
+| `check` | render・scratch 読み出し・後始末・比較の各段で明示的に状態を見る。`set -e` に依存しない |
+| `guard` | validate（失敗なら触らず exit 65）→ check → apply（内部で check） |
+| 直列化 | `flock /run/subetha-egress.lock` |
+| `remove` | timer 稼働中、Router 稼働中、**どちらも判定できない場合**も拒否。`FORCE=1` は検証専用 |
+| 目録 | 全 scope から `169.254.0.0/16` と `fe80::/10` を**範囲で**除外 |
+
+### 15.3 runner（`subetha-egress-verify`）
+
+| モード | 前提 | 内容 |
+|---|---|---|
+| 既定 | Router 稼働、外部 observer 任意 | 前提（§15.4）、行列（TCP 13 + multicast TCP/UDP 別 + loopback + UDP/ICMP 別 + 外部 observer + DNS 由来 private）、host 全アドレス（observer accept 0 + 制御接続あり）、対照、DNS（上書き無し・未キャッシュ名・veth 0・resolver:53 HTTP drop）、原子性（strace 1 バッチ、hammer 200、再適用 20 回で accept 0）、IPv6、loopback |
+| `--adversarial` | **Router 停止**、外部 observer **必須** | 代役コンテナを同 network に置き、その netns で行列と DNS、`check` の sabotage（目録行削除・早い RETURN・v6 行削除・押し下げ→`apply` が修復・look-alike chain・陳腐化・無効 env・重複トークン・目録読み出し失敗で check/guard 失敗）、別名アドレス（gap → 修復）、hairpin、DNAT **INPUT と FORWARD** 両経路 + 正の対照、隣接（sysctl で期待切替、Docker raw の帰属）、既存接続（host observer の tick 行で assert）、guard 復旧、最終 check |
+| `--fail-closed` | — | 不正 env → 20 秒後 dockerd 0・shim 0・journal に再試行記録 ≥2、未知キー → 失敗、復旧 |
+| `--reboot-prepare` / `--post-boot` / `--reboot-cleanup` | 外部 observer 必須 | probe（外部 observer / host observer / 公開）、boot 時 unit（readiness 付き）、試験用 `Requires=`。post-boot: 順序、捕捉稼働中、`check`、復元後最初の試行、外部/host observer の accept 0、公開対照、正の対照（捕捉 + observer）、probe ポートへの SYN 0、cleanup 後の check |
+
+### 15.4 前提（runner が FAIL にする）
+
+`check` 合格、Router 稼働、attachment set が `{subetha-router-net}` のみ、network に Router のみ、bridge 名、`IFACES` に bridge、
+**network の subnet が拒否範囲内**（起動直後の目録遅延を覆う）、`EnableIPv6=false`、`LiveRestoreEnabled=false`、firewalld 不在/無効/非稼働、
+`userland-proxy` 既定（cmdline と config-file）、`ExecStartPre` が `subetha-egress apply` と一致、guard timer 稼働、
+IANA レジストリ日付、DNS 上書き無し（container・daemon config・cmdline）、resolv.conf が `127.0.0.11`。
+
+### 15.5 ライフサイクルの言い直し
+
+- guard は**復旧**であって上限ではない（「≤30 秒」は撤回）。運用条件は「Router 稼働中に firewall を触らない」。
+- fail-closed の証拠は dockerd/shim の不在 **と journal の失敗・再試行記録**。
+- 導入・移行・破壊試験は Router 停止中。adversarial は代役コンテナで行う。
+- 起動直後の目録遅延は「subnet が拒否範囲内」を前提として受容し、runner がその前提を検査する。
+
+### 15.6 実測 39〜43
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 39 | runner 既定モード（Router 稼働、外部 observer 付き） | **59 PASS / 0 FAIL**。UDP 1 往路 0 復路、ICMP 同、SYN-ACK 0（双方向捕捉）、uplink probe 0 / host 発 378、observer accept 0 + 制御記録、resolver:53 HTTP `28` + `192.168/16` +2 |
+| 40 | runner `--adversarial`（Router 停止、代役） | **51 PASS / 0 FAIL**。sabotage 10 通り全て検出。押し下げは `apply` が修復。目録読み出し失敗で `check`/`guard` 失敗・policy 無傷。別名: 目録無しで `200` + observer accept、apply 後 `28` + accept 0。DNAT: INPUT `172.30.0.1` +2 / jump 除去で `200` + host observer accept 1、FORWARD `192.168/16` +2 / jump 除去で `200` + 外部 observer accept 1。既存接続: tick 4 → 0（conntrack 2 残存）。guard 2 秒 |
+| 41 | `--fail-closed` | 不正 `HOST_ADDRS4`: dockerd 0・shim 0、journal に失敗/再試行 **7 件**、原因行あり。未知キー: 失敗。復旧 ok |
+| 42 | reboot ×2（readiness unit、`Requires=`、外部 observer） | 1 回目: leak 判定が **timezone に依存**（tcpdump の JST と UTC の比較で制御接続自身を数えた）→ epoch 比較に修正。2 回目: **11 PASS / 0 FAIL**。observers 19:56:18.68/.90 → `applied` **19.01** → `Loading containers` **19.09** → 復元後最初の試行 **20.41 `28`**。外部/host observer accept 0、正の対照 1 SYN + 記録、probe ポートへの SYN 0 |
+| 43 | runner が成果物の欠陥を検出 | v5 初版の `place_jumps` は `-D <spec>` で**新しく入れた jump を消していた**（押し下げの修復が check で落ちる）→ 行番号削除に修正。観測の時計が 1 秒解像度で前段の accept を拾った → `%s.%N` |
+
+### 15.7 残余
+
+- **AL2023 は未実測**。受け入れは本番 host で runner 全モード `failed 0`（外部 observer は VPC 内の別 host）
+- DNS の出所は Docker 28.3.3 で実測。他版では runner の V5-8（未キャッシュ名・veth 0）が稼働版での再測定になる
+- boot 時の tcpdump EACCES は原因未特定（`-Z root` で回避。検証補助のみ）
+- `userland-proxy=false`、IPv6 有効化、任意名 bridge、nftables backend は runner が FAIL/未対応として扱う
+- guard の窓は閉じない。保守規則で補う
+
+### 15.8 成果物
+
+`deploy/egress/`: `subetha-egress`、`subetha-egress-verify`、`egress-observer.py`、`10-subetha-egress.conf`、`99-egress-verify.conf`、
+`subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。

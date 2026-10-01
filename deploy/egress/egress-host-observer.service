@@ -1,12 +1,15 @@
-# Verification aid (not part of the policy): a listener on the host that logs every arrival.
-# "Started" only after the socket answers (ExecStartPost), so Before=docker.service means ready.
+# Verification aid (not part of the policy): the host-side observer. It records every accepted
+# TCP connection and every received line on @PORT@ and serves them as JSON on @REPORT@ (loopback
+# use by the runner). "Started" only after the report endpoint answers (ExecStartPost), so
+# Before=docker.service means ready. Placeholders are substituted by `subetha-egress-verify
+# --reboot-prepare`.
 [Unit]
-Description=egress verification: host-side arrival observer
+Description=egress verification: host-side observer
 Before=docker.service
 
 [Service]
-ExecStart=/usr/bin/python3 -m http.server 19998 --bind 0.0.0.0 --directory /var/empty
-ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:19998/ && exit 0; sleep 0.2; done; exit 1'
+ExecStart=/usr/bin/python3 @UNIT_DIR@/egress-observer.py --port @PORT@ --report-port @REPORT@
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:@REPORT@/?since=0 && exit 0; sleep 0.2; done; exit 1'
 StandardOutput=append:/var/tmp/host-observer.log
 StandardError=append:/var/tmp/host-observer.log
 
