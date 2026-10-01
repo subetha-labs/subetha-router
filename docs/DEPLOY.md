@@ -183,8 +183,11 @@ SUBETHA_OUTBOUND_PRIVATE_KEY=0x...
 SUBETHA_ROUTER_RECEIVER=0x...
 ENVEOF
 
-# 4) 起動（env ファイルは root 所有 600 なので **sudo が要る**）
+# 4) 起動（env ファイルは root 所有 600 なので **sudo が要る**）。
+#    先に §8b の egress 制御を設置してから。Router は専用 network に**単独**で置く（§8b.1 の前提）
+sudo docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
 sudo docker run -d --name subetha-router --restart unless-stopped \
+  --network subetha-router-net \
   -p 127.0.0.1:8787:8787 \
   --env-file /etc/subetha-router.env \
   subetha-router
@@ -227,6 +230,97 @@ curl -s https://router.subethalabs.com/healthz
 claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
 ```
 
+## 8b. egress 制御（SSRF 防御 B。設計は `ssrf-egress-design.md` §25、レビュー #10 で承認）
+
+Router のコンテナから**内部宛先へ届くパケットを 0 にする** host 側の規則。Router のコードは変えない。
+namespace 内の宛先（loopback、自アドレス）は host から見えないので **A（アプリ側）の担当**であり、
+**B だけでは要件 INV-1'' は完成しない**（`ssrf-requirements.md` §9）。AI が上流 URL を指定する機能は、
+B と A の両方が通るまで出さない。
+
+### 8b.1 前提（runner が検証する。満たさなければ運用に入らない）
+
+- Docker の firewall backend が `iptables`（`docker info --format '{{.FirewallBackend.Driver}}'`）。`iptables` コマンド（nft 版で可）
+- `docker info --format '{{.LiveRestoreEnabled}}'` が `false`（既定）。firewalld が無いか無効。`userland-proxy` を daemon.json で `false` にしない
+- **Router の DNS を上書きしない**（`--dns` を付けない、daemon.json に `dns` を書かない）。
+  埋め込み resolver は host から継承した nameserver へ **host の namespace から**問い合わせる（上書きするとコンテナ側から出て落ちる）
+- Router は専用 network `subetha-router-net`（bridge `subetha0`）に**単独**で置く。他のコンテナを同じ network に付けない
+- IPv6 は bridge で無効（既定）。有効化は本手順の対象外（runner が FAIL にする）
+- **host が応答する全アドレス**のうちインタフェースに無いもの（EC2 の公開 IPv4 / Elastic IP）を `HOST_ADDRS4` に書く。
+  インタフェース上のアドレスは `apply` が毎回自動で集める
+
+### 8b.2 設置（Router 停止中に。初回は Router を作る前に）
+
+```sh
+cd subetha-router-egt
+sudo install -m 755 deploy/egress/subetha-egress deploy/egress/subetha-egress-verify /usr/local/sbin/
+sudo mkdir -p /usr/local/lib/subetha-egress /etc/systemd/system/docker.service.d
+sudo install -m 644 deploy/egress/egress-observer.py deploy/egress/egress-host-observer.service \
+  deploy/egress/egress-boot-capture.service deploy/egress/99-egress-verify.conf /usr/local/lib/subetha-egress/
+sudo install -m 644 deploy/egress/subetha-egress-guard.service deploy/egress/subetha-egress-guard.timer /etc/systemd/system/
+sudo install -m 644 deploy/egress/10-subetha-egress.conf /etc/systemd/system/docker.service.d/
+
+# 公開 IPv4 はインタフェースに無い。IMDSv2 で読む（無ければ none）
+TOKEN=$(curl -s -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)
+PUB=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+sudo tee /etc/subetha-egress.env >/dev/null <<ENV
+IFACES="subetha0 docker0 br+"
+HOST_ADDRS4="${PUB:-none}"
+ENV
+
+sudo systemctl daemon-reload
+sudo subetha-egress apply && echo "policy ok"        # apply は最後に check を走らせ、通らなければ失敗する
+sudo systemctl enable --now subetha-egress-guard.timer
+sudo systemctl restart docker
+# journal で "subetha-egress: applied" が "Loading containers: start" より前にあること
+sudo journalctl -b -u docker.service -o cat | grep -E 'subetha-egress: applied|Loading containers: start' | head -2
+```
+
+`/etc/subetha-egress.env` は `KEY=value`（空白を含む値は二重引用符。行内コメント不可）。未知のキー・重複・
+不正なアドレス・空の `IFACES`・未設定の `HOST_ADDRS4` は **`apply` が失敗し、Docker が上がらない**（fail-closed）。
+意図した挙動なので、`journalctl -u docker` の `subetha-egress:` 行を読んで直す。
+
+### 8b.3 Router の network
+
+```sh
+sudo docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
+```
+
+§6 の `docker run` に **`--network subetha-router-net`** を付ける。既に既定 bridge で動いている Router は
+`sudo docker rm -f subetha-router` してから作り直す（journal は `-v` のボリュームに残る）。
+
+### 8b.4 検証（稼働前に全モード。出力を保存する）
+
+**外部 observer が要る**: VPC 内の別 host（RFC1918 アドレス）で `deploy/egress/egress-observer.py` を動かす
+（`python3 egress-observer.py --port 19999 --report-port 19996`。到達した接続と行を記録し、JSON で返す）。
+Router host からその両ポートに届くこと（SG）。runner は observer の記録を**自分で読んで判定**する。
+
+```sh
+export OBSERVER=<observer ip>:19999 OBSERVER_REPORT=<observer ip>:19996
+sudo -E subetha-egress-verify                        # 非破壊（Router 稼働中）: 前提、行列、host 全アドレス、対照、DNS、原子性、IPv6
+sudo docker stop subetha-router                      # 以下は Router を止めて
+sudo -E subetha-egress-verify --adversarial          # 代役コンテナを同じ network に置き: check の sabotage、別名アドレス、hairpin、DNAT 両経路、隣接、既存接続、guard
+sudo -E subetha-egress-verify --fail-closed          # Docker を止め env を壊し、再試行を含めて上がらないことを journal で見る
+sudo docker start subetha-router
+sudo -E subetha-egress-verify --reboot-prepare && sudo reboot
+sudo -E subetha-egress-verify --post-boot && sudo -E subetha-egress-verify --reboot-cleanup
+```
+
+**全モードで `failed 0` が受け入れ条件。** 既定の環境変数: `ROUTER=subetha-router`、`NET=subetha-router-net`、
+`HEALTH_URL=http://127.0.0.1:8787/healthz`。runner は Router（または代役）の netns から試行し、veth（双方向）・
+uplink・conntrack・host/外部 observer の記録で「届いていない」を見る。観測が立ち上がらなければその項目は FAIL になる。
+
+### 8b.5 運用規則
+
+- **Router 稼働中に firewall を触らない**（`iptables -F`、firewalld の導入、他の管理ツール）。
+  guard timer は 30 秒毎に復旧するが、**その間は開く**。保証ではない
+- 再適用は `sudo subetha-egress apply`（原子的、数十 ms）。Docker の再起動は不要
+- 保守で外すとき（`subetha-egress remove`）は timer を止め、Router を止めてから。再開前に `sudo subetha-egress check`
+- 状態は `sudo subetha-egress status`。`check` が非 0 なら差分が stderr に出る
+- host にアドレスを足した/付け替えた（Elastic IP 等）ら `HOST_ADDRS4` を直して `apply`
+- IANA の special-purpose レジストリが更新されたら（runner が検出して FAIL にする）`DENY4` / `DENY6` を見直す
+- 起動直後、guard の初回実行までは bridge の gateway アドレスが目録に無い（network の subnet が RFC1918 なので
+  レジストリ行が落とす。runner はそれを前提として検査する）。`check` はその間だけ差分を報告する
+
 ## 9. EC2 側で必要なこと（このリポジトリの範囲外）
 
 - インスタンス作成（`ap-northeast-1` 等）、Docker のインストール
@@ -264,9 +358,10 @@ claude mcp add --transport http subetha-router https://router.subethalabs.com/mc
   ホスト上の他のエージェントも IMDS を使わないなら、`--http-endpoint disabled` で
   エンドポイントごと閉じる方が強い。Router が使わないことだけでは、その判断の根拠にならない。
 
-  **到達そのものを止める層は別**で、`docs/ssrf-requirements.md` に段階として定めている。
-  **アプリ側（fetch 前の検査 + 接続固定）か、インフラ側（`DOCKER-USER` の egress 規則か
-  迂回不能な forward proxy）のどちらか**で満たす。**AI が上流 URL を指定できる構成に進む前に**要る。
+  **到達そのものを止める層は別**で、インフラ側（B）は §8b の egress 制御として実装した
+  （`docs/ssrf-egress-design.md`）。namespace 内の宛先（loopback、自アドレス）は host から見えないので
+  アプリ側（A）の担当であり、**未実装**。**AI が上流 URL を指定できる構成に進む前に** B と A の両方の
+  受け入れが要る（`docs/ssrf-requirements.md` §9）。
 
 ### 単一インスタンス前提
 Router は journal を `flock(2)` で排他する。**同一ホストで 2 つ起動すると 2 つ目は起動に失敗する**

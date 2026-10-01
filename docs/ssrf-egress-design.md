@@ -1133,8 +1133,8 @@ non-blocking で取り込んだもの: IMDS **不達**は FAIL（`ALLOW_NO_IMDS=
 | # | 指摘（要約） | 判定 | v10 での応答 | 実測 |
 |---|---|---|---|---|
 | 1 | IMDS の両要求が curl の transport/HTTP status を捨てる。token 取得成功後に `public-ipv4` が timeout すると「公開 IP 無し」の INFO になり、`HOST_ADDRS4=none` が未掲載の公開 IP を持つ host で通る（mock で再現） | **正しい**（blocking） | 両要求で transport と HTTP status を検査。`public-ipv4` は **HTTP 200 + IPv4 として妥当**なら目録と照合、**HTTP 404 だけ**を「公開 IP 無し」の証明とし、それ以外は FAIL。`ALLOW_NO_IMDS=1` は **token 要求自体が到達不能**な場合（非 EC2）だけを INFO にし、token 成功後の失敗は免除しない | 68 |
-| 2 | regression が「`fail` が増えた」ことを検出成功と解釈し、`obs_verdict` が `ERR` でも PASS になる | 正しい（non-blocking） | 注入接続と制御接続の HTTP 200 を要求し、**1 つの session 束縛 report** から「accept ちょうど 2 件・うち marked ≥1」を直接 assert。`ERR` は FAIL のまま | 69 |
-| 3 | `hobs_stop` が `kill` の失敗を無視し pid ファイルを消すので、「observer gone」が証明されない | 正しい（non-blocking） | `hobs_stop` は pid を保持して **終了を bounded wait（5 秒）で確認**、生き残れば非 0。最終 inventory は pid への `kill -0` 失敗を要求。**注入試験**: SIGTERM を無視するプロセスを observer として登録し、teardown が失敗を報告することを確認 | 69 |
+| 2 | regression が「`fail` が増えた」ことを検出成功と解釈し、`obs_verdict` が `ERR` でも PASS になる | 正しい（non-blocking） | 注入接続と制御接続の HTTP 200 を要求し、**1 つの session 束縛 report** から「accept ちょうど 2 件・うち marked ≥1」を直接 assert。`ERR` は FAIL のまま（v10 では本番の述語そのものは呼んでいない → §26） | 70 |
+| 3 | `hobs_stop` が `kill` の失敗を無視し pid ファイルを消すので、「observer gone」が証明されない | 正しい（non-blocking） | `hobs_stop` は pid を保持して **終了を bounded wait（5 秒）で確認**、生き残れば非 0。最終 inventory は pid への `kill -0` 失敗を要求。**注入試験**: SIGTERM を無視するプロセスを observer として登録し、teardown が失敗を報告することを確認（v10 では teardown 1 回分の失敗のみ。停止失敗後に別の observer を起動してしまう経路はレビュー #10 の指摘 → §26） | 70 |
 
 AL2023 の受け入れ条件は変わらず（全モード、Linux の外部 observer + `ss`、免除なし、証拠と設置物の記録）。
 
@@ -1177,3 +1177,35 @@ AL2023 の受け入れ条件は変わらず（全モード、Linux の外部 obs
 
 `deploy/egress/`: `subetha-egress`（v8）、`subetha-egress-verify`（v8）、`egress-observer.py`（v5）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
 `subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
+
+## 26. 設計レビュー #10（v10、`8a57367`）: **APPROVE WITH CHANGES** → 設計フェーズ終了、実装フェーズへ
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。「v10 は v9 の blocking（IMDS）を構造的に解決した。残る 2 件は non-blocking で、
+DEPLOY.md の実装フェーズに進むことを妨げない。本番の受け入れ（AL2023）は未了」。
+IMDS の 4 分岐（9 ケース）はレビュアが mock で独立に実行し、すべて期待どおり。
+
+| # | 指摘（non-blocking） | 実装フェーズでの変更 |
+|---|---|---|
+| 1 | `hobs_start` が前の observer の停止失敗を無視して別のプロセスを起動し、`/health` に答えた方を受け入れる。pid ファイルを終了確認前に消す | `hobs_start` は停止失敗で**起動しない**。readiness は report の `pid` が起動した pid と一致することで束縛。pid ファイルは終了確認後に削除。注入試験に「停止失敗 → 起動拒否」を追加 |
+| 2 | regression は件数を assert するだけで、本番の制御述語を呼んでいない。report を保存していない | 述語を `control_ok` として本番の `control_after` と regression で**共有**し、regression は「述語が拒否する」ことを assert。report と verdict を証拠ディレクトリに保存 |
+| — | IMDS 要求は curl の既定設定や proxy 環境に影響され得る | `curl -q --noproxy '*'`（IMDS から直接の応答だけを証拠にする） |
+| — | §24 の実測参照（69 → 70）、observer lifecycle の閉じ方の表現 | 訂正 |
+
+AL2023 の受け入れ条件（変更なし）: 全モード、実 reboot、Linux の外部 observer（`ss`）、`ALLOW_NO_BACKLOG`/`ALLOW_NO_IMDS` なし、
+実 IMDS、稼働版での DNS 再測定、証拠と設置物の保存。Caddy の TLS は runner の対象外。要件 §9 の **B + A** の release gate は変わらない。
+
+### 26.1 実装フェーズの成果物
+
+- `docs/DEPLOY.md` §8「egress 制御」（前提、設置、network、検証の実行順、運用規則）、§6 の `docker run` に `--network subetha-router-net`、§9 の参照
+- `deploy/egress/subetha-egress-verify`（v9: 上記の変更）
+- 実測 72〜74: 変更後の runner で既定 / adversarial / fail-closed を再実行（下記）
+
+### 26.2 実測 72〜74（実装フェーズの runner v9）
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 72 | 既定モード | **64 PASS / 0 FAIL / 5 INFO** |
+| 73 | `--adversarial`（Router 停止、代役） | **65 PASS / 0 FAIL / 2 INFO**。regression は本番の述語 `control_ok` が「accept 2 件」の report を**拒否する**ことを assert（report と verdict を保存）。cleanup 注入: teardown 失敗の報告 + **停止失敗中の再起動を拒否**。復元 inventory PASS、observer プロセス残存 0 |
+| 74 | `--fail-closed` | **3 PASS** |
+
+reboot モードは runner v9 で変更していない経路（`hobs_start` は post-boot では使わない）なので再実行していない（実測 71 が現行の証拠）。

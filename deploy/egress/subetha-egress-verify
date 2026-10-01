@@ -1,5 +1,5 @@
 #!/bin/bash
-# subetha-egress-verify: run the acceptance protocol of docs/ssrf-egress-design.md §25 on the
+# subetha-egress-verify: run the acceptance protocol of docs/ssrf-egress-design.md §25 (v11 changes in §26) on the
 # host and print evidence for every item. Exit status is non-zero if any item fails, including
 # a failed restoration at the end. Every required observation is a gate: instrumentation that
 # fails to start, a setup step that fails, a command whose status cannot be read, or an observer
@@ -113,10 +113,12 @@ acc=sum(1 for r in d["rows"] if r["kind"]=="accept"); lines=sum(1 for r in d["ro
 bl=str(b.get("value")) if b.get("supported") else "unsupported:"+str(b.get("error"))
 print("accepts=%d seq=%d backlog=%s listening=%s marked=%d" % (acc, d["seq_last"], bl, d.get("listening"), lines))' "${4:-}"; }
 vf() { printf '%s' "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p"; }   # field of a verdict string
+control_ok() { # the production predicate: a verdict string since the boundary must show exactly 1 accept and a marked line
+  [ "$(vf "$1" accepts)" = 1 ] && [ "$(vf "$1" marked)" -ge 1 ]; }
 control_after() { # $1 item, $2 label, $3 url, $4 boundary seq (from the zero verdict), $5 session, $6 control url
   curl -s -m 3 -o /dev/null -H 'X-Control: host' "$6"; sleep 0.5
   local vd; vd=$(obs_verdict "$3" "$4" "$5" X-Control); case "$vd" in ERR*) ng "$1" "$2: control report invalid ($vd)"; return 1;; esac
-  [ "$(vf "$vd" accepts)" = 1 ] && [ "$(vf "$vd" marked)" -ge 1 ] && ok "$1" "$2: exactly 1 accept since the verdict's seq $4 and it carries X-Control (nothing slipped between verdict and control)" || ng "$1" "$2: control not the only accept since seq $4 ($vd)"; }
+  control_ok "$vd" && ok "$1" "$2: exactly 1 accept since the verdict's seq $4 and it carries X-Control (nothing slipped between verdict and control)" || ng "$1" "$2: control not the only accept since seq $4 ($vd)"; }
 backlog_ok() { # $1 backlog field -> 0 ok, 1 fail, 2 waived
   case "$1" in 0) return 0 ;; unsupported:*) [ "$ALLOW_NO_BACKLOG" = 1 ] && return 2 || return 1 ;; *) return 1 ;; esac; }
 ZA_SEQ=""
@@ -130,17 +132,22 @@ zero_accepts() { # $1 item, $2 label, $3 url, $4 since_seq, $5 session: one repo
     ok "$1" "$2: 0 accepts since seq $4, backlog $bl, listening (one session-bound report)"; return 0
   else ng "$1" "$2: $vd"; return 1; fi; }
 hobs_url() { echo "127.0.0.1:$OBS_REPORT"; }
-hobs_start() { hobs_stop; : > /var/tmp/egress-verify-hobs.log
+hobs_start() { # a previous observer that cannot be stopped aborts the start (never two owners of the port)
+  hobs_stop || { echo "a previous host observer (pid $HOBS_PID) could not be terminated; not starting another" >&2; return 1; }
+  : > /var/tmp/egress-verify-hobs.log
   nohup python3 "$UNIT_DIR/egress-observer.py" --port "$OBS_PORT" --report-port "$OBS_REPORT" >> /var/tmp/egress-verify-hobs.log 2>&1 &
-  echo $! > /var/tmp/egress-verify-hobs.pid
-  for i in $(seq 1 50); do HSESSION=$(obs_health "$(hobs_url)") && [ -n "$HSESSION" ] && return 0; sleep 0.2; done
-  echo "host observer did not become ready (/health)" >&2; return 1; }
+  HOBS_PID=$!; echo "$HOBS_PID" > /var/tmp/egress-verify-hobs.pid
+  for i in $(seq 1 50); do
+    HSESSION=$(obs_health "$(hobs_url)") && [ -n "$HSESSION" ] && [ "$(obs_field "$(hobs_url)" pid "$HSESSION")" = "$HOBS_PID" ] && return 0
+    sleep 0.2; done
+  echo "host observer did not become ready, or the process answering /health is not the one launched (pid $HOBS_PID)" >&2; return 1; }
 HOBS_PID=""
-hobs_stop() { # terminate the host observer and prove it is gone (bounded wait); non-zero if it survives
-  [ -f /var/tmp/egress-verify-hobs.pid ] || return 0
-  local pid i; pid=$(cat /var/tmp/egress-verify-hobs.pid); HOBS_PID=$pid; rm -f /var/tmp/egress-verify-hobs.pid
-  kill "$pid" 2>/dev/null
-  for i in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || { HOBS_PID=""; return 0; }; sleep 0.2; done
+hobs_stop() { # terminate the host observer and prove it is gone (bounded wait); the pid file is removed only
+              # once termination is established; non-zero (and the pid retained) if it survives
+  local pid i; if [ -f /var/tmp/egress-verify-hobs.pid ]; then pid=$(cat /var/tmp/egress-verify-hobs.pid); else pid=$HOBS_PID; fi
+  [ -n "$pid" ] || return 0
+  HOBS_PID=$pid; kill "$pid" 2>/dev/null
+  for i in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || { HOBS_PID=""; rm -f /var/tmp/egress-verify-hobs.pid; return 0; }; sleep 0.2; done
   echo "host observer pid $pid still alive after SIGTERM" >&2; return 1; }
 hobs_seq() { obs_field "$(hobs_url)" seq_last "$HSESSION"; }
 hobs_accepts() { obs_count "$(hobs_url)" "$1" "$HSESSION" accept; }
@@ -289,8 +296,9 @@ host_addresses() {
   # 404 on public-ipv4 is the only positive proof of "no public address"; any other outcome is a
   # lookup failure. The waiver covers only a host where the token request itself cannot reach IMDS.
   imds() { # $1 path, [$2 token] -> "<http code> <body>" or "ERR <reason>"
-    local out code; if [ -n "${2:-}" ]; then out=$(curl -s -m 3 -w '\n%{http_code}' -H "X-aws-ec2-metadata-token: $2" "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }
-    else out=$(curl -s -m 3 -w '\n%{http_code}' -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }; fi
+    # -q ignores ~/.curlrc, --noproxy '*' ignores proxy environment: the answer must come from IMDS itself
+    local out code; if [ -n "${2:-}" ]; then out=$(curl -q -s -m 3 --noproxy '*' -w '\n%{http_code}' -H "X-aws-ec2-metadata-token: $2" "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }
+    else out=$(curl -q -s -m 3 --noproxy '*' -w '\n%{http_code}' -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "http://169.254.169.254/latest/$1" 2>/dev/null) || { echo "ERR transport"; return; }; fi
     code=$(printf '%s' "$out" | tail -n1); printf '%s %s' "$code" "$(printf '%s' "$out" | sed '$d')"; }
   local tr tok pr; tr=$(imds api/token)
   case "$tr" in
@@ -466,9 +474,11 @@ adversarial() {
     local b=$ZA_SEQ sl ctl rv
     sl=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OBS_PORT/")                      # the slipped, unmarked accept
     ctl=$(curl -s -m 2 -o /dev/null -w '%{http_code}' -H 'X-Control: host' "http://127.0.0.1:$OBS_PORT/"); sleep 0.5
-    rv=$(obs_verdict "$(hobs_url)" "$b" "$HSESSION" X-Control)
+    rv=$(obs_verdict "$(hobs_url)" "$b" "$HSESSION" X-Control); obs_get "$(hobs_url)" "$b" "$HSESSION" > "$EVID/regression-report.json"; echo "$rv" > "$EVID/regression-verdict.txt"
     case "$rv" in ERR*) ng V7-17 "regression: instrumentation failure ($rv)" ;;
-      *) [ "$sl" = 200 ] && [ "$ctl" = 200 ] && [ "$(vf "$rv" accepts)" = 2 ] && [ "$(vf "$rv" marked)" -ge 1 ] && ok V7-17 "regression: with an unmarked accept slipped in, one report since the verdict's seq $b shows 2 accepts (1 marked); the control predicate (exactly 1) rejects this window" || ng V7-17 "regression: injected=$sl control=$ctl report=$rv" ;; esac; fi
+      *) if [ "$sl" = 200 ] && [ "$ctl" = 200 ] && [ "$(vf "$rv" accepts)" = 2 ] && [ "$(vf "$rv" marked)" -ge 1 ]; then
+           control_ok "$rv" && ng V7-17 "regression: the production control predicate ACCEPTED a window with a slipped accept ($rv)" || ok V7-17 "regression: with an unmarked accept slipped in, one report since the verdict's seq $b shows 2 accepts (1 marked) and the production control predicate rejects it (report saved)"
+         else ng V7-17 "regression: injected=$sl control=$ctl report=$rv"; fi ;; esac; fi
   hobs_stop || ng V7-17 "host observer did not terminate after the regression"
   echo "-- V7-17 cleanup-failure injection: a process that ignores SIGTERM must make the observer teardown fail"
   rm -f /var/tmp/egress-verify-zombie.ready
@@ -476,8 +486,9 @@ adversarial() {
   local zi; for zi in $(seq 1 50); do [ -f /var/tmp/egress-verify-zombie.ready ] && break; sleep 0.1; done   # handler installed before the signal is sent
   if [ -f /var/tmp/egress-verify-zombie.ready ]; then echo "$zp" > /var/tmp/egress-verify-hobs.pid
     if hobs_stop 2>/dev/null; then ng V7-17 "cleanup injection: teardown reported success although the process ignored SIGTERM"; else ok V7-17 "cleanup injection: teardown reports failure when the process survives SIGTERM (pid $zp)"; fi
+    if hobs_start 2>/dev/null; then ng V7-17 "cleanup injection: a new observer was started although the previous one could not be stopped"; hobs_stop; else ok V7-17 "cleanup injection: starting a new observer is refused while the previous one (pid $zp) survives"; fi
   else ng V7-17 "cleanup injection: stand-in process never became ready"; fi
-  kill -9 "$zp" 2>/dev/null; wait "$zp" 2>/dev/null; HOBS_PID=""; rm -f /var/tmp/egress-verify-zombie.ready
+  kill -9 "$zp" 2>/dev/null; wait "$zp" 2>/dev/null; HOBS_PID=""; rm -f /var/tmp/egress-verify-hobs.pid /var/tmp/egress-verify-zombie.ready
   echo "-- V7-3 host alias $A (outside every deny range) and V7-4 same-bridge hairpin"
   hobs_start || ng V7-3 "host observer not ready"   # stays up through V7-9
   iptables -t mangle -D SUBETHA-EGRESS -d $A/32 -j DROP 2>/dev/null
