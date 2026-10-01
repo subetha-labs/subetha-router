@@ -149,3 +149,80 @@ V-5 と V-6 が「止めすぎていない」ことの証明で、**V-1〜V-3 �
 - **U-1** 本番の backend。`docker info` で確認するまで §3 か §4 かが決まらない
 - **U-2** 本番の resolver アドレス。ローカルでは gateway（`192.168.5.2`）だった。EC2 では VPC DNS（`169.254.169.253` または VPC CIDR の `.2`）が既定で、**いずれも deny 範囲内**。§3.1 の `RESOLVER` はこれを `/etc/resolv.conf` から取る。**host が resolver でなければ §3.2 の DNS 例外は不要**（残しても無害）
 - **U-3** VPC 内に Router が正当に到達すべき private アドレスがあるか（例: 同一 VPC の RPC ノード）。あれば `10.0.0.0/8` 一括 DROP が壊す。**展開固有のポリシー**として owner 確認
+
+## 8. 設計レビュー: **REJECT** — B 単独では §8.2 を満たせないことが確定
+
+レビュー実施: 2026-10-01、`gpt-6-astra`、対象 `71411e6`（私の修正 3 件より前の版）。
+blocking 3 件。**うち 1 件は規則の誤りではなく、B という手段の構造的な限界**だった。
+blocking はすべて自分で実測して確認した。
+
+### 8.1 blocking 2: **コンテナ内 loopback を host の chain は一切見られない**（実測 10）
+
+`127.0.0.0/8` の DROP を **`FORWARD`（`DOCKER-USER`）と `INPUT` の両方**に置いた状態で、
+コンテナが自分の `127.0.0.1:9999` へ接続 → **`ok`**。host 側 chain のカウンタは**一切動かず**。
+
+→ `127.0.0.1` / `::1` / コンテナ自身の IP 宛ては **namespace 内で完結し、host は無力**。
+これは規則の書き方では直らない。**host 側の制御（= B）は、定義上この宛先を守れない。**
+
+しかも loopback は**正当な依存先**である（`Dockerfile:61-62` の `HEALTHCHECK` が
+`127.0.0.1:8787/healthz` を叩く。Router の既定 listen も `127.0.0.1`、`config.ts:562`）。
+「コンテナ内 loopback を全部塞ぐ」は health check を殺す。
+
+**含意**: §8.2 の不変条件「禁止宛先に接続試行パケットが 0 個」を**コンテナ内 loopback について**
+満たせる手段は、**アプリ側（A）だけ**である。または**要件を改訂して loopback を INV-1 の対象から外す**。
+
+### 8.2 blocking 3: 起動時と規則入れ替え時が fail-open（実測 11）
+
+`--restart unless-stopped` のコンテナは **daemon init 中に復元**される。実測: `systemctl restart docker` は
+active になるまで **10.6 秒**、その間にコンテナは既に動いていた。`ExecStartPost` はその**後**。
+→ reboot 後、Router は**規則が入る前に egress できる窓**を持つ。
+
+加えて再適用の `-F SUBETHA-EGRESS` は、参照中の chain を空にしてから積み直す。**空の user chain は即 RETURN**
+なので、積み直し中も窓が開く。
+
+**対処の方向**（設計で選ぶ）: (a) 規則を **Docker 起動前**に、`DOCKER-USER` に依存しない形で入れる
+（`FORWARD` に直接、または独自 chain を `FORWARD` 先頭に置き Docker 起動後に `DOCKER-USER` へも張る）、
+(b) 入れ替えは**新 chain を作って jump を差し替え**、旧 chain を後で消す（トランザクション的）、
+(c) 規則が入るまで Router コンテナを起動させない（`docker.service` の `After=` ではなく、
+Router の unit を別に切り `Requires=` で規則 unit に依存させる）。
+
+### 8.3 blocking 8: V-1〜V-8 は「0 個」を証明しない
+
+DROP カウンタの増加は「落ちた packet がある」の証明であって「抜けた packet が無い」の証明ではない。
+欠けている対象: コンテナ内 loopback（§8.1 で host では不可能）、隣接コンテナ、host の他アドレス、
+DNAT 後の宛先、proxy 迂回、既存接続、起動/再適用の窓、UDP/ICMP。
+V-8 は rebinding ではなく**静的な private 解決**の試験だった。
+
+### 8.4 その他の指摘（反映する）
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| 1 | `docker0` は既定だが設定可能。user-defined bridge（`br-…`）は両 chain を迂回 | 「Router は既定 bridge にのみ接続」を**展開要件**にし、`docker inspect` で検証する |
+| 4 | `ESTABLISHED` は「戻りトラフィック」と同義ではない。規則投入前に確立した禁止接続は以後通る | 投入時に既存接続を `conntrack -D` で落とす手順を加える。Caddy の返信経路は `ESTABLISHED` に依存するので**一括で前に出さない** |
+| 5 | INPUT の 53 例外が host の**全アドレス**に効く。port 一致は DNS の証明にならない | resolver アドレスに束縛（§3.1 と同様）。V-4 は「DNS 応答が返る」ことで判定 |
+| 6 | 未掲載の宛先は RETURN（= 通る）。`192.0.2/24`・`198.51.100/24`・`203.0.113/24` 等が漏れ、「既定 deny」を実装していない | IANA special-purpose を**全列挙**して DROP。既定 deny を文字通り実装 |
+| 7 | Caddy の説明が返信経路を無視 | 「コンテナの返信は `docker0` から `INPUT` に入り `ESTABLISHED` で通る」と書き直す |
+| 9 | REJECT が timeout に見えた説明は未証明。Linux は ICMP admin-prohibited を接続エラーとして**報告し得る** | 「区別できない」を**一般論として主張しない**。DROP 採用と `transport_failed` は維持（それに依存しない） |
+| 10 | 「本番と同 backend」は U-1 未解決と矛盾 | 「ローカルで実測した構成」とだけ書く |
+
+### 8.5 自分で先に直していた点（レビューと一致）
+
+- 指摘 3 の「daemon restart は `DOCKER-USER` を保持」→ 実測 9 で発見済み
+- 指摘 5 の resolver（host の stub ではなくコンテナ側）→ 実測 6〜8 で発見済み
+
+### 8.6 **結論: 判断を owner に戻す**
+
+B は「規則を直せば通る」段階ではない。**§8.1 により B 単独では要件を満たせない**。選択肢:
+
+| 選択 | 内容 | 代価 |
+|---|---|---|
+| **B + 要件改訂** | コンテナ内 loopback を INV-1 の対象から**明示的に外す**。host 側 egress のみ守る | loopback 宛て SSRF（Router 自身の 8787、同梱プロセス）は**守らない**と宣言する |
+| **B + A（併用）** | host 側で転送を止め、**アプリ側で loopback 宛てを fetch 前に拒否** | A の実装（10 経路）が結局必要。ただし A は loopback と transport 固定に絞れる |
+| **A のみ** | アプリ側で全部 | B の利点（アプリのバグまで守る）を失う |
+
+**私の推奨は「B + A（併用）」**。理由: 守る対象が物理的に分かれている
+（転送 = host が強い、loopback = アプリしか見えない）ので、**どちらか一方では構造的に足りない**。
+A を「loopback 拒否 + 接続固定」に絞れば、全 10 経路に入れる負担は小さくない が、
+**手段ごとに守る範囲を明示できる**。
+
+**blocking 3 は選択に依らず直す**（§8.2 の (a)〜(c)）。
