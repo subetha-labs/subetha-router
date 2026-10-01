@@ -1006,3 +1006,64 @@ non-blocking: `remove` は削除/flush の失敗を伝播し、chain と jump �
 
 `deploy/egress/`: `subetha-egress`（v7）、`subetha-egress-verify`（v5）、`egress-observer.py`（v3）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
 `subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。
+
+## 20. 設計レビュー #7（v7、`106ff89`）: **REJECT** → v8 で応答
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。blocking 5 件（すべて runner の失敗処理と証拠の束縛）、non-blocking 2 件。
+policy スクリプトは「文書化したトポロジ・目録・同時変更なしの前提の下で、弱い policy のまま成功を報告する新たな経路は見つからなかった」。
+
+| # | 指摘（要約） | 判定 | v8 での応答 | 実測 |
+|---|---|---|---|---|
+| 1 | EXIT trap が到着時の exit status を捨て、前提拒否（`exit 64/69`）が「0 failed、exit 0」になる | **正しい**（mock で再現） | trap は `rc=$?` を保持し、`rc≠0` なら FAIL 行を出して非 0 で終了。negative test（Router 稼働中の `--adversarial`）を手順に含める | 58 |
+| 2 | cleanup が失敗後も「verified」。NAT 削除の失敗が pipeline 内で消える、inspect 失敗が「無い」扱い、`Requires` 取得失敗が「依存無し」扱い、`[` の後の `$?` | **正しい** | 各操作の status を拾い、最後に**成功した query**で最終状態を証明（nat に別名無し、インタフェースに別名無し、`docker ps -a` に一時コンテナ無し、`Requires` に補助 unit 無し、unit の `is-active` は exit code で判定）。失敗は trap 経由で exit に反映 | 57、60 |
+| 3 | 既定モードの外部 observer が session に束縛されていない（`XSESSION` 空） | **正しい** | 既定モードも開始時に `/health` で session を束縛（`bind_observer`）。判定に使う read は session 未設定なら ERR | 56 |
+| 4 | accept 数・backlog・制御カーソルを別々の report から取るため、その間に accept が入り得る。hammer や他の 0-accept 判定に backlog gate と正の対照が無い | **正しい** | `obs_verdict` が **1 つの report** から accepts・seq・backlog・listening を返し、制御カーソルは**その report の seq** を使う。全 0-accept 判定を `zero_accepts`（backlog 0 かつ listening）に統一。hammer に host observer の正の対照（`X-Control` 付き accept ちょうど 1）を追加 | 56、57、60 |
+| 5 | post-boot の conntrack 判定が、停止後に取った空の probe IP で空振りする | **正しい** | probe の IP は**稼働中に**取得・非空を要求し、停止確認後も保持。文言を「現時点の snapshot」に限定 | 60 |
+
+non-blocking: `remove` の不在判定は「読めない」と「無い」を区別（`No chain` の stderr でのみ不在）。observer は backlog を**同じ lock の中で**読み（queue と log が 1 観測）、listen socket を non-blocking にし（lock 中に accept が block しない）、session にランダム nonce を付与。
+hammer の表現は「ループ区間（両端含む）内の SYN」に限定。
+
+## 21. 設計 v8（現行。§19 のうち以下で言い直した部分を置き換える）
+
+> 成果物は `deploy/egress/` の v8（スクリプト v8、runner v6、observer v4）。実測 56〜60 は runner v6 の出力。
+
+### 21.1 差分
+
+| 項目 | v8 |
+|---|---|
+| runner の終了状態 | trap が到着時の `rc` を保持。`rc≠0`（前提拒否・中断）は FAIL 行 + 非 0。復元失敗も非 0 |
+| 既定モード | `OBSERVER` を指定した場合は開始時に `/health` で session を束縛（`bind_observer`）。判定 read は session 未束縛なら ERR |
+| 0-accept の判定 | `zero_accepts`: **1 つの report** から accepts=0・backlog 0（`ss` 無しは `ALLOW_NO_BACKLOG=1` のときだけ INFO）・listening を同時に要求。制御接続のカーソルは同じ report の `seq` |
+| hammer | 上記に加え、host observer への正の対照（`X-Control` 付き accept ちょうど 1） |
+| adversarial / reboot の cleanup | 各操作の status を拾い、最終状態を**成功した query**（nat・インタフェース・`docker ps -a`・`Requires`・`is-active` の exit code）で証明 |
+| post-boot | probe の IP を**稼働中に**取得・非空を要求。最終 report から制御カーソルを取る。conntrack 判定は snapshot と明記 |
+| negative test | Router 稼働中の `--adversarial` は拒否され、FAIL 行と exit 1（実測 58） |
+| `subetha-egress remove` | `No chain` の stderr でのみ「不在」。読めなければ失敗 |
+| observer v4 | backlog を snapshot の lock 内で取得、listen socket を non-blocking に、session に nonce |
+
+### 21.2 実測 56〜60
+
+| # | 実測 | 結果 |
+|---|---|---|
+| 56 | runner v6 既定モード（外部 observer 束縛あり） | **64 PASS / 0 FAIL / 5 INFO**。外部 observer: 1 report で accepts 0・listening（backlog は Mac で `ss` 無し → INFO）。host observer: hammer 中 accepts 0・backlog 0、正の対照 accept 1（`X-Control`） |
+| 57 | runner v6 `--adversarial` | **61 PASS / 0 FAIL / 2 INFO**。alias/DNAT の 0-accept は 1 report で backlog 0。復元は fresh query で検証 |
+| 58 | negative test: Router 稼働中に `--adversarial` | 「refusing to remove the policy」→ `FAIL V7-0 invocation ended early with exit 64` → **exit 1** |
+| 59 | `--fail-closed` | **3 PASS** |
+| 60 | runner v6 初版の `obs_verdict` が python の引用符で壊れ、4 件の 0-accept 判定が空の verdict で FAIL した | 空の verdict は **FAIL になる**（成功に化けない）ことを確認した上で修正 |
+| 61 | reboot（runner v6、`colima restart`） | **post-boot 20 PASS / 0 FAIL / 2 INFO、cleanup 1 PASS**。boot id 変化、observer 設定一致、外部 session（nonce 付き）不変、host observer 1 invocation・`pid`=`MainPID`、捕捉 1 invocation。monotonic: observers 2.89/3.12 s → `applied` **3.26 s** → `Loading containers` **3.33 s**。probe IP を稼働中に取得（172.30.0.2）、停止を inspect で確認。1 report で外部 accept 0（backlog は Mac で `ss` 無し → INFO）、host accept 0・backlog 0。conntrack 0。boot〜静止の probe ポート SYN **0**。制御: 最終 report のカーソルから 1 SYN ↔ 1 accept（`X-Control`）、host observer も 1。終了時の invocation と session が不変。cleanup は fresh query で検証 |
+
+### 21.3 残余
+
+- **AL2023 は未実測**。受け入れは本番 host で runner v6 の全モード `failed 0`、**`ALLOW_NO_BACKLOG` なし**（外部 observer は VPC 内の Linux host で `egress-observer.py`、`ss` あり）。証拠ディレクトリを保存し、設置した成果物と設定を記録する
+- DNS の出所は Docker 28.3.3 で実測。V7-8 が稼働版で再測定する
+- boot 時の tcpdump EACCES（§13.6）は原因未特定（`-Z root` で回避）
+- `userland-proxy=false`、IPv6 有効化、`iptables` 以外の backend、任意名 bridge は runner が FAIL にする
+- guard の窓は閉じない（運用条件「Router 稼働中に firewall を触らない」）
+- hammer の「重なり」はループ区間内の SYN の存在であり、各コミットとの重なりではない
+- userspace の accept 数 + kernel の accept queue は「socket 層に受理された接続」の証拠。届いたが応答されなかった SYN は host 側の捕捉（往路のみ）と conntrack 不在で見る
+- `--reboot-prepare` 後に host が再起動するまでに外部 observer が再起動すると session が変わり、post-boot は FAIL する（意図どおり）
+
+### 21.4 成果物
+
+`deploy/egress/`: `subetha-egress`（v8）、`subetha-egress-verify`（v6）、`egress-observer.py`（v4）、`10-subetha-egress.conf`、`99-egress-verify.conf`、
+`subetha-egress-guard.{service,timer}`、`egress-host-observer.service`、`egress-boot-capture.service`。`DEPLOY.md` は実装フェーズ。

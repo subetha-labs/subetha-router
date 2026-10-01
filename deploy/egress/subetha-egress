@@ -1,6 +1,6 @@
 #!/bin/sh
 # subetha-egress: host-side egress control for the SubEtha Router container.
-# Design: docs/ssrf-egress-design.md (v7). Runs as root from docker.service's ExecStartPre
+# Design: docs/ssrf-egress-design.md (v8). Runs as root from docker.service's ExecStartPre
 # and every 30 s from subetha-egress-guard.timer.
 #
 #   subetha-egress apply        validate, dry-run both families, commit each in one transaction,
@@ -253,8 +253,14 @@ remove() {
       "$ipt" -t mangle -F "$CHAIN" || { err "$ipt: cannot flush $CHAIN"; rc=1; }
       "$ipt" -t mangle -X "$CHAIN" || { err "$ipt: cannot delete $CHAIN"; rc=1; }
     fi
-    "$ipt" -t mangle -S "$CHAIN" >/dev/null 2>&1 && { err "$ipt: $CHAIN still present"; rc=1; }
-    for h in $HOOKS; do "$ipt" -t mangle -S "$h" 2>/dev/null | awk -v c="$CHAIN" '$(NF-1)=="-j" && $NF==c {f=1} END{exit f?0:1}' && { err "$ipt: a $h jump to $CHAIN remains"; rc=1; }; done
+    # absence is established only by a read that fails *because* the chain does not exist
+    out=$("$ipt" -t mangle -S "$CHAIN" 2>&1); x=$?
+    if [ "$x" = 0 ]; then err "$ipt: $CHAIN still present"; rc=1
+    elif ! printf '%s' "$out" | grep -qi 'no chain'; then err "$ipt: cannot read $CHAIN ($out)"; rc=1; fi
+    for h in $HOOKS; do
+      hl=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      printf '%s\n' "$hl" | awk -v c="$CHAIN" '$(NF-1)=="-j" && $NF==c {f=1} END{exit f?0:1}' && { err "$ipt: a $h jump to $CHAIN remains"; rc=1; }
+    done
   done
   [ "$rc" = 0 ] && echo "subetha-egress: removed"
   return $rc

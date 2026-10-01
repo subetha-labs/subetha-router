@@ -11,9 +11,10 @@ each record to stdout, and serves them on --report-port:
                                 "backlog": {"supported": bool, "value": int|null, "error": str|null},
                                 "rows": [{"seq","t","kind","src","sport","data"}, ...]}
 
-A connection is accepted and recorded under one lock (the socket is polled first, so accept()
-never blocks while the lock is held); a report snapshot takes the same lock, so it can never
-see a connection that was accepted but not yet recorded. `session` changes whenever the process
+A connection is accepted and recorded under one lock (the listening socket is non-blocking and
+polled first, so accept() cannot block while the lock is held); a report snapshot reads the
+kernel queue and the log under the same lock, so it is one observation and can never see a
+connection that was accepted but not yet recorded. `session` changes whenever the process
 restarts; `seq` lets a runner reason with cursors instead of clocks. `backlog` is the kernel's
 accept queue for the observed port as reported by `ss` (Linux), with the query status exposed.
 Run it on the Router host (host-side observer) and on another host you control in the VPC
@@ -22,6 +23,7 @@ Run it on the Router host (host-side observer) and on another host you control i
 import argparse
 import json
 import os
+import secrets
 import select
 import socket
 import subprocess
@@ -79,8 +81,12 @@ def accept_loop(sock):
         while True:
             select.select([sock], [], [])
             with LOCK:
-                conn, addr = sock.accept()   # ready, so this does not block under the lock
+                try:
+                    conn, addr = sock.accept()   # non-blocking socket: never blocks under the lock
+                except BlockingIOError:
+                    continue                     # the connection went away before accept(); poll again
                 _record_locked("accept", addr)
+            conn.setblocking(True)
             threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
     except OSError as exc:
         with LOCK:
@@ -123,8 +129,9 @@ class Report(BaseHTTPRequestHandler):
         q = parse_qs(urlparse(self.path).query)
         since_seq = int(q.get("since_seq", ["0"])[0])
         since = float(q.get("since", ["0"])[0])
-        bl = backlog(STATE["port"])
         with LOCK:
+            # the queue is read under the same lock as the log, so backlog and rows are one observation
+            bl = backlog(STATE["port"])
             rows = [r for r in LOG if r["seq"] > since_seq and r["t"] >= since]
             body = json.dumps({"session": STATE["session"], "pid": STATE["pid"], "listening": STATE["listening"],
                                "seq_last": STATE["seq"], "backlog": bl, "rows": rows}).encode()
@@ -143,13 +150,14 @@ def main():
     ap.add_argument("--port", type=int, default=19999, help="observed port (connections and lines are logged)")
     ap.add_argument("--report-port", type=int, default=19998, help="HTTP port serving the log as JSON")
     a = ap.parse_args()
-    STATE["session"] = f"{int(time.time())}-{os.getpid()}"
+    STATE["session"] = f"{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
     STATE["port"] = a.port
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("0.0.0.0", a.port))
         sock.listen(128)
+        sock.setblocking(False)
     except OSError as exc:
         print(f"egress-observer: cannot listen on :{a.port}: {exc}", file=sys.stderr, flush=True)
         return 1
