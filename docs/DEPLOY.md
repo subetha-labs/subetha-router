@@ -256,39 +256,44 @@ B と A の両方が通るまで出さない。
 
 ### 8b.2 設置（Router 停止中に。初回は Router を作る前に）
 
-```sh
-# 0) 依存（runner と補助 unit が使う）と preflight
-sudo dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux curl
-for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss; do command -v $t >/dev/null || echo "MISSING: $t"; done
+次のブロックを**ファイルに保存して `sudo bash -e` で実行する**（対話シェルに貼ると、途中の失敗で止まらない）。
+どの段階でも失敗したら、そこで終わる。先に進めるために既定値で埋める箇所は無い。
 
-# 1) 成果物
-cd subetha-router-egt
-sudo install -m 755 deploy/egress/subetha-egress deploy/egress/subetha-egress-verify /usr/local/sbin/
-sudo mkdir -p /usr/local/lib/subetha-egress /etc/systemd/system/docker.service.d
-sudo install -m 644 deploy/egress/egress-observer.py deploy/egress/egress-host-observer.service \
+```sh
+#!/bin/bash -e
+# 0) 依存（runner と補助 unit が使う）と preflight。無いものがあれば終了
+dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux curl diffutils
+for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss cmp sha256sum awk tar; do command -v $t >/dev/null || { echo "MISSING: $t"; exit 1; }; done
+
+# 1) 成果物（リポジトリの checkout の直下で実行する。sudo は cwd を保つ）
+[ -f deploy/egress/subetha-egress ] || { echo "run this from the subetha-router-egt checkout"; exit 1; }
+install -m 755 deploy/egress/subetha-egress deploy/egress/subetha-egress-verify /usr/local/sbin/
+mkdir -p /usr/local/lib/subetha-egress /etc/systemd/system/docker.service.d
+install -m 644 deploy/egress/egress-observer.py deploy/egress/egress-host-observer.service \
   deploy/egress/egress-boot-capture.service deploy/egress/99-egress-verify.conf /usr/local/lib/subetha-egress/
-sudo install -m 644 deploy/egress/subetha-egress-guard.service deploy/egress/subetha-egress-guard.timer /etc/systemd/system/
-sudo install -m 644 deploy/egress/10-subetha-egress.conf /etc/systemd/system/docker.service.d/
+install -m 644 deploy/egress/subetha-egress-guard.service deploy/egress/subetha-egress-guard.timer /etc/systemd/system/
+install -m 644 deploy/egress/10-subetha-egress.conf /etc/systemd/system/docker.service.d/
 
 # 2) 公開 IPv4 を IMDS から読む。runner と同じ判定（token 取得 → 200 + IPv4 なら採用、404 なら none、それ以外は失敗）。
-#    失敗したら**ここで止める**。既定値で埋めない
-PUB=$(sudo subetha-egress-verify --public-ipv4) || { echo "IMDS lookup failed: do not continue"; false; }
+#    失敗すると `-e` で**ここで終わる**。既定値で埋めない
+PUB=$(subetha-egress-verify --public-ipv4)
 echo "public IPv4: $PUB"
-sudo tee /etc/subetha-egress.env >/dev/null <<ENV
-IFACES="subetha0 docker0 br+"
-HOST_ADDRS4="$PUB"
-ENV
+printf 'IFACES="subetha0 docker0 br+"\nHOST_ADDRS4="%s"\n' "$PUB" > /etc/subetha-egress.env
 
 # 3) 適用と確認（apply は最後に check を走らせ、通らなければ失敗する）
-sudo systemctl daemon-reload
-sudo subetha-egress apply && echo "policy ok"
-sudo systemctl enable --now subetha-egress-guard.timer && systemctl is-active subetha-egress-guard.timer
+systemctl daemon-reload
+subetha-egress apply
+systemctl enable --now subetha-egress-guard.timer
+[ "$(systemctl is-active subetha-egress-guard.timer)" = active ]
 
-# 4) ExecStartPre が効くことを、**この再起動の invocation だけ**で確認する
-sudo systemctl restart docker
-sudo journalctl _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value docker.service) -o cat \
-  | grep -E 'subetha-egress: applied|Loading containers: start'
-# 期待: "subetha-egress: applied (...)" が先、"Loading containers: start." が後。両方無ければ失敗
+# 4) ExecStartPre が効くことを、**この再起動の invocation だけ**で確認する（両方のメッセージがこの順で無ければ終了）
+systemctl restart docker
+sleep 1
+journalctl _SYSTEMD_INVOCATION_ID="$(systemctl show -p InvocationID --value docker.service)" -o cat \
+  | grep -E 'subetha-egress: applied|Loading containers: start' > /tmp/egress-startup.txt
+sed -n 1p /tmp/egress-startup.txt | grep -q 'subetha-egress: applied'
+sed -n 2p /tmp/egress-startup.txt | grep -q 'Loading containers: start'
+echo "egress control installed and verified at docker startup"
 ```
 
 `/etc/subetha-egress.env` は `KEY=value`（空白を含む値は二重引用符。行内コメント不可）。未知のキー・重複・
@@ -300,16 +305,67 @@ sudo journalctl _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value 
 network は §6 の手順 4 で作る（既にあれば `docker network inspect subetha-router-net` で bridge 名が `subetha0`、
 subnet が RFC1918 であることを確認する）。
 
-既に既定 bridge（docker0）で動いている Router を移す場合（**journal を失わない順序**）:
+既に既定 bridge（docker0）で動いている Router を移す場合。journal（`/app/runtime/journal.ndjson`）は
+**過去の paymentId の唯一の記録**なので、次の順序を**ファイルに保存して `sudo bash -e` で実行する**。
+どの段階でも失敗したらそこで止まり、**古いコンテナは手順 5 まで削除されない**。
 
 ```sh
-sudo docker inspect subetha-router --format '{{json .Mounts}}'            # /app/runtime がボリュームか確認
-# ボリューム無しで動いていたら、先に journal を取り出す（削除すると消える）
-sudo docker cp subetha-router:/app/runtime /var/lib/subetha-router-backup-$(date +%s)
-sudo docker stop subetha-router && sudo docker rm subetha-router
-# §6 の手順 4 で作り直す（`-v /var/lib/subetha-router:/app/runtime` と `--network subetha-router-net`）。
-# 取り出した journal はボリュームに移してから起動する（所有者 10001:10001）
+#!/bin/bash -e
+set -o pipefail
+R=subetha-router
+DEST=/var/lib/subetha-router                              # 新コンテナが mount する場所（§6 手順 4 と同じ）
+# 1) いまの journal の実体を特定する（/app/runtime の mount 元。名前付きボリュームなら /var/lib/docker/volumes/<name>/_data）
+SRC=$(docker inspect "$R" --format '{{range .Mounts}}{{if eq .Destination "/app/runtime"}}{{.Source}}{{end}}{{end}}')
+echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}"
+# 2) Router を止め、止まったことを確認する（コピーは停止後。停止までの追記を取りこぼさない）
+docker stop "$R"
+[ "$(docker inspect -f '{{.State.Running}}' "$R")" = false ]
+# 3) 実体から $DEST へ写す（失敗したら終了。journal.lock は flock 用の常設ファイルで、写しても害は無い）
+mkdir -p "$DEST"
+if [ -n "$SRC" ]; then [ "$SRC" = "$DEST" ] || cp -a "$SRC/." "$DEST/"; else docker cp "$R:/app/runtime/." "$DEST/"; fi
+chown -R 10001:10001 "$DEST"
+# 4) 新コンテナが mount する場所にある journal が、元と同じバイト列であることを確認する
+if [ -n "$SRC" ]; then
+  [ ! -e "$SRC/journal.ndjson" ] || cmp "$SRC/journal.ndjson" "$DEST/journal.ndjson"
+elif docker cp "$R:/app/runtime" - | tar -t | grep -qx 'runtime/journal.ndjson'; then
+  docker cp "$R:/app/runtime" - | tar -xO runtime/journal.ndjson | cmp - "$DEST/journal.ndjson"
+fi
+[ "$(stat -c %u:%g "$DEST")" = 10001:10001 ]
+ROWS=$(wc -l < "$DEST/journal.ndjson" 2>/dev/null || echo 0)
+SUM=$( { cat "$DEST/journal.ndjson" 2>/dev/null || true; } | sha256sum)
+LAST=$(python3 -c 'import json,sys
+last=None
+for l in open(sys.argv[1]):
+    if l.strip():
+        d=json.loads(l)
+        if d.get("event")=="created": last=d
+print(last["paymentId"] if last else "none")' "$DEST/journal.ndjson" 2>/dev/null || echo none)
+echo "journal rows: $ROWS; last created paymentId: $LAST"
+# 5) ここで初めて古いコンテナを消し、作り直す（§6 手順 4 と同じコマンド）
+docker rm "$R"
+docker network inspect subetha-router-net >/dev/null 2>&1 || \
+  docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
+docker run -d --name "$R" --restart unless-stopped --network subetha-router-net -p 127.0.0.1:8787:8787 \
+  -v "$DEST:/app/runtime" --env-file /etc/subetha-router.env subetha-router
+# 6) 移した journal を新コンテナが開いたことを確認する（Router は起動時に全行を replay し、壊れていれば上がらない）
+for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/healthz 2>/dev/null | grep -q '"router":"up"' && break; sleep 1; done
+curl -sf http://127.0.0.1:8787/healthz | grep -q '"router":"up"'
+[ "$(docker inspect "$R" --format '{{range .Mounts}}{{if eq .Destination "/app/runtime"}}{{.Source}}{{end}}{{end}}')" = "$DEST" ]
+[ "$(head -n "$ROWS" "$DEST/journal.ndjson" | sha256sum)" = "$SUM" ]   # 元の行はそのまま（再起動で unknown 行が後ろに足されることはある）
+# 新コンテナの Router が $DEST/journal.lock を排他 flock している（host の /proc/locks で見る。コンテナ内の /proc は ptrace 制限で読めないことがある）
+awk -v ino="$(stat -c %i "$DEST/journal.lock")" '$2=="FLOCK" && $4=="WRITE" && $6 ~ (":" ino "$")' /proc/locks | grep -q .
+if [ "$LAST" != none ]; then
+  # 最後の購入を R4（GET /v1/purchases/<id>）で引く。Router の HTTP API はコンテナ内 loopback の一時ポートだけで聞いている
+  # （8787 は MCP と /healthz）。ポートは起動ログの "router:" 行、principal は tools/remote-mcp.ts が固定する judge:public
+  INNER=$(docker logs "$R" 2>&1 | sed -n 's/^router: //p' | tail -n1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])')
+  docker exec "$R" node -e 'fetch("http://127.0.0.1:"+process.argv[1]+"/v1/purchases/"+process.argv[2],{headers:{"x-router-principal":"judge",authorization:"Bearer public"}}).then(r=>{console.log("R4 status",r.status);process.exit(r.status===200?0:1)})' "$INNER" "$LAST"
+fi
+echo "migration complete: $ROWS journal rows reopened by the new container"
 ```
+
+購入記録が一つも無い Router（`ROWS` 0）では手順 6 の R4 照会は省かれ、mount 先・内容・open の確認だけになる。
+手順 4 で `cmp` が差分を報告したら、`$DEST` を触らず原因を調べる（古いコンテナはまだ残っている）。
+MCP 側からも `subetha_router_status` に最後の `paymentId` を渡して同じ記録が返ることを見れば、運用で使う経路での確認になる。
 
 ### 8b.4 検証（稼働前に全モード。証拠を保存する）
 
@@ -395,8 +451,9 @@ sudo -E subetha-egress-verify --reboot-cleanup
     --query 'Reservations[].Instances[].MetadataOptions' --output table
   ```
 
-  ホスト上の他のエージェントも IMDS を使わないなら、`--http-endpoint disabled` で
-  エンドポイントごと閉じる方が強い。Router が使わないことだけでは、その判断の根拠にならない。
+  **IMDS のエンドポイントは閉じない。** §8b の egress 制御は、設置時（公開 IPv4 の取得）と受け入れ runner
+  （`HOST_ADDRS4` の照合）で **host から** IMDSv2 を使う。`HttpTokens=required` と hop limit 1 で
+  コンテナからのトークン取得を止めれば足りる。`--http-endpoint disabled` にすると設置と受け入れが fail-closed で止まる。
 
   **到達そのものを止める層は別**で、インフラ側（B）は §8b の egress 制御として実装した
   （`docs/ssrf-egress-design.md`）。namespace 内の宛先（loopback、自アドレス）は host から見えないので

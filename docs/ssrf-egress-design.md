@@ -1227,3 +1227,30 @@ reboot モードは runner v9 で変更していない経路（`hobs_start` は 
 
 実測 75〜77（runner v10）: `--public-ipv4` は IMDS 不達で `IMDS token request failed (ERR transport)`・exit 1（既定値を出さない）。
 既定 **64/0**、adversarial **65/0**（保存した verdict `accepts=2 seq=11 backlog=0 listening=True marked=1` が評価した report と一致）、fail-closed **3/0**。
+
+### 26.4 実装レビュー #2（`7afab91`）: **REJECT** → 手順を再改訂
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#1 の 8 件のうち 1・4・5・7・8 は解決、2・6 は non-blocking が残り、**3（移行時の journal）が blocking のまま**。runner の変更に新たな空の経路は無し。
+`--public-ipv4` の 9 分岐（mock）はレビュアが独立に確認。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 3 | 移行手順: `docker cp` の失敗が次の `rm` を止めない。コピーが停止より前（停止までの追記を取りこぼす）。`/app/runtime` の mount 元が `/var/lib/subetha-router` とは限らない | **正しい**（blocking） | 順序を **`bash -e` + `pipefail` のスクリプト**として明記: mount 元を特定（bind / 名前付きボリューム / mount 無し）→ 停止して確認 → **停止後に**実体から `$DEST` へ写す（失敗で終了）→ `$DEST` の journal が元と**同じバイト列**（`cmp`）で所有者が 10001:10001 → 行数と最後の `created` の `paymentId` / `principalId` を記録 → ここで初めて `rm`、§6 手順 4 と同じコマンドで作り直す → `/healthz` が `router: up`、mount 元が `$DEST`、元の行の sha256 が不変、コンテナ内の Router が `journal.ndjson` を open している、最後の購入をコンテナ内 loopback の R4（`GET /v1/purchases/<id>`、`judge` principal）で引いて 200。コンテナの 8787 は MCP と `/healthz` だけなので、host から R4 は叩けない（最初の案はそこを誤っていた） |
+| 2 | 設置手順の `|| { ...; false; }` は対話シェルを止めない | 正しい | 設置ブロック全体を**ファイルに保存して `sudo bash -e` で実行**する形に。失敗はそこで終わる |
+| 6 | preflight が `echo` するだけで止まらない | 正しい | `command -v ... || { echo MISSING; exit 1; }` |
+| 新 | §9 の「IMDS endpoint を閉じる方が強い」が、B の設置と受け入れ（host から IMDSv2 を使う）と矛盾 | 正しい（non-blocking） | §9 を「endpoint は閉じない。token 必須 + hop limit 1 で足りる」に改めた |
+
+journal 確認（手順 4）は手動の目視ではなく、invocation 内の 1 行目が `applied`、2 行目が `Loading containers` であることを `grep` で assert する形に改めた。
+
+改訂した 2 本のスクリプトは、docs に書いたものをそのまま抜き出して Colima VM で実行した（sabotage を含む）。
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 78 | **移行スクリプト（§8b.3）verbatim**。旧 Router は現行ソースで build した image を docker0 に置き、`/app/runtime` は `/var/lib/subetha-router-old` を bind、journal は synthetic harness で作った `judge` の `created` 2 行 | sabotage A（`$DEST` を通常ファイルに）: `mkdir` で exit 1、**`docker rm` 前に停止**、旧コンテナ残存（exited）、元 journal 不変。sabotage B（`cp` shim が複製を 10 バイト切り詰め）: `cmp: EOF on .../journal.ndjson after byte 2828` で exit 1、旧コンテナ残存。本番相当: exit 0、新コンテナは `subetha-router-net`、mount 元 `$DEST`、所有者 10001:10001、元の 2 行の sha256 一致、元の bind は手付かず、R4 `200`（未知の id は `404`: 対照）、`$DEST/journal.lock` の排他 flock が host の `/proc/locks` に見え、`docker stop` で消える（対照）。`failed 0` |
+| 79 | **設置スクリプト（§8b.2）verbatim**（VM に dnf と IMDS は無いので、その 2 つだけ shim） | T1 shim 無し: `dnf: command not found` で exit 127。T2 dnf だけ shim: `IMDS token request failed (ERR transport)` で exit 1、`public IPv4:` 行無し、**env ファイル不変**。T3 dnf + `--public-ipv4`→`none`: exit 0、invocation 内で `subetha-egress: applied` → `Loading containers: start.` の順、`HOST_ADDRS4="none"`、timer active、`check` 通過。T4 `journalctl` shim が逆順を返す: exit 1、成功行無し。終了後に元の env を戻して再適用 |
+
+#78 の最初の試行は 2026-09-26 build の `subetha-router:test` を使い、R4 が移行前後とも `404` だった。原因は手順ではなく、
+その image が `21155eb`（journal を固定パスに置く修正）より古く、journal が起動ごとの `runtime/remote-*/` にあったこと。
+R4 の確認が空でないことの傍証になったので残す。コンテナ内の `/proc/<pid>/fd` 列挙は Yama `ptrace_scope=1` の VM では
+0 件だった（読めない）ので、新コンテナが journal を開いている証拠は host の `/proc/locks`（`journal.lock` の `FLOCK WRITE`）に替えた。
+環境メモ: restart policy の無い代役コンテナは T3 の `systemctl restart docker` で止まったまま（`LiveRestoreEnabled=false` の帰結。Router は `unless-stopped`）。
