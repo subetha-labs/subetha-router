@@ -15,6 +15,7 @@
 | 3 | 経路の無い宛先（`10.255.255.1`）へ接続 | 即時失敗、**規則に到達しない** | 経路が無い宛先はカーネルが落とす。**規則の試験には転送される宛先を使う** |
 | 4 | DROP / REJECT(icmp-admin-prohibited) / 規則なし を `curl` で計時 | DROP **4s timeout** / REJECT **4s timeout** / なし **0.0006s refused** | **コンテナ内から DROP と REJECT は区別できない**。ICMP が戻らない。→ FR-C1' を実証: Router は遮断を報告できず、**証拠はカウンタだけ** |
 | 5 | bridge の IPv6 | `EnableIPv6: false` | 既定では IPv6 egress が無い。**有効化したら ip6tables 側も同じ規則が要る** |
+| 9 | `systemctl restart docker` 前後で `DOCKER-USER` 内のユーザ規則 | **残った**（count 1 → 1、チェーンも存続） | §3.4 の根拠を訂正: 消えるのは **host 再起動**。`ExecStartPost` は daemon 再起動のためではなく、reboot 後に `DOCKER-USER` 生成**後**に入れ直すため。**V-7 は reboot で行う** |
 | 7 | 実測 6 の修正（resolver 例外）を **host の `/etc/resolv.conf`** から取って適用 | **まだ `exit=6`**。host の値は `127.0.0.53`（systemd-resolved stub）、コンテナの値は `192.168.5.2` | **resolver はコンテナの中から読む**。host の stub はコンテナから到達不能で、Docker がその理由でコンテナ側を書き換えている |
 | 8 | コンテナ側 resolver で例外を張って再検証 | 公開 HTTPS **`exit=0` 0.07s**、禁止宛先 **`exit=28`**。UDP 53 RETURN **2 pkts**、`192.168/16` DROP **4 pkts** | **修正版は正しく動く**。例外と DROP が port で正しく分岐している証拠がカウンタに出る |
 | 6 | **§3.1 の規則をそのまま適用**し、公開 HTTPS へ接続 | **`curl exit=6`（名前解決失敗）**。`192.168.0.0/16` の DROP が **4 pkts** | **deny 一覧が resolver（`192.168.5.2`）を落とし、DNS が死んだ**。EC2 でも resolver は `169.254.169.253` か `10.x` で**同じく deny 範囲内**。→ DNS 例外を DROP より前に置く（§3.1 に追加）。コンテナ間（172.17.x）は生きていた |
@@ -93,10 +94,18 @@ bridge の IPv6 は既定で無効（実測 5）。**有効にする場合のみ
 
 ### 3.4 永続化
 
-`iptables` の規則は再起動で消える。**Docker が起動する前に適用される必要はない**
-（`DOCKER-USER` は Docker が作るので、**Docker 起動後**に入れる）。
-→ systemd の `docker.service` に **`ExecStartPost`** で上記スクリプトを呼ぶ drop-in を置く。
-`iptables-persistent` は Docker の規則と順序が競合するので**使わない**。
+**実測 9**: `systemctl restart docker` では `DOCKER-USER` 内のユーザ規則は**消えない**
+（restart 前後で `-j SUBETHA-PROBE` が残り、チェーンも残った）。Docker は自分のチェーンは作り直すが
+`DOCKER-USER` の中身には触らない。
+→ 規則が消えるのは **host の再起動**（netfilter はカーネルメモリ上）であって daemon 再起動ではない。
+
+したがって永続化の要件は「**host 再起動後、Docker が `DOCKER-USER` を作った後に**規則を入れ直す」。
+`docker.service` の **`ExecStartPost`** で上記スクリプトを呼ぶ drop-in が、この順序を満たす
+（`DOCKER-USER` は Docker 起動時に作られるので、その後に `-I DOCKER-USER 1` できる）。
+スクリプトは**冪等**（§3.1 の `-N || -F`、`-C || -I`）なので daemon 再起動で二重に入ることはない。
+`iptables-persistent` は Docker 起動**前**に復元して順序が崩れるので**使わない**。
+
+**V-7（再起動後の再検証）は daemon restart ではなく `sudo reboot` で行う**こと。
 
 ## 4. nftables backend の場合
 
