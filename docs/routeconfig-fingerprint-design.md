@@ -336,3 +336,81 @@ x402 の offer は `accepts[]` 由来で、**`resource.url` は offer に含ま�
 **SubEtha は facilitator が `payTo` を発行する**ため（`subetha.ts:197`）、
 **設定由来の指紋では受取先の変化を検出できない**。
 FR-17 が守るのは**設定で宛先を固定しているレール**（x402 / MPP 送信）である。
+
+## 9. 修正版設計（確定）
+
+### 9.1 構成
+
+```
+quote 時:
+  routeFingerprint = fingerprintOf(authoritativeTermsOf(route))
+  → journal の `created` patch に記録
+
+store 復元時（store.ts:30 intentFromCreated）:
+  patch["routeFingerprint"] を **明示的に復元**
+  - 文字列で `sha256:` 始まり → 採用
+  - 欠落            → undefined（legacy）
+  - **それ以外（型違い・空文字）→ 不正値として記録**（legacy に落とさない）
+
+purchase 時（orchestrator.ts:392 の直後）:
+  現在の設定から同じ指紋を再計算
+  - intent に指紋あり  → 一致しなければ拒否
+  - 指紋が不正値       → **拒否**
+  - 指紋なし（legacy） → **復元可能な destination 欄を現在の設定と照合**し、
+                          不一致なら拒否
+```
+
+### 9.2 指紋の対象（`authoritativeTermsOf`）
+
+```
+{
+  destination: { scheme, network, asset, payTo },
+  source:      { amount, asset, network, payTo?（存在する場合のみ） },
+  rail, sourceRail
+}
+```
+
+**除外**: `canonicalPath`（`routeId` 由来）、`decimals`（表示用）、
+上流 URL（§8.4 の通り、destination 条件の保護としては不要。
+**ただし「Provider 差し替えの検出」ではないことを明記**）。
+
+### 9.3 legacy の照合（指摘2 の修正）
+
+指紋が無い intent では、**`Intent` に復元済みの欄**で照合する:
+
+| 比較対象 | 復元元 |
+|---|---|
+| `intent.destination.network` / `asset` | `store.ts:48,49` |
+| **`intent.destination.selectedOffer.payTo`** | `store.ts:50` |
+| `intent.destination.selectedOffer.scheme` | 同上 |
+| `intent.source.amount` / `asset` / `network` | `store.ts:42-44` |
+
+→ **設定の `DestinationAllow` と `source` と比較**し、不一致なら拒否。
+**無条件に通さない。**
+
+### 9.4 拒否時の挙動
+
+| 面 | 内容 |
+|---|---|
+| 公開応答 | `status: "awaiting_payment"`, `code: "quote_changed"`（既存コード） |
+| **ログ** | 固定文 `route configuration mismatch` と `routeId`。**値・URL・ホスト名は出さない** |
+
+### 9.5 変更ファイル（確定）
+
+| ファイル | 変更 |
+|---|---|
+| `src/config.ts` | `authoritativeTermsOf(route)` と `routeFingerprintOf(route)` を追加。`assertAbsoluteHttpUrl` に `userinfo` / `fragment` 拒否（**`allowQuery` の既存挙動は変えない**） |
+| `src/core/intent.ts` | `Intent` に `routeFingerprint?: string` / `routeFingerprintInvalid?: boolean` |
+| **`src/core/store.ts`** | **`intentFromCreated` に明示的な復元を追加**（指摘1） |
+| `src/core/orchestrator.ts` | quote 時に記録、purchase 時に照合（指紋 / legacy / 不正値の 3 分岐） |
+| `src/main.ts` | `real` モードの上流が内部アドレスなら**警告**（起動は継続） |
+
+`budget.ts` は**変更しない**。
+
+### 9.6 やらないこと（確定）
+
+- grandfather（§8.2 で撤回）
+- 接続時 SSRF 強制（要件 §17.3）
+- 上流 URL の指紋への組み込み（§8.4）
+- SubEtha の facilitator 発行 `payTo` の変化検出（**§8.8 の限界として受容**）
+- 新しいイベント種別・新しい公開理由コード
