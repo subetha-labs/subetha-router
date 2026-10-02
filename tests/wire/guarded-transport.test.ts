@@ -268,13 +268,17 @@ describe("guarded transport: pinning (T-A3〜T-A8)", () => {
     expect(decoys.map((d) => d.observed.connections)).toEqual(decoys.map(() => 0));
     expect(events.map((e) => e.code)).toEqual(["connect_failed"]);
 
-    // 陽性対照: 固定しない素の fetch は囮に届く。
+    // 陽性対照: 固定しない素の fetch は囮に届く。port で聞いているのは囮だけなので 200 は囮が返したもの。
+    // 素の fetch（undici の既定 dispatcher）は keep-alive の接続を再利用するので、ここからは接続数ではなく
+    // 囮が見た要求数（Host の記録）で数える（Linux での受け入れ実行で接続数の判定が誤って落ちた。設計 §11）。
+    const requestsSeen = (): number => decoys.reduce((sum, d) => sum + d.observed.hosts.length, 0);
     const control = await undiciFetch(`http://localhost:${port}/x`);
     expect(control.status).toBe(200);
+    expect(requestsSeen()).toBe(1);
     expect(decoys.reduce((sum, d) => sum + d.observed.connections, 0)).toBeGreaterThanOrEqual(1);
 
     // 変異: 失敗したらシステム解決で再試行する transport は囮に届く（この試験が落ちる）。
-    const before = decoys.reduce((sum, d) => sum + d.observed.connections, 0);
+    const before = requestsSeen();
     const mutant = async (url: string): Promise<Response> => {
       try {
         return await transport.fetch(url, undefined, { operation: "mutant" });
@@ -283,7 +287,7 @@ describe("guarded transport: pinning (T-A3〜T-A8)", () => {
       }
     };
     expect((await mutant(`http://localhost:${port}/x`)).status).toBe(200);
-    expect(decoys.reduce((sum, d) => sum + d.observed.connections, 0)).toBeGreaterThan(before);
+    expect(requestsSeen()).toBe(before + 1);
   });
 
   it("T-A6: fallback は検査済みの中だけ", async () => {
