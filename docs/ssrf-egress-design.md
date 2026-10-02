@@ -1395,3 +1395,18 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 89 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AG（レビュアの配置: 別名を private にして旧 Router を起動した後、host の別名に古いディレクトリを重ねる。古い方は最後の `created` が同じ 2 行、コンテナの中は 3 行）、AH（`$DEST` を fstab に無い一時的な bind で覆い、旧 Router は同じディレクトリを使う）、回帰として AD-private・F・M・O、別名 AA の本番相当、bind・mount 無し（候補は `/proc/PID/root` 経由）・同一ディレクトリの本番相当 | **AG**: `the host path /srv/router-alias does not show the directory the container uses (64769:1389582 vs 64769:1346347)` で**旧 Router を止める前に**停止、`$DEST` は作られず。**AH**: `mount at /var/lib/subetha-router covering /var/lib/subetha-router is not in /etc/fstab: what /var/lib/subetha-router contains after a reboot is not established` で停止、役割は付かず、止めていない。AD-private・F・M・O は前回どおり。AA: identity で `authoritative`、exit 0。bind: exit 0、marker 行に新コンテナの ID。mount 無し: `/proc/PID/root` 経由の覗きで通り、exit 0、Caddy は「止まっていた」として unmask のみ。同一ディレクトリ: `authoritative`、exit 0。2 部構成とも `failed 0` |
+
+### 26.15 実装レビュー #13（`94ce3c9`）: **REJECT** → `$DEST` は root FS 直下、authoritative でも journal を identity で束縛
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#12 の identity 束縛と復旧の 3 状態は**解決**、再起動後の同一性は「狭まった」。新規 1 件 blocking、1 件 non-blocking。
+レビュアは抜き出した `role()` に合成の mountinfo / fstab を与えて 5 通りを実行した。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | fstab の target 列に載っていることは再起動後の同一性を保証しない: `bind,noauto` の行は起動時に mount されず、同じ target に別の source を書いた行も通る | **正しい**（blocking） | fstab を見るのをやめ、**`$DEST` を含む mount が `/` だけ**であることを要求する（root ファイルシステムの上に直接。AL2023 の既定）。bind や別のファイルシステムで覆われていれば、fstab に何が書いてあっても止まる。別ボリュームの構成は対象外と明記 |
+| 2 | `authoritative` はディレクトリの identity が一致した時点で返り、`$DEST` の**下の mount**の検査より前。`$DEST/journal.ndjson` に古いファイルを bind すると（private の別名と旧コンテナは元のまま）、ディレクトリの identity は一致、複製の比較は省かれ、手順 3 は `$SRC` しか見ないので、古い journal で完了し得る。新コンテナの再帰 bind はその子 mount を含む | **正しい**（blocking） | 下の mount の検査を**役割の判定より前**に移した（ファイル 1 つの bind も止まる）。authoritative でも `$DEST/$JP` が旧 Router の開いている journal と**同じ inode**であることを、止める前と止めた後に要求する |
+| 3 | 復旧手順が無条件に Caddy を起動する（移行前から意図して止めてあった入口を公開し得る） | 正しい（non-blocking） | 停止メッセージの `it was running before: 0/1` を復旧の条件にした（unmask は常に、start は 1 のときだけ） |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 90 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AI（レビュアの配置: `$DEST` を private の別名で旧 Router に使わせ、その後 `$DEST/journal.ndjson` に古い journal **ファイル**を bind。ディレクトリの inode は一致）、AJ（`$DEST` を覆う bind を `/etc/fstab` に `bind,noauto` で載せたうえで mount。終了後に fstab を復元）、回帰として別名 AA・bind・同一ディレクトリの本番相当 | **AI**: `unsupported: something is mounted beneath /var/lib/subetha-router (/var/lib/subetha-router/journal.ndjson)` で**役割判定より前に**停止、止めていない。**AJ**: `/var/lib/subetha-router is not directly on the root filesystem (covered by a mount at /var/lib/subetha-router): what it contains after a reboot is not established` で停止（fstab に載っていても）、止めていない、fstab は復元済み。AA: `authoritative`（identity 一致、`$DEST/$JP` の inode も旧 Router の fd と一致）、exit 0。bind・同一ディレクトリ: exit 0。`failed 0` |

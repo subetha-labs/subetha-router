@@ -398,10 +398,11 @@ if [ -n "$SRC" ]; then
   [ "$(ident "$SRC/$JP")" = "$J_ID" ] || { echo "$SRC/$JP is not the file the old Router has open: not covered by this procedure"; exit 1; }
   [ "$(real "$SRC/$JP")" = "$(real "$SRC")/$JP" ] || { echo "symlink inside $SRC: unsupported layout"; exit 1; }
 fi
-#    d. $DEST の役割。まず、$DEST を含む mount（/ 以外）がすべて /etc/fstab に載っていること（一時的な bind や重ねた mount は再起動で消え、
-#       同じ経路に別の中身が現れる）。次に、コンテナが見ている runtime と $DEST の identity が同じなら authoritative（コピーしない。何も消して
-#       はいけない）。host の mount 表で、正規位置が同じなのに別物（重ねた/隠れた mount）、経路や正規位置の入れ子、$DEST の下の mount なら止まる。
-#       mount 表や fstab が読めなければ止まる。それ以外だけ copy（使い捨ての複製）
+#    d. $DEST の役割。まず、$DEST が **root ファイルシステムの上に直接**あること（$DEST を含む mount が / だけ。bind や別のファイルシステムで
+#       覆われていれば止まる: 再起動後に同じ経路に同じ中身がある保証は、fstab に載っていても無い）。次に、$DEST の**下**に mount があれば止まる
+#       （ファイル 1 つの bind も含む。後で消すときに辿り、新コンテナの再帰 bind にも入る）。そのうえで、コンテナが見ている runtime と $DEST の
+#       identity が同じなら authoritative（コピーしない。何も消してはいけない）。host の mount 表で、正規位置が同じなのに別物（重ねた/隠れた
+#       mount）、経路や正規位置の入れ子なら止まる。mount 表が読めなければ止まる。それ以外だけ copy（使い捨ての複製）
 D_ID=$(ident "$DEST" 2>/dev/null || true)
 role() { python3 -c '
 import os,sys
@@ -409,10 +410,6 @@ s,d,rid,did=sys.argv[1:5]
 mounts=[]
 for line in open("/proc/self/mountinfo"):
     f=line.split(); mounts.append((f[4].replace("\\\\040"," "), f[3].replace("\\\\040"," "), f[2]))
-fstab=set()
-for line in open("/etc/fstab"):
-    f=line.split()
-    if f and not f[0].startswith("#") and len(f)>=2: fstab.add(f[1].replace("\\\\040"," "))
 def canon(p):
     p=os.path.realpath(p); best=None
     for mp,root,dev in mounts:
@@ -423,18 +420,19 @@ def canon(p):
 def inside(a,b): return a.startswith(b.rstrip("/")+"/")
 rd=os.path.realpath(d)
 covering=[mp for mp,_,_ in mounts if mp!="/" and (rd==mp or inside(rd,mp))]
-missing=[mp for mp in covering if mp not in fstab]
-if missing: sys.exit("mount at %s covering %s is not in /etc/fstab: what %s contains after a reboot is not established: not covered by this procedure" % (", ".join(missing), d, d))
+if covering: sys.exit("%s is not directly on the root filesystem (covered by a mount at %s): what it contains after a reboot is not established: not covered by this procedure" % (d, ", ".join(covering)))
+below=[mp for mp,_,_ in mounts if inside(mp,rd)]
+if below: sys.exit("unsupported: something is mounted beneath %s (%s): not covered by this procedure" % (d, ", ".join(below)))
 if did and did==rid: print("authoritative"); sys.exit()
 if s:
     rs=os.path.realpath(s); cs,cd=canon(s),canon(d)
     if cs==cd: sys.exit("ambiguous: %s and %s map to the same place in the mount table but are different directories (stacked or hidden mounts): not covered by this procedure" % (s,d))
     if inside(rs,rd) or inside(rd,rs): sys.exit("overlap: %s and %s are nested paths: not covered by this procedure" % (s,d))
     if cs[0]==cd[0] and (inside(cs[1],cd[1]) or inside(cd[1],cs[1])): sys.exit("overlap: %s resolves to %s and %s to %s on the same filesystem (bind mount alias): not covered by this procedure" % (s,cs[1],d,cd[1]))
-below=[mp for mp,_,_ in mounts if inside(mp,rd)]
-if below: sys.exit("unsupported: something is mounted beneath %s (%s): not covered by this procedure" % (d, ", ".join(below)))
 print("copy")' "$SRC" "$DEST" "$R_ID" "$D_ID"; }
 DEST_ROLE=$(role)
+#       authoritative なら、$DEST/$JP が旧 Router の開いている journal そのもの（同じ inode）であること（ディレクトリの一致だけでは journal は束縛されない）
+if [ "$DEST_ROLE" = authoritative ]; then [ "$(ident "$DEST/$JP")" = "$J_ID" ] || { echo "$DEST/$JP is not the file the old Router has open: not covered by this procedure"; exit 1; }; fi
 echo "$DEST is $DEST_ROLE ($([ "$DEST_ROLE" = authoritative ] && echo "the old Router already stores its journal there: nothing is copied and nothing there may be deleted" || echo "a copy of the old Router's runtime"))"
 echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}; the old Router (pid $PID) has /app/runtime/$JP open"
 #    e. 候補の journal を、**コンテナ自身の見え方**（/proc/$PID/root 経由）で覗き、その最後の購入を動いている旧 Router が返すこと。
@@ -456,6 +454,10 @@ if [ -n "$SRC" ]; then
   #  停止後も host の mount 元が同じディレクトリと同じファイル（同じ inode）であること
   [ "$(ident "$SRC")" = "$R_ID" ] || { echo "$SRC changed identity after the stop"; exit 1; }
   [ "$(ident "$SRC/$JP")" = "$J_ID" ] || { echo "$SRC/$JP changed identity after the stop"; exit 1; }
+  if [ "$DEST_ROLE" = authoritative ]; then
+    [ "$(ident "$DEST")" = "$R_ID" ] || { echo "$DEST changed identity after the stop"; exit 1; }
+    [ "$(ident "$DEST/$JP")" = "$J_ID" ] || { echo "$DEST/$JP changed identity after the stop"; exit 1; }
+  fi
   if [ "$DEST_ROLE" = copy ]; then
     [ ! -e "$DEST/$JP" ] || cmp "$SRC/$JP" "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }
     cp -a "$SRC/." "$DEST/"; cmp "$SRC/$JP" "$DEST/$JP"
@@ -529,8 +531,9 @@ echo "migration complete: $ROWS journal rows reopened by the new container"
 inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router の mount 元と `$DEST` が重なる木
 （一方が他方の中）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
 以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
-消されている、隣の `journal.lock` を開いていない、host の mount 元がコンテナの見ている runtime / journal と別物（identity 不一致。停止後の再確認も含む）、`$DEST` を含む mount が
-`/etc/fstab` に無い、mount 元や複製の中の symlink、候補の最後の購入を旧 Router が
+消されている、隣の `journal.lock` を開いていない、host の mount 元がコンテナの見ている runtime / journal と別物（identity 不一致。停止後の再確認も含む）、`$DEST` が root ファイル
+システムの上に直接ない（bind や別のファイルシステムで覆われている）、`$DEST` の下に mount がある（ファイル 1 つの bind も）、authoritative
+なのに `$DEST` の journal が旧 Router の開いているファイルと別物、mount 元や複製の中の symlink、候補の最後の購入を旧 Router が
 返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、複製の `sync` の失敗、旧配置（`remote-*/` の下に journal）、
 走査の失敗、`$DEST` の下に mount がある、重ねた/隠れた mount で別のディレクトリが同じ場所に見える、**最終構成で起動した新コンテナが上がらない**（Router の起動時の replay が拒む: 改行の無い末尾、JSON でない行、`seq` の飛び、
 欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナのプロセスが
@@ -558,10 +561,12 @@ inactive にならない、mask できない、443/80 に listener が残る、l
   - 名前が既に `subetha-router`（付け替え後の health 確認で止まった）: 旧コンテナは消えている。`/healthz` を確かめる（返らなければ
     `docker logs` を見る。記録は `$DEST` にあり、コンテナを消す理由は無い）。
   - どちらの場合も最後に入口を開ける（下記）。
-- どの場合も、入口を開けるのは最後: `sudo systemctl unmask --runtime caddy && sudo systemctl start caddy`。
+- どの場合も、入口は最後に扱う: `sudo systemctl unmask --runtime caddy` のうえ、停止メッセージの `it was running before: 1` のときだけ
+  `sudo systemctl start caddy`（`0` なら、移行前から止めてあった入口なので、開けない）。
 
-`$DEST`（`/var/lib/subetha-router`）は、`/etc/fstab` に載っている mount（通常は root ファイルシステム）の上の**通常のディレクトリ**であること。
-一時的な bind や重ねた mount で覆われていると止まる（再起動後に同じ経路に別の中身が現れるため）。
+`$DEST`（`/var/lib/subetha-router`）は **root ファイルシステムの上に直接ある通常のディレクトリ**であること（AL2023 の既定）。bind や別の
+ファイルシステムで覆われていると止まる（`/etc/fstab` に載っていても、`noauto` や別の source など、再起動後に同じ中身がある保証にならない）。
+別のボリュームに置く構成は本手順の対象外。
 購入記録が一つも無い Router は **0 バイトの journal ファイルがある**状態なので通り、R4 の照会だけ省かれる。
 旧配置の回収は本手順の範囲外（起動ごとに別ファイルで、`seq` もファイルごとに 1 から始まるため、単純に連結できない）。
 MCP 側からも `subetha_router_status` に最後の `paymentId` を渡して同じ記録が返ることを見れば、運用で使う経路での確認になる。
