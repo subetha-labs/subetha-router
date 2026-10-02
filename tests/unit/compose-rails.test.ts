@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { loadRuntimeConfig } from "../../src/config.js";
+import { loadRuntimeConfig, routeBindingOf } from "../../src/config.js";
 import { composeRails, type RouterCapabilities } from "../../src/main.js";
 import { TransportError, type TransportEvent } from "../../src/net/guarded-fetch.js";
 import type { EvmSigningCapability, MppTempoCapability } from "../../src/ports/outbound.js";
@@ -100,7 +100,7 @@ function compose(mode: "real" | "synthetic", capabilities: RouterCapabilities, e
   const events: TransportEvent[] = [];
   const config = loadRuntimeConfig({ ...configFor(mode), ...env }, (file) => readFileSync(file, "utf8"));
   const rails = composeRails(config, capabilities, (event) => events.push(event));
-  return { rails, events };
+  return { rails, events, config };
 }
 
 describe("composeRails transport allowances (T-A15)", () => {
@@ -130,6 +130,20 @@ describe("composeRails transport allowances (T-A15)", () => {
     const { rails } = compose("synthetic", {});
     expect(await outcomeOf(rails.outbound.readChallenge("r-x402"))).toBe("connect_failed");
     expect(await outcomeOf(rails.inbound.createOffer({ routeId: "r-x402", amount: "1500", asset: "0x0000000000000000000000000000000000005ce7", network: "eip155:11155111", routeBinding: "b", nowMs: Date.now() }))).toBe("connect_failed");
+  });
+
+  it("受信の verify / settle の文脈（route）は composeRails の包み越しに report に付く（本番の配線。T-A18）", async () => {
+    const { rails, events, config } = compose("real", { evmSigning: createSignerSpy().capability("eip155:84532"), mppTempo: createPayerSpy().capability() });
+    const route = config.router.routes["r-x402"]!;
+    // offer は route 束縛で受信 rail に引かれる。facilitator（loopback）は実能力なので拒否される。
+    const offer = { scheme: "subetha", network: "eip155:11155111", asset: "0x0000000000000000000000000000000000005ce7", amount: "1500", payTo: "0x0000000000000000000000000000000000000a0e", maxTimeoutSeconds: 60, extra: { challengeNonce: "0x01", routeBinding: routeBindingOf(route) } };
+    const credential = { x402Version: 2, accepted: offer, payload: { challengeNonce: "0x01", synthetic: true } };
+    expect(await outcomeOf(rails.inbound.verify(offer as never, credential as never, { routeId: "r-x402" }))).toBe("destination_blocked");
+    expect(await outcomeOf(rails.inbound.settle(offer as never, credential as never, { routeId: "r-x402" }))).toBe("destination_blocked");
+    expect(events.map((e) => [e.code, e.operation, e.routeId])).toEqual([
+      ["destination_blocked", "facilitator_verify", "r-x402"],
+      ["destination_blocked", "facilitator_settle", "r-x402"],
+    ]);
   });
 
   it("env では変えられない（見覚えのない変数を足しても実鍵の adapter は拒否のまま）", async () => {

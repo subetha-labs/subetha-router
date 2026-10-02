@@ -18,6 +18,9 @@ function arg(name: string, fallback: string): string {
 
 /** 設計 A の T-A17: `--after-headers stall|reset`。headers の後で body を止める / 切る（`/calls` は除く）。 */
 const afterHeaders = arg("after-headers", "none");
+/** `--after-headers-on all|challenge|verify|settle`: どの path の応答で止める / 切るか（既定は全部）。 */
+const afterHeadersOn = arg("after-headers-on", "all");
+const stallThis = (url: string): boolean => !url.startsWith("/calls") && (afterHeadersOn === "all" || url.startsWith(`/${afterHeadersOn}`));
 /** TCP 接続数（設計 A の囮・到達の試験が読む）。 */
 let connections = 0;
 
@@ -37,7 +40,7 @@ function send(response: http.ServerResponse, status: number, body: unknown): voi
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
   });
-  if (afterHeaders !== "none" && !(response.req.url ?? "").startsWith("/calls")) {
+  if (afterHeaders !== "none" && stallThis(response.req.url ?? "")) {
     // 設計 A の T-A17: headers（と content-length）は正しく返し、body を止める / 切る。
     response.write(text.slice(0, 1));
     // reset は headers がクライアントに届いてから切る（同じ tick で切ると fetch 自体が失敗し、headers 後の事象にならない）。

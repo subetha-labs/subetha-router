@@ -32,6 +32,8 @@ function stallThis(status: number): boolean {
 }
 /** TCP 接続数（設計 A の囮・到達の試験が読む）。 */
 let connections = 0;
+/** 閉じた TCP 接続数（捨てた body の接続が timeout を待たずに解放されることの観測。設計 A の T-A17 (c)(d)）。 */
+let closed = 0;
 
 const payMode = arg("pay", "ok");
 const baseAmount = arg("amount", "1200");
@@ -160,7 +162,7 @@ const server = http.createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { connections, challengeCalls, payCalls, seenQueries, seenCredentials });
+    send(response, 200, { connections, closed, challengeCalls, payCalls, seenQueries, seenCredentials });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -250,8 +252,11 @@ const server = http.createServer((request, response) => {
   );
 });
 
-server.on("connection", () => {
+server.on("connection", (socket) => {
   connections += 1;
+  socket.on("close", () => {
+    closed += 1;
+  });
 });
 server.listen(Number(arg("port", "0")), "127.0.0.1", () => {
   const address = server.address();

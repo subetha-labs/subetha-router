@@ -35,4 +35,16 @@ describe("no direct fetch outside src/net", () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  it("src/ で viem の http() transport（JSON-RPC の HTTP）を作るのは src/net/guarded-rpc.ts だけ", () => {
+    const offenders: string[] = [];
+    for (const file of walk("src")) {
+      if (file.startsWith(path.join("src", "net") + path.sep)) continue;
+      const source = readFileSync(file, "utf8");
+      if (/import\s*\{[^}]*\bhttp\b[^}]*\}\s*from\s*"viem"/.test(source) || /from\s*"viem\/clients\/transports\/http"/.test(source)) {
+        offenders.push(file);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });

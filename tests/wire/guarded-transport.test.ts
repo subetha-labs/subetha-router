@@ -7,14 +7,18 @@
  */
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import http from "node:http";
+import http2 from "node:http2";
 import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
-import { fetch as undiciFetch } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
+import { parseAddress } from "../../src/net/destination-policy.js";
 import {
   createGuardedTransport,
+  createVettedLookup,
+  discardBody,
   TransportError,
   type LookupFn,
   type TransportEvent,
@@ -23,6 +27,8 @@ import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
 
 interface Observed {
   connections: number;
+  /** 閉じた TCP 接続数（読み捨てた body の接続が閉じることの観測）。 */
+  closed: number;
   hosts: string[];
   sni: string[];
 }
@@ -50,7 +56,7 @@ async function listenHttp(
   port: number,
   mode: "ok" | "redirect" | "stall" | "reset" | "large" = "ok",
 ): Promise<Listener> {
-  const observed: Observed = { connections: 0, hosts: [], sni: [] };
+  const observed: Observed = { connections: 0, closed: 0, hosts: [], sni: [] };
   const server = track(
     http.createServer((request, response) => {
       observed.hosts.push(request.headers.host ?? "");
@@ -91,8 +97,11 @@ async function listenHttp(
       response.end(JSON.stringify({ ok: true }));
     }),
   );
-  server.on("connection", () => {
+  server.on("connection", (socket) => {
     observed.connections += 1;
+    socket.on("close", () => {
+      observed.closed += 1;
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -114,7 +123,7 @@ beforeAll(() => {
 });
 
 async function listenHttps(address: string, material: { cert: Buffer; key: Buffer }): Promise<Listener> {
-  const observed: Observed = { connections: 0, hosts: [], sni: [] };
+  const observed: Observed = { connections: 0, closed: 0, hosts: [], sni: [] };
   const server = track(
     https.createServer(
       {
@@ -131,8 +140,11 @@ async function listenHttps(address: string, material: { cert: Buffer; key: Buffe
       },
     ),
   );
-  server.on("connection", () => {
+  server.on("connection", (socket) => {
     observed.connections += 1;
+    socket.on("close", () => {
+      observed.closed += 1;
+    });
   });
   await new Promise<void>((resolve) => server.listen(0, address, () => resolve()));
   const bound = server.address() as net.AddressInfo;
@@ -253,10 +265,13 @@ describe("guarded transport: pinning (T-A3〜T-A8)", () => {
   it("T-A5: 検査済みに誰もいなければ失敗し、システム解決に落ちない（囮 0）。陽性対照と変異は囮に届く", async () => {
     const V = await unusedLoopback();
     // 囮を S の全アドレスの同じ port で聞く。port は囮の 1 つ目で決める。
+    // (iv) 囮を S の**全アドレス**の同じ port で聞く。1 つでも listen できなければ**失敗**（skip しない）。
     const first = await listenHttp(systemLocalhost[0]!.address, 0);
     const port = first.port;
-    const rest = await decoysOn(port, [systemLocalhost[0]!.address]).catch(() => [] as Listener[]);
+    const rest: Listener[] = [];
+    for (const entry of systemLocalhost.slice(1)) rest.push(await listenHttp(entry.address, port));
     const decoys = [first, ...rest];
+    expect(decoys.map((d) => d.address).sort()).toEqual(systemLocalhost.map((e) => e.address).sort());
     const { lookup, calls } = fixedLookup([[{ address: V, family: 4 }]]);
     const { events, report } = reporter();
     const transport = createGuardedTransport({ allowLoopback: true, report, lookup, interfaces: () => [] });
@@ -302,16 +317,47 @@ describe("guarded transport: pinning (T-A3〜T-A8)", () => {
     expect(decoys.map((d) => d.observed.connections)).toEqual(decoys.map(() => 0));
   });
 
-  it("T-A7: 注入した lookup の単一形式と配列形式（undici 経由は all: true）", async () => {
+  it("T-A7: 検査済み lookup は配列形式（all: true）と単一形式の両方に応える（単体）", () => {
+    const vetted = [parseAddress("127.0.0.1")!, parseAddress("::1")!];
+    const lookup = createVettedLookup(vetted);
+    const results: unknown[][] = [];
+    lookup("ignored.example", { all: true }, (...args) => results.push(args));
+    lookup("ignored.example", {}, (...args) => results.push(args));
+    lookup("ignored.example", undefined, (...args) => results.push(args));
+    // address はポリシーが正規化した文字列（`::1` は `0:0:0:0:0:0:0:1`）。undici はこれを接続先に使う。
+    expect(results).toEqual([
+      [null, [{ address: "127.0.0.1", family: 4 }, { address: vetted[1]!.text, family: 6 }]],
+      [null, "127.0.0.1", 4],
+      [null, "127.0.0.1", 4],
+    ]);
+    expect(vetted[1]!.text).toBe("0:0:0:0:0:0:0:1");
+    expect(() => createVettedLookup([])).toThrow();
+  });
+
+  it("T-A7: undici は connect.lookup を all: true で呼ぶ（spy。transport の vetting 側も all: true で解決する）", async () => {
     const fixture = await listenHttp("127.0.0.1", 0);
+    // (1) undici の呼び方そのもの: 本物の Agent に spy を渡す。
+    const seenByUndici: unknown[] = [];
+    const spy = (_hostname: string, options: unknown, callback: (...args: unknown[]) => void): void => {
+      seenByUndici.push(options);
+      callback(null, [{ address: "127.0.0.1", family: 4 }]);
+    };
+    const agent = new Agent({ allowH2: false, connect: { lookup: spy as unknown as typeof dnsLookup } });
+    const direct = await undiciFetch(`http://localhost:${fixture.port}/x`, { dispatcher: agent });
+    expect(direct.status).toBe(200);
+    await agent.close();
+    expect(seenByUndici).toHaveLength(1);
+    expect((seenByUndici[0] as { all?: unknown }).all).toBe(true);
+    // (2) transport の vetting 側の解決も all: true（A/AAAA 両方を見る。FR-A3）。
     const seen: unknown[] = [];
-    const lookup: LookupFn = (hostname, options, callback) => {
+    const lookup: LookupFn = (_hostname, options, callback) => {
       seen.push(options.all);
       callback(null, [{ address: "127.0.0.1", family: 4 }] as LookupAddress[]);
     };
     const transport = createGuardedTransport({ allowLoopback: true, report: () => {}, lookup, interfaces: () => [] });
     await transport.fetch(`http://localhost:${fixture.port}/x`, undefined, { operation: "test" });
     expect(seen).toEqual([true]);
+    expect(fixture.observed.connections).toBe(2);
   });
 
   it("T-A8: rebinding は要求単位で閉じる", async () => {
@@ -438,7 +484,22 @@ describe("guarded transport: lifetime (T-A16)", () => {
     expect(bytes.byteLength).toBe(64 * 1024 * 80);
   });
 
-  it("読まずに捨てた body は要求の timeout で閉じ、headers 後の停滞は adapter 側の報告対象（transport は 1 回も報告しない）", async () => {
+  it("読まずに捨てた body は要求の timeout で閉じる（fixture 側で socket が閉じるのを観測。transport は報告しない）", async () => {
+    const fixture = await listenHttp("127.0.0.1", 0, "stall");
+    const { lookup } = fixedLookup([[{ address: "127.0.0.1", family: 4 }]]);
+    const { events, report } = reporter();
+    const transport = createGuardedTransport({ allowLoopback: true, report, lookup, interfaces: () => [] });
+    const response = await transport.fetch(`http://localhost:${fixture.port}/stall`, { signal: AbortSignal.timeout(500) }, { operation: "test" });
+    expect(response.status).toBe(200);
+    // body は読まない。timeout（500 ms）で undici が要求を abort し、接続が閉じる。
+    const deadline = Date.now() + 3000;
+    while (fixture.observed.closed < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(fixture.observed.closed).toBe(1);
+    expect(fixture.observed.connections).toBe(1);
+    expect(events).toEqual([]);
+  });
+
+  it("headers 後の停滞を adapter が読んで失敗 → adapter が report(error, ctx) で 1 回報告する（transport は報告せず、TransportError は再報告しない）", async () => {
     const fixture = await listenHttp("127.0.0.1", 0, "stall");
     const { lookup } = fixedLookup([[{ address: "127.0.0.1", family: 4 }]]);
     const { events, report } = reporter();
@@ -458,5 +519,125 @@ describe("guarded transport: lifetime (T-A16)", () => {
     // 既に報告済みの TransportError は再報告しない。
     transport.report(new TransportError("connect_failed", ctx), ctx);
     expect(events).toHaveLength(1);
+  });
+});
+
+describe("guarded transport: failure codes before headers (T-A17 headers 前)", () => {
+  it("dns_failed: lookup の例外 → 接続 0、事象 1", async () => {
+    const fixture = await listenHttp("127.0.0.1", 0);
+    const lookup: LookupFn = (_hostname, _options, callback) => {
+      callback(Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }), []);
+    };
+    const { events, report } = reporter();
+    const transport = createGuardedTransport({ allowLoopback: true, report, lookup, interfaces: () => [] });
+    await expectTransportError(transport.fetch(`http://localhost:${fixture.port}/x`, undefined, { operation: "test" }), "dns_failed");
+    expect(fixture.observed.connections).toBe(0);
+    expect(events.map((e) => e.code)).toEqual(["dns_failed"]);
+  });
+
+  it("dns_failed: 空の解決結果", async () => {
+    const lookup: LookupFn = (_hostname, _options, callback) => callback(null, []);
+    const { events, report } = reporter();
+    const transport = createGuardedTransport({ allowLoopback: true, report, lookup, interfaces: () => [] });
+    await expectTransportError(transport.fetch("http://nowhere.test/x", undefined, { operation: "test" }), "dns_failed");
+    expect(events.map((e) => e.code)).toEqual(["dns_failed"]);
+  });
+
+  it("aborted: 呼び出し側の signal が abort 済み → 接続 0、事象 1（timeout とは区別する）", async () => {
+    const fixture = await listenHttp("127.0.0.1", 0);
+    const { lookup } = fixedLookup([[{ address: "127.0.0.1", family: 4 }]]);
+    const { events, report } = reporter();
+    const transport = createGuardedTransport({ allowLoopback: true, report, lookup, interfaces: () => [] });
+    const controller = new AbortController();
+    controller.abort();
+    await expectTransportError(transport.fetch(`http://localhost:${fixture.port}/x`, { signal: controller.signal }, { operation: "test" }), "aborted");
+    expect(fixture.observed.connections).toBe(0);
+    expect(events.map((e) => e.code)).toEqual(["aborted"]);
+  });
+
+  it("transport_failed（T-A20）: 自アドレスの列挙に失敗したら接続せず fail closed、事象ちょうど 1 回、TransportError で投げる", async () => {
+    const { events, report } = reporter();
+    const transport = createGuardedTransport({
+      allowLoopback: false,
+      report,
+      lookup: fixedLookup([[{ address: "8.8.8.8", family: 4 }]]).lookup,
+      interfaces: () => {
+        throw new Error("os.networkInterfaces failed");
+      },
+    });
+    // 公開アドレス（表では allowed）でも、自アドレスの判定ができないので接続しない。
+    const error = await expectTransportError(transport.fetch("http://dns.example/x", { signal: AbortSignal.timeout(2000) }, { operation: "test", routeId: "r" }), "transport_failed");
+    expect(error.message).not.toMatch(/8\.8\.8\.8|networkInterfaces/);
+    expect(events).toEqual([{ code: "transport_failed", operation: "test", routeId: "r", policy: expect.any(String) }]);
+    // adapter が同じ例外を report しても二重にならない。
+    transport.report(error, { operation: "test", routeId: "r" });
+    expect(events).toHaveLength(1);
+  });
+});
+
+describe("guarded transport: HTTP/1.1 only (T-A19)", () => {
+  it("h2 を提示しない: サーバが h2 を優先しても 1.1 で話す。対照（allowH2）は 2.0 になる", async () => {
+    const versions: string[] = [];
+    const server = track(
+      http2.createSecureServer({ ...TLS.provider, allowHTTP1: true }, (request, response) => {
+        versions.push(request.httpVersion);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true }));
+      }),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as net.AddressInfo).port;
+    const vetted = [parseAddress("127.0.0.1")!];
+    const transport = createGuardedTransport({
+      allowLoopback: true,
+      report: () => {},
+      lookup: fixedLookup([[{ address: "127.0.0.1", family: 4 }]]).lookup,
+      interfaces: () => [],
+      tls: { ca: [TLS.ca] },
+    });
+    const response = await transport.fetch(`https://provider.test:${port}/x`, undefined, { operation: "test" });
+    expect(response.status).toBe(200);
+    expect(versions).toEqual(["1.1"]);
+    // 対照: 同じサーバ・同じ CA・同じ固定で h2 を許した Agent は 2.0 を話す（サーバが h2 を提示していることの証明）。
+    const control = new Agent({ allowH2: true, connect: { lookup: createVettedLookup(vetted) as unknown as typeof dnsLookup, ca: [TLS.ca] } });
+    const h2 = await undiciFetch(`https://provider.test:${port}/x`, { dispatcher: control });
+    expect(h2.status).toBe(200);
+    await control.close();
+    expect(versions).toEqual(["1.1", "2.0"]);
+  });
+});
+
+describe("discardBody contract (T-A17 (d))", () => {
+  it("既にエラーになった stream、locked な stream、body 無し、null / undefined のどれでも投げず、unhandled rejection を残さない", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const errored = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error("already errored"));
+          },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(() => discardBody(errored)).not.toThrow();
+      const locked = new Response("x");
+      const reader = locked.body!.getReader();
+      expect(() => discardBody(locked)).not.toThrow();
+      reader.releaseLock();
+      expect(() => discardBody(new Response(null))).not.toThrow();
+      expect(() => discardBody(undefined)).not.toThrow();
+      expect(() => discardBody(null)).not.toThrow();
+      const healthy = new Response("abc");
+      discardBody(healthy);
+      await expect(healthy.text()).rejects.toBeDefined(); // cancel された
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

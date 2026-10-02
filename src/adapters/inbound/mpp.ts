@@ -14,15 +14,21 @@
  * 受信レグに鍵も gas 予算も持ち込まない。
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 
 import { Challenge } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import { Store } from "mppx";
+import { createClient as createViemClient } from "viem";
+import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
 import { stableJson } from "../../core/intent.js";
+import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
+import { guardedRpcTransport } from "../../net/guarded-rpc.js";
 import type {
   CreateOfferRequest,
+  InboundCallContext,
   InboundOffer,
   InboundRail,
   PaymentCredential,
@@ -59,6 +65,10 @@ export interface MppInboundOptions {
    * `settle` の分岐を実際に走らせるにはここを置き換えるしかない。
    * **本番では渡さない**（省略時は実 SDK を呼ぶ）。
    */
+  /** SSRF 防御 A の transport（必須）。SDK の JSON-RPC（receipt の照合等）はこれを通る（設計 §3.5 経路 11）。 */
+  readonly transport: GuardedTransport;
+  /** Tempo の JSON-RPC。省略時は viem の既知チェーン（4217 / 42431）の既定 URL（SDK の既定と同じ）。 */
+  readonly rpcUrl?: string;
   readonly broadcastForTest?: (credential: string, options: unknown) => Promise<unknown>;
 }
 
@@ -101,11 +111,36 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
    */
   const store = Store.memory();
 
+  /**
+   * SDK の JSON-RPC を SSRF 防御 A の transport に通す（設計 §3.5 経路 11）。SDK は `getClient` を verify / settle の
+   * 内側で呼ぶので、route は呼び出しの文脈を AsyncLocalStorage で運んで付ける。
+   */
+  const rpcContext = new AsyncLocalStorage<TransportContext>();
+  const knownChain = [tempoMainnet, tempoModerato].find((chain) => chain.id === options.chainId);
+  const rpcUrl = options.rpcUrl ?? knownChain?.rpcUrls.default.http[0];
+  const getClient = (parameters: { chainId?: number | undefined }) => {
+    if (parameters.chainId !== undefined && parameters.chainId !== options.chainId) {
+      throw new Error(`refusing to build an RPC client for chain ${parameters.chainId}`);
+    }
+    if (rpcUrl === undefined) {
+      throw new Error(`MPP inbound rpcUrl is required for chain ${options.chainId}`);
+    }
+    return createViemClient({
+      chain: knownChain ?? { ...tempoModerato, id: options.chainId },
+      transport: guardedRpcTransport(options.transport, rpcUrl, () => rpcContext.getStore() ?? { operation: "rpc" }),
+    });
+  };
+  const rpcContextOf = (context: InboundCallContext | undefined): TransportContext => ({
+    operation: "rpc",
+    ...(context === undefined ? {} : { routeId: context.routeId }),
+  });
+
   const mppx = Mppx.create({
     secretKey: options.secretKey,
     ...(options.realm === undefined ? {} : { realm: options.realm }),
     methods: [
       tempo.charge({
+        getClient,
         recipient: options.recipient as `0x${string}`,
         currency: options.currency,
         /**
@@ -200,7 +235,7 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
        * 同じ nonce になる（実測で確認済み）。`CreateOfferRequest` に一意な id が無いため、
        * ここで暗号論的乱数を混ぜる。
        */
-      const challenge: unknown = await mppx.challenge.tempo.charge({
+      const challenge: unknown = await rpcContext.run({ routeId: request.routeId, operation: "rpc" }, () => mppx.challenge.tempo.charge({
         amount: request.amount,
         /**
          * **chainId は challenge 呼び出し側で渡す。** `tempo.charge()` の factory 引数に
@@ -214,7 +249,7 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
           [META_ROUTE_BINDING]: request.routeBinding,
           [META_PAYMENT_ID]: `${request.routeId}:${request.nowMs}:${randomUUID()}`,
         },
-      });
+      }));
       if (!isRecord(challenge)) {
         throw new Error("mppx did not return a challenge");
       }
@@ -251,7 +286,7 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
      * （`tryClaim` はすべて broadcast 側にある）。したがって
      * **`verify` が通ったことを「受領した」根拠にしてはならない**。
      */
-    async verify(offer: InboundOffer, credential: PaymentCredential): Promise<{ isValid: boolean }> {
+    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
       const wire = credential.payload["credential"];
       if (typeof wire !== "string" || wire === "") {
         return { isValid: false };
@@ -260,7 +295,7 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
         // `request` は渡さない。渡すと SDK が route 要件を組み直して
         // `credential opaque does not match this route's requirements` になる（実測）。
         // 額・宛先の照合は challenge（`opaque`）に既に束縛されている。
-        await mppx.validateCredential(wire, { scope: offer.extra.routeBinding });
+        await rpcContext.run(rpcContextOf(context), () => mppx.validateCredential(wire, { scope: offer.extra.routeBinding }));
         return { isValid: true };
       } catch {
         // 検証できないまま settle へ進まない（この時点で課金は起きていない）。
@@ -276,7 +311,7 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
      * 公開状態 `awaiting_payment`（＝未払い）を表明してしまう（`orchestrator.ts:530-539`）。
      * 断定できないものはすべて `unknown` に落とす。
      */
-    async settle(offer: InboundOffer, credential: PaymentCredential): Promise<SettleResult> {
+    async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       const wire = credential.payload["credential"];
       if (typeof wire !== "string" || wire === "") {
         // 資格情報の形が違う。**課金は起きていないと断定できる**数少ない場合。
@@ -288,7 +323,7 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
         const broadcastOptions = { scope: offer.extra.routeBinding };
         receipt =
           options.broadcastForTest === undefined
-            ? await mppx.broadcastCredential(wire, broadcastOptions)
+            ? await rpcContext.run(rpcContextOf(context), () => mppx.broadcastCredential(wire, broadcastOptions))
             : await options.broadcastForTest(wire, broadcastOptions);
       } catch {
         // 例外は成否不明。自動再 settle はしない。

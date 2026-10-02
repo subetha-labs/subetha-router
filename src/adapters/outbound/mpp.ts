@@ -13,11 +13,12 @@
 
 import { Challenge, Constants, Credential, PaymentRequest, Receipt } from "mppx";
 import { Mppx, tempo } from "mppx/client";
-import { createClient as createViemClient, custom } from "viem";
+import { createClient as createViemClient, custom, type Client } from "viem";
 
 import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
-import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
+import { discardBody, type GuardedTransport, type TransportContext } from "../../net/guarded-fetch.js";
+import { guardedRpcTransport } from "../../net/guarded-rpc.js";
 import type {
   DestinationOffer,
   MppTempoCapability,
@@ -236,6 +237,34 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
   /** request-local な文脈。1 回の `pay` の中で `pay_challenge` → `pay` と進める（adapter 全体では共有しない）。 */
   type MutableContext = { routeId: string; operation: string };
 
+  type RpcRequest = (args: { method: string; params?: unknown }, options?: Record<string, unknown>) => Promise<unknown>;
+
+  /**
+   * 能力の client の JSON-RPC も SSRF 防御 A の transport に通す（設計 §3.5 経路 12）。
+   * viem の `http` transport なら、その URL で guarded な http transport を**作り直す**（能力側の fetch は使わない）。
+   * 試験用 spy（`non-signing-fixture`）の `custom` transport は HTTP を持たないのでそのまま。
+   * 実鍵で http 以外の transport は fail closed（どこへ出るか保証できない）。
+   */
+  function guardedRpcRequestOf(client: Client, ctx: MutableContext): RpcRequest {
+    const t = client.transport as { type?: unknown; url?: unknown; retryCount?: number; retryDelay?: number; timeout?: number };
+    if (t.type === "http" && typeof t.url === "string") {
+      const guarded = createViemClient({
+        ...(client.chain === undefined ? {} : { chain: client.chain }),
+        ...(client.account === undefined ? {} : { account: client.account }),
+        transport: guardedRpcTransport(transport, t.url, () => ({ routeId: ctx.routeId, operation: "rpc" }), {
+          retryCount: t.retryCount,
+          retryDelay: t.retryDelay,
+          timeout: t.timeout,
+        }),
+      });
+      return guarded.request.bind(guarded) as RpcRequest;
+    }
+    if (capability.kind === "non-signing-fixture") {
+      return client.request.bind(client) as RpcRequest;
+    }
+    throw new Error("MPP capability client must use viem's http transport (SSRF defense A)");
+  }
+
   function createClient(
     ctx: MutableContext,
     approved?: { readonly chainId: number; readonly recipient: string },
@@ -249,8 +278,13 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
           reach.touched = true;
         }
         const client = await capability.getClient(parameters);
+        const rpcRequest = guardedRpcRequestOf(client, ctx);
         if (reach === undefined) {
-          return client;
+          return createViemClient({
+            ...(client.chain === undefined ? {} : { chain: client.chain }),
+            ...(client.account === undefined ? {} : { account: client.account }),
+            transport: custom({ request: rpcRequest }, { retryCount: 0 }),
+          });
         }
         /**
          * 能力から返る client には実送金権限がある前提で、**送金系 RPC を 1 支払い 1 回**に
@@ -260,10 +294,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
          * `overrideOptions.retryCount` が無いと 3 回再試行し、`sendCalls` は本来
          * `request(args, { retryCount: 0 })` で呼ぶ）。caller の options / signal は保つ。
          */
-        const injectedRequest = client.request.bind(client) as (
-          args: { method: string; params?: unknown },
-          options?: Record<string, unknown>,
-        ) => Promise<unknown>;
+        const injectedRequest = rpcRequest;
         const guardedRequest = async (args: {
           method: string;
           params?: unknown;
@@ -328,9 +359,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       const init = baseInit();
       const response = await mppx.rawFetch(url, init);
       // SDK は challenge を headers から読み body を消費しない。読まない body は捨てる（設計 A §3.3-7）。
-      const discard = (): void => {
-        response.body?.cancel().catch(() => {});
-      };
+      const discard = (): void => discardBody(response);
       if (response.status !== 402) {
         discard();
         throw new Error(`upstream challenge returned status ${response.status}`);
@@ -392,9 +421,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       try {
         const response = await mppx.rawFetch(url, init);
         // SDK は challenge を headers から読み body を消費しない。読まない body は捨てる（設計 A §3.3-7）。
-        const discard = (): void => {
-          response.body?.cancel().catch(() => {});
-        };
+        const discard = (): void => discardBody(response);
         if (response.status !== 402) {
           discard();
           return { outcome: "not_sent", reason: "destination_challenge_unreadable" };

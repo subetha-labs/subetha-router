@@ -147,8 +147,9 @@ function inboundByRoute(
   return {
     createOffer: (request) => forRoute(request.routeId).createOffer(request),
     preflight: (offer, credential, nowMs) => forOffer(offer).preflight(offer, credential, nowMs),
-    verify: (offer, credential) => forOffer(offer).verify(offer, credential),
-    settle: (offer, credential) => forOffer(offer).settle(offer, credential),
+    // 呼び出しの文脈（route）を落とさない（運用者向け診断の route はここを通る。設計 A §3.5）。
+    verify: (offer, credential, context) => forOffer(offer).verify(offer, credential, context),
+    settle: (offer, credential, context) => forOffer(offer).settle(offer, credential, context),
   };
 }
 
@@ -295,6 +296,8 @@ export function composeRails(
         recipient: payTo,
         currency: route.source.asset,
         chainId,
+        // SDK の JSON-RPC も guarded transport を通る（設計 A §3.5 経路 11）。fixture 例外は他の受信と同じ能力で決まる。
+        transport: transportFor(inboundLoopback, report),
         // 承認期限は `min(approvalTtlMs, offerExpiry)` で切られる。既定は x402 受信と揃える。
         maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
       });

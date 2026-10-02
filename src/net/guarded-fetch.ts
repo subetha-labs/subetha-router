@@ -80,6 +80,35 @@ export type GuardedFetch = (
   context: TransportContext,
 ) => Promise<Response>;
 
+/** 検査済みアドレスだけを返す lookup（undici の `connect.lookup`）。Node の `all: true` 形式と単一形式の両方に対応する。 */
+export type VettedLookup = (hostname: string, options: unknown, callback: (...args: unknown[]) => void) => void;
+
+export function createVettedLookup(vetted: readonly ParsedAddress[]): VettedLookup {
+  if (vetted.length === 0) throw new Error("vetted address list must not be empty");
+  return (_hostname, opts, callback) => {
+    const all = typeof opts === "object" && opts !== null && (opts as { all?: unknown }).all === true;
+    if (all) {
+      callback(null, vetted.map((entry) => ({ address: entry.text, family: entry.family })));
+    } else {
+      const first = vetted[0]!;
+      callback(null, first.text, first.family);
+    }
+  };
+}
+
+/**
+ * 読まない body を捨てる（設計 §3.3-7）。null 安全。既にエラーになった stream の `cancel()` は reject するので
+ * ここで消費し、locked な stream の同期例外も無視する（捨てられない body は要求の timeout で閉じる）。
+ */
+export function discardBody(response: { readonly body?: ReadableStream<Uint8Array> | null } | null | undefined): void {
+  try {
+    const cancelled = response?.body?.cancel();
+    if (cancelled !== undefined) cancelled.catch(() => {});
+  } catch {
+    // locked 等。要求の timeout に任せる。
+  }
+}
+
 export interface GuardedTransport {
   readonly fetch: GuardedFetch;
   /** headers 後の失敗（body の読み取り等）を adapter が報告する。`TransportError` は再報告しない。 */
@@ -187,7 +216,7 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
     return vetted;
   }
 
-  const guardedFetch: GuardedFetch = async (input, init, context) => {
+  async function run(input: string | URL, init: RequestInit | undefined, context: TransportContext): Promise<Response> {
     let url: URL;
     try {
       url = input instanceof URL ? input : new URL(input);
@@ -199,23 +228,12 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
     }
     const vetted = await vet(url.hostname, context);
 
-    // 検査済みアドレスだけを返す lookup。Node の `all: true` 形式と単一形式の両方に対応する。
-    const vettedLookup = (
-      _hostname: string,
-      opts: unknown,
-      callback: (...args: unknown[]) => void,
-    ): void => {
-      const all = typeof opts === "object" && opts !== null && (opts as { all?: unknown }).all === true;
-      if (all) {
-        callback(null, vetted.map((entry) => ({ address: entry.text, family: entry.family })));
-      } else {
-        const first = vetted[0]!;
-        callback(null, first.text, first.family);
-      }
-    };
     const agent = new Agent({
+      // HTTP/1.1 だけ（設計 §3.3-8）。undici 8 は既定で h2 を許し、REFUSED_STREAM / GOAWAY で要求を自動で再送し得る。
+      // 有料要求の「1 回だけ送る」契約を transport で守るため、ALPN で h2 を提示しない。
+      allowH2: false,
       connect: {
-        lookup: vettedLookup as unknown as typeof dnsLookup,
+        lookup: createVettedLookup(vetted) as unknown as typeof dnsLookup,
         ...(options.tls?.ca === undefined ? {} : { ca: [...options.tls.ca] }),
       },
     });
@@ -234,6 +252,16 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
     // headers は返った。body は呼び出し側が後から読むので、close は待たない（進行中の要求を終えてから閉じる）。
     agent.close().catch(() => {});
     return response as unknown as Response;
+  }
+
+  const guardedFetch: GuardedFetch = async (input, init, context) => {
+    try {
+      return await run(input, init, context);
+    } catch (error) {
+      if (error instanceof TransportError) throw error;
+      // ポリシー判定・Agent 生成の予期しない失敗（自アドレスが読めない等）。接続は作っていない。fail closed（設計 §5）。
+      return fail("transport_failed", context, error);
+    }
   };
 
   return {
