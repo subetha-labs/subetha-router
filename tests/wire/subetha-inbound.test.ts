@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createSubethaInbound, SUBETHA_SCHEME } from "../../src/adapters/inbound/subetha.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
 
@@ -41,7 +42,7 @@ async function startFacilitator(args: readonly string[] = []): Promise<Listening
 }
 
 function inboundOf(fixture: Listening) {
-  return createSubethaInbound({ facilitatorUrl: fixture.baseUrl });
+  return createSubethaInbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }), facilitatorUrl: fixture.baseUrl });
 }
 
 async function issueOffer(fixture: Listening): Promise<InboundOffer> {

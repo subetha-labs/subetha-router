@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createMppOutbound } from "../../src/adapters/outbound/mpp.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer } from "../../src/ports/outbound.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
 import { createPayerSpy, SPY_PAYER_ADDRESS, TEMPO_TESTNET_CHAIN_ID } from "../fixtures/mpp-payer-spy.js";
@@ -33,7 +34,7 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
 }
 
 function railOf(fixture: Listening, spy: ReturnType<typeof createPayerSpy>) {
-  return createMppOutbound({
+  return createMppOutbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
     capability: spy.capability(),
   });
@@ -145,7 +146,7 @@ describe("mpp outbound over the installed official mppx client", () => {
   it("支払いチェーンが能力と違えば credential も送信もしない", async () => {
     const fixture = await startUpstream();
     const spy = createPayerSpy({ chainId: 4217 });
-    const rail = createMppOutbound({
+    const rail = createMppOutbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
       upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
       capability: spy.capability(),
     });
@@ -253,7 +254,7 @@ describe("mpp outbound over the installed official mppx client", () => {
   it("pull mode は credential 生成前に fail closed（課金してから未対応に気づかない）", async () => {
     const fixture = await startUpstream();
     const spy = createPayerSpy();
-    const rail = createMppOutbound({
+    const rail = createMppOutbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
       upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
       capability: spy.capability({ mode: "pull" }),
     });

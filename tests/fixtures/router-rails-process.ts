@@ -24,6 +24,8 @@ const evmNetwork = arg("evm-network", "eip155:84532");
 const capabilities: RouterCapabilities = {
   ...(rails === "b" ? {} : { evmSigning: createSignerSpy().capability(evmNetwork) }),
   ...(rails === "a" ? {} : { mppTempo: createPayerSpy().capability() }),
+  // 受信 facilitator は loopback の fixture（SSRF 防御 A の fixture 例外を明示する）。
+  fixtureFacilitators: true,
 };
 
 startRouter(capabilities).catch(reportStartupFailure);

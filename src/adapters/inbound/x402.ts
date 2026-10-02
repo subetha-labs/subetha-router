@@ -19,6 +19,7 @@
 
 import { randomBytes } from "node:crypto";
 
+import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
 import type {
   CreateOfferRequest,
   InboundOffer,
@@ -26,6 +27,7 @@ import type {
   PaymentCredential,
   PreflightResult,
   SettleResult,
+  InboundCallContext,
 } from "../../ports/inbound.js";
 
 /** x402 の EIP-3009 経路。ほかの scheme は扱わない（fail closed）。 */
@@ -55,6 +57,8 @@ const ISSUED_EXTRA_KEYS = [
 export interface X402InboundOptions {
   /** 受信 facilitator の base URL（`ROUTER_X402_INBOUND_FACILITATOR_URL`）。 */
   readonly facilitatorUrl: string;
+  /** facilitator へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
+  readonly transport: GuardedTransport;
   /** Router 自身の受取先。構成の `source.payTo`。 */
   readonly payTo: string;
   /** offer の有効期間（秒）。デモの操作時間を賄える値にする。 */
@@ -73,20 +77,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function createX402Inbound(options: X402InboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
+  const transport = options.transport;
   const maxTimeoutSeconds = options.maxTimeoutSeconds ?? 120;
   const assetDomain = options.assetDomain ?? { name: "USDC", version: "2" };
   const timeoutMs = options.timeoutMs ?? 10_000;
 
   /** 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。 */
-  async function post(path: string, body: unknown): Promise<{ status: number; json: unknown }> {
-    const response = await fetch(`${base}${path}`, {
+  async function post(
+    path: string,
+    body: unknown,
+    context: TransportContext,
+  ): Promise<{ status: number; json: unknown }> {
+    const response = await transport.fetch(`${base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
       redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
-    });
-    const text = await response.text();
+    }, context);
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
+      transport.report(error, context);
+      throw error;
+    }
     let json: unknown;
     try {
       json = text === "" ? undefined : JSON.parse(text);
@@ -202,12 +218,12 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
       return { ok: true };
     },
 
-    async verify(offer: InboundOffer, credential: PaymentCredential): Promise<{ isValid: boolean }> {
+    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
       const { status, json } = await post("/verify", {
         x402Version: 2,
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
-      });
+      }, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" });
       // 検証できないまま settle へ進まない（この時点では課金が起きていない）。
       // `invalidMessage` / `error` は読まない（facilitator の内部実装を転送しない）。
       if (status !== 200 || !isRecord(json)) {
@@ -216,13 +232,13 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
       return { isValid: json["isValid"] === true };
     },
 
-    async settle(offer: InboundOffer, credential: PaymentCredential): Promise<SettleResult> {
+    async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは呼び出し側（core）が `unknown` として確定する。自動再 settle はしない。
       const { status, json } = await post("/settle", {
         x402Version: 2,
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
-      });
+      }, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" });
       if (status >= 500) {
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }

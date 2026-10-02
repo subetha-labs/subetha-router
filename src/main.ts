@@ -18,6 +18,7 @@ import { createMppInbound } from "./adapters/inbound/mpp.js";
 import { createX402Inbound } from "./adapters/inbound/x402.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
+import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type TransportEvent } from "./net/guarded-fetch.js";
 import {
   ConfigError,
   loadRuntimeConfig,
@@ -60,6 +61,11 @@ export interface RouterCapabilities {
   readonly evmSigning?: EvmSigningCapability;
   /** 送信レール B（MPP / Tempo charge）の支払い能力。 */
   readonly mppTempo?: MppTempoCapability;
+  /**
+   * 受信 facilitator が loopback の fixture であることを**明示**する能力（SSRF 防御 A §3.4）。
+   * `tests/fixtures/router-*-process.ts` のような fixture 起動だけが渡す。本番の入口は渡さない。
+   */
+  readonly fixtureFacilitators?: true;
 }
 
 /**
@@ -146,9 +152,24 @@ function inboundByRoute(
   };
 }
 
+/** 運用者向けの transport 診断の出口（core の `note` と同じ stderr）。 */
+export function reportTransportToStderr(write: (message: string) => void): (event: TransportEvent) => void {
+  return (event) => write(`${formatTransportEvent(event)}\n`);
+}
+
+/**
+ * adapter ごとの transport（SSRF 防御 A §3.4）。`allowLoopback` は**その adapter の能力**だけで決める:
+ * 実能力は常に false、fixture の能力（`non-signing-fixture`、synthetic、`fixtureFacilitators`）だけ true。
+ * env / 設定からは変えられない。
+ */
+export function transportFor(allowLoopback: boolean, report: (event: TransportEvent) => void): GuardedTransport {
+  return createGuardedTransport({ allowLoopback, report });
+}
+
 export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
+  report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
 ): { inbound: InboundRail; outbound: OutboundRail } {
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
@@ -156,8 +177,8 @@ export function composeRails(
       throw new SignerNotAuthorizedError();
     }
     return {
-      inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl }),
-      outbound: createSyntheticX402Outbound({ upstreams: config.synthetic.upstreams }),
+      inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl, transport: transportFor(true, report) }),
+      outbound: createSyntheticX402Outbound({ upstreams: config.synthetic.upstreams, transport: transportFor(true, report) }),
     };
   }
 
@@ -186,7 +207,11 @@ export function composeRails(
         // 実 SDK 配線はできているが、署名能力が無い。偽の署名者で代替しない。
         throw new SignerNotAuthorizedError();
       }
-      rails[rail] = createX402Outbound({ upstreams: upstreamsFor(rail), capability });
+      rails[rail] = createX402Outbound({
+        upstreams: upstreamsFor(rail),
+        capability,
+        transport: transportFor(capability.kind === "non-signing-fixture", report),
+      });
       continue;
     }
     if (rail === "mpp") {
@@ -194,7 +219,11 @@ export function composeRails(
       if (capability === undefined) {
         throw new SignerNotAuthorizedError();
       }
-      rails[rail] = createMppOutbound({ upstreams: upstreamsFor(rail), capability });
+      rails[rail] = createMppOutbound({
+        upstreams: upstreamsFor(rail),
+        capability,
+        transport: transportFor(capability.kind === "non-signing-fixture", report),
+      });
       continue;
     }
     // 知らないレール名は合成にも落とさず起動を止める。
@@ -202,8 +231,12 @@ export function composeRails(
   }
 
   // 受信レールも route ごとに選ぶ（既定は subetha＝既存構成をそのまま維持）。
+  const inboundLoopback = capabilities.fixtureFacilitators === true;
   const inboundRails: Record<string, InboundRail> = {
-    subetha: createSubethaInbound({ facilitatorUrl: real.subethaFacilitatorUrl }),
+    subetha: createSubethaInbound({
+      facilitatorUrl: real.subethaFacilitatorUrl,
+      transport: transportFor(inboundLoopback, report),
+    }),
   };
   const usesX402Inbound = Object.values(config.router.routes).some(
     (route) => route.sourceRail === "x402",
@@ -224,6 +257,7 @@ export function composeRails(
       inboundRails[`x402:${route.routeId}`] = createX402Inbound({
         facilitatorUrl: real.x402InboundFacilitatorUrl,
         payTo,
+        transport: transportFor(inboundLoopback, report),
         // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
         // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
         ...(real.x402InboundOfferSeconds === undefined
@@ -307,6 +341,10 @@ function evidenceLabelOf(config: RuntimeConfig, capabilities: RouterCapabilities
  *
  * 判定はホスト名の文字列のみ。**DNS は引かない**ので、
  * 公開名が内部アドレスに解決する場合は検出できない（既知の限界）。
+ */
+/**
+ * 起動時の**文字列**検査（警告のみ）。強制は SSRF 防御 A の transport（`src/net/guarded-fetch.ts`）が
+ * 接続前に行う。ここは運用者が設定ミスに早く気付くための補助で、無くても守りは変わらない。
  */
 export function warnIfInternalUpstream(
   upstreams: Readonly<Record<string, string>>,

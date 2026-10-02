@@ -13,6 +13,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer } from "../../src/ports/outbound.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
 import { createForbiddenSignerSpy, createSignerSpy } from "../fixtures/x402-signer-spy.js";
@@ -35,7 +36,7 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
 }
 
 function railOf(fixture: Listening, spy: ReturnType<typeof createSignerSpy>) {
-  return createX402Outbound({
+  return createX402Outbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
     capability: spy.capability(NETWORK),
   });

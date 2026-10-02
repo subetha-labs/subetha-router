@@ -12,6 +12,7 @@ import { getAddress } from "viem";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer } from "../../src/ports/outbound.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
 import { createForbiddenSignerSpy, createSignerSpy, type SignerSpy } from "../fixtures/x402-signer-spy.js";
@@ -36,7 +37,7 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
 }
 
 function railOf(fixture: Listening, spy: SignerSpy, network = NETWORK) {
-  return createX402Outbound({
+  return createX402Outbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
     capability: spy.capability(network),
   });
@@ -298,7 +299,7 @@ describe("x402 outbound over the installed official SDK", () => {
 
   it("署名しない能力は loopback 以外の上流に向けられない", async () => {
     expect(() =>
-      createX402Outbound({
+      createX402Outbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
         upstreams: { [ROUTE_ID]: "https://example.com/v1/eth/snapshot" },
         capability: createSignerSpy().capability(NETWORK),
       }),

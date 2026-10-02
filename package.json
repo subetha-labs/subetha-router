@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "test": "vitest run",
@@ -24,6 +24,7 @@
     "@x402/fetch": "2.27.0",
     "fs-ext": "2.1.1",
     "mppx": "0.11.0",
+    "undici": "8.11.2",
     "viem": "2.54.0"
   },
   "devDependencies": {

@@ -3,9 +3,11 @@
  * Unpaid: only createOffer (a challenge) and preflight checks. Never calls settle.
  */
 import { createSubethaInbound, SUBETHA_SCHEME } from "../src/adapters/inbound/subetha.js";
+import { createGuardedTransport, formatTransportEvent } from "../src/net/guarded-fetch.js";
 
 const url = process.env.FAC_URL ?? "http://127.0.0.1:4042";
-const inbound = createSubethaInbound({ facilitatorUrl: url });
+const transport = createGuardedTransport({ allowLoopback: false, report: (event) => process.stderr.write(`${formatTransportEvent(event)}\n`) });
+const inbound = createSubethaInbound({ transport, facilitatorUrl: url });
 const routeBinding = "u01r-live|GET|%2Fv1%2Froutes%2Fu01r-live%2Fresource";
 
 const offer = await inbound.createOffer({

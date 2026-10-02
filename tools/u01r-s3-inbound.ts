@@ -7,6 +7,7 @@ import { createWalletClient, createPublicClient, http, erc20Abi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 import { createSubethaInbound } from "../src/adapters/inbound/subetha.js";
+import { createGuardedTransport, formatTransportEvent } from "../src/net/guarded-fetch.js";
 
 const facUrl = process.env.FAC_URL ?? "http://127.0.0.1:4042";
 const rpc = process.env.RPC_URL!;
@@ -17,7 +18,8 @@ const token = "0xADAb5CaB352fb1eBF24CD951de224f9e952C82Ed" as const;
 const account = privateKeyToAccount(pk);
 const pub = createPublicClient({ chain: sepolia, transport: http(rpc) });
 const wallet = createWalletClient({ account, chain: sepolia, transport: http(rpc) });
-const inbound = createSubethaInbound({ facilitatorUrl: facUrl });
+const transport = createGuardedTransport({ allowLoopback: false, report: (event) => process.stderr.write(`${formatTransportEvent(event)}\n`) });
+const inbound = createSubethaInbound({ transport, facilitatorUrl: facUrl });
 
 const before = await pub.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
 console.log(`payer ${account.address}  zETH before: ${before}`);

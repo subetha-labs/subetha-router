@@ -17,6 +17,7 @@ import { createClient as createViemClient, custom } from "viem";
 
 import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
+import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
 import type {
   DestinationOffer,
   MppTempoCapability,
@@ -33,6 +34,8 @@ export interface MppOutboundOptions {
   readonly upstreams: Readonly<Record<string, string>>;
   /** 支払い能力（無いまま組み立てない。呼び出し側が fail closed を決める）。 */
   readonly capability: MppTempoCapability;
+  /** 上流へ出る全要求（`mppx.rawFetch` を含む）が通る transport（SSRF 防御 A。必須）。 */
+  readonly transport: GuardedTransport;
   readonly timeoutMs?: number;
 }
 
@@ -228,7 +231,13 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
    * 公式 client を 1 支払いごとに組む。承認済み offer があるときは、実 SDK 側の
    * 受取先・チェーン allowlist にも承認値そのものを渡す（SDK が先に弾く）。
    */
+  const transport = options.transport;
+
+  /** request-local な文脈。1 回の `pay` の中で `pay_challenge` → `pay` と進める（adapter 全体では共有しない）。 */
+  type MutableContext = { routeId: string; operation: string };
+
   function createClient(
+    ctx: MutableContext,
     approved?: { readonly chainId: number; readonly recipient: string },
     /** 注入された支払い能力への到達と送金要求回数を記録する。 */
     reach?: { touched: boolean; sends: number },
@@ -296,6 +305,9 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     });
     return Mppx.create({
       methods: [method],
+      // 全要求（rawFetch）を SSRF 防御 A の transport に通す。文脈は呼び出し時の ctx を読む。
+      fetch: ((url: string | URL | Request, init?: RequestInit) =>
+        transport.fetch(url instanceof Request ? url.url : url, init, ctx as TransportContext)) as typeof globalThis.fetch,
       // `globalThis.fetch` を置き換えない。自動支払いリトライもしない。
       polyfill: false,
       maxPaymentRetries: 0,
@@ -312,14 +324,24 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     /** 上流の現在の challenge を読む（純粋読取・無課金・credential を作らない）。 */
     async readChallenge(routeId: string): Promise<readonly DestinationOffer[]> {
       const url = urlFor(routeId);
-      const mppx = createClient();
+      const mppx = createClient({ routeId, operation: "challenge" });
       const init = baseInit();
       const response = await mppx.rawFetch(url, init);
+      // SDK は challenge を headers から読み body を消費しない。読まない body は捨てる（設計 A §3.3-7）。
+      const discard = (): void => {
+        response.body?.cancel().catch(() => {});
+      };
       if (response.status !== 402) {
+        discard();
         throw new Error(`upstream challenge returned status ${response.status}`);
       }
       // 実 SDK に challenge を解析・選択させる（自前の解釈で置き換えない）。
-      const prepared = await mppx.preparePayment(response, { request: init });
+      let prepared;
+      try {
+        prepared = await mppx.preparePayment(response, { request: init });
+      } finally {
+        discard();
+      }
       const offers: DestinationOffer[] = [];
       for (const challenge of prepared.challenges) {
         const view = viewOf(challenge);
@@ -361,18 +383,29 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       // push mode では credential 生成の途中で既に broadcast され得るので、能力に触れたかを
       // 記録し、触れた後の失敗は `not_sent` と断定しない。
       const reach = { touched: false, sends: 0 };
-      const mppx = createClient({ chainId, recipient: approved.payTo }, reach);
+      const ctx: MutableContext = { routeId: request.routeId, operation: "pay_challenge" };
+      const mppx = createClient(ctx, { chainId, recipient: approved.payTo }, reach);
       const init = baseInit();
 
       // 送金直前に読み直す（凍結した challenge をそのまま払わない）。
       let prepared;
       try {
         const response = await mppx.rawFetch(url, init);
+        // SDK は challenge を headers から読み body を消費しない。読まない body は捨てる（設計 A §3.3-7）。
+        const discard = (): void => {
+          response.body?.cancel().catch(() => {});
+        };
         if (response.status !== 402) {
+          discard();
           return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
         }
-        prepared = await mppx.preparePayment(response, { request: init });
+        try {
+          prepared = await mppx.preparePayment(response, { request: init });
+        } finally {
+          discard();
+        }
       } catch {
+        // transport の失敗は既に報告済み。SDK の解析失敗は接続後の事象で、固定の結果に変える。
         return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
       }
 
@@ -422,6 +455,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
         expectedReference = undefined;
       }
 
+      ctx.operation = "pay";
       let response: Response;
       try {
         // 1 要求 1 回だけ。402 を受けても再作成・再送信をしない。
@@ -472,7 +506,9 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
           body = contentType.includes("application/json")
             ? await response.json()
             : await response.text();
-        } catch {
+        } catch (error) {
+          // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
+          transport.report(error, ctx);
           body = undefined;
         }
         if (!contentType.includes("application/json") || !isRecord(body)) {

@@ -525,7 +525,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
     let verified: { isValid: boolean };
     try {
-      verified = await options.inbound.verify(intent.source.offer, credential);
+      verified = await options.inbound.verify(intent.source.offer, credential, { routeId: intent.routeId });
     } catch {
       // 受信レールの応答が取れない以上、課金有無を証明できない。
       await store.append(intent.paymentId, "unknown", {
@@ -566,7 +566,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 宣言型ではなく実際の値として扱う（相手の振る舞いは型では保証されない）。
     let settled: unknown;
     try {
-      settled = await options.inbound.settle(intent.source.offer, credential);
+      settled = await options.inbound.settle(intent.source.offer, credential, { routeId: intent.routeId });
     } catch {
       // 例外・タイムアウトは必ず `unknown`。自動再 settle はしない。
       await store.append(intent.paymentId, "unknown", {

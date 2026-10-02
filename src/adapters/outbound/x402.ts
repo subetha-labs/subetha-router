@@ -18,6 +18,7 @@ import { getAddress } from "viem";
 
 import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
+import type { GuardedTransport } from "../../net/guarded-fetch.js";
 import type {
   DestinationOffer,
   EvmSigningCapability,
@@ -29,6 +30,8 @@ import type {
 export interface SyntheticX402Options {
   /** `routeId` → 上流 canonical URL（loopback の fixture に限る）。 */
   readonly upstreams: Readonly<Record<string, string>>;
+  /** 上流へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
+  readonly transport: GuardedTransport;
   readonly timeoutMs?: number;
 }
 
@@ -61,6 +64,7 @@ function offerOf(value: unknown): DestinationOffer | undefined {
 
 export function createSyntheticX402Outbound(options: SyntheticX402Options): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 5_000;
+  const transport = options.transport;
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
   const upstreams = new Map<string, string>();
   for (const [routeId, raw] of Object.entries(options.upstreams)) {
@@ -82,15 +86,22 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
   return {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
     async readChallenge(routeId: string): Promise<readonly DestinationOffer[]> {
-      const response = await fetch(urlFor(routeId), {
+      const ctx = { routeId, operation: "challenge" };
+      const response = await transport.fetch(urlFor(routeId), {
         method: "GET",
         redirect: "error",
         signal: AbortSignal.timeout(timeoutMs),
-      });
+      }, ctx);
       if (response.status !== 402) {
         throw new Error(`upstream challenge returned status ${response.status}`);
       }
-      const json: unknown = await response.json();
+      let json: unknown;
+      try {
+        json = await response.json();
+      } catch (error) {
+        transport.report(error, ctx);
+        throw error;
+      }
       if (!isRecord(json) || !Array.isArray(json["accepts"])) {
         throw new Error("upstream challenge has no accepts[]");
       }
@@ -123,19 +134,21 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
       ).toString("base64");
 
       // 1 要求 1 回だけ。402 を受けても再送しない（自動支払いリトライ無効）。
-      const response = await fetch(urlFor(request.routeId), {
+      const ctx = { routeId: request.routeId, operation: "pay" };
+      const response = await transport.fetch(urlFor(request.routeId), {
         method: "GET",
         headers: { "x-payment": credential },
         redirect: "error",
         signal: AbortSignal.timeout(timeoutMs),
-      });
+      }, ctx);
       const receipt = response.headers.get("x-payment-response");
 
       if (response.status === 200) {
         let body: unknown;
         try {
           body = await response.json();
-        } catch {
+        } catch (error) {
+          transport.report(error, ctx);
           return { outcome: "unknown", reason: "destination_pay_unknown" };
         }
         return {
@@ -179,6 +192,8 @@ export interface X402OutboundOptions {
   readonly upstreams: Readonly<Record<string, string>>;
   /** 署名能力（無いまま組み立てない。呼び出し側が fail closed を決める）。 */
   readonly capability: EvmSigningCapability;
+  /** 上流へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
+  readonly transport: GuardedTransport;
   readonly timeoutMs?: number;
 }
 
@@ -251,6 +266,7 @@ interface Challenge {
 export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 5_000;
   const capability = options.capability;
+  const transport = options.transport;
 
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
   const upstreams = new Map<string, string>();
@@ -278,17 +294,23 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   }
 
   /** 純粋読取の GET（支払いヘッダを付けない）。 */
-  async function getChallenge(url: string): Promise<Challenge> {
-    const response = await fetch(url, {
+  async function getChallenge(url: string, ctx: { routeId: string; operation: string }): Promise<Challenge> {
+    const response = await transport.fetch(url, {
       method: "GET",
       redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
-    });
+    }, ctx);
     if (response.status !== 402) {
       throw new Error(`upstream challenge returned status ${response.status}`);
     }
     const header = response.headers.get("PAYMENT-REQUIRED");
-    const body: unknown = await response.text();
+    let body: unknown;
+    try {
+      body = await response.text();
+    } catch (error) {
+      transport.report(error, ctx);
+      throw error;
+    }
     if (header === null || header === "") {
       throw new Error("upstream challenge has no v2 PAYMENT-REQUIRED header");
     }
@@ -328,7 +350,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   return {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
     async readChallenge(routeId: string): Promise<readonly DestinationOffer[]> {
-      return offersOf(await getChallenge(urlFor(routeId)));
+      return offersOf(await getChallenge(urlFor(routeId), { routeId, operation: "challenge" }));
     },
 
     async pay(request: PayRequest): Promise<PayResult> {
@@ -344,7 +366,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       let challenge: Challenge;
       try {
         // 送金直前に読み直す（凍結した accepts をそのまま渡さない）。
-        challenge = await getChallenge(url);
+        challenge = await getChallenge(url, { routeId: request.routeId, operation: "pay_challenge" });
       } catch {
         // まだ何も送っていない。
         return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
@@ -456,17 +478,18 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };
       }
 
+      const payCtx = { routeId: request.routeId, operation: "pay" };
       let response: Response;
       try {
         // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。
-        response = await fetch(url, {
+        response = await transport.fetch(url, {
           method: "GET",
           headers: httpClient.encodePaymentSignatureHeader(payload),
           redirect: "error",
           signal: AbortSignal.timeout(timeoutMs),
-        });
+        }, payCtx);
       } catch {
-        // 送ったかどうか分からない。自動再送しない（durable unknown）。
+        // 送ったかどうか分からない。自動再送しない（durable unknown）。transport は既に報告済み。
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
 
@@ -476,7 +499,9 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       let parsedResult;
       try {
         parsedResult = await httpClient.processResponse(response);
-      } catch {
+      } catch (error) {
+        // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
+        transport.report(error, payCtx);
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
       const header = parsedResult.header;

@@ -25,6 +25,19 @@ function arg(name: string, fallback: string): string {
   return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
 }
 
+/** 設計 A の T-A17: `--after-headers stall|reset`。headers の後で body を止める / 切る（`/calls` は除く）。 */
+const afterHeaders = arg("after-headers", "none");
+/** どの応答に効かせるか: `all`（既定）、`challenge`（402 だけ）、`pay`（402 以外だけ）。 */
+const afterHeadersOn = arg("after-headers-on", "all");
+function stallThis(status: number): boolean {
+  if (afterHeaders === "none") return false;
+  if (afterHeadersOn === "challenge") return status === 402;
+  if (afterHeadersOn === "pay") return status !== 402;
+  return true;
+}
+/** TCP 接続数（設計 A の囮・到達の試験が読む）。 */
+let connections = 0;
+
 const payMode = arg("pay", "ok");
 const baseAmount = arg("amount", "900");
 const changeAfter = Number(arg("change-after", "0"));
@@ -103,6 +116,13 @@ function send(
     "content-length": Buffer.byteLength(text),
     ...headers,
   });
+  if (stallThis(status) && !(response.req.url ?? "").startsWith("/calls")) {
+    // 設計 A の T-A17: headers（と content-length）は正しく返し、body を止める / 切る。
+    response.write(text.slice(0, 1));
+    // reset は headers がクライアントに届いてから切る（同じ tick で切ると fetch 自体が失敗し、headers 後の事象にならない）。
+    if (afterHeaders === "reset") setTimeout(() => response.socket?.destroy(), 50);
+    return;
+  }
   response.end(text);
 }
 
@@ -151,7 +171,7 @@ const server = http.createServer((request, response) => {
   const canonicalUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}${SNAPSHOT_PATH}`;
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { challengeCalls, payCalls, seenQueries, seenPayments });
+    send(response, 200, { connections, challengeCalls, payCalls, seenQueries, seenPayments });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -243,6 +263,9 @@ const server = http.createServer((request, response) => {
   );
 });
 
+server.on("connection", () => {
+  connections += 1;
+});
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   const actual = typeof address === "object" && address !== null ? address.port : 0;
