@@ -322,13 +322,13 @@ N=subetha-router-new                                      # 検証中の新コ�
 DEST=/var/lib/subetha-router                              # 新コンテナが mount する場所（§6 手順 4 と同じ）
 ENVF=/etc/subetha-router.env
 IMAGE=subetha-router
-GATE=caddy.service                                        # 127.0.0.1:8787 へ転送する唯一の入口（§7）
-NID=""; FINAL=0; STOPPED_GATE=0
+GATE=caddy.service                                        # 127.0.0.1:8787 へ転送する唯一の入口（§7）。unit は /usr/lib/systemd/system（公式パッケージ）
+NID=""; FINAL=0; STOPPED_GATE=0; DEST_ROLE=undetermined
 cleanup() { rc=$?; rm -f /tmp/journal.peek /tmp/journal.verify
   if [ "$rc" -ne 0 ] && [ "$FINAL" = 0 ]; then
     # このスクリプトが `docker create` で作った新コンテナ（その ID）だけを消す。名前では消さない（前回の残骸や旧コンテナに触らない）
     [ -z "$NID" ] || docker rm -f "$NID" >/dev/null 2>&1 || true
-    echo "stopped with exit $rc: the old container is untouched; ingress ($GATE) stays closed (stopped by this script: $STOPPED_GATE). See the recovery notes below the script" >&2
+    echo "stopped with exit $rc: the old container is untouched; ingress ($GATE) stays stopped and runtime-masked (it was running before: $STOPPED_GATE); $DEST is $DEST_ROLE. See the recovery notes below the script" >&2
   fi; exit "$rc"; }
 trap cleanup EXIT
 real() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
@@ -350,12 +350,20 @@ inner() { docker logs "$1" 2>&1 | sed -n 's/^router: //p' | tail -n1 | python3 -
 r4() { docker exec "$1" node -e 'fetch("http://127.0.0.1:"+process.argv[1]+"/v1/purchases/"+process.argv[2],{headers:{"x-router-principal":"judge",authorization:"Bearer public"}}).then(r=>{console.log("R4 status",r.status);process.exit(r.status===200?0:1)})' "$2" "$3"; }
 # コンテナのプロセスが開いているファイルのうち名前が $2 で終わるものを、host の /proc から（コンテナの中の経路のまま）列挙する
 openfiles() { local pid; for pid in $(docker top "$1" -o pid | tail -n +2 | tr -d ' '); do readlink /proc/"$pid"/fd/* 2>/dev/null | grep -F -- "$2" || true; done | sort -u; }
-# 0) 入口を閉じる。止めて、止まったことと 443/80 に listener が無いことを確認する。既に止まっていればそのまま。
-#    成功したときだけ（このスクリプトが止めた場合に）開け直す
-if [ "$(systemctl is-active "$GATE" 2>/dev/null || true)" = active ]; then systemctl stop "$GATE"; STOPPED_GATE=1; fi
-[ "$(systemctl is-active "$GATE" 2>/dev/null || true)" != active ] || { echo "$GATE is still active"; exit 1; }
-[ -z "$(ss -Hltn '( sport = :443 or sport = :80 )')" ] || { echo "something still listens on 443/80:"; ss -Hltnp '( sport = :443 or sport = :80 )'; exit 1; }
-echo "ingress closed ($GATE inactive, nothing on 443/80)"
+# 0) 入口を閉じる。Caddy を止め（起動中なら起動を取り消し）、runtime mask で誰も起動できないようにし、状態が **inactive そのもの**で
+#    あること（activating などの途中状態は不可）と、443/80 に listener が無いこと（列挙の失敗も不可）を確認する。
+#    開始時に動いていた（active / activating / reloading）場合だけ、成功後に開け直す
+PRE=$(systemctl is-active "$GATE" 2>/dev/null || true)
+case "$PRE" in active|activating|reloading) STOPPED_GATE=1 ;; esac
+systemctl stop "$GATE" 2>/dev/null || true
+systemctl reset-failed "$GATE" 2>/dev/null || true
+systemctl mask --runtime "$GATE"
+[ "$(systemctl is-enabled "$GATE" 2>/dev/null || true)" = masked-runtime ] || { echo "$GATE is not runtime-masked"; exit 1; }
+STATE=$(systemctl is-active "$GATE" 2>/dev/null || true)
+[ "$STATE" = inactive ] || { echo "$GATE is not inactive (state: $STATE)"; exit 1; }
+LISTEN=$(ss -Hltn '( sport = :443 or sport = :80 )')
+[ -z "$LISTEN" ] || { echo "something still listens on 443/80:"; printf '%s\n' "$LISTEN"; exit 1; }
+echo "ingress closed ($GATE was $PRE; now inactive and runtime-masked, nothing on 443/80)"
 # 1) 旧 Router が実際に使っている journal を確定する（まだ何も止めない）
 [ "$(docker inspect -f '{{.State.Running}}' "$R")" = true ] || { echo "$R must be running (this script stops it itself)"; exit 1; }
 ! docker inspect "$N" >/dev/null 2>&1 || { echo "a container named $N exists from an earlier attempt: inspect and remove it first"; exit 1; }
@@ -370,6 +378,8 @@ for m in json.load(sys.stdin):
     elif d=="/" or "/app/runtime".startswith(d+"/") or d.startswith("/app/runtime/"):
         sys.exit("unsupported mount layout: a mount at %s overlaps /app/runtime" % d)
 print(src)')
+if [ -n "$SRC" ] && [ "$(real "$SRC")" = "$(real "$DEST")" ]; then DEST_ROLE=authoritative; else DEST_ROLE=copy; fi
+echo "$DEST is $DEST_ROLE ($([ "$DEST_ROLE" = authoritative ] && echo "the old Router already stores its journal there: nothing is copied and nothing there may be deleted" || echo "a copy of the old Router's runtime"))"
 #    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
 #       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
 J=$(openfiles "$R" .ndjson)
@@ -402,7 +412,7 @@ docker stop "$R"
 #    $DEST に**内容の違う** journal が既にあれば上書きせずに止まる（前の試行で何かが書いた可能性。journal.lock は flock 用の常設ファイルで、写しても害は無い）
 mkdir -p "$DEST"
 if [ -n "$SRC" ]; then
-  if [ "$SRC" != "$DEST" ]; then
+  if [ "$DEST_ROLE" = copy ]; then
     [ ! -e "$DEST/$JP" ] || cmp "$SRC/$JP" "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }
     cp -a "$SRC/." "$DEST/"; cmp "$SRC/$JP" "$DEST/$JP"
   fi
@@ -458,13 +468,14 @@ docker rm "$R"
 docker rename "$NID" "$R"
 [ "$(docker inspect -f '{{.Id}}' "$R")" = "$NID" ]
 H=$(curl -sf http://127.0.0.1:8787/healthz); [[ "$H" == *'"router":"up"'* ]]
-if [ "$STOPPED_GATE" = 1 ]; then systemctl start "$GATE"; [ "$(systemctl is-active "$GATE")" = active ]; echo "ingress reopened ($GATE active)"
-else echo "ingress ($GATE) was not active when this script started: left as is"; fi
+systemctl unmask --runtime "$GATE"
+if [ "$STOPPED_GATE" = 1 ]; then systemctl start "$GATE"; [ "$(systemctl is-active "$GATE")" = active ]; echo "ingress reopened ($GATE unmasked and active)"
+else echo "ingress ($GATE) was not running when this script started: unmasked, left stopped"; fi
 echo "migration complete: $ROWS journal rows reopened by the new container"
 ```
 
-止まる条件（どれも旧コンテナを消さず、作りかけの新コンテナは消し、入口は閉じたまま）: 入口が閉じない（Caddy が止まらない、443/80 に
-listener が残る）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
+止まる条件（どれも旧コンテナを消さず、作りかけの新コンテナは消し、入口は止めたまま runtime mask も残す）: 入口が閉じない（Caddy が
+inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
 以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
 消されている、隣の `journal.lock` を開いていない、mount 元や複製の中の symlink、mount 元に journal が無い、候補の最後の購入を旧 Router が
 返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、旧配置（`remote-*/` の下に journal）、
@@ -472,15 +483,19 @@ listener が残る）、旧 Router が動いていない、前回の `subetha-ro
 欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナのプロセスが
 開いている journal が旧と違う、元の行が変わっている、flock の保持者が新コンテナでない、新コンテナが最後の購入を返さない。
 
-**止まった後の復旧**（入口は閉じたまま。先に状態を見る）:
-- 手順 5 までで止まった場合、新コンテナは消えている。`$DEST` に journal が残っていれば、旧 Router の journal と比べる
-  （`cmp /var/lib/subetha-router-old/... /var/lib/subetha-router/journal.ndjson` の要領。同じなら消してよい。
-  `"event":"unknown"` かつ `"reason":"interrupted_at_restart"` の行が後ろに足されているだけなら、新コンテナの起動が足したもので、
-  消してよい。それ以外の行が増えていたら、旧 journal に無い記録なので消さずに調べる。入口が閉じていればこれは起きない）。
-  旧 Router に戻すなら `sudo docker start subetha-router` → `/healthz` → `sudo systemctl start caddy`。直して再実行するなら
-  旧 Router を起動してから（スクリプトは動いている旧 Router を要求する）。
+**止まった後の復旧**（入口は止まったまま runtime mask されている。先に状態を見る。停止メッセージに `$DEST` の役割が出る）:
+- **`authoritative`**（旧 Router が最初から `/var/lib/subetha-router` を mount していた）: `$DEST` は旧 Router の記録そのもの。
+  **何も消さない**（journal も `journal.lock` も）。新コンテナが起動まで進んで `"event":"unknown"` / `"reason":"interrupted_at_restart"` の
+  行を足していても、それは Router の正規の記録（旧 Router も次の起動で同じことをする）。旧 Router に戻すなら
+  `sudo docker start subetha-router` → `/healthz`。
+- **`copy`**（旧 Router の mount 元が別の場所、または mount 無し）: `$DEST` は複製。手順 5 までで止まったなら新コンテナは消えている。
+  `$DEST` の journal を旧 Router の journal（mount 元のファイル。mount 無しなら `docker cp subetha-router:/app/runtime/journal.ndjson` で
+  取り出す）と比べ、同じか、`unknown` / `interrupted_at_restart` の行が後ろに足されているだけなら、`$DEST` を消して再実行してよい。
+  それ以外の行が増えていたら、旧 journal に無い記録なので消さずに調べる（入口が閉じていれば起きない）。
+  旧 Router に戻すなら `sudo docker start subetha-router` → `/healthz`。再実行は旧 Router を起動してから（スクリプトは動いている旧 Router を要求する）。
 - 手順 6 に入ってから止まった場合（`all checks passed` の後）は、新コンテナがもう動いていて記録も開いている。残っている旧コンテナを
-  `docker rm` し、`docker rename subetha-router-new subetha-router` し、`sudo systemctl start caddy` して終える。
+  `docker rm` し、`docker rename subetha-router-new subetha-router` して終える。
+- どの場合も、入口を開けるのは最後: `sudo systemctl unmask --runtime caddy && sudo systemctl start caddy`。
 
 購入記録が一つも無い Router は **0 バイトの journal ファイルがある**状態なので通り、R4 の照会だけ省かれる。
 旧配置の回収は本手順の範囲外（起動ごとに別ファイルで、`seq` もファイルごとに 1 から始まるため、単純に連結できない）。
