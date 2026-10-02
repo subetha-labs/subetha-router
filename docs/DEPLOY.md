@@ -307,17 +307,23 @@ subnet が RFC1918 であることを確認する）。
 
 既に既定 bridge（docker0）で動いている Router を移す場合。journal（既定 `/app/runtime/journal.ndjson`）は
 **過去の paymentId の唯一の記録**なので、次の順序を**ファイルに保存して `sudo bash -e` で実行する**。
-**旧 Router が動いている状態で**実行する（スクリプトが止める。止める前に、journal の実際の解決先と、候補が旧 Router の
-使っている journal であることを旧 Router 自身で確かめるため）。どの段階でも失敗したらそこで止まり、**古いコンテナは手順 5 まで削除されない**。
+**旧 Router が動いている状態で**実行する（スクリプトが止める。止める前に、旧 Router が**実際に開いている** journal を host の
+`/proc` で見て、その最後の購入を旧 Router 自身が返すことを確かめるため）。設定ファイルを自前で解釈して journal の場所を
+推定することはしない（Docker の env-file の解釈と食い違い得る）。新コンテナは**最終構成のまま**先に起動して検証し、
+全部通ってから旧コンテナを消して名前を付け替える。どの段階で失敗しても旧コンテナは残り、作りかけの新コンテナは消される。
 
 ```sh
 #!/bin/bash -e
 set -o pipefail
 R=subetha-router
+N=subetha-router-new                                      # 検証中の新コンテナの仮の名前（最後に $R に付け替える）
 DEST=/var/lib/subetha-router                              # 新コンテナが mount する場所（§6 手順 4 と同じ）
 ENVF=/etc/subetha-router.env
 IMAGE=subetha-router
-V=subetha-router-validate                                 # 削除前の検証に使う一時コンテナ
+CREATED_N=0; FINAL=0
+cleanup() { rc=$?; rm -f /tmp/journal.peek /tmp/journal.verify
+  if [ "$rc" -ne 0 ] && [ "$CREATED_N" = 1 ] && [ "$FINAL" = 0 ]; then docker rm -f "$N" >/dev/null 2>&1 || true; fi; exit "$rc"; }
+trap cleanup EXIT
 real() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
 norm() { python3 -c 'import os,sys
 p=sys.argv[1]
@@ -335,9 +341,11 @@ for l in open(sys.argv[1],"rb").read().splitlines():
 print(last)' "$1"; }
 inner() { docker logs "$1" 2>&1 | sed -n 's/^router: //p' | tail -n1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])'; }
 r4() { docker exec "$1" node -e 'fetch("http://127.0.0.1:"+process.argv[1]+"/v1/purchases/"+process.argv[2],{headers:{"x-router-principal":"judge",authorization:"Bearer public"}}).then(r=>{console.log("R4 status",r.status);process.exit(r.status===200?0:1)})' "$2" "$3"; }
-healthy() { for i in $(seq 1 60); do docker exec "$1" node -e 'fetch("http://127.0.0.1:8787/healthz").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))' 2>/dev/null && return 0; [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ] || return 1; sleep 1; done; return 1; }
-# 1) journal の所在を確定する（まだ何も止めない。旧 Router は動いていること）
+# コンテナのプロセスが開いているファイルのうち名前が $2 で終わるものを、host の /proc から（コンテナの中の経路のまま）列挙する
+openfiles() { local pid; for pid in $(docker top "$1" -o pid | tail -n +2 | tr -d ' '); do readlink /proc/"$pid"/fd/* 2>/dev/null | grep -F -- "$2" || true; done | sort -u; }
+# 1) 旧 Router が実際に使っている journal を確定する（まだ何も止めない）
 [ "$(docker inspect -f '{{.State.Running}}' "$R")" = true ] || { echo "$R must be running (this script stops it itself)"; exit 1; }
+! docker inspect "$N" >/dev/null 2>&1 || { echo "a container named $N exists from an earlier attempt: inspect and remove it first"; exit 1; }
 #    a. mount 配置: /app/runtime ちょうどの bind / 名前付きボリュームだけを受け付ける。/app/runtime を含む mount や、その下の mount があれば止まる
 SRC=$(docker inspect "$R" --format '{{json .Mounts}}' | python3 -c 'import json,sys
 src=""
@@ -349,19 +357,18 @@ for m in json.load(sys.stdin):
     elif d=="/" or "/app/runtime".startswith(d+"/") or d.startswith("/app/runtime/"):
         sys.exit("unsupported mount layout: a mount at %s overlaps /app/runtime" % d)
 print(src)')
-#    b. journal の場所: コンテナの SUBETHA_JOURNAL_PATH（既定 runtime/journal.ndjson）。`..` を含めば止まる。正規化して /app/runtime の下。
-#       新コンテナ（$ENVF）が同じ場所を使うこと
-JPATH=$(docker inspect "$R" --format '{{range .Config.Env}}{{println .}}{{end}}' | { grep '^SUBETHA_JOURNAL_PATH=' || echo 'SUBETHA_JOURNAL_PATH=runtime/journal.ndjson'; } | tail -n1 | cut -d= -f2-)
-JP=$(norm "$JPATH")
-NEWJ=$( { grep '^SUBETHA_JOURNAL_PATH=' "$ENVF" || echo 'SUBETHA_JOURNAL_PATH=runtime/journal.ndjson'; } | tail -n1 | cut -d= -f2-)
-[ "$(norm "$NEWJ")" = "$JP" ] || { echo "the new container would use SUBETHA_JOURNAL_PATH=$NEWJ but the old one uses $JPATH"; exit 1; }
-#    c. 旧 Router の**中で**その経路が実際に解決される先が /app/runtime/$JP そのもの（symlink を経由しない通常ファイル）であること。
-#       字面の正規化は filesystem の同一性を保証しないので、カーネルの解決結果で判定する
-REAL=$(docker exec "$R" node -e 'const fs=require("fs"),p=require("path");const f=fs.realpathSync(p.resolve("/app",process.argv[1]));if(!fs.statSync(f).isFile())throw new Error(f+" is not a regular file");console.log(f)' "$JPATH")
-[ "$REAL" = "/app/runtime/$JP" ] || { echo "inside the container $JPATH resolves to $REAL, not /app/runtime/$JP (symlink): not covered by this procedure"; exit 1; }
-echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}; journal: /app/runtime/$JP"
-#    d. 候補の journal を覗き、その最後の購入を**動いている旧 Router が返す**こと（候補が旧 Router の使っている journal である証拠）。
-#       mount 元の中の symlink は対象外として止まる。起動した Router は空でも journal を作るので、無ければ止まる
+#    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
+#       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
+J=$(openfiles "$R" .ndjson)
+[ "$(printf '%s\n' "$J" | grep -c .)" = 1 ] || { echo "the old Router holds $(printf '%s\n' "$J" | grep -c .) .ndjson files open, expected exactly one:"; printf '%s\n' "$J"; exit 1; }
+case "$J" in
+  *" (deleted)") echo "the old Router's journal was deleted while open: $J"; exit 1 ;;
+  /app/runtime/?*) JP=${J#/app/runtime/} ;;
+  *) echo "the old Router has $J open, not a file under /app/runtime: not covered by this procedure"; exit 1 ;;
+esac
+[ "$(openfiles "$R" /journal.lock)" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the old Router does not hold journal.lock next to $J"; exit 1; }
+echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}; the old Router has /app/runtime/$JP open"
+#    c. 候補の journal を覗き、その最後の購入を**動いている旧 Router が返す**こと。mount 元の中の symlink は対象外として止まる
 if [ -n "$SRC" ]; then
   [ -e "$SRC/$JP" ] || { echo "no journal at $SRC/$JP"; exit 1; }
   [ "$(real "$SRC/$JP")" = "$(real "$SRC")/$JP" ] || { echo "symlink inside $SRC: unsupported layout"; exit 1; }
@@ -392,59 +399,60 @@ chown -R 10001:10001 "$DEST"
 [ "$(stat -c %u:%g "$DEST")" = 10001:10001 ]
 [ -f "$DEST/$JP" ]
 [ "$(real "$DEST/$JP")" = "$(real "$DEST")/$JP" ] || { echo "symlink inside $DEST: unsupported layout"; exit 1; }
-# 4) 旧配置（21155eb より前の image は journal を runtime/remote-*/ の下に置いた）なら止まる。走査自体の失敗も止まる
+# 4) 旧配置（21155eb より前の image は journal を runtime/remote-*/ の下に置いた）なら止まる。走査自体の失敗も止まる。
+#    行数・内容・最後の購入は、起動前の複製（元と同じバイト列）から取る
 LEGACY=$(find "$DEST" -mindepth 2 -name journal.ndjson ! -path "$DEST/$JP")
 [ -z "$LEGACY" ] || { echo "legacy layout: $LEGACY. Recover it separately; nothing was removed"; exit 1; }
-#    複製の**別コピー**で新 image の Router を実際に起動する（同じ env、ポート公開なし）。起動時の replay 全部（journal の検査、
-#    intent の同一性、予算）を通ること、そして最後の購入を R4 で返すことを、旧コンテナを消す前に確かめる。
-#    起動時に unknown 行が足されることがあるので $DEST 自身ではなく別コピーに対して行い、終わったら捨てる
-rm -rf "$DEST.validate"; cp -a "$DEST" "$DEST.validate"
-docker rm -f "$V" >/dev/null 2>&1 || true
-docker run -d --name "$V" -v "$DEST.validate:/app/runtime" --env-file "$ENVF" "$IMAGE" >/dev/null
-healthy "$V" || { echo "the new image did not start on the copied journal:"; docker logs "$V" 2>&1 | tail -n 20; docker rm -f "$V" >/dev/null; exit 1; }
-if [ "$LAST0" != none ]; then
-  INNERV=$(inner "$V")
-  r4 "$V" "$INNERV" "$LAST0" || { echo "the new image, started on the copy, does not serve $LAST0"; docker rm -f "$V" >/dev/null; exit 1; }
-fi
-docker rm -f "$V" >/dev/null; rm -rf "$DEST.validate"
-#    起動が通ったので各行は改行終端の記録（行数 = 記録数）。最後の created が覗いた候補と一致すること
-ROWS=$(wc -l < "$DEST/$JP")
-LAST=$(lastcreated "$DEST/$JP")
+ROWS=$(wc -l < "$DEST/$JP"); SUM=$(sha256sum < "$DEST/$JP"); LAST=$(lastcreated "$DEST/$JP")
 [ "$LAST" = "$LAST0" ] || { echo "the copy's last purchase is $LAST but the candidate's was $LAST0"; exit 1; }
-SUM=$(sha256sum < "$DEST/$JP")
-echo "journal rows: $ROWS; last created paymentId: $LAST; the new image started on a copy and served it"
-# 5) ここで初めて古いコンテナを消し、作り直す（§6 手順 4 と同じコマンド）
-docker rm "$R"
+# 5) 新コンテナを**最終構成のまま**仮の名前で起動する（§6 手順 4 と同じ引数。旧コンテナは止まっているのでポートは空いている）。
+#    起動時の replay 全部（journal の検査、intent の同一性、予算）を通って上がること、Docker が解釈した env の journal の場所と、
+#    プロセスが実際に開いているファイルが /app/runtime/$JP そのものであること、最後の購入を R4 で返すことを、旧コンテナを消す前に確かめる
 docker network inspect subetha-router-net >/dev/null 2>&1 || \
   docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
-docker run -d --name "$R" --restart unless-stopped --network subetha-router-net -p 127.0.0.1:8787:8787 \
-  -v "$DEST:/app/runtime" --env-file "$ENVF" "$IMAGE"
-# 6) 移した journal を新コンテナが開いたことを確認する（Router は起動時に全行を replay し、壊れていれば上がらない）
-for i in $(seq 1 60); do H=$(curl -sf http://127.0.0.1:8787/healthz 2>/dev/null || true); [[ "$H" == *'"router":"up"'* ]] && break; sleep 1; done
-[[ "$H" == *'"router":"up"'* ]]
-[ "$(docker inspect "$R" --format '{{range .Mounts}}{{if eq .Destination "/app/runtime"}}{{.Source}}{{end}}{{end}}')" = "$DEST" ]
+docker run -d --name "$N" --restart unless-stopped --network subetha-router-net -p 127.0.0.1:8787:8787 \
+  -v "$DEST:/app/runtime" --env-file "$ENVF" "$IMAGE" >/dev/null
+CREATED_N=1
+for i in $(seq 1 60); do H=$(curl -sf http://127.0.0.1:8787/healthz 2>/dev/null || true); [[ "$H" == *'"router":"up"'* ]] && break; [ "$(docker inspect -f '{{.State.Running}}' "$N")" = true ] || break; sleep 1; done
+[[ "$H" == *'"router":"up"'* ]] || { echo "the new container did not come up on the copied journal:"; docker logs "$N" 2>&1 | tail -n 20; exit 1; }
+NEWJ=$(docker inspect "$N" --format '{{range .Config.Env}}{{println .}}{{end}}' | { grep '^SUBETHA_JOURNAL_PATH=' || echo 'SUBETHA_JOURNAL_PATH=runtime/journal.ndjson'; } | tail -n1 | cut -d= -f2-)
+[ "$(norm "$NEWJ")" = "$JP" ] || { echo "as Docker read $ENVF, the new container's SUBETHA_JOURNAL_PATH=$NEWJ is not /app/runtime/$JP"; exit 1; }
+JN=$(openfiles "$N" .ndjson)
+[ "$JN" = "/app/runtime/$JP" ] || { echo "the new container has '$JN' open, not /app/runtime/$JP"; exit 1; }
+[ "$(openfiles "$N" /journal.lock)" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the new container does not hold journal.lock next to its journal"; exit 1; }
+[ "$(docker inspect "$N" --format '{{range .Mounts}}{{if eq .Destination "/app/runtime"}}{{.Source}}{{end}}{{end}}')" = "$DEST" ]
 [ "$(head -n "$ROWS" "$DEST/$JP" | sha256sum)" = "$SUM" ]   # 元の行はそのまま（起動で unknown 行が後ろに足されることはある）
-# 新コンテナの Router が journal.lock を排他 flock している: host の /proc/locks で device と inode が一致し、
-# 保持 PID が新コンテナのプロセス（docker top）であること（コンテナ内の /proc は ptrace 制限で読めないことがある）
+# 新コンテナの Router が journal.lock を排他 flock している: host の /proc/locks で device と inode が一致し、保持 PID が新コンテナのプロセス（docker top）であること
 KEY=$(python3 -c 'import os,sys; st=os.stat(sys.argv[1]); print("%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino))' "$(dirname "$DEST/$JP")/journal.lock")
 HOLDER=$(awk -v key="$KEY" '$2=="FLOCK" && $4=="WRITE" && $6==key {print $5}' /proc/locks)
 [ -n "$HOLDER" ]
-docker top "$R" -o pid | tail -n +2 | tr -d ' ' | grep -x "$HOLDER" >/dev/null
+docker top "$N" -o pid | tail -n +2 | tr -d ' ' | grep -x "$HOLDER" >/dev/null
 if [ "$LAST" != none ]; then
   # 最後の購入を R4（GET /v1/purchases/<id>）で引く。Router の HTTP API はコンテナ内 loopback の一時ポートだけで聞いている
   # （8787 は MCP と /healthz）。ポートは起動ログの "router:" 行、principal は tools/remote-mcp.ts が固定する judge:public
-  INNER=$(inner "$R")
-  r4 "$R" "$INNER" "$LAST"
+  INNER=$(inner "$N")
+  r4 "$N" "$INNER" "$LAST"
 fi
+echo "all checks passed: the new container serves the migrated journal ($ROWS rows, last purchase $LAST). Removing the old container and renaming"
+# 6) ここで初めて旧コンテナを消し、新コンテナを $R に付け替える（ここから先で止まっても新コンテナは残る）
+FINAL=1
+NEWID=$(docker inspect -f '{{.Id}}' "$N")
+docker rm "$R"
+docker rename "$N" "$R"
+[ "$(docker inspect -f '{{.Id}}' "$R")" = "$NEWID" ]
+H=$(curl -sf http://127.0.0.1:8787/healthz); [[ "$H" == *'"router":"up"'* ]]
 echo "migration complete: $ROWS journal rows reopened by the new container"
 ```
 
-止まる条件（どれも**何も消さない**）: 旧 Router が動いていない、`/app/runtime` と重なる別の mount、bind / ボリューム以外の mount、
-journal の場所に `..` がある・`/app/runtime` の外・新旧で不一致、旧 Router の中で symlink を経由して別の場所に解決される、
-mount 元や複製の中の symlink、mount 元に journal が無い、候補の最後の購入を旧 Router が返さない、コピーや再読み出しの失敗、
-元と複製の不一致、旧配置（`remote-*/` の下に journal）、走査の失敗、**複製で起動した新 image が上がらない**（Router の起動時の
-replay が拒む: 改行の無い末尾、JSON でない行、`seq` の飛び、欠けた項目、paymentId / quoteId の重複、予算）、**その新 image が
-最後の購入を返さない**、複製の最後の購入が候補と食い違う。
+止まる条件（どれも旧コンテナを消さず、作りかけの新コンテナは消す）: 旧 Router が動いていない、前回の `subetha-router-new` が残っている、
+`/app/runtime` と重なる別の mount、bind / ボリューム以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の
+下でない（symlink や `..` で別の場所に解決されている）・消されている、隣の `journal.lock` を開いていない、mount 元や複製の中の symlink、
+mount 元に journal が無い、候補の最後の購入を旧 Router が返さない、コピーや再読み出しの失敗、元と複製の不一致、旧配置（`remote-*/` の
+下に journal）、走査の失敗、**最終構成で起動した新コンテナが上がらない**（Router の起動時の replay が拒む: 改行の無い末尾、JSON でない行、
+`seq` の飛び、欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナの
+プロセスが開いている journal が旧と違う、元の行が変わっている、flock の保持者が新コンテナでない、新コンテナが最後の購入を返さない。
+手順 6 に入ってから止まった場合（`all checks passed` の後）は、新コンテナはもう動いていて記録も開いている。残っている旧コンテナを
+`docker rm` し、`docker rename subetha-router-new subetha-router` して終える。
 購入記録が一つも無い Router は **0 バイトの journal ファイルがある**状態なので通り、R4 の照会だけ省かれる。
 旧配置の回収は本手順の範囲外（起動ごとに別ファイルで、`seq` もファイルごとに 1 から始まるため、単純に連結できない）。
 MCP 側からも `subetha_router_status` に最後の `paymentId` を渡して同じ記録が返ることを見れば、運用で使う経路での確認になる。
