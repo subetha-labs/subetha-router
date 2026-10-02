@@ -27,7 +27,8 @@ B（host 側 egress 制御、`ssrf-egress-design.md`）は実装フェーズを�
 | A-8 | `undici@8.11.2` の `engines.node` は `>=22.19.0`。この repo は `>=22.12.0`。手元は v22.23.1、コンテナの base image `node:22-bookworm-slim` は v22.23.3 | `node_modules/undici/package.json`、`Dockerfile` |
 | A-9 | 実 adapter モードの fixture 実行（`tests/wire/x402-cli.test.ts` 等）は `tests/fixtures/router-x402-process.ts` が `startRouter({ evmSigning: spy })` で**能力を注入**して起動し、facilitator は loopback の fixture。本番の入口 `tools/remote-router-process.ts` は実能力だけを注入する | 同ファイル |
 | A-10 | 送信 adapter は transport の例外を**握り潰して固定の結果に変える**（MPP の challenge 再読は `not_sent` / `destination_challenge_unreadable`、x402 の有料要求は `unknown` / `destination_pay_unknown`）。core には例外が届かない | `mpp.ts:366-377`、`x402.ts:458-468` |
-| A-11 | `::1` と `127.0.0.1` は**同じ port に別々に listen できる**。システム DNS の `localhost` は `::1` を先に返す（A-6）。したがって「検査済みが `127.0.0.1`、囮が `[::1]`」の配置で、**DNS に落ちた接続は囮に届いて観測できる** | ローカル実行 |
+| A-11 | `::1` と `127.0.0.1` は**同じ port に別々に listen できる**。システム解決（`dns.lookup`）の `localhost` は手元では `[::1, 127.0.0.1]`（A-6）だが、順序も構成も環境依存なので試験は**実行時に読む**。「検査済みの loopback アドレスでは誰も聞いておらず、システム解決が返す**別の**アドレスに囮を置く」配置なら、transport が自前の解決に落ちた接続は **Happy Eyeballs がどの順で試しても囮に届く**（検査済み側は refused で終わるため）。観測できるのは失敗経路。成功経路の固定は lookup の spy と `Host` で示す | ローカル実行 |
+| A-12 | 受信 adapter の `verify` / `settle` は `offer` を受け取り、offer は `createOffer({ routeId, ... })` で route に束縛されている（`preflight` の「route 束縛一致」）。受信の運用者ログの route はここから取れる | `src/ports/inbound.ts` |
 
 ## 3. 設計
 
@@ -84,7 +85,10 @@ interface GuardedFetchOptions {
    **待たずに**発行する（undici の `close()` は進行中の要求（body の読み取り）を終えてから閉じるので、呼び出し側が body を後から読んでも
    止まらない。読み捨てた body は要求の `signal` の timeout で abort され、その時点で閉じる）。`close()` の promise は捕捉して無視する。
 6. 返す `Response` は **undici の `Response` そのもの**（ラッパを被せない。`mppx.preparePayment` が Response を受け取るので、形を変えない）。
-   型は境界で `globalThis.Response` に写す（キャスト）。body の読み取りの失敗は接続後の事象で、既存の adapter の扱い（固定の結果）のまま。
+   型は境界で `globalThis.Response` に写す（キャスト）。
+7. **診断の所有**: headers が返る**前**の失敗は transport が分類して `report()` してから投げる。headers が返った**後**の失敗（body の停滞・切断、
+   SDK が body を読む途中の失敗）は **adapter が、同じ分類関数 `classifyTransportError(error)` で分類して `report()`** する（既存の catch の中。
+   公開結果は変えない）。1 つの失敗は fetch が resolve したか否かで必ずどちらか一方に属するので、**事象は失敗 1 つにつきちょうど 1 回**。
 
 全接続・全 fallback が vetted の中に閉じる根拠は事実 A-3/A-4。mppx 経由（`rawFetch`）も同じ関数を受け取る（事実 A-1）ので、SDK が内部で
 `globalThis.fetch` に逃げない限り到達する。到達の証明は §4（経路ごとの sabotage と、配線を外すと落ちることの確認）。
@@ -120,8 +124,10 @@ env / 設定ファイルからは変えられない。
 | 10 | 受信 x402 `post`（verify / settle） | `fetch` | `facilitator_<path>` | 同上 |
 
 配線: 各 adapter のオプションに **`transport: GuardedFetch`（必須）** を足す。省略で `globalThis.fetch` に落ちる経路は作らない
-（`fetch` という識別子を adapter から消し、lint で `globalThis.fetch` の直接使用を禁止する）。MPP は `Mppx.create({ fetch: transport, polyfill: false })`
-（context は `rawFetch(url, init)` の形に合わせ、adapter 側で `transport` を `(url, init) => transport(url, init, ctx)` に束ねて渡す）。
+（`fetch` という識別子を adapter から消し、lint で `globalThis.fetch` の直接使用を禁止する）。MPP は `Mppx.create({ fetch, polyfill: false })` に
+`(url, init) => transport(url, init, ctx)` を渡す。**`ctx` は `pay` の 1 回の呼び出しに属する request-local なオブジェクト**（`createClient` は pay ごとに
+作られ、同じ client が challenge 再読と有料要求に使われる）: `ctx.operation` を `pay_challenge` → `pay` と**その呼び出しの中で**進める。adapter 全体で
+共有する可変状態は持たない。`readChallenge` の ctx は不変。受信は `offer` の route 束縛から `routeId` を取る（事実 A-12）。
 `composeRails` が adapter ごとに transport を作る。`warnIfInternalUpstream`（起動時の文字列警告）は残し、強制ではない旨を注記する。
 `tools/t7-*`、`tools/u01r-*` の手元スクリプトも同じ必須オプションを通す（実能力なら `allowLoopback: false`）。
 
@@ -134,10 +140,12 @@ transport は `TransportError`（`code`、`operation`、`routeId?`）を投げ�
 |---|---|
 | `destination_blocked` | §3.1/§3.2 の**ポリシー拒否**だけ（URL の形、解決結果の分類）。接続は作っていない |
 | `dns_failed` | `dns.lookup` の例外（`ENOTFOUND`、`EAI_AGAIN` 等）、空の結果 |
-| `connect_failed` | undici の `cause.code` が `ECONNREFUSED` / `EHOSTUNREACH` / `ENETUNREACH` / `ECONNRESET`（接続前） / `UND_ERR_CONNECT_TIMEOUT`、TLS の検証失敗（`ERR_TLS_CERT_ALTNAME_INVALID`、`UNABLE_TO_VERIFY_LEAF_SIGNATURE`、`SELF_SIGNED_CERT_IN_CHAIN` 等） |
+| `connect_failed` | undici の `cause.code` が `ECONNREFUSED` / `EHOSTUNREACH` / `ENETUNREACH` / `UND_ERR_CONNECT_TIMEOUT`、TLS の検証失敗（`ERR_TLS_CERT_ALTNAME_INVALID`、`UNABLE_TO_VERIFY_LEAF_SIGNATURE`、`SELF_SIGNED_CERT_IN_CHAIN` 等）。**`ECONNRESET` は接続前か後かの証拠が無いので `transport_failed`** |
 | `upstream_timeout` | 要求の `AbortSignal.timeout` が切れた（`TimeoutError`） |
 | `aborted` | 呼び出し側の signal による abort（timeout 以外の `AbortError`） |
-| `transport_failed` | 上記のどれにも当たらない（不確定。経過時間から推定しない） |
+| `transport_failed` | 上記のどれにも当たらない（`ECONNRESET`、headers 後の切断、不確定。経過時間から推定しない） |
+
+headers 後（adapter が報告）: body の停滞で要求の timeout が切れた → `upstream_timeout`、切断 → `transport_failed`。報告の 1 行は同じ形。
 
 運用者向けログ 1 行: `outbound transport <code> operation=<operation> route=<routeId|-> policy=<POLICY_VERSION>`。**アドレス・ホスト名・URL・
 例外文字列は出さない**。`report` は `composeRails` が `process.stderr` に束ねる（core の `note` と同じ出口）。
@@ -157,12 +165,12 @@ transport は `TransportError`（`code`、`operation`、`routeId?`）を投げ�
 |---|---|---|
 | T-A1 | 表の単体: B の `DENY4`/`DENY6` を `deploy/egress/subetha-egress` から読み、A の表と集合として一致（`::ffff:0:0/96` は意味が違う旨を試験のコメントに） | 差分 0 |
 | T-A2 | 分類の単体: 各範囲の代表値と境界、`::ffff:127.0.0.1`（→ loopback）、`::ffff:8.8.8.8`（→ allowed）、`::ffff:10.0.0.1`（→ special）、NAT64、`0.0.0.0` / `::`、不正文字列、注入した自アドレス（公開 IP でも `own_address`）、**loopback は自アドレスより先**（`127.0.0.1` を interfaces に入れても `loopback`） | 期待どおりの reason |
-| T-A3 | 固定の証明（IPv4）: 注入 lookup `provider.test` → `127.0.0.1`、囮を `[::1]`、`allowLoopback: true` → `200`、fixture の `Host` は `provider.test:<port>`、lookup 呼び出し 1 回、**囮の接続 0** | FR-A3 |
-| T-A4 | 固定の証明（IPv6）: vetted `::1`、囮を `127.0.0.1` → `200`、囮の接続 0 | FR-A3 |
-| T-A5 | DNS に落ちない証明: vetted が誰も聞いていない `127.0.0.1:<閉じた port>`、囮が `[::1]:<同 port>` で listen → 失敗（`connect_failed`）、**囮の接続 0** | FR-A3 |
-| T-A6 | fallback は vetted の中だけ: vetted `[127.0.0.1:閉じた port と同じ port… ]` は port を分けられないので、vetted `[::1, 127.0.0.1]` で `::1` に誰もいない → `127.0.0.1` の fixture に届く（接続 1）。vetted `[::1]` だけなら失敗し `127.0.0.1` の囮の接続 0 | FR-A3 |
+| T-A3 | 固定の証明（IPv4、成功経路）: URL は `http://localhost:<P>/`。試験は実行時に `S = dns.lookup("localhost", {all:true})` を読んで記録する。fixture は `127.0.0.1:P`、囮は `S` に含まれる他の loopback（通常 `[::1]:P`）、注入 lookup は `[127.0.0.1]`、`allowLoopback: true` → `200`、fixture の `Host` は `localhost:P`、注入 lookup の呼び出し 1 回、囮の接続 0 | FR-A3（成功経路は lookup の spy と `Host` が根拠） |
+| T-A4 | 固定の証明（IPv6）: 同じ配置で fixture を `[::1]:P`、囮を `127.0.0.1:P`、注入 lookup `[::1]` → `200`、囮 0 | FR-A3 |
+| T-A5 | **DNS に落ちない証明（失敗経路）**: URL `http://localhost:P/`、注入 lookup は `[V]`（`V` は `S` に含まれる loopback とは**別の family** の loopback で、`V:P` には誰も聞いていない）、囮は `S` の**全アドレス**の `P` で listen。→ `connect_failed`、**囮の接続 0**。`V:P` は refused で即終わるので、transport が自前の解決に落ちれば Happy Eyeballs の順序に関わらず囮に届く（事実 A-11）。**陽性対照**: 固定しない素の `undici.fetch` で同じ URL → 囮の接続 ≥ 1。**変異**: 「検査済みの接続に失敗したらシステム解決で再試行する」transport（試験内の wrapper）→ 囮の接続 ≥ 1 で**この試験が落ちる**ことを確認 | FR-A3 |
+| T-A6 | fallback は vetted の中だけ: 注入 lookup `[V(誰もいない), 127.0.0.1]`（`V` は上と同じ）、fixture `127.0.0.1:P`、囮は `S` の他のアドレス → `200`、fixture の接続 1、囮 0。注入 lookup `[V]` だけなら T-A5 と同じく失敗・囮 0 | FR-A3 |
 | T-A7 | lookup の両形式: `all: true` で配列、単一形式で先頭、を単体で。undici 経由では `all: true` で呼ばれることを spy で確認 | §3.3-3 |
-| T-A8 | rebinding: lookup を「1 回目は `127.0.0.1`、2 回目以降は `[::1]`（囮）」にして 1 要求 → 接続は 1 回目の集合に閉じる（囮 0）。別の要求では再解決される（2 要求目は囮へ → `allowLoopback: true` でも囮が受ける = 要求単位で閉じていることの確認） | §5 |
+| T-A8 | rebinding: 注入 lookup を「1 回目は `[127.0.0.1]`、2 回目以降は `[V]`」にして 1 要求 → 接続は 1 回目の集合に閉じる（fixture 1、囮 0）。2 要求目は再解決され `[V]` → 失敗（要求単位で閉じていることの確認） | §5 |
 | T-A9 | 混在の拒否: lookup が `[公開 IP, 127.0.0.1]`、`allowLoopback: false` → `destination_blocked`、接続 0、lookup 1 回 | FR-A2 |
 | T-A10 | リテラル: loopback / 注入した自アドレス / 各禁止範囲 / userinfo 付き / `ftp:` → `destination_blocked`、接続 0 | FR-A1 |
 | T-A11 | `redirect: "follow"` を渡しても 302 で `transport_failed`、2 本目の接続 0 | §3.3-4 |
@@ -171,7 +179,8 @@ transport は `TransportError`（`code`、`operation`、`routeId?`）を投げ�
 | T-A14 | 配線の検証（実装フェーズの測定）: 10 経路それぞれについて、adapter の `transport` を `globalThis.fetch` に差し替えた一時的な変異で T-A13 の該当試験が**落ちる**ことを記録する（表にして設計書に残す。変異は戻す） | 空でない証明 |
 | T-A15 | 能力の混在（`composeRails` の単体）: (x402 実鍵, MPP fixture) → x402 の transport は `false`、MPP は `true`。逆も。synthetic は全部 `true`。`fixtureFacilitators` 無しの real は受信も `false`。env で変えられない | FR-C2' |
 | T-A16 | 寿命: 5 MB の body を headers 後にゆっくり読み切れる（`close()` を待たない契約）。読まずに捨てた body は要求の timeout で閉じる。例外時は `destroy()` | §3.3-5 |
-| T-A17 | 診断: 各 `code` を 1 回ずつ起こし、`report` の 1 行の形と、**行・公開応答・journal にアドレス・ホスト名・URL・例外文字列が含まれない**ことを正規表現で確認 | FR-C1 |
+| T-A17 | 診断: 各 `code` を 1 回ずつ起こし（headers 前）、さらに **headers 後の停滞**（fixture が headers を返して body を止める → 要求の timeout → `upstream_timeout`）と **headers 後の切断**（`transport_failed`）を受信 `post` と MPP `pay_challenge` で起こす。確認: `report` は失敗 1 つにつき**ちょうど 1 行**、形は §3.6、**行・公開応答・journal にアドレス・ホスト名・URL・例外文字列が含まれない**（正規表現）、公開結果は §3.5 の表のまま | FR-C1、FR-C1' |
+| T-A18 | 文脈の帰属: 異なる route の `pay` を 2 本同時に走らせ、各 `report` 行の `route` と `operation`（`pay_challenge` → `pay`）がそれぞれの呼び出しに正しく付く。受信の `verify` / `settle` の行に offer の route が付く | §3.5 |
 
 既存の wire テスト（`tests/wire/*`）は fixture が loopback なので、transport を `allowLoopback: true` で渡すように更新する。
 
@@ -198,3 +207,14 @@ transport は `TransportError`（`code`、`operation`、`routeId?`）を投げ�
 | 5 | Agent の `close()` を待つかどうか、body の寿命、Response の変換が未定義 | 正しい（non-blocking） | §3.3-5/6: `close()` は待たずに発行（body 完了後に閉じる）、例外と abort は `destroy()`、Response はラッパ無しのキャスト。T-A16 |
 | 6 | B の `::ffff:0:0/96` 一括拒否と A の埋め込み分類は意味が違う。順序と、B に委ねる分類を明記すること | 正しい（non-blocking） | §3.1 の判定順序（mapped の正規化を表より前に）、§1 の委任（展開固有の prefix は B） |
 | 7 | `undici@8.11.2` は Node `>=22.19.0`、repo は `>=22.12.0` | 正しい（non-blocking） | `engines.node` を `>=22.19.0` に（事実 A-8） |
+
+## 7. 設計レビュー #2（v2、`27b1640`）: **REJECT** → v3
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#1 の 7 件のうち 1・2・5・6・7 は**解決**、3・4 は「狭まった」。FR-A1/A2/A4/A5/A6/A7/C2' は満たすと確認
+（`unwrapFetch` は SDK 印付きの wrapper だけを剥がすので、注入した closure は残る）。
+
+| # | 指摘（要約） | 判定 | v3 での変更 |
+|---|---|---|---|
+| 1 | fallback 試験の URL が `provider.test` では、システム解決は失敗するだけで囮に届かず、「囮 0」が証拠にならない。URL と解決の振る舞いを試験ごとに指定し、固定しない接続が囮に届く陽性対照と、「失敗後にシステム解決へ落ちる」transport の変異で試験が落ちることを要求。`localhost` の順序を仮定しない | **正しい**（blocking） | T-A3〜T-A8 を `localhost` と実行時に読んだ `S` で定義し直した。失敗経路（T-A5）で囮を `S` の全アドレスに置き、検査済み側は refused にして順序非依存に。陽性対照と変異を T-A5 に明記。成功経路の根拠は lookup の spy と `Host` と明記（事実 A-11 を改訂） |
+| 2 | 診断が headers で止まる: headers 後に body が停滞・切断した失敗は報告されない。`ECONNRESET` の「接続前」は根拠が無い | **正しい**（blocking） | §3.3-7: headers 前は transport、後は adapter が同じ分類関数で報告（失敗 1 つにつき 1 回）。`ECONNRESET` は `transport_failed`。T-A17 に停滞・切断の 2 例を追加 |
+| 3 | MPP の 1 client が `pay_challenge` と `pay` の両方に使われるので、不変の ctx では両方に正しく付かない。受信の route、同時要求の帰属 | 正しい（non-blocking） | §3.5: `pay` 呼び出しごとの request-local な ctx を進める（adapter 全体の可変状態は持たない）。受信は offer の route 束縛から（事実 A-12）。T-A18 |
