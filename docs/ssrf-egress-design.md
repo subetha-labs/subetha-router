@@ -1339,3 +1339,15 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 85 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit を `/usr/lib/systemd/system` に置き `127.0.0.1:443` で聞かせる）。前回の 22 件に U（Caddy が `activating` の状態で開始: `ExecStartPre=/bin/sleep 30` の runtime drop-in + `start --no-block`）、V（`ss` を shim で失敗させる）、W（旧 Router が最初から `$DEST` を mount している構成で、新コンテナの `docker start` を shim で失敗させ、復旧手順を実行）を加えた 25 件の sabotage と、本番相当 3 件（bind / mount 無し / 同一ディレクトリ） | **U**: 開始時 `activating` → `ingress closed (caddy.service was activating; now inactive and runtime-masked, nothing on 443/80)`、失敗後も inactive + `masked-runtime`。**V**: `ss shim: failed` で停止、`ingress closed` を宣言せず、旧 Router は止めていない、入口は止めたまま mask。**W**: `$DEST is authoritative (... nothing is copied and nothing there may be deleted)` と表示、停止メッセージにも役割、journal の sha256 不変、`journal.lock` 残存、新コンテナ残らず、入口閉じたまま。復旧手順どおり `docker start subetha-router` → R4 200（何も消さずに戻れた）。他の 22 件は前回どおり（全失敗経路で Caddy inactive + `masked-runtime`）。本番相当: bind（Caddy active）→ `ingress reopened`、exit 0。mount 無し（Caddy を先に止めておく）→ 「開始時に止まっていた」として unmask だけして止めたまま、exit 0。同一ディレクトリ → `is authoritative`、コピー無し、exit 0。**harness の順序ミス 1 件**: 同一ディレクトリの本番相当を、直前の mount 無しの件で止めた Caddy を起こさずに走らせたため、スクリプトは正しく「開始時に止まっていた: unmask して止めたまま」と動いたのに harness が「開け直すこと」を期待して FAIL にした。Caddy を起こしてから同一ディレクトリの件だけ再実行し、`ingress reopened` で `failed 0`。スクリプトの欠陥ではない |
+
+### 26.11 実装レビュー #9（`6419252`）: **REJECT** → 重なる木を止める
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#8 の 2 件は**解決**（入口、`SRC == DEST` の復旧）。新規 1 件 blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | `copy` と判定された `$DEST` が本体を含み得る: 旧 Router が `/var/lib/subetha-router/old` を mount していると、realpath は等しくないので `copy`、手順 3 で `$DEST` に写し、手順 4 の旧配置走査が `$DEST/old/journal.ndjson` を見つけて止まる。journal は同じなので復旧手順は `$DEST` の削除を許し、**複製と本体の両方**を消す | **正しい**（blocking） | 手順 1 で、旧 Router の mount 元と `$DEST` の realpath が**一方が他方の中**なら止める（どちらの向きも）。`authoritative` は等しいときだけ、`copy` は重ならないときだけ。復旧手順に「`copy` は mount 元と重ならないので消しても旧 Router の記録に触れない」と明記 |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 86 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。X: 旧 Router が `/var/lib/subetha-router/old` を mount（レビュアの入れ子の反例）、復旧手順の実行まで。加えて本番相当 2 件（bind、同一ディレクトリ） | **X**: 旧 Router は R4 200（本体は `$DEST/old/journal.ndjson`）。スクリプトは `the old Router's runtime (/var/lib/subetha-router/old) is inside /var/lib/subetha-router: overlapping trees are not covered by this procedure` で**旧 Router を止める前に**停止。役割は付かず、`$DEST` に何も写されず、本体の sha256 不変、入口は止めたまま mask。復旧（消すものは無い。入口を開ける）: `unmask --runtime` + `start` で Caddy active、旧 Router は R4 200 のまま。本番相当（bind）: `ingress reopened`、exit 0。同一ディレクトリ: `is authoritative`、コピー無し、`ingress reopened`、exit 0。`failed 0` |

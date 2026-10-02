@@ -378,7 +378,16 @@ for m in json.load(sys.stdin):
     elif d=="/" or "/app/runtime".startswith(d+"/") or d.startswith("/app/runtime/"):
         sys.exit("unsupported mount layout: a mount at %s overlaps /app/runtime" % d)
 print(src)')
-if [ -n "$SRC" ] && [ "$(real "$SRC")" = "$(real "$DEST")" ]; then DEST_ROLE=authoritative; else DEST_ROLE=copy; fi
+#    $DEST の役割を realpath で決める。旧 Router の mount 元と $DEST が**同じ**なら authoritative（コピーしない。何も消してはいけない）。
+#    一方が他方の中にある（重なる木）なら、複製と本体を区別できないので止まる。それ以外は copy（$DEST は使い捨ての複製）
+if [ -n "$SRC" ]; then
+  RS=$(real "$SRC"); RD=$(real "$DEST")
+  case "$RS" in
+    "$RD") DEST_ROLE=authoritative ;;
+    "$RD"/*) echo "the old Router's runtime ($SRC) is inside $DEST: overlapping trees are not covered by this procedure"; exit 1 ;;
+    *) case "$RD" in "$RS"/*) echo "$DEST is inside the old Router's runtime ($SRC): overlapping trees are not covered by this procedure"; exit 1 ;; esac; DEST_ROLE=copy ;;
+  esac
+else DEST_ROLE=copy; fi
 echo "$DEST is $DEST_ROLE ($([ "$DEST_ROLE" = authoritative ] && echo "the old Router already stores its journal there: nothing is copied and nothing there may be deleted" || echo "a copy of the old Router's runtime"))"
 #    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
 #       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
@@ -475,7 +484,8 @@ echo "migration complete: $ROWS journal rows reopened by the new container"
 ```
 
 止まる条件（どれも旧コンテナを消さず、作りかけの新コンテナは消し、入口は止めたまま runtime mask も残す）: 入口が閉じない（Caddy が
-inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
+inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router の mount 元と `$DEST` が重なる木
+（一方が他方の中）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
 以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
 消されている、隣の `journal.lock` を開いていない、mount 元や複製の中の symlink、mount 元に journal が無い、候補の最後の購入を旧 Router が
 返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、旧配置（`remote-*/` の下に journal）、
@@ -488,7 +498,8 @@ inactive にならない、mask できない、443/80 に listener が残る、l
   **何も消さない**（journal も `journal.lock` も）。新コンテナが起動まで進んで `"event":"unknown"` / `"reason":"interrupted_at_restart"` の
   行を足していても、それは Router の正規の記録（旧 Router も次の起動で同じことをする）。旧 Router に戻すなら
   `sudo docker start subetha-router` → `/healthz`。
-- **`copy`**（旧 Router の mount 元が別の場所、または mount 無し）: `$DEST` は複製。手順 5 までで止まったなら新コンテナは消えている。
+- **`copy`**（旧 Router の mount 元が別の場所、または mount 無し）: `$DEST` は複製で、旧 Router の mount 元と**重ならない**
+  （重なる木は手順 1 で止まる）ので、`$DEST` を消しても旧 Router の記録には触れない。手順 5 までで止まったなら新コンテナは消えている。
   `$DEST` の journal を旧 Router の journal（mount 元のファイル。mount 無しなら `docker cp subetha-router:/app/runtime/journal.ndjson` で
   取り出す）と比べ、同じか、`unknown` / `interrupted_at_restart` の行が後ろに足されているだけなら、`$DEST` を消して再実行してよい。
   それ以外の行が増えていたら、旧 journal に無い記録なので消さずに調べる（入口が閉じていれば起きない）。
