@@ -312,8 +312,9 @@ subnet が RFC1918 であることを確認する）。
 推定することはしない（Docker の env-file の解釈と食い違い得る）。**入口（Caddy）は最初に閉じ、終わるまで閉じたまま**にする:
 新コンテナは最終構成のまま先に起動して検証するので、検証が済む前に外から届いてはいけない。全部通ってから旧コンテナを消して
 名前を付け替え、入口を開け直す。失敗したときの状態は段階で決まる: **引き渡し（記録が `handoff` になる）より前**の失敗では旧コンテナが残り、
-作りかけの新コンテナは消され、入口は閉じたまま。**引き渡し後**の失敗では新コンテナを残して前進で終える（入口を開け直した後に止まる
-こともある）。どちらも `/var/lib/subetha-router-migration.state` の記録と下の復旧手順に従う。
+作りかけの新コンテナは消され、入口は**閉じられた後なら**開け直されるまで閉じたまま（閉じる前に止まれば触っていない）。**引き渡し後**の
+失敗では新コンテナを残して前進で終える（入口を開け直した後に止まることもあるので、入口の実際の状態を見る）。どちらも
+`/var/lib/subetha-router-migration.state` の記録と下の復旧手順に従う。
 mask は**再起動しても残る**もの（`systemctl mask`）を使い、新コンテナは引き渡しの直前まで再起動ポリシー無しで作るので、途中で host が
 再起動しても、入口は閉じたまま、新コンテナは勝手に上がらない。進行状況は `/var/lib/subetha-router-migration.state` に記録し、復旧はそれを読む。
 host 上の他のプロセスが `127.0.0.1:8787` を使わないこと（受け入れ runner を同時に走らせない）。
@@ -557,8 +558,8 @@ rm -f "$STATE"
 echo "migration complete: $ROWS journal rows reopened by the new container"
 ```
 
-止まる条件（どれも旧コンテナを消さず、作りかけの新コンテナは消し、入口は止めたまま mask も残す）: 前回の復旧記録が残っている、入口が
-閉じない（Caddy が inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router の mount 元と `$DEST` が重なる木
+止まる条件（引き渡し前。どれも旧コンテナを消さず、作りかけの新コンテナは消し、入口は閉じた後なら止めたまま mask も残す）: 前回の復旧記録が
+残っている、入口が閉じない（Caddy が inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router の mount 元と `$DEST` が重なる木
 （一方が他方の中）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
 以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
 消されている、隣の `journal.lock` を開いていない、host の mount 元がコンテナの見ている runtime / journal と別物（identity 不一致。停止後の再確認も含む）、`$DEST` が root ファイル
@@ -569,7 +570,8 @@ echo "migration complete: $ROWS journal rows reopened by the new container"
 欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナのプロセスが
 開いている journal が旧と違う、元の行が変わっている、flock の保持者が新コンテナでない、新コンテナが最後の購入を返さない。
 
-**止まった後の復旧**（入口は止まったまま mask されている。まず記録を読む）:
+**止まった後の復旧**（入口は、閉じるのに成功した後なら開け直すまで止まったまま mask されている。閉じる前に止まった場合は触っていない。
+引き渡し後は `systemctl is-enabled caddy` / `is-active caddy` で実際の状態を見る。まず記録を読む）:
 `sudo cat /var/lib/subetha-router-migration.state` に `phase`（スクリプトの trap も、停止時にこのディスク上の段階に従う。記録を更新できなかった
 ときは `warning: could not update the recovery record` と出る。その場合も**ディスク上の記録の段階が正**）、`gate_was_running`（0/1）、`dest_role`（`copy` / `authoritative` / `undetermined`）、
 `old_source`、`journal`、`journal_ident`（旧 Router が開いていた journal の dev:inode）、`journal_rows` / `journal_sha256`（停止後に検証した

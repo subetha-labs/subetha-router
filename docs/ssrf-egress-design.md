@@ -1479,3 +1479,17 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 95 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。`record()` の単体確認（15 項目、`phase=handoff`、`PREVPHASE` は成功後に更新）。AT（直前の記録の後に `state.tmp` をディレクトリにして、引き渡しの記録の **書き込み**を失敗させる）、bind の本番相当 | **AT**: `migrate.sh: line 12: /var/lib/subetha-router-migration.state.tmp: Is a directory` で停止、`all checks passed` は出ず、**旧コンテナは残り**、新コンテナは trap が消し、ディスク上の記録は `replacement-started` のまま（trap も更新できず `warning: could not update the recovery record`）。本番相当: exit 0、記録は消える。`failed 0` |
+
+### 26.21 実装レビュー #19（`fb03f46`）: **APPROVE WITH CHANGES**
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#18 の blocking（記録の書き込み）は**解決**。非 blocking 1 件: 「入口は止めたまま mask されている」という
+言い回しが、閉じる前に止まった場合（mask していない）と、引き渡し後に unmask / 起動してから止まった場合（記録の削除で失敗など）に合わない。
+レビュアは `record()` の 7 通りの制御フロー（成功、直列化・書き込み・読み戻し・各 sync・rename の失敗）を独立に probe し、journal の同定、
+停止後の複製、引き渡し前の耐久性、実際の起動 replay、R4、ロック所有、復旧の削除順序に blocking を見つけなかった。
+
+| # | 指摘 | 判定 | 変更 |
+|---|---|---|---|
+| 1 | 入口の状態の記述を段階で限定する（閉じるのに成功した後、開け直すまで。引き渡し後は実際の状態を見る） | 正しい（non-blocking） | 冒頭、止まる条件、復旧の見出しの 3 箇所を改めた。段階ごとの復旧手順は変更なし |
+
+実装フェーズの受け入れ: **B の運用手順と成果物は、この commit でレビュア承認**（AL2023 での実行が配備の受け入れとして残る: 全 verify モード、
+waiver 無し、実機の再起動と IMDS、Linux の外部 observer、証拠の保存）。A + B のリリース門は別。
