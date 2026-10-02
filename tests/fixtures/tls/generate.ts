@@ -1,0 +1,41 @@
+/**
+ * 試験用の TLS 素材を**実行時に**作る（`openssl` CLI を使う。鍵も証明書も repo には置かない）。
+ * SSRF 防御 A の transport 試験（設計 T-A12）で、証明書検証を有効のままにして固定した IP への HTTPS を確かめる。
+ */
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+export interface TlsMaterial {
+  readonly dir: string;
+  readonly ca: string;
+  readonly provider: { readonly cert: Buffer; readonly key: Buffer };
+  readonly other: { readonly cert: Buffer; readonly key: Buffer };
+  readonly untrusted: { readonly cert: Buffer; readonly key: Buffer };
+}
+
+function openssl(dir: string, args: readonly string[]): void {
+  execFileSync("openssl", [...args], { cwd: dir, stdio: ["ignore", "ignore", "pipe"] });
+}
+
+/** CA、CA 署名の `provider.test` / `other.test`、自己署名の `provider.test`（信頼されない）を作る。 */
+export function generateTestTls(): TlsMaterial {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "subetha-test-tls-"));
+  const ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
+  openssl(dir, ["req", "-x509", ...ec, "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=subetha-router test CA (not for production)"]);
+  for (const name of ["provider.test", "other.test"]) {
+    openssl(dir, ["req", ...ec, "-keyout", `${name}.key`, "-out", `${name}.csr`, "-subj", `/CN=${name}`]);
+    writeFileSync(path.join(dir, `${name}.ext`), `subjectAltName=DNS:${name}\nbasicConstraints=CA:FALSE\n`);
+    openssl(dir, ["x509", "-req", "-in", `${name}.csr`, "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", `${name}.pem`, "-days", "2", "-extfile", `${name}.ext`]);
+  }
+  openssl(dir, ["req", "-x509", ...ec, "-keyout", "untrusted.key", "-out", "untrusted.pem", "-days", "2", "-subj", "/CN=provider.test", "-addext", "subjectAltName=DNS:provider.test"]);
+  const read = (name: string): Buffer => readFileSync(path.join(dir, name));
+  return {
+    dir,
+    ca: read("ca.pem").toString("utf8"),
+    provider: { cert: read("provider.test.pem"), key: read("provider.test.key") },
+    other: { cert: read("other.test.pem"), key: read("other.test.key") },
+    untrusted: { cert: read("untrusted.pem"), key: read("untrusted.key") },
+  };
+}

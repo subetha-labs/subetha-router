@@ -6,7 +6,6 @@
  * Happy Eyeballs の順序に関わらず囮に届く。
  */
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
-import { readFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -20,6 +19,7 @@ import {
   type LookupFn,
   type TransportEvent,
 } from "../../src/net/guarded-fetch.js";
+import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
 
 interface Observed {
   connections: number;
@@ -107,12 +107,11 @@ async function listenHttp(
   };
 }
 
-const TLS = {
-  ca: readFileSync("tests/fixtures/tls/ca.pem", "utf8"),
-  provider: { cert: readFileSync("tests/fixtures/tls/provider.test.pem"), key: readFileSync("tests/fixtures/tls/provider.test.key") },
-  other: { cert: readFileSync("tests/fixtures/tls/other.test.pem"), key: readFileSync("tests/fixtures/tls/other.test.key") },
-  untrusted: { cert: readFileSync("tests/fixtures/tls/untrusted.pem"), key: readFileSync("tests/fixtures/tls/untrusted.key") },
-};
+/** 試験用の TLS 素材は実行時に openssl で作る（repo に鍵を置かない）。 */
+let TLS: TlsMaterial;
+beforeAll(() => {
+  TLS = generateTestTls();
+});
 
 async function listenHttps(address: string, material: { cert: Buffer; key: Buffer }): Promise<Listener> {
   const observed: Observed = { connections: 0, hosts: [], sni: [] };
