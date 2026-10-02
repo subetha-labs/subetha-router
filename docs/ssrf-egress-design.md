@@ -1440,3 +1440,17 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 92 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AM（既存の復旧記録がある状態で実行）。AN（レビュアの配置: 下に古い 1 行の journal を持つ `/srv/router-alias` に `$DEST`（3 行の本物）を一時的に bind し private に、旧 Router はその別名を使う。`record old-stopped` 直後の `mkdir` を shim にして SIGKILL。その後 `umount` で別名を失わせ（再起動で起きること）、復旧手順を実行）。AO（`docker create` と `docker start` の間で SIGKILL）。bind の本番相当 | **AM**: `a recovery record from an earlier attempt exists` で停止、記録は **sha256 が不変**、旧 Router も入口も触られず。**AN**: `authoritative`、記録は `phase=old-stopped`、`journal_ident=64769:1389745`（本物）。別名を外した後、復旧手順どおり旧 Router を起こすと `/healthz` は返り R4 も 200 だが、**開いている journal の identity は `64769:1389744`（古い方）で記録と不一致** → 入口を開けず、旧を消して `$DEST` で作り直し → identity が記録と一致、R4 200、3 行。**AO**: 記録は `phase=replacement-created` で新コンテナの ID を持ち（created、ポリシー `no`）、その ID で削除できた。本番相当: exit 0、成功で記録が消える。`failed 0` |
+
+### 26.18 実装レビュー #16（`445c177`）: **REJECT** → 復旧の削除順序
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#15 の記録保護・分岐の排他・trap の表示は**解決**、別名の復旧と中断の窓は「狭まった」。新規 1 件 blocking、2 件 non-blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | 復旧が、回復に使える journal の所在を確定する前に消し得る: `started` の記録は `journal_ident` が空で `dest_role=undetermined`、早い失敗はそのまま `failed-before-handoff` になる。手順は identity 不一致で `docker stop && docker rm` を先に書き、`undetermined` の「止めて調べる」が後にある。mount の無い旧コンテナでは書き込み層が唯一の記録 | **正しい**（blocking） | 引き渡し前の復旧を**消す前に分ける**形に書き直した: `journal_ident` が空（`started`）なら何も止めておらず、記録を消して入口を扱うだけ。identity があるなら、(1) 新コンテナの後始末 → (2) **`$DEST` に回復に使える journal があるか**を記録（`authoritative` は identity、`copy` は行数と sha256）で確定 → (3) 旧 Router を起こして identity を照合し、一致なら残す、不一致で (2) があるなら作り直し、**不一致で (2) が無ければ止めて調べる（消さない。「最後に」へ進まない）**。記録に `previous_phase`（最後に通った段階）を追加 |
+| 2 | `docker create` 成功と `record replacement-created` の間で落ちると、記録に無いコンテナが残り、次回は名前で拒否される | 正しい（non-blocking） | 実行ごとの識別子 `attempt` を記録に書き、新コンテナに `--label subetha.migration=<attempt>` を付ける。復旧は ID が無くても label で見つけて消す（起動していない） |
+| 3 | 複製の復旧が `journal.ndjson` を直書きしており、記録の `journal` の経路を使っていない | 正しい（non-blocking） | 復旧の経路を記録の `journal`（`/app/runtime/` 以下の相対パス）から導くように改めた |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 93 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AP（`ss` shim で手順 0 で失敗）、AQ（mount の無い旧 Router。`old-stopped` 直後に SIGKILL。復旧手順を実行）、AR（`docker create` 成功後、`record replacement-created` の `sync` を shim にして SIGKILL）、bind の本番相当 | **AP**: 記録は `phase=failed-before-handoff previous_phase=started`、`journal_ident` 空、旧 Router は running、この試行の label を持つコンテナは無し → 復旧は記録を消して入口を扱うだけ。**AQ**: 記録は `phase=old-stopped`、identity あり、`copy`、`journal_rows` 空（写す前）。復旧手順の順序どおり、手順 2 で `$DEST` に使える journal が無いことを確認 → 手順 3 で旧 Router を起こし、開いている journal の identity が記録と一致（`50:1389798`、書き込み層の journal）→ 残す、何も消さない、R4 200。**AR**: 記録は `phase=copied` で `new_container_id` 空（レビュアの窓）。`docker ps -a --filter label=subetha.migration=<attempt>` で起動していない `subetha-router-new`（ポリシー `no`）を見つけ、ID で削除。本番相当: exit 0、最終コンテナに attempt の label、記録は消える。harness 側の未定義変数で一度中断し、同じ内容で再実行。`failed 0` |

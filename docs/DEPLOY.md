@@ -326,8 +326,9 @@ ENVF=/etc/subetha-router.env
 IMAGE=subetha-router
 GATE=caddy.service                                        # 127.0.0.1:8787 へ転送する唯一の入口（§7）。unit は /usr/lib/systemd/system（公式パッケージ）
 STATE=/var/lib/subetha-router-migration.state             # 復旧のための記録（root FS 上。再起動しても残る。成功したら消す）
-NID=""; FINAL=0; STOPPED_GATE=0; DEST_ROLE=undetermined; J_ID=""; R_ID=""; JP=""; ROWS=""; SUM=""; SRC=""
-record() { { echo "updated=$(date -u +%FT%TZ)"; echo "phase=$1"; echo "gate_was_running=$STOPPED_GATE"; echo "dest=$DEST"; echo "dest_role=$DEST_ROLE"; echo "old_container=$R"; echo "old_source=$SRC"; echo "journal=/app/runtime/$JP"; echo "journal_ident=$J_ID"; echo "runtime_ident=$R_ID"; echo "journal_rows=$ROWS"; echo "journal_sha256=${SUM%% *}"; echo "new_container_id=$NID"; } > "$STATE.tmp" && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")"; }
+NID=""; FINAL=0; STOPPED_GATE=0; DEST_ROLE=undetermined; J_ID=""; R_ID=""; JP=""; ROWS=""; SUM=""; SRC=""; PREVPHASE=none
+ATTEMPT=$(date -u +%Y%m%dT%H%M%SZ)-$$                      # この実行の識別子（記録と、作る新コンテナの label に付ける）
+record() { { echo "updated=$(date -u +%FT%TZ)"; echo "attempt=$ATTEMPT"; echo "phase=$1"; echo "previous_phase=$PREVPHASE"; echo "gate_was_running=$STOPPED_GATE"; echo "dest=$DEST"; echo "dest_role=$DEST_ROLE"; echo "old_container=$R"; echo "old_source=$SRC"; echo "journal=/app/runtime/$JP"; echo "journal_ident=$J_ID"; echo "runtime_ident=$R_ID"; echo "journal_rows=$ROWS"; echo "journal_sha256=${SUM%% *}"; echo "new_container_id=$NID"; } > "$STATE.tmp" && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")"; PREVPHASE=$1; }
 cleanup() { rc=$?; rm -f /tmp/journal.peek /tmp/journal.verify
   if [ "$rc" -ne 0 ]; then
     if [ "$FINAL" = 0 ]; then
@@ -504,7 +505,7 @@ record copied
 docker network inspect subetha-router-net >/dev/null 2>&1 || \
   docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
 #    再起動ポリシーは付けずに作る（検証が終わる前に host が再起動しても、新コンテナが勝手に上がらない）。引き渡しの直前に unless-stopped にする
-NID=$(docker create --name "$N" --network subetha-router-net -p 127.0.0.1:8787:8787 \
+NID=$(docker create --name "$N" --label "subetha.migration=$ATTEMPT" --network subetha-router-net -p 127.0.0.1:8787:8787 \
   -v "$DEST:/app/runtime" --env-file "$ENVF" "$IMAGE")
 record replacement-created
 docker start "$NID" >/dev/null
@@ -571,25 +572,34 @@ journal。`copied` 以降）、`new_container_id` がある。途中で host が
 `handoff` の前なら再起動ポリシー無しなので上がらず、旧コンテナは止めたまま（`unless-stopped` は手で止めたものを起動しない）。
 `phase` で**排他的に**分ける:
 
-- **`started` / `old-stopped` / `copied` / `replacement-created` / `replacement-started` / `failed-before-handoff`**（引き渡し前。**旧 Router に戻す**）:
-  1. `new_container_id` があれば、`docker ps -a --no-trunc` でその ID を見て、running なら `docker stop`、そして `docker rm`（この ID だけ。名前では消さない）。
-  2. `dest_role` が `authoritative` なら `$DEST` には**何も触らない**（旧 Router の記録そのもの。新コンテナが起動で足した
-     `"event":"unknown"` / `"reason":"interrupted_at_restart"` の行は正規の記録）。`copy` なら `$DEST` は複製で、旧 Router の mount 元と重ならない
-     （手順 1 で保証）。`undetermined` なら何も写していない。**この段階ではまだ消さない**（下の 4 で使うことがある）。
-  3. 旧 Router を `sudo docker start subetha-router` し、`/healthz` を待ってから、**開いている journal が記録のものか**を確かめる
-     （health だけでは足りない。一時的な bind 越しに使っていた mount 元は、再起動で別の中身を見せ得る）:
-     ```sh
-     pid=$(for p in $(docker top subetha-router -o pid | tail -n +2 | tr -d ' '); do readlink /proc/$p/fd/* 2>/dev/null | grep -q '\.ndjson$' && echo $p; done | head -n1)
-     fd=$(for f in /proc/$pid/fd/*; do readlink "$f" | grep -q '\.ndjson$' && echo "${f##*/}"; done | head -n1)
-     stat -L -c '%d:%i' /proc/$pid/fd/$fd          # 記録の journal_ident と一致すること
-     ```
-     一致すれば旧 Router はそのまま。**一致しなければ入口を開けず**、`docker stop subetha-router && docker rm subetha-router` のうえ、
-     `$DEST` に検証済みの journal があるとき（`authoritative`、または `copied` 以降の `copy`）はそこで作り直す（§6 手順 4 の
-     `docker run`、`-v /var/lib/subetha-router:/app/runtime`。`copy` なら先に `head -n <journal_rows> /var/lib/subetha-router/journal.ndjson | sha256sum`
-     が `journal_sha256` に一致することを見る）。作り直した Router でも同じ確認（`stat -L` の値は `authoritative` なら `journal_ident` と一致、
-     `copy` なら `$DEST/journal.ndjson` の `stat -c '%d:%i'` と一致）。`undetermined` で一致しないときは、記録に無い状態なので止めて調べる。
-  4. `copy` で旧 Router をそのまま使うことにした場合だけ、`$DEST` を消す: `findmnt -l -n -o TARGET | grep '^/var/lib/subetha-router/'` が
-     何も出さないことを見て（`-R` は mount point でないディレクトリでは何も示さない）、`rm -rf --one-file-system /var/lib/subetha-router`。
+- **引き渡し前**（`phase` が `started` / `old-stopped` / `copied` / `replacement-created` / `replacement-started`、または `failed-before-handoff`。
+  後者は `previous_phase` が最後に通った段階）。**何も消す前に**、記録の中身で分ける:
+  - **`journal_ident` が空**（`started` で止まった。journal の確定より前）: 旧 Router は止めておらず、何も写しておらず、新コンテナも無い。
+    `docker ps` で `subetha-router` が running であることを見て、下の「最後に」だけを行う（記録を消し、入口を扱う）。running でなければ
+    記録に無い状態なので**止めて調べる**（何も消さない）。
+  - **`journal_ident` がある**（`old-stopped` 以降）: 旧 Router は止めてある。順に:
+    1. 新コンテナの後始末。`new_container_id` があれば `docker ps -a --no-trunc` でその ID を見て、running なら `docker stop`、そして
+       `docker rm`（この ID だけ）。ID が無くても、`docker create` の直後に落ちた場合に備えて
+       `docker ps -a --filter label=subetha.migration=<記録の attempt> --format '{{.ID}} {{.Status}}'` を見る。出てきたものは
+       この試行が作った（起動していない）新コンテナなので `docker rm` する。名前（`subetha-router-new`）で消さない。
+    2. **回復に使える journal がどこにあるか**を、消す前に確定する。`$DEST`（記録の `dest`）側は:
+       `authoritative` なら `stat -c '%d:%i' <dest>/<journal の /app/runtime/ 以下>` が `journal_ident` と一致すること、
+       `copy` で `journal_rows` があるなら `head -n <journal_rows> <dest>/<同じ相対パス> | sha256sum` が `journal_sha256` と一致すること。
+       どちらでもない（`copy` で `journal_rows` が空 = 写す前、など）なら `$DEST` には回復に使えるものは無い。
+    3. 旧 Router を `sudo docker start subetha-router` し、`/healthz` を待ってから、**開いている journal が記録のものか**を確かめる
+       （health だけでは足りない。一時的な bind 越しに使っていた mount 元は、再起動で別の中身を見せ得る）:
+       ```sh
+       pid=$(for p in $(docker top subetha-router -o pid | tail -n +2 | tr -d ' '); do readlink /proc/$p/fd/* 2>/dev/null | grep -q '\.ndjson$' && echo $p; done | head -n1)
+       fd=$(for f in /proc/$pid/fd/*; do readlink "$f" | grep -q '\.ndjson$' && echo "${f##*/}"; done | head -n1)
+       stat -L -c '%d:%i' /proc/$pid/fd/$fd          # 記録の journal_ident と一致すること
+       ```
+       - 一致: 旧 Router はそのまま使う。`copy` なら `$DEST` は不要なので、`findmnt -l -n -o TARGET | grep '^/var/lib/subetha-router/'` が
+         何も出さないことを見て `rm -rf --one-file-system /var/lib/subetha-router`（`authoritative` は何も消さない）。
+       - 不一致、かつ 2 で `$DEST` に回復に使える journal が**ある**: 入口を開けず、`docker stop subetha-router && docker rm subetha-router`
+         のうえ、§6 手順 4 の `docker run`（`-v /var/lib/subetha-router:/app/runtime`）で作り直し、同じ確認で `stat -L` の値が
+         `authoritative` なら `journal_ident`、`copy` なら `stat -c '%d:%i' <dest>/<相対パス>` と一致することを見る。
+       - 不一致、かつ 2 で回復に使える journal が**無い**: **止めて調べる**。旧コンテナは `docker stop` するだけで**消さない**
+         （mount の無い旧コンテナでは、その書き込み層が唯一の記録）。入口は閉じたまま。下の「最後に」には進まない。
 - **`handoff` / `failed-after-handoff`**（引き渡し後。**前進で終える。旧に戻さず、`$DEST` も新コンテナも消さない**）:
   新コンテナ（`new_container_id`）が記録を開いている。`docker ps -a --no-trunc --format '{{.ID}} {{.Names}} {{.Status}}'` でその行を見る:
   - 止まっていれば `docker start <id>`。再起動ポリシーが `no` なら `docker update --restart unless-stopped <id>`。
