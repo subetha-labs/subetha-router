@@ -263,3 +263,56 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | I-7 | 既存 wire テストの更新（`allowLoopback: true` の transport） | 緑 |
 | I-8 | 配線の変異の記録（T-A14）と Linux での受け入れ実行（§4 末尾）。結果を §11 に記録 | §11 |
 | I-9 | Codex の実装レビュー → 指摘の反映 | §12 |
+
+## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`）
+
+### 11.1 設計からの逸脱（実装レビューで可否を問う）
+
+| # | 設計 | 実装 | 理由 |
+|---|---|---|---|
+| D-1 | §3.3 `createGuardedFetch(options): GuardedFetch`（関数 1 つ） | `createGuardedTransport(options): GuardedTransport = { fetch, report, allowLoopback }`。adapter のオプションは `transport: GuardedTransport`（必須） | headers 後の body 失敗を adapter が**同じ出口・同じ `policy`** で報告するため、`report(error, ctx)` を fetch と一緒に渡す。`report` は `classifyTransportError` で分類し、`TransportError`（transport が投げる前に報告済み）は二重に報告しない（§3.3-7 の排他をここで実装） |
+| D-2 | §3.5 受信は offer の route 束縛から `routeId` を取る | `verify` / `settle` に省略可能な第 3 引数 `InboundCallContext { routeId }` を追加し、core（orchestrator）が intent の `routeId` を渡す。`challenge` は `request.routeId` | offer が持つのは `routeBinding`（指紋）だけで `routeId` は復元できない（事実 A-12 の読み違い）。context 無しの呼び出しは `route=-` |
+| D-3 | §3.5 lint で `globalThis.fetch` の直接使用を禁止 | 単体試験 `tests/unit/no-direct-fetch.test.ts` が `src/` を走査する。`src/net/` と `src/client/` を除外し、コメントと型参照 `typeof globalThis.fetch` は無視 | repo に lint 設定が無い。`src/client/` は Router の公開契約（R1–R4）の型付きクライアントで、MCP server と tools が **Router 自身の HTTP API** を呼ぶ側。宛先は運用者が設定した `baseUrl` の origin だけ（quote が返す URL へは出さない、と同ファイルの方針にある）。要求に由来する宛先ではないので 10 経路（要件 FR-A6「上流へ出る全要求経路」）の外と判断した |
+| D-4 | §5 試験用 CA と証明書を `tests/fixtures/tls/` にコミット（有効期間 10 年） | `tests/fixtures/tls/generate.ts` が試験の開始時に `openssl` CLI で一時ディレクトリに生成する（有効期間 2 日）。README は生成物の表 | `.gitignore` が `*.pem` / `*.key` を除外している。鍵を force-add するより生成の方が安全。T-A12 は実行環境に `openssl` を要する（Linux コンテナでは `apt-get install openssl`。無ければ T-A12 は失敗する） |
+| D-5 | §3.6 undici の `cause.code` で分類 | `cause` の連鎖と `AggregateError.errors` を深さ 5 まで辿り、最初に当たる分類を採る | undici は複数アドレスへの接続失敗を `AggregateError` に、TLS の検証失敗を `cause.cause` に包む（T-A12 で確認） |
+| D-6 | §3.3-5 abort で `destroy()` | fetch が例外で終わったら `destroy()`（abort を含む）。headers 後は `close()` を待たずに発行し、abort された要求は undici 側で終わるので `close()` が完了する | 契約は同じ。T-A16 で 5 MB の遅い読み取りと読み捨て body の timeout を確認 |
+
+### 11.2 試験の実装で分かったこと（§2 の事実に追加）
+
+| # | 事実 | 影響 |
+|---|---|---|
+| A-15 | undici は `:9` 等の "bad port" への要求を**接続前に** `TypeError` で拒む | 閉じた port の試験（T-A15）は実行時に bind → close した port を使う |
+| A-16 | fixture の `--after-headers reset` で headers を書いた直後に socket を壊すと、undici が fetch 自体を失敗させる（`UND_ERR_SOCKET`）ので adapter は headers を受け取れない | fixture は 50 ms 後に壊す |
+| A-17 | fixture の接続数は `server.on("connection")`。`/calls` の読み出しが keep-alive で接続を持つと数が揺れる | 読み出しは `http.get(..., { agent: false })` で、読み出し自身の接続を差し引く |
+| A-18 | 素の undici fetch（既定 dispatcher）は keep-alive の接続を再利用する。T-A5 の陽性対照の後に変異を走らせると、変異の要求は囮に届いても**接続数が増えない** | T-A5 の陽性対照と変異は囮が見た**要求数**（`Host` の記録）で数える。Linux 受け入れ 1 回目（M-A2）で検出し `7a8cf84` で修正 |
+| A-19 | Linux コンテナ（`node:22-bookworm-slim`）でも `localhost` は `[::1, 127.0.0.1]` の順 | T-A3 / T-A5 の囮は `::1` 側に立つ（macOS と同じ配置） |
+| A-20 | macOS は `127.0.0.2` に alias 無しでは bind できない（`EADDRNOTAVAIL`） | T-A5 / T-A6 / T-A8 は前提検査で**失敗**する（skip ではない。§4 どおり）。受け入れは Linux |
+
+### 11.3 測定
+
+| # | 測定 | 結果 |
+|---|---|---|
+| M-A1 | macOS 手元 `npm test`（`eda0653`、alias 無し） | 340 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8: `cannot bind 127.0.0.2: EADDRNOTAVAIL`。A-20） |
+| M-A2 | Linux 受け入れ 1 回目（`eda0653`。Colima VM 内 `node:22-bookworm-slim`、Node 22.23.3、aarch64、`git archive HEAD` を展開して `npm ci && npm test`） | 342 passed / 14 skipped / **1 failed**: T-A5 の最後の判定（変異の要求が keep-alive の接続を再利用し、接続数が増えない）。試験側の誤り → A-18 |
+| M-A3 | Linux 受け入れ 2 回目（`7a8cf84`。同じ手順） | **343 passed / 14 skipped / 0 failed**（T-A1〜T-A18 を含む全件緑。27 ファイル、43 s。14 skipped は env で gate された既存の試験で、A の試験に skip は無い） |
+| M-A4 | T-A14 配線の変異（macOS、`eda0653`）。各 adapter の `transport.fetch` を素の `globalThis.fetch` に戻し（MPP は `Mppx.create` の `fetch` オプションを外して SDK 既定に落とす）、該当の T-A13 を 1 件ずつ `vitest -t` で実行。変異は毎回元に戻し、最後に `git diff --quiet -- src` で空を確認 | **10 / 10 検出**（下表） |
+
+T-A14 の表（「落ちる」= その試験が 1 failed）:
+
+| 変異（素の fetch に戻した配線） | 経路 | T-A13 の試験 | 結果 |
+|---|---|---|---|
+| MPP `createClient` の `fetch` オプションを外す | 1, 2, 3 | MPP 1 / MPP 2 / MPP 3 | 3 件とも落ちる（例: MPP 1 は「promise resolved `[{ scheme: 'tempo/charge', … }]` instead of rejecting」= challenge が素の fetch で読めてしまう） |
+| 実 x402 `getChallenge` | 4, 5 | 実 x402 4 / 実 x402 5 | 落ちる |
+| 実 x402 有料要求 | 6 | 実 x402 6 | 落ちる |
+| 合成 x402 `readChallenge` | 7 | 合成 x402 7 | 落ちる |
+| 合成 x402 `pay` | 8 | 合成 x402 8 | 落ちる |
+| 受信 subetha `post` | 9 | 受信 subetha 9 | 落ちる |
+| 受信 x402 `post` | 10 | 受信 x402 10 | 落ちる |
+
+同じ手順の 1 回目は結果の読み取り（vitest の要約行の形: 単体の `-t` 実行では `N failed | M skipped` で `passed` が出ない）を誤って
+「全件検出されず」と出た。読み取りを直して再実行した結果が上の表（手順の誤りであり、試験・実装の変更は無い）。
+
+### 11.4 受け入れの判定
+
+- §4 の T-A1〜T-A18: Linux で全件緑（M-A3）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
+- 公開結果（§3.5 の表）は既存の wire テストが変わらず通ることで確認（`tests/wire/*` は `allowLoopback: true` の transport を渡すだけの変更）。
