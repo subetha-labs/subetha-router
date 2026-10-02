@@ -328,16 +328,17 @@ GATE=caddy.service                                        # 127.0.0.1:8787 へ�
 STATE=/var/lib/subetha-router-migration.state             # 復旧のための記録（root FS 上。再起動しても残る。成功したら消す）
 NID=""; FINAL=0; STOPPED_GATE=0; DEST_ROLE=undetermined; J_ID=""; R_ID=""; JP=""; ROWS=""; SUM=""; SRC=""; PREVPHASE=none
 ATTEMPT=$(date -u +%Y%m%dT%H%M%SZ)-$$                      # この実行の識別子（記録と、作る新コンテナの label に付ける）
-record() { { echo "updated=$(date -u +%FT%TZ)"; echo "attempt=$ATTEMPT"; echo "phase=$1"; echo "previous_phase=$PREVPHASE"; echo "gate_was_running=$STOPPED_GATE"; echo "dest=$DEST"; echo "dest_role=$DEST_ROLE"; echo "old_container=$R"; echo "old_source=$SRC"; echo "journal=/app/runtime/$JP"; echo "journal_ident=$J_ID"; echo "runtime_ident=$R_ID"; echo "journal_rows=$ROWS"; echo "journal_sha256=${SUM%% *}"; echo "new_container_id=$NID"; } > "$STATE.tmp" && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")"; PREVPHASE=$1; }
+record() { { echo "updated=$(date -u +%FT%TZ)"; echo "attempt=$ATTEMPT"; echo "phase=$1"; echo "previous_phase=$PREVPHASE"; echo "gate_was_running=$STOPPED_GATE"; echo "dest=$DEST"; echo "dest_role=$DEST_ROLE"; echo "old_container=$R"; echo "old_source=$SRC"; echo "journal=/app/runtime/$JP"; echo "journal_ident=$J_ID"; echo "runtime_ident=$R_ID"; echo "journal_rows=$ROWS"; echo "journal_sha256=${SUM%% *}"; echo "new_container_id=$NID"; } > "$STATE.tmp" && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")" && PREVPHASE=$1; }   # どれか失敗すれば非 0（-e で止まる）。PREVPHASE は全部通った後だけ更新
 cleanup() { rc=$?; rm -f /tmp/journal.peek /tmp/journal.verify
   if [ "$rc" -ne 0 ]; then
-    if [ "$FINAL" = 0 ]; then
+    DUR=$(sed -n 's/^phase=//p' "$STATE" 2>/dev/null || true)     # ディスク上の記録の段階。復旧はこれを読むので、trap もこれに従う
+    if [ "$FINAL" = 0 ] && [ "$DUR" != handoff ]; then
       # このスクリプトが `docker create` で作った新コンテナ（その ID）だけを消す。名前では消さない（前回の残骸や旧コンテナに触らない）
       [ -z "$NID" ] || docker rm -f "$NID" >/dev/null 2>&1 || true
-      record failed-before-handoff 2>/dev/null || true
+      record failed-before-handoff 2>/dev/null || echo "warning: could not update the recovery record $STATE (durable phase: ${DUR:-none})" >&2
       echo "stopped with exit $rc before the handoff: the old container is untouched; ingress ($GATE) stays stopped and masked (it was running before: $STOPPED_GATE); $DEST is $DEST_ROLE. Recovery record: $STATE. See the recovery notes below the script" >&2
     else
-      record failed-after-handoff 2>/dev/null || true
+      record failed-after-handoff 2>/dev/null || echo "warning: could not update the recovery record $STATE (durable phase: ${DUR:-none})" >&2
       echo "stopped with exit $rc after the handoff: the new container $NID is kept (it may already be named $R); ingress ($GATE) is now $(systemctl is-enabled "$GATE" 2>/dev/null || true)/$(systemctl is-active "$GATE" 2>/dev/null || true) (it was running before: $STOPPED_GATE). Recovery record: $STATE. See the recovery notes below the script" >&2
     fi
   fi; exit "$rc"; }
@@ -535,10 +536,10 @@ if [ "$LAST" != none ]; then
 fi
 # 6) 削除の境界の直前に、もう一度ファイルシステムを確定する（新コンテナが起動で足した行も含めて）。ここで止まれば trap が新コンテナを消し、旧コンテナは残る
 sync -f "$DEST"
-#    ここから先で止まっても新コンテナは残る（前進で復旧する）。記録を handoff にしてから、再起動ポリシーを最終構成（unless-stopped）にし、
-#    旧コンテナを消し、新コンテナを $R に付け替え、入口を開け直す
-FINAL=1
+#    記録を handoff にできた時点から先は、止まっても新コンテナは残る（前進で復旧する）。記録の書き込みに失敗すればここで止まり、trap は
+#    ディスク上の記録（まだ replacement-started）に従って新コンテナを消す。その後、再起動ポリシーを最終構成（unless-stopped）にし、旧コンテナを消し、新コンテナを $R に付け替え、入口を開け直す
 record handoff
+FINAL=1
 docker update --restart unless-stopped "$NID" >/dev/null
 [ "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$NID")" = unless-stopped ]
 echo "all checks passed and the copy is durable: the new container $NID serves the migrated journal ($ROWS rows, last purchase $LAST); ingress was running before: $STOPPED_GATE. Removing the old container, renaming, reopening ingress"
@@ -566,7 +567,8 @@ echo "migration complete: $ROWS journal rows reopened by the new container"
 開いている journal が旧と違う、元の行が変わっている、flock の保持者が新コンテナでない、新コンテナが最後の購入を返さない。
 
 **止まった後の復旧**（入口は止まったまま mask されている。まず記録を読む）:
-`sudo cat /var/lib/subetha-router-migration.state` に `phase`、`gate_was_running`（0/1）、`dest_role`（`copy` / `authoritative` / `undetermined`）、
+`sudo cat /var/lib/subetha-router-migration.state` に `phase`（スクリプトの trap も、停止時にこのディスク上の段階に従う。記録を更新できなかった
+ときは `warning: could not update the recovery record` と出る。その場合も**ディスク上の記録の段階が正**）、`gate_was_running`（0/1）、`dest_role`（`copy` / `authoritative` / `undetermined`）、
 `old_source`、`journal`、`journal_ident`（旧 Router が開いていた journal の dev:inode）、`journal_rows` / `journal_sha256`（停止後に検証した
 journal。`copied` 以降）、`new_container_id` がある。途中で host が再起動していても同じ: 入口は mask されたまま、新コンテナは
 `handoff` の前なら再起動ポリシー無しなので上がらず、旧コンテナは止めたまま（`unless-stopped` は手で止めたものを起動しない）。

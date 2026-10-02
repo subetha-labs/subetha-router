@@ -1454,3 +1454,15 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 93 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AP（`ss` shim で手順 0 で失敗）、AQ（mount の無い旧 Router。`old-stopped` 直後に SIGKILL。復旧手順を実行）、AR（`docker create` 成功後、`record replacement-created` の `sync` を shim にして SIGKILL）、bind の本番相当 | **AP**: 記録は `phase=failed-before-handoff previous_phase=started`、`journal_ident` 空、旧 Router は running、この試行の label を持つコンテナは無し → 復旧は記録を消して入口を扱うだけ。**AQ**: 記録は `phase=old-stopped`、identity あり、`copy`、`journal_rows` 空（写す前）。復旧手順の順序どおり、手順 2 で `$DEST` に使える journal が無いことを確認 → 手順 3 で旧 Router を起こし、開いている journal の identity が記録と一致（`50:1389798`、書き込み層の journal）→ 残す、何も消さない、R4 200。**AR**: 記録は `phase=copied` で `new_container_id` 空（レビュアの窓）。`docker ps -a --filter label=subetha.migration=<attempt>` で起動していない `subetha-router-new`（ポリシー `no`）を見つけ、ID で削除。本番相当: exit 0、最終コンテナに attempt の label、記録は消える。harness 側の未定義変数で一度中断し、同じ内容で再実行。`failed 0` |
+
+### 26.19 実装レビュー #17（`47d8b30`）: **REJECT** → `record()` の失敗伝播（自分で入れた退行）
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#16 の 3 件は**解決**。新規 1 件 blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | 前回 `record()` の末尾に足した `; PREVPHASE=$1` が、`&&` 連鎖（書き込み → tmp の sync → rename → ディレクトリの sync）の失敗を飲み込む: 途中で失敗しても最後の代入が成功して関数は 0 を返し、`bash -e` でも止まらない。`record handoff` の tmp sync が失敗してもディスク上の記録は `replacement-started` のまま、再起動ポリシー・旧コンテナの削除・rename へ進む。復旧は引き渡し前の分岐を選び、唯一の Router である新コンテナの削除を指示する | **正しい**（blocking。レビュアは stub で 445c177 と比較し再現） | `PREVPHASE=$1` を `&&` 連鎖の最後の要素にした（全部通った後だけ更新、どれか失敗すれば非 0 で `-e` が止める）。`record handoff` を **`FINAL=1` の前**に移し、記録できなければ trap が新コンテナを消す（巻き戻し）。trap は**ディスク上の記録の段階**を読み、`handoff` なら `FINAL` に関わらず前進側として新コンテナを残す。trap 内で記録を更新できないときは `warning: could not update the recovery record` を出す（復旧手順にも「ディスク上の記録が正」と明記） |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 94 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。記録の永続化への fault injection: AS1（引き渡し時の tmp の `sync` を shim で失敗）、AS2（`mv -f tmp state` を shim で失敗）、AS3（rename 後のディレクトリ `sync` を失敗: ディスク上は既に `handoff`）、AS4（最初の記録の書き込み先 `state.tmp` をディレクトリにして書けなくする）、bind の本番相当 | **AS1 / AS2**: 記録の失敗で停止、`all checks passed` は出ず、**旧コンテナは残り**、trap はディスク上の段階（`replacement-started`）に従って新コンテナを消し、記録は `failed-before-handoff`（`previous_phase=replacement-started`）。**AS3**: ディスク上の記録が `handoff` なので trap は前進側に入り、新コンテナを**残し**、記録は `failed-after-handoff`。復旧手順の前進分岐どおり（起動確認・ポリシー・旧削除・rename）で R4 200。**AS4**: `record started` が書けず停止、`warning: could not update the recovery record` を出し、入口は触られず（mask 前）、旧 Router は running。本番相当: exit 0、記録は消える。`failed 0` |
