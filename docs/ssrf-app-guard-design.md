@@ -10,7 +10,7 @@ B（host 側 egress 制御、`ssrf-egress-design.md`）は実装フェーズを�
 | 守る宛先 | **namespace を出ない宛先**: `127.0.0.0/8`、`::1`、コンテナ自身のアドレス、`127.0.0.11`（要件 §9）。加えて B と同じ IANA special-purpose 表（深層防御。要件 §9 は任意としているが、FR-A1 の最低限リストを満たすために入れる） |
 | 守る経路 | Router から**外へ出る HTTP 要求のすべて**（FR-A6/A7 の 10 経路: MPP 送信 3、実 x402 送信 3、合成 x402 送信 2、受信 facilitator 2） |
 | 守り方 | **fetch 前の分類**（解決した全アドレスの 1 つでも禁止なら拒否 = FR-A2）と、**検査済みアドレスへの接続固定**（FR-A3/A7。transport が自前で名前解決しない） |
-| 守らないもの | 公開アドレス上の proxy の先（要件 §9）。namespace を出るパケットの最終的な遮断は B（A の表は B と同じだが、B が正） |
+| 守らないもの | 公開アドレス上の proxy の先（要件 §9）。namespace を出るパケットの最終的な遮断は B（A の表は B と同じだが、B が正）。**展開固有の保護対象**（VPC の CIDR、グローバル IP を持つ内部サービス、`EXTRA_DENY*`）は A では知り得ないので **B に委ねる**（要件 §9「範囲一覧の網羅は B」） |
 | 入れない | 「AI が上流 URL を指定する」機能そのもの。**release gate は B + A の両方の受け入れ**（要件 §9） |
 
 ## 2. 事実（2026-10-02 に測った）
@@ -24,6 +24,10 @@ B（host 側 egress 制御、`ssrf-egress-design.md`）は実装フェーズを�
 | A-5 | `undici.fetch` は `redirect: "error"` を守る（302 で例外、2 本目の要求は出ない）。TLS では固定 IP に接続しても **SNI は元のホスト名**（`SNICallback` で `provider.test` を観測） | 同 (d)(e) |
 | A-6 | Node 22 の `dns.lookup(name, { all: true, verbatim: true })` は A/AAAA を両方返す（`localhost` → `::1`, `127.0.0.1`）。リテラルは解決せずそのまま返る（`::ffff:127.0.0.1` も文字列のまま） | ローカル実行 |
 | A-7 | `undici` は依存に無い（`npm ls undici` 空）。Node 22 の global fetch の `dispatcher` に別コピーの Agent を渡す互換は保証されないので、**`undici` の `fetch` と `Agent` を同じコピーで**使う | `package.json` |
+| A-8 | `undici@8.11.2` の `engines.node` は `>=22.19.0`。この repo は `>=22.12.0`。手元は v22.23.1、コンテナの base image `node:22-bookworm-slim` は v22.23.3 | `node_modules/undici/package.json`、`Dockerfile` |
+| A-9 | 実 adapter モードの fixture 実行（`tests/wire/x402-cli.test.ts` 等）は `tests/fixtures/router-x402-process.ts` が `startRouter({ evmSigning: spy })` で**能力を注入**して起動し、facilitator は loopback の fixture。本番の入口 `tools/remote-router-process.ts` は実能力だけを注入する | 同ファイル |
+| A-10 | 送信 adapter は transport の例外を**握り潰して固定の結果に変える**（MPP の challenge 再読は `not_sent` / `destination_challenge_unreadable`、x402 の有料要求は `unknown` / `destination_pay_unknown`）。core には例外が届かない | `mpp.ts:366-377`、`x402.ts:458-468` |
+| A-11 | `::1` と `127.0.0.1` は**同じ port に別々に listen できる**。システム DNS の `localhost` は `::1` を先に返す（A-6）。したがって「検査済みが `127.0.0.1`、囮が `[::1]`」の配置で、**DNS に落ちた接続は囮に届いて観測できる** | ローカル実行 |
 
 ## 3. 設計
 
@@ -41,6 +45,11 @@ B（host 側 egress 制御、`ssrf-egress-design.md`）は実装フェーズを�
 - **自アドレス**: `os.networkInterfaces()` の全アドレス（IPv4/IPv6、scope id を落とす）を**判定のたびに**取る（コンテナの bridge アドレス、
   後から足されたアドレスを含む）。テストでは供給元を注入する。
 - リテラル IP も同じ表を通す（FR-A3）。`0.0.0.0` / `::` は `unspecified`。
+- **判定の順序**（固定）: (1) 構文 → `invalid`。(2) IPv4-mapped なら**埋め込み IPv4 に置き換えて**以下を続ける（B の `::ffff:0:0/96` 一括拒否とは
+  **意味が違う**: A は埋め込みを分類する。T-A1 の表の一致は字面の一致であり、この 1 行だけ意味が異なることを明記する）。
+  (3) unspecified。(4) **loopback**（`127.0.0.0/8`、`::1`）→ `loopback`。(5) **自アドレス**（`networkInterfaces()` のうち loopback で**ない**もの）→
+  `own_address`。(6) 表 → `special_purpose`。(7) allowed。
+  loopback を自アドレスより先に判定するので、fixture 例外（§3.4）が loopback を許しても**自分の bridge アドレス等は拒否のまま**。
 
 ### 3.2 解決と「いずれか」規則（FR-A2、FR-A3）
 
@@ -50,66 +59,119 @@ B（host 側 egress 制御、`ssrf-egress-design.md`）は実装フェーズを�
 
 ### 3.3 接続固定の transport（FR-A3、FR-A7）
 
-`src/net/guarded-fetch.ts`: `createGuardedFetch(options): GuardedFetch`（`(url, init) => Promise<Response>`）。要求ごとに:
+`src/net/guarded-fetch.ts`: `createGuardedFetch(options): GuardedFetch`。
 
-1. URL を解析。`http:` / `https:` 以外、userinfo 付き、は `destination_blocked`。
+```ts
+type GuardedFetch = (url: string | URL, init: RequestInit, context: { routeId?: string; operation: string }) => Promise<Response>;
+interface GuardedFetchOptions {
+  allowLoopback: boolean;                       // §3.4。組み立て側だけが true にできる
+  report: (event: TransportEvent) => void;      // 運用者向けログ（§3.6）。**投げる前に**呼ぶ
+  lookup?: Lookup;                              // 既定 dns.lookup（試験で注入）
+  interfaces?: () => string[];                  // 既定 os.networkInterfaces（試験で注入）
+  tls?: { ca?: string[] };                      // 試験の CA だけ。本番は未指定（システムの信頼ストア）
+}
+```
+
+要求ごとに:
+
+1. URL を解析。`http:` / `https:` 以外、userinfo 付き、空のホストは `destination_blocked`（接続しない）。
 2. §3.2 で vetted を得る（ここで止まれば**接続は 1 本も作らない** = FR-A4）。
-3. `new undici.Agent({ connect: { lookup: vettedLookup } })` を作る。`vettedLookup` はホスト名に関わらず **vetted だけ**を返す
-   （`all: true` 形式と単一形式の両方に対応）。TLS の servername と `Host` は URL のホスト名のまま（事実 A-5）。
+3. `new undici.Agent({ connect: { lookup: vettedLookup, ...tls } })`。`vettedLookup` はホスト名に関わらず **vetted だけ**を返す
+   （Node の `all: true` 形式と単一形式の**両方**に対応。単一形式は vetted の先頭）。TLS の servername と `Host` は URL のホスト名のまま
+   （事実 A-5）。証明書検証は**既定のまま**（`rejectUnauthorized` を触らない。試験は `tls.ca` で試験用 CA を足すだけ）。
 4. `undici.fetch(url, { ...init, redirect: "error", dispatcher })`。呼び出し側が `redirect` を変えても **`"error"` で上書き**する。
-5. `finally` で `agent.close()`（要求ごとに Agent を作り捨てる。接続の再利用で古い宛先に繋がることが無い。要求量は小さい）。
+5. **Agent の寿命**: fetch が例外で終わった、または signal が abort されたら `agent.destroy()`（即時）。headers が返ったら `agent.close()` を
+   **待たずに**発行する（undici の `close()` は進行中の要求（body の読み取り）を終えてから閉じるので、呼び出し側が body を後から読んでも
+   止まらない。読み捨てた body は要求の `signal` の timeout で abort され、その時点で閉じる）。`close()` の promise は捕捉して無視する。
+6. 返す `Response` は **undici の `Response` そのもの**（ラッパを被せない。`mppx.preparePayment` が Response を受け取るので、形を変えない）。
+   型は境界で `globalThis.Response` に写す（キャスト）。body の読み取りの失敗は接続後の事象で、既存の adapter の扱い（固定の結果）のまま。
 
 全接続・全 fallback が vetted の中に閉じる根拠は事実 A-3/A-4。mppx 経由（`rawFetch`）も同じ関数を受け取る（事実 A-1）ので、SDK が内部で
-`globalThis.fetch` に逃げない限り到達する。到達の証明は §4 の sabotage テスト（各 adapter で拒否が効き、fixture に要求が 0）。
+`globalThis.fetch` に逃げない限り到達する。到達の証明は §4（経路ごとの sabotage と、配線を外すと落ちることの確認）。
 
 ### 3.4 fixture 例外（FR-C2、FR-C2'）
 
-`createGuardedFetch({ allowLoopback })`。**`true` にできるのは組み立て側（`composeRails`）だけ**で、次の 2 つに限る:
+transport は **adapter ごとに 1 つ**作る（共有しない）。`allowLoopback` は**その adapter の能力**から決める:
 
-- `ROUTER_ADAPTER_MODE=synthetic`（合成レール。`assertLoopbackUrl` が既に loopback 以外を拒む）
-- 署名しない試験用能力（`capability.kind === "non-signing-fixture"` 等、fixture であることを**能力が明示**するもの）
+| adapter | `allowLoopback: true` になる条件 |
+|---|---|
+| 実 x402 送信 | `capabilities.evmSigning.kind === "non-signing-fixture"` |
+| MPP 送信 | `capabilities.mppTempo.kind === "non-signing-fixture"` |
+| 合成 x402 送信 | `ROUTER_ADAPTER_MODE=synthetic`（`assertLoopbackUrl` が loopback 以外を既に拒む） |
+| 受信 subetha / x402 | synthetic モード、または `capabilities.fixtureFacilitators === true`（**新設の明示的な能力**。`tests/fixtures/router-x402-process.ts` 等の fixture 起動だけが渡す。`tools/remote-router-process.ts` は渡さない） |
 
-`allowLoopback` が許すのは **loopback だけ**（`127.0.0.0/8`、`::1`）。他の禁止範囲と自アドレスは fixture でも拒否。env / 設定ファイルからは
-変えられない（本番の強制は常に有効）。実能力で組み立てた adapter は常に `false`。
+能力が混在する組み立て（x402 が実鍵で MPP が fixture、またはその逆）では、**実能力の adapter は `false`、fixture の adapter だけ `true`**。
+`true` が許すのは **loopback だけ**（`127.0.0.0/8`、`::1`）。自アドレス・他の禁止範囲は fixture でも拒否（§3.1 の順序）。
+env / 設定ファイルからは変えられない。
 
 ### 3.5 10 経路への配線（FR-A6、FR-A7）
 
-| 経路 | 配線 |
-|---|---|
-| MPP 送信（`rawFetch` 3） | `createMppOutbound({ transport })` → `Mppx.create({ fetch: transport, polyfill: false, ... })` |
-| 実 x402 送信（`getChallenge` + 2） | `createX402Outbound({ transport })` → `fetch` を `transport` に置換 |
-| 合成 x402 送信（2） | `createSyntheticX402Outbound({ transport })` → 同上 |
-| 受信 subetha / x402（`post` 各 1） | `createSubethaInbound({ transport })` / `createX402Inbound({ transport })` |
+| # | 経路 | 呼び出し | `operation` | 拒否時の既存の公開結果（変えない） |
+|---|---|---|---|---|
+| 1 | MPP `readChallenge` | `mppx.rawFetch` | `challenge` | quote の失敗（既存） |
+| 2 | MPP `pay` の challenge 再読 | `mppx.rawFetch` | `pay_challenge` | `not_sent` / `destination_challenge_unreadable` |
+| 3 | MPP `pay` の有料要求 | `mppx.rawFetch`（credential 付き） | `pay` | `unknown` / `destination_pay_unknown` |
+| 4 | 実 x402 `readChallenge` → `getChallenge` | `fetch` | `challenge` | quote の失敗 |
+| 5 | 実 x402 `pay` の challenge 再読 → `getChallenge` | `fetch` | `pay_challenge` | `not_sent`（既存の分類） |
+| 6 | 実 x402 `pay` の有料要求 | `fetch` | `pay` | `unknown` / `destination_pay_unknown` |
+| 7 | 合成 x402 `readChallenge` | `fetch` | `challenge` | quote の失敗 |
+| 8 | 合成 x402 `pay` | `fetch` | `pay` | 既存の分類 |
+| 9 | 受信 subetha `post`（verify / settle / challenge） | `fetch` | `facilitator_<path>` | `source_verify_unavailable` 等（既存） |
+| 10 | 受信 x402 `post`（verify / settle） | `fetch` | `facilitator_<path>` | 同上 |
 
-`transport` は**必須**オプション（省略で `globalThis.fetch` に落ちない）。`composeRails` が `allowLoopback` を決めて 1 つ作り、全 adapter に渡す。
-`warnIfInternalUpstream`（起動時の警告）は残す（起動時の文字列検査であって強制ではない旨を注記）。
+配線: 各 adapter のオプションに **`transport: GuardedFetch`（必須）** を足す。省略で `globalThis.fetch` に落ちる経路は作らない
+（`fetch` という識別子を adapter から消し、lint で `globalThis.fetch` の直接使用を禁止する）。MPP は `Mppx.create({ fetch: transport, polyfill: false })`
+（context は `rawFetch(url, init)` の形に合わせ、adapter 側で `transport` を `(url, init) => transport(url, init, ctx)` に束ねて渡す）。
+`composeRails` が adapter ごとに transport を作る。`warnIfInternalUpstream`（起動時の文字列警告）は残し、強制ではない旨を注記する。
+`tools/t7-*`、`tools/u01r-*` の手元スクリプトも同じ必須オプションを通す（実能力なら `allowLoopback: false`）。
 
 ### 3.6 診断（FR-C1、FR-C1'）
 
-transport は `TransportError` を投げ、`code` は固定集合 `destination_blocked` / `dns_failed` / `connect_failed` / `upstream_timeout` / `transport_failed`。
-A は接続前に拒否するので `destination_blocked` を**確定**として出せる（B の「タイムアウトからの推定禁止」とは別）。
-運用者向けログ（adapter の `note`）: `outbound transport <code> route=<routeId> policy=<POLICY_VERSION>`。**アドレス・ホスト名・URL は出さない**。
-公開応答と journal は**現状のまま**（`pay` の例外は `destination_pay_unknown`、quote 時の例外は既存の失敗経路）。新しい公開コードは足さない。
+transport は `TransportError`（`code`、`operation`、`routeId?`）を投げる。**投げる前に `report()` を呼ぶ**ので、adapter が例外を握り潰して
+固定の結果に変えても（事実 A-10）、運用者向けの 1 行は残る。`code` と根拠:
+
+| `code` | 根拠（実際の error / cause） |
+|---|---|
+| `destination_blocked` | §3.1/§3.2 の**ポリシー拒否**だけ（URL の形、解決結果の分類）。接続は作っていない |
+| `dns_failed` | `dns.lookup` の例外（`ENOTFOUND`、`EAI_AGAIN` 等）、空の結果 |
+| `connect_failed` | undici の `cause.code` が `ECONNREFUSED` / `EHOSTUNREACH` / `ENETUNREACH` / `ECONNRESET`（接続前） / `UND_ERR_CONNECT_TIMEOUT`、TLS の検証失敗（`ERR_TLS_CERT_ALTNAME_INVALID`、`UNABLE_TO_VERIFY_LEAF_SIGNATURE`、`SELF_SIGNED_CERT_IN_CHAIN` 等） |
+| `upstream_timeout` | 要求の `AbortSignal.timeout` が切れた（`TimeoutError`） |
+| `aborted` | 呼び出し側の signal による abort（timeout 以外の `AbortError`） |
+| `transport_failed` | 上記のどれにも当たらない（不確定。経過時間から推定しない） |
+
+運用者向けログ 1 行: `outbound transport <code> operation=<operation> route=<routeId|-> policy=<POLICY_VERSION>`。**アドレス・ホスト名・URL・
+例外文字列は出さない**。`report` は `composeRails` が `process.stderr` に束ねる（core の `note` と同じ出口）。
+公開応答と journal は**現状のまま**（§3.5 の表）。新しい公開コードは足さない。
 
 ### 3.7 依存
 
-`undici@8.11.2` を **exact** で追加（この repo の慣行。Node 22 対応）。型は undici の `Response` を境界で `globalThis.Response` に写す
-（本体は `status` / `headers` / `text` / `json` しか使わない）。
+`undici@8.11.2` を **exact** で追加し、`engines.node` を **`>=22.19.0`** に上げる（事実 A-8。手元とコンテナは 22.23）。型は undici の
+`Response` を境界で `globalThis.Response` に写す（キャスト。§3.3-6）。
 
 ## 4. 受け入れ（実装フェーズの product test。vitest、実 TCP）
 
+観測手段: 試験用の fixture は **TCP の接続数**（`server.on("connection")`）と `Host` を記録する。**囮**: 検査済みが `127.0.0.1` のとき `[::1]` の同じ port に
+囮を置く（事実 A-11）。transport が自前で名前解決に落ちれば `localhost` → `::1` で囮に届き、試験が落ちる。
+
 | ID | 試験 | 合格条件 |
 |---|---|---|
-| T-A1 | ポリシー表の単体: B の `DENY4`/`DENY6` を `deploy/egress/subetha-egress` から読み、A の表と**集合として一致** | 差分 0 |
-| T-A2 | 分類の単体: 各範囲の代表値、境界値、`::ffff:127.0.0.1` / `::ffff:8.8.8.8`、NAT64、`0.0.0.0` / `::`、不正文字列、注入した自アドレス（公開 IP でも `own_address`） | 期待どおりの reason |
-| T-A3 | 固定の証明: 注入した lookup が `provider.test` → `127.0.0.1`（fixture）。`allowLoopback: true` で `200`、fixture が見た `Host` は `provider.test:<port>`、lookup 呼び出しは 1 回 | FR-A3 |
-| T-A4 | DNS に落ちない証明: lookup が誰も聞いていないアドレスを返す → 失敗（`connect_failed` / `upstream_timeout`）、fixture の要求 0 | FR-A3 |
-| T-A5 | 混在: lookup が `[公開 IP, 127.0.0.1]` を返し `allowLoopback: false` → `destination_blocked`、要求 0 | FR-A2 |
-| T-A6 | リテラル loopback / 自アドレス / 各禁止範囲の URL を `allowLoopback: false` で → `destination_blocked`、要求 0 | FR-A1 |
-| T-A7 | `redirect: "follow"` を渡しても 302 で失敗し 2 本目が出ない | §3.3 |
-| T-A8 | **到達の sabotage**（FR-A7）: 5 つの adapter それぞれを `allowLoopback: false` の transport で組み立て、loopback の fixture へ → 全経路が `destination_blocked`、fixture の要求 0。同じ fixture で `true` なら成功（既存テストが通る） | 各 adapter |
-| T-A9 | 運用者ログの形: `outbound transport destination_blocked route=... policy=...` にアドレスが含まれない | FR-C1 |
-| T-A10 | `composeRails`: real は `allowLoopback: false`、synthetic と non-signing fixture は `true`（env で変えられない） | FR-C2' |
+| T-A1 | 表の単体: B の `DENY4`/`DENY6` を `deploy/egress/subetha-egress` から読み、A の表と集合として一致（`::ffff:0:0/96` は意味が違う旨を試験のコメントに） | 差分 0 |
+| T-A2 | 分類の単体: 各範囲の代表値と境界、`::ffff:127.0.0.1`（→ loopback）、`::ffff:8.8.8.8`（→ allowed）、`::ffff:10.0.0.1`（→ special）、NAT64、`0.0.0.0` / `::`、不正文字列、注入した自アドレス（公開 IP でも `own_address`）、**loopback は自アドレスより先**（`127.0.0.1` を interfaces に入れても `loopback`） | 期待どおりの reason |
+| T-A3 | 固定の証明（IPv4）: 注入 lookup `provider.test` → `127.0.0.1`、囮を `[::1]`、`allowLoopback: true` → `200`、fixture の `Host` は `provider.test:<port>`、lookup 呼び出し 1 回、**囮の接続 0** | FR-A3 |
+| T-A4 | 固定の証明（IPv6）: vetted `::1`、囮を `127.0.0.1` → `200`、囮の接続 0 | FR-A3 |
+| T-A5 | DNS に落ちない証明: vetted が誰も聞いていない `127.0.0.1:<閉じた port>`、囮が `[::1]:<同 port>` で listen → 失敗（`connect_failed`）、**囮の接続 0** | FR-A3 |
+| T-A6 | fallback は vetted の中だけ: vetted `[127.0.0.1:閉じた port と同じ port… ]` は port を分けられないので、vetted `[::1, 127.0.0.1]` で `::1` に誰もいない → `127.0.0.1` の fixture に届く（接続 1）。vetted `[::1]` だけなら失敗し `127.0.0.1` の囮の接続 0 | FR-A3 |
+| T-A7 | lookup の両形式: `all: true` で配列、単一形式で先頭、を単体で。undici 経由では `all: true` で呼ばれることを spy で確認 | §3.3-3 |
+| T-A8 | rebinding: lookup を「1 回目は `127.0.0.1`、2 回目以降は `[::1]`（囮）」にして 1 要求 → 接続は 1 回目の集合に閉じる（囮 0）。別の要求では再解決される（2 要求目は囮へ → `allowLoopback: true` でも囮が受ける = 要求単位で閉じていることの確認） | §5 |
+| T-A9 | 混在の拒否: lookup が `[公開 IP, 127.0.0.1]`、`allowLoopback: false` → `destination_blocked`、接続 0、lookup 1 回 | FR-A2 |
+| T-A10 | リテラル: loopback / 注入した自アドレス / 各禁止範囲 / userinfo 付き / `ftp:` → `destination_blocked`、接続 0 | FR-A1 |
+| T-A11 | `redirect: "follow"` を渡しても 302 で `transport_failed`、2 本目の接続 0 | §3.3-4 |
+| T-A12 | TLS（試験用 CA を `tls.ca` に注入。`rejectUnauthorized` は触らない）: (a) `provider.test` の SAN を持つ証明書 → `200`、サーバが見た SNI は `provider.test`、`Host` も `provider.test`（別々に確認）。(b) SAN が `other.test` の証明書 → `connect_failed`（`ERR_TLS_CERT_ALTNAME_INVALID`）、HTTP 要求 0。(c) 試験用 CA に無い証明書 → `connect_failed`、要求 0 | FR-A3 の TLS 検証 |
+| T-A13 | **経路ごとの到達**（10 経路）: 各経路について、前提となる要求（challenge 等）は通し、**その経路の要求だけ**を `destination_blocked` にする（transport の `report` を spy し、`operation` で特定）。確認: (1) `report` がその `operation` で `destination_blocked` を 1 回、(2) fixture の接続数が前提分だけ増え、対象の要求で増えない、(3) 公開結果は §3.5 の表のとおり | FR-A7 |
+| T-A14 | 配線の検証（実装フェーズの測定）: 10 経路それぞれについて、adapter の `transport` を `globalThis.fetch` に差し替えた一時的な変異で T-A13 の該当試験が**落ちる**ことを記録する（表にして設計書に残す。変異は戻す） | 空でない証明 |
+| T-A15 | 能力の混在（`composeRails` の単体）: (x402 実鍵, MPP fixture) → x402 の transport は `false`、MPP は `true`。逆も。synthetic は全部 `true`。`fixtureFacilitators` 無しの real は受信も `false`。env で変えられない | FR-C2' |
+| T-A16 | 寿命: 5 MB の body を headers 後にゆっくり読み切れる（`close()` を待たない契約）。読まずに捨てた body は要求の timeout で閉じる。例外時は `destroy()` | §3.3-5 |
+| T-A17 | 診断: 各 `code` を 1 回ずつ起こし、`report` の 1 行の形と、**行・公開応答・journal にアドレス・ホスト名・URL・例外文字列が含まれない**ことを正規表現で確認 | FR-C1 |
 
 既存の wire テスト（`tests/wire/*`）は fixture が loopback なので、transport を `allowLoopback: true` で渡すように更新する。
 
@@ -120,3 +182,19 @@ A は接続前に拒否するので `destination_blocked` を**確定**として
   利得は「検査と接続の間」に限られ、それは無い）。
 - `undici` の `Agent` を要求ごとに作る設計は性能より単純さを取った。要求量が増えたら vetted 集合をキーにした再利用を検討する。
 - B と表を二重に持つ。表の更新は B（`subetha-egress`）側を正とし、T-A1 が差分を検出する。
+- 試験用 CA と証明書は `tests/fixtures/tls/` に**コミット**する（自己署名、SAN `provider.test` と `other.test`、有効期間 10 年、鍵は試験専用）。
+  生成コマンドを同ディレクトリの README に残す。本番コードはこれらを読まない。
+
+## 6. 設計レビュー #1（v1、`316849d`）: **REJECT** → v2
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。中核（lookup 置換による固定、mppx への注入、必須の transport、「いずれか」拒否、redirect の拒否）は妥当と確認。
+
+| # | 指摘（要約） | 判定 | v2 での変更 |
+|---|---|---|---|
+| 1 | 1 本の transport では能力の混在（x402 実鍵 + MPP fixture 等）を表せない。受信 facilitator に独立した fixture 許可が無い。loopback は `networkInterfaces()` にも出るので「loopback は許すが自アドレスは拒む」が矛盾する | **正しい**（blocking） | adapter ごとに transport を作り、その能力で `allowLoopback` を決める（§3.4）。受信は新設の明示的能力 `fixtureFacilitators`。判定順序で loopback を自アドレスより先に（§3.1） |
+| 2 | 5 つの adapter を塞ぐ試験では、前提の要求（challenge）で止まり、有料要求の経路が守られていなくても検出できない。10 経路を個別に到達させ、配線を外すと落ちることも示すこと。公開結果は変えないこと | **正しい**（blocking） | T-A13（経路ごとに前提を通し、その要求だけを拒否、`report` の `operation` で特定、接続数で確認）、T-A14（配線の変異で落ちることの記録）、§3.5 に既存の公開結果の対応表 |
+| 3 | fallback・rebinding・IPv6・両方の lookup 形式・証明書検証の試験が無い。「要求 0」は禁止接続が無いことの証明にならず、システム DNS に落ちた失敗も通る。scratch の TLS 試験は `rejectUnauthorized: false` | **正しい**（blocking） | 囮（`::1` / `127.0.0.1` の同 port）で DNS への fallback を**観測可能**に（事実 A-11、T-A3〜T-A8）。TLS は試験用 CA で検証を**有効のまま**（T-A12 の 3 通り）。SNI と Host を別々に確認 |
+| 4 | 診断は名前だけで根拠と報告経路が無い。adapter に `note` は無く、`(url, init)` では route が分からず、例外は adapter の catch で消える | **正しい**（blocking） | `TransportError` と `code` の根拠表（§3.6）、`report` を**投げる前に**呼ぶ、`context { routeId, operation }` を transport の引数に、`composeRails` が stderr に束ねる。T-A17 で各 code と秘匿を確認 |
+| 5 | Agent の `close()` を待つかどうか、body の寿命、Response の変換が未定義 | 正しい（non-blocking） | §3.3-5/6: `close()` は待たずに発行（body 完了後に閉じる）、例外と abort は `destroy()`、Response はラッパ無しのキャスト。T-A16 |
+| 6 | B の `::ffff:0:0/96` 一括拒否と A の埋め込み分類は意味が違う。順序と、B に委ねる分類を明記すること | 正しい（non-blocking） | §3.1 の判定順序（mapped の正規化を表より前に）、§1 の委任（展開固有の prefix は B） |
+| 7 | `undici@8.11.2` は Node `>=22.19.0`、repo は `>=22.12.0` | 正しい（non-blocking） | `engines.node` を `>=22.19.0` に（事実 A-8） |
