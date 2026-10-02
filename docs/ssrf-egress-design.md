@@ -1424,3 +1424,19 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 91 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AK（レビュアの配置: 空白を含む別名 `/srv/router alias` を private にし、旧 Router が `/srv/router alias/old`（実体は `$DEST/old`）を mount）。AL（レビュアの要求: 誤った journal の新コンテナが上がった直後に host が落ちる状況を、先頭空白の env で `snapshot.ndjson` を開く新コンテナを起動させ、最初の `curl` を shim にして **SIGKILL**（trap は走らない）で再現。そのまま **VM を実際に再起動**（boot id `7f8a0fe5` → `9a4ae32b`）し、復旧手順を実行。その後 bind の本番相当） | **AK**: mountinfo は `/srv/router\040alias` と記録され、`unesc()` で解いた正規位置から `overlap: /srv/router alias/old resolves to /var/lib/subetha-router/old and /var/lib/subetha-router to /var/lib/subetha-router on the same filesystem (bind mount alias)` で停止、止めていない、何も写さず、復旧記録 `phase=failed-before-handoff`。**AL（再起動前）**: Caddy は `masked`（`/etc/systemd/system/caddy.service -> /dev/null` がディスク上）で inactive、新コンテナは running だが再起動ポリシー `no`、旧は exited、記録は `phase=replacement-started gate_was_running=1 dest_role=copy`。**AL（再起動後、uptime 33 s）**: Caddy は masked のまま inactive、443/80 に listener 無し、**新コンテナは exited（起動しない）**、旧は stopped のまま、記録は残存。復旧手順どおり: 記録の ID で新コンテナを削除、複製は旧 journal と同一なので `findmnt -l` で下に mount が無いことを見て `rm -rf --one-file-system`、旧 Router を `docker start` → R4 200、記録を消し、`unmask`、`gate_was_running=1` なので `start caddy` → active。本番相当（bind）: `masked across reboots` を使い、成功時に記録が消え、Caddy は unmask、新コンテナの再起動ポリシーは引き渡し時に `unless-stopped`、exit 0。両部とも `failed 0` |
+
+### 26.17 実装レビュー #15（`29c42ce`）: **REJECT** → 復旧手順の排他化と検証、記録の保護
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#14 のエスケープと trap のメッセージは**解決**、再起動は「狭まった」。新規 3 件 blocking、2 件 non-blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | 復旧が旧 Router を古い journal の上で起こし得る: `$DEST` を一時的に bind した private の別名（下に古い journal）を旧 Router が使っていると `authoritative`。`old-stopped` 直後に中断して再起動すると別名は消え、復旧は旧コンテナを起こして health だけ見て入口を開ける。別名の経路は古い中身を見せている | **正しい**（blocking） | 記録に旧 Router の journal の **dev:inode**（`journal_ident`）と、停止後に検証した journal の行数・sha256 を持たせた。復旧は旧 Router を起こした後、**開いている journal の dev:inode を `/proc/<pid>/fd` で取って記録と比べる**ことを必須にし、一致しなければ入口を開けず、`$DEST` の検証済み journal（authoritative はその本体、copy は sha256 を確認した複製）で作り直す |
+| 2 | 既存の記録を見つけて止まる経路でも、先に仕掛けた trap が `record` を呼び、初期値で**前回の記録を上書き**する | **正しい**（blocking） | 既存記録の確認を **trap を仕掛ける前**に移した。拒否した場合、記録には触れない（回帰: バイト単位で不変） |
+| 3 | 復旧の分岐が重なる: 「`handoff` 以外」が巻き戻し（新コンテナ削除・`$DEST` 削除）で、`failed-after-handoff` は前進でもある | **正しい**（blocking） | phase 集合を**排他**に: `started` / `old-stopped` / `copied` / `replacement-created` / `replacement-started` / `failed-before-handoff` は巻き戻し、`handoff` / `failed-after-handoff` は前進（巻き戻しの削除を禁止） |
+| 4 | 中断の窓: `docker start` と `record replacement-started` の間（ID 無しで新コンテナが存在）、`docker update --restart unless-stopped` と `record handoff` の間（再起動で上がる） | 正しい（non-blocking） | `docker create` の直後に `record replacement-created`（ID 付き）。再起動ポリシーの変更を **`record handoff` の後**に移した（それ以前は無ポリシー、以後は前進復旧でポリシーを付ける） |
+| 5 | 引き渡し後の trap が常に「still masked」と言うが、unmask 後の失敗もある | 正しい（non-blocking） | trap 時点の `is-enabled` / `is-active` の観測値を出す |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 92 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AM（既存の復旧記録がある状態で実行）。AN（レビュアの配置: 下に古い 1 行の journal を持つ `/srv/router-alias` に `$DEST`（3 行の本物）を一時的に bind し private に、旧 Router はその別名を使う。`record old-stopped` 直後の `mkdir` を shim にして SIGKILL。その後 `umount` で別名を失わせ（再起動で起きること）、復旧手順を実行）。AO（`docker create` と `docker start` の間で SIGKILL）。bind の本番相当 | **AM**: `a recovery record from an earlier attempt exists` で停止、記録は **sha256 が不変**、旧 Router も入口も触られず。**AN**: `authoritative`、記録は `phase=old-stopped`、`journal_ident=64769:1389745`（本物）。別名を外した後、復旧手順どおり旧 Router を起こすと `/healthz` は返り R4 も 200 だが、**開いている journal の identity は `64769:1389744`（古い方）で記録と不一致** → 入口を開けず、旧を消して `$DEST` で作り直し → identity が記録と一致、R4 200、3 行。**AO**: 記録は `phase=replacement-created` で新コンテナの ID を持ち（created、ポリシー `no`）、その ID で削除できた。本番相当: exit 0、成功で記録が消える。`failed 0` |
