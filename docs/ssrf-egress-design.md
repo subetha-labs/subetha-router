@@ -1313,3 +1313,16 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 83 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image）。bind mount の旧 Router に Q・A〜G・P・K1・K2・L・M・O・O2、別構成の旧 Router に I・J・N・N2、mount 無しの旧 Router に H。それぞれ本番相当の実行 | 旧 Router が開いている journal は host の `/proc/<pid>/fd` から `/app/runtime/journal.ndjson` と観測できた。**P**（レビュアの反例: env ファイルに先頭空白付きの ` SUBETHA_JOURNAL_PATH=runtime/snapshot.ndjson`、同じディレクトリに決済前の前置き `snapshot.ndjson`）: 新コンテナは最終構成で起動し、Docker が解釈した env が `runtime/snapshot.ndjson` だと分かって停止、新コンテナは trap が消し、旧コンテナ残存。G（別の journal 名）も同じ経路で停止。**N / N2**（symlink の先を使う旧 Router。R4 200 を先に確認）: `has /app/elsewhere/ledger.ndjson open, not a file under /app/runtime` で停止（止めていない）。F（動作中に journal を削除）: `(deleted)` を検出して停止（止めていない）。Q（前回の `subetha-router-new` が残っている）: 触らずに停止。D・E・K1・K2・O: 最終構成の新コンテナが上がらず停止、ログに Router 自身の理由（`must be a non-empty string` / `no terminating newline` / `must be a positive integer` / `invalid_json` / `intent identity already in use`）。A・B・C・L・M・O2・I・J・H は前回どおり。20 件すべて exit 1、旧コンテナ残存、`subetha-router-new` は残らない。本番相当（bind・mount 無し）: `all checks passed` の後に旧コンテナを消して `rename`、exit 0、作り直し後の名前は `subetha-router`、restart policy `unless-stopped`、R4 200 が 2 回（旧 Router・新コンテナ）、未知 id 404、flock の保持 PID が `docker top` に出る、`docker stop` で消える。`failed 0` |
+
+### 26.9 実装レビュー #7（`636d3d3`）: **REJECT** → 入口を閉じてから検証する
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#6 の env parser の件は**解決**（受け入れの迂回としては）、後片付けは「狭まった」。新規 1 件 blocking、1 件 non-blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | 新コンテナは journal の検証（Docker が解釈した env、開いているファイル）より**前に** `127.0.0.1:8787` に公開され、Caddy はそこへ転送している。entry point は `/mcp` を `/healthz` と一緒に出す。古い snapshot で上がった新コンテナに、検証で弾かれるまでの間に quote や purchase が届き得る。trap が消した後、その記録は旧 journal の外に残り、旧 Router に戻すと届かなくなる。正しい構成でも後段の失敗後に旧 Router を起動して再実行すると、手順 3 のコピーが新しく受けた記録を上書きし得る | **正しい**（blocking） | **入口（`caddy.service`）を最初に閉じる**: 止めて、inactive かつ 443/80 に listener が無いことを確認。終わるまで閉じたまま（失敗時も）、成功して付け替えた後だけ（このスクリプトが止めた場合に）開け直す。既に止まっていればそのまま触らない。手順 3 で `$DEST` に**内容の違う** journal が既にあれば上書きせずに止まる。復旧手順を記載: `unknown` / `interrupted_at_restart` の追記だけなら消してよい、それ以外の行があれば消さずに調べる、旧 Router に戻してから入口を開ける |
+| 2 | `docker run` はコンテナを作った後の起動で失敗し得る（公開ポートが使用中など）。`CREATED_N=1` は成功後なので、trap が消さない | 正しい（non-blocking） | `docker create` と `docker start` に分け、作成した ID を先に受けて trap に登録する。trap は **その ID だけ**を消し、名前では消さない（名前で消すと、開始時の「前回の残骸が無いこと」の検査で止まったときに、このスクリプトが作っていない残骸を消してしまう。測定 84 の最初の試行で実際に起きた） |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 84 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、`127.0.0.1:443` で聞く Caddy の代役 unit を置いて）。前回の 20 件に R（`$DEST` に内容の違う journal が既にある）と T（`docker create` 後の `docker start` を shim で失敗させる）を加えた 22 件の sabotage と、本番相当 2 件 | 最初の試行は Q（前回の `subetha-router-new` が残っている）で **FAIL**: trap が名前で消す fallback を持っていたため、開始時の検査で止まったときに、このスクリプトが作っていない残骸を消した。trap を「`docker create` が返した ID だけ」に直して再実行し、**22 件すべて exit 1**、旧コンテナ残存、`subetha-router-new` は残らず、**全失敗経路で入口が閉じたまま**（Caddy inactive）。R: `exists and differs` で停止し、`$DEST` の journal は上書きされていない。T: shim の失敗後、作られたコンテナは trap が ID で消した。P（先頭空白の env）・G・O・D・E・K1・K2 は最終構成で起動した新コンテナの検証または起動で停止、N・N2・F・I・J・M・O2・L・A・B・C・H は前回どおり。本番相当（bind、Caddy 動作中）: `ingress closed` → 全検査 → `rename` → **`ingress reopened`**（Caddy active）、exit 0。本番相当（mount 無し、Caddy を先に止めておく）: 入口は「開始時に止まっていた」として触らず、exit 0。いずれも R4 200 が 2 回（旧 Router・新コンテナ）、未知 id 404、flock の保持 PID が `docker top` に出る。`failed 0` |
