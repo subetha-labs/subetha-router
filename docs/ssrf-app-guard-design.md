@@ -93,9 +93,10 @@ interface GuardedFetchOptions {
    - headers の**後**、adapter（または SDK）が **body を読む**途中の失敗（停滞で要求の timeout、切断）: **adapter が同じ分類関数
      `classifyTransportError(error)` で分類して `report()`**（既存の catch の中。公開結果は変えない）。
    - headers の後、adapter が **body を読まない**応答（MPP の 402 challenge: SDK は headers から読む。事実 A-14）: adapter が headers の処理を終えた
-     直後に **`response.body.cancel()` で明示的に捨てる**。接続は即時に解放され、その body の停滞や切断は**操作の失敗ではない**ので事象を出さない
-     （出すものが無い）。実装で `preparePayment` が body を保持しないことを確認し、T-A17 で「停滞した body が挟まっても challenge 再読が遅れず失敗
-     せず、接続が解放される」ことを見る。
+     直後に **`response.body?.cancel().catch(() => {})` で明示的に捨てる**（null 安全。既にエラーになった stream の `cancel()` は reject するので、
+     その reject は**その場で消費**し、challenge の結果にも診断にも影響させない。早期 return の経路でも必ず捨てる）。接続は即時に解放され、
+     その body の停滞や切断は**操作の失敗ではない**ので事象を出さない（出すものが無い）。実装で `preparePayment` が body を保持しないことを確認し、
+     T-A17 で「停滞した body が挟まっても challenge 再読が遅れず失敗せず、接続が解放される」「cancel の前に既にエラーになった body でも同じ」を見る。
 
 全接続・全 fallback が vetted の中に閉じる根拠は事実 A-3/A-4。mppx 経由（`rawFetch`）も同じ関数を受け取る（事実 A-1）ので、SDK が内部で
 `globalThis.fetch` に逃げない限り到達する。到達の証明は §4（経路ごとの sabotage と、配線を外すと落ちることの確認）。
@@ -186,7 +187,7 @@ headers 後（adapter が報告）: body の停滞で要求の timeout が切れ
 | T-A14 | 配線の検証（実装フェーズの測定）: 10 経路それぞれについて、adapter の `transport` を `globalThis.fetch` に差し替えた一時的な変異で T-A13 の該当試験が**落ちる**ことを記録する（表にして設計書に残す。変異は戻す） | 空でない証明 |
 | T-A15 | 能力の混在（`composeRails` の単体）: (x402 実鍵, MPP fixture) → x402 の transport は `false`、MPP は `true`。逆も。synthetic は全部 `true`。`fixtureFacilitators` 無しの real は受信も `false`。env で変えられない | FR-C2' |
 | T-A16 | 寿命: 5 MB の body を headers 後にゆっくり読み切れる（`close()` を待たない契約）。読まずに捨てた body は要求の timeout で閉じる。例外時は `destroy()` | §3.3-5 |
-| T-A17 | 診断: 各 `code` を 1 回ずつ起こす（headers 前）。headers 後は fixture に `--after-headers stall\|reset` を足して 4 例: (a) **消費する body の停滞**（x402 `getChallenge` の `text()`、受信 `post` の `text()`）→ 要求の timeout → `upstream_timeout` を adapter が 1 行、(b) **消費する body の切断** → `transport_failed` 1 行、(c) **消費しない body の停滞**（MPP `pay_challenge`。fixture は**正しい MPP challenge の headers** を返してから body を止める）→ challenge 再読は遅れず成功し、事象 0、Agent が閉じる（接続解放を fixture 側の切断で観測）、(d) 消費しない body の切断 → 同じく事象 0 で成功。確認: `report` は失敗 1 つにつき**ちょうど 1 行**、形は §3.6、**行・公開応答・journal にアドレス・ホスト名・URL・例外文字列が含まれない**（正規表現）、公開結果は §3.5 の表のまま | FR-C1、FR-C1' |
+| T-A17 | 診断: 各 `code` を 1 回ずつ起こす（headers 前）。headers 後は fixture に `--after-headers stall\|reset` を足して 4 例: (a) **消費する body の停滞**（x402 `getChallenge` の `text()`、受信 `post` の `text()`）→ 要求の timeout → `upstream_timeout` を adapter が 1 行、(b) **消費する body の切断** → `transport_failed` 1 行、(c) **消費しない body の停滞**（MPP `pay_challenge`。fixture は**正しい MPP challenge の headers** を返してから body を止める）→ challenge 再読は遅れず成功し、事象 0、Agent が閉じる（接続解放を fixture 側の切断で観測）、(d) 消費しない body の切断（cancel の前に既にエラーになった stream）→ 同じく事象 0 で成功、unhandled rejection 無し。さらに **有料応答の body を消費する 3 経路**（MPP `pay` の receipt、実 x402 `pay`、合成 x402 `pay`。fixture は**正しい receipt** を返してから body を止める/切る）で (e) 停滞 → `upstream_timeout` 1 行、(f) 切断 → `transport_failed` 1 行、公開結果は既存のまま。確認: `report` は失敗 1 つにつき**ちょうど 1 行**、形は §3.6、**行・公開応答・journal にアドレス・ホスト名・URL・例外文字列が含まれない**（正規表現）、公開結果は §3.5 の表のまま | FR-C1、FR-C1' |
 | T-A18 | 文脈の帰属: 異なる route の `pay` を 2 本同時に走らせ、各 `report` 行の `route` と `operation`（`pay_challenge` → `pay`）がそれぞれの呼び出しに正しく付く。受信の `verify` / `settle` の行に offer の route が付く | §3.5 |
 
 既存の wire テスト（`tests/wire/*`）は fixture が loopback なので、transport を `allowLoopback: true` で渡すように更新する。
@@ -239,3 +240,26 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 |---|---|---|---|
 | 1 | T-A5 の「`S` と別の family の loopback」は dual-stack（`localhost` → `::1`, `127.0.0.1`）では作れない。family ではなく**別のアドレス** `V ∉ S` を要求し、`V:P` が refused であること、`S` の全アドレスで囮が聞くこと、陽性対照と変異が実行できることを要求。作れない環境を受け入れにしない | **正しい**（blocking） | `V` を「`S` に含まれない loopback アドレス」（Linux は `127.0.0.2`。事実 A-13）に定義し直し、前提 4 点を**失敗条件**として明記（skip しない）。受け入れの実行環境を Linux に固定し、手順を §4 末尾に |
 | 2 | MPP の `pay_challenge` は SDK が headers から challenge を読み body を消費しないので、headers 後に body が停滞しても adapter の catch に入らず、報告されない。未消費 body の観測者を定義するか、扱いを明示的に改めること。重複の規則、正しい challenge headers の使用、消費する body の例も | **正しい**（blocking） | 未消費 body は headers の処理後に **`body.cancel()`** で捨てる（接続解放、操作の失敗ではないので事象無し）と明示（§3.3-7 の 3 分割、事実 A-14）。T-A17 を 4 例（消費/未消費 × 停滞/切断）に改め、MPP 側は正しい challenge headers を使う |
+
+## 9. 設計レビュー #4（v4、`bc877f3`）: **APPROVE WITH CHANGES** → 設計確定
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#3 の 2 件は**解決**。新規の接続固定の迂回は無し。FR-A1〜A7、FR-C1'、FR-C2'、§9 を満たすと評価。
+
+| # | 指摘 | 判定 | 反映 |
+|---|---|---|---|
+| 1 | `body.cancel()` の失敗の扱いが未定義（既にエラーの stream では reject する。既存の catch で待つと `destination_challenge_unreadable` に化け、放置すると unhandled rejection） | 正しい（non-blocking） | §3.3-7: null 安全、reject をその場で消費、早期 return でも捨てる。T-A17 (d) に「cancel 前に既にエラー」を追加 |
+| 2 | T-A17 の消費 body の例が challenge と受信 `post` だけで、有料応答の body 消費側（MPP receipt、実/合成 x402 の有料応答）の報告漏れを検出できない | 正しい（non-blocking） | T-A17 に (e)(f) を追加（正しい receipt を返してから停滞/切断） |
+
+## 10. 実装タスク（実装フェーズの単位。順に、各単位で `npm test`）
+
+| # | 単位 | 成果物 |
+|---|---|---|
+| I-1 | 依存: `undici@8.11.2`（exact）、`engines.node >=22.19.0` | `package.json`、lock |
+| I-2 | ポリシー: `src/net/destination-policy.ts`（分類、表、`POLICY_VERSION`、自アドレス供給元の注入） | T-A1、T-A2 |
+| I-3 | transport: `src/net/guarded-fetch.ts`（`createGuardedFetch`、`TransportError`、`classifyTransportError`、lookup の両形式、要求ごとの Agent、redirect の上書き、寿命） | T-A3〜T-A12、T-A16 |
+| I-4 | fixture: `tests/fixtures/tls/`（CA、`provider.test`、`other.test`、信頼されない証明書、README）、fixture サーバに `--after-headers stall\|reset`、接続数と `Host` の記録、囮サーバ | — |
+| I-5 | 配線: 5 adapter に `transport` 必須、MPP の request-local ctx と body の cancel、adapter 側の報告、受信の route、`composeRails` の adapter ごとの transport と `fixtureFacilitators`、fixture 起動と tools の更新、`warnIfInternalUpstream` の注記 | T-A13、T-A15、T-A17、T-A18 |
+| I-6 | 直接 `fetch` の禁止: `src/` で `globalThis.fetch` / 裸の `fetch(` を `src/net/` 以外で使っていないことの試験 | 補助 |
+| I-7 | 既存 wire テストの更新（`allowLoopback: true` の transport） | 緑 |
+| I-8 | 配線の変異の記録（T-A14）と Linux での受け入れ実行（§4 末尾）。結果を §11 に記録 | §11 |
+| I-9 | Codex の実装レビュー → 指摘の反映 | §12 |
