@@ -311,7 +311,9 @@ subnet が RFC1918 であることを確認する）。
 `/proc` で見て、その最後の購入を旧 Router 自身が返すことを確かめるため）。設定ファイルを自前で解釈して journal の場所を
 推定することはしない（Docker の env-file の解釈と食い違い得る）。**入口（Caddy）は最初に閉じ、終わるまで閉じたまま**にする:
 新コンテナは最終構成のまま先に起動して検証するので、検証が済む前に外から届いてはいけない。全部通ってから旧コンテナを消して
-名前を付け替え、入口を開け直す。どの段階で失敗しても旧コンテナは残り、作りかけの新コンテナは消され、入口は閉じたまま。
+名前を付け替え、入口を開け直す。失敗したときの状態は段階で決まる: **引き渡し（記録が `handoff` になる）より前**の失敗では旧コンテナが残り、
+作りかけの新コンテナは消され、入口は閉じたまま。**引き渡し後**の失敗では新コンテナを残して前進で終える（入口を開け直した後に止まる
+こともある）。どちらも `/var/lib/subetha-router-migration.state` の記録と下の復旧手順に従う。
 mask は**再起動しても残る**もの（`systemctl mask`）を使い、新コンテナは引き渡しの直前まで再起動ポリシー無しで作るので、途中で host が
 再起動しても、入口は閉じたまま、新コンテナは勝手に上がらない。進行状況は `/var/lib/subetha-router-migration.state` に記録し、復旧はそれを読む。
 host 上の他のプロセスが `127.0.0.1:8787` を使わないこと（受け入れ runner を同時に走らせない）。
@@ -328,7 +330,8 @@ GATE=caddy.service                                        # 127.0.0.1:8787 へ�
 STATE=/var/lib/subetha-router-migration.state             # 復旧のための記録（root FS 上。再起動しても残る。成功したら消す）
 NID=""; FINAL=0; STOPPED_GATE=0; DEST_ROLE=undetermined; J_ID=""; R_ID=""; JP=""; ROWS=""; SUM=""; SRC=""; PREVPHASE=none
 ATTEMPT=$(date -u +%Y%m%dT%H%M%SZ)-$$                      # この実行の識別子（記録と、作る新コンテナの label に付ける）
-record() { { echo "updated=$(date -u +%FT%TZ)"; echo "attempt=$ATTEMPT"; echo "phase=$1"; echo "previous_phase=$PREVPHASE"; echo "gate_was_running=$STOPPED_GATE"; echo "dest=$DEST"; echo "dest_role=$DEST_ROLE"; echo "old_container=$R"; echo "old_source=$SRC"; echo "journal=/app/runtime/$JP"; echo "journal_ident=$J_ID"; echo "runtime_ident=$R_ID"; echo "journal_rows=$ROWS"; echo "journal_sha256=${SUM%% *}"; echo "new_container_id=$NID"; } > "$STATE.tmp" && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")" && PREVPHASE=$1; }   # どれか失敗すれば非 0（-e で止まる）。PREVPHASE は全部通った後だけ更新
+record() { local body; body=$(printf 'updated=%s\nattempt=%s\nphase=%s\nprevious_phase=%s\ngate_was_running=%s\ndest=%s\ndest_role=%s\nold_container=%s\nold_source=%s\njournal=%s\njournal_ident=%s\nruntime_ident=%s\njournal_rows=%s\njournal_sha256=%s\nnew_container_id=%s' "$(date -u +%FT%TZ)" "$ATTEMPT" "$1" "$PREVPHASE" "$STOPPED_GATE" "$DEST" "$DEST_ROLE" "$R" "$SRC" "/app/runtime/$JP" "$J_ID" "$R_ID" "$ROWS" "${SUM%% *}" "$NID") && printf '%s\n' "$body" > "$STATE.tmp" && [ "$(sed -n 's/^phase=//p' "$STATE.tmp")" = "$1" ] && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")" && PREVPHASE=$1; }
+#   記録は一度に組み立てて 1 回の printf で書き、書いた tmp から phase を読み戻してから rename する。どれか失敗すれば非 0（-e で止まる）。PREVPHASE は全部通った後だけ更新
 cleanup() { rc=$?; rm -f /tmp/journal.peek /tmp/journal.verify
   if [ "$rc" -ne 0 ]; then
     DUR=$(sed -n 's/^phase=//p' "$STATE" 2>/dev/null || true)     # ディスク上の記録の段階。復旧はこれを読むので、trap もこれに従う

@@ -1466,3 +1466,16 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 94 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。記録の永続化への fault injection: AS1（引き渡し時の tmp の `sync` を shim で失敗）、AS2（`mv -f tmp state` を shim で失敗）、AS3（rename 後のディレクトリ `sync` を失敗: ディスク上は既に `handoff`）、AS4（最初の記録の書き込み先 `state.tmp` をディレクトリにして書けなくする）、bind の本番相当 | **AS1 / AS2**: 記録の失敗で停止、`all checks passed` は出ず、**旧コンテナは残り**、trap はディスク上の段階（`replacement-started`）に従って新コンテナを消し、記録は `failed-before-handoff`（`previous_phase=replacement-started`）。**AS3**: ディスク上の記録が `handoff` なので trap は前進側に入り、新コンテナを**残し**、記録は `failed-after-handoff`。復旧手順の前進分岐どおり（起動確認・ポリシー・旧削除・rename）で R4 200。**AS4**: `record started` が書けず停止、`warning: could not update the recovery record` を出し、入口は触られず（mask 前）、旧 Router は running。本番相当: exit 0、記録は消える。`failed 0` |
+
+### 26.20 実装レビュー #18（`319b0b8`）: **REJECT** → 記録の書き込みを 1 回に
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#17 は「狭まった」（sync / rename の失敗は伝わるが、個々の書き込みは未検査）。新規 1 件 non-blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | `record()` の `{ echo ...; echo ...; }` は `&&` の非終端オペランドなので errexit が効かず、途中の `echo` が失敗しても最後の `echo` の状態で成功になる。`phase=` の無い不完全な記録が公開され、旧コンテナの削除へ進み得る | **正しい**（blocking） | 記録を**一度に組み立てて 1 回の `printf` で書き**、書いた tmp から `phase` を読み戻して一致を確かめてから `sync` → rename → ディレクトリ `sync`。どれか失敗すれば非 0 |
+| 2 | 冒頭の「どの段階で失敗しても旧コンテナは残り、新コンテナは消え、入口は閉じたまま」は、引き渡し後の前進復旧と矛盾する | 正しい（non-blocking） | 段階で分けた説明に改め、記録と復旧手順を指すようにした |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 95 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。`record()` の単体確認（15 項目、`phase=handoff`、`PREVPHASE` は成功後に更新）。AT（直前の記録の後に `state.tmp` をディレクトリにして、引き渡しの記録の **書き込み**を失敗させる）、bind の本番相当 | **AT**: `migrate.sh: line 12: /var/lib/subetha-router-migration.state.tmp: Is a directory` で停止、`all checks passed` は出ず、**旧コンテナは残り**、新コンテナは trap が消し、ディスク上の記録は `replacement-started` のまま（trap も更新できず `warning: could not update the recovery record`）。本番相当: exit 0、記録は消える。`failed 0` |
