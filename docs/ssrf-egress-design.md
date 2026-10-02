@@ -1380,3 +1380,18 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | 88 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AA（`$DEST` の別名、回帰）、AD（レビュアの重ねた mount: `$DEST` を `/srv/router-alias` に bind し、その上に `/srv/router-old` を重ねる。`$DEST` には最後の `created` が同じ 2 行の古い journal、`router-old` には 3 行目に `unknown` を足した本物）、AE（`$DEST/old` を `$SRC` の bind に）、AF（2 回目の `sync -f` を shim で失敗）、bind の本番相当（回帰） | AA: `is authoritative`（identity 一致）、exit 0、`all checks passed and the copy is durable` が最後の `sync -f` の後。AE: `unsupported: something is mounted beneath /var/lib/subetha-router (/var/lib/subetha-router/old)` で**止める前に**停止、何も写さず。AF: 最後の `sync -f` の失敗で停止、`all checks passed` は出ず、新コンテナは trap が消し、旧は残り（exited）、復旧で `docker start` → R4 200。本番相当: exit 0。**AD は 2 通り**: (a) **既定の伝播**（root mount が `shared`）では、重ねた 2 本目の bind が **`$DEST` 自身にも伝播して覆う**（`findmnt $DEST` → `/dev/vda1[/srv/router-old]`、inode が 3 つとも一致）ので、`$DEST` と旧 Router の runtime は**本当に同じディレクトリ**になり、`authoritative` で本物の 3 行を開いて exit 0（R4 200）。最初の試行はこれを「古い journal を残したまま完了した」と誤って FAIL にしたが、`$DEST` の中身自体が伝播で本物になっていた。(b) 別名を `--make-private` にして重ねると `$DEST` は覆われず（inode が異なる）、`is copy` と判定され、`$DEST/journal.ndjson exists and differs ...` で**旧 Router を止める前に**停止、古い journal は不変。レビュアの in-memory の probe が想定した「identity が異なる」状態は (b) で、カーネルの既定では (a) になる。どちらも安全側 |
 
 伝播の帰結として、重ねた mount の下に隠れた古いディレクトリは**この手順の対象外**（スクリプトは見えている mount を使い、identity で判定する）。
+
+### 26.14 実装レビュー #12（`9a212cb`）: **REJECT** → identity を fd と root に束縛、`$DEST` の mount は fstab に
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#11 の 3 件は**解決**。測定 88 の伝播の説明は受け入れられた（「現在の状態の分類としては正しい」）が、
+それが次の 2 つを保証しないとして新規 2 件が blocking、1 件が non-blocking。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | host 側の候補は、旧 Router が**実際に開いている**ファイルと identity で結び付けられていない。fd の経路文字列だけを集め、host の mount 元を読む。コンテナ起動後に host の別名に別の mount を重ねると（Docker の既定 `rprivate` なのでコンテナの中は元のまま）、host の経路は古い中身を見せる。最後の `created` が同じ古い journal なら R4 も通り、古い複製で完了する | **正しい**（blocking） | 旧 Router の journal を持つプロセスの **PID と fd 番号**を取り、`stat -L /proc/PID/fd/N`（開いているファイルそのもの）と `stat -L /proc/PID/root/app/runtime`（コンテナが見ている runtime）の (dev:inode) を取る。host の mount 元とその journal がそれと**同じ identity**でなければ、止める前に止まる。候補の覗き（最後の購入、`$DEST` との比較）は **`/proc/PID/root` 経由のコンテナ自身の見え方**で行う。停止後、複製の前にも host 側の identity を再確認 |
+| 2 | 受け入れた `$DEST` の bind（測定 88 の伝播で `$DEST` を覆った mount）は再起動で消え、同じ経路に下の古いディレクトリが現れる。自動再起動のコンテナがそれを mount し、入口が古い状態の Router を公開し得る。`syncfs` は mount の形を保存しない | **正しい**（blocking） | `$DEST` を含む mount（`/` 以外）が**すべて `/etc/fstab` に載っている**ことを要求し、載っていなければ止まる（一時的な bind・重ねた mount・伝播で覆われた状態はここで止まる。起動後の同一性が確立しない配置は対象外）。`$DEST` は fstab の mount 上の通常のディレクトリであることを本文に明記 |
+| 3 | 復旧手順に「付け替え後の health 確認で止まった」状態が無い（新コンテナは既に `subetha-router`、手順は `subetha-router-new` を要求して進めない） | 正しい（non-blocking） | marker 行に新コンテナの ID を出し、復旧を ID で 3 状態に分けた: 旧 + 新（未付け替え）、新のみ（付け替え前）、付け替え済み。Caddy の条件付き再開は維持 |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 89 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AG（レビュアの配置: 別名を private にして旧 Router を起動した後、host の別名に古いディレクトリを重ねる。古い方は最後の `created` が同じ 2 行、コンテナの中は 3 行）、AH（`$DEST` を fstab に無い一時的な bind で覆い、旧 Router は同じディレクトリを使う）、回帰として AD-private・F・M・O、別名 AA の本番相当、bind・mount 無し（候補は `/proc/PID/root` 経由）・同一ディレクトリの本番相当 | **AG**: `the host path /srv/router-alias does not show the directory the container uses (64769:1389582 vs 64769:1346347)` で**旧 Router を止める前に**停止、`$DEST` は作られず。**AH**: `mount at /var/lib/subetha-router covering /var/lib/subetha-router is not in /etc/fstab: what /var/lib/subetha-router contains after a reboot is not established` で停止、役割は付かず、止めていない。AD-private・F・M・O は前回どおり。AA: identity で `authoritative`、exit 0。bind: exit 0、marker 行に新コンテナの ID。mount 無し: `/proc/PID/root` 経由の覗きで通り、exit 0、Caddy は「止まっていた」として unmask のみ。同一ディレクトリ: `authoritative`、exit 0。2 部構成とも `failed 0` |

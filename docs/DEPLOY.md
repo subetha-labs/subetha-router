@@ -348,8 +348,9 @@ for l in open(sys.argv[1],"rb").read().splitlines():
 print(last)' "$1"; }
 inner() { docker logs "$1" 2>&1 | sed -n 's/^router: //p' | tail -n1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])'; }
 r4() { docker exec "$1" node -e 'fetch("http://127.0.0.1:"+process.argv[1]+"/v1/purchases/"+process.argv[2],{headers:{"x-router-principal":"judge",authorization:"Bearer public"}}).then(r=>{console.log("R4 status",r.status);process.exit(r.status===200?0:1)})' "$2" "$3"; }
-# コンテナのプロセスが開いているファイルのうち名前が $2 で終わるものを、host の /proc から（コンテナの中の経路のまま）列挙する
-openfiles() { local pid; for pid in $(docker top "$1" -o pid | tail -n +2 | tr -d ' '); do readlink /proc/"$pid"/fd/* 2>/dev/null | grep -F -- "$2" || true; done | sort -u; }
+ident() { stat -L -c '%d:%i' "$1"; }                     # (dev:inode)。/proc の magic link（fd、root）も辿る
+# コンテナのプロセスが開いているファイルのうち名前に $2 を含むものを、host の /proc から "PID FD 経路（コンテナの中の経路のまま）" で列挙する
+openfds() { local pid fd t; for pid in $(docker top "$1" -o pid | tail -n +2 | tr -d ' '); do for fd in /proc/"$pid"/fd/*; do t=$(readlink "$fd" 2>/dev/null) || continue; case "$t" in *"$2"*) echo "$pid ${fd##*/} $t" ;; esac; done; done; }
 # 0) 入口を閉じる。Caddy を止め（起動中なら起動を取り消し）、runtime mask で誰も起動できないようにし、状態が **inactive そのもの**で
 #    あること（activating などの途中状態は不可）と、443/80 に listener が無いこと（列挙の失敗も不可）を確認する。
 #    開始時に動いていた（active / activating / reloading）場合だけ、成功後に開け直す
@@ -378,16 +379,40 @@ for m in json.load(sys.stdin):
     elif d=="/" or "/app/runtime".startswith(d+"/") or d.startswith("/app/runtime/"):
         sys.exit("unsupported mount layout: a mount at %s overlaps /app/runtime" % d)
 print(src)')
-#    $DEST の役割。旧 Router の mount 元と $DEST を比べる: 同じ経路か、ディレクトリの (dev, inode) が同じなら authoritative
-#    （コピーしない。何も消してはいけない）。mountinfo で bind mount を解いた正規位置（デバイス + そのファイルシステム内の経路。同じ
-#    mount point に重ねた mount は**後の（見えている）方**）が同じなのに別のディレクトリなら、重ねた mount か隠れた mount なので止まる。
-#    経路か正規位置で一方が他方の中（重なる木。別名経由も含む）なら止まる。$DEST の**下に何かが mount されていれば**止まる
-#    （後で消すときに辿ってしまう）。mount 表が読めなければ止まる。それ以外だけ copy（使い捨ての複製）
+#    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
+#       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
+JF=$(openfds "$R" .ndjson)
+[ "$(printf '%s\n' "$JF" | grep -c .)" = 1 ] || { echo "the old Router holds $(printf '%s\n' "$JF" | grep -c .) .ndjson files open, expected exactly one:"; printf '%s\n' "$JF"; exit 1; }
+read -r PID FD J <<< "$JF"
+case "$J" in
+  *" (deleted)") echo "the old Router's journal was deleted while open: $J"; exit 1 ;;
+  /app/runtime/?*) JP=${J#/app/runtime/} ;;
+  *) echo "the old Router has $J open, not a file under /app/runtime: not covered by this procedure"; exit 1 ;;
+esac
+[ "$(openfds "$R" /journal.lock | awk '{print $3}')" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the old Router does not hold journal.lock next to $J"; exit 1; }
+#    c. その journal と、コンテナが見ている /app/runtime の identity (dev:inode) を、プロセスの fd と root 経由で取る。
+#       host の mount 元が**同じもの**を見せていること（コンテナ起動後に host 側で重ねた mount などで、host の経路が別の中身を見せていれば止まる）
+J_ID=$(ident "/proc/$PID/fd/$FD"); R_ID=$(ident "/proc/$PID/root/app/runtime")
+if [ -n "$SRC" ]; then
+  [ "$(ident "$SRC")" = "$R_ID" ] || { echo "the host path $SRC does not show the directory the container uses ($(ident "$SRC") vs $R_ID): not covered by this procedure"; exit 1; }
+  [ "$(ident "$SRC/$JP")" = "$J_ID" ] || { echo "$SRC/$JP is not the file the old Router has open: not covered by this procedure"; exit 1; }
+  [ "$(real "$SRC/$JP")" = "$(real "$SRC")/$JP" ] || { echo "symlink inside $SRC: unsupported layout"; exit 1; }
+fi
+#    d. $DEST の役割。まず、$DEST を含む mount（/ 以外）がすべて /etc/fstab に載っていること（一時的な bind や重ねた mount は再起動で消え、
+#       同じ経路に別の中身が現れる）。次に、コンテナが見ている runtime と $DEST の identity が同じなら authoritative（コピーしない。何も消して
+#       はいけない）。host の mount 表で、正規位置が同じなのに別物（重ねた/隠れた mount）、経路や正規位置の入れ子、$DEST の下の mount なら止まる。
+#       mount 表や fstab が読めなければ止まる。それ以外だけ copy（使い捨ての複製）
+D_ID=$(ident "$DEST" 2>/dev/null || true)
 role() { python3 -c '
 import os,sys
+s,d,rid,did=sys.argv[1:5]
 mounts=[]
 for line in open("/proc/self/mountinfo"):
-    f=line.split(); mounts.append((f[4].replace("\\040"," "), f[3].replace("\\040"," "), f[2]))
+    f=line.split(); mounts.append((f[4].replace("\\\\040"," "), f[3].replace("\\\\040"," "), f[2]))
+fstab=set()
+for line in open("/etc/fstab"):
+    f=line.split()
+    if f and not f[0].startswith("#") and len(f)>=2: fstab.add(f[1].replace("\\\\040"," "))
 def canon(p):
     p=os.path.realpath(p); best=None
     for mp,root,dev in mounts:
@@ -395,43 +420,28 @@ def canon(p):
             if best is None or len(mp)>=len(best[0]): best=(mp,root,dev)   # same length: the later entry is the mount on top
     mp,root,dev=best; rel=p if mp=="/" else p[len(mp):]
     return dev, (os.path.normpath((root if root!="/" else "")+rel) or "/")
-def ident(p):
-    try: st=os.stat(p); return (st.st_dev, st.st_ino)
-    except OSError: return None
 def inside(a,b): return a.startswith(b.rstrip("/")+"/")
-s,d=sys.argv[1],sys.argv[2]; rs,rd=os.path.realpath(s),os.path.realpath(d); cs,cd=canon(s),canon(d); i_s,i_d=ident(s),ident(d)
-if rs==rd or (i_s is not None and i_s==i_d): print("authoritative"); sys.exit()
-if cs==cd: sys.exit("ambiguous: %s and %s map to the same place in the mount table but are different directories (stacked or hidden mounts): not covered by this procedure" % (s,d))
-if inside(rs,rd) or inside(rd,rs): sys.exit("overlap: %s and %s are nested paths: not covered by this procedure" % (s,d))
-if cs[0]==cd[0] and (inside(cs[1],cd[1]) or inside(cd[1],cs[1])): sys.exit("overlap: %s resolves to %s and %s to %s on the same filesystem (bind mount alias): not covered by this procedure" % (s,cs[1],d,cd[1]))
+rd=os.path.realpath(d)
+covering=[mp for mp,_,_ in mounts if mp!="/" and (rd==mp or inside(rd,mp))]
+missing=[mp for mp in covering if mp not in fstab]
+if missing: sys.exit("mount at %s covering %s is not in /etc/fstab: what %s contains after a reboot is not established: not covered by this procedure" % (", ".join(missing), d, d))
+if did and did==rid: print("authoritative"); sys.exit()
+if s:
+    rs=os.path.realpath(s); cs,cd=canon(s),canon(d)
+    if cs==cd: sys.exit("ambiguous: %s and %s map to the same place in the mount table but are different directories (stacked or hidden mounts): not covered by this procedure" % (s,d))
+    if inside(rs,rd) or inside(rd,rs): sys.exit("overlap: %s and %s are nested paths: not covered by this procedure" % (s,d))
+    if cs[0]==cd[0] and (inside(cs[1],cd[1]) or inside(cd[1],cs[1])): sys.exit("overlap: %s resolves to %s and %s to %s on the same filesystem (bind mount alias): not covered by this procedure" % (s,cs[1],d,cd[1]))
 below=[mp for mp,_,_ in mounts if inside(mp,rd)]
 if below: sys.exit("unsupported: something is mounted beneath %s (%s): not covered by this procedure" % (d, ", ".join(below)))
-print("copy")' "$1" "$2"; }
-if [ -n "$SRC" ]; then DEST_ROLE=$(role "$SRC" "$DEST"); else DEST_ROLE=copy; fi
+print("copy")' "$SRC" "$DEST" "$R_ID" "$D_ID"; }
+DEST_ROLE=$(role)
 echo "$DEST is $DEST_ROLE ($([ "$DEST_ROLE" = authoritative ] && echo "the old Router already stores its journal there: nothing is copied and nothing there may be deleted" || echo "a copy of the old Router's runtime"))"
-#    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
-#       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
-J=$(openfiles "$R" .ndjson)
-[ "$(printf '%s\n' "$J" | grep -c .)" = 1 ] || { echo "the old Router holds $(printf '%s\n' "$J" | grep -c .) .ndjson files open, expected exactly one:"; printf '%s\n' "$J"; exit 1; }
-case "$J" in
-  *" (deleted)") echo "the old Router's journal was deleted while open: $J"; exit 1 ;;
-  /app/runtime/?*) JP=${J#/app/runtime/} ;;
-  *) echo "the old Router has $J open, not a file under /app/runtime: not covered by this procedure"; exit 1 ;;
-esac
-[ "$(openfiles "$R" /journal.lock)" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the old Router does not hold journal.lock next to $J"; exit 1; }
-echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}; the old Router has /app/runtime/$JP open"
-#    c. 候補の journal を覗き、その最後の購入を**動いている旧 Router が返す**こと。mount 元の中の symlink は対象外として止まる
-if [ -n "$SRC" ]; then
-  [ -e "$SRC/$JP" ] || { echo "no journal at $SRC/$JP"; exit 1; }
-  [ "$(real "$SRC/$JP")" = "$(real "$SRC")/$JP" ] || { echo "symlink inside $SRC: unsupported layout"; exit 1; }
-  PEEK=$SRC/$JP
-else
-  docker cp "$R:/app/runtime/$JP" /tmp/journal.peek; PEEK=/tmp/journal.peek
-fi
+echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}; the old Router (pid $PID) has /app/runtime/$JP open"
+#    e. 候補の journal を、**コンテナ自身の見え方**（/proc/$PID/root 経由）で覗き、その最後の購入を動いている旧 Router が返すこと。
+#       copy の場合、$DEST に内容の違う journal が既にあれば、旧 Router を止める前に止まる（前の試行で何かが書いた可能性。上書きしない）
+PEEK=/proc/$PID/root/app/runtime/$JP
 LAST0=$(lastcreated "$PEEK")
-#    copy の場合、$DEST に**内容の違う** journal が既にあれば、旧 Router を止める前に止まる（前の試行で何かが書いた可能性。上書きしない）
 if [ "$DEST_ROLE" = copy ] && [ -e "$DEST/$JP" ]; then cmp "$PEEK" "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }; fi
-rm -f /tmp/journal.peek
 if [ "$LAST0" != none ]; then
   INNER0=$(inner "$R")
   r4 "$R" "$INNER0" "$LAST0" || { echo "the running Router does not serve $LAST0, the last purchase in the candidate journal: not the journal it uses"; exit 1; }
@@ -443,6 +453,9 @@ docker stop "$R"
 #    $DEST に**内容の違う** journal が既にあれば上書きせずに止まる（前の試行で何かが書いた可能性。journal.lock は flock 用の常設ファイルで、写しても害は無い）
 mkdir -p "$DEST"
 if [ -n "$SRC" ]; then
+  #  停止後も host の mount 元が同じディレクトリと同じファイル（同じ inode）であること
+  [ "$(ident "$SRC")" = "$R_ID" ] || { echo "$SRC changed identity after the stop"; exit 1; }
+  [ "$(ident "$SRC/$JP")" = "$J_ID" ] || { echo "$SRC/$JP changed identity after the stop"; exit 1; }
   if [ "$DEST_ROLE" = copy ]; then
     [ ! -e "$DEST/$JP" ] || cmp "$SRC/$JP" "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }
     cp -a "$SRC/." "$DEST/"; cmp "$SRC/$JP" "$DEST/$JP"
@@ -478,9 +491,12 @@ for i in $(seq 1 60); do H=$(curl -sf http://127.0.0.1:8787/healthz 2>/dev/null 
 [[ "$H" == *'"router":"up"'* ]] || { echo "the new container did not come up on the copied journal:"; docker logs "$NID" 2>&1 | tail -n 20; exit 1; }
 NEWJ=$(docker inspect "$NID" --format '{{range .Config.Env}}{{println .}}{{end}}' | { grep '^SUBETHA_JOURNAL_PATH=' || echo 'SUBETHA_JOURNAL_PATH=runtime/journal.ndjson'; } | tail -n1 | cut -d= -f2-)
 [ "$(norm "$NEWJ")" = "$JP" ] || { echo "as Docker read $ENVF, the new container's SUBETHA_JOURNAL_PATH=$NEWJ is not /app/runtime/$JP"; exit 1; }
-JN=$(openfiles "$NID" .ndjson)
+JN=$(openfds "$NID" .ndjson | awk '{print $3}' | sort -u)
 [ "$JN" = "/app/runtime/$JP" ] || { echo "the new container has '$JN' open, not /app/runtime/$JP"; exit 1; }
-[ "$(openfiles "$NID" /journal.lock)" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the new container does not hold journal.lock next to its journal"; exit 1; }
+[ "$(openfds "$NID" /journal.lock | awk '{print $3}' | sort -u)" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the new container does not hold journal.lock next to its journal"; exit 1; }
+#    新コンテナが開いている journal が、host の $DEST/$JP そのもの（同じ inode）であること
+read -r NPID NFD _ <<< "$(openfds "$NID" .ndjson | head -n1)"
+[ "$(ident "/proc/$NPID/fd/$NFD")" = "$(ident "$DEST/$JP")" ] || { echo "the new container's open journal is not $DEST/$JP"; exit 1; }
 [ "$(docker inspect "$NID" --format '{{range .Mounts}}{{if eq .Destination "/app/runtime"}}{{.Source}}{{end}}{{end}}')" = "$DEST" ]
 [ "$(head -n "$ROWS" "$DEST/$JP" | sha256sum)" = "$SUM" ]   # 元の行はそのまま（起動で unknown 行が後ろに足されることはある）
 # 新コンテナの Router が journal.lock を排他 flock している: host の /proc/locks で device と inode が一致し、保持 PID が新コンテナのプロセス（docker top）であること
@@ -498,7 +514,7 @@ fi
 sync -f "$DEST"
 #    ここから先で止まっても新コンテナは残る。ここで初めて旧コンテナを消し、新コンテナを $R に付け替え、入口を開け直す
 FINAL=1
-echo "all checks passed and the copy is durable: the new container serves the migrated journal ($ROWS rows, last purchase $LAST). Removing the old container, renaming, reopening ingress"
+echo "all checks passed and the copy is durable: the new container $NID serves the migrated journal ($ROWS rows, last purchase $LAST). Removing the old container, renaming, reopening ingress"
 docker rm "$R"
 docker rename "$NID" "$R"
 [ "$(docker inspect -f '{{.Id}}' "$R")" = "$NID" ]
@@ -513,7 +529,8 @@ echo "migration complete: $ROWS journal rows reopened by the new container"
 inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router の mount 元と `$DEST` が重なる木
 （一方が他方の中）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
 以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
-消されている、隣の `journal.lock` を開いていない、mount 元や複製の中の symlink、mount 元に journal が無い、候補の最後の購入を旧 Router が
+消されている、隣の `journal.lock` を開いていない、host の mount 元がコンテナの見ている runtime / journal と別物（identity 不一致。停止後の再確認も含む）、`$DEST` を含む mount が
+`/etc/fstab` に無い、mount 元や複製の中の symlink、候補の最後の購入を旧 Router が
 返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、複製の `sync` の失敗、旧配置（`remote-*/` の下に journal）、
 走査の失敗、`$DEST` の下に mount がある、重ねた/隠れた mount で別のディレクトリが同じ場所に見える、**最終構成で起動した新コンテナが上がらない**（Router の起動時の replay が拒む: 改行の無い末尾、JSON でない行、`seq` の飛び、
 欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナのプロセスが
@@ -533,12 +550,18 @@ inactive にならない、mask できない、443/80 に listener が残る、l
   取り出す）と比べ、同じか、`unknown` / `interrupted_at_restart` の行が後ろに足されているだけなら、`$DEST` を消して再実行してよい。
   それ以外の行が増えていたら、旧 journal に無い記録なので消さずに調べる（入口が閉じていれば起きない）。
   旧 Router に戻すなら `sudo docker start subetha-router` → `/healthz`。再実行は旧 Router を起動してから（スクリプトは動いている旧 Router を要求する）。
-- `all checks passed and the copy is durable` が出た後に止まった場合だけ、新コンテナが残っていて記録も開いている（この行は最後の
-  `sync -f` が通ってから出る。`sync` で止まれば新コンテナは消えていて、上の 2 項目の復旧になる）。`docker ps` で
-  `subetha-router-new` が running で `curl -s http://127.0.0.1:8787/healthz` が `"router":"up"` を返すことを確かめてから、
-  残っている旧コンテナを `docker rm` し、`docker rename subetha-router-new subetha-router` して終える。
+- `all checks passed and the copy is durable` が出た後に止まった場合だけ、新コンテナ（その行に ID が出る）が残っていて記録も開いている
+  （この行は最後の `sync -f` が通ってから出る。`sync` で止まれば新コンテナは消えていて、上の 2 項目の復旧になる）。
+  `docker ps -a --no-trunc --format '{{.ID}} {{.Names}} {{.Status}}'` でその ID の行を見て、状態で分ける:
+  - 名前が `subetha-router-new`（まだ付け替えていない）: running で `curl -s http://127.0.0.1:8787/healthz` が `"router":"up"` を返す
+    ことを確かめ、旧コンテナが残っていれば `docker rm subetha-router`、そして `docker rename subetha-router-new subetha-router`。
+  - 名前が既に `subetha-router`（付け替え後の health 確認で止まった）: 旧コンテナは消えている。`/healthz` を確かめる（返らなければ
+    `docker logs` を見る。記録は `$DEST` にあり、コンテナを消す理由は無い）。
+  - どちらの場合も最後に入口を開ける（下記）。
 - どの場合も、入口を開けるのは最後: `sudo systemctl unmask --runtime caddy && sudo systemctl start caddy`。
 
+`$DEST`（`/var/lib/subetha-router`）は、`/etc/fstab` に載っている mount（通常は root ファイルシステム）の上の**通常のディレクトリ**であること。
+一時的な bind や重ねた mount で覆われていると止まる（再起動後に同じ経路に別の中身が現れるため）。
 購入記録が一つも無い Router は **0 バイトの journal ファイルがある**状態なので通り、R4 の照会だけ省かれる。
 旧配置の回収は本手順の範囲外（起動ごとに別ファイルで、`seq` もファイルごとに 1 から始まるため、単純に連結できない）。
 MCP 側からも `subetha_router_status` に最後の `paymentId` を渡して同じ記録が返ることを見れば、運用で使う経路での確認になる。
