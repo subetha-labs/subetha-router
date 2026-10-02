@@ -263,7 +263,7 @@ B と A の両方が通るまで出さない。
 #!/bin/bash -e
 # 0) 依存（runner と補助 unit が使う）と preflight。無いものがあれば終了
 dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux curl diffutils
-for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss cmp sha256sum awk tar; do command -v $t >/dev/null || { echo "MISSING: $t"; exit 1; }; done
+for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss cmp sha256sum awk tar sync findmnt readlink; do command -v $t >/dev/null || { echo "MISSING: $t"; exit 1; }; done
 
 # 1) 成果物（リポジトリの checkout の直下で実行する。sudo は cwd を保つ）
 [ -f deploy/egress/subetha-egress ] || { echo "run this from the subetha-router-egt checkout"; exit 1; }
@@ -378,16 +378,29 @@ for m in json.load(sys.stdin):
     elif d=="/" or "/app/runtime".startswith(d+"/") or d.startswith("/app/runtime/"):
         sys.exit("unsupported mount layout: a mount at %s overlaps /app/runtime" % d)
 print(src)')
-#    $DEST の役割を realpath で決める。旧 Router の mount 元と $DEST が**同じ**なら authoritative（コピーしない。何も消してはいけない）。
-#    一方が他方の中にある（重なる木）なら、複製と本体を区別できないので止まる。それ以外は copy（$DEST は使い捨ての複製）
-if [ -n "$SRC" ]; then
-  RS=$(real "$SRC"); RD=$(real "$DEST")
-  case "$RS" in
-    "$RD") DEST_ROLE=authoritative ;;
-    "$RD"/*) echo "the old Router's runtime ($SRC) is inside $DEST: overlapping trees are not covered by this procedure"; exit 1 ;;
-    *) case "$RD" in "$RS"/*) echo "$DEST is inside the old Router's runtime ($SRC): overlapping trees are not covered by this procedure"; exit 1 ;; esac; DEST_ROLE=copy ;;
-  esac
-else DEST_ROLE=copy; fi
+#    $DEST の役割。旧 Router の mount 元と $DEST を 3 通りで比べる: realpath、mountinfo で bind mount の別名を解いた正規位置
+#    （デバイス + そのファイルシステム内の経路）、ディレクトリの (dev, inode)。どれかで**同じ**なら authoritative（コピーしない。
+#    何も消してはいけない）。経路か正規位置で**一方が他方の中**（重なる木。別名経由も含む）なら止まる。それ以外だけ copy（使い捨ての複製）
+role() { python3 -c '
+import os,sys
+def canon(p):
+    p=os.path.realpath(p); best=None
+    for line in open("/proc/self/mountinfo"):
+        f=line.split(); dev=f[2]; root=f[3].replace("\\040"," "); mp=f[4].replace("\\040"," ")
+        if p==mp or p.startswith(mp.rstrip("/")+"/"):
+            if best is None or len(mp)>len(best[0]): best=(mp,root,dev)
+    mp,root,dev=best; rel=p if mp=="/" else p[len(mp):]
+    return dev, (os.path.normpath((root if root!="/" else "")+rel) or "/")
+def ident(p):
+    try: st=os.stat(p); return (st.st_dev, st.st_ino)
+    except OSError: return None
+def inside(a,b): return a.startswith(b.rstrip("/")+"/")
+s,d=sys.argv[1],sys.argv[2]; rs,rd=os.path.realpath(s),os.path.realpath(d); cs,cd=canon(s),canon(d); i_s,i_d=ident(s),ident(d)
+if rs==rd or cs==cd or (i_s is not None and i_s==i_d): print("authoritative"); sys.exit()
+if inside(rs,rd) or inside(rd,rs): sys.exit("overlap: %s and %s are nested paths: not covered by this procedure" % (s,d))
+if cs[0]==cd[0] and (inside(cs[1],cd[1]) or inside(cd[1],cs[1])): sys.exit("overlap: %s resolves to %s and %s to %s on the same filesystem (bind mount alias): not covered by this procedure" % (s,cs[1],d,cd[1]))
+print("copy")' "$1" "$2"; }
+if [ -n "$SRC" ]; then DEST_ROLE=$(role "$SRC" "$DEST"); else DEST_ROLE=copy; fi
 echo "$DEST is $DEST_ROLE ($([ "$DEST_ROLE" = authoritative ] && echo "the old Router already stores its journal there: nothing is copied and nothing there may be deleted" || echo "a copy of the old Router's runtime"))"
 #    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
 #       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
@@ -433,6 +446,8 @@ else
 fi
 chown -R 10001:10001 "$DEST"
 [ "$(stat -c %u:%g "$DEST")" = 10001:10001 ]
+#    複製をディスクに確定する（cp も docker cp も fsync しない）。ファイル、そのディレクトリ、親ディレクトリ、最後にファイルシステム全体。失敗すればここで止まる
+if [ "$DEST_ROLE" = copy ]; then sync "$DEST/$JP"; sync "$(dirname "$DEST/$JP")" "$DEST" "$(dirname "$DEST")"; sync -f "$DEST"; fi
 [ -f "$DEST/$JP" ]
 [ "$(real "$DEST/$JP")" = "$(real "$DEST")/$JP" ] || { echo "symlink inside $DEST: unsupported layout"; exit 1; }
 # 4) 旧配置（21155eb より前の image は journal を runtime/remote-*/ の下に置いた）なら止まる。走査自体の失敗も止まる。
@@ -471,7 +486,9 @@ if [ "$LAST" != none ]; then
   r4 "$NID" "$INNER" "$LAST"
 fi
 echo "all checks passed: the new container serves the migrated journal ($ROWS rows, last purchase $LAST). Removing the old container, renaming, reopening ingress"
-# 6) ここで初めて旧コンテナを消し、新コンテナを $R に付け替え、入口を開け直す（ここから先で止まっても新コンテナは残る）
+# 6) 削除の境界の直前に、もう一度ファイルシステムを確定する（新コンテナが起動で足した行も含めて）。ここまでで止まれば旧コンテナは残る
+sync -f "$DEST"
+#    ここで初めて旧コンテナを消し、新コンテナを $R に付け替え、入口を開け直す（ここから先で止まっても新コンテナは残る）
 FINAL=1
 docker rm "$R"
 docker rename "$NID" "$R"
@@ -488,7 +505,7 @@ inactive にならない、mask できない、443/80 に listener が残る、l
 （一方が他方の中）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
 以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
 消されている、隣の `journal.lock` を開いていない、mount 元や複製の中の symlink、mount 元に journal が無い、候補の最後の購入を旧 Router が
-返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、旧配置（`remote-*/` の下に journal）、
+返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、複製の `sync` の失敗、旧配置（`remote-*/` の下に journal）、
 走査の失敗、**最終構成で起動した新コンテナが上がらない**（Router の起動時の replay が拒む: 改行の無い末尾、JSON でない行、`seq` の飛び、
 欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナのプロセスが
 開いている journal が旧と違う、元の行が変わっている、flock の保持者が新コンテナでない、新コンテナが最後の購入を返さない。
@@ -499,7 +516,9 @@ inactive にならない、mask できない、443/80 に listener が残る、l
   行を足していても、それは Router の正規の記録（旧 Router も次の起動で同じことをする）。旧 Router に戻すなら
   `sudo docker start subetha-router` → `/healthz`。
 - **`copy`**（旧 Router の mount 元が別の場所、または mount 無し）: `$DEST` は複製で、旧 Router の mount 元と**重ならない**
-  （重なる木は手順 1 で止まる）ので、`$DEST` を消しても旧 Router の記録には触れない。手順 5 までで止まったなら新コンテナは消えている。
+  （経路でも、bind mount の別名を解いた正規位置でも。重なる木や別名は手順 1 で止まる）ので、`$DEST` を消しても旧 Router の記録には
+  触れない。消す前に `findmnt -R /var/lib/subetha-router` で下に何も mount されていないことを見て、`rm -rf --one-file-system` で消す。
+  手順 5 までで止まったなら新コンテナは消えている。
   `$DEST` の journal を旧 Router の journal（mount 元のファイル。mount 無しなら `docker cp subetha-router:/app/runtime/journal.ndjson` で
   取り出す）と比べ、同じか、`unknown` / `interrupted_at_restart` の行が後ろに足されているだけなら、`$DEST` を消して再実行してよい。
   それ以外の行が増えていたら、旧 journal に無い記録なので消さずに調べる（入口が閉じていれば起きない）。

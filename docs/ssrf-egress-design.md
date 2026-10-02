@@ -1351,3 +1351,16 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 | # | 測定 | 結果 |
 |---|---|---|
 | 86 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。X: 旧 Router が `/var/lib/subetha-router/old` を mount（レビュアの入れ子の反例）、復旧手順の実行まで。加えて本番相当 2 件（bind、同一ディレクトリ） | **X**: 旧 Router は R4 200（本体は `$DEST/old/journal.ndjson`）。スクリプトは `the old Router's runtime (/var/lib/subetha-router/old) is inside /var/lib/subetha-router: overlapping trees are not covered by this procedure` で**旧 Router を止める前に**停止。役割は付かず、`$DEST` に何も写されず、本体の sha256 不変、入口は止めたまま mask。復旧（消すものは無い。入口を開ける）: `unmask --runtime` + `start` で Caddy active、旧 Router は R4 200 のまま。本番相当（bind）: `ingress reopened`、exit 0。同一ディレクトリ: `is authoritative`、コピー無し、`ingress reopened`、exit 0。`failed 0` |
+
+### 26.12 実装レビュー #10（`8eda4a7`）: **REJECT** → 別名の解決と複製の fsync
+
+レビュー実施: 2026-10-02、`gpt-6-astra`。#9 の入れ子は「狭まった」（経路の入れ子は止まるが、別名は見えない）。新規 1 件。
+
+| # | 指摘（要約） | 判定 | 改訂 |
+|---|---|---|---|
+| 1 | realpath の文字列比較は host の bind mount の別名を見ない: `/srv/router-alias` が `/var/lib/subetha-router` の bind mount で、旧 Router がそれを mount していると realpath は異なり `copy` になる。同じディレクトリなので `cmp` は自分と比べて通り、`cp -a` は同一ファイルで失敗し、復旧手順は「同じなら消してよい」と**本体**の削除を許す。祖先の別名も同様 | **正しい**（blocking） | 役割判定を 3 通りに: realpath、**`/proc/self/mountinfo` で bind mount を解いた正規位置**（デバイス + そのファイルシステム内の経路。bind の連鎖も `root` 欄で潰れる）、ディレクトリの (dev, inode)。どれかで同じなら authoritative、経路または正規位置で一方が他方の中なら止まる（別名経由を含む）。復旧手順の削除は `findmnt -R` で下に mount が無いことを見てから `rm -rf --one-file-system` |
+| 2 | 複製の journal がディスクに確定していない: `cp` / `docker cp`（moby の archive 展開）は fsync せず、Router の起動も journal を読むだけ（中断 intent が無ければ追記も無い）。旧コンテナを消した直後に host が落ちると、唯一の journal が欠けたり空になり得る | **正しい**（blocking） | 手順 3 の最後に **`sync` を明示**（ファイル → そのディレクトリ・`$DEST`・親ディレクトリ → `sync -f` でファイルシステム全体。失敗は `-e` で止まり旧コンテナは残る）。削除の境界の直前にもう一度 `sync -f`（新コンテナが起動で足した行も含めて） |
+
+| # | 測定 | 結果 |
+|---|---|---|
+| 87 | **再改訂した移行スクリプト verbatim**（VM、現行ソースの image、Caddy の代役 unit）。AA: `/srv/router-alias` を `$DEST` の bind mount にして旧 Router がそれを mount（レビュアの別名の反例）。AB: `/srv/lib-alias` を `/var/lib` の bind mount にして旧 Router が `/srv/lib-alias/subetha-router/old` を mount（祖先の別名）。AC: `$DEST` 自身を `$OLD/sub` の bind mount にし、旧 Router は `$OLD` を mount。Y: `sync` を shim で失敗。Z: `sync` を記録する shim を入れた bind の本番相当 | **AA**: `is authoritative` と判定（realpath は異なるが mountinfo の正規位置と (dev, inode) が一致）、コピー無しで本番相当が exit 0、全確認通過、`ingress reopened`。**AB**: `overlap: /srv/lib-alias/subetha-router/old resolves to /var/lib/subetha-router/old and /var/lib/subetha-router to /var/lib/subetha-router on the same filesystem (bind mount alias)` で**旧 Router を止める前に**停止、`$DEST` に何も写されず、本体不変。**AC**: `... /var/lib/subetha-router to /var/lib/subetha-router-old/sub ... (bind mount alias)` で停止（止めていない）。**Y**: `sync shim: failed` で停止、削除の境界に達せず、旧コンテナ残存、入口閉じたまま。**Z**: exit 0、`sync` の呼び出しは順に `journal.ndjson` → `そのディレクトリ $DEST /var/lib` → `-f $DEST`（複製の直後）→ `-f $DEST`（削除の境界の直前）。`failed 0` |
