@@ -475,3 +475,27 @@ T-A18 は「段階の異なる同時実行」までは見ていない（pay 2 �
 
 付随: 読取系 RPC は能力の `retryCount` に従って再送し得る（§5 に明記）。JSON-RPC 目録・h1 client・`useH2c`・AsyncLocalStorage・`src/client/` の
 評価は #2 と同じ。
+
+## 15. 実装レビュー #4（`458efe3`、2026-10-03、`gpt-6-astra`）: **APPROVE** → A の実装受け入れ
+
+#3 の 3 件は**すべて fixed**（viem の timeout 0 と期限の所有、早期 return の discard、記述と判定の訂正）。新規の指摘なし。
+レビュアは実際の RPC wrapper と遅い直列化・停滞した応答の probe で `viemTimeout: 0`、fetch 1 回、`TimeoutError` の報告を再現し、
+12 経路の応答の所有（読むか捨てるか）を経路ごとに確認した。読取系 RPC の再送（能力の `retryCount`、確認の polling）は支払いの再送とは別と整理。
+viem の size 上限で buffered Response が未読のまま拒まれる場合があるが、上流の接続は既に終わっているので対象外。
+`tsc` は通過、vitest は sandbox の `EPERM` で未実行（Linux 受け入れと変異の記録は著者報告のまま）。
+
+### 15.1 A の受け入れの判定
+
+- 実装: `456cc0b` → `eda0653` → `7a8cf84` → `d569caa` → `1487f8d` → `af0d74d`（コード・試験）。設計の最終は本 commit。
+- Linux 受け入れ（§4）: `af0d74d` で **364 passed / 14 skipped / 0 failed**（M-A14）。macOS は A-20 の 3 件が前提で失敗するのが正しい。
+- 配線の変異 12 / 12、契約の変異 6 / 6 が検出（M-A13、M-A15）。
+- 実装レビュー: #1〜#3 REJECT（各回の指摘はすべて反映して記録）、#4 **APPROVE**。
+
+### 15.2 release gate（要件 §9）の状態
+
+- **A**: 受け入れ完了（本 commit）。namespace 内の宛先の拒否と解決済みアドレスへの接続固定、12 経路、HTTP/1.1 のみ・1 fetch 1 dispatch、
+  RPC の body と期限の所有、診断の 1 回報告。
+- **B**: 運用手順と成果物は `ssrf-egress-design.md` §26.21 でレビュア承認済み。**本番（AL2023）での受け入れ実行は未了**（運用者の作業。
+  この機械には AWS の資格情報が無い）。
+- したがって「AI が上流 URL を指定する」機能の release gate（B と A の**両方**の受け入れ）は、**B の本番受け入れが済むまで閉じたまま**。
+  現在の Router（運用者が設定した固定 route）はこの gate の対象外で、A の配線は本番に入れられる（Node ≥ 22.19.0、`undici@8.11.2`）。
