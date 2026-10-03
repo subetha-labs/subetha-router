@@ -17,6 +17,8 @@ function arg(name: string, fallback: string): string {
 /** 設計 A の T-A17: `--after-headers stall|reset`、`--after-headers-on all|challenge|pay`。 */
 const afterHeaders = arg("after-headers", "none");
 const afterHeadersOn = arg("after-headers-on", "all");
+/** 種類別の閉じた接続数（`challenge` = 402 / `other` = それ以外 / `calls` = 観測用）。 */
+const closedByKind: Record<string, number> = { challenge: 0, other: 0, calls: 0, none: 0 };
 function stallThis(status: number): boolean {
   if (afterHeaders === "none") return false;
   if (afterHeadersOn === "challenge") return status === 402;
@@ -68,6 +70,9 @@ function accepts(): unknown[] {
 
 function send(response: http.ServerResponse, status: number, body: unknown, headers = {}): void {
   const text = JSON.stringify(body);
+  const kind = (response.req.url ?? "").startsWith("/calls") ? "calls" : status === 402 ? "challenge" : "other";
+  const tagged = response.socket as unknown as { subethaKind?: string } | null;
+  if (tagged !== null) tagged.subethaKind = kind;
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
@@ -87,7 +92,7 @@ const server = http.createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { connections, challengeCalls, payCalls, seenQueries });
+    send(response, 200, { connections, closedByKind, challengeCalls, payCalls, seenQueries });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -150,8 +155,12 @@ const server = http.createServer((request, response) => {
   );
 });
 
-server.on("connection", () => {
+server.on("connection", (socket) => {
   connections += 1;
+  socket.on("close", () => {
+    const kind = (socket as unknown as { subethaKind?: string }).subethaKind ?? "none";
+    closedByKind[kind] = (closedByKind[kind] ?? 0) + 1;
+  });
 });
 server.listen(Number(arg("port", "0")), "127.0.0.1", () => {
   const address = server.address();

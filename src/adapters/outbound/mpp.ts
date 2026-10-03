@@ -536,6 +536,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       if (response.status === 200) {
         // HTTP 200 だけでは課金の証拠にしない。
         if (!receiptOk) {
+          discardBody(response); // 読まない body は捨てて接続を即時に解放する（設計 §3.3-7）
           return { outcome: "unknown", reason: "destination_receipt_unverified" };
         }
         let body: unknown;
@@ -565,6 +566,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
         };
       }
       if (response.status === 502) {
+        discardBody(response); // 502 の body は読まない
         // 「支払い済み・データなし」を主張するには整合した実 receipt が必要。
         if (!receiptOk || receiptHeader === null) {
           return { outcome: "unknown", reason: "destination_pay_unknown" };
@@ -578,6 +580,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       // 402 を含む 4xx も 5xx も、credential を送ったあとは課金有無を断定できない
       // （push は client 側で broadcast 済み、pull も server が broadcast した可能性を否定できない）。
       // durable unknown を保持し、再作成・再送・自動返金はしない。
+      discardBody(response);
       return { outcome: "unknown", reason: "destination_pay_unknown" };
     },
   };

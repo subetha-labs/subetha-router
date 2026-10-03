@@ -18,7 +18,7 @@ import { getAddress } from "viem";
 
 import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
-import type { GuardedTransport } from "../../net/guarded-fetch.js";
+import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import type {
   DestinationOffer,
   EvmSigningCapability,
@@ -93,6 +93,7 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
         signal: AbortSignal.timeout(timeoutMs),
       }, ctx);
       if (response.status !== 402) {
+        discardBody(response); // 読まない body は捨てて接続を即時に解放する（設計 §3.3-7）
         throw new Error(`upstream challenge returned status ${response.status}`);
       }
       let json: unknown;
@@ -158,6 +159,8 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
           ...(receipt === null ? {} : { txRef: receipt, receiptRef: receipt }),
         };
       }
+      // 200 以外は body を読まない。捨てて接続を即時に解放する（設計 §3.3-7）。
+      discardBody(response);
       // 課金は成立したがデータがない（設計 §10 M6 と同じ終端）。
       if (response.status === 502) {
         return {
@@ -301,6 +304,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       signal: AbortSignal.timeout(timeoutMs),
     }, ctx);
     if (response.status !== 402) {
+      discardBody(response); // 読まない body は捨てて接続を即時に解放する（設計 §3.3-7）
       throw new Error(`upstream challenge returned status ${response.status}`);
     }
     const header = response.headers.get("PAYMENT-REQUIRED");

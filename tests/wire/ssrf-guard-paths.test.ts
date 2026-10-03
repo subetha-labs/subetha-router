@@ -389,6 +389,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const t0 = Date.now();
       const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-${mode}`, attempt: 1 }); // pay_challenge（同じ）→ pay
       expect(result.outcome, mode).toBe("paid");
+      expectSilent(result);
       expect(Date.now() - t0, mode).toBeLessThan(LONG / 2); // 停滞した challenge body を待っていない
       expect(events, mode).toEqual([]);
       // 捨てた 2 本（challenge / pay_challenge の 402 応答を書いた socket）が timeout（5 s）を待たずに閉じる = cancel が接続を解放している。
@@ -483,27 +484,68 @@ describe("diagnostics after headers (T-A17)", () => {
     }
   });
 
-  it("(g) RPC の body の停滞（経路 12 送信）: upstream_timeout を rpc で 1 回。公開結果は既存の unknown / destination_pay_unknown", async () => {
-    const rpc = await start("tests/fixtures/rpc-server.ts", ["--chain-id", "42431", "--after-headers", "stall"]);
-    const upstream = await start("tests/fixtures/mpp-upstream.ts");
-    const events: TransportEvent[] = [];
-    const capability = {
-      chainId: 42_431,
-      account: { address: SPY_PAYER_ADDRESS, type: "json-rpc" as const },
-      // 能力の timeout（500 ms）を transport が応答全体の期限として引き継ぐ。
-      getClient: () => createViemClient({ chain: tempoTestnet(42_431), transport: viemHttp(rpc.baseUrl, { retryCount: 0, timeout: SHORT }) }),
-      mode: "push" as const,
-      kind: "non-signing-fixture" as const,
-    };
-    const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${upstream.baseUrl}/v1/eth/snapshot` }, capability, timeoutMs: 5000 });
-    const [offer] = await rail.readChallenge(MPP.route);
-    const t0 = Date.now();
-    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-g", attempt: 1 });
-    expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
-    expect(Date.now() - t0).toBeLessThan(SHORT * 5);
-    expectSilent(result);
-    expect(events.map((e) => [e.code, e.operation, e.routeId])).toEqual([["upstream_timeout", "rpc", MPP.route]]);
-    expect((await stats<{ payCalls: number }>(upstream)).payCalls).toBe(0);
+  it("(g) RPC の body の停滞・切断（経路 12 送信）: upstream_timeout / transport_failed を rpc で 1 回。公開結果は既存の unknown / destination_pay_unknown", async () => {
+    for (const [mode, code] of [["stall", "upstream_timeout"], ["reset", "transport_failed"]] as const) {
+      const rpc = await start("tests/fixtures/rpc-server.ts", ["--chain-id", "42431", "--after-headers", mode]);
+      const upstream = await start("tests/fixtures/mpp-upstream.ts");
+      const events: TransportEvent[] = [];
+      const capability = {
+        chainId: 42_431,
+        account: { address: SPY_PAYER_ADDRESS, type: "json-rpc" as const },
+        // 能力の timeout（400 ms）を transport が応答全体の期限として引き継ぐ。
+        getClient: () => createViemClient({ chain: tempoTestnet(42_431), transport: viemHttp(rpc.baseUrl, { retryCount: 0, timeout: SHORT }) }),
+        mode: "push" as const,
+        kind: "non-signing-fixture" as const,
+      };
+      const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${upstream.baseUrl}/v1/eth/snapshot` }, capability, timeoutMs: 5000 });
+      const [offer] = await rail.readChallenge(MPP.route);
+      const t0 = Date.now();
+      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-g-${mode}`, attempt: 1 });
+      expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+      expect(Date.now() - t0, mode).toBeLessThan(SHORT * 5);
+      expectSilent(result);
+      expect(events.map((e) => [e.code, e.operation, e.routeId]), mode).toEqual([[code, "rpc", MPP.route]]);
+      expect((await stats<{ payCalls: number }>(upstream)).payCalls, mode).toBe(0);
+    }
+  });
+
+  it("(h) 読まずに終わる応答（早期 return）も body を捨てて接続を即時に解放する。公開結果は既存のまま、事象 0", async () => {
+    type Closed = { closedByKind: Record<string, number> };
+    const closedOther = async (fixture: Listening): Promise<number> => (await stats<Closed>(fixture)).closedByKind["other"] ?? 0;
+    const LONG = 5000; // 要求の timeout。discard が無ければ停滞した接続はこれまで開いたまま
+    // MPP: 200 だが reference が合わない receipt + body 停滞 → unknown / destination_receipt_unverified。有料応答の socket が閉じる。
+    {
+      const fixture = await start("tests/fixtures/mpp-upstream.ts", ["--reference", "wrong", "--after-headers", "stall", "--after-headers-on", "pay"]);
+      const events: TransportEvent[] = [];
+      const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: createPayerSpy().capability(), timeoutMs: LONG });
+      const [offer] = await rail.readChallenge(MPP.route);
+      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-h1", attempt: 1 });
+      expect(result).toEqual({ outcome: "unknown", reason: "destination_receipt_unverified" });
+      expectSilent(result);
+      expect(await waitFor(async () => (await closedOther(fixture)) >= 1, 1500), "mpp receipt_unverified socket closes").toBe(true);
+      expect(events).toEqual([]);
+    }
+    // 合成 x402: pay が 500 + body 停滞 → unknown / destination_pay_unknown。socket が閉じる。
+    {
+      const fixture = await start("tests/fixtures/upstream-server.ts", ["--pay", "error", "--after-headers", "stall", "--after-headers-on", "pay"]);
+      const events: TransportEvent[] = [];
+      const rail = createSyntheticX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, timeoutMs: LONG });
+      const [offer] = await rail.readChallenge(X402.route);
+      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-h2", attempt: 1 });
+      expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+      expectSilent(result);
+      expect(await waitFor(async () => (await closedOther(fixture)) >= 1, 1500), "synthetic 500 socket closes").toBe(true);
+      expect(events).toEqual([]);
+    }
+    // 実 x402: challenge が 402 以外（200）+ body 停滞 → readChallenge は例外（既存）。socket が閉じる。
+    {
+      const fixture = await start("tests/fixtures/x402-upstream.ts", ["--challenge-status", "200", "--after-headers", "stall"]);
+      const events: TransportEvent[] = [];
+      const rail = createX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: createSignerSpy().capability(X402.network), timeoutMs: LONG });
+      await expect(rail.readChallenge(X402.route)).rejects.toThrow(/upstream challenge returned status 200/);
+      expect(await waitFor(async () => (await closedOther(fixture)) >= 1, 1500), "x402 non-402 challenge socket closes").toBe(true);
+      expect(events).toEqual([]);
+    }
   });
 
   it("秘匿: report の行にアドレス・ホスト名・URL・例外文字列が無い", async () => {
@@ -528,6 +570,7 @@ describe("context attribution under concurrency (T-A18)", () => {
       rail.pay({ routeId: "route-b", offer: offerB!, paymentId: "pb", attempt: 1 }),
     ]);
     expect([a.outcome, b.outcome]).toEqual(["paid_no_data", "paid_no_data"]);
+    expectSilent([a, b]);
     expect(events.map((e) => `${e.routeId}:${e.operation}:${e.code}`).sort()).toEqual(["route-a:pay:upstream_timeout", "route-b:pay:upstream_timeout"]);
   });
 

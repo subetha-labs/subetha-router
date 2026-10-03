@@ -1,5 +1,6 @@
 /**
  * SSRF 防御 A: viem の JSON-RPC `http` transport を guarded transport に通す（設計 §3.5 の経路 11・12）。
+ * 内部の期限はこの transport だけが持つ（viem の timeout は 0 = 無効）。
  * `src/` で viem の `http()` を作ってよいのは**ここだけ**（`tests/unit/no-direct-fetch.test.ts` が検査する）。
  *
  * body の所有: viem は `fetchFn` が返した応答の body を自分で読むが、その読み取りは viem の timeout（headers で解除）の外にあり、
@@ -94,7 +95,9 @@ export function guardedRpcTransport(
     ...(options.fetchOptions === undefined ? {} : { fetchOptions: options.fetchOptions }),
     retryCount: options.retryCount ?? 0,
     ...(options.retryDelay === undefined ? {} : { retryDelay: options.retryDelay }),
-    // viem 自身の timeout（headers まで）は transport の期限より後に置き、期限切れの分類（upstream_timeout）を transport 側で決める。
-    timeout: timeoutMs + 250,
+    // viem 自身の timeout は**無効**（0 なら viem はタイマーを置かず signal も渡さない）。viem のタイマーは `fetchFn` より前に始まるので
+    // 「transport の期限 + 余白」では順序を保証できず、viem の AbortError が `aborted` に化ける。期限は transport だけが持つ
+    // （実装レビュー #3 の指摘 1）。呼び出し側が渡した signal は `AbortSignal.any` で保つ。
+    timeout: 0,
   });
 }

@@ -29,6 +29,10 @@ function arg(name: string, fallback: string): string {
 const afterHeaders = arg("after-headers", "none");
 /** どの応答に効かせるか: `all`（既定）、`challenge`（402 だけ）、`pay`（402 以外だけ）。 */
 const afterHeadersOn = arg("after-headers-on", "all");
+/** challenge GET の status（既定 402。T-A17 (h): 402 以外を返して adapter の早期 return を踏ませる）。 */
+const challengeStatus = Number(arg("challenge-status", "402"));
+/** 種類別の閉じた接続数（`challenge` = 402 / `other` = それ以外 / `calls` = 観測用）。 */
+const closedByKind: Record<string, number> = { challenge: 0, other: 0, calls: 0, none: 0 };
 function stallThis(status: number): boolean {
   if (afterHeaders === "none") return false;
   if (afterHeadersOn === "challenge") return status === 402;
@@ -111,6 +115,9 @@ function send(
   headers: Record<string, string> = {},
 ): void {
   const text = JSON.stringify(body);
+  const kind = (response.req.url ?? "").startsWith("/calls") ? "calls" : status === 402 ? "challenge" : "other";
+  const tagged = response.socket as unknown as { subethaKind?: string } | null;
+  if (tagged !== null) tagged.subethaKind = kind;
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
@@ -171,7 +178,7 @@ const server = http.createServer((request, response) => {
   const canonicalUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}${SNAPSHOT_PATH}`;
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { connections, challengeCalls, payCalls, seenQueries, seenPayments });
+    send(response, 200, { connections, closedByKind, challengeCalls, payCalls, seenQueries, seenPayments });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -194,7 +201,7 @@ const server = http.createServer((request, response) => {
     challengeCalls += 1;
     send(
       response,
-      402,
+      challengeStatus,
       { error: "payment_required" },
       { "PAYMENT-REQUIRED": paymentRequiredHeader(canonicalUrl, "payment_required") },
     );
@@ -263,8 +270,12 @@ const server = http.createServer((request, response) => {
   );
 });
 
-server.on("connection", () => {
+server.on("connection", (socket) => {
   connections += 1;
+  socket.on("close", () => {
+    const kind = (socket as unknown as { subethaKind?: string }).subethaKind ?? "none";
+    closedByKind[kind] = (closedByKind[kind] ?? 0) + 1;
+  });
 });
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
