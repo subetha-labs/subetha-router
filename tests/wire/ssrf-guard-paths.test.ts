@@ -116,6 +116,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const rail = createMppOutbound({ transport: denyAt("pay_challenge", events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability() });
     const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-2", attempt: 1 });
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_challenge_unreadable" });
+    expectSilent(result);
     expect(events).toEqual([{ code: "destination_blocked", operation: "pay_challenge", routeId: MPP.route, policy: expect.any(String) }]);
     expect(await counter.adapter()).toBe(before); // 対象の要求は接続していない
   });
@@ -131,6 +132,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const rail = createMppOutbound({ transport: denyAt("pay", events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability() });
     const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-3", attempt: 1 });
     expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    expectSilent(result);
     expect(events).toEqual([{ code: "destination_blocked", operation: "pay", routeId: MPP.route, policy: expect.any(String) }]);
     expect(await counter.adapter()).toBe(before + 1); // challenge 再読の 1 本だけ。有料要求は接続していない
   });
@@ -155,6 +157,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const rail = createX402Outbound({ transport: denyAt("pay_challenge", events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network) });
     const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-5", attempt: 1 });
     expect(result.outcome).toBe("not_sent");
+    expectSilent(result);
     expect(events.map((e) => [e.code, e.operation])).toEqual([["destination_blocked", "pay_challenge"]]);
     expect(await counter.adapter()).toBe(before);
   });
@@ -170,6 +173,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const rail = createX402Outbound({ transport: denyAt("pay", events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network) });
     const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-6", attempt: 1 });
     expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    expectSilent(result);
     expect(events.map((e) => [e.code, e.operation])).toEqual([["destination_blocked", "pay"]]);
     expect(await counter.adapter()).toBe(before + 1);
   });
@@ -366,7 +370,7 @@ describe("diagnostics after headers (T-A17)", () => {
     expect(events).toEqual([{ code: "upstream_timeout", operation: "challenge", routeId: X402.route, policy: expect.any(String) }]);
   });
 
-  it("(b) 消費する body の切断: 受信 subetha の verify → transport_failed を 1 回", async () => {
+  it("(b) 消費する body の切断: 受信 subetha の createOffer（challenge）→ transport_failed を 1 回", async () => {
     const fixture = await start("tests/fixtures/facilitator-server.ts", ["--token", "0x0000000000000000000000000000000000005ce7", "--pay-to", "0x0000000000000000000000000000000000000a0e", "--chain-id", "11155111", "--after-headers", "reset"]);
     const events: TransportEvent[] = [];
     const inbound = createSubethaInbound({ transport: denyAt(undefined, events), facilitatorUrl: fixture.baseUrl, timeoutMs: SHORT });
@@ -387,9 +391,13 @@ describe("diagnostics after headers (T-A17)", () => {
       expect(result.outcome, mode).toBe("paid");
       expect(Date.now() - t0, mode).toBeLessThan(LONG / 2); // 停滞した challenge body を待っていない
       expect(events, mode).toEqual([]);
-      // 捨てた 2 本（challenge / pay_challenge）の接続が timeout（5 s）を待たずに閉じる = cancel が接続を解放している。
-      expect(await waitFor(async () => (await stats<{ closed: number }>(fixture)).closed >= 2, 1500), mode).toBe(true);
-      expect((await stats<{ payCalls: number }>(fixture)).payCalls, mode).toBe(1);
+      // 捨てた 2 本（challenge / pay_challenge の 402 応答を書いた socket）が timeout（5 s）を待たずに閉じる = cancel が接続を解放している。
+      // 観測用（/calls）と有料応答の socket は数えない（種類別に数える。M-A8 で cancel を外すとこの判定が落ちる）。
+      type Closed = { closedByKind: Record<string, number>; payCalls: number };
+      expect(await waitFor(async () => ((await stats<Closed>(fixture)).closedByKind["challenge"] ?? 0) >= 2, 1500), mode).toBe(true);
+      const after = await stats<Closed>(fixture);
+      expect(after.closedByKind["challenge"], mode).toBe(2);
+      expect(after.payCalls, mode).toBe(1);
     }
   });
 
@@ -414,6 +422,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const [offer] = await rail.readChallenge(MPP.route);
       const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-${mode}`, attempt: 1 });
       expect(result.outcome, mode).toBe("paid_no_data");
+      expectSilent(result);
       expect(events, mode).toEqual([{ code, operation: "pay", routeId: MPP.route, policy: expect.any(String) }]);
     }
   });
@@ -427,6 +436,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const [offer] = await rail.readChallenge(X402.route);
       const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-x-${mode}`, attempt: 1 });
       expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+      expectSilent(result);
       expect(events, mode).toEqual([{ code, operation: "pay", routeId: X402.route, policy: expect.any(String) }]);
     }
   });
@@ -439,8 +449,61 @@ describe("diagnostics after headers (T-A17)", () => {
       const [offer] = await rail.readChallenge(X402.route);
       const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-s-${mode}`, attempt: 1 });
       expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+      expectSilent(result);
       expect(events, mode).toEqual([{ code, operation: "pay", routeId: X402.route, policy: expect.any(String) }]);
     }
+  });
+
+  it("(g) RPC の body の停滞・切断（経路 11 受信）: upstream_timeout / transport_failed を rpc で 1 回。verify は isValid false のまま、期限内に終わる", async () => {
+    for (const [mode, code] of [["stall", "upstream_timeout"], ["reset", "transport_failed"]] as const) {
+      const rpc = await start("tests/fixtures/rpc-server.ts", ["--chain-id", "42431", "--after-headers", mode]);
+      const events: TransportEvent[] = [];
+      const routeId = "md-mpp-inbound";
+      const binding = [routeId, "GET", `/v1/routes/${routeId}/resource`].map(encodeURIComponent).join("|");
+      const rail = createMppInbound({
+        transport: denyAt(undefined, events),
+        rpcUrl: rpc.baseUrl,
+        rpcTimeoutMs: SHORT,
+        secretKey: "0123456789abcdef0123456789abcdef0123456789abcdef",
+        recipient: "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2",
+        currency: "0x20c0000000000000000000000000000000000000",
+        chainId: 42_431,
+        maxTimeoutSeconds: 600,
+        realm: "router-test",
+      });
+      const offer = await rail.createOffer({ routeId, amount: "10000", asset: "0x20c0000000000000000000000000000000000000", network: "eip155:42431", routeBinding: binding, nowMs: Date.now() });
+      const wire = Credential.serialize(Credential.from({ challenge: Challenge.deserialize(offer.extra["challenge"] as string), payload: { type: "hash", hash: `0x${"22".repeat(32)}` } }));
+      const credential = { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, credential: wire } } as unknown as PaymentCredential;
+      const t0 = Date.now();
+      const verified = await rail.verify(offer, credential, { routeId });
+      expect(verified, mode).toEqual({ isValid: false });
+      expect(Date.now() - t0, mode).toBeLessThan(SHORT * 5); // viem の timeout（headers で解除）ではなく transport の期限で終わる
+      expectSilent(verified);
+      expect(events.map((e) => [e.code, e.operation, e.routeId]), mode).toEqual([[code, "rpc", routeId]]);
+    }
+  });
+
+  it("(g) RPC の body の停滞（経路 12 送信）: upstream_timeout を rpc で 1 回。公開結果は既存の unknown / destination_pay_unknown", async () => {
+    const rpc = await start("tests/fixtures/rpc-server.ts", ["--chain-id", "42431", "--after-headers", "stall"]);
+    const upstream = await start("tests/fixtures/mpp-upstream.ts");
+    const events: TransportEvent[] = [];
+    const capability = {
+      chainId: 42_431,
+      account: { address: SPY_PAYER_ADDRESS, type: "json-rpc" as const },
+      // 能力の timeout（500 ms）を transport が応答全体の期限として引き継ぐ。
+      getClient: () => createViemClient({ chain: tempoTestnet(42_431), transport: viemHttp(rpc.baseUrl, { retryCount: 0, timeout: SHORT }) }),
+      mode: "push" as const,
+      kind: "non-signing-fixture" as const,
+    };
+    const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${upstream.baseUrl}/v1/eth/snapshot` }, capability, timeoutMs: 5000 });
+    const [offer] = await rail.readChallenge(MPP.route);
+    const t0 = Date.now();
+    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-g", attempt: 1 });
+    expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    expect(Date.now() - t0).toBeLessThan(SHORT * 5);
+    expectSilent(result);
+    expect(events.map((e) => [e.code, e.operation, e.routeId])).toEqual([["upstream_timeout", "rpc", MPP.route]]);
+    expect((await stats<{ payCalls: number }>(upstream)).payCalls).toBe(0);
   });
 
   it("秘匿: report の行にアドレス・ホスト名・URL・例外文字列が無い", async () => {
@@ -466,5 +529,31 @@ describe("context attribution under concurrency (T-A18)", () => {
     ]);
     expect([a.outcome, b.outcome]).toEqual(["paid_no_data", "paid_no_data"]);
     expect(events.map((e) => `${e.routeId}:${e.operation}:${e.code}`).sort()).toEqual(["route-a:pay:upstream_timeout", "route-b:pay:upstream_timeout"]);
+  });
+
+  it("受信 MPP の RPC（AsyncLocalStorage）: 異なる route の verify を同じ rail で同時に走らせても、各 report 行の route が自分の呼び出しに付く", async () => {
+    const rpc = await start("tests/fixtures/rpc-server.ts", ["--chain-id", "42431"]);
+    const events: TransportEvent[] = [];
+    const rail = createMppInbound({
+      transport: denyAt("rpc", events),
+      rpcUrl: rpc.baseUrl,
+      secretKey: "0123456789abcdef0123456789abcdef0123456789abcdef",
+      recipient: "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2",
+      currency: "0x20c0000000000000000000000000000000000000",
+      chainId: 42_431,
+      maxTimeoutSeconds: 600,
+      realm: "router-test",
+    });
+    const credentialFor = async (routeId: string) => {
+      const binding = [routeId, "GET", `/v1/routes/${routeId}/resource`].map(encodeURIComponent).join("|");
+      const offer = await rail.createOffer({ routeId, amount: "10000", asset: "0x20c0000000000000000000000000000000000000", network: "eip155:42431", routeBinding: binding, nowMs: Date.now() });
+      const wire = Credential.serialize(Credential.from({ challenge: Challenge.deserialize(offer.extra["challenge"] as string), payload: { type: "hash", hash: `0x${"33".repeat(32)}` } }));
+      return { offer, credential: { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, credential: wire } } as unknown as PaymentCredential };
+    };
+    const a = await credentialFor("route-a");
+    const b = await credentialFor("route-b");
+    const [va, vb] = await Promise.all([rail.verify(a.offer, a.credential, { routeId: "route-a" }), rail.verify(b.offer, b.credential, { routeId: "route-b" })]);
+    expect([va, vb]).toEqual([{ isValid: false }, { isValid: false }]);
+    expect(events.map((e) => `${e.routeId}:${e.operation}:${e.code}`).sort()).toEqual(["route-a:rpc:destination_blocked", "route-b:rpc:destination_blocked"]);
   });
 });

@@ -31,6 +31,8 @@ interface Observed {
   closed: number;
   hosts: string[];
   sni: string[];
+  /** 要求ごとの Authorization（421 の再送で credential が 2 度届かないことの観測）。 */
+  auth: string[];
 }
 
 interface Listener {
@@ -54,12 +56,19 @@ function track<T extends { close(cb?: () => void): unknown }>(server: T): T {
 async function listenHttp(
   address: string,
   port: number,
-  mode: "ok" | "redirect" | "stall" | "reset" | "large" = "ok",
+  mode: "ok" | "redirect" | "stall" | "reset" | "large" | "misdirected" = "ok",
 ): Promise<Listener> {
-  const observed: Observed = { connections: 0, closed: 0, hosts: [], sni: [] };
+  const observed: Observed = { connections: 0, closed: 0, hosts: [], sni: [], auth: [] };
   const server = track(
     http.createServer((request, response) => {
       observed.hosts.push(request.headers.host ?? "");
+      observed.auth.push(request.headers.authorization ?? "");
+      if (mode === "misdirected") {
+        // Fetch 標準の 421 再試行を誘う応答。
+        response.writeHead(421, { "content-type": "text/plain", connection: "close" });
+        response.end("misdirected");
+        return;
+      }
       if (mode === "redirect") {
         response.writeHead(302, { location: "/elsewhere" });
         response.end();
@@ -123,7 +132,7 @@ beforeAll(() => {
 });
 
 async function listenHttps(address: string, material: { cert: Buffer; key: Buffer }): Promise<Listener> {
-  const observed: Observed = { connections: 0, closed: 0, hosts: [], sni: [] };
+  const observed: Observed = { connections: 0, closed: 0, hosts: [], sni: [], auth: [] };
   const server = track(
     https.createServer(
       {
@@ -639,5 +648,34 @@ describe("discardBody contract (T-A17 (d))", () => {
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+describe("guarded transport: one dispatch per fetch (T-A21)", () => {
+  it("421 を受けても同じ要求を再送しない（credential 付き GET と JSON の POST）。対照の素の undici fetch は 2 度送る", async () => {
+    const fixture = await listenHttp("127.0.0.1", 0, "misdirected");
+    const lookup = fixedLookup([[{ address: "127.0.0.1", family: 4 }]]).lookup;
+    const { events, report } = reporter();
+    const transport = createGuardedTransport({ allowLoopback: true, report, lookup, interfaces: () => [] });
+    const url = `http://localhost:${fixture.port}/paid`;
+    // (1) credential 付き GET: fixture が見た要求は 1 回だけ。transport は transport_failed を 1 回。
+    await expectTransportError(transport.fetch(url, { headers: { authorization: "Payment once" } }, { operation: "pay" }), "transport_failed");
+    expect(fixture.observed.auth).toEqual(["Payment once"]);
+    expect(fixture.observed.connections).toBe(1);
+    // (2) 再生可能な body（JSON 文字列）の POST も同じ。
+    await expectTransportError(
+      transport.fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction" }) }, { operation: "rpc" }),
+      "transport_failed",
+    );
+    expect(fixture.observed.hosts).toHaveLength(2);
+    expect(fixture.observed.connections).toBe(2);
+    expect(events.map((e) => [e.code, e.operation])).toEqual([["transport_failed", "pay"], ["transport_failed", "rpc"]]);
+    // (3) 対照: 同じ Agent 構成で guard の無い undici fetch は 421 の後に同じ credential をもう 1 度送る（接続も 2 本）。
+    const control = new Agent({ allowH2: false, connect: { lookup: createVettedLookup([parseAddress("127.0.0.1")!]) as unknown as typeof dnsLookup } });
+    const response = await undiciFetch(url, { dispatcher: control, headers: { authorization: "Payment twice" } });
+    expect(response.status).toBe(421);
+    await control.close();
+    expect(fixture.observed.auth.slice(2)).toEqual(["Payment twice", "Payment twice"]);
+    expect(fixture.observed.connections).toBe(4);
   });
 });

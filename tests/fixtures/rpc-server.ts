@@ -13,6 +13,8 @@ function arg(name: string, fallback: string): string {
 }
 
 const chainId = Number(arg("chain-id", "42431"));
+/** 設計 A の T-A17 (g): `--after-headers stall|reset`。JSON-RPC 応答の headers の後で body を止める / 切る（`/calls` は除く）。 */
+const afterHeaders = arg("after-headers", "none");
 const txHash = `0x${"b0".repeat(32)}`;
 let connections = 0;
 const methods: string[] = [];
@@ -47,6 +49,11 @@ function stub(method: string): unknown {
 function send(response: http.ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+  if (afterHeaders !== "none" && !(response.req.url ?? "").startsWith("/calls")) {
+    response.write(text.slice(0, 1));
+    if (afterHeaders === "reset") setTimeout(() => response.socket?.destroy(), 50);
+    return;
+  }
   response.end(text);
 }
 

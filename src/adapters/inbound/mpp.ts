@@ -69,6 +69,8 @@ export interface MppInboundOptions {
   readonly transport: GuardedTransport;
   /** Tempo の JSON-RPC。省略時は viem の既知チェーン（4217 / 42431）の既定 URL（SDK の既定と同じ）。 */
   readonly rpcUrl?: string;
+  /** RPC 応答全体（headers + body）の期限。既定 10 s。 */
+  readonly rpcTimeoutMs?: number;
   readonly broadcastForTest?: (credential: string, options: unknown) => Promise<unknown>;
 }
 
@@ -127,7 +129,9 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
     }
     return createViemClient({
       chain: knownChain ?? { ...tempoModerato, id: options.chainId },
-      transport: guardedRpcTransport(options.transport, rpcUrl, () => rpcContext.getStore() ?? { operation: "rpc" }),
+      transport: guardedRpcTransport(options.transport, rpcUrl, () => rpcContext.getStore() ?? { operation: "rpc" }, {
+        timeout: options.rpcTimeoutMs,
+      }),
     });
   };
   const rpcContextOf = (context: InboundCallContext | undefined): TransportContext => ({

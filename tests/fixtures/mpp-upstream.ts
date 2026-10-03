@@ -34,6 +34,8 @@ function stallThis(status: number): boolean {
 let connections = 0;
 /** 閉じた TCP 接続数（捨てた body の接続が timeout を待たずに解放されることの観測。設計 A の T-A17 (c)(d)）。 */
 let closed = 0;
+/** 種類別の閉じた接続数。応答を書くときに socket へ種類を付ける（`challenge` = 402 / `paid` = それ以外 / `calls` = 観測用）。 */
+const closedByKind: Record<string, number> = { challenge: 0, paid: 0, calls: 0, none: 0 };
 
 const payMode = arg("pay", "ok");
 const baseAmount = arg("amount", "1200");
@@ -141,6 +143,9 @@ function send(
   headers: Record<string, string> = {},
 ): void {
   const text = JSON.stringify(body);
+  const kind = (response.req.url ?? "").startsWith("/calls") ? "calls" : status === 402 ? "challenge" : "paid";
+  const tagged = response.socket as unknown as { subethaKind?: string } | null;
+  if (tagged !== null) tagged.subethaKind = kind;
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
@@ -162,7 +167,7 @@ const server = http.createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { connections, closed, challengeCalls, payCalls, seenQueries, seenCredentials });
+    send(response, 200, { connections, closed, closedByKind, challengeCalls, payCalls, seenQueries, seenCredentials });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -256,6 +261,8 @@ server.on("connection", (socket) => {
   connections += 1;
   socket.on("close", () => {
     closed += 1;
+    const kind = (socket as unknown as { subethaKind?: string }).subethaKind ?? "none";
+    closedByKind[kind] = (closedByKind[kind] ?? 0) + 1;
   });
 });
 server.listen(Number(arg("port", "0")), "127.0.0.1", () => {

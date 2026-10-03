@@ -12,7 +12,7 @@
 
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { isIP } from "node:net";
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
 
 import {
   classifyAddress,
@@ -107,6 +107,35 @@ export function discardBody(response: { readonly body?: ReadableStream<Uint8Arra
   } catch {
     // locked 等。要求の timeout に任せる。
   }
+}
+
+/**
+ * 1 回の fetch につき dispatch は 1 回だけ（設計 §3.3-10）。undici の fetch は **421** を受けると接続を捨て、**同じ要求を新しい接続で
+ * 自動再送**する（Fetch 標準の 421 再試行。body が無いか再生可能な要求が対象で、credential 付き GET も JSON 文字列の POST も該当する）。
+ * credential 付き要求を transport が 2 度送らないよう、2 回目の dispatch を拒んで fetch を失敗させる（→ `transport_failed`）。
+ */
+export class RedispatchRefusedError extends Error {
+  override readonly name = "RedispatchRefusedError";
+  constructor() {
+    super("guarded transport refused a second dispatch within one fetch (HTTP 421 retry)");
+  }
+}
+
+function oneDispatch(): Dispatcher.DispatcherComposeInterceptor {
+  let used = false;
+  return (dispatch) => (opts, handler) => {
+    if (used) {
+      const error = new RedispatchRefusedError();
+      if (typeof handler.onResponseError === "function") {
+        handler.onResponseError(null as unknown as Dispatcher.DispatchController, error);
+      } else {
+        (handler as { onError?: (error: Error) => void }).onError?.(error);
+      }
+      return false;
+    }
+    used = true;
+    return dispatch(opts, handler);
+  };
 }
 
 export interface GuardedTransport {
@@ -243,7 +272,8 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
       response = await undiciFetch(url, {
         ...(init as Parameters<typeof undiciFetch>[1]),
         redirect: "error",
-        dispatcher: agent,
+        // 2 回目の dispatch（421 再試行）を拒む（§3.3-10）。
+        dispatcher: agent.compose(oneDispatch()),
       });
     } catch (error) {
       agent.destroy().catch(() => {});

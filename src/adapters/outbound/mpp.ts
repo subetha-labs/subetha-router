@@ -241,17 +241,27 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
 
   /**
    * 能力の client の JSON-RPC も SSRF 防御 A の transport に通す（設計 §3.5 経路 12）。
-   * viem の `http` transport なら、その URL で guarded な http transport を**作り直す**（能力側の fetch は使わない）。
+   * viem の**素の** `http` transport（`type` と `key` が `http`）なら、その URL・`fetchOptions`（認証ヘッダ等）・retry・timeout で
+   * guarded な http transport を**作り直す**（能力側の fetch は使わない。`onFetchRequest` 等の closure は引き継げないので対象外）。
    * 試験用 spy（`non-signing-fixture`）の `custom` transport は HTTP を持たないのでそのまま。
-   * 実鍵で http 以外の transport は fail closed（どこへ出るか保証できない）。
+   * 実鍵で素の http 以外の transport（`fallback`、`webSocket`、`withFeePayer` 等の装飾）は fail closed（どこへ出るか保証できない）。
    */
   function guardedRpcRequestOf(client: Client, ctx: MutableContext): RpcRequest {
-    const t = client.transport as { type?: unknown; url?: unknown; retryCount?: number; retryDelay?: number; timeout?: number };
-    if (t.type === "http" && typeof t.url === "string") {
+    const t = client.transport as {
+      type?: unknown;
+      key?: unknown;
+      url?: unknown;
+      fetchOptions?: RequestInit;
+      retryCount?: number;
+      retryDelay?: number;
+      timeout?: number;
+    };
+    if (t.type === "http" && t.key === "http" && typeof t.url === "string") {
       const guarded = createViemClient({
         ...(client.chain === undefined ? {} : { chain: client.chain }),
         ...(client.account === undefined ? {} : { account: client.account }),
         transport: guardedRpcTransport(transport, t.url, () => ({ routeId: ctx.routeId, operation: "rpc" }), {
+          fetchOptions: t.fetchOptions,
           retryCount: t.retryCount,
           retryDelay: t.retryDelay,
           timeout: t.timeout,
@@ -262,7 +272,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     if (capability.kind === "non-signing-fixture") {
       return client.request.bind(client) as RpcRequest;
     }
-    throw new Error("MPP capability client must use viem's http transport (SSRF defense A)");
+    throw new Error("MPP capability client must use viem's plain http transport (SSRF defense A)");
   }
 
   function createClient(
