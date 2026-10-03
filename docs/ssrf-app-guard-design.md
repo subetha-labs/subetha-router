@@ -106,6 +106,13 @@ interface GuardedFetchOptions {
    `transport_failed` を**1 回報告して** `TransportError` で投げる（§5「読めなければ fail closed」の実装）。`TransportError` 以外の例外が
    transport から漏れる経路は無い。T-A20。
 
+10. **1 回の fetch につき dispatch は 1 回**（実装レビュー #2 の指摘 1）: undici の `fetch` は **421** を受けると接続を捨てて**同じ要求を
+    新しい接続で自動再送**する（Fetch 標準の 421 再試行。body が無いか再生可能な要求が対象で、credential 付き GET も JSON 文字列の POST も
+    該当する。h2 とは無関係）。transport は Agent に interceptor を重ね（`agent.compose`）、2 回目の dispatch を拒んで fetch を失敗させる
+    （`transport_failed`。最初の要求は送られているので adapter の公開結果は既存の `unknown` 側に落ちる）。T-A21 で、fixture が見た要求が
+    1 回であること、対照の素の undici fetch が同じ credential を 2 度送ることを見る。undici の HTTP/1.1 client 自体は書き込んだ要求を再送しない
+    （`client-h1.js` の `kRunning` の分岐は pipelining の制御。要求ごとの Agent なので pipeline の後続もない）。
+
 全接続・全 fallback が vetted の中に閉じる根拠は事実 A-3/A-4。mppx 経由（`rawFetch`）も同じ関数を受け取る（事実 A-1）ので、SDK が内部で
 `globalThis.fetch` に逃げない限り到達する。到達の証明は §4（経路ごとの sabotage と、配線を外すと落ちることの確認）。
 
@@ -165,6 +172,15 @@ namespace 内に解決される名前は A の範囲（要件 §9）であり、
   能力の値を引き継ぐ）。試験用 spy（`non-signing-fixture`）の `custom` transport は HTTP を持たないのでそのまま。実鍵で http 以外の
   transport は fail closed（どこへ出るか保証できない）。route は pay の request-local ctx。
 
+**RPC の body と期限（実装レビュー #2 の指摘 2・4）**: viem は `fetchFn` が返した応答の body を**自分で**読み、その読み取りは viem の
+timeout（headers で解除）の外にあり、失敗は viem の例外に包まれて adapter の catch で固定の結果に変わる（報告 0、停滞は無期限）。そこで
+`guardedRpcTransport` は **body をここで読み切り**（上限 10 MiB。viem の既定と同じ）、応答全体（headers + body）に 1 つの期限
+（既定 10 s。viem の timeout は期限 + 250 ms に置き、期限切れの分類は transport 側で決める）を掛け、headers 後の失敗を
+`transport.report` で 1 回報告してから投げる。viem には読み切った body を持つ新しい `Response` を渡す（viem はネットワークに触れない）。
+送信側の作り直しは viem の**素の** `http` transport（`type` と `key` が `http`）だけを対象にし、URL・`fetchOptions`（認証ヘッダ等）・
+`retryCount` / `retryDelay` / `timeout` を引き継ぐ。`onFetchRequest` 等の closure は引き継げないので対象外（文書化）。装飾された transport
+（`withFeePayer` は `type: "feePayer"`）、`fallback`、`webSocket` は実鍵では fail closed。受信側は `rpcTimeoutMs`（既定 10 s）。
+
 ### 3.6 診断（FR-C1、FR-C1'）
 
 transport は `TransportError`（`code`、`operation`、`routeId?`）を投げる。**投げる前に `report()` を呼ぶ**ので、adapter が例外を握り潰して
@@ -217,6 +233,7 @@ headers 後（adapter が報告）: body の停滞で要求の timeout が切れ
 | T-A18 | 文脈の帰属: 異なる route の `pay` を 2 本同時に走らせ、各 `report` 行の `route` と `operation`（`pay_challenge` → `pay`）がそれぞれの呼び出しに正しく付く。受信の `verify` / `settle` の行に offer の route が付く（**`composeRails` の包み越し**に。実装レビュー #1 の指摘 3） | §3.5 |
 | T-A19 | HTTP/1.1 だけ: `allowHTTP1` の HTTP/2 サーバ（試験用 CA）に対し、transport の要求は `httpVersion` `1.1`。対照として `allowH2: true` の Agent は `2.0`（サーバが h2 を提示している証明） | §3.3-8 |
 | T-A20 | 判定の失敗: 自アドレスの供給元が例外を投げたら、公開アドレス宛でも接続せず `transport_failed` を 1 回、`TransportError` で投げる。adapter が同じ例外を `report` しても二重にならない | §3.3-9 |
+| T-A21 | 1 回の fetch につき 1 dispatch: 421 を返す fixture に credential 付き GET と JSON の POST → fixture が見た要求は各 1 回、`transport_failed` 1 回ずつ。対照の素の undici fetch（同じ Agent 構成）は同じ credential を 2 度送り接続も 2 本 | §3.3-10 |
 
 実装レビュー #1（§12）で強めた受け入れ条件: T-A5 の囮は `S` の全アドレスで listen できなければ**失敗**（catch で空にしない）。
 T-A7 は `createVettedLookup` の**単体**（配列 / 単一形式）と、本物の undici `Agent` に spy を渡して `all: true` で呼ばれることの観測。
@@ -225,6 +242,10 @@ T-A16 の「読まずに捨てた body」は fixture 側の socket の close を
 `discardBody` の契約（既にエラーの stream / locked / null）を単体で見る。(e)(f) は実・合成 x402 とも停滞と切断、受信は **verify** の停滞と
 切断（`--after-headers-on verify`）。headers 前の `dns_failed` / `aborted` を 1 回ずつ。T-A13 の公開結果に transport の語彙・アドレス・URL が
 無いことを `expectSilent` で見る。
+実装レビュー #2（§13）で追加: T-A17 (c)(d) の接続解放は**種類別**（402 を書いた socket だけ）に数え、観測用 `/calls` と有料応答の socket は
+数えない（cancel を外すと落ちることを M-A8 で測る）。T-A17 (g) は RPC fixture の `--after-headers stall|reset` で、受信（verify）と送信（pay）の
+RPC body の停滞・切断が `rpc` で 1 回報告され、停滞が transport の期限で終わること。T-A18 に受信 RPC の同時実行（同じ rail、別 route）の帰属。
+`expectSilent` は pay の公開結果すべてに。
 
 既存の wire テスト（`tests/wire/*`）は fixture が loopback なので、transport を `allowLoopback: true` で渡すように更新する。
 
@@ -243,6 +264,8 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
   生成コマンドを同ディレクトリの README に残す。本番コードはこれらを読まない。
 
 - HTTP/2 は使わない（§3.3-8）。将来 h2 を使うなら、credential 付き要求の再送方針を設計して試験してから。
+- 1 回の fetch につき dispatch は 1 回（§3.3-10）。421 を返す Provider への要求は `transport_failed` になり、adapter は既存の `unknown` 側に写す。
+- RPC の body は transport が読み切る（§3.5）。viem の `maxResponseBodySize` 相当の上限（10 MiB）は transport 側で掛ける。
 - `tls.ca` は Node の既定の信頼ストアを**置き換える**（追加ではない）。試験専用で、本番は未指定（システムの信頼ストア）。
 - 受信 MPP の RPC URL は省略時 SDK の既定と同じ公開エンドポイント。認証付き RPC を使うには adapter の `rpcUrl`（env からの設定は未実装。
   運用の follow-up）。送信 MPP は能力の `rpcUrl`（`SUBETHA_TEMPO_RPC_URL`）をそのまま guarded に作り直す。
@@ -307,7 +330,7 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | I-8 | 配線の変異の記録（T-A14）と Linux での受け入れ実行（§4 末尾）。結果を §11 に記録 | §11 |
 | I-9 | Codex の実装レビュー → 指摘の反映 | §12 |
 
-## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`、実装レビュー #1 の反映 `d569caa`）
+## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`、実装レビュー #1 の反映 `d569caa`、#2 の反映 `1487f8d`）
 
 ### 11.1 設計からの逸脱（実装レビューで可否を問う）
 
@@ -322,6 +345,9 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | D-7 | §3.5 の経路は 10 | **12**（JSON-RPC の経路 11・12 を追加。§3.5）。受信 MPP は `tempo.charge({ getClient })` + AsyncLocalStorage、送信 MPP は能力の client の viem `http` transport を guarded に作り直す | 実装レビュー #1 の指摘 2。要件 FR-A6 は「10 経路と将来増えるもの」なので要件の改訂は不要。`operation` は `rpc`。送信側の公開結果は既存の写像（能力に触れた後の失敗は `unknown`）のまま |
 | D-8 | §3.3 に h2 の記述なし | `Agent({ allowH2: false })`（§3.3-8） | 実装レビュー #1 の指摘 1。undici 8 の既定 h2 + REFUSED_STREAM 再送が「1 回だけ送る」契約に反する |
 | D-9 | §3.3-7 の transport の分類は接続失敗を想定 | 判定自体の例外（自アドレスの列挙失敗等）を `transport_failed` に正規化して 1 回報告（§3.3-9） | 実装レビュー #1 の指摘 5。接続は作っていない。T-A20 |
+| D-10 | §3.3 に 421 の記述なし | `agent.compose(oneDispatch())` で 2 回目の dispatch を拒む（§3.3-10） | 実装レビュー #2 の指摘 1。undici fetch の 421 再試行は h2 と無関係で、`allowH2: false` では防げない |
+| D-11 | §3.5 の RPC は fetch だけを guard | `guardedRpcTransport` が body を読み切り、応答全体に期限（既定 10 s）と上限（10 MiB）を掛け、headers 後の失敗を 1 回報告（§3.5） | 実装レビュー #2 の指摘 2。viem は body を timeout の外で読み、失敗を包む |
+| D-12 | §3.5 送信の作り直しは URL だけ | `fetchOptions`（認証ヘッダ等）・`retryCount` / `retryDelay` / `timeout` を引き継ぐ。対象は `type` と `key` が `http` の素の transport だけ | 実装レビュー #2 の指摘 4。装飾 transport の意味は URL から復元できないので fail closed |
 
 ### 11.2 試験の実装で分かったこと（§2 の事実に追加）
 
@@ -339,6 +365,9 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | A-24 | push 形式（`type: "hash"`）の credential は署名無しで作れる（`Credential.from({ challenge, payload })` → `serialize`）。SDK は HMAC（`opaque`）を検証した後に `eth_getTransactionReceipt` を RPC に出す | T-A13 の経路 11 を実 SDK で駆動する材料（RPC fixture は receipt 無し → 既存の fail-closed 結果） |
 | A-25 | 送信 MPP で json-rpc account の能力は最初の RPC が `wallet_sendCalls`（送金系）。adapter の at-most-once guard はその試行を数えるので、RPC が `destination_blocked` でも公開結果は `unknown`（既存の写像） | 経路 12 の公開結果の期待値。運用者向けの `destination_blocked rpc` 行で「出ていない」ことは分かる |
 | A-26 | ポリシーの `ParsedAddress.text` は IPv6 を長形式（`::1` → `0:0:0:0:0:0:0:1`）に正規化する。undici はこれを接続先に使える | T-A7 の単体の期待値 |
+| A-27 | undici 8 の `fetch` は `response.status === 421 && !isNewConnectionFetch && (body 無し || body.source 有り)` で接続を捨てて `httpNetworkOrCacheFetch(..., true)` を**もう 1 回**走らせる（`lib/web/fetch/index.js`）。interceptor は `handler.onResponseError(null, err)` で dispatch を失敗させられる（`lib/interceptor/dns.js` と同じ） | §3.3-10 の実装。T-A21 の対照は同じ credential を 2 度送る（M-A9） |
+| A-28 | viem 2.54 の http transport は `withTimeout(fetchFn)` の後に `readResponseBody` を呼ぶ（timeout は headers で解除）。transport の値は `{ key, type: "http", url, fetchOptions, retryCount, retryDelay, timeout }` | D-11 / D-12 の根拠 |
+| A-29 | `withFeePayer` の transport は `type: "feePayer"`（viem/tempo `Transport.js`） | 実鍵では fail closed に当たる（受信・送信の現構成では未使用） |
 
 ### 11.3 測定
 
@@ -350,6 +379,10 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | M-A5 | macOS 手元 `npm test`（`d569caa`、実装レビュー #1 の反映後、alias 無し） | 354 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8。A-20。28 ファイル） |
 | M-A6 | Linux 受け入れ 3 回目（`d569caa`。同じ手順） | **357 passed / 14 skipped / 0 failed**（T-A1〜T-A20 の全件緑。28 ファイル、45 s。14 skipped は env で gate された `tests/wire/chat-crossimpl.test.ts` の 14 件で、A の試験に skip は無い） |
 | M-A7 | T-A14 配線の変異（macOS、`d569caa`。12 経路。手順は M-A4 と同じ。経路 11 は受信 MPP の `getClient` を素の viem `http(rpcUrl)` に、経路 12 は能力の `client.request` をそのまま返す変異） | **12 / 12 検出**（下表の 11・12 行。`-t "MPP 1"` は経路 11・12 の試験名にも一致するので、経路 1 の変異の要約は `2 failed \| 2 passed`。落ちた 2 件は MPP 1 と送信 MPP 12） |
+| M-A8 | 契約の変異（macOS、`1487f8d`。各 1 件ずつ元に戻す）: C-1 `oneDispatch` を外す → T-A21、C-2 challenge body の cancel を外す → T-A17 (c)(d)、C-3 RPC body 失敗の報告を外す → T-A17 (g)、C-4 RPC の応答全体の期限を外す → T-A17 (g) | **4 / 4 検出**: C-1 → T-A21 `1 failed`、C-2 → T-A17 (c)(d) `1 failed`（402 を書いた socket が 2 本閉じない）、C-3 → T-A17 (g) `2 failed`（受信・送信）、C-4 → T-A17 (g) `2 failed`（停滞が期限で終わらない）。1 回目の試行は `-t` の regex に括弧を含めて C-2 が 0 件実行（`25 skipped`）になったので、試験名の部分文字列で再実行した |
+| M-A9 | macOS 手元 `npm test`（`1487f8d`、alias 無し） | 358 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8。A-20。28 ファイル） |
+| M-A10 | Linux 受け入れ 4 回目（`1487f8d`。同じ手順） | **361 passed / 14 skipped / 0 failed**（T-A1〜T-A21 の全件緑。28 ファイル、45 s。14 skipped は env で gate された `tests/wire/chat-crossimpl.test.ts`） |
+| M-A11 | T-A14 配線の変異（macOS、`1487f8d`。12 経路。M-A7 と同じ手順） | **12 / 12 検出**（内訳は M-A7 と同じ。経路 1 の `-t "MPP 1"` は 11・12 の試験名にも一致し `2 failed \| 2 passed`） |
 | M-A4 | T-A14 配線の変異（macOS、`eda0653`）。各 adapter の `transport.fetch` を素の `globalThis.fetch` に戻し（MPP は `Mppx.create` の `fetch` オプションを外して SDK 既定に落とす）、該当の T-A13 を 1 件ずつ `vitest -t` で実行。変異は毎回元に戻し、最後に `git diff --quiet -- src` で空を確認 | **10 / 10 検出**（下表） |
 
 T-A14 の表（「落ちる」= その試験が 1 failed）:
@@ -371,7 +404,7 @@ T-A14 の表（「落ちる」= その試験が 1 failed）:
 
 ### 11.4 受け入れの判定
 
-- §4 の T-A1〜T-A20: Linux で全件緑（M-A3 は実装レビュー #1 前の T-A1〜T-A18、M-A6 は反映後の全件）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
+- §4 の T-A1〜T-A21: Linux で全件緑（M-A3 は実装レビュー #1 前の T-A1〜T-A18、M-A6 は #1 反映後、M-A10 は #2 反映後の全件）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
 - 公開結果（§3.5 の表）は既存の wire テストが変わらず通ることで確認（`tests/wire/*` は `allowLoopback: true` の transport を渡すだけの変更）。
 
 ## 12. 実装レビュー #1（`d41a610`、2026-10-03、`gpt-6-astra`）: **REJECT** → 反映 `d569caa`
@@ -389,3 +422,20 @@ T-A14 の表（「落ちる」= その試験が 1 failed）:
 
 付随の指摘: `tls.ca` は既定の信頼ストアを置き換える（§5 に明記）、`src/client/` の除外は妥当、no-direct-fetch の走査は補助的（lint ではない）、
 T-A18 は「段階の異なる同時実行」までは見ていない（pay 2 本の同時実行で `pay_challenge` → `pay` の帰属は見ている。追加は見送り）。
+
+## 13. 実装レビュー #2（`ec1465a`、2026-10-03、`gpt-6-astra`）: **REJECT** → 反映 `1487f8d`
+
+#1 の 5 件は「3・4a・4b・4(T-A16)・4e/f・4(受信 verify)・4(dns/abort)・5 = fixed、1・2・4c/d・4(秘匿) = partially fixed」と評価された。
+レビュアは MockAgent の probe で 421 の再送（同じ Authorization の GET が 2 回）、実際にビルドした `guardedRpcTransport` で RPC body の
+切断（報告 0）と停滞（期限の 5 倍待っても未完）を再現した。
+
+| # | 指摘 | 判定 | 反映 |
+|---|---|---|---|
+| 1 | **High** undici fetch の 421 再試行で credential 付き要求が 2 度送られる（h2 とは無関係。`redirect: "error"` では防げない） | 正しい（A-27） | 1 fetch 1 dispatch の interceptor（§3.3-10、D-10）。T-A21 と対照。M-A8 C-1 |
+| 2 | **Medium** RPC の body の失敗が未報告、body の読み取りに期限が無い（viem は headers で timeout を解除） | 正しい（A-28） | transport が body を読み切り、応答全体の期限と上限、1 回の報告（§3.5、D-11）。T-A17 (g)、M-A8 C-3 / C-4。受信は `rpcTimeoutMs` |
+| 3 | **Medium** T-A17 (c)(d) の `closed >= 2` は観測用 `/calls` と有料応答の socket でも満たせる | 正しい | fixture が応答の種類を socket に付けて種類別に数える。判定は 402 を書いた socket が 2 本閉じること。M-A8 C-2 で cancel を外すと落ちることを測る |
+| 4 | **Medium** 送信の作り直しが `fetchOptions`（認証ヘッダ）と装飾 transport の意味を捨てる | 正しい | `fetchOptions` 等を引き継ぐ。対象は素の `http`（`type`・`key`）だけ、それ以外の実鍵は fail closed（§3.5、D-12） |
+
+付随: (b) の試験名を「createOffer（challenge）」に直す、`expectSilent` を pay の公開結果すべてに、受信 RPC の同時実行の帰属（T-A18）。
+レビュアの確認事項: JSON-RPC の目録は現構成で完全（remote fee payer / `withFeePayer` は未設定で到達不能）、x402 署名はローカル、
+`src/client/` の除外は妥当、AsyncLocalStorage の帰属は追跡した経路で信頼できる、`useH2c` は明示 true のみ、h1 client は書き込んだ要求を再送しない。
