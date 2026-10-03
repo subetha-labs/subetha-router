@@ -98,6 +98,14 @@ interface GuardedFetchOptions {
      その body の停滞や切断は**操作の失敗ではない**ので事象を出さない（出すものが無い）。実装で `preparePayment` が body を保持しないことを確認し、
      T-A17 で「停滞した body が挟まっても challenge 再読が遅れず失敗せず、接続が解放される」「cancel の前に既にエラーになった body でも同じ」を見る。
 
+8. **HTTP/1.1 だけ**（実装レビュー #1 の指摘 1）: `Agent({ allowH2: false })`。undici 8 は既定で ALPN に h2 を提示し、`REFUSED_STREAM` /
+   `GOAWAY` を受けた要求を**自動で再送**する（RFC 9113 §8.7 の「1 回だけ」の範囲でも、相手の申告に依存した再送）。credential を載せた
+   有料要求を transport が 2 度送り得るのは「1 回だけ送る」契約（§3.5 の表の経路 3・6・8）に反するので、h2 を提示しない。
+   Node 同梱の fetch（undici 6）は h2 を既定で使わないので、A 以前の挙動と同じ。T-A19 で ALPN の結果（`1.1`）と対照（`2.0`）を見る。
+9. **判定自体の失敗**（同指摘 5）: 自アドレスの列挙など、ポリシー判定や Agent 生成が例外で終わったら、接続を作らずに
+   `transport_failed` を**1 回報告して** `TransportError` で投げる（§5「読めなければ fail closed」の実装）。`TransportError` 以外の例外が
+   transport から漏れる経路は無い。T-A20。
+
 全接続・全 fallback が vetted の中に閉じる根拠は事実 A-3/A-4。mppx 経由（`rawFetch`）も同じ関数を受け取る（事実 A-1）ので、SDK が内部で
 `globalThis.fetch` に逃げない限り到達する。到達の証明は §4（経路ごとの sabotage と、配線を外すと落ちることの確認）。
 
@@ -130,6 +138,8 @@ env / 設定ファイルからは変えられない。
 | 8 | 合成 x402 `pay` | `fetch` | `pay` | 既存の分類 |
 | 9 | 受信 subetha `post`（verify / settle / challenge） | `fetch` | `facilitator_<path>` | `source_verify_unavailable` 等（既存） |
 | 10 | 受信 x402 `post`（verify / settle） | `fetch` | `facilitator_<path>` | 同上 |
+| 11 | 受信 MPP の SDK の JSON-RPC（`validateCredential` / `broadcastCredential` が `getTransactionReceipt`・`eth_call` 等を出す。challenge 発行時の metadata 読取も含む） | viem `http` transport（`fetchFn`） | `rpc` | `isValid: false` / `unknown` / `source_settle_unknown`（既存） |
+| 12 | 送信 MPP の能力の client の JSON-RPC（`createCredential` が nonce・fee・送金 RPC を出す） | viem `http` transport（`fetchFn`） | `rpc` | `unknown` / `destination_pay_unknown`（既存。能力に触れた後の失敗は保守的に unknown） |
 
 配線: 各 adapter のオプションに **`transport: GuardedFetch`（必須）** を足す。省略で `globalThis.fetch` に落ちる経路は作らない
 （`fetch` という識別子を adapter から消し、lint で `globalThis.fetch` の直接使用を禁止する）。MPP は `Mppx.create({ fetch, polyfill: false })` に
@@ -138,6 +148,22 @@ env / 設定ファイルからは変えられない。
 共有する可変状態は持たない。`readChallenge` の ctx は不変。受信は `offer` の route 束縛から `routeId` を取る（事実 A-12）。
 `composeRails` が adapter ごとに transport を作る。`warnIfInternalUpstream`（起動時の文字列警告）は残し、強制ではない旨を注記する。
 `tools/t7-*`、`tools/u01r-*` の手元スクリプトも同じ必須オプションを通す（実能力なら `allowLoopback: false`）。
+
+**JSON-RPC（経路 11・12。実装レビュー #1 の指摘 2 で追加）**: Router が出す HTTP は Provider / facilitator への要求だけではない。
+受信 MPP の SDK は `tempo.charge` の `getClient` が返す viem client で RPC（receipt の照合、署名検証の `eth_call`）を出し、
+既定（`getClient` 未指定）では SDK 内蔵の `http(url)` = 素の `globalThis.fetch` で、`redirect` の拒否も無い。送信 MPP は能力の client
+（本番は `tools/real-mpp-capability.ts` の `http(rpcUrl)`）に委ねていた。宛先は運用者の設定だが、RPC 事業者の redirect や
+namespace 内に解決される名前は A の範囲（要件 §9）であり、B は見られない。配線は `src/net/guarded-rpc.ts` の
+`guardedRpcTransport(transport, url, context)`（viem `http(url, { fetchFn })`。`src/` で viem の `http()` を作ってよいのはここだけ。
+試験 I-6 が検査する）:
+
+- 受信 MPP: adapter が `tempo.charge({ getClient })` を渡す。client は guarded な http transport で作る。route は `verify` / `settle` /
+  `createOffer` の呼び出し文脈を **AsyncLocalStorage** で `fetchFn` まで運ぶ（SDK は `getClient` を呼び出しの内側で呼ぶ）。
+  RPC URL は `rpcUrl` オプション、省略時は viem の既知チェーン（4217 / 42431）の既定 URL（SDK の既定と同じ公開エンドポイント）。
+- 送信 MPP: adapter が能力の client の transport を見て、viem `http`（`transport.type === "http"`、`url`）なら**その URL で guarded な
+  http transport を作り直し**、SDK には guard した `request` だけを持つ最小 client を渡す（能力側の fetch は使わない。`retryCount` 等は
+  能力の値を引き継ぐ）。試験用 spy（`non-signing-fixture`）の `custom` transport は HTTP を持たないのでそのまま。実鍵で http 以外の
+  transport は fail closed（どこへ出るか保証できない）。route は pay の request-local ctx。
 
 ### 3.6 診断（FR-C1、FR-C1'）
 
@@ -183,12 +209,22 @@ headers 後（adapter が報告）: body の停滞で要求の timeout が切れ
 | T-A10 | リテラル: loopback / 注入した自アドレス / 各禁止範囲 / userinfo 付き / `ftp:` → `destination_blocked`、接続 0 | FR-A1 |
 | T-A11 | `redirect: "follow"` を渡しても 302 で `transport_failed`、2 本目の接続 0 | §3.3-4 |
 | T-A12 | TLS（試験用 CA を `tls.ca` に注入。`rejectUnauthorized` は触らない）: (a) `provider.test` の SAN を持つ証明書 → `200`、サーバが見た SNI は `provider.test`、`Host` も `provider.test`（別々に確認）。(b) SAN が `other.test` の証明書 → `connect_failed`（`ERR_TLS_CERT_ALTNAME_INVALID`）、HTTP 要求 0。(c) 試験用 CA に無い証明書 → `connect_failed`、要求 0 | FR-A3 の TLS 検証 |
-| T-A13 | **経路ごとの到達**（10 経路）: 各経路について、前提となる要求（challenge 等）は通し、**その経路の要求だけ**を `destination_blocked` にする（transport の `report` を spy し、`operation` で特定）。確認: (1) `report` がその `operation` で `destination_blocked` を 1 回、(2) fixture の接続数が前提分だけ増え、対象の要求で増えない、(3) 公開結果は §3.5 の表のとおり | FR-A7 |
+| T-A13 | **経路ごとの到達**（12 経路。実装レビュー #1 で JSON-RPC の経路 11・12 を追加）: 各経路について、前提となる要求（challenge 等）は通し、**その経路の要求だけ**を `destination_blocked` にする（transport の `report` を spy し、`operation` で特定）。確認: (1) `report` がその `operation` で `destination_blocked` を 1 回、(2) fixture の接続数が前提分だけ増え、対象の要求で増えない、(3) 公開結果は §3.5 の表のとおり | FR-A7 |
 | T-A14 | 配線の検証（実装フェーズの測定）: 10 経路それぞれについて、adapter の `transport` を `globalThis.fetch` に差し替えた一時的な変異で T-A13 の該当試験が**落ちる**ことを記録する（表にして設計書に残す。変異は戻す） | 空でない証明 |
 | T-A15 | 能力の混在（`composeRails` の単体）: (x402 実鍵, MPP fixture) → x402 の transport は `false`、MPP は `true`。逆も。synthetic は全部 `true`。`fixtureFacilitators` 無しの real は受信も `false`。env で変えられない | FR-C2' |
 | T-A16 | 寿命: 5 MB の body を headers 後にゆっくり読み切れる（`close()` を待たない契約）。読まずに捨てた body は要求の timeout で閉じる。例外時は `destroy()` | §3.3-5 |
 | T-A17 | 診断: 各 `code` を 1 回ずつ起こす（headers 前）。headers 後は fixture に `--after-headers stall\|reset` を足して 4 例: (a) **消費する body の停滞**（x402 `getChallenge` の `text()`、受信 `post` の `text()`）→ 要求の timeout → `upstream_timeout` を adapter が 1 行、(b) **消費する body の切断** → `transport_failed` 1 行、(c) **消費しない body の停滞**（MPP `pay_challenge`。fixture は**正しい MPP challenge の headers** を返してから body を止める）→ challenge 再読は遅れず成功し、事象 0、Agent が閉じる（接続解放を fixture 側の切断で観測）、(d) 消費しない body の切断（cancel の前に既にエラーになった stream）→ 同じく事象 0 で成功、unhandled rejection 無し。さらに **有料応答の body を消費する 3 経路**（MPP `pay` の receipt、実 x402 `pay`、合成 x402 `pay`。fixture は**正しい receipt** を返してから body を止める/切る）で (e) 停滞 → `upstream_timeout` 1 行、(f) 切断 → `transport_failed` 1 行、公開結果は既存のまま。確認: `report` は失敗 1 つにつき**ちょうど 1 行**、形は §3.6、**行・公開応答・journal にアドレス・ホスト名・URL・例外文字列が含まれない**（正規表現）、公開結果は §3.5 の表のまま | FR-C1、FR-C1' |
-| T-A18 | 文脈の帰属: 異なる route の `pay` を 2 本同時に走らせ、各 `report` 行の `route` と `operation`（`pay_challenge` → `pay`）がそれぞれの呼び出しに正しく付く。受信の `verify` / `settle` の行に offer の route が付く | §3.5 |
+| T-A18 | 文脈の帰属: 異なる route の `pay` を 2 本同時に走らせ、各 `report` 行の `route` と `operation`（`pay_challenge` → `pay`）がそれぞれの呼び出しに正しく付く。受信の `verify` / `settle` の行に offer の route が付く（**`composeRails` の包み越し**に。実装レビュー #1 の指摘 3） | §3.5 |
+| T-A19 | HTTP/1.1 だけ: `allowHTTP1` の HTTP/2 サーバ（試験用 CA）に対し、transport の要求は `httpVersion` `1.1`。対照として `allowH2: true` の Agent は `2.0`（サーバが h2 を提示している証明） | §3.3-8 |
+| T-A20 | 判定の失敗: 自アドレスの供給元が例外を投げたら、公開アドレス宛でも接続せず `transport_failed` を 1 回、`TransportError` で投げる。adapter が同じ例外を `report` しても二重にならない | §3.3-9 |
+
+実装レビュー #1（§12）で強めた受け入れ条件: T-A5 の囮は `S` の全アドレスで listen できなければ**失敗**（catch で空にしない）。
+T-A7 は `createVettedLookup` の**単体**（配列 / 単一形式）と、本物の undici `Agent` に spy を渡して `all: true` で呼ばれることの観測。
+T-A16 の「読まずに捨てた body」は fixture 側の socket の close を観測する（読まない）。T-A17 は (c)(d) を **pay の `pay_challenge`** で行い、
+捨てた body の接続が要求の timeout（5 s）を待たずに閉じること（= cancel が解放している）を fixture の `closed` で観測し、
+`discardBody` の契約（既にエラーの stream / locked / null）を単体で見る。(e)(f) は実・合成 x402 とも停滞と切断、受信は **verify** の停滞と
+切断（`--after-headers-on verify`）。headers 前の `dns_failed` / `aborted` を 1 回ずつ。T-A13 の公開結果に transport の語彙・アドレス・URL が
+無いことを `expectSilent` で見る。
 
 既存の wire テスト（`tests/wire/*`）は fixture が loopback なので、transport を `allowLoopback: true` で渡すように更新する。
 
@@ -205,6 +241,13 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 - B と表を二重に持つ。表の更新は B（`subetha-egress`）側を正とし、T-A1 が差分を検出する。
 - 試験用 CA と証明書は `tests/fixtures/tls/` に**コミット**する（自己署名、SAN `provider.test` と `other.test`、有効期間 10 年、鍵は試験専用）。
   生成コマンドを同ディレクトリの README に残す。本番コードはこれらを読まない。
+
+- HTTP/2 は使わない（§3.3-8）。将来 h2 を使うなら、credential 付き要求の再送方針を設計して試験してから。
+- `tls.ca` は Node の既定の信頼ストアを**置き換える**（追加ではない）。試験専用で、本番は未指定（システムの信頼ストア）。
+- 受信 MPP の RPC URL は省略時 SDK の既定と同じ公開エンドポイント。認証付き RPC を使うには adapter の `rpcUrl`（env からの設定は未実装。
+  運用の follow-up）。送信 MPP は能力の `rpcUrl`（`SUBETHA_TEMPO_RPC_URL`）をそのまま guarded に作り直す。
+- `src/client/`（Router 自身の公開 API を呼ぶ側）は A の対象外（§11 D-3）。実装レビュー #1 も妥当と判断（「支払い経路の RPC を除外する理由には
+  ならない」の指摘は経路 11・12 で反映）。
 
 ## 6. 設計レビュー #1（v1、`316849d`）: **REJECT** → v2
 
@@ -264,7 +307,7 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | I-8 | 配線の変異の記録（T-A14）と Linux での受け入れ実行（§4 末尾）。結果を §11 に記録 | §11 |
 | I-9 | Codex の実装レビュー → 指摘の反映 | §12 |
 
-## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`）
+## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`、実装レビュー #1 の反映 `d569caa`）
 
 ### 11.1 設計からの逸脱（実装レビューで可否を問う）
 
@@ -275,7 +318,10 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | D-3 | §3.5 lint で `globalThis.fetch` の直接使用を禁止 | 単体試験 `tests/unit/no-direct-fetch.test.ts` が `src/` を走査する。`src/net/` と `src/client/` を除外し、コメントと型参照 `typeof globalThis.fetch` は無視 | repo に lint 設定が無い。`src/client/` は Router の公開契約（R1–R4）の型付きクライアントで、MCP server と tools が **Router 自身の HTTP API** を呼ぶ側。宛先は運用者が設定した `baseUrl` の origin だけ（quote が返す URL へは出さない、と同ファイルの方針にある）。要求に由来する宛先ではないので 10 経路（要件 FR-A6「上流へ出る全要求経路」）の外と判断した |
 | D-4 | §5 試験用 CA と証明書を `tests/fixtures/tls/` にコミット（有効期間 10 年） | `tests/fixtures/tls/generate.ts` が試験の開始時に `openssl` CLI で一時ディレクトリに生成する（有効期間 2 日）。README は生成物の表 | `.gitignore` が `*.pem` / `*.key` を除外している。鍵を force-add するより生成の方が安全。T-A12 は実行環境に `openssl` を要する（Linux コンテナでは `apt-get install openssl`。無ければ T-A12 は失敗する） |
 | D-5 | §3.6 undici の `cause.code` で分類 | `cause` の連鎖と `AggregateError.errors` を深さ 5 まで辿り、最初に当たる分類を採る | undici は複数アドレスへの接続失敗を `AggregateError` に、TLS の検証失敗を `cause.cause` に包む（T-A12 で確認） |
-| D-6 | §3.3-5 abort で `destroy()` | fetch が例外で終わったら `destroy()`（abort を含む）。headers 後は `close()` を待たずに発行し、abort された要求は undici 側で終わるので `close()` が完了する | 契約は同じ。T-A16 で 5 MB の遅い読み取りと読み捨て body の timeout を確認 |
+| D-6 | §3.3-5 abort で `destroy()` | fetch が例外で終わったら `destroy()`（abort を含む）。headers 後は `close()` を待たずに発行し、abort された要求は undici 側で終わるので `close()` が完了する | 契約は同じ。T-A16 で 5 MB の遅い読み取りと読み捨て body の timeout（socket の close）を確認 |
+| D-7 | §3.5 の経路は 10 | **12**（JSON-RPC の経路 11・12 を追加。§3.5）。受信 MPP は `tempo.charge({ getClient })` + AsyncLocalStorage、送信 MPP は能力の client の viem `http` transport を guarded に作り直す | 実装レビュー #1 の指摘 2。要件 FR-A6 は「10 経路と将来増えるもの」なので要件の改訂は不要。`operation` は `rpc`。送信側の公開結果は既存の写像（能力に触れた後の失敗は `unknown`）のまま |
+| D-8 | §3.3 に h2 の記述なし | `Agent({ allowH2: false })`（§3.3-8） | 実装レビュー #1 の指摘 1。undici 8 の既定 h2 + REFUSED_STREAM 再送が「1 回だけ送る」契約に反する |
+| D-9 | §3.3-7 の transport の分類は接続失敗を想定 | 判定自体の例外（自アドレスの列挙失敗等）を `transport_failed` に正規化して 1 回報告（§3.3-9） | 実装レビュー #1 の指摘 5。接続は作っていない。T-A20 |
 
 ### 11.2 試験の実装で分かったこと（§2 の事実に追加）
 
@@ -287,6 +333,12 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | A-18 | 素の undici fetch（既定 dispatcher）は keep-alive の接続を再利用する。T-A5 の陽性対照の後に変異を走らせると、変異の要求は囮に届いても**接続数が増えない** | T-A5 の陽性対照と変異は囮が見た**要求数**（`Host` の記録）で数える。Linux 受け入れ 1 回目（M-A2）で検出し `7a8cf84` で修正 |
 | A-19 | Linux コンテナ（`node:22-bookworm-slim`）でも `localhost` は `[::1, 127.0.0.1]` の順 | T-A3 / T-A5 の囮は `::1` 側に立つ（macOS と同じ配置） |
 | A-20 | macOS は `127.0.0.2` に alias 無しでは bind できない（`EADDRNOTAVAIL`） | T-A5 / T-A6 / T-A8 は前提検査で**失敗**する（skip ではない。§4 どおり）。受け入れは Linux |
+| A-21 | undici 8.11.2 は `allowH2` の既定が `true`（`lib/core/connect.js`）。`client-h2.js` は `REFUSED_STREAM` を 1 回再送する | §3.3-8。T-A19 で、`allowH2: true` の対照は Node の `http2.createSecureServer({ allowHTTP1: true })` に対し `2.0` を話す |
+| A-22 | mppx の `tempo.charge` は `getClient` 未指定だと SDK 内蔵の `http(url)`（`defaults.rpcUrl`: `https://rpc.tempo.xyz` / `https://rpc.moderato.tempo.xyz`）で client を作る。viem の既知チェーン（`viem/tempo/chains`）の既定 URL と同じ | 受信 MPP の `rpcUrl` 省略時の既定をこれに合わせた |
+| A-23 | viem 2.54 の `http(url, { fetchFn })` は要求ごとに `fetchFn(url, { body, headers, method, signal })` を呼ぶ。`client.transport` は `{ type: "http", url, retryCount, retryDelay, timeout }` を公開する | 送信 MPP で能力の client から URL を取り、guarded に作り直す根拠 |
+| A-24 | push 形式（`type: "hash"`）の credential は署名無しで作れる（`Credential.from({ challenge, payload })` → `serialize`）。SDK は HMAC（`opaque`）を検証した後に `eth_getTransactionReceipt` を RPC に出す | T-A13 の経路 11 を実 SDK で駆動する材料（RPC fixture は receipt 無し → 既存の fail-closed 結果） |
+| A-25 | 送信 MPP で json-rpc account の能力は最初の RPC が `wallet_sendCalls`（送金系）。adapter の at-most-once guard はその試行を数えるので、RPC が `destination_blocked` でも公開結果は `unknown`（既存の写像） | 経路 12 の公開結果の期待値。運用者向けの `destination_blocked rpc` 行で「出ていない」ことは分かる |
+| A-26 | ポリシーの `ParsedAddress.text` は IPv6 を長形式（`::1` → `0:0:0:0:0:0:0:1`）に正規化する。undici はこれを接続先に使える | T-A7 の単体の期待値 |
 
 ### 11.3 測定
 
@@ -295,6 +347,9 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | M-A1 | macOS 手元 `npm test`（`eda0653`、alias 無し） | 340 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8: `cannot bind 127.0.0.2: EADDRNOTAVAIL`。A-20） |
 | M-A2 | Linux 受け入れ 1 回目（`eda0653`。Colima VM 内 `node:22-bookworm-slim`、Node 22.23.3、aarch64、`git archive HEAD` を展開して `npm ci && npm test`） | 342 passed / 14 skipped / **1 failed**: T-A5 の最後の判定（変異の要求が keep-alive の接続を再利用し、接続数が増えない）。試験側の誤り → A-18 |
 | M-A3 | Linux 受け入れ 2 回目（`7a8cf84`。同じ手順） | **343 passed / 14 skipped / 0 failed**（T-A1〜T-A18 を含む全件緑。27 ファイル、43 s。14 skipped は env で gate された既存の試験で、A の試験に skip は無い） |
+| M-A5 | macOS 手元 `npm test`（`d569caa`、実装レビュー #1 の反映後、alias 無し） | 354 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8。A-20。28 ファイル） |
+| M-A6 | Linux 受け入れ 3 回目（`d569caa`。同じ手順） | **357 passed / 14 skipped / 0 failed**（T-A1〜T-A20 の全件緑。28 ファイル、45 s。14 skipped は env で gate された `tests/wire/chat-crossimpl.test.ts` の 14 件で、A の試験に skip は無い） |
+| M-A7 | T-A14 配線の変異（macOS、`d569caa`。12 経路。手順は M-A4 と同じ。経路 11 は受信 MPP の `getClient` を素の viem `http(rpcUrl)` に、経路 12 は能力の `client.request` をそのまま返す変異） | **12 / 12 検出**（下表の 11・12 行。`-t "MPP 1"` は経路 11・12 の試験名にも一致するので、経路 1 の変異の要約は `2 failed \| 2 passed`。落ちた 2 件は MPP 1 と送信 MPP 12） |
 | M-A4 | T-A14 配線の変異（macOS、`eda0653`）。各 adapter の `transport.fetch` を素の `globalThis.fetch` に戻し（MPP は `Mppx.create` の `fetch` オプションを外して SDK 既定に落とす）、該当の T-A13 を 1 件ずつ `vitest -t` で実行。変異は毎回元に戻し、最後に `git diff --quiet -- src` で空を確認 | **10 / 10 検出**（下表） |
 
 T-A14 の表（「落ちる」= その試験が 1 failed）:
@@ -308,11 +363,29 @@ T-A14 の表（「落ちる」= その試験が 1 failed）:
 | 合成 x402 `pay` | 8 | 合成 x402 8 | 落ちる |
 | 受信 subetha `post` | 9 | 受信 subetha 9 | 落ちる |
 | 受信 x402 `post` | 10 | 受信 x402 10 | 落ちる |
+| 受信 MPP `getClient` を素の viem `http(rpcUrl)` に（M-A7） | 11 | 受信 MPP 11 | 落ちる |
+| 送信 MPP `guardedRpcRequestOf` が能力の `client.request` をそのまま返す（M-A7） | 12 | 送信 MPP 12 | 落ちる |
 
 同じ手順の 1 回目は結果の読み取り（vitest の要約行の形: 単体の `-t` 実行では `N failed | M skipped` で `passed` が出ない）を誤って
 「全件検出されず」と出た。読み取りを直して再実行した結果が上の表（手順の誤りであり、試験・実装の変更は無い）。
 
 ### 11.4 受け入れの判定
 
-- §4 の T-A1〜T-A18: Linux で全件緑（M-A3）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
+- §4 の T-A1〜T-A20: Linux で全件緑（M-A3 は実装レビュー #1 前の T-A1〜T-A18、M-A6 は反映後の全件）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
 - 公開結果（§3.5 の表）は既存の wire テストが変わらず通ることで確認（`tests/wire/*` は `allowLoopback: true` の transport を渡すだけの変更）。
+
+## 12. 実装レビュー #1（`d41a610`、2026-10-03、`gpt-6-astra`）: **REJECT** → 反映 `d569caa`
+
+レビューは read-only で実装・試験・設計 §11・SDK（mppx / @x402 / undici 8.11.2 / viem）を読み、Node の probe で表の一致・正規化・
+未報告の診断・同梱 fetch の h2 既定を確かめた（vitest の実行は sandbox の `EPERM` で不可。Linux 受け入れと変異の記録は「未検証」扱い）。
+
+| # | 指摘 | 判定 | 反映 |
+|---|---|---|---|
+| 1 | **High** undici 8 は既定で h2 を許し、`REFUSED_STREAM` / `GOAWAY` で要求を自動再送する。credential 付き要求の「1 回だけ送る」契約に反する | 正しい（A-21 で確認） | `allowH2: false`（§3.3-8、D-8）。T-A19 で ALPN の結果と対照を観測 |
+| 2 | **High** 10 経路に Router 発の MPP JSON-RPC（受信 `tempo.charge` の既定 client、送信の能力の `http(rpcUrl)`）が無い。RPC の redirect や namespace 内への解決は A の範囲 | 正しい | 経路 11・12 を追加（§3.5、D-7、`src/net/guarded-rpc.ts`）。T-A13 に 11・12（実 SDK を push credential で駆動、HTTP の RPC fixture）、I-6 に viem `http` の import 禁止、T-A14 に 2 行 |
+| 3 | **Medium** `composeRails` の受信の包みが `verify` / `settle` の第 3 引数を落とし、本番では `route=-` になる | 正しい | 包みが context を渡す。compose の単体に「包み越しの帰属」（T-A18） |
+| 4 | **Medium** 受け入れの欠け: T-A5 の囮の `catch` で前提の失敗を飲む / T-A7 が vetting 側の spy で同語反復 / T-A17 (c)(d) が `readChallenge` で接続解放を見ない / 有料応答の切断が x402 に無い / 受信 verify の試験が実は challenge / `dns_failed`・abort・公開結果の秘匿が無い | 正しい | §4 の追記のとおり全て反映（T-A5 厳格化、T-A7 単体 + undici spy、T-A16 socket close、T-A17 pay_challenge + `closed` + `discardBody` 契約 + x402 切断 + 受信 verify、`dns_failed` / `aborted`、`expectSilent`） |
+| 5 | **Medium** 自アドレスの列挙が失敗すると例外が transport から素通りし、報告 0 | 正しい | 判定の例外を `transport_failed` に正規化して 1 回報告（§3.3-9、D-9）。T-A20 |
+
+付随の指摘: `tls.ca` は既定の信頼ストアを置き換える（§5 に明記）、`src/client/` の除外は妥当、no-direct-fetch の走査は補助的（lint ではない）、
+T-A18 は「段階の異なる同時実行」までは見ていない（pay 2 本の同時実行で `pay_challenge` → `pay` の帰属は見ている。追加は見送り）。
