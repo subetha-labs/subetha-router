@@ -175,11 +175,20 @@ namespace 内に解決される名前は A の範囲（要件 §9）であり、
 **RPC の body と期限（実装レビュー #2 の指摘 2・4）**: viem は `fetchFn` が返した応答の body を**自分で**読み、その読み取りは viem の
 timeout（headers で解除）の外にあり、失敗は viem の例外に包まれて adapter の catch で固定の結果に変わる（報告 0、停滞は無期限）。そこで
 `guardedRpcTransport` は **body をここで読み切り**（上限 10 MiB。viem の既定と同じ）、応答全体（headers + body）に 1 つの期限
-（既定 10 s。viem の timeout は期限 + 250 ms に置き、期限切れの分類は transport 側で決める）を掛け、headers 後の失敗を
+（既定 10 s）を掛け、headers 後の失敗を
 `transport.report` で 1 回報告してから投げる。viem には読み切った body を持つ新しい `Response` を渡す（viem はネットワークに触れない）。
+**期限の所有は transport だけ**（実装レビュー #3 の指摘 1）: viem の timeout は **0（無効）**にする。viem のタイマーは `fetchFn` より前
+（要求の直列化・`Request` 構築の前）に始まるので、「transport の期限 + 余白」では順序を保証できず、viem の AbortError が `aborted` に化ける。
+0 なら viem はタイマーを置かず signal も渡さない（`withTimeout` は `timeout > 0` のときだけ）。呼び出し側が渡した signal は `AbortSignal.any`
+で保つ。単体（`tests/unit/guarded-rpc.test.ts`）で viem 側の `timeout` が 0 であること、headers の停滞が `upstream_timeout` で終わることを見る。
 送信側の作り直しは viem の**素の** `http` transport（`type` と `key` が `http`）だけを対象にし、URL・`fetchOptions`（認証ヘッダ等）・
 `retryCount` / `retryDelay` / `timeout` を引き継ぐ。`onFetchRequest` 等の closure は引き継げないので対象外（文書化）。装飾された transport
 （`withFeePayer` は `type: "feePayer"`）、`fallback`、`webSocket` は実鍵では fail closed。受信側は `rpcTimeoutMs`（既定 10 s）。
+
+**読まずに終わる応答**（実装レビュー #3 の指摘 2）: adapter が headers だけ見て早期 return / throw する経路（MPP の receipt 不一致・502・
+その他 status、合成 x402 の 402 以外の challenge と 200 以外の有料応答、実 x402 の 402 以外の challenge）でも `discardBody` で body を捨て、
+接続を即時に解放する。公開結果は変えず、事象も出さない（読まない body の失敗は操作の失敗ではない。§3.3-7）。実 x402 の有料応答は
+SDK の `processResponse` が全 status で body を読むので対象外。T-A17 (h)。
 
 ### 3.6 診断（FR-C1、FR-C1'）
 
@@ -246,6 +255,8 @@ T-A16 の「読まずに捨てた body」は fixture 側の socket の close を
 数えない（cancel を外すと落ちることを M-A8 で測る）。T-A17 (g) は RPC fixture の `--after-headers stall|reset` で、受信（verify）と送信（pay）の
 RPC body の停滞・切断が `rpc` で 1 回報告され、停滞が transport の期限で終わること。T-A18 に受信 RPC の同時実行（同じ rail、別 route）の帰属。
 `expectSilent` は pay の公開結果すべてに。
+実装レビュー #3（§14）で追加: T-A17 (h) = 読まずに終わる応答の接続解放（MPP の receipt 不一致、合成 x402 の 500、実 x402 の 402 以外の
+challenge。fixture の種類別 `closedByKind.other`）。(g) の送信側に切断を追加。`tests/unit/guarded-rpc.test.ts` で viem の timeout が 0 であること。
 
 既存の wire テスト（`tests/wire/*`）は fixture が loopback なので、transport を `allowLoopback: true` で渡すように更新する。
 
@@ -266,6 +277,8 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 - HTTP/2 は使わない（§3.3-8）。将来 h2 を使うなら、credential 付き要求の再送方針を設計して試験してから。
 - 1 回の fetch につき dispatch は 1 回（§3.3-10）。421 を返す Provider への要求は `transport_failed` になり、adapter は既存の `unknown` 側に写す。
 - RPC の body は transport が読み切る（§3.5）。viem の `maxResponseBodySize` 相当の上限（10 MiB）は transport 側で掛ける。
+- 「1 回だけ送る」は credential 付きの要求と送金系 RPC についての主張。読取系 RPC は能力の `retryCount`（本番の能力は 0）に従って viem が
+  再送し得る（認証ヘッダ付きの読取も含む）。送金系は adapter の guard が 1 回に制限する。
 - `tls.ca` は Node の既定の信頼ストアを**置き換える**（追加ではない）。試験専用で、本番は未指定（システムの信頼ストア）。
 - 受信 MPP の RPC URL は省略時 SDK の既定と同じ公開エンドポイント。認証付き RPC を使うには adapter の `rpcUrl`（env からの設定は未実装。
   運用の follow-up）。送信 MPP は能力の `rpcUrl`（`SUBETHA_TEMPO_RPC_URL`）をそのまま guarded に作り直す。
@@ -330,7 +343,7 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | I-8 | 配線の変異の記録（T-A14）と Linux での受け入れ実行（§4 末尾）。結果を §11 に記録 | §11 |
 | I-9 | Codex の実装レビュー → 指摘の反映 | §12 |
 
-## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`、実装レビュー #1 の反映 `d569caa`、#2 の反映 `1487f8d`）
+## 11. 実装の記録（I-1〜I-8。実装 `456cc0b`、`eda0653`、`7a8cf84`、実装レビュー #1 の反映 `d569caa`、#2 の反映 `1487f8d`、#3 の反映 `af0d74d`）
 
 ### 11.1 設計からの逸脱（実装レビューで可否を問う）
 
@@ -348,6 +361,8 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | D-10 | §3.3 に 421 の記述なし | `agent.compose(oneDispatch())` で 2 回目の dispatch を拒む（§3.3-10） | 実装レビュー #2 の指摘 1。undici fetch の 421 再試行は h2 と無関係で、`allowH2: false` では防げない |
 | D-11 | §3.5 の RPC は fetch だけを guard | `guardedRpcTransport` が body を読み切り、応答全体に期限（既定 10 s）と上限（10 MiB）を掛け、headers 後の失敗を 1 回報告（§3.5） | 実装レビュー #2 の指摘 2。viem は body を timeout の外で読み、失敗を包む |
 | D-12 | §3.5 送信の作り直しは URL だけ | `fetchOptions`（認証ヘッダ等）・`retryCount` / `retryDelay` / `timeout` を引き継ぐ。対象は `type` と `key` が `http` の素の transport だけ | 実装レビュー #2 の指摘 4。装飾 transport の意味は URL から復元できないので fail closed |
+| D-13 | §3.5 viem の timeout は期限 + 250 ms | viem の timeout は **0**（無効）。期限は transport だけ | 実装レビュー #3 の指摘 1（A-30）。余白では順序を保証できない |
+| D-14 | §3.3-7 の cancel は MPP の 402 challenge だけ | 早期 return / throw する全経路で `discardBody`（§3.5「読まずに終わる応答」） | 実装レビュー #3 の指摘 2。接続が要求の timeout まで残っていた |
 
 ### 11.2 試験の実装で分かったこと（§2 の事実に追加）
 
@@ -368,6 +383,9 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | A-27 | undici 8 の `fetch` は `response.status === 421 && !isNewConnectionFetch && (body 無し || body.source 有り)` で接続を捨てて `httpNetworkOrCacheFetch(..., true)` を**もう 1 回**走らせる（`lib/web/fetch/index.js`）。interceptor は `handler.onResponseError(null, err)` で dispatch を失敗させられる（`lib/interceptor/dns.js` と同じ） | §3.3-10 の実装。T-A21 の対照は同じ credential を 2 度送る（M-A9） |
 | A-28 | viem 2.54 の http transport は `withTimeout(fetchFn)` の後に `readResponseBody` を呼ぶ（timeout は headers で解除）。transport の値は `{ key, type: "http", url, fetchOptions, retryCount, retryDelay, timeout }` | D-11 / D-12 の根拠 |
 | A-29 | `withFeePayer` の transport は `type: "feePayer"`（viem/tempo `Transport.js`） | 実鍵では fail closed に当たる（受信・送信の現構成では未使用） |
+| A-30 | viem の `withTimeout` は `fetchFn` を呼ぶ前にタイマーを始め、`timeout > 0` のときだけタイマーと signal を持つ。レビュアの probe: 直列化に 400 ms 掛かる状況で `timeout 50 + 250` の構成は viem の AbortError が先に出た | D-13。0 で viem 側を無効化 |
+| A-31 | `@x402/core` の `processResponse` は全 status で body を読む（`response.json()` / `text()`） | 実 x402 の有料応答に未読の早期 return は無い |
+| A-32 | buffering 後は viem の `withTimeout` が body の読み取りまで覆うので、「期限を外す」変異（C-4）の検出は**誤分類**（AbortError → `aborted`）だった（レビュー #3 の指摘 3）。viem の timeout を 0 にした後は、期限を外すと停滞が終わらない | M-A8 C-4 の記述を M-A13 で訂正 |
 
 ### 11.3 測定
 
@@ -379,10 +397,14 @@ macOS の手元実行は `sudo ifconfig lo0 alias 127.0.0.2 up` を足したう�
 | M-A5 | macOS 手元 `npm test`（`d569caa`、実装レビュー #1 の反映後、alias 無し） | 354 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8。A-20。28 ファイル） |
 | M-A6 | Linux 受け入れ 3 回目（`d569caa`。同じ手順） | **357 passed / 14 skipped / 0 failed**（T-A1〜T-A20 の全件緑。28 ファイル、45 s。14 skipped は env で gate された `tests/wire/chat-crossimpl.test.ts` の 14 件で、A の試験に skip は無い） |
 | M-A7 | T-A14 配線の変異（macOS、`d569caa`。12 経路。手順は M-A4 と同じ。経路 11 は受信 MPP の `getClient` を素の viem `http(rpcUrl)` に、経路 12 は能力の `client.request` をそのまま返す変異） | **12 / 12 検出**（下表の 11・12 行。`-t "MPP 1"` は経路 11・12 の試験名にも一致するので、経路 1 の変異の要約は `2 failed \| 2 passed`。落ちた 2 件は MPP 1 と送信 MPP 12） |
-| M-A8 | 契約の変異（macOS、`1487f8d`。各 1 件ずつ元に戻す）: C-1 `oneDispatch` を外す → T-A21、C-2 challenge body の cancel を外す → T-A17 (c)(d)、C-3 RPC body 失敗の報告を外す → T-A17 (g)、C-4 RPC の応答全体の期限を外す → T-A17 (g) | **4 / 4 検出**: C-1 → T-A21 `1 failed`、C-2 → T-A17 (c)(d) `1 failed`（402 を書いた socket が 2 本閉じない）、C-3 → T-A17 (g) `2 failed`（受信・送信）、C-4 → T-A17 (g) `2 failed`（停滞が期限で終わらない）。1 回目の試行は `-t` の regex に括弧を含めて C-2 が 0 件実行（`25 skipped`）になったので、試験名の部分文字列で再実行した |
+| M-A8 | 契約の変異（macOS、`1487f8d`。各 1 件ずつ元に戻す）: C-1 `oneDispatch` を外す → T-A21、C-2 challenge body の cancel を外す → T-A17 (c)(d)、C-3 RPC body 失敗の報告を外す → T-A17 (g)、C-4 RPC の応答全体の期限を外す → T-A17 (g) | **4 / 4 検出**: C-1 → T-A21 `1 failed`、C-2 → T-A17 (c)(d) `1 failed`（402 を書いた socket が 2 本閉じない）、C-3 → T-A17 (g) `2 failed`（受信・送信）、C-4 → T-A17 (g) `2 failed`（当時は viem の timeout が残っていたので、落ちた理由は停滞ではなく **AbortError の誤分類**。A-32、M-A13 で訂正）。1 回目の試行は `-t` の regex に括弧を含めて C-2 が 0 件実行（`25 skipped`）になったので、試験名の部分文字列で再実行した |
 | M-A9 | macOS 手元 `npm test`（`1487f8d`、alias 無し） | 358 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8。A-20。28 ファイル） |
 | M-A10 | Linux 受け入れ 4 回目（`1487f8d`。同じ手順） | **361 passed / 14 skipped / 0 failed**（T-A1〜T-A21 の全件緑。28 ファイル、45 s。14 skipped は env で gate された `tests/wire/chat-crossimpl.test.ts`） |
 | M-A11 | T-A14 配線の変異（macOS、`1487f8d`。12 経路。M-A7 と同じ手順） | **12 / 12 検出**（内訳は M-A7 と同じ。経路 1 の `-t "MPP 1"` は 11・12 の試験名にも一致し `2 failed \| 2 passed`） |
+| M-A12 | macOS 手元 `npm test`（`af0d74d`、alias 無し） | 361 passed / 14 skipped / 3 failed（T-A5, T-A6, T-A8。A-20。29 ファイル） |
+| M-A13 | 契約の変異（macOS、`af0d74d`）: C-1〜C-4 を再測、C-5a 合成/実 x402 の早期 return の `discardBody` を外す → T-A17 (h)、C-5b MPP の早期 return の `discardBody` を外す（challenge の cancel は残す）→ T-A17 (h)。**C-4 の訂正**: viem の timeout が 0 なので、期限を外すと停滞は終わらず（g）が test timeout で落ちる（M-A8 の「誤分類で落ちる」から変わった） | **6 / 6 検出**: C-1 → T-A21 `1 failed`、C-2 → (c)(d) `1 failed`、C-3 → (g) `2 failed`（受信・送信）、C-4 → (g) `2 failed`（期限が無く停滞が終わらない）、C-5a → (h) `1 failed`、C-5b → (h) `1 failed` |
+| M-A14 | Linux 受け入れ 5 回目（`af0d74d`。同じ手順） | **364 passed / 14 skipped / 0 failed**（T-A1〜T-A21 と `tests/unit/guarded-rpc.test.ts` の全件緑。29 ファイル、51 s。14 skipped は env で gate された `tests/wire/chat-crossimpl.test.ts`） |
+| M-A15 | T-A14 配線の変異（macOS、`af0d74d`。12 経路） | **12 / 12 検出**（内訳は M-A7 と同じ） |
 | M-A4 | T-A14 配線の変異（macOS、`eda0653`）。各 adapter の `transport.fetch` を素の `globalThis.fetch` に戻し（MPP は `Mppx.create` の `fetch` オプションを外して SDK 既定に落とす）、該当の T-A13 を 1 件ずつ `vitest -t` で実行。変異は毎回元に戻し、最後に `git diff --quiet -- src` で空を確認 | **10 / 10 検出**（下表） |
 
 T-A14 の表（「落ちる」= その試験が 1 failed）:
@@ -404,7 +426,7 @@ T-A14 の表（「落ちる」= その試験が 1 failed）:
 
 ### 11.4 受け入れの判定
 
-- §4 の T-A1〜T-A21: Linux で全件緑（M-A3 は実装レビュー #1 前の T-A1〜T-A18、M-A6 は #1 反映後、M-A10 は #2 反映後の全件）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
+- §4 の T-A1〜T-A21: Linux で全件緑（M-A3 は実装レビュー #1 前の T-A1〜T-A18、M-A6 は #1 反映後、M-A10 は #2 反映後、M-A14 は #3 反映後の全件）。macOS は A-20 の 3 件が前提検査で失敗するのが正しい挙動。
 - 公開結果（§3.5 の表）は既存の wire テストが変わらず通ることで確認（`tests/wire/*` は `allowLoopback: true` の transport を渡すだけの変更）。
 
 ## 12. 実装レビュー #1（`d41a610`、2026-10-03、`gpt-6-astra`）: **REJECT** → 反映 `d569caa`
@@ -439,3 +461,17 @@ T-A18 は「段階の異なる同時実行」までは見ていない（pay 2 �
 付随: (b) の試験名を「createOffer（challenge）」に直す、`expectSilent` を pay の公開結果すべてに、受信 RPC の同時実行の帰属（T-A18）。
 レビュアの確認事項: JSON-RPC の目録は現構成で完全（remote fee payer / `withFeePayer` は未設定で到達不能）、x402 署名はローカル、
 `src/client/` の除外は妥当、AsyncLocalStorage の帰属は追跡した経路で信頼できる、`useH2c` は明示 true のみ、h1 client は書き込んだ要求を再送しない。
+
+## 14. 実装レビュー #3（`34dc48d`、2026-10-03、`gpt-6-astra`）: **REJECT** → 反映 `af0d74d`
+
+#2 の 4 件は「421 = fixed、RPC body = partially fixed（分類）、socket 解放の判定 = fixed、fetchOptions = fixed（文書化した範囲で）」。
+レビュアは MockAgent の probe で guarded 1 要求 / 対照 2 要求を再現し、viem の timeout と transport の期限の競合を実測した。
+
+| # | 指摘 | 判定 | 反映 |
+|---|---|---|---|
+| 1 | **Medium** viem のタイマーは `fetchFn` より前に始まるので、「期限 + 250 ms」では順序を保証できず、`aborted` に化ける | 正しい（A-30） | viem の timeout を 0 に（D-13）。`tests/unit/guarded-rpc.test.ts` |
+| 2 | **Medium** 読まずに終わる応答（MPP の receipt 不一致・502・その他、合成 x402 の 402 以外の challenge と 200 以外の有料応答、実 x402 の 402 以外の challenge）が body を捨てず、接続が要求の timeout まで残る | 正しい | 早期 return / throw の全経路で `discardBody`（D-14）。T-A17 (h)、M-A13 C-5 |
+| 3 | **Low** 記述の過大: M-A8 C-4 の検出理由は誤分類、送信側 (g) は停滞のみ、(c)(d) と同時実行の pay に `expectSilent` が無い | 正しい | A-32 と M-A8 の訂正、(g) 送信側に切断、`expectSilent` を追加 |
+
+付随: 読取系 RPC は能力の `retryCount` に従って再送し得る（§5 に明記）。JSON-RPC 目録・h1 client・`useH2c`・AsyncLocalStorage・`src/client/` の
+評価は #2 と同じ。
