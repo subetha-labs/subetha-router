@@ -14,6 +14,20 @@ function arg(name: string, fallback: string): string {
   return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
 }
 
+/** 設計 A の T-A17: `--after-headers stall|reset`、`--after-headers-on all|challenge|pay`。 */
+const afterHeaders = arg("after-headers", "none");
+const afterHeadersOn = arg("after-headers-on", "all");
+/** 種類別の閉じた接続数（`challenge` = 402 / `other` = それ以外 / `calls` = 観測用）。 */
+const closedByKind: Record<string, number> = { challenge: 0, other: 0, calls: 0, none: 0 };
+function stallThis(status: number): boolean {
+  if (afterHeaders === "none") return false;
+  if (afterHeadersOn === "challenge") return status === 402;
+  if (afterHeadersOn === "pay") return status !== 402;
+  return true;
+}
+/** TCP 接続数（設計 A の試験が読む）。 */
+let connections = 0;
+
 const payMode = arg("pay", "ok");
 const baseAmount = arg("amount", "900");
 /** この回数だけ challenge を返したあとは提示内容を変える（quote 変更のレース再現）。 */
@@ -56,11 +70,21 @@ function accepts(): unknown[] {
 
 function send(response: http.ServerResponse, status: number, body: unknown, headers = {}): void {
   const text = JSON.stringify(body);
+  const kind = (response.req.url ?? "").startsWith("/calls") ? "calls" : status === 402 ? "challenge" : "other";
+  const tagged = response.socket as unknown as { subethaKind?: string } | null;
+  if (tagged !== null) tagged.subethaKind = kind;
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
     ...headers,
   });
+  if (stallThis(status) && !(response.req.url ?? "").startsWith("/calls")) {
+    // 設計 A の T-A17: headers（と content-length）は正しく返し、body を止める / 切る。
+    response.write(text.slice(0, 1));
+    // reset は headers がクライアントに届いてから切る（同じ tick で切ると fetch 自体が失敗し、headers 後の事象にならない）。
+    if (afterHeaders === "reset") setTimeout(() => response.socket?.destroy(), 50);
+    return;
+  }
   response.end(text);
 }
 
@@ -68,7 +92,7 @@ const server = http.createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { challengeCalls, payCalls, seenQueries });
+    send(response, 200, { connections, closedByKind, challengeCalls, payCalls, seenQueries });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -131,6 +155,13 @@ const server = http.createServer((request, response) => {
   );
 });
 
+server.on("connection", (socket) => {
+  connections += 1;
+  socket.on("close", () => {
+    const kind = (socket as unknown as { subethaKind?: string }).subethaKind ?? "none";
+    closedByKind[kind] = (closedByKind[kind] ?? 0) + 1;
+  });
+});
 server.listen(Number(arg("port", "0")), "127.0.0.1", () => {
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;

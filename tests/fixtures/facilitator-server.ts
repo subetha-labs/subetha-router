@@ -18,6 +18,14 @@ function arg(name: string, fallback: string): string {
   return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
 }
 
+/** 設計 A の T-A17: `--after-headers stall|reset`。headers の後で body を止める / 切る（`/calls` は除く）。 */
+const afterHeaders = arg("after-headers", "none");
+/** `--after-headers-on all|challenge|verify|settle`: どの path の応答で止める / 切るか（既定は全部）。 */
+const afterHeadersOn = arg("after-headers-on", "all");
+const stallThis = (url: string): boolean => !url.startsWith("/calls") && (afterHeadersOn === "all" || url.startsWith(`/${afterHeadersOn}`));
+/** TCP 接続数（設計 A の囮・到達の試験が読む）。 */
+let connections = 0;
+
 const token = arg("token", "0x0000000000000000000000000000000000005ce7");
 const chainId = Number(arg("chain-id", "11155111"));
 const payTo = arg("pay-to", "0x00000000000000000000000000000000000r0ute");
@@ -71,6 +79,13 @@ function send(response: http.ServerResponse, status: number, body: unknown): voi
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
   });
+  if (afterHeaders !== "none" && stallThis(response.req.url ?? "")) {
+    // 設計 A の T-A17: headers（と content-length）は正しく返し、body を止める / 切る。
+    response.write(text.slice(0, 1));
+    // reset は headers がクライアントに届いてから切る（同じ tick で切ると fetch 自体が失敗し、headers 後の事象にならない）。
+    if (afterHeaders === "reset") setTimeout(() => response.socket?.destroy(), 50);
+    return;
+  }
   response.end(text);
 }
 
@@ -78,7 +93,7 @@ const server = http.createServer((request, response) => {
   void (async () => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method === "GET" && url.pathname === "/calls") {
-      send(response, 200, { verifyCalls, settleCalls });
+      send(response, 200, { connections, verifyCalls, settleCalls });
       return;
     }
     if (request.method !== "POST") {
@@ -202,6 +217,9 @@ const server = http.createServer((request, response) => {
   });
 });
 
+server.on("connection", () => {
+  connections += 1;
+});
 server.listen(Number(arg("port", "0")), "127.0.0.1", () => {
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;

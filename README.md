@@ -16,8 +16,8 @@ The 2 legs are **independent payments, not an exchange and not a bridge**. There
 Pay **with your own key** and use the remote Router.
 
 ```sh
-git clone https://github.com/subetha-labs/subetha-router-egt.git
-cd subetha-router-egt
+git clone https://github.com/subetha-labs/subetha-router.git
+cd subetha-router
 npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
 

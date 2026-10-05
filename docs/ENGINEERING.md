@@ -326,8 +326,8 @@ The hosted version ("Try it now" at the top) is enough, but if you want to run e
 environment, do this.
 
 ```sh
-git clone https://github.com/subetha-labs/subetha-router-egt.git
-cd subetha-router-egt
+git clone https://github.com/subetha-labs/subetha-router.git
+cd subetha-router
 npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
 

@@ -8,6 +8,7 @@
  */
 
 import { stableJson } from "../../core/intent.js";
+import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
 import type {
   CreateOfferRequest,
   InboundOffer,
@@ -15,6 +16,7 @@ import type {
   PaymentCredential,
   PreflightResult,
   SettleResult,
+  InboundCallContext,
 } from "../../ports/inbound.js";
 
 export const SUBETHA_SCHEME = "subetha-zerc20";
@@ -22,6 +24,8 @@ export const SUBETHA_SCHEME = "subetha-zerc20";
 export interface SubethaInboundOptions {
   /** facilitator の base URL（設定 1 本だけ）。 */
   readonly facilitatorUrl: string;
+  /** facilitator へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
+  readonly transport: GuardedTransport;
   /** 発行 offer の `maxTimeoutSeconds`。 */
   readonly maxTimeoutSeconds?: number;
   readonly timeoutMs?: number;
@@ -137,19 +141,31 @@ function requireFee(json: Record<string, unknown>): Record<string, unknown> | un
 
 export function createSubethaInbound(options: SubethaInboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
+  const transport = options.transport;
   const timeoutMs = options.timeoutMs ?? 5_000;
   const maxTimeoutSeconds = options.maxTimeoutSeconds ?? 120;
 
   /** 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。 */
-  async function post(path: string, body: unknown): Promise<{ status: number; json: unknown }> {
-    const response = await fetch(`${base}${path}`, {
+  async function post(
+    path: string,
+    body: unknown,
+    context: TransportContext,
+  ): Promise<{ status: number; json: unknown }> {
+    const response = await transport.fetch(`${base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
       redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
-    });
-    const text = await response.text();
+    }, context);
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
+      transport.report(error, context);
+      throw error;
+    }
     let json: unknown;
     try {
       json = text === "" ? undefined : JSON.parse(text);
@@ -173,7 +189,7 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
 
   return {
     async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
-      const { status, json } = await post("/challenge", { amount: request.amount });
+      const { status, json } = await post("/challenge", { amount: request.amount }, { routeId: request.routeId, operation: "facilitator_challenge" });
       if (status !== 200 || !isRecord(json)) {
         throw new Error(`facilitator challenge failed with status ${status}`);
       }
@@ -238,12 +254,12 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
       return { ok: true };
     },
 
-    async verify(offer: InboundOffer, credential: PaymentCredential): Promise<{ isValid: boolean }> {
+    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
       const { status, json } = await post("/verify", {
         x402Version: 2,
         paymentPayload: credential,
         paymentRequirements: requirementsOf(offer),
-      });
+      }, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" });
       // 検証できないまま settle へ進まない（この時点では課金が起きていない）。
       if (status !== 200 || !isRecord(json)) {
         return { isValid: false };
@@ -251,13 +267,13 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
       return { isValid: json["isValid"] === true };
     },
 
-    async settle(offer: InboundOffer, credential: PaymentCredential): Promise<SettleResult> {
+    async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは呼び出し側（core）が `unknown` として確定する。自動再 settle はしない。
       const { status, json } = await post("/settle", {
         x402Version: 2,
         paymentPayload: credential,
         paymentRequirements: requirementsOf(offer),
-      });
+      }, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" });
       if (status >= 500) {
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }

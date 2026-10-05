@@ -15,6 +15,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { createX402Outbound } from "../src/adapters/outbound/x402.js";
+import { createGuardedTransport, formatTransportEvent } from "../src/net/guarded-fetch.js";
 import { startListening } from "../tests/fixtures/loopback.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
 
@@ -43,7 +44,8 @@ async function main(): Promise<void> {
   const payer = createRealEvmCapability(key);
   process.stdout.write(`payer address: ${payer.address}\n`);
 
-  const rail = createX402Outbound({
+  const transport = createGuardedTransport({ allowLoopback: false, report: (event) => process.stderr.write(`${formatTransportEvent(event)}\n`) });
+  const rail = createX402Outbound({ transport,
     upstreams: { [ROUTE_ID]: UPSTREAM },
     capability: payer.capability(SCOPE.network),
   });

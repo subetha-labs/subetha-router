@@ -56,7 +56,8 @@ const SEND_METHODS = new Set([
   "wallet_sendTransaction",
 ]);
 
-const tempoTestnet = (chainId: number): Chain => ({
+/** 試験用の Tempo チェーン定義（実 RPC URL を持たない）。HTTP の RPC fixture（`rpc-server.ts`）を使う能力も同じ chain を使う。 */
+export const tempoTestnet = (chainId: number): Chain => ({
   id: chainId,
   name: "tempo-testnet-fixture",
   nativeCurrency: { name: "Fixture", symbol: "FIX", decimals: 18 },

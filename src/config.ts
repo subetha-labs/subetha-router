@@ -86,6 +86,40 @@ export function routeBindingOf(route: RouteConfig): string {
   return [route.routeId, "GET", route.canonicalPath].map(encodeURIComponent).join("|");
 }
 
+/**
+ * route 設定のうち**支払いの権威**にあたる部分だけを取り出す（設計 §9.2）。
+ *
+ * 含めるのは「変わったら、その quote で払ってはいけない」欄:
+ * 宛先の scheme/network/asset/**payTo**、受信の金額・資産・network・payTo、両レール名。
+ *
+ * **含めないもの**:
+ * - `canonicalPath` — `routeId` から導出される（`canonicalPathOf`）ので独立した情報を持たない
+ * - `decimals` — 表示用。決済は base unit の `amount` で行う
+ * - 上流 URL — 宛先条件の保護には不要（同一 offer なら受取先も額も同じ）。
+ *   **「Provider 差し替えの検出」ではない**ことを設計 §8.4 に記録した
+ *
+ * `source.payTo` は SubEtha では存在しない。`stableJson` が **undefined の欄を除外**する
+ * （`core/intent.ts`）ので、欄の有無で指紋がぶれることはない。
+ */
+export function authoritativeTermsOf(route: RouteConfig): unknown {
+  return {
+    destination: {
+      scheme: route.destination.scheme,
+      network: route.destination.network,
+      asset: route.destination.asset,
+      payTo: route.destination.payTo,
+    },
+    source: {
+      amount: route.source.amount,
+      asset: route.source.asset,
+      network: route.source.network,
+      payTo: route.source.payTo,
+    },
+    rail: route.rail,
+    sourceRail: route.sourceRail,
+  };
+}
+
 /* ------------------------------------------------------------------------- *
  * 起動時のランタイム構成（CLI が読む。秘密は env からのみ受け取り、出力しない）
  * ------------------------------------------------------------------------- */
@@ -385,6 +419,17 @@ export function assertAbsoluteHttpUrl(raw: string, at: string, allowQuery = fals
   }
   if (!allowQuery && url.search !== "") {
     throw new ConfigError(`${at} must not carry a query`);
+  }
+  // `user:pass@host` は曖昧さを持ち込む（どこが権威ある host か読み手で変わる）。
+  // 既存運用の資格情報は**パスに入る**（`docs/DEPLOY.md`）ので、ここを拒否しても壊れない。
+  if (url.username !== "" || url.password !== "") {
+    throw new ConfigError(`${at} must not carry userinfo`);
+  }
+  // fragment はサーバへ送られないので、設定値に書かれていれば設定ミス。
+  // **空の fragment（末尾 `#`）は `url.hash` が空文字**になるため、
+  // パース結果ではなく**生の文字列に区切り子があるか**で見る（レビュー指摘4）。
+  if (url.hash !== "" || raw.includes("#")) {
+    throw new ConfigError(`${at} must not carry a fragment`);
   }
   return url.toString();
 }

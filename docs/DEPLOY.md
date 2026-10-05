@@ -172,8 +172,8 @@ sudo systemctl enable --now docker
 sudo usermod -aG docker ec2-user && exec sudo su - ec2-user   # グループ反映
 
 # 2) 取得してビルド（インスタンス上でビルドするのでアーキテクチャは自動で合う）
-git clone https://github.com/subetha-labs/subetha-router-egt.git
-cd subetha-router-egt
+git clone https://github.com/subetha-labs/subetha-router.git
+cd subetha-router
 docker build -t subetha-router .
 
 # 3) 鍵を EnvironmentFile に置く（シェル履歴とプロセス一覧に残さない）
@@ -183,9 +183,16 @@ SUBETHA_OUTBOUND_PRIVATE_KEY=0x...
 SUBETHA_ROUTER_RECEIVER=0x...
 ENVEOF
 
-# 4) 起動（env ファイルは root 所有 600 なので **sudo が要る**）
+# 4) 起動（env ファイルは root 所有 600 なので **sudo が要る**）。
+#    先に §8b.2 の egress 制御を設置してから。Router は専用 network に**単独**で置く（§8b.1 の前提）。
+#    journal は §2 のとおりボリュームに置く（`-v` が無いとコンテナ削除で全記録が消える）
+sudo mkdir -p /var/lib/subetha-router && sudo chown 10001:10001 /var/lib/subetha-router
+sudo docker network inspect subetha-router-net >/dev/null 2>&1 || \
+  sudo docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
 sudo docker run -d --name subetha-router --restart unless-stopped \
+  --network subetha-router-net \
   -p 127.0.0.1:8787:8787 \
+  -v /var/lib/subetha-router:/app/runtime \
   --env-file /etc/subetha-router.env \
   subetha-router
 
@@ -227,6 +234,545 @@ curl -s https://router.subethalabs.com/healthz
 claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
 ```
 
+## 8b. egress 制御（SSRF 防御 B。設計は `ssrf-egress-design.md` §25、レビュー #10 で承認）
+
+Router のコンテナから**内部宛先へ届くパケットを 0 にする** host 側の規則。Router のコードは変えない。
+namespace 内の宛先（loopback、自アドレス）は host から見えないので **A（アプリ側）の担当**であり、
+**B だけでは要件 INV-1'' は完成しない**（`ssrf-requirements.md` §9）。AI が上流 URL を指定する機能は、
+B と A の両方が通るまで出さない。
+
+### 8b.0 Docker の版と、既存ホストの扱い（本番受け入れで見つかった前提。2026-10-05）
+
+**egress 制御は Docker 28.2 以上を前提にする**（設計の実測は 28.3.3。runner の V7-15 は `docker info` の `FirewallBackend.Driver` が
+`iptables` であることを要求する。このフィールドは 28.1.0 で入った。28.2 以上はこの手順の方針。DNS の出所は V7-8 が稼働版で再測定する）。
+**AL2023 のリポジトリの `docker` は 25.0.x しか無く、そのままでは受け入れは通らない**（§6 手順 1 の `dnf install -y docker` は
+egress 制御を入れない構成用）。29 系は未測定なので 28 系に固定する。
+
+**既存ホストの Docker をその場で入れ替えない。** 入れ替えと降格の手順を書いてリハーサルしたが（同じコンテナ ID で復帰、戻しも通った）、
+独立レビューで中断・再起動・作り直しの経路に未解決の指摘が残った（2 回 REJECT）。**新しいホストを作り、受け入れを通してから切り替える**
+（§8b.6）。新しいホストでは Router を作る前に、次のブロックを**ファイルに保存して `sudo bash -e <file>` で実行する**（shebang を貼るだけでは
+失敗で止まらない）。Docker の公式手順が対象にするのは CentOS Stream で、AL2023 は対象外: これは **運用者が検証した別ディストリビューションへの導入**であり、
+根拠は §8b.4 をこの版・この host で通した結果だけである（28.3.3 での実測は代わりにならない）:
+
+```sh
+#!/bin/bash -e
+set -o pipefail
+# Docker 公式の署名鍵は指紋を照合してから登録する（docs.docker.com/engine/install/centos）
+curl -fsS -m 30 https://download.docker.com/linux/centos/gpg -o /tmp/docker.gpg
+FP=$(gpg --show-keys --with-colons /tmp/docker.gpg | awk -F: '$1=="fpr"{print $10; exit}')
+[ "$FP" = 060A61C51B558A7F742B77AAC52FEB6B621E9F35 ]
+install -m 644 /tmp/docker.gpg /etc/pki/rpm-gpg/docker-ce.gpg
+rpm --import /etc/pki/rpm-gpg/docker-ce.gpg
+# CentOS 9 用のリポジトリ（AL2023 の $releasever は使えないので 9 に固定）
+printf '[docker-ce-stable]\nname=Docker CE Stable (el9)\nbaseurl=https://download.docker.com/linux/centos/9/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/docker-ce.gpg\n' > /etc/yum.repos.d/docker-ce.repo
+dnf install -y --setopt=install_weak_deps=False docker-ce-28.5.2-1.el9 docker-ce-cli-28.5.2-1.el9 containerd.io-2.3.6-1.el9
+dnf install -y 'dnf-command(versionlock)'
+dnf versionlock add docker-ce docker-ce-cli containerd.io
+LOCKS=$(dnf versionlock list | grep -cE '^(docker-ce|docker-ce-cli|containerd\.io)-' || true)
+[ "$LOCKS" = 3 ]
+systemctl enable --now docker
+V=$(docker version --format '{{.Server.Version}}'); [ "$V" = 28.5.2 ]
+FB=$(docker info --format '{{.FirewallBackend.Driver}}'); [ "$FB" = iptables ]
+LR=$(docker info --format '{{.LiveRestoreEnabled}}'); [ "$LR" = false ]
+echo "docker-ce $V installed (backend $FB) and version-locked"
+```
+
+セキュリティ更新は、新しい版で §8b.4 を通してから固定を付け替える（自動では上がらない）。
+
+### 8b.1 前提（runner が検証する。満たさなければ運用に入らない）
+
+- Docker の firewall backend が `iptables`（`docker info --format '{{.FirewallBackend.Driver}}'`）。`iptables` コマンド（nft 版で可）
+- `docker info --format '{{.LiveRestoreEnabled}}'` が `false`（既定）。firewalld が無いか無効。`userland-proxy` を daemon.json で `false` にしない
+- **Router の DNS を上書きしない**（`--dns` を付けない、daemon.json に `dns` を書かない）。
+  埋め込み resolver は host から継承した nameserver へ **host の namespace から**問い合わせる（上書きするとコンテナ側から出て落ちる）
+- Router は専用 network `subetha-router-net`（bridge `subetha0`、RFC1918 の subnet）に**単独**で置く。他のコンテナを同じ network に付けない
+- IPv6 は bridge で無効（既定）。有効化は本手順の対象外（runner が FAIL にする）
+- **host が応答する全アドレス**のうちインタフェースに無いもの（EC2 の公開 IPv4 / Elastic IP）を `HOST_ADDRS4` に書く。
+  インタフェース上のアドレスは `apply` が毎回自動で集める。公開 IPv4 は **IMDS から読み、読めなければ設置を中止する**（推測しない）
+- 検証に使う **外部 observer**: VPC 内の別 host（RFC1918 アドレス、**Linux、`ss` あり**）で `deploy/egress/egress-observer.py` を動かす。
+  Router host からその両ポートに届くこと（SG）
+
+### 8b.2 設置（Router 停止中に。初回は Router を作る前に）
+
+次のブロックを**ファイルに保存して `sudo bash -e` で実行する**（対話シェルに貼ると、途中の失敗で止まらない）。
+どの段階でも失敗したら、そこで終わる。先に進めるために既定値で埋める箇所は無い。
+
+```sh
+#!/bin/bash -e
+# 0) 依存（runner と補助 unit が使う）と preflight。無いものがあれば終了
+# curl は入れない: AL2023 は curl-minimal が同梱で、`curl` パッケージを指定すると衝突して止まる（本番受け入れで判明）。直後の検査が存在を確かめる
+dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux diffutils
+for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss cmp sha256sum awk tar sync findmnt readlink; do command -v $t >/dev/null || { echo "MISSING: $t"; exit 1; }; done
+
+# 1) 成果物（リポジトリの checkout の直下で実行する。sudo は cwd を保つ）
+[ -f deploy/egress/subetha-egress ] || { echo "run this from the subetha-router checkout"; exit 1; }
+install -m 755 deploy/egress/subetha-egress deploy/egress/subetha-egress-verify /usr/local/sbin/
+mkdir -p /usr/local/lib/subetha-egress /etc/systemd/system/docker.service.d
+install -m 644 deploy/egress/egress-observer.py deploy/egress/egress-host-observer.service \
+  deploy/egress/egress-boot-capture.service deploy/egress/99-egress-verify.conf /usr/local/lib/subetha-egress/
+install -m 644 deploy/egress/subetha-egress-guard.service deploy/egress/subetha-egress-guard.timer /etc/systemd/system/
+install -m 644 deploy/egress/10-subetha-egress.conf /etc/systemd/system/docker.service.d/
+
+# 2) 公開 IPv4 を IMDS から読む。runner と同じ判定（token 取得 → 200 + IPv4 なら採用、404 なら none、それ以外は失敗）。
+#    失敗すると `-e` で**ここで終わる**。既定値で埋めない
+PUB=$(subetha-egress-verify --public-ipv4)
+echo "public IPv4: $PUB"
+printf 'IFACES="subetha0 docker0 br+"\nHOST_ADDRS4="%s"\n' "$PUB" > /etc/subetha-egress.env
+
+# 3) 適用と確認（apply は最後に check を走らせ、通らなければ失敗する）
+systemctl daemon-reload
+subetha-egress apply
+systemctl enable --now subetha-egress-guard.timer
+[ "$(systemctl is-active subetha-egress-guard.timer)" = active ]
+
+# 4) ExecStartPre が効くことを、**この再起動の invocation だけ**で確認する（両方のメッセージがこの順で無ければ終了）
+systemctl restart docker
+sleep 1
+journalctl _SYSTEMD_INVOCATION_ID="$(systemctl show -p InvocationID --value docker.service)" -o cat \
+  | grep -E 'subetha-egress: applied|Loading containers: start' > /tmp/egress-startup.txt
+sed -n 1p /tmp/egress-startup.txt | grep -q 'subetha-egress: applied'
+sed -n 2p /tmp/egress-startup.txt | grep -q 'Loading containers: start'
+echo "egress control installed and verified at docker startup"
+```
+
+`/etc/subetha-egress.env` は `KEY=value`（空白を含む値は二重引用符。行内コメント不可）。未知のキー・重複・
+不正なアドレス・空の `IFACES`・未設定の `HOST_ADDRS4` は **`apply` が失敗し、Docker が上がらない**（fail-closed）。
+意図した挙動なので、`journalctl -u docker` の `subetha-egress:` 行を読んで直す。
+
+### 8b.3 Router の network と、既存 Router の移行
+
+network は §6 の手順 4 で作る（既にあれば `docker network inspect subetha-router-net` で bridge 名が `subetha0`、
+subnet が RFC1918 であることを確認する）。
+
+既に既定 bridge（docker0）で動いている Router を移す場合。journal（既定 `/app/runtime/journal.ndjson`）は
+**過去の paymentId の唯一の記録**なので、次の順序を**ファイルに保存して `sudo bash -e` で実行する**。
+**旧 Router が動いている状態で**実行する（スクリプトが止める。止める前に、旧 Router が**実際に開いている** journal を host の
+`/proc` で見て、その最後の購入を旧 Router 自身が返すことを確かめるため）。設定ファイルを自前で解釈して journal の場所を
+推定することはしない（Docker の env-file の解釈と食い違い得る）。**入口（Caddy）は最初に閉じ、終わるまで閉じたまま**にする:
+新コンテナは最終構成のまま先に起動して検証するので、検証が済む前に外から届いてはいけない。全部通ってから旧コンテナを消して
+名前を付け替え、入口を開け直す。失敗したときの状態は段階で決まる: **引き渡し（記録が `handoff` になる）より前**の失敗では旧コンテナが残り、
+作りかけの新コンテナは消され、入口は**閉じられた後なら**開け直されるまで閉じたまま（閉じる前に止まれば触っていない）。**引き渡し後**の
+失敗では新コンテナを残して前進で終える（入口を開け直した後に止まることもあるので、入口の実際の状態を見る）。どちらも
+`/var/lib/subetha-router-migration.state` の記録と下の復旧手順に従う。
+mask は**再起動しても残る**もの（`systemctl mask`）を使い、新コンテナは引き渡しの直前まで再起動ポリシー無しで作るので、途中で host が
+再起動しても、入口は閉じたまま、新コンテナは勝手に上がらない。進行状況は `/var/lib/subetha-router-migration.state` に記録し、復旧はそれを読む。
+host 上の他のプロセスが `127.0.0.1:8787` を使わないこと（受け入れ runner を同時に走らせない）。
+
+```sh
+#!/bin/bash -e
+set -o pipefail
+R=subetha-router
+N=subetha-router-new                                      # 検証中の新コンテナの仮の名前（最後に $R に付け替える）
+DEST=/var/lib/subetha-router                              # 新コンテナが mount する場所（§6 手順 4 と同じ）
+ENVF=/etc/subetha-router.env
+IMAGE=subetha-router
+GATE=caddy.service                                        # 127.0.0.1:8787 へ転送する唯一の入口（§7）。unit は /usr/lib/systemd/system（公式パッケージ）
+STATE=/var/lib/subetha-router-migration.state             # 復旧のための記録（root FS 上。再起動しても残る。成功したら消す）
+NID=""; FINAL=0; STOPPED_GATE=0; DEST_ROLE=undetermined; J_ID=""; R_ID=""; JP=""; ROWS=""; SUM=""; SRC=""; PREVPHASE=none
+ATTEMPT=$(date -u +%Y%m%dT%H%M%SZ)-$$                      # この実行の識別子（記録と、作る新コンテナの label に付ける）
+record() { local body; body=$(printf 'updated=%s\nattempt=%s\nphase=%s\nprevious_phase=%s\ngate_was_running=%s\ndest=%s\ndest_role=%s\nold_container=%s\nold_source=%s\njournal=%s\njournal_ident=%s\nruntime_ident=%s\njournal_rows=%s\njournal_sha256=%s\nnew_container_id=%s' "$(date -u +%FT%TZ)" "$ATTEMPT" "$1" "$PREVPHASE" "$STOPPED_GATE" "$DEST" "$DEST_ROLE" "$R" "$SRC" "/app/runtime/$JP" "$J_ID" "$R_ID" "$ROWS" "${SUM%% *}" "$NID") && printf '%s\n' "$body" > "$STATE.tmp" && [ "$(sed -n 's/^phase=//p' "$STATE.tmp")" = "$1" ] && sync "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE" && sync "$(dirname "$STATE")" && PREVPHASE=$1; }
+#   記録は一度に組み立てて 1 回の printf で書き、書いた tmp から phase を読み戻してから rename する。どれか失敗すれば非 0（-e で止まる）。PREVPHASE は全部通った後だけ更新
+cleanup() { rc=$?; rm -f /tmp/journal.peek /tmp/journal.verify
+  if [ "$rc" -ne 0 ]; then
+    DUR=$(sed -n 's/^phase=//p' "$STATE" 2>/dev/null || true)     # ディスク上の記録の段階。復旧はこれを読むので、trap もこれに従う
+    if [ "$FINAL" = 0 ] && [ "$DUR" != handoff ]; then
+      # このスクリプトが `docker create` で作った新コンテナ（その ID）だけを消す。名前では消さない（前回の残骸や旧コンテナに触らない）
+      [ -z "$NID" ] || docker rm -f "$NID" >/dev/null 2>&1 || true
+      record failed-before-handoff 2>/dev/null || echo "warning: could not update the recovery record $STATE (durable phase: ${DUR:-none})" >&2
+      echo "stopped with exit $rc before the handoff: the old container is untouched; ingress ($GATE) stays stopped and masked (it was running before: $STOPPED_GATE); $DEST is $DEST_ROLE. Recovery record: $STATE. See the recovery notes below the script" >&2
+    else
+      record failed-after-handoff 2>/dev/null || echo "warning: could not update the recovery record $STATE (durable phase: ${DUR:-none})" >&2
+      echo "stopped with exit $rc after the handoff: the new container $NID is kept (it may already be named $R); ingress ($GATE) is now $(systemctl is-enabled "$GATE" 2>/dev/null || true)/$(systemctl is-active "$GATE" 2>/dev/null || true) (it was running before: $STOPPED_GATE). Recovery record: $STATE. See the recovery notes below the script" >&2
+    fi
+  fi; exit "$rc"; }
+# 前回の復旧記録が残っていれば、**trap を仕掛ける前に**止まる（trap は記録を書き換えるので、先に確認する）
+! [ -e "$STATE" ] || { echo "a recovery record from an earlier attempt exists: $STATE. Finish that recovery first (see the notes below the script)"; cat "$STATE"; exit 1; }
+trap cleanup EXIT
+real() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+norm() { python3 -c 'import os,sys
+p=sys.argv[1]
+if ".." in p.split("/"): sys.exit("SUBETHA_JOURNAL_PATH=%s contains ..: not covered by this procedure" % p)
+a=os.path.normpath(p if p.startswith("/") else os.path.join("/app",p))
+if not a.startswith("/app/runtime/"): sys.exit("SUBETHA_JOURNAL_PATH=%s is outside /app/runtime: not covered by this procedure" % p)
+print(a[len("/app/runtime/"):])' "$1"; }
+lastcreated() { python3 -c 'import json,sys
+last="none"
+for l in open(sys.argv[1],"rb").read().splitlines():
+    try:
+        d=json.loads(l)
+        if isinstance(d,dict) and d.get("event")=="created" and isinstance(d.get("paymentId"),str): last=d["paymentId"]
+    except ValueError: pass
+print(last)' "$1"; }
+inner() { docker logs "$1" 2>&1 | sed -n 's/^router: //p' | tail -n1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])'; }
+r4() { docker exec "$1" node -e 'fetch("http://127.0.0.1:"+process.argv[1]+"/v1/purchases/"+process.argv[2],{headers:{"x-router-principal":"judge",authorization:"Bearer public"}}).then(r=>{console.log("R4 status",r.status);process.exit(r.status===200?0:1)})' "$2" "$3"; }
+ident() { stat -L -c '%d:%i' "$1"; }                     # (dev:inode)。/proc の magic link（fd、root）も辿る
+# コンテナのプロセスが開いているファイルのうち名前に $2 を含むものを、host の /proc から "PID FD 経路（コンテナの中の経路のまま）" で列挙する
+openfds() { local pid fd t; for pid in $(docker top "$1" -o pid | tail -n +2 | tr -d ' '); do for fd in /proc/"$pid"/fd/*; do t=$(readlink "$fd" 2>/dev/null) || continue; case "$t" in *"$2"*) echo "$pid ${fd##*/} $t" ;; esac; done; done; }
+# 0) 入口を閉じる。Caddy を止め（起動中なら起動を取り消し）、**再起動しても残る mask**（/etc/systemd/system/caddy.service -> /dev/null）で
+#    誰も起動できないようにし、状態が **inactive そのもの**であること（activating などの途中状態は不可）と、443/80 に listener が無いこと
+#    （列挙の失敗も不可）を確認する。開始時に動いていた（active / activating / reloading）場合だけ、成功後に開け直す。
+#    （前回の復旧記録の有無は trap を仕掛ける前に見ている）
+PRE=$(systemctl is-active "$GATE" 2>/dev/null || true)
+case "$PRE" in active|activating|reloading) STOPPED_GATE=1 ;; esac
+record started
+systemctl stop "$GATE" 2>/dev/null || true
+systemctl reset-failed "$GATE" 2>/dev/null || true
+systemctl mask "$GATE"
+[ "$(systemctl is-enabled "$GATE" 2>/dev/null || true)" = masked ] || { echo "$GATE is not masked"; exit 1; }
+STATE_GATE=$(systemctl is-active "$GATE" 2>/dev/null || true)
+[ "$STATE_GATE" = inactive ] || { echo "$GATE is not inactive (state: $STATE_GATE)"; exit 1; }
+LISTEN=$(ss -Hltn '( sport = :443 or sport = :80 )')
+[ -z "$LISTEN" ] || { echo "something still listens on 443/80:"; printf '%s\n' "$LISTEN"; exit 1; }
+echo "ingress closed ($GATE was $PRE; now inactive and masked across reboots, nothing on 443/80)"
+# 1) 旧 Router が実際に使っている journal を確定する（まだ何も止めない）
+[ "$(docker inspect -f '{{.State.Running}}' "$R")" = true ] || { echo "$R must be running (this script stops it itself)"; exit 1; }
+! docker inspect "$N" >/dev/null 2>&1 || { echo "a container named $N exists from an earlier attempt: inspect and remove it first"; exit 1; }
+#    a. mount 配置: /app/runtime ちょうどの bind / 名前付きボリュームだけを受け付ける。/app/runtime を含む mount や、その下の mount があれば止まる
+SRC=$(docker inspect "$R" --format '{{json .Mounts}}' | python3 -c 'import json,sys
+src=""
+for m in json.load(sys.stdin):
+    d=(m.get("Destination") or "").rstrip("/") or "/"
+    if d=="/app/runtime":
+        if m.get("Type") not in ("bind","volume"): sys.exit("unsupported mount type %s at /app/runtime" % m.get("Type"))
+        src=m["Source"]
+    elif d=="/" or "/app/runtime".startswith(d+"/") or d.startswith("/app/runtime/"):
+        sys.exit("unsupported mount layout: a mount at %s overlaps /app/runtime" % d)
+print(src)')
+#    b. 旧 Router のプロセスが開いている .ndjson（カーネルが解決した経路）がちょうど 1 つで、/app/runtime の下の消されていない
+#       ファイルであり、同じディレクトリの journal.lock も開いていること。設定の解釈ではなく、開いているファイルそのものを見る
+JF=$(openfds "$R" .ndjson)
+[ "$(printf '%s\n' "$JF" | grep -c .)" = 1 ] || { echo "the old Router holds $(printf '%s\n' "$JF" | grep -c .) .ndjson files open, expected exactly one:"; printf '%s\n' "$JF"; exit 1; }
+read -r PID FD J <<< "$JF"
+case "$J" in
+  *" (deleted)") echo "the old Router's journal was deleted while open: $J"; exit 1 ;;
+  /app/runtime/?*) JP=${J#/app/runtime/} ;;
+  *) echo "the old Router has $J open, not a file under /app/runtime: not covered by this procedure"; exit 1 ;;
+esac
+[ "$(openfds "$R" /journal.lock | awk '{print $3}')" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the old Router does not hold journal.lock next to $J"; exit 1; }
+#    c. その journal と、コンテナが見ている /app/runtime の identity (dev:inode) を、プロセスの fd と root 経由で取る。
+#       host の mount 元が**同じもの**を見せていること（コンテナ起動後に host 側で重ねた mount などで、host の経路が別の中身を見せていれば止まる）
+J_ID=$(ident "/proc/$PID/fd/$FD"); R_ID=$(ident "/proc/$PID/root/app/runtime")
+if [ -n "$SRC" ]; then
+  [ "$(ident "$SRC")" = "$R_ID" ] || { echo "the host path $SRC does not show the directory the container uses ($(ident "$SRC") vs $R_ID): not covered by this procedure"; exit 1; }
+  [ "$(ident "$SRC/$JP")" = "$J_ID" ] || { echo "$SRC/$JP is not the file the old Router has open: not covered by this procedure"; exit 1; }
+  [ "$(real "$SRC/$JP")" = "$(real "$SRC")/$JP" ] || { echo "symlink inside $SRC: unsupported layout"; exit 1; }
+fi
+#    d. $DEST の役割。まず、$DEST が **root ファイルシステムの上に直接**あること（$DEST を含む mount が / だけ。bind や別のファイルシステムで
+#       覆われていれば止まる: 再起動後に同じ経路に同じ中身がある保証は、fstab に載っていても無い）。次に、$DEST の**下**に mount があれば止まる
+#       （ファイル 1 つの bind も含む。後で消すときに辿り、新コンテナの再帰 bind にも入る）。そのうえで、コンテナが見ている runtime と $DEST の
+#       identity が同じなら authoritative（コピーしない。何も消してはいけない）。host の mount 表で、正規位置が同じなのに別物（重ねた/隠れた
+#       mount）、経路や正規位置の入れ子なら止まる。mount 表が読めなければ止まる。それ以外だけ copy（使い捨ての複製）
+D_ID=$(ident "$DEST" 2>/dev/null || true)
+role() { python3 -c '
+import os,sys,re
+def unesc(s): return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1),8)), s)   # mountinfo escapes space/tab/newline/backslash as \040 etc.
+s,d,rid,did=sys.argv[1:5]
+mounts=[]
+for line in open("/proc/self/mountinfo"):
+    f=line.split(); mounts.append((unesc(f[4]), unesc(f[3]), f[2]))
+def canon(p):
+    p=os.path.realpath(p); best=None
+    for mp,root,dev in mounts:
+        if p==mp or p.startswith(mp.rstrip("/")+"/"):
+            if best is None or len(mp)>=len(best[0]): best=(mp,root,dev)   # same length: the later entry is the mount on top
+    mp,root,dev=best; rel=p if mp=="/" else p[len(mp):]
+    return dev, (os.path.normpath((root if root!="/" else "")+rel) or "/")
+def inside(a,b): return a.startswith(b.rstrip("/")+"/")
+rd=os.path.realpath(d)
+covering=[mp for mp,_,_ in mounts if mp!="/" and (rd==mp or inside(rd,mp))]
+if covering: sys.exit("%s is not directly on the root filesystem (covered by a mount at %s): what it contains after a reboot is not established: not covered by this procedure" % (d, ", ".join(covering)))
+below=[mp for mp,_,_ in mounts if inside(mp,rd)]
+if below: sys.exit("unsupported: something is mounted beneath %s (%s): not covered by this procedure" % (d, ", ".join(below)))
+if did and did==rid: print("authoritative"); sys.exit()
+if s:
+    rs=os.path.realpath(s); cs,cd=canon(s),canon(d)
+    if cs==cd: sys.exit("ambiguous: %s and %s map to the same place in the mount table but are different directories (stacked or hidden mounts): not covered by this procedure" % (s,d))
+    if inside(rs,rd) or inside(rd,rs): sys.exit("overlap: %s and %s are nested paths: not covered by this procedure" % (s,d))
+    if cs[0]==cd[0] and (inside(cs[1],cd[1]) or inside(cd[1],cs[1])): sys.exit("overlap: %s resolves to %s and %s to %s on the same filesystem (bind mount alias): not covered by this procedure" % (s,cs[1],d,cd[1]))
+print("copy")' "$SRC" "$DEST" "$R_ID" "$D_ID"; }
+DEST_ROLE=$(role)
+#       authoritative なら、$DEST/$JP が旧 Router の開いている journal そのもの（同じ inode）であること（ディレクトリの一致だけでは journal は束縛されない）
+if [ "$DEST_ROLE" = authoritative ]; then [ "$(ident "$DEST/$JP")" = "$J_ID" ] || { echo "$DEST/$JP is not the file the old Router has open: not covered by this procedure"; exit 1; }; fi
+echo "$DEST is $DEST_ROLE ($([ "$DEST_ROLE" = authoritative ] && echo "the old Router already stores its journal there: nothing is copied and nothing there may be deleted" || echo "a copy of the old Router's runtime"))"
+echo "current /app/runtime backing: ${SRC:-<no mount: inside the container>}; the old Router (pid $PID) has /app/runtime/$JP open"
+#    e. 候補の journal を、**コンテナ自身の見え方**（/proc/$PID/root 経由）で覗き、その最後の購入を動いている旧 Router が返すこと。
+#       copy の場合、$DEST に内容の違う journal が既にあれば、旧 Router を止める前に止まる（前の試行で何かが書いた可能性。上書きしない）
+PEEK=/proc/$PID/root/app/runtime/$JP
+LAST0=$(lastcreated "$PEEK")
+if [ "$DEST_ROLE" = copy ] && [ -e "$DEST/$JP" ]; then cmp "$PEEK" "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }; fi
+if [ "$LAST0" != none ]; then
+  INNER0=$(inner "$R")
+  r4 "$R" "$INNER0" "$LAST0" || { echo "the running Router does not serve $LAST0, the last purchase in the candidate journal: not the journal it uses"; exit 1; }
+fi
+# 2) Router を止め、止まったことを確認する（コピーは停止後。停止までの追記を取りこぼさない）
+docker stop "$R"
+[ "$(docker inspect -f '{{.State.Running}}' "$R")" = false ]
+record old-stopped
+# 3) 実体から $DEST へ写し、journal が元と同じバイト列であることを**別の読み出し**で確認する（どれが失敗しても終了）。
+#    $DEST に**内容の違う** journal が既にあれば上書きせずに止まる（前の試行で何かが書いた可能性。journal.lock は flock 用の常設ファイルで、写しても害は無い）
+mkdir -p "$DEST"
+if [ -n "$SRC" ]; then
+  #  停止後も host の mount 元が同じディレクトリと同じファイル（同じ inode）であること
+  [ "$(ident "$SRC")" = "$R_ID" ] || { echo "$SRC changed identity after the stop"; exit 1; }
+  [ "$(ident "$SRC/$JP")" = "$J_ID" ] || { echo "$SRC/$JP changed identity after the stop"; exit 1; }
+  if [ "$DEST_ROLE" = authoritative ]; then
+    [ "$(ident "$DEST")" = "$R_ID" ] || { echo "$DEST changed identity after the stop"; exit 1; }
+    [ "$(ident "$DEST/$JP")" = "$J_ID" ] || { echo "$DEST/$JP changed identity after the stop"; exit 1; }
+  fi
+  if [ "$DEST_ROLE" = copy ]; then
+    [ ! -e "$DEST/$JP" ] || cmp "$SRC/$JP" "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }
+    cp -a "$SRC/." "$DEST/"; cmp "$SRC/$JP" "$DEST/$JP"
+  fi
+else
+  docker cp "$R:/app/runtime/$JP" /tmp/journal.verify   # 停止後の独立した読み出し。無ければここで終わる
+  [ ! -e "$DEST/$JP" ] || cmp /tmp/journal.verify "$DEST/$JP" || { echo "$DEST/$JP exists and differs from the old Router's journal: a previous attempt may have written there. Reconcile first; nothing was overwritten"; exit 1; }
+  docker cp "$R:/app/runtime/." "$DEST/"
+  cmp /tmp/journal.verify "$DEST/$JP"; rm -f /tmp/journal.verify
+fi
+chown -R 10001:10001 "$DEST"
+[ "$(stat -c %u:%g "$DEST")" = 10001:10001 ]
+#    複製をディスクに確定する（cp も docker cp も fsync しない）。ファイル、そのディレクトリ、親ディレクトリ、最後にファイルシステム全体。失敗すればここで止まる
+if [ "$DEST_ROLE" = copy ]; then sync "$DEST/$JP"; sync "$(dirname "$DEST/$JP")" "$DEST" "$(dirname "$DEST")"; sync -f "$DEST"; fi
+[ -f "$DEST/$JP" ]
+[ "$(real "$DEST/$JP")" = "$(real "$DEST")/$JP" ] || { echo "symlink inside $DEST: unsupported layout"; exit 1; }
+# 4) 旧配置（21155eb より前の image は journal を runtime/remote-*/ の下に置いた）なら止まる。走査自体の失敗も止まる。
+#    行数・内容・最後の購入は、起動前の複製（元と同じバイト列）から取る
+LEGACY=$(find "$DEST" -mindepth 2 -name journal.ndjson ! -path "$DEST/$JP")
+[ -z "$LEGACY" ] || { echo "legacy layout: $LEGACY. Recover it separately; nothing was removed"; exit 1; }
+ROWS=$(wc -l < "$DEST/$JP"); SUM=$(sha256sum < "$DEST/$JP"); LAST=$(lastcreated "$DEST/$JP")
+[ "$LAST" = "$LAST0" ] || { echo "the copy's last purchase is $LAST but the candidate's was $LAST0"; exit 1; }
+record copied
+# 5) 新コンテナを**最終構成のまま**仮の名前で作って起動する（§6 手順 4 と同じ引数。旧コンテナは止まっているのでポートは空いている。
+#    入口は閉じているので外からは届かない）。起動時の replay 全部（journal の検査、intent の同一性、予算）を通って上がること、
+#    Docker が解釈した env の journal の場所と、プロセスが実際に開いているファイルが /app/runtime/$JP そのものであること、
+#    最後の購入を R4 で返すことを、旧コンテナを消す前に確かめる
+docker network inspect subetha-router-net >/dev/null 2>&1 || \
+  docker network create --driver bridge -o com.docker.network.bridge.name=subetha0 subetha-router-net
+#    再起動ポリシーは付けずに作る（検証が終わる前に host が再起動しても、新コンテナが勝手に上がらない）。引き渡しの直前に unless-stopped にする
+NID=$(docker create --name "$N" --label "subetha.migration=$ATTEMPT" --network subetha-router-net -p 127.0.0.1:8787:8787 \
+  -v "$DEST:/app/runtime" --env-file "$ENVF" "$IMAGE")
+record replacement-created
+docker start "$NID" >/dev/null
+record replacement-started
+for i in $(seq 1 60); do H=$(curl -sf http://127.0.0.1:8787/healthz 2>/dev/null || true); [[ "$H" == *'"router":"up"'* ]] && break; [ "$(docker inspect -f '{{.State.Running}}' "$NID")" = true ] || break; sleep 1; done
+[[ "$H" == *'"router":"up"'* ]] || { echo "the new container did not come up on the copied journal:"; docker logs "$NID" 2>&1 | tail -n 20; exit 1; }
+NEWJ=$(docker inspect "$NID" --format '{{range .Config.Env}}{{println .}}{{end}}' | { grep '^SUBETHA_JOURNAL_PATH=' || echo 'SUBETHA_JOURNAL_PATH=runtime/journal.ndjson'; } | tail -n1 | cut -d= -f2-)
+[ "$(norm "$NEWJ")" = "$JP" ] || { echo "as Docker read $ENVF, the new container's SUBETHA_JOURNAL_PATH=$NEWJ is not /app/runtime/$JP"; exit 1; }
+JN=$(openfds "$NID" .ndjson | awk '{print $3}' | sort -u)
+[ "$JN" = "/app/runtime/$JP" ] || { echo "the new container has '$JN' open, not /app/runtime/$JP"; exit 1; }
+[ "$(openfds "$NID" /journal.lock | awk '{print $3}' | sort -u)" = "$(dirname "/app/runtime/$JP")/journal.lock" ] || { echo "the new container does not hold journal.lock next to its journal"; exit 1; }
+#    新コンテナが開いている journal が、host の $DEST/$JP そのもの（同じ inode）であること
+read -r NPID NFD _ <<< "$(openfds "$NID" .ndjson | head -n1)"
+[ "$(ident "/proc/$NPID/fd/$NFD")" = "$(ident "$DEST/$JP")" ] || { echo "the new container's open journal is not $DEST/$JP"; exit 1; }
+[ "$(docker inspect "$NID" --format '{{range .Mounts}}{{if eq .Destination "/app/runtime"}}{{.Source}}{{end}}{{end}}')" = "$DEST" ]
+[ "$(head -n "$ROWS" "$DEST/$JP" | sha256sum)" = "$SUM" ]   # 元の行はそのまま（起動で unknown 行が後ろに足されることはある）
+# 新コンテナの Router が journal.lock を排他 flock している: host の /proc/locks で device と inode が一致し、保持 PID が新コンテナのプロセス（docker top）であること
+KEY=$(python3 -c 'import os,sys; st=os.stat(sys.argv[1]); print("%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino))' "$(dirname "$DEST/$JP")/journal.lock")
+HOLDER=$(awk -v key="$KEY" '$2=="FLOCK" && $4=="WRITE" && $6==key {print $5}' /proc/locks)
+[ -n "$HOLDER" ]
+docker top "$NID" -o pid | tail -n +2 | tr -d ' ' | grep -x "$HOLDER" >/dev/null
+if [ "$LAST" != none ]; then
+  # 最後の購入を R4（GET /v1/purchases/<id>）で引く。Router の HTTP API はコンテナ内 loopback の一時ポートだけで聞いている
+  # （8787 は MCP と /healthz）。ポートは起動ログの "router:" 行、principal は tools/remote-mcp.ts が固定する judge:public
+  INNER=$(inner "$NID")
+  r4 "$NID" "$INNER" "$LAST"
+fi
+# 6) 削除の境界の直前に、もう一度ファイルシステムを確定する（新コンテナが起動で足した行も含めて）。ここで止まれば trap が新コンテナを消し、旧コンテナは残る
+sync -f "$DEST"
+#    記録を handoff にできた時点から先は、止まっても新コンテナは残る（前進で復旧する）。記録の書き込みに失敗すればここで止まり、trap は
+#    ディスク上の記録（まだ replacement-started）に従って新コンテナを消す。その後、再起動ポリシーを最終構成（unless-stopped）にし、旧コンテナを消し、新コンテナを $R に付け替え、入口を開け直す
+record handoff
+FINAL=1
+docker update --restart unless-stopped "$NID" >/dev/null
+[ "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$NID")" = unless-stopped ]
+echo "all checks passed and the copy is durable: the new container $NID serves the migrated journal ($ROWS rows, last purchase $LAST); ingress was running before: $STOPPED_GATE. Removing the old container, renaming, reopening ingress"
+docker rm "$R"
+docker rename "$NID" "$R"
+[ "$(docker inspect -f '{{.Id}}' "$R")" = "$NID" ]
+H=$(curl -sf http://127.0.0.1:8787/healthz); [[ "$H" == *'"router":"up"'* ]]
+systemctl unmask "$GATE"
+if [ "$STOPPED_GATE" = 1 ]; then systemctl start "$GATE"; [ "$(systemctl is-active "$GATE")" = active ]; echo "ingress reopened ($GATE unmasked and active)"
+else echo "ingress ($GATE) was not running when this script started: unmasked, left stopped"; fi
+rm -f "$STATE"
+echo "migration complete: $ROWS journal rows reopened by the new container"
+```
+
+止まる条件（引き渡し前。どれも旧コンテナを消さず、作りかけの新コンテナは消し、入口は閉じた後なら止めたまま mask も残す）: 前回の復旧記録が
+残っている、入口が閉じない（Caddy が inactive にならない、mask できない、443/80 に listener が残る、listener の列挙に失敗する）、旧 Router の mount 元と `$DEST` が重なる木
+（一方が他方の中）、旧 Router が動いていない、前回の `subetha-router-new` が残っている、`/app/runtime` と重なる別の mount、bind / ボリューム
+以外の mount、旧 Router が開いている `.ndjson` が 1 つでない・`/app/runtime` の下でない（symlink や `..` で別の場所に解決されている）・
+消されている、隣の `journal.lock` を開いていない、host の mount 元がコンテナの見ている runtime / journal と別物（identity 不一致。停止後の再確認も含む）、`$DEST` が root ファイル
+システムの上に直接ない（bind や別のファイルシステムで覆われている）、`$DEST` の下に mount がある（ファイル 1 つの bind も）、authoritative
+なのに `$DEST` の journal が旧 Router の開いているファイルと別物、mount 元や複製の中の symlink、候補の最後の購入を旧 Router が
+返さない、`$DEST` に内容の違う journal が既にある、コピーや再読み出しの失敗、元と複製の不一致、複製の `sync` の失敗、旧配置（`remote-*/` の下に journal）、
+走査の失敗、`$DEST` の下に mount がある、重ねた/隠れた mount で別のディレクトリが同じ場所に見える、**最終構成で起動した新コンテナが上がらない**（Router の起動時の replay が拒む: 改行の無い末尾、JSON でない行、`seq` の飛び、
+欠けた項目、paymentId / quoteId の重複、予算）、Docker が解釈した新コンテナの env の journal の場所が旧と違う、新コンテナのプロセスが
+開いている journal が旧と違う、元の行が変わっている、flock の保持者が新コンテナでない、新コンテナが最後の購入を返さない。
+
+**止まった後の復旧**（入口は、閉じるのに成功した後なら開け直すまで止まったまま mask されている。閉じる前に止まった場合は触っていない。
+引き渡し後は `systemctl is-enabled caddy` / `is-active caddy` で実際の状態を見る。まず記録を読む）:
+`sudo cat /var/lib/subetha-router-migration.state` に `phase`（スクリプトの trap も、停止時にこのディスク上の段階に従う。記録を更新できなかった
+ときは `warning: could not update the recovery record` と出る。その場合も**ディスク上の記録の段階が正**）、`gate_was_running`（0/1）、`dest_role`（`copy` / `authoritative` / `undetermined`）、
+`old_source`、`journal`、`journal_ident`（旧 Router が開いていた journal の dev:inode）、`journal_rows` / `journal_sha256`（停止後に検証した
+journal。`copied` 以降）、`new_container_id` がある。途中で host が再起動していても同じ: 入口は mask されたまま、新コンテナは
+`handoff` の前なら再起動ポリシー無しなので上がらず、旧コンテナは止めたまま（`unless-stopped` は手で止めたものを起動しない）。
+`phase` で**排他的に**分ける:
+
+- **引き渡し前**（`phase` が `started` / `old-stopped` / `copied` / `replacement-created` / `replacement-started`、または `failed-before-handoff`。
+  後者は `previous_phase` が最後に通った段階）。**何も消す前に**、記録の中身で分ける:
+  - **`journal_ident` が空**（`started` で止まった。journal の確定より前）: 旧 Router は止めておらず、何も写しておらず、新コンテナも無い。
+    `docker ps` で `subetha-router` が running であることを見て、下の「最後に」だけを行う（記録を消し、入口を扱う）。running でなければ
+    記録に無い状態なので**止めて調べる**（何も消さない）。
+  - **`journal_ident` がある**（`old-stopped` 以降）: 旧 Router は止めてある。順に:
+    1. 新コンテナの後始末。`new_container_id` があれば `docker ps -a --no-trunc` でその ID を見て、running なら `docker stop`、そして
+       `docker rm`（この ID だけ）。ID が無くても、`docker create` の直後に落ちた場合に備えて
+       `docker ps -a --filter label=subetha.migration=<記録の attempt> --format '{{.ID}} {{.Status}}'` を見る。出てきたものは
+       この試行が作った（起動していない）新コンテナなので `docker rm` する。名前（`subetha-router-new`）で消さない。
+    2. **回復に使える journal がどこにあるか**を、消す前に確定する。`$DEST`（記録の `dest`）側は:
+       `authoritative` なら `stat -c '%d:%i' <dest>/<journal の /app/runtime/ 以下>` が `journal_ident` と一致すること、
+       `copy` で `journal_rows` があるなら `head -n <journal_rows> <dest>/<同じ相対パス> | sha256sum` が `journal_sha256` と一致すること。
+       どちらでもない（`copy` で `journal_rows` が空 = 写す前、など）なら `$DEST` には回復に使えるものは無い。
+    3. 旧 Router を `sudo docker start subetha-router` し、`/healthz` を待ってから、**開いている journal が記録のものか**を確かめる
+       （health だけでは足りない。一時的な bind 越しに使っていた mount 元は、再起動で別の中身を見せ得る）:
+       ```sh
+       pid=$(for p in $(docker top subetha-router -o pid | tail -n +2 | tr -d ' '); do readlink /proc/$p/fd/* 2>/dev/null | grep -q '\.ndjson$' && echo $p; done | head -n1)
+       fd=$(for f in /proc/$pid/fd/*; do readlink "$f" | grep -q '\.ndjson$' && echo "${f##*/}"; done | head -n1)
+       stat -L -c '%d:%i' /proc/$pid/fd/$fd          # 記録の journal_ident と一致すること
+       ```
+       - 一致: 旧 Router はそのまま使う。`copy` なら `$DEST` は不要なので、`findmnt -l -n -o TARGET | grep '^/var/lib/subetha-router/'` が
+         何も出さないことを見て `rm -rf --one-file-system /var/lib/subetha-router`（`authoritative` は何も消さない）。
+       - 不一致、かつ 2 で `$DEST` に回復に使える journal が**ある**: 入口を開けず、`docker stop subetha-router && docker rm subetha-router`
+         のうえ、§6 手順 4 の `docker run`（`-v /var/lib/subetha-router:/app/runtime`）で作り直し、同じ確認で `stat -L` の値が
+         `authoritative` なら `journal_ident`、`copy` なら `stat -c '%d:%i' <dest>/<相対パス>` と一致することを見る。
+       - 不一致、かつ 2 で回復に使える journal が**無い**: **止めて調べる**。旧コンテナは `docker stop` するだけで**消さない**
+         （mount の無い旧コンテナでは、その書き込み層が唯一の記録）。入口は閉じたまま。下の「最後に」には進まない。
+- **`handoff` / `failed-after-handoff`**（引き渡し後。**前進で終える。旧に戻さず、`$DEST` も新コンテナも消さない**）:
+  新コンテナ（`new_container_id`）が記録を開いている。`docker ps -a --no-trunc --format '{{.ID}} {{.Names}} {{.Status}}'` でその行を見る:
+  - 止まっていれば `docker start <id>`。再起動ポリシーが `no` なら `docker update --restart unless-stopped <id>`。
+  - 名前が `subetha-router-new` なら、`curl -s http://127.0.0.1:8787/healthz` が `"router":"up"` を返すことを確かめ、旧コンテナが残っていれば
+    `docker rm subetha-router`、そして `docker rename subetha-router-new subetha-router`。
+  - 名前が既に `subetha-router` なら旧コンテナは消えている。`/healthz` を確かめる（返らなければ `docker logs`。記録は `$DEST` にあり、
+    コンテナを消す理由は無い）。
+- どの場合も最後に: `sudo rm /var/lib/subetha-router-migration.state`、`sudo systemctl unmask caddy`、そして **`gate_was_running=1` のときだけ**
+  `sudo systemctl start caddy`（`0` なら、移行前から止めてあった入口なので、開けない）。
+
+`$DEST`（`/var/lib/subetha-router`）は **root ファイルシステムの上に直接ある通常のディレクトリ**であること（AL2023 の既定）。bind や別の
+ファイルシステムで覆われていると止まる（`/etc/fstab` に載っていても、`noauto` や別の source など、再起動後に同じ中身がある保証にならない）。
+別のボリュームに置く構成は本手順の対象外。
+購入記録が一つも無い Router は **0 バイトの journal ファイルがある**状態なので通り、R4 の照会だけ省かれる。
+旧配置の回収は本手順の範囲外（起動ごとに別ファイルで、`seq` もファイルごとに 1 から始まるため、単純に連結できない）。
+MCP 側からも `subetha_router_status` に最後の `paymentId` を渡して同じ記録が返ることを見れば、運用で使う経路での確認になる。
+
+### 8b.4 検証（稼働前に全モード。証拠を保存する）
+
+受け入れ条件: **全モードで `failed 0`、かつ `ALLOW_NO_BACKLOG` と `ALLOW_NO_IMDS` を設定しない**。
+この 2 つは試験環境専用の免除で、設定すると不足した証拠が INFO になる。本番では**必ず unset** する。
+runner の出力と証拠ディレクトリ（`/var/tmp/egress-verify-<時刻>-<mode>/`）、設置した成果物の commit と
+`/etc/subetha-egress.env` の内容を保存する。
+
+環境変数: `ROUTER` は Router の**コンテナ名**（既定 `subetha-router`）、`HEALTH_URL` は Router の health endpoint で
+**コンテナの中からも外からも同じ URL で届くもの**（既定 `http://127.0.0.1:8787/healthz`。Caddy の TLS endpoint ではない）、
+`OBSERVER=<observer ip>:19999`、`OBSERVER_REPORT=<observer ip>:19996`（外部 observer は
+`python3 egress-observer.py --port 19999 --report-port 19996`。**検証の全期間、再起動せずに**動かし続ける。
+runner は observer の記録を自分で読み、session が変わると FAIL にする）。
+
+```sh
+unset ALLOW_NO_BACKLOG ALLOW_NO_IMDS
+export OBSERVER=<observer ip>:19999 OBSERVER_REPORT=<observer ip>:19996
+sudo -E subetha-egress-verify                        # 非破壊（Router 稼働中）
+sudo docker stop subetha-router                      # 以下 2 つは Router を止めて
+sudo -E subetha-egress-verify --adversarial          # 代役コンテナを同じ network に置き、policy の除去/再適用と check の sabotage を行う
+sudo -E subetha-egress-verify --fail-closed          # Docker を止め env を壊し、再試行を含めて上がらないことを journal で見る
+sudo docker start subetha-router
+sudo -E subetha-egress-verify --reboot-prepare       # probe と boot 時の観測 unit を入れる（捕捉の寿命は既定 900 秒）
+sudo reboot
+```
+
+再起動後（**900 秒以内**に。超えたら `--reboot-cleanup` して `--reboot-prepare` からやり直す）:
+
+```sh
+unset ALLOW_NO_BACKLOG ALLOW_NO_IMDS
+export OBSERVER=<observer ip>:19999 OBSERVER_REPORT=<observer ip>:19996   # 再接続した shell で同じ値を再設定
+sudo -E subetha-egress-verify --post-boot
+sudo -E subetha-egress-verify --reboot-cleanup
+```
+
+`--adversarial` は Router が止まっていることを**成功した query で確認**し、確認できなければ拒否して非 0 で終わる。
+観測が立ち上がらない・observer の session が変わる・捕捉が読めない、はすべて FAIL になる。
+
+### 8b.5 運用規則
+
+- **イメージのビルドは `docker build --network host` で行う。** 既定 bridge のビルド用コンテナは DNS を host の nameserver（VPC の内部アドレス）へ
+  直接問い合わせ、egress 制御に落とされる（`apt-get` が失敗する。2026-10-05 の本番で確認）。規則を緩めない
+- **Router 稼働中に firewall と host のアドレスを触らない**（`iptables -F`、firewalld の導入、他の管理ツール、
+  Elastic IP の付け替え、インタフェースへのアドレス追加）。guard timer は 30 秒毎に復旧するが**その間は開く**。保証ではない
+- 保守とアドレス変更は次の順序で: `docker stop subetha-router` → `systemctl stop subetha-egress-guard.timer subetha-egress-guard.service`
+  → 作業（`subetha-egress remove` を含む保守、アドレス変更なら `HOST_ADDRS4` の更新）→ `sudo subetha-egress apply`（check を含む）
+  → `systemctl start subetha-egress-guard.timer` と `systemctl is-active subetha-egress-guard.timer` → `docker start subetha-router`
+- 再適用だけなら `sudo subetha-egress apply`（原子的、数十 ms）。Docker の再起動は不要
+- 状態は `sudo subetha-egress status`。`check` が非 0 なら差分が stderr に出る
+- IANA の special-purpose レジストリが更新されたら（runner が検出して FAIL にする）`DENY4` / `DENY6` を見直す
+- 起動直後、guard の初回実行までは bridge の gateway アドレスが目録に無い（network の subnet が RFC1918 なので
+  レジストリ行が落とす。runner はそれを前提として検査する）。`check` はその間だけ差分を報告する
+
+### 8b.6 既存ホストから新しいホストへの切り替え
+
+既定 bridge・Docker 25 で動いている既存ホスト（旧）を、§8b.0〜§8b.4 を通した新しいホスト（新）に置き換える。
+**旧ホストは切り替えが確定するまで変更しない**（止めるだけ）。
+
+**journal の原則**: 書き手は常に 1 つ。**新の Router が要求を受けられる状態になった時点から、新の journal が正**（完了した購入だけでなく、
+保留・unknown・起動時の復旧記録も含む。起動しただけで追記され得る）。以後、旧を使うには両方を止めて新の journal を旧へ写す。
+
+**この手順が扱う journal の配置は 1 つだけ**: `SUBETHA_JOURNAL_PATH` を設定しておらず、Router が**実際に開いている**ファイルが
+mount した directory 直下の `journal.ndjson` であること。旧を止める前に確かめる: `docker inspect` の `Config.Env` に `SUBETHA_JOURNAL_PATH` が無いこと、
+Router のプロセスが開いている journal（host の `/proc/<pid>/fd` の `readlink`）が `/app/runtime/journal.ndjson` の 1 つだけであること、その dev:inode が
+host の `<mount 元>/journal.ndjson` と同じこと（`stat -L -c %d:%i`）。**満たさなければこの手順は使わない。** 新でも起動後に同じ確認をする。
+以下の「journal」「写し」「比較」はすべてこのファイルを指す。
+
+**MPP 受信の既知の制約**: 資格情報の再生防止ストアはプロセス内（`p5-inbound-rails-design.md`）で、**切り替えは再起動と同じく消える**。
+journal を写しても移らない。Router 自身の at-most-once は journal（quote の直列化と intent の状態）に依る。この制約が解消されるまで、
+MPP 受信で実価値を扱わない（testnet のみ）という既存の前提は切り替え後も変わらない。
+
+準備（公開に影響しない）:
+
+1. 新: 旧と同じ VPC・サブネット・SG、AL2023、IMDSv2 必須 + hop limit 1（§9）。§8b.0 → §8b.2
+2. 旧 → 新へ、**イメージ**（`docker save <イメージ ID>` を `docker load`。ID が一致すること）と `/etc/subetha-router.env`（root 600、sha256 が一致）を
+   端から端まで暗号化した経路で写す（秘密を作業端末のディスクに置かない）
+3. 新: §6 手順 4 で Router を起動（**空の journal**、`127.0.0.1:8787` のみ）。同じ支払い鍵を持つ 2 つ目のプロセスなので、**購入の経路を一切持たせない**:
+   入口（Caddy）を起動しない、8787 を転送しない、購入を出す client を向けない。**検証中の journal は空のままであること**を切り替え直前に確かめる
+   （1 行でもあれば調べ終わるまで切り替えない）
+4. 新: §8b.4 を全モード `failed 0`（外部 observer、免除なし、実 reboot）。証拠を保存
+5. 新: Caddy を入れ、設定と証明書（`/etc/caddy/Caddyfile`、Caddy の data directory）を旧から同じ経路で写す。所有者と権限を service の実行ユーザに合わせ、
+   `caddy validate` を通す。**起動はしない**（`systemctl disable caddy`、`is-active` が `inactive`）
+6. 旧へ **プライベート IP で SSH できること**を新ホスト経由（ProxyJump）で実際に試す（Elastic IP を外すと旧は公開 IP を失う）
+
+切り替え（公開が止まる。数分）。各行は前の行が成功してから:
+
+1. 新: `docker stop subetha-router`。検証中の journal が空であることを確かめ、directory を `/var/lib/subetha-router.verify-<時刻>` に退避して空にする
+2. 旧: 入口を閉じる `systemctl disable --now caddy`（`is-active` が `inactive`）→ `docker stop -t 60 subetha-router` → `docker update --restart no subetha-router`
+3. 旧（止める前に済ませておく確認の再掲）: 上の「journal の配置」の確認が通っていること。旧: journal の全行が JSON として読め、末尾が改行で終わること。行数・バイト数・sha256 を記録（**引き渡し時点の写し**）
+4. 旧 → 新へ journal の directory を写す（`journal.ndjson` の sha256・行数・バイト数が一致。所有者 10001:10001）。引き渡し時点の写しを新にも別名で残す
+5. Elastic IP を旧から新へ付け替える（**付け替える EIP のアドレスを控えておく**）
+6. 新: §8b.5 の順序で `HOST_ADDRS4` を更新: guard timer と service を止める → `subetha-egress-verify --public-ipv4` の値が**控えた EIP と一致する**まで
+   進まない（404 や旧アドレスは「付け替え未完了」）→ `/etc/subetha-egress.env` を書き換える → `subetha-egress apply` → guard timer を起動して `is-active`
+7. 新: `docker start subetha-router` → `healthy`、`/healthz`、起動ログの mode / label。**アプリ自身が journal を replay して起動したこと**が受け入れ条件
+   （JSON の検査は予備）。**新の Router が開いている journal が `<mount 元>/journal.ndjson` であること**（上の確認を新で行う）。
+   その journal は引き渡し時点の写しと**先頭バイト列が一致**（`cmp -n <写しのバイト数>`）= 追記だけ
+8. 新: **入口を閉じたまま** `subetha-egress-verify`（既定モード）を `failed 0`（公開 IPv4 の照合、DNS、行列を含む）
+9. 新: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz` と MCP の `tools/list`（AAAA や別の入口が無いことも確認）
+
+戻す（どの時点でも、次の 1 本の順序に合流する）:
+
+1. 新: Caddy と Router を止める（`systemctl disable --now caddy`、`docker stop -t 60 subetha-router`。未起動なら不要）
+2. **使う journal を決める**: 新の Router を一度も起動していない（切り替え手順 7 より前）なら旧の journal のまま。起動していたなら、新の journal
+   （上で確かめた、Router が開いていたファイル）を引き渡し時点の写しと `cmp` する。**バイト単位で同一なら旧の journal のまま。1 バイトでも増えていれば新が正**:
+   旧の journal を別名に退避し、新の journal を旧へ写して sha256・バイト数が一致することを確かめる。古い journal のまま旧を起動しない
+3. Elastic IP を旧へ戻し、旧で `subetha-egress` を使っていなければそのまま、公開 IPv4 が戻ったことを IMDS で確かめる
+4. 旧: `docker update --restart unless-stopped subetha-router` → `docker start` → `healthy`、`/healthz`、Router が開いている journal が手順 2 で決めたファイルであること
+5. 旧: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz`
+
+切り替え後: 旧ホストは Router と Caddy を止めたまま数日置き、問題が無ければ終了する。
+
 ## 9. EC2 側で必要なこと（このリポジトリの範囲外）
 
 - インスタンス作成（`ap-northeast-1` 等）、Docker のインストール
@@ -234,6 +780,41 @@ claude mcp add --transport http subetha-router https://router.subethalabs.com/mc
 - TLS 終端（Caddy / nginx / ALB のいずれか）とドメイン（`subethalabs`）の DNS
 - **鍵の配置**: env を直接書かず、systemd の `EnvironmentFile`（mode 600）か
   AWS Secrets Manager 等を使う。**シェル履歴とプロセス一覧に鍵を残さない**
+- **IMDS のトークン取得を塞ぐ**: Router は上流 URL を `fetch` する。
+  コンテナは既定の bridge ネットワークで動くため、`169.254.169.254` に**到達できる**。
+  Router 自身は IMDS を使わないので、**IMDSv2 を必須にし PUT 応答の hop limit を 1 にする**。
+  bridge 経由のコンテナはホストから 1 hop 先なので、トークン応答が届かず**新規のトークンを取れない**。
+  **両方が必要**: v1 を許したままでは PUT 不要なので hop limit だけでは効かない。
+
+  **守る範囲を正確に言う**: これは「bridge トポロジのコンテナが IMDS から**自力でトークンを得る**」ことを
+  止める。`169.254.169.254` への到達そのものは止めないし、ホスト側で得たトークンの中継も、
+  `--network host` で動かした場合も防がない。他のリンクローカル宛て（DNS `169.254.169.253` 等）にも効かない。
+  言い換えると、守るのは「**bridge トポロジから IMDSv2 トークンを直接・新規に取得する**」経路だけであり、
+  それ以上は主張しない。
+
+  ```sh
+  # 現在値（HttpTokens が optional なら v1 が許可されている）
+  aws ec2 describe-instances --instance-ids <id> \
+    --query 'Reservations[].Instances[].MetadataOptions' --output table
+
+  # v2 必須 + hop limit 1。--http-endpoint は指定しない（既に disabled なら再有効化してしまう）
+  aws ec2 modify-instance-metadata-options --instance-id <id> \
+    --http-tokens required --http-put-response-hop-limit 1
+
+  # 反映確認。稼働中のインスタンスでは State が pending → applied に変わるまで待つ。
+  # HttpTokens=required, HttpPutResponseHopLimit=1, **State=applied** の 3 つを確認する
+  aws ec2 describe-instances --instance-ids <id> \
+    --query 'Reservations[].Instances[].MetadataOptions' --output table
+  ```
+
+  **IMDS のエンドポイントは閉じない。** §8b の egress 制御は、設置時（公開 IPv4 の取得）と受け入れ runner
+  （`HOST_ADDRS4` の照合）で **host から** IMDSv2 を使う。`HttpTokens=required` と hop limit 1 で
+  コンテナからのトークン取得を止めれば足りる。`--http-endpoint disabled` にすると設置と受け入れが fail-closed で止まる。
+
+  **到達そのものを止める層は別**で、インフラ側（B）は §8b の egress 制御として実装した
+  （`docs/ssrf-egress-design.md`）。namespace 内の宛先（loopback、自アドレス）は host から見えないので
+  アプリ側（A）の担当であり、**未実装**。**AI が上流 URL を指定できる構成に進む前に** B と A の両方の
+  受け入れが要る（`docs/ssrf-requirements.md` §9）。
 
 ### 単一インスタンス前提
 Router は journal を `flock(2)` で排他する。**同一ホストで 2 つ起動すると 2 つ目は起動に失敗する**

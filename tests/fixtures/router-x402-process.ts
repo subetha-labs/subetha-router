@@ -17,4 +17,4 @@ function arg(name: string, fallback: string): string {
 
 const network = arg("network", "eip155:84532");
 
-startRouter({ evmSigning: createSignerSpy().capability(network) }).catch(reportStartupFailure);
+startRouter({ evmSigning: createSignerSpy().capability(network), fixtureFacilitators: true }).catch(reportStartupFailure);

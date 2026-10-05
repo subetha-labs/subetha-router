@@ -1,0 +1,278 @@
+#!/bin/sh
+# subetha-egress: host-side egress control for the SubEtha Router container.
+# Design: docs/ssrf-egress-design.md (v8). Runs as root from docker.service's ExecStartPre
+# and every 30 s from subetha-egress-guard.timer.
+#
+#   subetha-egress apply        validate, dry-run both families, commit each in one transaction,
+#                               put the hook jumps in place (repairing displacement), then check
+#   subetha-egress check        exit 0 iff the live chains equal the policy rendered now (fresh host
+#                               inventory) and the first rules of every hook are exactly our jumps
+#   subetha-egress guard        validate; check; on mismatch apply (which ends with check)
+#   subetha-egress render [4|6] print the iptables-restore input
+#   subetha-egress status       show hooks and chains with packet counters
+#   subetha-egress remove       maintenance only: refuses while the guard timer or the Router runs,
+#                               or when that cannot be determined (FORCE=1 overrides)
+#
+# Policy: a packet entering the host from a container bridge is dropped when its destination is
+# (1) one of this host's own addresses or an address listed in HOST_ADDRS*, (2) not globally
+# reachable per the IANA special-purpose registries (snapshot 2025-10-09, plus the conservative
+# exclusions listed below), or (3) listed in EXTRA_DENY*. The only exemption is the reply
+# direction of connections opened towards the container (Caddy -> Router). There is no DNS
+# exception: the Router resolves through Docker's embedded DNS with no DNS override, so the
+# upstream queries are sent from the host's own namespace (design §13.3).
+#
+# Every step that can fail is checked explicitly; nothing relies on `set -e` reaching through a
+# command substitution, a pipeline or a conditional call.
+set -u
+
+CHAIN=SUBETHA-EGRESS
+CHK=SUBETHA-EGRESS-CHK          # scratch chain used by `check` to normalise the expected policy
+HOOKS="PREROUTING FORWARD INPUT" # PREROUTING judges the pre-DNAT destination; FORWARD/INPUT the post-DNAT one
+ROUTER_CONTAINER="${ROUTER_CONTAINER:-subetha-router}"
+LOCK=/run/subetha-egress.lock
+
+# ---------------------------------------------------------------- configuration
+# /etc/subetha-egress.env grammar (exact):
+#   - blank lines and lines whose first character is '#' are ignored; no inline comments
+#   - every other line is KEY=value or KEY="value"; quotes must be balanced and are stripped
+#   - keys: IFACES HOST_ADDRS4 HOST_ADDRS6 EXTRA_DENY4 EXTRA_DENY6; unknown or repeated keys fail
+# The file is parsed, not sourced: an unquoted value with a space would otherwise run as a command.
+IFACES="subetha0 docker0 br+"   # bridges whose ingress is subject to the policy; tokens must be unique
+HOST_ADDRS4=                    # REQUIRED: every IPv4 address this host answers on that is not on an
+                                # interface (public/elastic addresses NAT'd at the gateway), or `none`.
+                                # Interface addresses are collected automatically at apply/check time.
+HOST_ADDRS6=
+EXTRA_DENY4=                    # deployment-specific: internal services on globally routable addresses
+EXTRA_DENY6=
+ENV_FILE="${SUBETHA_EGRESS_ENV:-/etc/subetha-egress.env}"
+
+fail() { echo "subetha-egress: $*" >&2; exit 65; }
+err()  { echo "subetha-egress: $*" >&2; }
+
+seen=
+if [ -r "$ENV_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) fail "$ENV_FILE: not KEY=value: '$line'" ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$key" in IFACES|HOST_ADDRS4|HOST_ADDRS6|EXTRA_DENY4|EXTRA_DENY6) ;;
+      *) fail "$ENV_FILE: unknown key '$key'" ;; esac
+    case " $seen " in *" $key "*) fail "$ENV_FILE: duplicate key '$key'" ;; esac
+    seen="$seen $key"
+    case "$val" in
+      \"?*\") val="${val#\"}"; val="${val%\"}" ;;      # balanced quotes
+      \"*|*\") fail "$ENV_FILE: unbalanced quotes in $key" ;;
+    esac
+    case "$val" in *\"*) fail "$ENV_FILE: stray quote in $key" ;; esac
+    eval "$key=\"\$val\""
+  done < "$ENV_FILE"
+fi
+
+# IANA IPv4 Special-Purpose Address Registry (2025-10-09): every block with Globally Reachable =
+# False, plus 192.88.99.0/24 (deprecated 6to4 relay, unmarked), multicast and the reserved class E
+# block (which contains 255.255.255.255). Conservative exclusion: the whole of 192.0.0.0/24,
+# including the globally reachable anycast hosts 192.0.0.9 and 192.0.0.10.
+DENY4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12
+192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24
+203.0.113.0/24 224.0.0.0/4 240.0.0.0/4"
+# IANA IPv6 Special-Purpose Address Registry (2025-10-09), Globally Reachable = False, plus
+# multicast. Conservative exclusions: the whole of 2001::/23 (its reachable anycast sub-blocks,
+# Teredo (N/A), ORCHIDv2, DETs); 64:ff9b::/96 and 2002::/16 (no NAT64 / 6to4 in this
+# deployment); fec0::/10 (deprecated site-local). 2001:db8::/32 lies outside 2001::/23.
+DENY6="::/128 ::1/128 ::ffff:0:0/96 64:ff9b::/96 64:ff9b:1::/48 100::/64 100:0:0:1::/64
+2001::/23 2001:db8::/32 2002::/16 3fff::/20 5f00::/16 fc00::/7 fe80::/10 fec0::/10 ff00::/8"
+
+# ---------------------------------------------------------------- validation
+is_iface() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.+-]{1,15}$'; }
+is_addr4() { # a.b.c.d[/n]: octets 0-255, prefix 0-32
+  printf '%s' "$1" | awk -F'[./]' 'NF==4||NF==5 { for(i=1;i<=4;i++) if($i!~/^[0-9]+$/ || $i>255) exit 1;
+    if(NF==5 && ($5!~/^[0-9]+$/ || $5>32)) exit 1; exit 0 } { exit 1 }'; }
+is_addr6() { # hex groups with at least one ':', optional prefix 0-128 (semantics checked by --test)
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F:]*:[0-9a-fA-F:.]*(/[0-9]{1,3})?$' || return 1
+  case "$1" in */*) [ "${1##*/}" -le 128 ] ;; esac; }
+listed() { eval "v=\$$1"; [ "$v" = none ] || printf '%s' "$v"; }
+
+validate() {
+  [ -n "$(echo $IFACES)" ] || fail "IFACES is empty"
+  seen_if=
+  for i in $IFACES; do
+    is_iface "$i" || fail "IFACES: bad interface token '$i'"
+    case " $seen_if " in *" $i "*) fail "IFACES: duplicate token '$i'" ;; esac
+    seen_if="$seen_if $i"
+  done
+  [ -n "$(echo $HOST_ADDRS4)" ] || fail "HOST_ADDRS4 is required: every IPv4 address this host answers on that is not on an interface (public/elastic), or 'none'"
+  for a in $(listed HOST_ADDRS4) $EXTRA_DENY4; do is_addr4 "$a" || fail "not an IPv4 address/CIDR: '$a'"; done
+  for a in $(listed HOST_ADDRS6) $EXTRA_DENY6; do is_addr6 "$a" || fail "not an IPv6 address/CIDR: '$a'"; done
+}
+
+# Every address configured on this host's interfaces, read now, except link-local ranges
+# (169.254.0.0/16, fe80::/10): the host side of every container veth carries an fe80:: address
+# that comes and goes with the container, and both ranges are already denied by the registry
+# lines. Returns non-zero when the inventory cannot be read; callers must check.
+host_ifaddrs() {
+  out=$(ip "-$1" -o addr show 2>&1) || { err "cannot read host addresses: $out"; return 1; }
+  printf '%s\n' "$out" | awk '{print $4}' | cut -d/ -f1 |
+    awk '!/^169\.254\./ && !/^[fF][eE][89aAbB]/' | sort -u
+}
+
+render() { # prints the iptables-restore input for family $1; non-zero if the inventory failed
+  if [ "${1:-4}" = 6 ]; then deny="$DENY6"; extra="$EXTRA_DENY6"; fixed=$(listed HOST_ADDRS6)
+  else deny="$DENY4"; extra="$EXTRA_DENY4"; fixed=$(listed HOST_ADDRS4); fi
+  auto=$(host_ifaddrs "${1:-4}") || return 70
+  printf '*mangle\n:%s - [0:0]\n' "$CHAIN"
+  # replies to connections opened towards the container (Caddy -> Router); Router-originated
+  # flows are ORIGINAL direction and never match
+  printf -- '-A %s -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j RETURN\n' "$CHAIN"
+  for n in $fixed $auto; do printf -- '-A %s -d %s -j DROP\n' "$CHAIN" "$n"; done
+  for n in $deny; do printf -- '-A %s -d %s -j DROP\n' "$CHAIN" "$n"; done
+  for n in $extra; do printf -- '-A %s -d %s -j DROP\n' "$CHAIN" "$n"; done
+  printf -- '-A %s -j RETURN\nCOMMIT\n' "$CHAIN"
+}
+
+tools() { if [ "$1" = 6 ]; then ipt=ip6tables; restore=ip6tables-restore; else ipt=iptables; restore=iptables-restore; fi; }
+expected_jumps() { for i in $IFACES; do printf -- '-A %s -i %s -j %s\n' "$1" "$i" "$CHAIN"; done | sort; }
+nifaces() { echo $IFACES | wc -w | tr -d ' '; }
+lock() { exec 9>"$LOCK" && flock 9 || fail "cannot take $LOCK"; }
+
+# ---------------------------------------------------------------- commands
+# Put our jumps at the head of every hook without a window. Fast path: the first N rules are
+# already exactly our N jumps. Otherwise insert a fresh copy of every jump at position 1 (so the
+# first N rules become ours, above whatever displaced them); only when every insertion succeeded
+# AND the head now reads back as exactly our jumps are the old copies below position N deleted,
+# by rule number, highest first. On any insertion failure nothing is deleted: the pre-existing
+# protection is left exactly as it was. Foreign rules are never deleted.
+place_jumps() {
+  tools "$1"; n=$(nifaces); rc=0
+  for h in $HOOKS; do
+    list=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; return 1; }
+    top=$(printf '%s\n' "$list" | grep -v '^-P' | head -n "$n" | sort)
+    [ "$top" = "$(expected_jumps "$h")" ] && continue
+    inserted=0
+    for i in $IFACES; do
+      if "$ipt" -t mangle -I "$h" 1 -i "$i" -j "$CHAIN"; then inserted=$((inserted+1)); else err "$ipt: cannot insert the $h jump for $i"; fi
+    done
+    [ "$inserted" -eq "$n" ] || { err "$ipt $h: $inserted of $n jumps inserted; leaving existing rules untouched"; rc=1; continue; }
+    list=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot re-list $h"; rc=1; continue; }
+    top=$(printf '%s\n' "$list" | grep -v '^-P' | head -n "$n" | sort)
+    [ "$top" = "$(expected_jumps "$h")" ] || { err "$ipt $h: head is not our jumps after insertion; leaving old copies in place"; rc=1; continue; }
+    for num in $(printf '%s\n' "$list" | grep -v '^-P' | awk -v n="$n" -v c="$CHAIN" 'NR>n && $(NF-1)=="-j" && $NF==c {print NR}' | sort -rn); do
+      "$ipt" -t mangle -D "$h" "$num" || { err "$ipt: cannot delete displaced $h rule $num"; rc=1; }
+    done
+  done
+  return $rc
+}
+
+apply_unlocked() {
+  validate
+  r4=$(render 4) || fail "IPv4 policy could not be rendered (host inventory unreadable?)"
+  r6=$(render 6) || fail "IPv6 policy could not be rendered (host inventory unreadable?)"
+  # Dry-run both families against the real parser before committing either.
+  printf '%s\n' "$r4" | iptables-restore --test --noflush  || fail "IPv4 policy rejected by iptables-restore --test"
+  printf '%s\n' "$r6" | ip6tables-restore --test --noflush || fail "IPv6 policy rejected by ip6tables-restore --test"
+  # One transaction per family: the chain is flushed and rebuilt inside a single commit, so an
+  # attached chain is never empty. The jumps are placed afterwards and persist across reapplies.
+  printf '%s\n' "$r4" | iptables-restore --noflush  || fail "IPv4 policy commit failed"
+  printf '%s\n' "$r6" | ip6tables-restore --noflush || fail "IPv6 policy commit failed"
+  place_jumps 4 || fail "IPv4 jumps could not be placed"
+  place_jumps 6 || fail "IPv6 jumps could not be placed"
+  check_unlocked || fail "policy does not verify after apply"
+  echo "subetha-egress: applied ($(iptables -t mangle -S "$CHAIN" | grep -c '^-A') IPv4 rules, $(ip6tables -t mangle -S "$CHAIN" | grep -c '^-A') IPv6 rules) on $(echo $IFACES) at $(echo $HOOKS)"
+}
+
+# The live chain must equal, rule for rule, the policy rendered now (fresh inventory), compared
+# in the kernel's own normal form: the expected policy is loaded into a scratch chain and read
+# back with -S. Then the first N rules of every hook must be exactly our N jumps.
+check_unlocked() {
+  validate; rc=0; n=$(nifaces)
+  for v in 4 6; do tools "$v"
+    live=$("$ipt" -t mangle -S "$CHAIN" 2>/dev/null) || { err "$ipt chain $CHAIN missing"; rc=1; continue; }
+    src=$(render "$v") || { err "$ipt: expected policy could not be rendered (host inventory unreadable?)"; rc=1; continue; }
+    printf '%s\n' "$src" | sed "s/$CHAIN/$CHK/g" | "$restore" --noflush || { err "$ipt: cannot load the expected policy into $CHK"; rc=1; continue; }
+    raw=$("$ipt" -t mangle -S "$CHK" 2>/dev/null) || { err "$ipt: cannot read $CHK back"; rc=1; "$ipt" -t mangle -F "$CHK" 2>/dev/null; "$ipt" -t mangle -X "$CHK" 2>/dev/null; continue; }
+    want=$(printf '%s\n' "$raw" | sed "s/$CHK/$CHAIN/g")
+    "$ipt" -t mangle -F "$CHK" && "$ipt" -t mangle -X "$CHK" || { err "$ipt: cannot remove the scratch chain $CHK"; rc=1; }
+    if [ "$live" != "$want" ]; then
+      err "$ipt chain $CHAIN differs from the expected policy:"
+      printf '%s\n' "$live" > "/run/subetha-egress.live.$$"; printf '%s\n' "$want" > "/run/subetha-egress.want.$$"
+      diff "/run/subetha-egress.live.$$" "/run/subetha-egress.want.$$" >&2 || true
+      rm -f "/run/subetha-egress.live.$$" "/run/subetha-egress.want.$$"; rc=1
+    fi
+    for h in $HOOKS; do
+      hl=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      top=$(printf '%s\n' "$hl" | grep -v '^-P' | head -n "$n" | sort)
+      [ "$top" = "$(expected_jumps "$h")" ] || { err "$ipt $h: the first $n rules are not exactly our jumps"; printf '%s\n' "$top" | sed 's/^/    /' >&2; rc=1; }
+    done
+  done
+  return $rc
+}
+apply() { lock; apply_unlocked; }
+check() { lock; check_unlocked; }
+
+# One critical section: the lock is held from the check through the repair.
+guard() {
+  lock; validate
+  if check_unlocked 2>/dev/null; then exit 0; fi
+  err "policy differs or is detached, re-applying"
+  apply_unlocked
+}
+
+status() {
+  for v in 4 6; do tools "$v"; echo "== $ipt =="
+    for h in $HOOKS; do "$ipt" -t mangle -S "$h" | grep -- "-j $CHAIN" | sed "s/^-A/  /" || true; done
+    "$ipt" -t mangle -L "$CHAIN" -n -v --line-numbers 2>/dev/null || echo "  (no chain)"
+  done
+}
+
+remove() {
+  lock
+  if [ "${FORCE:-0}" != 1 ]; then
+    command -v systemctl >/dev/null 2>&1 || fail "cannot determine the guard timer state (no systemctl); set FORCE=1 to override"
+    for u in subetha-egress-guard.timer subetha-egress-guard.service; do
+      st=$(systemctl is-active "$u" 2>/dev/null); x=$?
+      case "$x:$st" in 3:inactive|3:failed|4:*) ;; 0:*) fail "$u is $st and would re-apply; stop it first" ;;
+        *) fail "cannot determine the state of $u (exit $x, '$st'); set FORCE=1 to override" ;; esac
+    done
+    command -v docker >/dev/null 2>&1 || fail "cannot determine whether $ROUTER_CONTAINER runs (no docker); set FORCE=1 to override"
+    if running=$(docker inspect -f '{{.State.Running}}' "$ROUTER_CONTAINER" 2>/dev/null); then
+      [ "$running" = false ] || fail "$ROUTER_CONTAINER is running (State.Running=$running); stop it before removing the policy"
+    else
+      # inspect failed: absence is only established by a successful listing that does not contain it
+      names=$(docker ps -a --format '{{.Names}}' 2>/dev/null) || fail "cannot query the Docker daemon; set FORCE=1 to override"
+      printf '%s\n' "$names" | grep -qx "$ROUTER_CONTAINER" && fail "cannot determine whether $ROUTER_CONTAINER runs; set FORCE=1 to override"
+    fi
+  fi
+  rc=0
+  for v in 4 6; do tools "$v"
+    for h in $HOOKS; do
+      hl=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      for num in $(printf '%s\n' "$hl" | grep -v '^-P' | awk -v c="$CHAIN" '$(NF-1)=="-j" && $NF==c {print NR}' | sort -rn); do
+        "$ipt" -t mangle -D "$h" "$num" || { err "$ipt: cannot delete $h rule $num"; rc=1; }
+      done
+    done
+    if "$ipt" -t mangle -S "$CHAIN" >/dev/null 2>&1; then
+      "$ipt" -t mangle -F "$CHAIN" || { err "$ipt: cannot flush $CHAIN"; rc=1; }
+      "$ipt" -t mangle -X "$CHAIN" || { err "$ipt: cannot delete $CHAIN"; rc=1; }
+    fi
+    # absence is established by a SUCCESSFUL listing of the whole table that does not define the chain. The error text of a
+    # read of a missing chain is not portable (iptables-nft 1.8.8 on AL2023 says "incompatible, use 'nft' tool", not "No chain").
+    if all=$("$ipt" -t mangle -S 2>&1); then
+      printf '%s\n' "$all" | grep -qx -- "-N $CHAIN" && { err "$ipt: $CHAIN still present"; rc=1; }
+    else err "$ipt: cannot list the mangle table ($all)"; rc=1; fi
+    for h in $HOOKS; do
+      hl=$("$ipt" -t mangle -S "$h" 2>/dev/null) || { err "$ipt: cannot list $h"; rc=1; continue; }
+      printf '%s\n' "$hl" | awk -v c="$CHAIN" '$(NF-1)=="-j" && $NF==c {f=1} END{exit f?0:1}' && { err "$ipt: a $h jump to $CHAIN remains"; rc=1; }
+    done
+  done
+  [ "$rc" = 0 ] && echo "subetha-egress: removed"
+  return $rc
+}
+
+case "${1:-}" in
+  apply) apply ;;
+  check) check ;;
+  guard) guard ;;
+  render) validate; render "${2:-4}" ;;
+  status) status ;;
+  remove) remove ;;
+  *) echo "usage: subetha-egress apply|check|guard|render [4|6]|status|remove" >&2; exit 64 ;;
+esac

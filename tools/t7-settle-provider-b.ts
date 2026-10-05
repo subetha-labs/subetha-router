@@ -12,6 +12,7 @@
  */
 
 import { createMppOutbound } from "../src/adapters/outbound/mpp.js";
+import { createGuardedTransport, formatTransportEvent } from "../src/net/guarded-fetch.js";
 import { createRealMppCapability, TEMPO_MODERATO_CHAIN_ID } from "./real-mpp-capability.js";
 
 const ROUTE_ID = "md-b-eth-snapshot";
@@ -42,7 +43,8 @@ async function main(): Promise<void> {
   });
   process.stdout.write(`payer address: ${payer.address}\n`);
 
-  const rail = createMppOutbound({
+  const transport = createGuardedTransport({ allowLoopback: false, report: (event) => process.stderr.write(`${formatTransportEvent(event)}\n`) });
+  const rail = createMppOutbound({ transport,
     upstreams: { [ROUTE_ID]: UPSTREAM },
     capability: payer.capability(),
   });

@@ -25,6 +25,23 @@ function arg(name: string, fallback: string): string {
   return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
 }
 
+/** 設計 A の T-A17: `--after-headers stall|reset`。headers の後で body を止める / 切る（`/calls` は除く）。 */
+const afterHeaders = arg("after-headers", "none");
+/** どの応答に効かせるか: `all`（既定）、`challenge`（402 だけ）、`pay`（402 以外だけ）。 */
+const afterHeadersOn = arg("after-headers-on", "all");
+/** challenge GET の status（既定 402。T-A17 (h): 402 以外を返して adapter の早期 return を踏ませる）。 */
+const challengeStatus = Number(arg("challenge-status", "402"));
+/** 種類別の閉じた接続数（`challenge` = 402 / `other` = それ以外 / `calls` = 観測用）。 */
+const closedByKind: Record<string, number> = { challenge: 0, other: 0, calls: 0, none: 0 };
+function stallThis(status: number): boolean {
+  if (afterHeaders === "none") return false;
+  if (afterHeadersOn === "challenge") return status === 402;
+  if (afterHeadersOn === "pay") return status !== 402;
+  return true;
+}
+/** TCP 接続数（設計 A の囮・到達の試験が読む）。 */
+let connections = 0;
+
 const payMode = arg("pay", "ok");
 const baseAmount = arg("amount", "900");
 const changeAfter = Number(arg("change-after", "0"));
@@ -98,11 +115,21 @@ function send(
   headers: Record<string, string> = {},
 ): void {
   const text = JSON.stringify(body);
+  const kind = (response.req.url ?? "").startsWith("/calls") ? "calls" : status === 402 ? "challenge" : "other";
+  const tagged = response.socket as unknown as { subethaKind?: string } | null;
+  if (tagged !== null) tagged.subethaKind = kind;
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
     ...headers,
   });
+  if (stallThis(status) && !(response.req.url ?? "").startsWith("/calls")) {
+    // 設計 A の T-A17: headers（と content-length）は正しく返し、body を止める / 切る。
+    response.write(text.slice(0, 1));
+    // reset は headers がクライアントに届いてから切る（同じ tick で切ると fetch 自体が失敗し、headers 後の事象にならない）。
+    if (afterHeaders === "reset") setTimeout(() => response.socket?.destroy(), 50);
+    return;
+  }
   response.end(text);
 }
 
@@ -151,7 +178,7 @@ const server = http.createServer((request, response) => {
   const canonicalUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}${SNAPSHOT_PATH}`;
 
   if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { challengeCalls, payCalls, seenQueries, seenPayments });
+    send(response, 200, { connections, closedByKind, challengeCalls, payCalls, seenQueries, seenPayments });
     return;
   }
   if (url.pathname !== SNAPSHOT_PATH) {
@@ -174,7 +201,7 @@ const server = http.createServer((request, response) => {
     challengeCalls += 1;
     send(
       response,
-      402,
+      challengeStatus,
       { error: "payment_required" },
       { "PAYMENT-REQUIRED": paymentRequiredHeader(canonicalUrl, "payment_required") },
     );
@@ -243,6 +270,13 @@ const server = http.createServer((request, response) => {
   );
 });
 
+server.on("connection", (socket) => {
+  connections += 1;
+  socket.on("close", () => {
+    const kind = (socket as unknown as { subethaKind?: string }).subethaKind ?? "none";
+    closedByKind[kind] = (closedByKind[kind] ?? 0) + 1;
+  });
+});
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   const actual = typeof address === "object" && address !== null ? address.port : 0;

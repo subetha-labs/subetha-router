@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 
@@ -1145,4 +1145,390 @@ test("quote→承認→受信 settle→送信 pay→結果の durable 保存が 
   expect(afterRestart?.status).toBe("delivered");
   expect(afterRestart?.result).toEqual(UPSTREAM_BODY);
   expect(outbound.payCalls).toBe(1);
+});
+
+/* ---------------------------------------------------------------------------- *
+ * FR-17: 設定変更時に未処理 quote を無効化する（設計 docs/routeconfig-fingerprint-design.md）
+ *
+ * なぜ必要か: 送金直前の照合（`readAndMatchDestination`）は **journal 保存済みの offer**
+ * を基準にするので、運用者が設定の `payTo` を変えても**旧受取先に払えてしまう**。
+ * journal された quote は**再起動も越える**。
+ * ---------------------------------------------------------------------------- */
+
+/** 指定した欄だけを差し替えた設定を作る。 */
+function configWith(mutate: (c: RouterConfig) => void): RouterConfig {
+  const c = baseConfig();
+  mutate(c as RouterConfig);
+  return c;
+}
+
+test("FR-17: 宛先 payTo を変えると、変更前の quote では払わない（再起動を越えて）", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  // 運用者が受取先を差し替えて再起動。上流はまだ旧 offer を出している。
+  const after = await boot(
+    configWith((c) => {
+      (c.routes[ROUTE_ID]!.destination as { payTo: string }).payTo = "0xattacker";
+    }),
+  );
+  const result = await after.purchase(purchaseArgs(quote));
+
+  expect(result.status).toBe("awaiting_payment");
+  expect(result.code).toBe("quote_changed");
+  // 受信も送信も**一切触らない**。
+  expect(inbound.settleCalls).toBe(0);
+  expect(inbound.verifyCalls).toBe(0);
+  expect(outbound.payCalls).toBe(0);
+  expect(outbound.readChallengeCalls).toBe(1); // quote 時の 1 回だけ
+});
+
+test("FR-17: 設定が変わっていなければ、再起動後も従来どおり成立する", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const after = await boot(); // 同じ設定
+  const result = await after.purchase(purchaseArgs(quote));
+
+  // 指紋が**再構築を生き残る**ことの証明（store.ts の復元が効いている）。
+  expect(result.status).toBe("delivered");
+});
+
+test("FR-17: 受信額の変更でも払わない（指紋の対象範囲）", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const after = await boot(
+    configWith((c) => {
+      (c.routes[ROUTE_ID]!.source as { amount: string }).amount = "9999";
+    }),
+  );
+  expect((await after.purchase(purchaseArgs(quote))).code).toBe("quote_changed");
+});
+
+test("FR-17: decimals の変更では拒否しない（対象外の欄）", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  // `decimals` は表示用。決済は base unit の `amount` で行うので指紋に含めない。
+  const after = await boot(
+    configWith((c) => {
+      (c.routes[ROUTE_ID]!.source as { decimals: number }).decimals = 18;
+    }),
+  );
+  expect((await after.purchase(purchaseArgs(quote))).status).toBe("delivered");
+});
+
+test("FR-17: route が設定から消えていたら払わない", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const after = await boot(
+    configWith((c) => {
+      delete (c.routes as Record<string, unknown>)[ROUTE_ID];
+    }),
+  );
+  const result = await after.purchase(purchaseArgs(quote));
+
+  expect(result.code).toBe("quote_changed");
+  expect(outbound.payCalls).toBe(0);
+});
+
+/**
+ * legacy（この機能より前に発行された quote）は**一律で拒否**する（設計 §11.1）。
+ *
+ * なぜ部分照合しないか: `rail` / `sourceRail` は **journal に保存されていない**ので、
+ * legacy intent では復元できない。一部の欄だけ照合すると
+ * 「守れていない欄がある」ことを隠して運用者に誤った安心を与える。
+ * 拒否のコストは再 quote であり、資金の損失ではない。
+ */
+test("FR-17: 指紋を持たない legacy quote は、設定が同じでも拒否する", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  // journal から指紋欄だけを取り除き、この機能より前のレコードを再現する。
+  const lines = (await readFile(journalPath, "utf8")).split("\n").filter((l) => l !== "");
+  const stripped = lines.map((line) => {
+    const row = JSON.parse(line) as { event?: string; patch?: Record<string, unknown> };
+    if (row.event === "created" && row.patch !== undefined) {
+      delete row.patch["routeFingerprint"];
+    }
+    return JSON.stringify(row);
+  });
+  await writeFile(journalPath, `${stripped.join("\n")}\n`, "utf8");
+
+  const after = await boot(); // 設定は**変えていない**
+  const result = await after.purchase(purchaseArgs(quote));
+
+  expect(result.status).toBe("awaiting_payment");
+  expect(result.code).toBe("quote_changed");
+  expect(outbound.payCalls).toBe(0);
+});
+
+test("FR-17: 指紋が壊れた値なら legacy に落とさず拒否する", async () => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  // 数値・null・空文字・接頭辞違いはいずれも「読めない値」。
+  const lines = (await readFile(journalPath, "utf8")).split("\n").filter((l) => l !== "");
+  const broken = lines.map((line) => {
+    const row = JSON.parse(line) as { event?: string; patch?: Record<string, unknown> };
+    if (row.event === "created" && row.patch !== undefined) {
+      row.patch["routeFingerprint"] = 42;
+    }
+    return JSON.stringify(row);
+  });
+  await writeFile(journalPath, `${broken.join("\n")}\n`, "utf8");
+
+  const after = await boot();
+  expect((await after.purchase(purchaseArgs(quote))).code).toBe("quote_changed");
+});
+
+/**
+ * 拒否の判定は 1 本の不等号だが、**運用者向けの診断は理由を区別する**。
+ * 公開応答は常に `quote_changed` のままで、設定の内容は漏らさない。
+ */
+test("FR-17: 拒否理由が診断ログで区別される（公開応答は変えない）", async () => {
+  const notes: string[] = [];
+  const bootNoting = async (config: RouterConfig = baseConfig()): Promise<RouterCore> => {
+    const core = await createRouterCore({
+      journalPath,
+      config,
+      inbound,
+      outbound,
+      note: (m) => notes.push(m),
+    });
+    opened.push(core);
+    return core;
+  };
+
+  const before = await bootNoting();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const after = await bootNoting(
+    configWith((c) => {
+      (c.routes[ROUTE_ID]!.destination as { payTo: string }).payTo = "0xattacker";
+    }),
+  );
+  const result = await after.purchase(purchaseArgs(quote));
+
+  // 公開応答は区別しない。
+  expect(result.code).toBe("quote_changed");
+  // ログは理由を示すが、**値は出さない**。
+  const mismatch = notes.find((m) => m.includes("route configuration mismatch"));
+  expect(mismatch).toContain("why=route configuration changed");
+  expect(mismatch).not.toContain("0xattacker");
+  expect(mismatch).not.toContain("0xprovidera");
+
+  // 別の原因は**別の理由**として出る（区別が潰れていないこと）。
+  // 2 本目は**元の設定**で取る（`0xattacker` 設定では上流が一致せず quote できない）。
+  await after.close();
+  const original = await bootNoting();
+  const quote2 = await original.quote({
+    principalId: "alice",
+    requestId: "req-2",
+    routeId: ROUTE_ID,
+  });
+  expect(quote2.ok).toBe(true);
+  if (!quote2.ok) return;
+  await original.close();
+
+  notes.length = 0;
+  const removed = await bootNoting(
+    configWith((c) => {
+      delete (c.routes as Record<string, unknown>)[ROUTE_ID];
+    }),
+  );
+  expect((await removed.purchase(purchaseArgs(quote2, "req-2"))).code).toBe("quote_changed");
+  expect(notes.find((m) => m.includes("route configuration mismatch"))).toContain(
+    "why=route removed",
+  );
+});
+
+/**
+ * 指紋の**各欄**を個別に変えて拒否されることを固定する（レビュー指摘1）。
+ *
+ * なぜ必要か: `destination.payTo` と `source.amount` だけを試験していると、
+ * **他の欄を `authoritativeTermsOf` から外しても気づけない**。
+ * 支払いの宛先・額・レールを決める欄はすべて守られていなければならない。
+ */
+test.each([
+  [
+    "destination.scheme",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID]!.destination as { scheme: string }).scheme = "other";
+    },
+  ],
+  [
+    "destination.network",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID]!.destination as { network: string }).network = "eip155:1";
+    },
+  ],
+  [
+    "destination.asset",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID]!.destination as { asset: string }).asset = "0xother";
+    },
+  ],
+  [
+    "source.asset",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID]!.source as { asset: string }).asset = "0xother";
+    },
+  ],
+  [
+    "source.network",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID]!.source as { network: string }).network = "eip155:1";
+    },
+  ],
+  [
+    "source.payTo (x402/MPP 受信の受取先)",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID]!.source as { payTo?: string }).payTo = "0xelsewhere";
+    },
+  ],
+  [
+    "rail",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID] as { rail?: string }).rail = "mpp";
+    },
+  ],
+  [
+    "sourceRail",
+    (c: RouterConfig) => {
+      (c.routes[ROUTE_ID] as { sourceRail?: string }).sourceRail = "x402";
+    },
+  ],
+])("FR-17: %s の変更で拒否する", async (_label, mutate) => {
+  const before = await boot();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const after = await boot(configWith(mutate));
+  const result = await after.purchase(purchaseArgs(quote));
+
+  expect(result.code).toBe("quote_changed");
+  // 上流にも受信にも触らない。
+  expect(inbound.settleCalls).toBe(0);
+  expect(outbound.payCalls).toBe(0);
+});
+
+/**
+ * 壊れた指紋は**legacy と区別して**診断する（レビュー指摘3）。
+ * 公開応答は同じ `quote_changed` のまま。
+ */
+test.each([
+  ["数値", 42],
+  ["null", null],
+  ["空文字", ""],
+  ["接頭辞違い", "md5:abc"],
+  ["接頭辞のみ", "sha256:"],
+])("FR-17: 壊れた指紋（%s）は legacy と区別して拒否する", async (_label, bad) => {
+  const notes: string[] = [];
+  const bootNoting = async (): Promise<RouterCore> => {
+    const core = await createRouterCore({
+      journalPath,
+      config: baseConfig(),
+      inbound,
+      outbound,
+      note: (m) => notes.push(m),
+    });
+    opened.push(core);
+    return core;
+  };
+
+  const before = await bootNoting();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const lines = (await readFile(journalPath, "utf8")).split("\n").filter((l) => l !== "");
+  const broken = lines.map((line) => {
+    const row = JSON.parse(line) as { event?: string; patch?: Record<string, unknown> };
+    if (row.event === "created" && row.patch !== undefined) {
+      row.patch["routeFingerprint"] = bad;
+    }
+    return JSON.stringify(row);
+  });
+  await writeFile(journalPath, `${broken.join("\n")}\n`, "utf8");
+
+  notes.length = 0;
+  const after = await bootNoting();
+  expect((await after.purchase(purchaseArgs(quote))).code).toBe("quote_changed");
+
+  // `sha256:` 始まりは「読めた」扱いなので digest 不一致、それ以外は「読めない」。
+  const mismatch = notes.find((m) => m.includes("route configuration mismatch"));
+  const expected =
+    typeof bad === "string" && bad.startsWith("sha256:")
+      ? "why=route configuration changed"
+      : "why=unreadable quote fingerprint";
+  expect(mismatch).toContain(expected);
+});
+
+/** legacy（欄なし）は**壊れた値とは別の**診断になる。 */
+test("FR-17: legacy は malformed と区別して診断される", async () => {
+  const notes: string[] = [];
+  const bootNoting = async (): Promise<RouterCore> => {
+    const core = await createRouterCore({
+      journalPath,
+      config: baseConfig(),
+      inbound,
+      outbound,
+      note: (m) => notes.push(m),
+    });
+    opened.push(core);
+    return core;
+  };
+
+  const before = await bootNoting();
+  const quote = await before.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) return;
+  await before.close();
+
+  const lines = (await readFile(journalPath, "utf8")).split("\n").filter((l) => l !== "");
+  const stripped = lines.map((line) => {
+    const row = JSON.parse(line) as { event?: string; patch?: Record<string, unknown> };
+    if (row.event === "created" && row.patch !== undefined) {
+      delete row.patch["routeFingerprint"];
+    }
+    return JSON.stringify(row);
+  });
+  await writeFile(journalPath, `${stripped.join("\n")}\n`, "utf8");
+
+  notes.length = 0;
+  const after = await bootNoting();
+  expect((await after.purchase(purchaseArgs(quote))).code).toBe("quote_changed");
+  expect(notes.find((m) => m.includes("route configuration mismatch"))).toContain(
+    "why=quote predates this check",
+  );
 });

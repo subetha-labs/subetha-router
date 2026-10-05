@@ -27,6 +27,27 @@ function requestKey(principalId: string, requestId: string): string {
 }
 
 /** `created` 行から intent を起こす。 */
+/**
+ * `routeFingerprint` を**生の値から**判定する（設計 §11.3）。
+ *
+ * `asString` は非文字列に fallback を返す（throw も coerce もしない）ので、
+ * **先に生のプロパティの有無と型を見る**。そうしないと
+ * 「壊れた値」が「legacy（欄なし）」に化けて**照合を素通りする**。
+ */
+function routeFingerprintOf(patch: Patch): {
+  readonly routeFingerprint?: string;
+  readonly routeFingerprintInvalid?: boolean;
+} {
+  const raw = patch["routeFingerprint"];
+  if (raw === undefined) {
+    return {}; // legacy: この機能より前に発行された quote
+  }
+  if (typeof raw === "string" && raw.startsWith("sha256:")) {
+    return { routeFingerprint: raw };
+  }
+  return { routeFingerprintInvalid: true };
+}
+
 function intentFromCreated(paymentId: string, at: string, patch: Patch): Intent {
   const source = asObject(patch["source"]);
   const destination = asObject(patch["destination"]);
@@ -52,6 +73,9 @@ function intentFromCreated(paymentId: string, at: string, patch: Patch): Intent 
       outcome: "none",
     },
     quoteFingerprint: asString(patch["quoteFingerprint"]),
+    // **spread ではなく明示的に復元する。** この関数はフィールドを列挙するので、
+    // 足し忘れると append 直後に欄が消え、照合が一切効かなくなる（設計 §8.1）。
+    ...routeFingerprintOf(patch),
     approvalDeadlineMs: asNumber(patch["approvalDeadlineMs"]),
     updatedAt: at,
   };

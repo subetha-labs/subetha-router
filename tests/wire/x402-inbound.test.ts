@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createX402Inbound, X402_INBOUND_SCHEME } from "../../src/adapters/inbound/x402.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
 
@@ -38,7 +39,7 @@ async function startFacilitator(args: readonly string[] = []): Promise<Listening
 }
 
 function railOf(fixture: Listening) {
-  return createX402Inbound({ facilitatorUrl: fixture.baseUrl, payTo: PAY_TO });
+  return createX402Inbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }), facilitatorUrl: fixture.baseUrl, payTo: PAY_TO });
 }
 
 async function issue(fixture: Listening): Promise<InboundOffer> {

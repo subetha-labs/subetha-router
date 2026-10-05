@@ -18,6 +18,7 @@ import { createMppInbound } from "./adapters/inbound/mpp.js";
 import { createX402Inbound } from "./adapters/inbound/x402.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
+import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type TransportEvent } from "./net/guarded-fetch.js";
 import {
   ConfigError,
   loadRuntimeConfig,
@@ -60,6 +61,11 @@ export interface RouterCapabilities {
   readonly evmSigning?: EvmSigningCapability;
   /** 送信レール B（MPP / Tempo charge）の支払い能力。 */
   readonly mppTempo?: MppTempoCapability;
+  /**
+   * 受信 facilitator が loopback の fixture であることを**明示**する能力（SSRF 防御 A §3.4）。
+   * `tests/fixtures/router-*-process.ts` のような fixture 起動だけが渡す。本番の入口は渡さない。
+   */
+  readonly fixtureFacilitators?: true;
 }
 
 /**
@@ -141,14 +147,30 @@ function inboundByRoute(
   return {
     createOffer: (request) => forRoute(request.routeId).createOffer(request),
     preflight: (offer, credential, nowMs) => forOffer(offer).preflight(offer, credential, nowMs),
-    verify: (offer, credential) => forOffer(offer).verify(offer, credential),
-    settle: (offer, credential) => forOffer(offer).settle(offer, credential),
+    // 呼び出しの文脈（route）を落とさない（運用者向け診断の route はここを通る。設計 A §3.5）。
+    verify: (offer, credential, context) => forOffer(offer).verify(offer, credential, context),
+    settle: (offer, credential, context) => forOffer(offer).settle(offer, credential, context),
   };
+}
+
+/** 運用者向けの transport 診断の出口（core の `note` と同じ stderr）。 */
+export function reportTransportToStderr(write: (message: string) => void): (event: TransportEvent) => void {
+  return (event) => write(`${formatTransportEvent(event)}\n`);
+}
+
+/**
+ * adapter ごとの transport（SSRF 防御 A §3.4）。`allowLoopback` は**その adapter の能力**だけで決める:
+ * 実能力は常に false、fixture の能力（`non-signing-fixture`、synthetic、`fixtureFacilitators`）だけ true。
+ * env / 設定からは変えられない。
+ */
+export function transportFor(allowLoopback: boolean, report: (event: TransportEvent) => void): GuardedTransport {
+  return createGuardedTransport({ allowLoopback, report });
 }
 
 export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
+  report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
 ): { inbound: InboundRail; outbound: OutboundRail } {
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
@@ -156,8 +178,8 @@ export function composeRails(
       throw new SignerNotAuthorizedError();
     }
     return {
-      inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl }),
-      outbound: createSyntheticX402Outbound({ upstreams: config.synthetic.upstreams }),
+      inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl, transport: transportFor(true, report) }),
+      outbound: createSyntheticX402Outbound({ upstreams: config.synthetic.upstreams, transport: transportFor(true, report) }),
     };
   }
 
@@ -186,7 +208,11 @@ export function composeRails(
         // 実 SDK 配線はできているが、署名能力が無い。偽の署名者で代替しない。
         throw new SignerNotAuthorizedError();
       }
-      rails[rail] = createX402Outbound({ upstreams: upstreamsFor(rail), capability });
+      rails[rail] = createX402Outbound({
+        upstreams: upstreamsFor(rail),
+        capability,
+        transport: transportFor(capability.kind === "non-signing-fixture", report),
+      });
       continue;
     }
     if (rail === "mpp") {
@@ -194,7 +220,11 @@ export function composeRails(
       if (capability === undefined) {
         throw new SignerNotAuthorizedError();
       }
-      rails[rail] = createMppOutbound({ upstreams: upstreamsFor(rail), capability });
+      rails[rail] = createMppOutbound({
+        upstreams: upstreamsFor(rail),
+        capability,
+        transport: transportFor(capability.kind === "non-signing-fixture", report),
+      });
       continue;
     }
     // 知らないレール名は合成にも落とさず起動を止める。
@@ -202,8 +232,12 @@ export function composeRails(
   }
 
   // 受信レールも route ごとに選ぶ（既定は subetha＝既存構成をそのまま維持）。
+  const inboundLoopback = capabilities.fixtureFacilitators === true;
   const inboundRails: Record<string, InboundRail> = {
-    subetha: createSubethaInbound({ facilitatorUrl: real.subethaFacilitatorUrl }),
+    subetha: createSubethaInbound({
+      facilitatorUrl: real.subethaFacilitatorUrl,
+      transport: transportFor(inboundLoopback, report),
+    }),
   };
   const usesX402Inbound = Object.values(config.router.routes).some(
     (route) => route.sourceRail === "x402",
@@ -224,6 +258,7 @@ export function composeRails(
       inboundRails[`x402:${route.routeId}`] = createX402Inbound({
         facilitatorUrl: real.x402InboundFacilitatorUrl,
         payTo,
+        transport: transportFor(inboundLoopback, report),
         // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
         // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
         ...(real.x402InboundOfferSeconds === undefined
@@ -261,6 +296,8 @@ export function composeRails(
         recipient: payTo,
         currency: route.source.asset,
         chainId,
+        // SDK の JSON-RPC も guarded transport を通る（設計 A §3.5 経路 11）。fixture 例外は他の受信と同じ能力で決まる。
+        transport: transportFor(inboundLoopback, report),
         // 承認期限は `min(approvalTtlMs, offerExpiry)` で切られる。既定は x402 受信と揃える。
         maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
       });
@@ -291,16 +328,90 @@ function evidenceLabelOf(config: RuntimeConfig, capabilities: RouterCapabilities
   return labels.length === 0 ? "real" : labels.join("+");
 }
 
+/**
+ * 内部アドレスを指す上流を**警告する**（起動は止めない。設計 §3.2）。
+ *
+ * **止めない理由**: 合成 fixture は loopback を要するし、
+ * ローカルで実 facilitator を立てる構成も正当。ここで塞ぐと試験と実験が動かない。
+ *
+ * **これは SSRF 対策ではない**: 上流 URL は設定値で、攻撃者が注入する経路は無い。
+ * 守っているのは**運用者の設定ミス**であり、検出と可視化で足りる。
+ * 攻撃者が URL を選べる構成に進むときは、DNS 解決後・接続時の強制を別途設計する。
+ *
+ * **アドレスの prefix 判定は IP リテラルにだけ当てる。** ホスト名に当てると
+ * `10.example.com` や `fcm.googleapis.com` のような**正当な公開ホストを誤検知**する
+ * （レビューと自己検証の両方で発見）。DNS 名は suffix 規則で別に見る。
+ *
+ * 判定はホスト名の文字列のみ。**DNS は引かない**ので、
+ * 公開名が内部アドレスに解決する場合は検出できない（既知の限界）。
+ */
+/**
+ * 起動時の**文字列**検査（警告のみ）。強制は SSRF 防御 A の transport（`src/net/guarded-fetch.ts`）が
+ * 接続前に行う。ここは運用者が設定ミスに早く気付くための補助で、無くても守りは変わらない。
+ */
+export function warnIfInternalUpstream(
+  upstreams: Readonly<Record<string, string>>,
+  write: (message: string) => void,
+): void {
+  for (const [routeId, raw] of Object.entries(upstreams)) {
+    let host: string;
+    try {
+      host = new URL(raw).hostname.toLowerCase();
+    } catch {
+      continue; // 形が壊れた URL は設定検証が別途弾く。
+    }
+    // `new URL()` は IPv6 を角括弧付きで返す。中身だけを見る。
+    const bracketed = host.startsWith("[") && host.endsWith("]");
+    const bare = bracketed ? host.slice(1, -1) : host;
+
+    // IPv4 リテラル（4 オクテット）だけを prefix 判定の対象にする。
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
+    const privateV4 =
+      v4 !== null &&
+      ((): boolean => {
+        const [a, b] = [Number(v4[1]), Number(v4[2])];
+        return (
+          a === 127 || a === 10 || (a === 192 && b === 168) || (a === 169 && b === 254) ||
+          (a === 172 && b >= 16 && b <= 31)
+        );
+      })();
+
+    // IPv6 リテラルは**コロンを含む形**だけで判定する。
+    const privateV6 =
+      bare.includes(":") &&
+      (bare === "::1" ||
+        bare.startsWith("fe80:") ||
+        // ULA は fc00::/7。**ヘクステットは 4 桁**なので、先頭 2 桁が `fc`/`fd` でも
+        // `fc::1`（= 00fc:…）や `fc0::1` は範囲外。桁数を 2 に固定して誤検知を避ける。
+        /^f[cd][0-9a-f]{2}:/.test(bare));
+
+    // DNS 名は suffix 規則で別に見る（prefix は使わない）。
+    const internalName =
+      bare === "localhost" || bare.endsWith(".localhost") || bare.endsWith(".internal");
+
+    if (privateV4 || privateV6 || internalName) {
+      // **URL もホスト名も出さない**（`docs/DEPLOY.md` の方針）。route だけ示す。
+      write(`warning: upstream for route ${routeId} points at an internal address\n`);
+    }
+  }
+}
+
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
   const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"));
   const rails = composeRails(config, capabilities);
 
   mkdirSync(path.dirname(path.resolve(config.journalPath)), { recursive: true });
+  if (config.adapterMode === "real" && config.real !== undefined) {
+    warnIfInternalUpstream(config.real.upstreams, (m) => process.stderr.write(m));
+  }
+
   const core = await createRouterCore({
     journalPath: config.journalPath,
     config: config.router,
     inbound: rails.inbound,
     outbound: rails.outbound,
+    // 拒否の理由を運用者に伝える（固定文のみ。値は渡さない）。
+    note: (message) => process.stderr.write(`${message}\n`),
   });
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。

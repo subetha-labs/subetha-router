@@ -40,6 +40,11 @@ export type SettleResult =
   | { readonly outcome: "rejected"; readonly reason: string }
   | { readonly outcome: "unknown"; readonly reason: string };
 
+/** core が受信操作に添える文脈（運用者向け診断の route 帰属。設計 A §3.5）。 */
+export interface InboundCallContext {
+  readonly routeId: string;
+}
+
 export interface InboundRail {
   createOffer(request: CreateOfferRequest): Promise<InboundOffer>;
   /**
@@ -47,6 +52,6 @@ export interface InboundRail {
    * この関数を持たない adapter では有料ライフサイクルを開始しない（fail closed）。
    */
   preflight(offer: InboundOffer, credential: PaymentCredential, nowMs: number): PreflightResult;
-  verify(offer: InboundOffer, credential: PaymentCredential): Promise<{ isValid: boolean }>;
-  settle(offer: InboundOffer, credential: PaymentCredential): Promise<SettleResult>;
+  verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }>;
+  settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult>;
 }

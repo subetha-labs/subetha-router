@@ -15,6 +15,10 @@ import { describe, expect, it } from "vitest";
 
 import { createMppInbound, MPP_INBOUND_SCHEME } from "../../src/adapters/inbound/mpp.js";
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
+
+/** fixture は loopback なので許す（SSRF 防御 A の transport は必須）。 */
+const LOOPBACK_TRANSPORT = createGuardedTransport({ allowLoopback: true, report: () => {} });
 
 const SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef";
 const RECIPIENT = "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2";
@@ -32,6 +36,7 @@ function railOf(
   } = {},
 ) {
   return createMppInbound({
+    transport: LOOPBACK_TRANSPORT,
     ...(overrides.broadcastForTest === undefined
       ? {}
       : { broadcastForTest: overrides.broadcastForTest }),
@@ -110,6 +115,7 @@ describe("mpp inbound adapter", () => {
   it("rejects a chain the SDK cannot resolve rather than guessing one", async () => {
     // 設定ミスを黙って既定チェーンに落とさない。
     const rail = createMppInbound({
+    transport: LOOPBACK_TRANSPORT,
       secretKey: SECRET,
       recipient: RECIPIENT,
       currency: CURRENCY,
@@ -280,6 +286,7 @@ describe("mpp inbound adapter", () => {
     // HMAC 束縛が弱い状態で起動させない（SDK の要求は 32 バイト以上）。
     expect(() =>
       createMppInbound({
+    transport: LOOPBACK_TRANSPORT,
         secretKey: "too-short",
         recipient: RECIPIENT,
         currency: CURRENCY,
