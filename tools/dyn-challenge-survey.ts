@@ -13,6 +13,8 @@
  *
  * `--profile base-sepolia-usdc` を付けると、設計 §3.3 (i) の offer の検査（T0-c の 3）を**この probe の中で**当てて、
  * 各 offer が通るか・通らないならどの規則かを出す（製品の実装ではない。T8 が同じ規則を実装する）。
+ * **設計の検査の一部である**: 「`payTo` が運用者自身でない」は見ない（運用者のアドレスを持たない）。`asset` はアドレスとして
+ * 大文字小文字を無視して比べる（保存した offer との照合は別で、そちらはバイト単位）。
  *
  * usage: npx tsx tools/dyn-challenge-survey.ts [--profile base-sepolia-usdc] https://… [https://… ...]
  */
@@ -112,6 +114,9 @@ function checkOffer(offer: unknown, profile: NonNullable<typeof PROFILE>): strin
   if (typeof o["amount"] !== "string" || !/^(0|[1-9][0-9]{0,29})$/.test(o["amount"]) || o["amount"] === "0") return "amount_format";
   if (BigInt(o["amount"]) > profile.maxUpstreamAmount) return "amount_over_limit";
   if (typeof o["payTo"] !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(o["payTo"])) return "payTo";
+  // 設計は「ゼロ・運用者自身・token コントラクトでない」を求める。運用者のアドレスはこの probe には無いので見ない。
+  if (/^0x0{40}$/.test(o["payTo"])) return "payTo_zero";
+  if (o["payTo"].toLowerCase() === profile.asset) return "payTo_is_token";
   if (typeof o["maxTimeoutSeconds"] !== "number" || !Number.isInteger(o["maxTimeoutSeconds"]) || o["maxTimeoutSeconds"] < 1 || o["maxTimeoutSeconds"] > 600) return "maxTimeoutSeconds";
   for (const key of Object.keys(o)) {
     if (REQUIRED.includes(key) || key === "extra" || DESCRIPTIVE.has(key)) continue;
@@ -160,8 +165,20 @@ async function survey(url: string): Promise<Record<string, unknown>> {
     if (PROFILE !== undefined && Array.isArray(decoded?.accepts)) {
       const verdicts = decoded.accepts.map((offer) => checkOffer(offer, PROFILE));
       out["offerVerdicts"] = verdicts;
-      // 「上流の順に見て、検査を通る最初の 1 件」。resource の束縛も要る。
-      out["quoteWouldSelect"] = decoded.resource?.url !== url ? "none (resource.url differs)" : verdicts.indexOf("pass") === -1 ? "none" : `offer #${verdicts.indexOf("pass") + 1}`;
+      // 「上流の順に見て、検査を通る最初の 1 件」。その前に、応答全体の条件（402・v2・個数・resource の束縛）。
+      const version = (decoded as { x402Version?: unknown }).x402Version;
+      out["quoteWouldSelect"] =
+        response.status !== 402
+          ? "none (not a 402)"
+          : version !== 2
+            ? "none (not x402 v2)"
+            : decoded.accepts.length > 16
+              ? "none (more than 16 offers)"
+              : decoded.resource?.url !== url
+                ? "none (resource.url differs)"
+                : verdicts.indexOf("pass") === -1
+                  ? "none"
+                  : `offer #${verdicts.indexOf("pass") + 1}`;
     }
   }
   // MPP: WWW-Authenticate: Payment …（複数の challenge・他の方式との併記もある）

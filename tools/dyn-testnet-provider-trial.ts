@@ -9,7 +9,8 @@
  *   - 1 件 `PER_PAYMENT_CAP` 以下、合計 `TOTAL_CAP` 以下、最大 `MAX_PAYMENTS` 件
  *   - `--pay` が無ければ 402 を読むだけ（署名も支払いもしない）
  *
- * 出すのは結果の分類・応答の形・tx の参照だけ（応答の本文は出さない・保存しない）。
+ * 出すのは結果の分類と、**形を確かめた値だけ**: 応答は「最上位の型と欄の数・大きさ」、content type は media type、
+ * tx の参照は 32 バイトの hex のときだけ。応答の本文・欄の名前・例外の文字列は出さない・保存しない。
  *
  * usage: T7_PAYER_PRIVATE_KEY=0x… npx tsx tools/dyn-testnet-provider-trial.ts [--pay] https://… [https://… ...]
  */
@@ -23,13 +24,16 @@ const PER_PAYMENT_CAP = 10_000n;
 const TOTAL_CAP = 30_000n;
 const MAX_PAYMENTS = 8;
 
-function shapeOf(value: unknown, depth = 0): unknown {
-  if (Array.isArray(value)) return value.length === 0 ? [] : [depth > 2 ? "…" : shapeOf(value[0], depth + 1)];
-  if (value !== null && typeof value === "object") {
-    if (depth > 2) return "{…}";
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 12).map(([k, v]) => [k, shapeOf(v, depth + 1)]));
-  }
+/** 応答の大まかな形（欄の名前は出さない。上流が決める文字列なので）。 */
+function summaryOf(value: unknown): string {
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (value !== null && typeof value === "object") return `object(${Object.keys(value).length} fields)`;
   return value === null ? "null" : typeof value;
+}
+
+function mediaTypeOf(raw: string): string {
+  const media = raw.split(";")[0]!.trim().toLowerCase();
+  return /^[a-z0-9.+-]{1,40}\/[a-z0-9.+-]{1,60}$/.test(media) ? media : "other";
 }
 
 async function main(): Promise<void> {
@@ -88,18 +92,20 @@ async function main(): Promise<void> {
       row["signs"] = payer.signCount() - signsBefore;
       row["result"] = result.outcome;
       if (result.outcome === "paid") {
-        row["contentType"] = result.contentType;
-        row["bodyShape"] = shapeOf(result.body);
+        row["contentType"] = mediaTypeOf(result.contentType);
+        row["body"] = summaryOf(result.body);
         row["bodyBytes"] = JSON.stringify(result.body ?? null).length;
-        row["txRef"] = result.txRef;
+        row["txRef"] = typeof result.txRef === "string" && /^0x[0-9a-fA-F]{64}$/.test(result.txRef) ? result.txRef : "not a transaction hash";
       } else {
-        row["reason"] = result.reason;
+        // adapter の理由コードは固定の集合（上流の文字列ではない）。
+        row["reason"] = /^[a-z_]{1,48}$/.test(result.reason) ? result.reason : "other";
         if ("receiptRef" in result && result.receiptRef !== undefined) row["hasReceipt"] = true;
       }
     } catch (error) {
-      // 例外の文字列は固定の接頭辞だけ（URL や鍵が混ざり得る）。
+      // 例外の文字列は出さない（URL や上流の値が混ざり得る）。種類の名前だけ。
       row["result"] = "error";
-      row["error"] = error instanceof Error ? error.message.slice(0, 80) : "unknown";
+      const name = error instanceof Error ? error.name : "";
+      row["error"] = /^[A-Za-z]{1,40}$/.test(name) ? name : "Error";
     }
   }
   process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), pay, payer: payer.address, payments, spentBaseUnits: spent.toString(), transportEvents, rows }, null, 1)}\n`);
