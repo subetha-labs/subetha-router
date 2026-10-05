@@ -52,6 +52,10 @@ export interface PayResponse {
   readonly headers?: Record<string, string>;
   /** `body` の代わりに、この総量になるまで本文を少しずつ送る（「読まれた量」を測る試験用）。 */
   readonly streamBytes?: number;
+  /** `streamBytes` と併用: この量を送ったところで**何も送らずに止まる**（本文の途中で固まる上流）。 */
+  readonly stallAfterBytes?: number;
+  /** `streamBytes` と併用: この量を送ったところで**接続を切る**。 */
+  readonly resetAfterBytes?: number;
 }
 
 export interface X402Upstream {
@@ -74,7 +78,7 @@ export interface StreamRecord {
  * 本文を 16 KiB ずつ、**相手が読んだ分だけ**送る（`write` が詰まったら `drain` を待つ）。相手が読むのをやめれば、
  * 送れる量はソケットのバッファの分で止まる。総量よりずっと少ない `written` は「読み切られなかった」ことを示す。
  */
-function streamBody(response: ServerResponse, total: number, records: StreamRecord[]): void {
+function streamBody(response: ServerResponse, total: number, records: StreamRecord[], cut: { stallAfter?: number | undefined; resetAfter?: number | undefined } = {}): void {
   const record: StreamRecord = { total, written: 0, completed: false, closed: false };
   records.push(record);
   const chunk = Buffer.alloc(16 * 1024, 0x20);
@@ -83,6 +87,12 @@ function streamBody(response: ServerResponse, total: number, records: StreamReco
   });
   const pump = (): void => {
     while (!record.closed && record.written < total) {
+      if (cut.stallAfter !== undefined && record.written >= cut.stallAfter) return;
+      if (cut.resetAfter !== undefined && record.written >= cut.resetAfter) {
+        // 送った分（ヘッダと本文の先頭）が相手に届いてから切る。すぐ切ると、ヘッダごと失われる。
+        setTimeout(() => response.socket?.destroy(), 100);
+        return;
+      }
       const size = Math.min(chunk.length, total - record.written);
       const flowing = response.write(size === chunk.length ? chunk : chunk.subarray(0, size));
       record.written += size;
@@ -170,7 +180,7 @@ export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"
         ...(reply.headers ?? {}),
       });
       if (reply.streamBytes === undefined) response.end(reply.body);
-      else streamBody(response, reply.streamBytes, seen.streams);
+      else streamBody(response, reply.streamBytes, seen.streams, { stallAfter: reply.stallAfterBytes, resetAfter: reply.resetAfterBytes });
     };
     if (reply.delayMs === undefined) send();
     else setTimeout(send, reply.delayMs);

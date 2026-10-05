@@ -618,6 +618,34 @@ describe("支払い", () => {
     expect(h.signed).toHaveLength(1);
   });
 
+  test("receipt を確かめた後に本文が途中で固まったら、期限で打ち切って paid_no_data（receipt は残る・枠は返る・再送しない）", async () => {
+    const h = await harness({ paidTimeoutMs: 400 });
+    const offer = await h.quote();
+    h.upstream.state.pay = () => reply(h.address, { streamBytes: 64 * 1024, stallAfterBytes: 16 * 1024 });
+    const started = Date.now();
+    const result = await h.pay(offer);
+    expect(result).toMatchObject({ outcome: "paid_no_data", reason: "paid_data_unavailable" });
+    expect((result as { receiptRef?: string }).receiptRef).toEqual(expect.any(String));
+    expect(Date.now() - started).toBeLessThan(2000);
+    await settled();
+    expect(h.gate).toEqual({ admitted: 3, released: 3 });
+    expect(h.upstream.seen.payments).toHaveLength(1);
+    expect(h.signed).toHaveLength(1);
+  });
+
+  test("receipt を確かめた後に本文の途中で接続が切れたら paid_no_data（receipt は残る・枠は返る・再送しない）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    h.upstream.state.pay = () => reply(h.address, { streamBytes: 64 * 1024, resetAfterBytes: 16 * 1024 });
+    const result = await h.pay(offer);
+    expect(result).toMatchObject({ outcome: "paid_no_data", reason: "paid_data_unavailable" });
+    expect((result as { receiptRef?: string }).receiptRef).toEqual(expect.any(String));
+    await settled();
+    expect(h.gate).toEqual({ admitted: 3, released: 3 });
+    expect(h.upstream.seen.payments).toHaveLength(1);
+    expect(h.signed).toHaveLength(1);
+  });
+
   test("有料要求の期限は未払いの期限と別: 未払いの期限より遅い応答でも成立する", async () => {
     const h = await harness({ unpaidTimeoutMs: 300, paidTimeoutMs: 5000 });
     const offer = await h.quote();

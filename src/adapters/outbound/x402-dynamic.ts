@@ -585,7 +585,9 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       if (response.status >= 500) {
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
-      // 402 を含む 4xx: 上流が支払いを受け付けなかった。再署名はしない。
+      // 402 を含む 4xx: 上流は「受け付けなかった」と答えた。再署名はしない。
+      // **未決済の証明ではない**（署名済みの authorization は `validBefore` まで有効で、上流は後から決済できる）。
+      // core はこの後も動的予算を保持する（設計 §6.5）。
       return { outcome: "rejected", reason: "destination_rejected" };
     },
   };
