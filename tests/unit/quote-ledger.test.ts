@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 async function open(
-  options: { retentionDays?: number; isPromoted?: (quoteId: string) => boolean; ioForTest?: { beforeWrite?: () => void; beforeSync?: () => void } } = {},
+  options: { retentionDays?: number; isPromoted?: (quoteId: string) => boolean; ioForTest?: { beforeWrite?: () => void; beforeSync?: () => void; afterOpen?: () => void } } = {},
 ): Promise<QuoteLedger> {
   const ledger = await QuoteLedger.open({
     dir,
@@ -323,6 +323,43 @@ test("fsync の失敗（行は書けたが耐久化が不明）の後も書か�
   const reopened = await open();
   expect(reopened.attemptOf("q-1")?.credentialDigest).toBe("sha256:first");
   expect(await reopened.recordAttempt("q-1", "sha256:third")).toBe(false);
+});
+
+test("ファイルを開いた後の準備で失敗しても、開いたファイルを閉じる。控えは書かなくなる", async () => {
+  let fail = true;
+  const ledger = await open({
+    ioForTest: {
+      afterOpen: () => {
+        if (fail) throw new Error("stat failed");
+      },
+    },
+  });
+  await expect(ledger.put(quote(1))).rejects.toBeInstanceOf(LedgerUnusableError);
+  fail = false;
+  expect(ledger.handleStats).toEqual({ opened: 1, closed: 1 });
+  expect(ledger.unusable).toBe(true);
+  await ledger.close();
+  expect(ledger.handleStats).toEqual({ opened: 1, closed: 1 });
+});
+
+test("通常の利用でも、開いたファイルは日付の切り替わりと close ですべて閉じる", async () => {
+  const ledger = await open();
+  await ledger.put(quote(1));
+  clock += DAY;
+  await ledger.put(quote(2));
+  expect(ledger.handleStats).toEqual({ opened: 2, closed: 1 });
+  await ledger.close();
+  expect(ledger.handleStats).toEqual({ opened: 2, closed: 2 });
+});
+
+test("起動時: 512 バイトを超える attempt の行は読まない", async () => {
+  await mkdir(dir, { recursive: true });
+  const good = JSON.stringify({ kind: "quote", at: "x", ...quote(1) });
+  const fat = JSON.stringify({ kind: "attempt", quoteId: "q-1", paymentId: "pay-1", at: "x", credentialDigest: "x".repeat(600) });
+  await writeFile(path.join(dir, "2026-10-05.ndjson"), `${good}\n${fat}\n`);
+  const ledger = await open();
+  expect(ledger.loadStats).toEqual({ linesRead: 2, skipped: 1, loaded: 1 });
+  expect(ledger.attemptOf("q-1")).toBeUndefined();
 });
 
 test("検査での拒否（大きすぎる・重複・寿命）は失敗として扱わず、その後も書ける", async () => {

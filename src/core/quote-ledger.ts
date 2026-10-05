@@ -7,7 +7,8 @@
  * - `<dir>/<UTC 日付>.ndjson` に append + fsync。行は `quote` と `attempt` の 2 種類
  * - メモリに載せるのは**期限内の quote だけ**。quote の寿命は 24 時間以内に限るので、起動時に読むのは
  *   **当日と前日のファイルだけ**（それより古いファイルに期限内の quote は無い）。行ごとに読み、ファイル全体は持たない
- * - 保持期間（日数）より古いファイルは、起動時と日付の切り替わりに削除する
+ * - 保持期間（日数）より古いファイルは、起動時と、**日付が替わって最初に書くとき**に削除する
+ *   （何も書かれないまま日付が替わっただけでは削除しない。定期的な削除は組み込み側の仕事）
  * - 1 行の大きさに上限がある（`quote` は 8 KiB、`attempt` は 512 バイト）。超える quote は成立させない
  *
  * 控えは**権威ではない**: 昇格した quote は journal の記録が正で、控えの行は無視する（`isPromoted`）。
@@ -102,7 +103,12 @@ export interface OpenQuoteLedgerOptions {
   /** journal に昇格済みの quote か。昇格済みの行は読み飛ばす（journal が正）。 */
   readonly isPromoted?: (quoteId: string) => boolean;
   /** **試験専用。** 書き込みの前・fsync の前に呼ばれ、例外を投げると I/O の失敗を再現できる。 */
-  readonly ioForTest?: { readonly beforeWrite?: () => void; readonly beforeSync?: () => void };
+  readonly ioForTest?: {
+    readonly beforeWrite?: () => void;
+    readonly beforeSync?: () => void;
+    /** ファイルを開いた直後（末尾の検査の前）。 */
+    readonly afterOpen?: () => void;
+  };
 }
 
 /** directory の fsync（新しく作ったファイル名を耐久化する。journal と同じ扱い）。 */
@@ -163,6 +169,8 @@ export class QuoteLedger {
   #queue: Promise<void> = Promise.resolve();
   #closed = false;
   #failure: unknown;
+  #opened = 0;
+  #closedHandles = 0;
   readonly #io: NonNullable<OpenQuoteLedgerOptions["ioForTest"]>;
   #skipped = 0;
   #linesRead = 0;
@@ -261,6 +269,11 @@ export class QuoteLedger {
           }
           this.#index(quote);
         } else if (line["kind"] === "attempt") {
+          // attempt の行には quote より小さい上限がある。
+          if (Buffer.byteLength(raw, "utf8") + 1 > MAX_ATTEMPT_LINE_BYTES) {
+            this.#skipped += 1;
+            continue;
+          }
           const { quoteId, paymentId, at, credentialDigest } = line;
           if (typeof quoteId !== "string" || typeof paymentId !== "string" || typeof at !== "string" || typeof credentialDigest !== "string") {
             this.#skipped += 1;
@@ -334,15 +347,23 @@ export class QuoteLedger {
     try {
       const date = dateOf(this.#now());
       if (this.#handle === undefined || this.#handleDate !== date) {
-        await this.#handle?.close().catch(() => {});
+        if (this.#handle !== undefined) {
+          await this.#handle.close().catch(() => {});
+          this.#closedHandles += 1;
+        }
         this.#handle = undefined;
         const file = path.join(this.#dir, `${date}.ndjson`);
         const handle = await open(file, "a+");
+        this.#opened += 1;
+        try {
+          this.#io.afterOpen?.();
         /**
          * 既存のファイルが改行で終わっていなければ（前回の書き込みが途中で切れた）、**先に改行を書く**。
          * そうしないと次の行が切れた断片に続いてしまい、fsync まで済んだ記録が読み戻せなくなる。
          */
-        const { size } = await handle.stat();
+        // 新しいファイルなら、後で directory も fsync して名前を耐久化する（下）。
+        let size = 0;
+        size = (await handle.stat()).size;
         if (size > 0) {
           const tail = Buffer.alloc(1);
           await handle.read(tail, 0, 1, size - 1);
@@ -351,11 +372,16 @@ export class QuoteLedger {
             await handle.sync();
           }
         }
+        if (size === 0) await syncDirectory(this.#dir);
+        } catch (error) {
+          // 準備の途中で失敗した。開いたファイルを持ち主なしで残さない。
+          await handle.close().catch(() => {});
+          this.#closedHandles += 1;
+          throw error;
+        }
         this.#handle = handle;
         const rolled = this.#handleDate !== "";
         this.#handleDate = date;
-        // 新しいファイル名を耐久化する（ファイルの fsync だけでは、システムの異常終了で名前ごと消え得る）。
-        if (size === 0) await syncDirectory(this.#dir);
         if (rolled) await this.#prune();
       }
       this.#io.beforeWrite?.();
@@ -449,6 +475,11 @@ export class QuoteLedger {
     return { linesRead: this.#linesRead, skipped: this.#skipped, loaded: this.#loaded };
   }
 
+  /** 開いたファイルと閉じたファイルの数（閉じ忘れが無いことの確認用）。 */
+  get handleStats(): { readonly opened: number; readonly closed: number } {
+    return { opened: this.#opened, closed: this.#closedHandles };
+  }
+
   /** 書き込みが成否不明で止まっているか。 */
   get unusable(): boolean {
     return this.#failure !== undefined;
@@ -457,7 +488,10 @@ export class QuoteLedger {
   async close(): Promise<void> {
     await this.#queue;
     this.#closed = true;
-    await this.#handle?.close().catch(() => {});
+    if (this.#handle !== undefined) {
+      await this.#handle.close().catch(() => {});
+      this.#closedHandles += 1;
+    }
     this.#handle = undefined;
   }
 }

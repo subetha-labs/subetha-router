@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { afterEach, beforeEach, expect, test } from "vitest";
 
-import type { BudgetLimits } from "../../src/config.js";
+import { parseRouterConfig, resolveProfile, type BudgetLimits } from "../../src/config.js";
 import { Budget, PromotionNotWrittenError, type DynamicReservation } from "../../src/core/budget.js";
 import { openJournal, type Journal } from "../../src/core/journal.js";
 import { dynamicFieldsOf, IntentStore } from "../../src/core/store.js";
@@ -382,4 +382,66 @@ test("動的の行を含む journal を、動的を知らない読み方（静�
   expect(fixed.purchases).toBe(0);
   // 動的予算は、動的を無効にした設定でも数え続けられる。
   expect(Budget.loadDynamic(limits(), reopened).purchases).toBe(1);
+});
+
+test("動的を無効にした実際の設定（enabled: false）でも、動的の行を含む journal を再生でき、予算は数え続ける", async () => {
+  const journal = await journalOf();
+  await journal.append(dynamicCreated(1, reservation()));
+  await journal.append({ paymentId: "static-1", event: "created", patch: { quoteId: "sq-1", routeId: "md-static", principalId: "judge", requestId: "s-1", approvalDeadlineMs: 1 } });
+  await journal.append({ paymentId: "static-1", event: "budget_reserved", patch: { source: { ...USDC, amount: "7000" }, destination: { ...PATHUSD, amount: "7000" } } });
+  await journal.close();
+
+  const PAY_TO = "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2";
+  const staticPart = {
+    approvalTtlMs: 600_000,
+    routes: {
+      "md-static": {
+        routeId: "md-static",
+        canonicalPath: "/v1/routes/md-static/resource",
+        rail: "mpp",
+        sourceRail: "x402",
+        source: { amount: "7000", ...USDC, decimals: 6, payTo: PAY_TO },
+        destination: { scheme: "tempo/charge", ...PATHUSD, payTo: PAY_TO },
+      },
+    },
+    budget: limits(),
+  };
+  const disabled = parseRouterConfig({
+    ...staticPart,
+    dynamic: {
+      enabled: false,
+      profiles: {
+        "dyn-x402-to-mpp": {
+          profileId: "dyn-x402-to-mpp",
+          sourceRail: "x402",
+          source: { ...USDC, decimals: 6, payTo: PAY_TO },
+          rail: "mpp",
+          destination: { scheme: "tempo/charge", ...PATHUSD, decimals: 6, feeAsset: PATHUSD.asset, maxFee: "5000" },
+          par: true,
+          maxUpstreamAmount: "100000",
+          fee: { flat: "1000", bps: 0, min: "1000" },
+        },
+      },
+      budget: { maxPurchases: 1, buckets: [{ ...USDC, maxTotal: "100000", maxPerPurchase: "30000" }, { ...PATHUSD, maxTotal: "100000", maxPerPurchase: "30000" }] },
+    },
+  });
+  expect(disabled.dynamic?.enabled).toBe(false);
+  // 無効でも、journal の動的 intent がどのプロファイルのものかは解決できる。
+  expect(resolveProfile(disabled, "dyn-x402-to-mpp")?.rail).toBe("mpp");
+
+  const reopened = await journalOf();
+  const store = await IntentStore.load(reopened);
+  expect(store.byPaymentId("pay-1")?.dynamic?.profileId).toBe("dyn-x402-to-mpp");
+  const fixed = Budget.load(disabled.budget, reopened, async () => {});
+  expect(fixed.purchases).toBe(1);
+  expect(fixed.spentOf(USDC.network, USDC.asset)).toBe("7000");
+  // 無効の間も動的の消費は保たれる（再び有効にしたとき、上限は続きから効く）。
+  const dynamic = Budget.loadDynamic(disabled.dynamic!.budget, reopened);
+  expect(dynamic.purchases).toBe(1);
+  expect(await dynamic.promote(reservation(), async () => {})).toEqual({ ok: false, reason: "purchase_count_limit" });
+
+  // `dynamic` を持たない設定（この機能を知らない設定）でも、同じ journal で静的の経路は起動できる。
+  const plain = parseRouterConfig(staticPart);
+  expect(plain.dynamic).toBeUndefined();
+  expect(Budget.load(plain.budget, reopened, async () => {}).purchases).toBe(1);
 });
