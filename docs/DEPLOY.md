@@ -241,6 +241,50 @@ namespace 内の宛先（loopback、自アドレス）は host から見えな�
 **B だけでは要件 INV-1'' は完成しない**（`ssrf-requirements.md` §9）。AI が上流 URL を指定する機能は、
 B と A の両方が通るまで出さない。
 
+### 8b.0 Docker の版（本番受け入れで見つかった前提。2026-10-05）
+
+**egress 制御は Docker 28.2 以上を前提にする**（設計の実測は 28.3.3。runner の V7-15 は `docker info` の `FirewallBackend.Driver` が
+`iptables` であることを要求する。このフィールドは 28.1.0 で入った。28.2 以上はこの手順の方針。DNS の出所は V7-8 が稼働版で再測定する）。
+**AL2023 のリポジトリの `docker` は 25.0.x しか無く、そのままでは受け入れは通らない**（§6 手順 1 の `dnf install -y docker` は
+egress 制御を入れない構成用）。AL2023（arm64）では Docker 公式の CentOS 9 用パッケージに入れ替える。29 系は未測定なので
+**`docker-ce` / `docker-ce-cli` 28.5.2-1.el9、`containerd.io` 2.3.6-1.el9 に固定**し、versionlock を掛ける
+（セキュリティ更新は、新しい版をリハーサルしてから固定を付け替える。自動では上がらない）。
+
+手順は 2 本のスクリプト（`deploy/docker/replace-docker.sh`、`deploy/docker/rollback-docker.sh`。root で `bash` 実行）。
+**前提: journal が host の mount（`/app/runtime`）にあること**（無ければ止まる。その場合は入れ替えを後回しにできない: 先に相談）。
+8787 が外から直接届かないこと（SG は 443 と 22 のみ。§5）。入口は `caddy.service`。
+
+`replace-docker.sh` がすること（どの段階でも失敗すれば止まり、段階と次の行動を表示する）:
+
+1. **事前検査（サービスに触れない）**: 現在のパッケージ、コンテナ ID・イメージ ID、journal の場所、空き容量（3 GiB）と inode、
+   SELinux と Docker の security options の記録。Docker の署名鍵を取得して**指紋を照合**してから登録。入れ替えるパッケージを
+   先にダウンロード。**戻すための材料を `/root/docker-replace-<時刻>/`（700）に保存**: 元の 3 パッケージ、`docker save` したイメージ、
+   `docker inspect` の全文（環境変数を含むので root のみ）
+2. **入口を閉じる**（Caddy を止める）→ Router を 60 秒の猶予で止める。終了コードは記録するだけで、**journal の全行が JSON として
+   読めること**を条件にする（追記専用・1 行 1 文書）。停止状態の journal を保存先に写して `cmp`、sha256 を記録
+3. **入れ替え**（`--allowerasing`、weak dependency 無し）→ パッケージの版、daemon の版（28.5.2）、backend（`iptables`）、
+   live-restore（`false`）、**同じコンテナ ID・同じイメージ ID**、journal の sha256 が不変、を確認。versionlock が 3 件あることを確認
+4. **入口を閉じたまま** Router を起動 → healthy、`/healthz`、コンテナから journal が読み書きできる → **その後で**入口を開ける
+
+終わると Router は稼働、入口は開いている。**続けて §8b.2 を行うときは、§8b.2 の指示どおり先に Router を止める**
+（`docker stop subetha-router`。§8b.2 は Docker を再起動し、既定 bridge の Router に規則を掛ける。§8b.3 は旧 Router が動いている状態から始め、
+入口は §8b.3 のスクリプトが閉じる）。
+
+戻すとき（入れ替え後に Docker が上がらない、検査が通らない等）は `rollback-docker.sh <保存先>` → **host を再起動**
+（新しい daemon の network 規則を消す。Docker の案内どおり）→ `rollback-docker.sh <保存先> --after-reboot`。
+1 回目は入口を閉じて無効化し（再起動をまたいで閉じたまま）、この 3 パッケージの versionlock だけを外し、保存した元のパッケージに戻す。
+2 回目は、旧 daemon がコンテナを覚えていればそれを起動し、覚えていなければ**保存したイメージ ID と記録した設定**（環境変数、port、
+mount、再起動ポリシー、init、healthcheck、command）で作り直す。**journal が元の場所に無ければ起動しない**（空の directory を
+作らせない）。保存した停止時の journal は、より新しい journal を上書きしてはならない。daemon の降格は Docker の保証外なので、
+この経路は最後の手段であり、通ったら §8b の作業は中止して原因を調べる。
+
+リハーサル（2026-10-05、本番と同じ AL2023 arm64、`docker-25.0.16` / `containerd-2.2.7` / `runc-1.3.6`、healthcheck・再起動ポリシー・
+公開 port・bind mount・環境変数付きのコンテナと、入口の代役 unit）: 入れ替え 2 回（同じコンテナ ID、journal 不変、検査後に入口再開）、
+戻し（コンテナが残る場合。再起動中は入口が閉じたまま）、戻し（コンテナとイメージを消した状態から作り直し。設定と環境変数が一致）、
+鍵の指紋を変えた場合に事前検査で止まりサービスに触れないこと、を確認した。入れ替え後の host 再起動で Docker とコンテナが戻ること、
+Docker 自身の `mangle` の規則が 0 件であることも確認した。本番の Router の PID 1 は `npm exec` で、停止時の終了コードは未確認
+（そのため終了コードではなく journal の検査を条件にしている）。
+
 ### 8b.1 前提（runner が検証する。満たさなければ運用に入らない）
 
 - Docker の firewall backend が `iptables`（`docker info --format '{{.FirewallBackend.Driver}}'`）。`iptables` コマンド（nft 版で可）
