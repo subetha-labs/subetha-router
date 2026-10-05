@@ -405,10 +405,10 @@ interface Harness {
   sends(): number;
 }
 
-async function harness(options: { paidTimeoutMs?: number; profile?: DynamicProfile; capability?: Partial<MppTempoCapability> } = {}): Promise<Harness> {
+async function harness(options: { paidTimeoutMs?: number; rpcBudgetMs?: number; rpcRetryCount?: number; offerFeePayer?: boolean; profile?: DynamicProfile; capability?: Partial<MppTempoCapability> } = {}): Promise<Harness> {
   const rpc = await startTempoRpc({ tls: TLS });
   closers.push(rpc.close);
-  const upstream = await startMppUpstream(TLS, rpc.plainUrl);
+  const upstream = await startMppUpstream(TLS, rpc.plainUrl, "provider.test", { offerFeePayer: options.offerFeePayer === true });
   closers.push(upstream.close);
   const real = privateKeyToAccount(generatePrivateKey());
   const innerSigned: Tx[] = [];
@@ -433,7 +433,7 @@ async function harness(options: { paidTimeoutMs?: number; profile?: DynamicProfi
       return { release: () => { gate.released += 1; } };
     },
   });
-  const client = createClient({ chain: tempoModerato, transport: http(rpc.url, { retryCount: 0 }) });
+  const client = createClient({ chain: tempoModerato, transport: http(rpc.url, { retryCount: options.rpcRetryCount ?? 0 }) });
   const rail = createMppOutbound({
     upstreams: {},
     transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
@@ -442,6 +442,7 @@ async function harness(options: { paidTimeoutMs?: number; profile?: DynamicProfi
       profiles: { [PROFILE_ID]: options.profile ?? PROFILE },
       transport,
       ...(options.paidTimeoutMs === undefined ? {} : { paidTimeoutMs: options.paidTimeoutMs }),
+      ...(options.rpcBudgetMs === undefined ? {} : { rpcBudgetMs: options.rpcBudgetMs }),
     },
   });
   return {
@@ -724,6 +725,99 @@ describe("支払い", () => {
     expect((await h.pay(offer)).outcome).toBe("paid");
     expect(second).toHaveLength(1);
     expect(h.sends()).toBe(1);
+  });
+
+  test("feePayer: true を申し出る上流にも push で払う: 署名と送金は 1 回、肩代わりの欄は transaction に現れない", async () => {
+    const h = await harness({ offerFeePayer: true });
+    const offer = await h.quote();
+    expect(JSON.parse(String(offer.extra?.["terms"])).request.methodDetails.feePayer).toBe(true);
+    expect(await h.pay(offer)).toMatchObject({ outcome: "paid" });
+    expect(h.upstream.seen).toMatchObject({ credentials: 1, verified: 1, rejected: 0 });
+    expect(h.innerSigned).toHaveLength(1);
+    expect(h.sends()).toBe(1);
+    // 元の account が署名した transaction にも、送った raw にも、肩代わりの欄は無い。fee token は自分で明示している。
+    expect(Object.keys(h.innerSigned[0]!).filter((key) => key.startsWith("feePayer"))).toEqual([]);
+    const envelope = TxEnvelopeTempo.deserialize(h.rpc.sentRaw[0] as never) as unknown as Tx;
+    expect(envelope["feePayerSignature"]).toBeUndefined();
+    expect(envelope["feeToken"]).toBe(MPP_FIXTURE_CURRENCY);
+    expect(h.rpc.lastSender?.toLowerCase()).toBe(h.address.toLowerCase());
+  });
+
+  test("送信の境界: 以前の支払いで署名した、まだ有効な raw を次の支払いで送らせない", async () => {
+    const h = await harness();
+    const captured: Hex[] = [];
+    sdk.wrapAccount = ((facade: FacadeLike) => ({
+      address: facade.address,
+      type: "local",
+      signTransaction: async (tx: unknown, options?: unknown) => {
+        const fresh = await facade.signTransaction(tx, options);
+        captured.push(fresh);
+        // 2 件目では、1 件目の raw（同じ送り主・同じ受取先・同じ額・期限内）にすり替える。
+        return captured.length === 1 ? fresh : captured[0]!;
+      },
+    })) as never;
+    expect((await h.pay(await h.quote())).outcome).toBe("paid");
+    expect(await h.pay(await h.quote())).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    expect(captured).toHaveLength(2);
+    expect(h.rpc.sentRaw).toEqual([captured[0]]);
+  });
+
+  test("RPC の要求は検査した値そのものを送る: 検査の後で中身が変わる params・method は通らない", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    const rogue = privateKeyToAccount(generatePrivateKey());
+    const outcomes: string[] = [];
+    sdk.wrapAccount = ((facade: FacadeLike, clients: { request(args: unknown): Promise<unknown> }[]) => ({
+      address: facade.address,
+      type: "local",
+      signTransaction: async (tx: unknown, options?: unknown) => {
+        const good = await facade.signTransaction(tx, options);
+        const evil = await rogue.signTransaction({ ...recode(tx as Tx, OTHER, undefined), type: "tempo", account: undefined, chain: undefined, nonceManager: undefined } as never, { serializer: TempoTransaction.serialize as never });
+        const attempt = (label: string, args: unknown) => clients[0]!.request(args).then(() => outcomes.push(`${label}:sent`), () => outcomes.push(`${label}:refused`));
+        // (1) 検査では正しい raw に見え、直列化すると別の raw になる配列
+        const shifty = Object.assign([good], { toJSON: () => [evil] });
+        await attempt("toJSON-params", { method: "eth_sendRawTransactionSync", params: shifty });
+        // (2) 読取に見えて、直列化すると送金のメソッド名になる method
+        await attempt("toJSON-method", { method: { startsWith: () => false, toJSON: () => "eth_sendRawTransaction" }, params: [evil] });
+        // (3) 読むたびに値が変わる method
+        let reads = 0;
+        await attempt("getter-method", { get method() { reads += 1; return reads === 1 ? "eth_chainId" : "eth_sendRawTransaction"; }, params: [evil] });
+        // (4) String オブジェクトの raw
+        await attempt("boxed-raw", { method: "eth_sendRawTransactionSync", params: [new String(good)] });
+        return good;
+      },
+    })) as never;
+    const result = await h.pay(offer);
+    // (1) は「検査した raw そのもの」が送られる（正しい送金として 1 回）。その後の SDK 自身の送信は 2 回目なので通らない。
+    // (3) は、手前の viem が method を何度読むかで「読取として通る」か「送金として拒否される」かが変わる。どちらでも別の raw は出ない。
+    expect(outcomes.filter((entry) => !entry.startsWith("getter-method"))).toEqual(["toJSON-params:sent", "toJSON-method:refused", "boxed-raw:refused"]);
+    expect(h.rpc.sentRaw).toHaveLength(1);
+    expect(h.rpc.lastSender?.toLowerCase()).toBe(h.address.toLowerCase());
+    // 送金のメソッドが RPC に出たのは、検査した raw の 1 回だけ。
+    expect(h.rpc.methods.filter((method) => method.startsWith("eth_send"))).toEqual(["eth_sendRawTransactionSync"]);
+    expect(result.outcome).toBe("unknown");
+  });
+
+  test("RPC は再試行しない（能力側が再試行を設定していても）。失敗したら署名しない", async () => {
+    const h = await harness({ rpcRetryCount: 3 });
+    const offer = await h.quote();
+    h.rpc.http.status = 503;
+    const started = Date.now();
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+    expect(Date.now() - started).toBeLessThan(3000);
+    // 見積りの各段が 1 回ずつ失敗するだけ（`Retry-After` も待たない）。
+    expect(h.rpc.http.requests).toBeLessThanOrEqual(4);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
+  test("RPC に使える時間の合計を過ぎたら、次の RPC を出さない（署名もしない）", async () => {
+    const h = await harness({ rpcBudgetMs: 250 });
+    const offer = await h.quote();
+    h.rpc.http.delayMs = 200;
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+    expect(h.rpc.http.requests).toBeLessThanOrEqual(2);
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.sends()).toBe(0);
   });
 
   /* ---------------------------------------------------------------- 手数料・RPC の失敗 */

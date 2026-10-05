@@ -50,6 +50,8 @@ export interface TempoRpc {
   readonly balances: Map<string, bigint>;
   /** 送金の RPC を失敗させる（成否不明の再現）。 */
   failSend: boolean;
+  /** 受けた HTTP 要求の数、HTTP の状態コードの差し替え（再試行の試験用）、応答までの待ち。 */
+  readonly http: { requests: number; status: number | undefined; delayMs: number };
   /** receipt を直接登録する。 */
   register(hash: Hex, transfers: readonly TransferSpec[], options?: { status?: "0x1" | "0x0"; from?: string }): void;
   close(): Promise<void>;
@@ -90,6 +92,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
   const balances = new Map<string, bigint>();
 
   const state: { lastSender: string | undefined; failSend: boolean } = { lastSender: undefined, failSend: false };
+  const httpState: { requests: number; status: number | undefined; delayMs: number } = { requests: 0, status: undefined, delayMs: 0 };
   const quote = { gas: 0xd412n, baseFeePerGas: 0x23c34600n };
 
   /** raw の署名から送り主を復元する。secp256k1 以外・署名なしは例外。 */
@@ -184,6 +187,12 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
+      httpState.requests += 1;
+      if (httpState.status !== undefined) {
+        response.writeHead(httpState.status, { "content-type": "text/plain", "retry-after": "30" });
+        response.end("unavailable");
+        return;
+      }
       let id: unknown = null;
       let payload: unknown;
       try {
@@ -196,8 +205,12 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
         payload = { jsonrpc: "2.0", id, error: { code: typeof code === "number" ? code : -32000, message: error instanceof Error ? error.message : "error" } };
       }
       const text = JSON.stringify(payload);
-      response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
-      response.end(text);
+      const send = (): void => {
+        response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+        response.end(text);
+      };
+      if (httpState.delayMs === 0) send();
+      else setTimeout(send, httpState.delayMs);
     });
   };
   const plain = http.createServer(handler);
@@ -211,6 +224,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
     port,
     plainUrl,
     quote,
+    http: httpState,
     methods,
     sentRaw,
     balances,

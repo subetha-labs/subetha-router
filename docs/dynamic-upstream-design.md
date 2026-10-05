@@ -452,8 +452,14 @@ journal に保存する本文は 256 KiB が上限。
    client が viem の素の `http` transport であることは `assertDynamicMppCapability`（起動時に呼ぶ。T13）と支払い時の両方で確かめる
 9. **1 件の支払いで Router が出す RPC**（`eth_fillTransaction` を持たない fixture で固定）: `eth_fillTransaction`（未対応の応答）→ `eth_getBlockByNumber` → `eth_maxPriorityFeePerGas` →
    `eth_estimateGas` → `eth_sendRawTransactionSync` の 5 回。送金は 1 回
-10. **RPC の期限は支払いの期限（30 秒）とは別**で、能力の http transport の設定（既定 10 秒／回）に従う。最悪の所要時間は「未払いの読取 5 秒＋RPC 最大 5 回＋credential つきの要求 30 秒」。
-    入口の 120 秒に収めるため、**動的プロファイルの能力は RPC の期限を短く（5 秒以下）設定する**ことを T13 の配線の条件にする
+10. **RPC の時間は adapter が抑える**（第 1 版は「能力の設定に従い、1 回 5 秒以下にすれば足りる」と書いたが、能力側の再試行と `Retry-After` の待ちが
+    数えられておらず誤りだった）。動的経路の RPC は**読取も含めて再試行しない**（能力の `retryCount` は引き継がない）。1 回の期限は 5 秒以下（`rpcTimeoutMs`。
+    能力の設定がより短ければそちら）、**1 件の支払いで RPC に使える時間の合計は 20 秒**（`rpcBudgetMs`。過ぎたら次の RPC を出さない）。
+    回数はノードの対応で変わる（`eth_gasPrice` に落ちると 6 回）ので、回数ではなく時間で抑える。
+    最悪の所要時間は「未払いの読取 5 秒＋RPC 20 秒＋最後の 1 回 5 秒＋credential つきの要求 30 秒」= 60 秒。署名（ローカルの鍵）には期限を付けていない
+11. **RPC の要求は「検査したもの」と「送るもの」を同じ値にする**: `method` は文字列の原始値として 1 度だけ読み、読取の `params` は JSON の写しにしてから送り、
+    送金は検査した raw だけを持つ新しい要求を組んで送る（SDK が渡した要求オブジェクトをそのまま transport に渡すと、getter や `toJSON` で検査の後に中身を変えられる）。
+    送金の raw は「**この支払いで**署名の境界が返した raw」との一致を要求する（送り主の照合だけでは、以前の支払いで署名された有効な raw を区別できない）
 
 ## 4. 受信の束縛（U-2・FR-6・AC-5）
 

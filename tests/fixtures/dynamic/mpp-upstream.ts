@@ -13,6 +13,7 @@ import type { AddressInfo } from "node:net";
 import { Challenge, Constants, Credential, Receipt } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import { createClient, http as viemHttp } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { tempoModerato } from "viem/tempo/chains";
 
 import type { TlsMaterial } from "../tls/generate.js";
@@ -47,7 +48,13 @@ export interface MppUpstream {
   close(): Promise<void>;
 }
 
-export async function startMppUpstream(tls: TlsMaterial, rpcUrl: string, host = "provider.test"): Promise<MppUpstream> {
+export async function startMppUpstream(
+  tls: TlsMaterial,
+  rpcUrl: string,
+  host = "provider.test",
+  /** `feePayer: true` を申し出る上流にする（手数料の肩代わり用の account を持たせる。鍵は乱数で、資金は無い）。 */
+  options: { readonly offerFeePayer?: boolean } = {},
+): Promise<MppUpstream> {
   const realm = "dynamic-mpp-fixture";
   const seen = { challenges: 0, credentials: 0, verified: 0, rejected: 0, urls: [] as string[] };
   const state: MppUpstreamState = { amount: "1000", mutateChallenge: undefined, prependChallenges: undefined, scope: "none", body: JSON.stringify({ ok: true }), contentType: "application/json", afterVerify: undefined, delayMs: 0 };
@@ -55,7 +62,7 @@ export async function startMppUpstream(tls: TlsMaterial, rpcUrl: string, host = 
   const mppx = Mppx.create({
     secretKey: "fixture-secret-0123456789abcdef0123456789abcdef",
     realm,
-    methods: [tempo.charge({ recipient: MPP_FIXTURE_RECIPIENT, currency: MPP_FIXTURE_CURRENCY, decimals: 0, getClient: () => client as never } as never)],
+    methods: [tempo.charge({ recipient: MPP_FIXTURE_RECIPIENT, currency: MPP_FIXTURE_CURRENCY, decimals: 0, getClient: () => client as never, ...(options.offerFeePayer === true ? { feePayer: privateKeyToAccount(generatePrivateKey()) } : {}) } as never)],
   });
   const api = mppx as unknown as {
     challenge: { tempo: { charge(parameters: Record<string, unknown>): Promise<Record<string, unknown>> } };

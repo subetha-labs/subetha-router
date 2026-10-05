@@ -36,6 +36,10 @@ export interface MppDynamicOptions {
   readonly unpaidTimeoutMs?: number;
   /** credential を付けた要求の期限。既定 30 秒。 */
   readonly paidTimeoutMs?: number;
+  /** RPC 1 回の期限の上限。既定 5 秒（能力の設定がこれより短ければそちら）。RPC は再試行しない。 */
+  readonly rpcTimeoutMs?: number;
+  /** 1 件の支払いで RPC に使える時間の合計。過ぎたら次の RPC を出さない。既定 20 秒。 */
+  readonly rpcBudgetMs?: number;
   readonly now?: () => number;
 }
 
@@ -548,6 +552,8 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
   assertCapabilityShape(capability);
   const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
   const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
+  const rpcTimeoutMs = options.rpcTimeoutMs ?? 5_000;
+  const rpcBudgetMs = options.rpcBudgetMs ?? 20_000;
   const now = options.now ?? Date.now;
   const denyHosts = options.denyHosts ?? [];
 
@@ -658,9 +664,9 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
           chain: client.chain,
           transport: guardedRpcTransport(transport, plain.url, () => ({ routeId: request.routeId, operation: "rpc" }), {
             fetchOptions: plain.fetchOptions,
-            retryCount: plain.retryCount,
-            retryDelay: plain.retryDelay,
-            timeout: plain.timeout,
+            // 能力側の再試行は引き継がない（読取も含めて 1 回ずつ。所要時間を数えられる形にする）。
+            retryCount: 0,
+            timeout: Math.min(plain.timeout ?? rpcTimeoutMs, rpcTimeoutMs),
           }),
         });
         rpcRequest = guarded.request.bind(guarded) as RpcRequest;
@@ -670,31 +676,56 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
 
       const guard = createGuardedTempoAccount({ account: capability.account, profile, offer: approved, now });
       let sends = 0;
-      const guardedRequest = async (args: { method: string; params?: unknown }): Promise<unknown> => {
-        if (!isSendOrSignMethod(args.method)) {
-          return rpcRequest(args);
+      const rpcDeadline = Date.now() + rpcBudgetMs;
+      /**
+       * SDK・viem からの RPC。**検査した値と、実際に送る値を同じものにする**: `method` は文字列の原始値として 1 度だけ読み、
+       * `params` は JSON の写し（getter・`toJSON`・Proxy を持たない素の値）にしてから分類・検査し、その写しだけを送る。
+       */
+      const guardedRequest = async (args: unknown): Promise<unknown> => {
+        const method: unknown = isRecord(args) ? args["method"] : undefined;
+        if (typeof method !== "string") {
+          throw new TempoSigningRefusedError("destination_rpc_request_refused");
         }
-        if (!RAW_SEND_METHODS.has(args.method)) {
+        if (Date.now() >= rpcDeadline) {
+          throw new TempoSigningRefusedError("destination_rpc_budget_exhausted");
+        }
+        if (!isSendOrSignMethod(method)) {
+          let params: unknown;
+          try {
+            const raw: unknown = (args as Record<string, unknown>)["params"];
+            params = raw === undefined ? undefined : (JSON.parse(JSON.stringify(raw)) as unknown);
+          } catch {
+            throw new TempoSigningRefusedError("destination_rpc_request_refused");
+          }
+          return rpcRequest(params === undefined ? { method } : { method, params }, { retryCount: 0 });
+        }
+        if (!RAW_SEND_METHODS.has(method)) {
           throw new TempoSigningRefusedError("destination_send_method_refused");
         }
         if (sends >= 1) {
           // 1 度目の成否が不明でも、2 度目は出さない。
           throw new TempoSigningRefusedError("destination_duplicate_send_refused");
         }
-        const raw = Array.isArray(args.params) ? (args.params as unknown[])[0] : undefined;
-        // 署名の境界を通った raw そのものであること。そのうえで中身をもう一度確かめる。
-        if (raw === undefined || raw !== guard.signedRaw()) {
+        const params: unknown = (args as Record<string, unknown>)["params"];
+        const raw: unknown = Array.isArray(params) ? params[0] : undefined;
+        /**
+         * **この支払いで署名の境界が返した raw そのもの**であること（文字列の原始値どうしの比較）。送り主の照合だけでは足りない:
+         * 以前の支払いで署名された、まだ有効な raw も送り主は同じである。そのうえで中身をもう一度確かめる。
+         */
+        const signed = guard.signedRaw();
+        if (typeof raw !== "string" || signed === undefined || raw !== signed) {
           throw new TempoSigningRefusedError("destination_send_not_the_signed_transaction");
         }
-        checkRawTempoTransfer(raw, profile, approved, capability.account.address, now());
+        checkRawTempoTransfer(signed, profile, approved, capability.account.address, now());
         sends += 1;
-        return rpcRequest(args, { retryCount: 0 });
+        // 送るのは、検査した raw だけを持つ新しい要求。
+        return rpcRequest({ method, params: [signed] }, { retryCount: 0 });
       };
       const sdkClient = createViemClient({
         // fee token を固定する（viem は未指定のとき chain の値を入れる）。入らなければ署名の境界が拒否する。
         chain: { ...chain!, feeToken: profile.destination.feeAsset as Hex } as never,
         account: guard.account as never,
-        transport: custom({ request: guardedRequest }, { retryCount: 0 }),
+        transport: custom({ request: guardedRequest as never }, { retryCount: 0 }),
       });
       const mppx = Mppx.create({
         methods: [
