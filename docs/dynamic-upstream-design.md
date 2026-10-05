@@ -1,51 +1,52 @@
 # 設計: 動的上流 URL
 
-> 2026-10-05。要件は `docs/dynamic-upstream-requirements.md`（以下「要件」）。FR・AC・U の番号はその文書のもの。
+> 2026-10-05、第 2 版。要件は `docs/dynamic-upstream-requirements.md`（以下「要件」）。FR・AC・U の番号はその文書のもの。
 > 本書は U-1〜U-9 に結論を出し、変更箇所と試験を定める。**実装の着手とタスク分割は次のフェーズ**。
-> 先行して出した修正: 予算の予約を verify の後へ移した（PR #6、本番反映済み。要件 FR-23 の主要部分）。
+> 第 1 版は独立レビューで REJECT（重大 1・高 7・中 4）。指摘と反映先は §15。
+> 先行して出した修正: 予算の予約を verify の後へ（PR #6、本番反映済み）、MPP 受信の credential を quote に束縛（PR #7）。
 
 ## 0. 一枚で
 
 ```
 呼び出し側 ─ quote(profileId, url) ─> Router ─ GET url（未払い・A の transport）─> 上流
-            <─ subject（url・payTo・上流額・手数料・受信額・ownerKey）
+            <─ subject（url・payTo・上流額・手数料・受信額・開示）＋ ownerKey
 人間が承認
 呼び出し側 ─ purchase(credential, ownerKey) ─> Router
-                                               1. preflight（署名に効く束縛）
-                                               2. 上流を読み直して保存済み offer と照合
-                                               3. 受信 verify
-                                               4. ここで初めて journal に書く → 予算予約 → 受信 settle
-                                               5. 範囲内の支払い操作だけを署名／送金 → 応答（上限つき）
+     1. 持ち主・承認・設定の指紋・期限・preflight（署名／送金そのものに効く束縛）
+     2. 試行の印を控えに残す（1 quote に 1 行まで）
+     3. 上流を読み直して保存済み offer と照合 → 受信 verify
+     4. 期限の再検査 →【予算の確認と journal への昇格を 1 つの操作で】→ 受信 settle
+     5. 運用者の鍵は「設定から組み直した支払い」だけに署名 → 応答（上限つき）
 ```
 
-設計の柱は 4 つ。
+柱は 4 つ。
 
-1. **動的プロファイル = 運用者が設定で宣言する「宛先だけが空いた route」**。起動時の Map は既存のまま、プロファイル 1 つが 1 エントリになる（U-1）
-2. **未払いの quote は journal に書かない**。別の「quote 控え」に置き、受信 verify が通った時点で journal に昇格する（FR-21・FR-33）
-3. **運用者の鍵が行う操作は、上流の offer ではなく設定で決めた範囲と照合する**（FR-18）
-4. **持ち主の証明は quote 時に発行する `ownerKey`**。共有 principal・`requestId`・`paymentId` は証明に使わない（FR-32）
+1. **動的プロファイル** = 運用者が設定で宣言する「宛先だけが空いた route」（U-1）
+2. **未払いの quote は journal に入れない**。耐久性のある「控え」に置き、**予算が通ったときだけ** journal に昇格する（FR-21・FR-33）
+3. **運用者の鍵は、上流や SDK が渡してきたものではなく、設定と承認済みの値から組み直したものにだけ署名する**（FR-18）
+4. **持ち主の証明は `ownerKey`**。共有 principal・`requestId`・`paymentId` は証明に使わない（FR-32）
 
 ## 1. 設定（U-1・U-3・FR-2・FR-13）
 
-`RouterConfig` に `dynamic` を足す。**省略時は無効**。env からは有効にできない（本番の入口 `tools/remote-mcp.ts` がコードで組む設定に書く）。
+`RouterConfig` に `dynamic` を足す。**省略時は無効**。env からは有効にできない（本番の入口 `tools/remote-mcp.ts` がコードで組む）。
 
 ```ts
 interface DynamicConfig {
   readonly enabled: boolean;
   readonly profiles: Readonly<Record<string, DynamicProfile>>;
-  readonly budget: BudgetLimits;              // 静的 route とは別の通算（§6）
-  readonly limits: DynamicLimits;             // §8 の数値
-  readonly denyHosts: readonly string[];      // §7.3
+  readonly budget: BudgetLimits;              // 静的 route とは別の通算（§6.4）
+  readonly limits: DynamicLimits;             // §7 の数値
+  readonly denyHosts: readonly string[];      // §7.4
 }
 interface DynamicProfile {
   readonly profileId: string;                 // routeId と同じ文字種・同じ名前空間。route と重複したら起動失敗
-  readonly sourceRail: "x402" | "mpp";        // SubEtha 受信は対象外（本番の構成に無い）
+  readonly sourceRail: "x402" | "mpp";        // SubEtha 受信は対象外
   readonly source: { network; asset; decimals; payTo };          // 額は持たない
   readonly rail: "x402" | "mpp";
   readonly destination: {
     scheme; network; asset; decimals;
     tokenDomain?: { name; version };          // x402 送信: EIP-712 domain の権威
-    feeAsset?: string; maxFee?: string;       // mpp 送信: 手数料資産と 1 件の上限（base units）
+    feeAsset?: string; maxFee?: string;       // mpp 送信: 手数料資産（必須）と 1 件の上限（feeAsset の base units）
   };
   readonly par: true;                          // 1:1 とみなす宣言。true 以外は起動失敗
   readonly maxUpstreamAmount: string;          // 送信資産の base units
@@ -53,384 +54,475 @@ interface DynamicProfile {
 }
 ```
 
-- プロファイルは **route と同じ経路で起動時 Map に載る**: `railByRoute`（`src/main.ts:75-98`）、`inboundByRoute`（`:109-154`）、
-  route 単位の受信 adapter 生成（`:252-305`）は、route の列にプロファイルを連結して回す。
-  プロファイルの `routeBinding` は `routeBindingOf` と同じ形（`profileId|GET|/v1/routes/<profileId>/resource`）で、**プロファイル単位**。
-  quote 単位の束縛は §4 で別に作る
-- `Intent.routeId` にはプロファイル ID が入る。**購入口のパス・client・MCP の purchase は変更なし**
-  （`/v1/routes/<profileId>/resource`、`src/client/index.ts:295`、`src/http/app.ts:221-233`）
-- 指紋（`authoritativeTermsOf` 相当）にはプロファイルの全欄と `dynamic.enabled` を含める。
-  **手数料・上限・ペア・有効／無効のどれを変えても、変更前の quote は purchase で `quote_changed`**（FR-16・FR-34）。
-  既存の判定（`orchestrator.ts` の `routeMismatch`）をそのまま使う: 無効化するとプロファイルが解決できず `currentRoute === undefined` になる
-- 一覧（R1）の `routes` は変えない。`dynamic.enabled` のとき、同じ応答に `dynamic: { profiles: [...] }` を**追加**する
-  （profileId、両側の rail／network／asset／decimals、手数料規則、上限）。上流 URL は元々持たない
+**プロファイルは `enabled` に関わらず解決できる**（HTTP・core とも）。無効のとき:
+quote は外部接続の前に `dynamic_disabled`。purchase は、未昇格の quote なら `quote_changed`、既に始まった購入なら現在の状態を返す
+（新しい実行は起きない。`orchestrator.ts:402-405` の既存の順序どおり）。指紋には全欄と `enabled` を含めるので、
+**手数料・上限・ペア・有効／無効のどれを変えても、変更前の未実行の quote は `quote_changed`**（FR-16・FR-34）。
 
-### 1.1 旧要件が挙げた静的前提への答え（旧 §12.2・§15.1 の全箇所）
+### 1.1 起動時の配線で変える箇所（第 1 版は「列挙元だけ」と書いたが誤り）
 
-| 箇所 | 対応 |
+| 箇所 | 変更 |
 |---|---|
-| `main.ts` の送信 dispatch・受信 Map 2 本 | プロファイルを route と同列に登録。変更は列挙元だけ |
-| `orchestrator.ts` の `unknown_route` | `resolveRoute` に加えて `resolveProfile` を引く。どちらにも無ければ従来どおり拒否 |
-| `app.ts` の quote／purchase の route 要求 | 同上。quote 本文に `upstream.url` があるときだけ動的として扱う |
-| `projection.ts` の `RouteConfig` 要求 | 動的用の `dynamicQuoteBody` を別に持つ（静的の関数は触らない） |
-| adapter 内の upstream Map（`x402.ts:255`、`mpp.ts:203`） | **Map はそのまま**。動的は port に渡された URL を使う別経路（§3） |
-| `client` の固定パス、MCP の `routeId` | 変更なし（profileId が `routeId` の位置に入る） |
-| `Intent` に上流 URL が無い | `upstream`・`dynamic` を追加（§2.3）。旧実装は未知の欄を無視する（`store.ts:51-82`） |
+| `main.ts:192-201` 能力の要求と upstream Map の構築 | プロファイルのレールも `railsInUse` に入れる。プロファイルは upstream Map に**入れない** |
+| `main.ts:75-98` `railByRoute` | route＋プロファイルで Map を作る。**`readChallenge(routeId, target)` の `target` を転送する**（今は捨てる。`:95`） |
+| `main.ts:109-154` `inboundByRoute`、`:252-305` 受信 adapter の生成 | プロファイルごとに受信 adapter を作り、`routeBinding`（プロファイル単位）で引けるようにする |
+| `orchestrator.ts` `quoteLocked`／`purchaseLocked` | `resolveRoute` に加え `resolveProfile`。動的は別関数に分け、静的の経路に条件分岐を増やさない |
+| `http/app.ts:286,313` | route かプロファイルのどちらかに解決できれば通す。動的の投影は `dynamicQuoteBody`（静的の関数は触らない） |
+| `client/index.ts:234`、`mcp/tools.ts:209` | 一覧の `dynamic` を落とさず返す。動的 quote 文書の追加欄（`upstream`・`pricing`・`disclosures`・`ownerKey`）を保持する |
+| `Intent`・`store.ts:51-82` | `upstream`・`dynamic` を追加し、`intentFromCreated` で**明示的に復元**する（列挙式なので足し忘れると消える） |
 
-## 2. 入口と記録（U-1・FR-1・FR-3〜5・FR-7）
+client／MCP が quote 文書から読むのは、**credential を組むための受信 offer、購入口のパス（`/v1/routes/<profileId>/resource`）、
+承認の束縛、`paymentId`、`ownerKey`**。Router が実行するのは保存した記録で、文書中の URL・`payTo`・額は実行に使わない。
+
+## 2. 入口と記録（FR-1・FR-3〜5・FR-7・FR-14）
 
 ### 2.1 入口
 
-- HTTP: `POST /v1/quotes` の本文に `upstream: { url }` を足せる。`routeId` にはプロファイル ID を入れる。
-  `upstream` が無ければ**現行と完全に同じ処理**
-- MCP: **新しい tool `subetha_router_quote_url`**（`profileId`・`url`・`requestId`）。既存の `subetha_router_quote` の
-  schema と説明は変えない。purchase／status は既存 tool に**省略可能な引数を足すだけ**（§5）
-- 呼び出し側は**自分が払えるレールのプロファイルを選ぶ**。上流がそのプロファイルの送信レールの offer を出さなければ
-  `no_matching_offer`。Router がプロファイルを推測して選ぶことはしない
+- HTTP: `POST /v1/quotes` の本文に `upstream: { url }` を足せる。`routeId` にプロファイル ID。`upstream` が無ければ現行と同じ処理
+- MCP: **新しい tool `subetha_router_quote_url`**（`profileId`・`url`・`requestId`）。既存 tool の schema は変えず、
+  purchase／status に省略可能な引数を足す（§5）
+- 呼び出し側が**自分の払えるレールのプロファイルを選ぶ**。Router は推測で選ばない
 
 ### 2.2 URL（FR-3・FR-4・U-8）
 
-`parseUpstreamUrl(raw)` は純粋関数で、**ネットワークに出る前に**次を拒否する。通ったら `new URL(raw).href` を唯一の表現として返す。
+`parseUpstreamUrl(raw)` は純粋関数で、**ネットワークに出る前に**拒否する。通ったら `new URL(raw).href` が唯一の表現。
 
 | 規則 | 値 |
 |---|---|
 | 長さ | 2048 文字以下 |
 | scheme | `https:` のみ |
 | userinfo・fragment | 拒否 |
-| ポート | 既定（443）のみ。明示的な `:443` 以外のポート指定は拒否 |
-| ホスト | **IP リテラルは拒否**（v4・v6 とも）。末尾ドット付きは拒否 |
-| `raw !== href` | **拒否**（`new URL()` が書き換える入力＝大文字ホスト・dot segment・空白・既定ポートの明示などは、呼び出し側に直して出し直させる） |
-| クエリ | 文字列の一部として許す。並べ替えない |
-| `denyHosts` | §7.3 |
+| ポート | 既定（443）のみ |
+| ホスト | IP リテラル（v4・v6）と末尾ドットは拒否 |
+| `raw !== href` | **拒否**（`new URL()` が書き換える入力は、呼び出し側に直して出し直させる） |
+| クエリ | 文字列の一部として許す |
+| `denyHosts` 等 | §7.4 |
 
-「正規化で変わる入力を拒否する」ことで、**呼び出し側が渡した文字列・表示・保存・fetch・上流の申告との比較がすべて同一のバイト列**になる。
-独自の同値規則は持たない。
+### 2.3 offer の選び方（FR-14）
 
-### 2.3 quote の記録
+上流が返した順に見て、**§3.3 の「offer の検査」をすべて通る最初の 1 件**。入力は offer 列・プロファイル・能力の種類だけ。
+通るものが無ければ `no_matching_offer`。金額は `^[0-9]{1,30}$` の 10 進文字列だけを BigInt にする（指数・符号・空は拒否）。
 
-動的 quote の記録（控え、昇格後は journal の `created`）は既存の欄に加えて次を持つ。
+### 2.4 quote の記録（FR-5・FR-11）
+
+控え（昇格後は journal の `created`）に、既存の欄に加えて次を保存する。**承認対象に出す値はすべてここにある**。
 
 ```
 upstream: { url, method: "GET" }
-dynamic:  { profileId, upstreamAmount, fee, ownerKeyHash }
-destination.selectedOffer   // payTo を含む。既存欄
-routeFingerprint            // プロファイルの指紋。既存欄
+dynamic: {
+  profileId,
+  profile: { source: {network, asset, decimals, payTo}, destination: {scheme, network, asset, decimals, tokenDomain?, feeAsset?, maxFee?},
+             rail, sourceRail, fee, maxUpstreamAmount },      // 適用したプロファイルの写し
+  pricing: { upstreamAmount, converted, fee, total },
+  ownerKeyHash
+}
+destination.selectedOffer    // payTo を含む。既存欄
+routeFingerprint             // プロファイルの指紋。既存欄
 ```
 
-**purchase はこの記録だけを実行する。** MCP が持ち回る quote 文書から読むのは `quoteId` と `ownerKey` だけで、
-URL・`payTo`・額は読まない（既存の `purchaseLocked` が `store` の intent しか使わないのと同じ）。
+### 2.5 `requestId` の衝突（FR-7）
 
-### 2.4 `requestId` の衝突（FR-7）
+`(principal, requestId)` が既にあるとき、既存が静的で要求も同じ静的 route なら従来どおり既存 quote を返す。
+**それ以外は `request_id_conflict`**（動的 quote は冪等に再取得できない。返すには持ち主の証明が要るが、取り直す側はまだ持っていない）。
 
-`(principal, requestId)` が既にあるとき:
-- 既存が静的で要求も同じ静的 route → 従来どおり既存 quote を返す
-- **それ以外（どちらかが動的、または route／URL が違う）→ `request_id_conflict`**。
-  動的 quote は**冪等な再取得をしない**（返すには持ち主の証明が要るが、再取得する側はまだ `ownerKey` を受け取っていない）。
-  応答を取り損ねた呼び出し側は新しい `requestId` で取り直す。未払いの quote は何も消費しない（§6）
-
-他人の `requestId` を先に使って衝突させる嫌がらせは可能だが、相手は別の ID で取り直せる（§10 に記録）。
-
-## 3. 送信レール（port の拡張、FR-8・FR-18・FR-24・FR-27・FR-28）
+## 3. 送信レール（FR-8・FR-18・FR-24・FR-27・FR-28）
 
 ```ts
-interface UpstreamTarget { readonly url: string }          // parseUpstreamUrl を通った href
+interface UpstreamTarget { readonly url: string }
 interface OutboundRail {
   readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]>;
   pay(request: PayRequest /* + target?: UpstreamTarget */): Promise<PayResult>;
 }
 ```
 
-- `target` が**無い**呼び出しは現行と同じ（起動時 Map の URL、クエリ拒否、fixture の loopback 規則）
-- `target` が**ある**呼び出しは、adapter 生成時に渡した **`dynamic` オプション**（プロファイル、動的用 transport、上限）を使う。
-  `dynamic` を持たない adapter に `target` を渡したら例外（fail closed）
-- core は、動的 intent については**常に** `intent.upstream.url` を `target` に渡す。静的 intent には渡さない
+`target` が無い呼び出しは現行と同じ。ある呼び出しは adapter 生成時の `dynamic` オプション（プロファイル・動的用 transport・上限）を使い、
+`dynamic` を持たない adapter では例外。core は動的 intent に**常に** `intent.upstream.url` を渡す。
 
-### 3.1 動的用 transport（FR-24・AC-12）
+### 3.1 動的経路の transport（FR-24・AC-12）— 要件どおり、loopback 例外を作らない
 
-`composeRails` は動的用に**別の transport インスタンス**を作る: `transportFor(false, report)`。
-署名能力が `non-signing-fixture` でも、`fixtureFacilitators` があっても、**動的用は loopback を許さない**。
-
-**要件との差分（明示）**: 無課金の成立試験（AC-2）には loopback の上流 fixture が要る。そのため
-**コードからしか渡せない能力 `capabilities.fixtureDynamicUpstreams: true`** を 1 つ足し、これがあるときだけ動的用 transport が
-loopback を許す。渡すのは `tests/fixtures/*` の起動スクリプトだけで、`tools/remote-mcp.ts` を含む本番の入口は渡さない
-（env・設定・呼び出し側の入力からは作れない。既存の `fixtureFacilitators` と同じ型の扱い。`src/main.ts:59-69`）。
-AC-12 の「fixture 能力の Router でも loopback に届かない」は「**この専用能力を持たない限り**届かない」と読み替え、
-静的検査（本番の入口がこの能力名を参照しない）を試験に加える。
+- 動的経路が使う transport は**すべて** `allowLoopback: false`: 上流への HTTP、動的プロファイルの MPP 送信の RPC、
+  動的プロファイルの受信 adapter（facilitator・RPC）。`composeRails` は静的用とは別のインスタンスを作って渡す
+- 動的プロファイルの MPP 能力は **viem の素の `http` transport** であること（`mpp.ts:246-275` の guarded 経路に必ず乗る）。
+  `non-signing-fixture` の `custom` transport は guarded transport を通らないので、**動的プロファイルでは起動失敗**にする
+- **無課金の成立試験（AC-2）のための継ぎ目**: `GuardedTransportOptions.dialForTest`。
+  宛先の判定（解決・分類・拒否）は**本番と同じコードがそのまま走り**、判定を通った公開アドレスへの TCP 接続だけを、
+  試験が指定した loopback の fixture（任意のポート）に向け直す。SNI と証明書検証は元のホスト名のまま（fixture は試験用 CA の証明書を出す）。
+  つまり試験の Router でも、`https://127.0.0.1/…` や内部に解決する名前は**判定で拒否される**（AC-12 を書き換えない）
+- `dialForTest` を渡せるのは `tests/fixtures/*` の起動スクリプトだけ。`src/main.ts` の本番経路と `tools/` はこの名前を参照しない（静的検査を試験にする）
 
 ### 3.2 一致の定義（FR-8・AC-6）
 
-purchase 時の読み直しで比較するのは**保存した `DestinationOffer` の全体**（既存の `stableJson` 一致）。その中身は:
+purchase 時の読み直しで比較するのは**保存した `DestinationOffer` の全体**（既存の `stableJson` 一致）。
 
-| レール | 含む | 含まない（毎回変わってよい） |
+| レール | 含む | 含まない |
 |---|---|---|
 | x402 | `scheme`・`network`・`asset`・`amount`・`payTo`・`maxTimeoutSeconds`・`extra`（`name`・`version`） | 402 の本文、`resource` の記述、`error` |
-| mpp | `scheme`（`tempo/charge`）・`network`・`asset`・`amount`・`payTo`・`extra.realm`・`extra.terms`（`request` と `meta` の全文） | challenge の `id`・`expires`（`src/adapters/outbound/mpp.ts:120-145` の既存の射影のとおり） |
+| mpp | `scheme`・`network`・`asset`・`amount`・`payTo`・`extra.realm`・`extra.terms`（`request` と `meta` の全文） | challenge の `id`・`expires`（`mpp.ts:120-145` の既存の射影） |
 
 ### 3.3 支払い操作の範囲（FR-18・U-3・AC-16）
 
-**判断の基準は設定（プロファイル）で、上流の offer ではない。** 範囲外の offer は quote の時点で候補から外し（`no_matching_offer`）、
-purchase 時には署名・送金の直前にもう一度、**実際に署名／送信しようとしているもの**を検査する。
+**原則: 署名器に渡すものを、設定と承認済みの値から Router が組み直す。** 上流の offer と SDK は「何を払うか」の提案者でしかない。
+検査は 3 段: (i) offer の検査（quote 時・読み直し時）、(ii) **署名の境界**、(iii) 送信の境界（MPP のみ・二重の確認）。
 
 **x402 送信（EIP-3009 `exact`）**
 
-| 段 | 検査 |
+| 段 | 内容 |
 |---|---|
-| offer（quote 時・読み直し時） | トップレベルのキーは `scheme・network・asset・amount・payTo・maxTimeoutSeconds・extra` のみ。`extra` のキーは `name・version` のみで**プロファイルの `tokenDomain` と一致**。`scheme === "exact"`。`network`・`asset` はプロファイルと一致。`amount` は 10 進正整数で `maxUpstreamAmount` 以下。`payTo` は EVM アドレスで、ゼロ・運用者自身・token コントラクトでない。`maxTimeoutSeconds` は 1〜600 |
-| 署名直前（既存の `guardedSigner` に追加。`x402.ts:399-424`） | 既存: `primaryType`・`chainId`・`verifyingContract`・`to`・`from`・`value`。**追加**: `domain.name`／`version` がプロファイルと一致、`domain` に余分なキーが無い、`types.TransferWithAuthorization` が EIP-3009 の 6 欄と**完全一致**、`validAfter <= now`、`validBefore <= now + 600 + 60`、`nonce` が 32 バイト |
+| (i) offer | トップレベルのキーは `scheme・network・asset・amount・payTo・maxTimeoutSeconds・extra` のみ。`extra` は `name・version` のみで**プロファイルの `tokenDomain` と一致**。`scheme === "exact"`、`network`・`asset` はプロファイルと一致、`amount <= maxUpstreamAmount`、`payTo` は EVM アドレスでゼロ・運用者自身・token コントラクトでない、`maxTimeoutSeconds` は 1〜600 |
+| (ii) 署名（`x402.ts:399-424` の `guardedSigner` を置き換え） | SDK が渡した typed data から**取り出すのは `validAfter`・`validBefore`・`nonce` だけ**。`validAfter <= now`、`now < validBefore <= now + 660`、`nonce` は 32 バイトであることを確かめ、それ以外の値が承認済みと一致すること（`to`・`from`・`value`・`chainId`・`verifyingContract`）も確かめたうえで、**`domain = {name, version, chainId, verifyingContract}`（プロファイルから）、固定の `EIP712Domain`／`TransferWithAuthorization` 型定義、`message` を Router が組み直して署名器に渡す**。SDK が渡した `types`・`domain`・`primaryType` はそのまま使わない（`types.EIP712Domain` の差し替えで署名対象を変えられるため。`viem/_esm/utils/signature/hashTypedData.js:9`） |
 
-**MPP 送信（Tempo charge・push）**
+**MPP 送信（Tempo charge・push・local account）**
 
-| 段 | 検査 |
+| 段 | 内容 |
 |---|---|
-| challenge（quote 時・読み直し時） | `method === "tempo"`・`intent === "charge"`。`request` のキーは `amount・currency・recipient・methodDetails`（＋ SDK が必ず付ける既知の欄。実装時に実 challenge から列挙して固定し、**未知のキーは拒否**）。`methodDetails` のキーは `chainId・supportedModes・memo` のみ（**`splits`・`feePayer`・`machineTokenEnabled` は拒否**）。`amount > 0`（0 は送金ではなく proof 署名になる。`mppx/dist/tempo/client/Charge.js:80-97`）。`supportedModes` が無いか `push` を含む。`currency`・`chainId` はプロファイルと一致 |
-| 能力 | 動的プロファイルが使う MPP 能力は `mode: "push"` を明示していること。無ければ**起動失敗**（`pull` が SDK に選ばれる余地を残さない。要件 §4 の未検証経路） |
-| 送信直前（既存の送金 RPC guard に追加。`mpp.ts:307-321`） | 通すメソッドは **`eth_sendRawTransactionSync`／`eth_sendRawTransaction` のみ**（他の送金系は拒否）。raw を `ox/tempo` の `TxEnvelopeTempo.deserialize` で復号し: 型 `0x76`、`chainId` 一致、**call はちょうど 1 つ**、`to === プロファイルの asset`、`value === 0`、`data` は `transferWithMemo(recipient, amount, memo)` か `transfer(recipient, amount)` で **`recipient`・`amount` が保存した offer と一致**、`feeToken` は未指定か `feeAsset`、`feePayerSignature`・`authorizationList`・`keyAuthorization` が無い、`validBefore <= now + 60`、**`gas × maxFeePerGas` から求めた手数料の上限が `maxFee` 以下** |
+| 能力 | 動的プロファイルの MPP 能力は `mode: "push"` を明示し、**`account.type === "local"`** であること。違えば起動失敗（JSON-RPC account は `sendCallsSync` に行き、署名の境界を Router が持てない。`mppx/dist/tempo/client/Charge.js:200-219`） |
+| (i) challenge | `method === "tempo"`・`intent === "charge"`。`request` と `methodDetails` のキーは許可リスト（実 challenge から列挙して固定。M-3）。**`splits`・`feePayer`・`machineTokenEnabled`・未知のキーは拒否**。`amount > 0`（0 は送金ではなく proof 署名になる。`Charge.js:80-97`）、`supportedModes` が無いか `push` を含む、`currency`・`chainId` はプロファイルと一致 |
+| (ii) 署名 | SDK に渡す account を **包んだ local account** にする。`signTransaction(tx)` は次を確かめてから、**確かめた欄だけで組み直した transaction** を元の account に署名させる: Tempo 型、`chainId` 一致、**call はちょうど 1 つ**で `to === asset`・`value === 0`・`data` が `transferWithMemo(recipient, amount, memo)` か `transfer(recipient, amount)` で `recipient`・`amount` が保存した offer と一致、**`feeToken === feeAsset`（未指定は拒否）**、`gas > 0`・`maxFeePerGas > 0` で手数料の上限が `maxFee` 以下、`validBefore <= now + 60`、`feePayer`・`authorizationList`・`keyAuthorization`・`accessList` が無い。1 支払いにつき署名は 1 回。**SDK に見せる account は最小の facade**: 持つのは `address`・`type: "local"`・この `signTransaction` だけ。`sign({hash})`（生の署名）・`signMessage`・`signTypedData`・`signAuthorization` は**存在しないか常に拒否**。`signTransaction` に渡された `serializer` 引数は**使わず**、Router が選んだ Tempo の serializer で直列化する（viem は serializer の出力のハッシュに署名するため。`viem/_esm/accounts/utils/signTransaction.js`）。元の account は `tempo.charge` の `account` にも、SDK に返す client にも**載せない**（今は両方に載っている。`mpp.ts:285`・`:332`）。組み直すとき、SDK が決めた nonce（expiring nonce）と有効期限の欄は範囲を確かめたうえで引き継ぐ |
+| fee token の固定 | adapter が SDK に渡す client の chain に `feeToken: feeAsset` を設定する（viem は未指定のとき chain の値を入れる。`viem/_esm/tempo/chainConfig.js:123-124`）。入らなかった場合は (ii) が拒否する |
+| (iii) 送信（既存の RPC guard に追加。`mpp.ts:307-321`） | **送金系のメソッド**のうち通すのは `eth_sendRawTransactionSync`／`eth_sendRawTransaction` のみ（見積り・nonce・receipt などの読取はそのまま通す）。raw を `ox/tempo` の `TxEnvelopeTempo.deserialize` で復号し、(ii) と同じ欄を**もう一度**確かめる。1 支払い 1 回 |
 
-**実測（`tools/dyn-mpp-tx-decode-probe.ts`、本書と同じ commit）**: `ox/tempo` で署名済みの Tempo transaction を組み、
-復号して上の全欄（`calls`・`to`・関数名と引数・`feeToken`・`gas`・`maxFeePerGas`・`validBefore`・`feePayerSignature`）を
-取り出せることを確認した。**まだ示していないこと**: (a) SDK が実際に guard へ渡す raw がこの形であること
-(b) `gas × maxFeePerGas` を `feeAsset` の base units に直す換算。どちらも実装の最初のタスクで fixture と testnet の実 tx から確かめ、
-換算が決まるまで `maxFee` の検査は「上限を満たさなければ拒否」ではなく**機能自体を有効にしない**（M-1・M-2、§11）。
+**実測と未実測**: `tools/dyn-mpp-tx-decode-probe.ts`（本書と同じ commit）は、**手で組んだ** Tempo transaction を復号して上の欄を取り出せることを示す。
+署名の境界が**見ないもの**: 署名より前の見積り・読取の RPC、receipt の真偽、確定。
+示していないこと: (a) SDK が包んだ account の `signTransaction` に渡す transaction の実際の形 (b) 手数料の上限（`gas × maxFeePerGas`）を `feeAsset` の base units に直す換算
+(c) chain の `feeToken` 設定が実際に transaction に入ること。**(a)〜(c) が実装の最初のタスクで確かめられるまで、MPP 送信のプロファイルは有効にしない**（M-1・M-2）。
 
-### 3.4 上流から受け取るものの上限（FR-27・FR-28・U-8）
+### 3.4 上流から受け取るものの上限と、応答の扱い（FR-27・FR-28）
 
 | 対象 | 上限 | 超過時 |
 |---|---|---|
-| 応答ヘッダ全体 | undici の既定（16 KiB）を明示して固定 | transport の失敗（未払い） |
-| 402 の本文 | 64 KiB | 読み切らずに中断、quote 不成立／`destination_challenge_unreadable` |
+| 応答ヘッダ全体 | 16 KiB（動的用 Agent に `maxHeaderSize` を**明示**。undici の既定は Node から継承され固定値ではない） | **未払いの要求**では transport の失敗。**支払いヘッダを付けた要求**では送金の有無が分からないので `unknown` |
+| 402 の本文 | 64 KiB | 中断。quote 不成立／`destination_challenge_unreadable` |
 | `accepts`／challenge の個数 | 16 | 同上 |
-| 有料応答の本文 | 256 KiB | receipt が整合していれば `paid_no_data`（理由 `response_too_large`）、していなければ `unknown` |
+| 有料応答の本文 | 256 KiB | 下の順序で判定 |
 
-- 実装は **body を上限つきの stream に差し替えた `Response`** を SDK に渡す（SDK の `processResponse` はそのまま使う）。
-  receipt はヘッダにあるので、本文を読む前に判定できる
-- **対応する応答**: `content-type` が `application/json`（パラメータ可）で、最上位が object か array の JSON。
-  それ以外は `paid_no_data`（理由 `unsupported_response`）。x402・MPP で同じ規則にする
-  （現状は MPP が object のみ。`mpp.ts:542-558`。**動的経路だけ**揃え、静的は変えない）
-- journal に保存する本文は上の 256 KiB が上限（FR-24 相当）
+有料応答は**本文を読む前に** receipt ヘッダを Router 自身が検証する（x402 の SDK の `processResponse` は本文を先に読むので使わない。
+`@x402/core` の該当箇所を確認済み。receipt の復号は SDK の関数を使う）。
+receipt が整合 → 本文を上限つきで読む → 超過は `paid_no_data`（`response_too_large`）、対応外の形は `paid_no_data`（`unsupported_response`）。
+receipt が不整合・無い → 本文は読まずに捨て、`unknown`（既存の判定のまま）。
+
+**対応する応答**: `content-type` が `application/json`（パラメータ可）で、**最上位が JSON object**。配列・文字列・数値・text は対応外（AC-15 のとおり）。
+journal に保存する本文は 256 KiB が上限。
 
 ## 4. 受信の束縛（U-2・FR-6・AC-5）
 
-プロファイルの受信 adapter は route のものと同じクラスを使い、**動的プロファイル用の生成時オプション**で次を有効にする。
+**x402 受信**（動的プロファイルの adapter だけに有効にする生成時オプション。静的は変えない）: preflight に
+`authorization.nonce === offer.extra.challengeNonce`、`to === offer.payTo`、`value === offer.amount`、`validBefore <= offer.extra.expiresAt` を追加する。
+**束縛を成立させるのは preflight ではなく、続く facilitator の署名検証**である: 署名は `nonce` を含むので（`@x402/evm/dist/esm/exact/facilitator/index.mjs:121`）、
+別の quote 用の署名の `nonce` 欄だけを書き換えた credential は preflight を通っても **verify で落ちる**。preflight の追加は、
+「別の quote の署名をそのまま持ち込む」ものを早く落とす役目。試験は両方の形を verify まで通して確かめる。
+呼び出し側の署名ツールは既にこの形で署名している（`tools/x402-payer.ts:56-57`）。
 
-**x402 受信**: preflight に追加（`src/adapters/inbound/x402.ts:175-218`）。
-`payload.authorization` について `nonce === offer.extra.challengeNonce`、`to === offer.payTo`、`value === offer.amount`、
-`validBefore <= offer.extra.expiresAt` を要求する。
-EIP-3009 の署名は `nonce` を含むので、**ある quote のために作った署名は、`challengeNonce` の違う別の quote では preflight を通らない**。
-`challengeNonce` は quote ごとの乱数 32 バイト（`:146`）。同じ署名の二重使用は token コントラクトの nonce が止める。
-呼び出し側の署名ツールは既にこの形で署名している（`tools/x402-payer.ts:56-57`）ので、手順は変わらない。
-**静的 route の preflight は変えない**（標準クライアントの乱数 nonce を受け付ける現状を保つ）。
+**MPP 受信**: PR #7 の束縛（wire credential の**中の** challenge の id が、発行した offer の id と一致）を前提にする。
+SDK は中の challenge を HMAC で認証し（額・受取先・期限・opaque を含む）、送金の memo をその challenge に照合する。
+SDK の memo 束縛は challenge の 56 ビットの要約であり、衝突に依らない一意性ではない（§11）。
+AC-5 は**実 SDK＋実際の形の receipt を返す RPC fixture**で、(a) 正しい credential が通る (b) B の id に A の欄 (c) B の challenge に A の送金、
+の 3 つを verify と settle の両方で確かめ、journal の再オープン後と A/A・A/B の並行でも**送信の呼び出し回数**を数える。
 
-**MPP 受信**: 変更なし。challenge の `id` は額・受取先・期限・quote ごとの乱数（`meta`）を含む HMAC で
-（`src/adapters/inbound/mpp.ts:232-256`）、支払い側の送金は memo でその `id` に束縛される。
-別の quote の challenge には使えないことを、**実 SDK の検証経路**で試験する（AC-5。常に成功する stub は使わない）。
-SDK の replay ストアがプロセス内である点（`:109-114`）は、Router 側の at-most-once（quote の直列化と intent の状態）で補う現状のまま。
-
-**額**: 受信額は `upstreamAmount`（decimals 換算）＋手数料で、quote ごとに違う。受信 adapter の `createOffer` は元々
-`request.amount` を使う（`x402.ts:153`、`mpp.ts:243`）ので、core が計算した額を渡すだけでよい。
-core の照合（`orchestrator.ts:329-339`）は「設定の額」ではなく「**計算した額**」と比べる分岐を動的用に足す。
+**額**: 受信額は quote ごとに違う。adapter の `createOffer` は元々 `request.amount` を使う。core の照合（`orchestrator.ts:329-339`）は、
+動的では「設定の額」ではなく「計算した `total`」と比べる。
 
 ## 5. 持ち主の分離（U-7・FR-32・AC-20）
 
-- 動的 quote の発行時に `ownerKey`（乱数 32 バイト、base64url）を作り、**`sha256(ownerKey)` だけ**を記録に保存する
-- `ownerKey` は quote の応答に 1 度だけ載る（quote 文書の一部）。以後 Router はどの応答にも載せない
-- 動的 intent に対する `purchase`・`status`・`offerFor` は、渡された `ownerKey` のハッシュが一致するときだけ応じる
-  （`timingSafeEqual`）。一致しないときは**存在しない場合と同じ応答**（`unknown_quote`／404）
-- 運び方: HTTP はヘッダ `x-router-owner-key`。MCP の purchase は、**既に持ち回っている quote 文書**の中の `ownerKey` を読んでヘッダに載せる
-  （呼び出し側の手順は増えない）。MCP の status に省略可能な引数 `ownerKey` を足す
-- 再起動後も記録から検証できる。静的 intent は従来どおり principal の一致だけ（FR-1）
+- quote 発行時に `ownerKey`（乱数 32 バイト、base64url）を作り、**`sha256(ownerKey)` だけ**を保存する。`ownerKey` は quote の応答に 1 度だけ載る
+- 動的 quote／intent に対する**すべての入口**で、応答を組む前に照合する（`timingSafeEqual`）: `purchase`（既に始まった購入の現在状態を返す分岐・
+  冪等な応答を含む）、`status`、`offerFor` の 2 箇所（`http/app.ts:331`・`:392`）。不一致は**存在しない場合と同じ応答**
+- 運び方: HTTP はヘッダ `x-router-owner-key`。MCP の purchase は持ち回っている quote 文書の `ownerKey` を載せる。status に省略可能な引数 `ownerKey`
+- **漏らさない**: journal・控えにはハッシュだけ。ログ・エラー本文・診断に `ownerKey` と要求ヘッダを出さない。
+  `tools/remote-mcp.ts:281` は例外のメッセージをそのまま出しているので、固定文に変える。漏洩の有無を試験する（§13）
 
-## 6. quote の控えと予算（FR-21・FR-22・FR-33・U-5）
+## 6. 控え・昇格・予算（FR-19〜22・FR-33・U-5）
 
-### 6.1 quote 控え
+### 6.1 控え（quote ledger）
 
-未払いの動的 quote は journal に書かず、**quote 控え**（`<journal の directory>/dynamic-quotes/<UTC 日付>.ndjson`）に append＋fsync する。
+`<journal の directory>/dynamic-quotes/<UTC 日付>.ndjson` に append＋fsync。書き手は Router プロセスだけ。行は 2 種類:
 
-- 書き手は Router プロセスだけ（journal と同じ単一プロセス）。メモリには**期限内の quote だけ**を持つ
-- 起動時は当日と前日のファイルから期限内のものだけを読む。**2 日より古いファイルは起動時と日付の切り替わりに削除**する
-- 期限内の未払い quote の数に上限（§8）。超えたら**上流に接続する前に** `dynamic_capacity` で拒否する
-- 控えは「まだ何も起きていない quote」だけを持つので、失っても資金は動かない。**MPP 受信で、呼び出し側が支払った後に quote が
-  期限切れになる**と資金は戻らないが、これは控えの有無と無関係で、静的 route でも同じ（要件 §7）
+- `quote`: §2.4 の記録
+- `attempt`: `{ quoteId, at, credentialDigest }`。**1 quote につき最初の 1 行だけ**書く
 
-### 6.2 昇格
+メモリには**期限内の quote**だけを持つ。起動時は保持期間内のファイルから、期限内の quote と、journal に昇格済みでないものを読む。
+**保持期間は 7 日**（`limits.ledgerRetentionDays`）。それより古いファイルは起動時と日付の切り替わりに削除する。
+期限内の未払い quote の数に上限（§7）。超えたら上流に接続する前に `dynamic_capacity`。
 
-動的 purchase の順序（静的との違いは 4 の位置だけ）:
+### 6.2 purchase の順序
 
 ```
-1. ownerKey・requestId・approval・指紋・期限・preflight     … 何も書かない
-2. 上流を読み直して保存済み offer と照合                     … 何も書かない
-3. 受信 verify                                              … 何も書かない
-4. journal に created（控えの記録の写し）と source_pending を書く
-5. 期限の再検査 → 予算予約 → 受信 settle → 以降は静的と同じ
+1. ownerKey・requestId・approval・指紋・期限・preflight                         … 何も書かない
+2. 控えに attempt を書く（その quote で初めてのときだけ）
+3. 残高の事前確認（§6.6）→ 上流の読み直しと照合 → 受信 verify                    … 何も書かない
+4. 期限の再検査
+5. 【昇格】動的予算の mutex の中で: 残枠の検査 →（通れば）journal に 1 行 `created`（記録の写し＋予約の内容）を append＋fsync
+     通らなければ何も書かずに `bucket_limit` 等で終わる
+6. `source_pending` → 受信 settle → 以降は静的と同じ
 ```
 
-- 3 までで終わる試行（無効な署名、上流の変更、verify 不能）は **journal にも予算にも何も残さない**。同じ quote で再試行できる
-  （x402 では資金は動いていない。MPP では呼び出し側の送金は済んでいるので、再試行できることが呼び出し側の利益になる）
-- 4 の後は静的と同じ規則: 中断は再起動で `unknown`、取った予約は解放しない
-- quote ごとの直列化（`withKey`）は控えの段階から効かせる。昇格済みの quote は控えから引かず、journal の intent を使う
+- **予算と昇格は 1 つの journal 行**。動的の予算は `created` 行のうち `dynamic.reservation` を持つものを数える（別のイベントを足さない）。
+  「予約はあるが intent が無い」「intent はあるが予約が無い」という中間状態が存在しない
+- **journal に行が増えるのは予算が通ったときだけ**なので、journal・`IntentStore`・再生時間は**動的予算の件数上限**で有界になる（FR-33）。
+  予算が尽きた後の試行、verify 後の期限切れ、無効な署名は、いずれも journal を増やさない
+- クラッシュの境界: 5 の前 → journal に何も無く、quote は控えにあり、期限内なら再試行できる。5 の後・6 の前 → `created`（予約済み）が残る。
+  **その quote の再試行は手順 1〜4 をすべてやり直し（持ち主・承認・指紋／無効化・期限・preflight・上流の読み直し・verify）、省くのは手順 5 の予約だけ**
+  （`created` 行が既にあれば予約済みとして扱う）。期限切れ・無効化された quote は予約済みでも settle に進まない。6 の途中 → 再起動で `unknown`（既存の規則）。
+  journal の行が途中で切れた場合は、既存どおり起動時に fail closed（自動では再試行可能にならない。`src/core/journal.ts`）
+- 既存の `Budget` はこの形を**まだ持たない**（`budget_reserved` だけを数え、受信・送信の 2 つの額しか持たない。`src/core/budget.ts:61-82`、`:108-149`）。
+  動的用に「`created` 行の `dynamic.reservation` を数える再生」「手数料の額」「検査と append を同じ mutex で行う昇格」を足す。二重の昇格は
+  quote ごとの直列化（`orchestrator.ts` の `withKey`）と `IntentStore` の同一性検査（`store.ts:211-216`）が止める
 
-### 6.3 予算の 4 分類（FR-21・U-5）
+### 6.3 「何も書かない」と既存の `unknown` の意味の関係
 
-| 分類 | 何が残るか | 予算 |
-|---|---|---|
-| (1) 発行しただけの quote | 控えのみ | 消費しない |
-| (2) 受信が成立しなかったと確定した試行 | 何も残らない（昇格前） | 消費しない |
-| (3) 結果が不明な試行 | journal（`unknown`） | 予約を保持 |
-| (4) 受信が成立した購入 | journal | 予約を保持 |
+静的の流れは verify の前に `source_pending` を書き、中断を `unknown` にする。動的は昇格まで journal に書かない。この違いが安全な理由と、失うもの:
 
-**「確定」の定義**: **受信 verify が成立しなかった**こと（署名無効・残高不足・形の誤り）。x402・MPP とも verify は資金を動かさず、
-replay の記録も取らない（1 回目の修正のレビューで SDK を確認済み）。
-**verify が通った後に settle が拒否された場合は「確定」に含めない**: x402 の facilitator が `success: false` を返しても、
-送信済みの transaction が後で成立する可能性を Router は否定できない（`src/adapters/inbound/x402.ts:242-253`）。
-この場合の予約は保持する（(3) と同じ扱い）。攻撃に使うには、資金のある口座の有効な署名を用意したうえで settle だけを失敗させる必要があり、
-1 回につき動的側の 1 件分の枠しか減らない。**解放の仕組み（EIP-3009 の `authorizationState` を期限後に読む等）は本スライスに入れない**（§10）。
+- **Router 側**: 5 より前に Router が動かす資金は無い（verify は資金も replay の記録も動かさない）。journal に残すべき Router の行為が無い
+- **x402 受信の呼び出し側**: 5 より前に資金は動かない。失うものは無い
+- **MPP 受信の呼び出し側（ここは安全性ではなく、証拠の保持と回復の取り引き）**: 送金は purchase の前に済んでいる。verify が `false` を返しても**未払いの証明ではない**
+  （adapter は RPC の失敗も `false` にする。`src/adapters/inbound/mpp.ts`）。そこで:
+  - 手順 2 の `attempt` 行が「この quote に対して credential が提出された」事実を**7 日間**残す（credential 自体ではなく要約）
+  - 昇格前の失敗は quote を潰さない。**期限内なら同じ credential で再試行できる**（静的では verify の失敗で quote が終端になるので、動的の方が呼び出し側に有利）
+  - 期限が切れたら再試行はできず、資金は戻らない。これは静的でも同じ（要件 §7）。`attempt` 行は運用者が手作業で調べる手掛かりになる
+  - **静的より弱くなる点**: 静的は verify 中の中断を journal の `unknown` として**無期限に**残す。動的が残すのは「最初に提出された credential の要約」
+    1 行で、**7 日で消え**、後から別の credential が出された場合はそれを指さない。公開状態も `unknown` ではなく `awaiting_payment` になる。
+    journal を払わない試行で増やさないことと引き換えの、**期限つきの証拠保持**である（§11）
+- 公開状態: 昇格前の quote に対する status は `awaiting_payment` を返す。**MPP では「未払い」を意味しない**ことを、動的 quote の `disclosures` と status の応答に明記する（§8）
 
 ### 6.4 動的側の予算（FR-19・FR-22）
 
-- `dynamic.budget` を**別の `Budget` インスタンス**で数える。journal のイベント名は `dyn_budget_reserved`
-  （`Budget.load` にイベント名を渡す。静的側は `budget_reserved` だけを数えるので互いに干渉しない。旧実装は未知のイベントを無視する）
-- 1 件の予約 = 受信額 ＋ 送信元本 ＋ **そのプロファイルの `maxFee`（`feeAsset` のバケット）**。
-  MPP 送信では §3.3 の送信直前の検査が実際の手数料上限を `maxFee` 以下に強制し、送金は 1 支払い 1 回なので、
-  **動的購入による送信側の支出は `dynamic.budget` の通算上限を超えない**。x402 送信は facilitator がガスを払うので `maxFee` は 0
-- 動的側が尽きると動的 quote／purchase は `bucket_limit` 等で明示的に失敗し、静的 route は影響を受けない
-- 運用: 動的用の送信ウォレットを分けるかは運用者の選択とし、**分けない場合の最大損失は `dynamic.budget` の通算上限**と `DEPLOY.md` に書く
+- `dynamic.budget` は別の `Budget` インスタンス。静的は従来どおり `budget_reserved` だけを数え、互いに干渉しない
+- 1 件の予約 = 受信額（受信資産のバケット）＋ 送信元本（送信資産のバケット）＋ **`maxFee`（`feeAsset` のバケット）**。
+  MPP 送信では §3.3 (ii) が手数料資産と上限を署名前に強制し、署名は 1 支払い 1 回なので、**動的購入による送信側の支出（元本＋手数料）は
+  `dynamic.budget` の通算上限を超えない**。x402 送信は facilitator がガスを払うので `maxFee` は 0
+- この主張は M-1（換算）が確かめられた範囲でのみ成り立つ（§3.3）
+- 動的側が尽きると動的 purchase は明示的に失敗し、静的 route は影響を受けない。**最大損失は `dynamic.budget` の通算上限**と `DEPLOY.md` に書く
 
-### 6.5 受信額と手数料（FR-15・FR-17・U-3・U-4）
+### 6.5 予算の 4 分類（FR-21・U-5）
+
+| 分類 | 残るもの | 動的予算 |
+|---|---|---|
+| (1) 発行しただけの quote | 控え | 消費しない |
+| (2) 受信が成立しなかったと確定した試行 | 控え（`attempt`） | 消費しない |
+| (3) 結果が不明な試行（昇格後） | journal（`unknown`） | 保持 |
+| (3') MPP 受信で、昇格前に verify できなかった試行 | 控え（`attempt`、7 日） | 消費しない。**未払いとは言えない**が Router は何も支出していない |
+| (4) 受信が成立した購入 | journal | 保持 |
+
+rail ごとの「確定」:
+
+| rail | 確定して未成立 | 不明として保持 |
+|---|---|---|
+| x402 受信 | verify が成立しない（昇格前）。 | 昇格後の settle の失敗すべて。facilitator は送信前に `success:false` を返すことも、送信後に返すこともあり（`@x402/evm/.../facilitator/index.mjs:305` 付近）、**Router は応答からその 2 つを確実には区別できない**（理由文字列を信用しない方針。`src/adapters/inbound/x402.ts:14-17`） |
+| MPP 受信 | 昇格前に終わる試行は予算に触れない（未払いの証明ではないが、Router は何も支出していない） | 昇格後の settle の失敗すべて |
+
+昇格後の settle 拒否を解放する仕組み（x402 なら期限後に `authorizationState` を読んで未使用を確かめる）は**本スライスに入れない**。
+攻撃には資金のある口座の有効な署名と、verify と settle の間に失敗させる操作が要り、1 回で減るのは動的側の 1 件分（§11）。
+
+### 6.6 受信額・手数料・残高（FR-15・FR-17・FR-20）
 
 ```
-converted = upstreamAmount × 10^(source.decimals − destination.decimals)   // 割り切れなければ拒否
+converted = upstreamAmount × 10^(source.decimals − destination.decimals)   // 負の指数で割り切れなければ拒否
 fee       = max(fee.min, fee.flat + ceil(converted × fee.bps / 10000))
-total     = converted + fee                                                // 受信資産の base units。BigInt
+total     = converted + fee                                                // BigInt。30 桁を超えたら拒否
 ```
 
-- `upstreamAmount > maxUpstreamAmount`、`total` が受信側の 1 件上限を超える、のいずれも quote 不成立
-- **手数料の値は owner が決める。** 決める前に MPP 送信の実手数料を測る（M-1）。testnet の初期値の案は測定後に提示する
+`upstreamAmount > maxUpstreamAmount`、`total` が受信側の 1 件上限を超える、は quote 不成立。**手数料の値は owner が決める**（M-1 の後に案を出す）。
 
-### 6.6 残高の事前確認（FR-20・U-7）
-
-送信能力に省略可能な `balanceOf(asset)` を足す（MPP は既存の client で読める。x402 は Base Sepolia の RPC を設定した場合だけ）。
-あるときは、動的 purchase の手順 2 で「元本＋`maxFee`」に足りなければ `operator_funds_unavailable` で止める（何も書かない）。
-無いときは検査しない。**検査と送信の間に残高が変わる競合は残る**（予算の通算上限が実質の歯止め）。
+残高の事前確認: 送信能力に省略可能な `balanceOf(asset)`。あるとき、手順 3 で**元本の資産と手数料の資産を別々に**確かめ（同じ資産なら合算）、
+足りなければ `operator_funds_unavailable`。無いときは検査しない。検査と送信の間の競合は残る。MPP 受信の呼び出し側は守らない（FR-10 (c)）。
 
 ## 7. 匿名利用への対策（FR-25・FR-26・FR-30・FR-31・U-6）
 
-### 7.1 入口（`tools/remote-mcp.ts`）
+### 7.1 入口の資源上限（FR-31）— **静的の呼び出しにも掛かる。要件 FR-35 に例外として追記する**（§12）
 
-- 要求本文は **64 KiB**、受信の期限は **10 秒**。超過は MCP の処理に入る前に切る（現状は全部読む。`:271-275`）
-- **送信元ごと**の上限: 60 要求／分。送信元は Caddy が付ける `X-Forwarded-For` の**最後の値**
-  （Router は `127.0.0.1` にしか公開していないので、届く要求は必ず Caddy 経由。`DEPLOY.md` §6）。
-  ヘッダが無い要求は 1 つの送信元として数える
-- これは静的 route の呼び出しにも効く（静的の入出力は変えないが、**過剰な呼び出しは 429 になる**。FR-35 の例外として明記）
+| 入口 | 上限 |
+|---|---|
+| `tools/remote-mcp.ts` | 要求本文 64 KiB（超過は読み切らずに 413）、ヘッダ＋本文の受信期限 10 秒、同時接続数 64 |
+| `src/http/app.ts`（R1〜R4） | 本文 16 KiB（既存）。`server.headersTimeout`・`requestTimeout` を 10 秒に明示 |
 
-### 7.2 動的の門（core 内、`DynamicGate`）
+正当な呼び出しは quote 文書と credential を合わせても数 KiB で、影響を受けない。
 
-quote と purchase 試行の両方が通る。**外部接続の前**に判定する。
+### 7.2 送信元の識別
+
+送信元 = Caddy が付ける `X-Forwarded-For` の最後の値。Caddy の `reverse_proxy` は既定で外から来た転送ヘッダを信用せず上書きする。
+**この信頼は配置に依存する**: プロセスは `0.0.0.0` で待ち受け（`tools/remote-mcp.ts:296`）、Docker の公開設定が `127.0.0.1:8787` に限っている（`DEPLOY.md` §6）。
+同じホストや同じ Docker network から直接届く要求はヘッダを偽れるが、それは運用者の管理下にある。ヘッダが無い要求は 1 つの送信元として数える。
+`DEPLOY.md` に「動的 URL を有効にするホストは、Router の port を Caddy 以外に公開しない」を条件として書く。
+
+### 7.3 動的の門（`DynamicGate`、core 内）
+
+quote と purchase 試行の両方が通る。**上流・facilitator・RPC のどれにも接続する前**に判定し、purchase は**手順 1〜6 の全体**を 1 つの枠として数える。
 
 | 対象 | 上限（初期値） |
 |---|---|
-| 動的 quote の全体頻度 | 30／分 |
-| 動的 purchase 試行の全体頻度 | 30／分 |
-| 同時に進行中の動的な上流接続 | 8 |
-| 期限内の未払い quote | 500 |
-| 宛先ホスト名ごと | 10／分 |
-| 宛先アドレスごと（解決後） | 60／分 |
+| 動的 quote: 全体／送信元ごと | 10／分 ／ 3／分 |
+| 動的 purchase 試行: 全体／送信元ごと | 10／分 ／ 3／分 |
+| 同時に進行中の動的操作: 全体／送信元ごと | 8 ／ 2 |
+| 期限内の未払い quote | 200 |
+| 宛先ホスト名ごと: 頻度／同時 | 10／分 ／ 2 |
+| 宛先アドレスごと: 頻度／同時 | 60／分 ／ 4 |
 
-- **アドレス単位**の判定のため、guarded transport に「検査済みアドレスが決まった後・接続の前」に呼ばれる `admit` フックを足す
-  （`src/net/guarded-fetch.ts` の `vet` の直後）。別名を増やしても同じアドレスなら同じ枠を使う。
-  CDN の共有アドレスで別の Provider が同じ枠に入るので、ホスト名単位より緩くしてある
-- 状態はプロセス内で、再起動で消える（再起動は呼び出し側が起こせない）
-- facilitator・RPC への通信は要求ごとに別の接続で、門の同時実行数の外にある（動的の負荷で待たされない）
+- **送信元は MCP 層から core に渡す**（HTTP ヘッダ `x-router-source`）。MCP サーバは外から来た同名のヘッダを使わず、**自分が導いた値で必ず上書きする**。
+  このヘッダは認証ではない: Router の HTTP（既定で loopback。`src/config.ts:562`）に直接届くプロセスは任意の値を名乗れる。
+  公開しているのは MCP の port だけ（`DEPLOY.md` §6）なので遠隔からは届かないが、**Router の HTTP に届くローカルのプロセスは信頼する**ことを配置の条件として `DEPLOY.md` に書く
+- **アドレス単位**: guarded transport の `vet` が返す**検査済みアドレスの全部**に対して、接続の前に枠を取る（どれに接続するかは undici が決めるため、
+  全アドレスが枠内のときだけ通す）。枠は応答の本文を読み終えるか中断したときに返す。`admit`／`release` のフックを `src/net/guarded-fetch.ts` の `vet` の直後に足す
+- 枠を取るのは**重複を除いた検査済みアドレスの全部**に対して不可分に。返すのは本文の読了・中断・失敗のとき
+  （`fetch` は headers で戻るので、`finally` ではなく本文の stream の終了に結び付ける。`guarded-fetch.ts:282`）
+- **DNS**: 動的用 transport では解決に**期限（3 秒）**を付け、要求の中断と期限のどちらでも待ちを打ち切る（今の `vet` は中断を見ない。`guarded-fetch.ts:228`）。
+  `dns.lookup` 自体は取り消せないので、**進行中の解決の数にも上限**を置き、期限で待ちをやめた解決は終わるまでその枠を使い続ける
+- 門の待ち行列は持たない（超過は即 429）。カウンタは時間窓ごとに捨て、保持するキーの数に上限。**上限を超えたら新しいキーの要求は拒否する**（緩い枠に落とさない）
+- 控えの 1 行は**直列化後 8 KiB 以下**（超える quote は成立させない）。`attempt` 行は 1 quote に 1 行・512 バイト以下
+- 状態はプロセス内で、再起動で消える。上限と未払い quote の保持（7 日・行の大きさ）から、控えの最悪ディスク使用量は
+  `10／分 × 60 × 24 × 7 × 8.5 KiB ≈ 860 MiB`。メモリに載るのは期限内の 200 件まで
+- facilitator・RPC の容量: 1 件の purchase は verify・settle・送信の準備・receipt の照合でそれぞれ複数の要求を出すので、
+  **purchase の頻度上限は RPC の要求数の上限ではない**。抑えるのは同時実行数（全体 8）と 1 要求ごとの期限・再試行なし（A の transport）で、
+  1 件あたりの要求数の上限は実装時に数えて試験に固定する（M-2）。静的 route の要求はこの枠の外にある
 
-### 7.3 自分自身と依存先（FR-25・AC-13）
+### 7.4 自分自身と依存先（FR-25・AC-13）— **別名は防げない。要件に限界として追記する**（§12）
 
-`parseUpstreamUrl` はホスト名が次に**一致するかそのサブドメイン**なら拒否する: `canonicalBaseUrl` のホスト、`dynamic.denyHosts`
-（本番は `router.subethalabs.com` を入れる）、設定済みの facilitator と RPC の URL のホスト（起動時に設定から集める）。
-別名で同じサーバを指しても、`https` のみ・証明書検証ありなので TLS で失敗する。Router 自身の公開アドレスへの直接接続は B が落とす。
-**運用者の静的 Provider は拒否しない**（動的に指定してよい。7.2 の宛先単位の上限が容量を守る）。
+`parseUpstreamUrl` はホスト名が次に一致するかそのサブドメインなら拒否する: `canonicalBaseUrl` のホスト、`dynamic.denyHosts`、
+設定済みの facilitator と RPC の URL のホスト。
+
+- **Router 自身**: 公開アドレスへの直接接続は B が落とす。公開プロキシ経由は A・B の範囲外（`ssrf-requirements.md:277-278`）で、ホスト名の拒否が唯一の防御
+- **facilitator・RPC**: 同じサーバを指す**別の有効なホスト名**（CDN の別名、有効な証明書つき）は拒否できない。第 1 版の「TLS で失敗する」は誤り。
+  これらは誰でも直接届く公開サービスであり、Router 経由で増えるのは負荷だけなので、**アドレス単位の上限（7.3）で抑える**ことを防御とする。
+  アドレスの一致で拒否する案は、CDN を共有する無関係な Provider を巻き込むので採らない
+- 試験: 拒否ホスト名・サブドメインの拒否（AC-13）と、**別名で同じアドレスに届く場合にアドレス単位の枠を共有する**こと（AC-17）
+
+### 7.5 配置の条件（FR-24 の運用条件）
+
+`DEPLOY.md` に追記: 動的 URL を有効にしてよいのは、B の標準受け入れ（`subetha-egress-verify`）が通っているホストだけ。
+Router 自身は B の有無を内側から確かめられないので、これは**運用の gate**であり、`tools/remote-mcp.ts` の設定に有効化を書く行に、
+受け入れの記録（日付・runner の結果の場所）をコメントで残すことを手順にする。
 
 ## 8. 表示と結果（FR-9〜12・FR-29・U-9）
 
-**quote の応答（動的）**: 既存の欄に加えて
+**quote の応答（動的）**: 既存の欄に加えて、§2.4 の記録から組む。
 
 ```
 upstream:    { url, method: "GET" }
-destination: { ..., payTo }
-pricing:     { upstreamAmount, fee, total, sourceDecimals, destinationDecimals }
-disclosures: { destinationVerifiedByOperator: false, refundOnFailure: false,
-               fundsMayMoveBeforeRouterAccepts: <offer の fundsMoveOnCredential>,
-               unsupportedResponseIsPaidWithoutData: true }
+destination: { ..., payTo, decimals }
+pricing:     { upstreamAmount, converted, fee, total, sourceDecimals, destinationDecimals }
+disclosures: {
+  destinationVerifiedByOperator: false,
+  refundOnFailure: false,
+  fundsMoveOnCredential: <受信 offer の申告>,
+  routerMayRejectAfterFundsMoved: ["expired", "upstream_changed", "dynamic_disabled", "budget_exhausted", "operator_funds_unavailable"],  // fundsMoveOnCredential のとき
+  awaitingPaymentDoesNotMeanUnpaid: <fundsMoveOnCredential>,
+  unsupportedResponseIsPaidWithoutData: true,
+  supportedResponse: "application/json object, <= 256 KiB"
+}
 ownerKey
 ```
 
-すべて §2.3 の記録から組む（FR-11）。MCP の `subject` はこれらを**そのまま**含め、`nextStep` に同じ内容を文でも書く。
+MCP の `subject` はこれらをそのまま含め、`nextStep` に同じ内容を文でも書く（FR-10）。
 
-**結果（動的）**: MCP は上流の本文を
-`{ untrusted: true, source: "upstream", contentType, body }` に包み、`delivered` の意味を
-`proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" }` として添える。静的 route の結果の形は変えない。
+**結果（動的）**: MCP は上流の本文を `{ untrusted: true, source: "upstream", contentType, body }` に包み、
+`proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" }` を添える。`contentType` は `application/json` に正規化した固定値だけを返す。
+静的 route の結果の形は変えない。
 
-**ログ**: 運用者向けの stderr には、動的 quote／purchase ごとに `profileId`・**ホスト名のみ**・結果コードを出す
-（パスとクエリは出さない。乱用の調査はホスト名と時刻で控え／journal を引く）。transport の診断は従来どおり URL を出さない。
+**ログ**: 運用者向けの stderr に、動的 quote／purchase ごとに `profileId`・**ホスト名のみ**・結果コード・送信元を出す（パス・クエリ・`ownerKey` は出さない）。
 
 ## 9. 回帰と旧実装（FR-35）
 
-- `dynamic.enabled: false` の Router（**同じ実装**）: 動的 quote は外部接続なしに拒否。journal の動的 intent は読めるが purchase は
-  `quote_changed`、status は `ownerKey` が要る。`dyn_budget_reserved` は数え続ける
-- **この機能より前のイメージに戻した場合**: 動的 intent は「設定に無い route」として purchase できない。予算は静的側だけ数える。
-  ただし **`ownerKey` の検査は無い**ので、`paymentId`（UUID）を知る相手は動的購入の結果を読める。
-  FR-35 が求めるのは「無効にした Router」での分離であり、旧イメージへの巻き戻しは対象外として §10 に記録する
+- `dynamic.enabled: false` の Router（同じ実装）: §1 のとおり。journal の動的 intent は読め、予算は数え続け、`ownerKey` の検査は効く
+- **この機能より前のイメージに戻した場合**: 動的 intent は設定に無い route として purchase できない。動的の `created` 行は静的予算に数えられない。
+  **`ownerKey` の検査は無い**ので、`paymentId`（UUID）を知る相手は動的購入の結果を読める。要件が求めるのは「無効にした Router」での分離で、
+  旧イメージへの巻き戻しは対象外とし §11 に記録する。巻き戻すときは控えの directory を残す
 
-## 10. 受容する制約（要件 §7 への追加）
+## 10. 実装の前に測るもの
+
+| ID | 内容 | 方法 | 使い道 |
+|---|---|---|---|
+| M-1 | MPP 送信の実手数料と、`gas × maxFeePerGas` から `feeAsset` の額への換算 | **既存の**送信 tx の receipt を読む（新しい支払いはしない） | `maxFee`・手数料規則、§3.3 |
+| M-2 | SDK が包んだ account の `signTransaction` と送金 RPC に渡す実物の形、chain の `feeToken` が入ること | fixture（署名のみ・送信しない）。足りなければ **testnet で 1 件の新しい支払い**（owner の了承済みの範囲: testnet・使い捨て口座） | §3.3 (ii)(iii) |
+| M-3 | 実 challenge の欄の一覧（Provider A・B と、公開されている第三者の x402／MPP エンドポイント数件） | 未払いの読取のみ | §3.3 (i) の許可キー |
+| M-4 | 第三者 Provider での quote 成立率 | 未払いの読取のみ | §11 の互換性の制約が実用に耐えるか |
+
+**順序は M-2 → M-1 → M-3**（M-4 はタスク分割を止めないが、第三者 Provider 対応を公表する前に必要）。
+M-1 は receipt の標本だけでは上限の規則を証明できないので、Tempo の手数料の仕様と照らして換算と丸めを定める。
+M-2 は SDK → 包んだ account → 固定の serializer → guarded RPC を**オフライン**で通し、正の対照と迂回の試み（生の署名、serializer の差し替え）を含める。
+新しい testnet の支払いが要る場合は、その都度の範囲（件数・額・口座）を示してから行う。
+結果で §3.3 の表が変わる場合は本書を改訂してから実装する。
+
+## 11. 受容する制約（要件 §7 への追加）
 
 | 制約 | 理由 |
 |---|---|
-| verify 成立後に settle が拒否された試行は動的側の予約を保持する | 「未成立の確定」を facilitator の応答だけでは言えない（§6.3） |
-| 動的 quote は冪等に再取得できない。他人の `requestId` を先取りする嫌がらせが可能 | 持ち主の証明なしに既存 quote を返さないため（§2.4） |
-| 上流が `resource` を fetch URL と 1 バイトでも違う形で申告すると使えない。標準外の欄を足す Provider も使えない | 束縛と署名範囲を緩めないため。**実在の第三者 Provider でどの程度通るかは未計測**（M-4） |
-| MPP の第三者 Provider は、既存の Provider B が使う scope（`_mppx_scope`）を持たない | 動的経路では scope を**あれば照合・無ければ不問**にする。challenge はその URL への TLS 接続の応答として得たものなので、Router にとっての束縛は接続先。**静的は従来どおり必須** |
+| 昇格後に settle が拒否された試行は動的予算を保持する | §6.5 |
+| 動的 quote は冪等に再取得できない。他人の `requestId` の先取りが可能 | §2.5 |
+| 上流が `resource` を fetch URL と 1 バイトでも違う形で申告すると使えない。標準外の欄を足す Provider も使えない | 束縛と署名範囲を緩めないため。実在の Provider での成立率は未計測（M-4） |
+| MPP の第三者 Provider は既存の scope（`_mppx_scope`）を持たない | 動的経路では「あれば照合・無ければ不問」。保存した URL・guarded な TLS 接続・offer の照合が権威。静的は従来どおり必須 |
+| facilitator・RPC を別名で指す URL は拒否できない | §7.4 |
+| MPP 受信の束縛は SDK の 56 ビットの memo 要約に依る | SDK の仕様。衝突に依らない一意性は主張しない |
 | 旧イメージへの巻き戻しで動的購入の結果が `paymentId` で読める | §9 |
-| 静的 route の無効な purchase 試行は従来どおり journal に行を残す | 本スライスは静的の記録順を変えない。入口の頻度制限（§7.1）で抑える |
+| MPP 受信で昇格前に検証できなかった試行の証拠は、最初の credential の要約 1 行・7 日だけ（静的は journal に `unknown` が残る） | §6.3。**owner の確認事項** |
+| `dialForTest` の試験が示すのは宛先の判定と HTTP の配線で、本番の経路や B の強制ではない | B は別の運用 gate（§7.5） |
+| 静的 route の無効な purchase 試行は従来どおり journal に行を残す | 静的の記録順を変えない。入口の資源上限（§7.1）だけが掛かる |
+| 昇格前に Router が落ちると、進行中だった試行は journal に残らない（控えの `attempt` だけ） | §6.3 |
 
-## 11. 実装の前に測るもの
+## 12. 要件書に入れる改訂（本書と同じ commit）
 
-| ID | 内容 | 使い道 |
+| 箇所 | 改訂 | 理由 |
 |---|---|---|
-| M-1 | MPP 送信の実手数料（既存の送信 tx の receipt）と、`gas × maxFeePerGas` から `feeAsset` の額への換算 | `maxFee`・手数料規則の値、§3.3 の検査 |
-| M-2 | SDK が push・local account で送金 RPC に渡す実際の raw（fixture と testnet） | §3.3 の復号が実物に効くこと |
-| M-3 | 実 challenge（Provider B と、公開されている第三者の MPP／x402 エンドポイント数件）の欄の一覧 | §3.3 の許可キー、M-4 |
-| M-4 | 第三者 Provider での quote 成立率（未払いの読取のみ） | §10 の互換性の制約が実用に耐えるか |
+| FR-35 | 「FR-23 による予算の扱いの修正**と FR-31 の入口の資源上限**を除く」 | FR-31 は入口で本文を読む前に効くので、静的・動的を区別できない |
+| FR-25・AC-13 | 「ホスト名で拒否する。**同じサーバを指す別の有効なホスト名は拒否できず、FR-30 のアドレス単位の上限で負荷を抑える**」 | §7.4 |
+| FR-5 | 「journal に保存」→「**耐久性のある記録（控え）に保存し、購入を実行するときは journal の記録として実行する**」 | §6 |
 
-M-1〜M-3 は無課金（読取のみ）。結果で §3.3 の表が変わる場合は本書を改訂してから実装する。
+owner の決定（D-1〜D-3）と他の FR は変えない。**この 3 点は owner の確認事項**で、2 回目のレビューの評価は次のとおり:
+FR-5 は保存場所の明確化（ただし §6.3 の「7 日で消える証拠」まで承認するものではない。それは §11 の制約として別に確認する）。
+**FR-25 と FR-35 は実質的な緩和**である。FR-25 は「宛先にできない」が「既知の名前は拒否し、別名は頻度で抑える」になる
+（アドレスで拒否する方法もあるが、CDN を共有する無関係な Provider を巻き込むので選ばなかった、という選択）。
+FR-35 は既存の呼び出しに 64 KiB・10 秒の上限が掛かる。正当な要求の大きさは実装時に測る
+（動的の結果は最大 256 KiB なので、**結果を含む文書を purchase にそのまま送り返すクライアントは上限に当たる**。MCP が持ち回るのは quote 文書だけであることを試験で確かめる）。
 
-## 12. 試験計画（AC との対応）
+## 13. 試験計画（AC との対応）
 
 | AC | 層 | 要点 |
 |---|---|---|
-| 1・11・13 | unit | `parseUpstreamUrl` と無効時の拒否。**接続数 0** を fixture の接続カウンタで確かめる |
-| 2 | wire | `fixtureDynamicUpstreams` を持つ Router＋上流 fixture（x402・MPP）で両方向 |
-| 3・24 | unit／wire | 応答の全欄を記録と突き合わせる |
-| 4・7・10・22 | unit | 改竄した quote 文書、`requestId` 衝突、設定変更、無効化後の再生 |
-| 5 | unit＋wire | **実際の検証経路**: オフライン署名した EIP-3009（facilitator fixture が署名と nonce を検証）と、実 mppx の検証＋RPC fixture。同額・静的↔動的・並行・再起動後 |
-| 6 | wire | 表 §3.2 の各欄を 1 つずつ変える。`id`／`expires` だけの変化では成立 |
-| 8・9 | unit | offer の選択、換算、手数料の丸め |
-| 12 | wire | 既存の T-A 系 fixture（公開名が内部に解決する DNS）を動的の 3 接続点＋SDK の RPC に当てる。専用能力なしでは loopback に届かない。本番の入口が `fixtureDynamicUpstreams` を参照しない静的検査 |
-| 14・15 | wire | リダイレクト、期限、各上限、text／array／偽 receipt |
-| 16 | unit＋wire | 範囲外の offer／challenge と、**範囲内に見える offer から範囲外の署名／transaction を作らせる fixture SDK 差し替え**。署名器・送金 RPC の呼び出しが 0 |
-| 17 | unit＋wire | 門と入口の各上限。別名 2 つ→同じアドレスで枠を共有 |
-| 18・19 | unit | 無効な credential の反復で両方の予算が減らない。動的側を使い切っても静的が成立 |
-| 20 | unit＋wire | `quoteId`・`requestId`・`paymentId` を知っていても `ownerKey` 無しでは取得・購入・参照できない。再起動後も |
-| 21 | unit | 控えの上限、期限切れの除去、古いファイルの削除、起動時の読込量 |
+| 1・11・13 | unit | `parseUpstreamUrl`、無効時の拒否。**接続数 0** を fixture のカウンタで確かめる |
+| 2 | wire | `dialForTest` つきの Router＋TLS の上流 fixture（x402・MPP）で両方向。**宛先の判定は本番と同じ** |
+| 3・24 | unit／wire | 応答の全欄（FR-9・FR-10 の全項目）を記録と突き合わせる |
+| 4・7・10・22 | unit | 改竄した quote 文書、`requestId` 衝突、設定変更、無効化、無効の Router での再生（予算・持ち主・実行不可） |
+| 5 | wire | §4 の 3 形（x402 は「署名そのまま別 quote」「nonce 欄だけ書き換え」を **verify まで**。MPP は実 SDK＋実形の receipt）。同額・**異額**・静的↔動的・並行（A/A・A/B）・**journal 再オープン後**。送信の呼び出し回数。**正の対照**（正しい credential は通る） |
+| 6 | wire | §3.2 の各欄を 1 つずつ変える。`id`／`expires` だけの変化では成立 |
+| 8・9 | unit | offer の選択順、換算、手数料の丸め、桁あふれ |
+| 12 | wire | 既存の T-A 系 fixture を動的の全接続点（quote 読取・再読取・有料要求・MPP 送信の RPC・受信の facilitator／RPC）に当てる。`dialForTest` つきでも loopback・内部解決は拒否。本番の入口が `dialForTest` を参照しない静的検査。`custom` transport の MPP 能力で動的プロファイルが起動失敗 |
+| 14・15 | wire | リダイレクト、期限、ヘッダ・本文・個数の各上限（未払い／支払い後で終端が違うこと）、text／配列／偽 receipt、**本文より先に receipt を判定している**こと |
+| 16 | unit＋wire | 範囲外の offer／challenge は候補にならない。**SDK を差し替えて範囲外の typed data／transaction を作らせ**、元の署名器の呼び出しが 0。`EIP712Domain` 型の差し替え、`feeToken` 未指定・別資産、call 2 つ、`keyAuthorization`、JSON-RPC account、`pull`、額 0 |
+| 17 | unit＋wire | 門の各上限（頻度・同時実行、全体・送信元・ホスト名・アドレス）。別名 2 つ→同じアドレスで枠を共有。DNS の期限。入口の本文・受信時間。枠の返却（本文の読了・中断） |
+| 18・19 | unit | 無効な credential の反復で両方の予算が減らない。**予算が尽きた後・verify 後の期限切れの反復で journal が 1 行も増えない**。`unknown` は枠を保持。動的側を使い切っても静的が成立 |
+| 20 | unit＋wire | `quoteId`・`requestId`・`paymentId` を知っていても `ownerKey` 無しでは取得・購入・参照・終端状態の読取ができない。再起動後も。**`ownerKey` が journal・控え・ログ・エラー本文のどこにも出ない** |
+| 21 | unit | 控えの上限、期限切れの除去、保持期間、起動時の読込量。昇格の各クラッシュ点（5 の前・5 の後・6 の途中）。MPP 受信で verify が不能だった試行の `attempt` が残り、期限内に再試行できる |
 | 23 | 全体 | 既存テスト（skip と失敗を区別） |
 
-各 fixture の試験は**守っているコードを外して落ちること**を確かめる。
+fixture の試験は**守っているコードを外して落ちること**を確かめる。
 
-## 13. 変更するファイル（見込み）
+## 14. 変更するファイル（見込み）
 
-`src/config.ts`（dynamic の型と検証・指紋）、`src/net/upstream-url.ts`（新規）、`src/net/guarded-fetch.ts`（`admit` フック）、
-`src/ports/outbound.ts`、`src/adapters/outbound/{x402,mpp}.ts`（動的経路・範囲の検査・上限つき応答）、
-`src/adapters/inbound/x402.ts`（nonce 束縛のオプション）、`src/core/{orchestrator,store,intent,budget}.ts`、
-`src/core/quote-ledger.ts`（新規・控え）、`src/core/dynamic-gate.ts`（新規）、`src/http/{app,projection}.ts`、
-`src/client/*`、`src/mcp/{server,tools}.ts`、`src/main.ts`、`tools/remote-mcp.ts`（入口の上限・プロファイル設定）、
-`tools/sign-payment.ts`（変更不要の見込み。確認する）、`docs/DEPLOY.md`・`CLAUDE.md`・`README.md`（手順）。
+`src/config.ts`、`src/net/upstream-url.ts`（新規）、`src/net/guarded-fetch.ts`（`admit`／`release`・DNS の期限・`maxHeaderSize`・`dialForTest`）、
+`src/ports/outbound.ts`、`src/adapters/outbound/{x402,mpp}.ts`、`src/adapters/inbound/x402.ts`、
+`src/core/{orchestrator,store,intent,budget}.ts`、`src/core/quote-ledger.ts`（新規）、`src/core/dynamic-gate.ts`（新規）、
+`src/http/{app,projection}.ts`、`src/client/*`、`src/mcp/{server,tools}.ts`、`src/main.ts`、`tools/remote-mcp.ts`、
+`docs/DEPLOY.md`・`CLAUDE.md`・`README.md`。
 
-## 14. 本書で決めていないこと
+## 15. 独立レビューの記録
 
-手数料・各上限の最終値（owner）、M-1〜M-4 の結果、タスク分割、testnet の実決済 gate の範囲。
+| 回 | 日付 | モデル | 判定 |
+|---|---|---|---|
+| 1 | 2026-10-05 | `gpt-6-astra`（read-only） | **REJECT**（重大 1・高 7・中 4） |
+| 2 | 2026-10-05 | `gpt-6-astra`（read-only・範囲限定） | **APPROVE WITH CHANGES**（12 件中 8 件解消・4 件一部。再設計は不要、タスク分割に進める） |
+
+2 回目の残り 4 点は本版に反映した（再々レビューはしない）: 予約済み `created` の再試行は全検査をやり直す（§6.2）、
+署名の facade から生の署名と serializer の差し替えを除く（§3.3）、MPP の昇格前の不確かさは期限つきの証拠保持という取り引きであると明記（§6.3・§6.5・§11）、
+資源上限の実装条件と RPC 要求数の主張の訂正（§7.3）。
+
+| # | 指摘（第 1 版） | 反映 |
+|---|---|---|
+| 1 | MPP 受信の credential が quote に束縛されていない（封筒だけを照合）。**現行の本番にも当てはまる** | PR #7 で修正。§4 |
+| 2 | MPP の検査が署名の後にある | 署名の境界に移した（包んだ local account）。§3.3 |
+| 3 | `feeToken` 未指定を許すと手数料資産の保証が崩れる | 必須・一致に変更、chain 設定で固定、残高は資産別。§3.3・§6.6 |
+| 4 | 昇格が予算の前で、未払いのまま journal が増え続ける | 予算と昇格を 1 行に統合。§6.2 |
+| 5 | 「verify の前は何も書かない」が MPP の支払いの証拠と `unknown` の意味を失う | `attempt` 行・7 日保持・再試行可・開示。§6.1・§6.3・§8 |
+| 6 | テスト用の loopback 例外は FR-24／AC-12 の弱体化。fixture の MPP 能力が guarded RPC を迂回する | 例外をやめ `dialForTest`（判定は本番と同じ）。`custom` transport は起動失敗。§3.1 |
+| 7 | 未払いの仕事の上限が不足（同時実行・DNS・入口・purchase 全体） | §7.1〜7.3 |
+| 8 | 別名は TLS で止まらない | 誤りを訂正し、限界として要件に追記。§7.4・§12 |
+| 9 | EIP-712 の型定義を差し替えられる | typed data を Router が組み直す。§3.3 |
+| 10 | 上限つき応答と SDK の読み順が合わない。配列の扱いが AC-15 と違う | receipt を先に自前で判定。object のみ。§3.4 |
+| 11 | 記録に decimals・価格・プロファイルの写しが無い。開示が FR-10 (c) を満たさない。選択順・数値検査・B の gate | §2.3・§2.4・§6.6・§7.5・§8 |
+| 12 | 「既存の配線は変更なし」が不正確 | §1.1 を書き直し |
