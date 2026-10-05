@@ -2,13 +2,16 @@
  * 動的上流 URL のための transport の拡張（設計 `docs/dynamic-upstream-design.md` §3.1・§3.4・§7.3、タスク T3）。
  * 実 TCP / TLS（loopback）。**オプションを渡さない transport の挙動は変えない**ことも確かめる。
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import https from "node:https";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo } from "node:net";
 
 import { afterEach, beforeAll, expect, test } from "vitest";
 
+import { DEFAULT_DYNAMIC_LIMITS } from "../../src/config.js";
+import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import {
   createGuardedTransport,
   TransportError,
@@ -38,7 +41,7 @@ afterEach(async () => {
   while (closers.length > 0) await closers.pop()!();
 });
 
-type Mode = "ok" | "big-headers" | "stream" | "stall-body";
+type Mode = "ok" | "big-headers" | "stream" | "stall-body" | "misdirected" | "no-content" | "reset-body" | "never-respond";
 
 /** TLS の上流 fixture（`provider.test` の証明書）。 */
 async function upstream(mode: Mode = "ok", hold?: { release?: () => void }): Promise<Upstream> {
@@ -50,6 +53,25 @@ async function upstream(mode: Mode = "ok", hold?: { release?: () => void }): Pro
       response.writeHead(402, { "content-type": "application/json", "payment-required": "x".repeat(20_000) });
       response.end("{}");
       return;
+    }
+    if (mode === "misdirected") {
+      response.writeHead(421, { "content-type": "application/json", connection: "close" });
+      response.end("{}");
+      return;
+    }
+    if (mode === "no-content") {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    if (mode === "reset-body") {
+      response.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+      response.write('{"part":1,');
+      setTimeout(() => response.socket?.destroy(), 50);
+      return;
+    }
+    if (mode === "never-respond") {
+      return; // headers も返さない
     }
     if (mode === "stream" || mode === "stall-body") {
       response.writeHead(200, { "content-type": "application/json" });
@@ -146,8 +168,18 @@ test("dialForTest: 証明書がホスト名と合わなければ接続は失敗�
   expect(fixture.seen.requests).toBe(0);
 });
 
-test("本番の入口は dialForTest を参照しない（静的検査）", () => {
-  for (const file of ["src/main.ts", "tools/remote-mcp.ts", "tools/remote-router-process.ts"]) {
+test("本番の入口は dialForTest を参照しない（静的検査: src/main.ts と tools/ の全ファイル）", () => {
+  const files = ["src/main.ts"];
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (/\.(ts|mts|js|mjs)$/.test(name)) files.push(full);
+    }
+  };
+  walk("tools");
+  expect(files.length).toBeGreaterThan(10);
+  for (const file of files) {
     expect(readFileSync(file, "utf8"), file).not.toContain("dialForTest");
   }
 });
@@ -400,4 +432,124 @@ test("オプションを渡さない transport は、20 KB の応答ヘッダを
   // undici の既定の上限（Node の既定 16 KiB）は transport が決めたものではない。ここで固定するのは
   // 「動的用の 32 KiB が静的に漏れていない」こと: 32 KiB なら通る 20 KB のヘッダが、未指定では通らない。
   expect(await codeOf(legacy.fetch(`https://provider.test:${fixture.port}/`, { method: "GET" }, CTX))).toBe("transport_failed");
+});
+
+/* ---------------------------------------------------------------- レビュー後に足した場合分け */
+
+test("admit: 同じアドレスの別の綴り（IPv6 の省略形・IPv4-mapped）は正規化して 1 つに畳む", async () => {
+  const fixture = await upstream();
+  const gate = admission(fixture);
+  const lookup: LookupFn = (_hostname, _options, callback) =>
+    callback(null, [
+      { address: "2606:2800:220:1:0:0:0:1", family: 6 },
+      { address: "2606:2800:220:1::1", family: 6 },
+      { address: PUBLIC_A, family: 4 },
+      { address: `::ffff:${PUBLIC_A}`, family: 6 },
+    ] as LookupAddress[]);
+  const transport = transportWith({ lookup, dialForTest: () => ({ host: "127.0.0.1", port: fixture.port }), admit: gate.admit });
+  const response = await transport.fetch("https://provider.test/", { method: "GET" }, CTX);
+  await response.text();
+  expect(gate.admitted).toHaveLength(1);
+  // 4 つの綴りが、IPv6 1 つと IPv4 1 つの 2 つになる（`ParsedAddress.text` の正規形）。
+  expect(gate.admitted[0]).toEqual(["2606:2800:220:1:0:0:0:1", PUBLIC_A]);
+});
+
+test("admit を実際の門につなぐ: 1 つでも枠の無いアドレスがあれば何も取らずに拒否し、接続しない", async () => {
+  const fixture = await upstream("stream", {});
+  const gate = new DynamicGate({ limits: { ...DEFAULT_DYNAMIC_LIMITS, perAddressConcurrent: 1 } });
+  const admit: NonNullable<GuardedTransportOptions["admit"]> = (addresses) => {
+    const result = gate.admitAddresses(addresses);
+    return result.ok ? result.lease : undefined;
+  };
+  const dial = { dialForTest: () => ({ host: "127.0.0.1", port: fixture.port }), admit };
+  // A だけを使う要求が、本文の途中で枠を持っている。
+  const holder = transportWith({ lookup: lookupTo(PUBLIC_A), ...dial });
+  const held = await holder.fetch("https://provider.test/", { method: "GET" }, CTX);
+  expect(gate.activeOfAddress(PUBLIC_A)).toBe(1);
+  const before = fixture.seen.connections;
+  // B と A に解決する名前。B は空いているが A が埋まっている。
+  const both = transportWith({ lookup: lookupTo(PUBLIC_B, PUBLIC_A), ...dial });
+  expect(await codeOf(both.fetch("https://provider.test/", { method: "GET" }, CTX))).toBe("admission_refused");
+  expect(gate.activeOfAddress(PUBLIC_B)).toBe(0);
+  expect(fixture.seen.connections).toBe(before);
+  // 持っていた応答を捨てると A が空く。
+  await held.body?.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(gate.activeOfAddress(PUBLIC_A)).toBe(0);
+});
+
+test("release: 421（再送の拒否）・本文の無い応答・headers の後の切断・headers が来ないままの期限でも 1 回だけ返す", async () => {
+  const cases: Array<{ mode: Mode; run: (transport: ReturnType<typeof transportWith>) => Promise<string> }> = [
+    { mode: "misdirected", run: (transport) => codeOf(transport.fetch("https://provider.test/", { method: "GET" }, CTX)) },
+    {
+      mode: "no-content",
+      run: async (transport) => {
+        const response = await transport.fetch("https://provider.test/", { method: "GET" }, CTX);
+        await response.text();
+        return String(response.status);
+      },
+    },
+    {
+      mode: "reset-body",
+      run: async (transport) => {
+        const response = await transport.fetch("https://provider.test/", { method: "GET" }, CTX);
+        return response.text().then(
+          () => "read",
+          () => "body failed",
+        );
+      },
+    },
+    { mode: "never-respond", run: (transport) => codeOf(transport.fetch("https://provider.test/", { method: "GET", signal: AbortSignal.timeout(300) }, CTX)) },
+  ];
+  const outcomes: string[] = [];
+  for (const entry of cases) {
+    const fixture = await upstream(entry.mode);
+    const gate = admission(fixture);
+    const transport = transportWith({ lookup: lookupTo(PUBLIC_A), dialForTest: () => ({ host: "127.0.0.1", port: fixture.port }), admit: gate.admit });
+    outcomes.push(await entry.run(transport));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(gate.admitted, entry.mode).toHaveLength(1);
+    expect(gate.releases, entry.mode).toBe(1);
+  }
+  expect(outcomes).toEqual(["transport_failed", "204", "body failed", "upstream_timeout"]);
+});
+
+test("DNS: 待つのをやめた後に解決が失敗しても、未処理の例外にならず枠が空く。中断でも枠は解決が終わるまで埋まる", async () => {
+  const failures: Array<(error: Error) => void> = [];
+  let calls = 0;
+  const lookup: LookupFn = (_hostname, _options, callback) => {
+    calls += 1;
+    failures.push((error) => callback(error as NodeJS.ErrnoException, []));
+  };
+  const events: TransportEvent[] = [];
+  const transport = transportWith({ lookup, dns: { timeoutMs: 5_000, maxInFlight: 1 } }, events);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const controller = new AbortController();
+    const pending = codeOf(transport.fetch("https://slow.test/", { method: "GET", signal: controller.signal }, CTX));
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    expect(await pending).toBe("aborted");
+    // 中断で待つのはやめたが、解決は終わっていないので枠は埋まったまま。
+    expect(await codeOf(transport.fetch("https://next.test/", { method: "GET" }, CTX))).toBe("admission_refused");
+    expect(calls).toBe(1);
+    // 後から失敗が届く。
+    failures[0]!(new Error("ENOTFOUND late"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unhandled).toEqual([]);
+    // 枠が空いたので次は解決を始める。
+    const next = codeOf(transport.fetch("https://next.test/", { method: "GET" }, CTX));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(calls).toBe(2);
+    failures[1]!(new Error("ENOTFOUND"));
+    expect(await next).toBe("dns_failed");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  // 失敗 1 件につき報告は 1 回。
+  expect(events.map((event) => event.code)).toEqual(["aborted", "admission_refused", "dns_failed"]);
 });
