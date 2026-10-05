@@ -1527,3 +1527,20 @@ waiver 無し、実機の再起動と IMDS、Linux の外部 observer、証拠�
 
 レビュー: 実装レビュー 3 回（REJECT → REJECT → **APPROVE**、`gpt-6-astra`）。要件 §9 の **B + A** の release gate は、切り替え後にこの host が
 本番になった時点で B 側が満たされる。
+
+### 27.1 切り替え（2026-10-05、DEPLOY.md §8b.6）
+
+旧 host（Docker 25、既定 bridge）から、§27 の受け入れを通した新 host へ切り替えた。
+
+| 段階 | 結果 |
+|---|---|
+| journal の配置（旧、停止前） | `SUBETHA_JOURNAL_PATH` 無し。開いている journal は mount した `journal.ndjson`（dev:inode 一致） |
+| 引き渡し | 旧の入口を閉じて Router を停止。journal 69 行 / 46825 バイト、sha256 が旧・新で一致。新の検証用 journal は 0 バイトで退避 |
+| Elastic IP | 新 host へ付け替え。IMDS の公開 IPv4 が付け替えた EIP と一致してから `HOST_ADDRS4` を更新し `apply` |
+| 新 Router の起動 | journal を replay して `healthy`。開いている journal は `journal.ndjson`、引き渡し時点の写しと先頭 46825 バイトが一致 |
+| 入口を開ける前の検査 | `subetha-egress-verify`（既定）70 passed / 0 failed |
+| 入口を開けた後 | 外から `/healthz` と MCP の `initialize` / route 一覧が応答。8787 への直接接続は外から届かない |
+
+切り替え後、外部 observer とリハーサル用 host は終了、旧 host は**停止**（切り戻し用に保持。Router は再起動ポリシー `no`、Caddy は無効）。
+これで公開中の Router は B の内側にある。要件 §9 の release gate は **B（本節）+ A（`ssrf-app-guard-design.md` §15）**の両方が満たされた。
+ただし A を含む版のイメージへの更新は別作業（切り替えでは旧と同じイメージ ID を使った）。
