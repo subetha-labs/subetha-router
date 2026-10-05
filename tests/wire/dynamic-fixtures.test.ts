@@ -14,7 +14,9 @@ import { createMppOutbound } from "../../src/adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "../../src/adapters/outbound/x402.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
 import { DynamicTargetUnsupportedError } from "../../src/ports/outbound.js";
-import { dialTo, publicLookup } from "../fixtures/dynamic/dial.js";
+// SDK は memo の作り方を公開していない（`exports` に無い）。試験では実装のファイルを直接読む。
+import * as Attribution from "../../node_modules/mppx/dist/tempo/Attribution.js";
+import { dialTo, publicLookup, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
 import { MPP_FIXTURE_CHAIN_ID, MPP_FIXTURE_CURRENCY, MPP_FIXTURE_RECIPIENT, startMppUpstream } from "../fixtures/dynamic/mpp-upstream.js";
 import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 import { startVerifyingFacilitator } from "../fixtures/dynamic/verifying-facilitator.js";
@@ -86,6 +88,26 @@ test("x402 の上流には、差し替えがあっても loopback の名前で�
   expect(upstream.seen.connections).toBe(0);
 });
 
+test("差し替えの表に無いホスト名へは接続しない（試験が外部へ出ない）", async () => {
+  const upstream = await startX402Upstream(TLS);
+  closers.push(upstream.close);
+  // 名前解決は公開アドレスを返すが、差し替えの表にあるのは provider.test だけ。
+  const transport = transportTo({ "provider.test": upstream.port });
+  const started = Date.now();
+  const failure = await transport.fetch("https://typo-provider.test/", { method: "GET" }, CTX).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(failure).toMatchObject({ code: "connect_failed" });
+  // 失敗の原因が「表に無い」こと（どこかへ接続を試みて断られたのではない）。
+  const causes: unknown[] = [];
+  for (let cause: unknown = failure; cause !== undefined && cause !== null && causes.length < 8; cause = (cause as { cause?: unknown }).cause) causes.push(cause);
+  expect(causes.some((cause) => cause instanceof UnmappedFixtureHostError)).toBe(true);
+  // 公開アドレスへの接続を待っていない（すぐに失敗する）。
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(upstream.seen.connections).toBe(0);
+});
+
 /* ------------------------------------------------------------------ 署名を検証する facilitator */
 
 const TYPES = {
@@ -124,10 +146,20 @@ async function post(baseUrl: string, path: string, body: unknown): Promise<Recor
   return (await response.json()) as Record<string, unknown>;
 }
 
-function envelope(signed: Awaited<ReturnType<typeof signedPayment>>, patch: { authorization?: Record<string, unknown>; signature?: string; requirements?: Record<string, unknown> } = {}) {
+function envelope(
+  signed: Awaited<ReturnType<typeof signedPayment>>,
+  patch: { authorization?: Record<string, unknown>; signature?: string; requirements?: Record<string, unknown>; accepted?: Record<string, unknown> } = {},
+) {
   return {
     x402Version: 2,
-    paymentPayload: { x402Version: 2, scheme: "exact", network: FIXTURE_NETWORK, payload: { signature: patch.signature ?? signed.signature, authorization: { ...signed.authorization, ...(patch.authorization ?? {}) } } },
+    // v2 の封筒（Router の受信 adapter が送る形と同じ: `accepted` を持つ）。
+    paymentPayload: {
+      x402Version: 2,
+      scheme: "exact",
+      network: FIXTURE_NETWORK,
+      accepted: { ...signed.requirements, ...(patch.accepted ?? {}) },
+      payload: { signature: patch.signature ?? signed.signature, authorization: { ...signed.authorization, ...(patch.authorization ?? {}) } },
+    },
     paymentRequirements: { ...signed.requirements, ...(patch.requirements ?? {}) },
   };
 }
@@ -168,14 +200,53 @@ test("facilitator: 署名した内容と 1 つでも違えば落ちる（nonce�
   expect(await post(facilitator.baseUrl, "/settle", envelope(signed))).toMatchObject({ success: true });
 });
 
-test("facilitator: 期限の切れた authorization は落ちる", async () => {
-  let now = Date.now();
+test("facilitator: 期限の境界は実物と同じ（あと 6 秒以上残っていなければ落ちる）", async () => {
+  const nowSeconds = 1_800_000_000;
+  let now = nowSeconds * 1000;
   const facilitator = await startVerifyingFacilitator({ now: () => now });
   closers.push(facilitator.close);
-  const signed = await signedPayment({ validBefore: Math.floor(now / 1000) + 60 });
+  const signed = await signedPayment({ validBefore: nowSeconds + 60 });
   expect(await post(facilitator.baseUrl, "/verify", envelope(signed))).toMatchObject({ isValid: true });
-  now += 61_000;
+  now = (nowSeconds + 54) * 1000; // ちょうど 6 秒残っている
+  expect(await post(facilitator.baseUrl, "/verify", envelope(signed))).toMatchObject({ isValid: true });
+  now = (nowSeconds + 55) * 1000; // 5 秒しか残っていない
   expect(await post(facilitator.baseUrl, "/verify", envelope(signed))).toMatchObject({ isValid: false, invalidReason: "validity" });
+});
+
+test("facilitator: v2 の封筒でなければ落ちる（accepted が無い・scheme や network が requirements と違う）", async () => {
+  const facilitator = await startVerifyingFacilitator();
+  closers.push(facilitator.close);
+  const signed = await signedPayment();
+  const good = envelope(signed);
+  const withoutAccepted = { ...good, paymentPayload: { x402Version: 2, scheme: "exact", network: FIXTURE_NETWORK, payload: good.paymentPayload.payload } };
+  expect(await post(facilitator.baseUrl, "/verify", withoutAccepted)).toMatchObject({ isValid: false, invalidReason: "not_v2" });
+  expect(await post(facilitator.baseUrl, "/verify", { ...good, paymentPayload: { ...good.paymentPayload, x402Version: 1 } })).toMatchObject({ isValid: false, invalidReason: "not_v2" });
+  expect(await post(facilitator.baseUrl, "/verify", envelope(signed, { accepted: { scheme: "upto" } }))).toMatchObject({ isValid: false, invalidReason: "scheme" });
+  expect(await post(facilitator.baseUrl, "/verify", envelope(signed, { accepted: { network: "eip155:8453" } }))).toMatchObject({ isValid: false, invalidReason: "network_mismatch" });
+  expect(await post(facilitator.baseUrl, "/verify", good)).toMatchObject({ isValid: true });
+});
+
+test("facilitator: nonce の使用済みは token ごと。同じ nonce でも別の token への支払いは別に扱う", async () => {
+  const facilitator = await startVerifyingFacilitator();
+  closers.push(facilitator.close);
+  const account = privateKeyToAccount(generatePrivateKey());
+  const nonce = `0x${"7c".repeat(32)}` as Hex;
+  const sign = async (asset: Hex) => {
+    const authorization = { from: account.address, to: FIXTURE_PAY_TO, value: "1000", validAfter: "0", validBefore: String(Math.floor(Date.now() / 1000) + 600), nonce };
+    const signature = await account.signTypedData({
+      domain: { name: "USDC", version: "2", chainId: 84532, verifyingContract: asset },
+      types: TYPES,
+      primaryType: "TransferWithAuthorization",
+      message: { from: account.address, to: FIXTURE_PAY_TO as Hex, value: 1000n, validAfter: 0n, validBefore: BigInt(authorization.validBefore), nonce },
+    });
+    const requirements = { scheme: "exact", network: FIXTURE_NETWORK, asset, amount: "1000", payTo: FIXTURE_PAY_TO, maxTimeoutSeconds: 600, extra: { name: "USDC", version: "2" } };
+    return { x402Version: 2, paymentPayload: { x402Version: 2, scheme: "exact", network: FIXTURE_NETWORK, accepted: requirements, payload: { signature, authorization } }, paymentRequirements: requirements };
+  };
+  const first = await sign(FIXTURE_ASSET as Hex);
+  const second = await sign("0x00000000000000000000000000000000000000d2");
+  expect(await post(facilitator.baseUrl, "/settle", first)).toMatchObject({ success: true });
+  expect(await post(facilitator.baseUrl, "/settle", second)).toMatchObject({ success: true });
+  expect(await post(facilitator.baseUrl, "/settle", first)).toMatchObject({ success: false, errorReason: "nonce_used" });
 });
 
 test("facilitator: TLS で立てれば、本番と同じ宛先の判定の transport から届く", async () => {
@@ -196,7 +267,6 @@ async function mppHarness() {
   const upstream = await startMppUpstream(TLS, rpc.url);
   closers.push(upstream.close);
   const account = privateKeyToAccount(generatePrivateKey());
-  rpc.sender = account.address;
   const client = createClient({ account, chain: { ...tempoModerato, feeToken: MPP_FIXTURE_CURRENCY } as never, transport: http(rpc.url, { retryCount: 0 }) });
   const mppx = Mppx.create({
     methods: [tempo.charge({ account, mode: "push", getClient: () => client, autoSwap: false, allowedChainIds: [MPP_FIXTURE_CHAIN_ID], expectedRecipients: [MPP_FIXTURE_RECIPIENT] } as never)],
@@ -234,75 +304,94 @@ test("MPP: 実 SDK の client が RPC の fixture に送金し、上流（実 SD
   expect(receipt).toMatchObject({ status: "success", method: "tempo", reference: hash });
   expect(upstream.seen).toMatchObject({ challenges: 1, credentials: 1, verified: 1, rejected: 0 });
   expect(rpc.methods).toContain("eth_getTransactionReceipt");
-  void account;
+  // receipt の送り主は、raw の署名から復元したもの（試験が与えた値ではない）。
+  expect(rpc.lastSender).toBe(account.address);
 });
 
-test("MPP: 同じ支払いの 2 度目、別の challenge に付け替えた支払い、送金の無い hash は、上流が落とす", async () => {
+test("MPP: A の送金を B の challenge に付け替えたものは、A がまだ使われていなくても落ちる（memo の束縛）", async () => {
   const { rpc, upstream, challengeOf, credentialFor, submit } = await mppHarness();
   const url = "https://provider.test/v1/report";
-  const headerA = await challengeOf(url);
-  const wireA = await credentialFor(headerA);
-  expect((await submit(url, wireA)).status).toBe(200);
-
-  // 1. 同じ credential をもう一度（hash の使い回し）。
-  const again = await submit(url, wireA);
-  await again.text();
-  expect(again.status).toBe(402);
-
-  // 2. A の送金を、B の challenge の credential として出す（memo が B に束縛されていない）。
-  const headerB = await challengeOf(url);
+  const wireA = await credentialFor(await challengeOf(url)); // 送金は済んだが、まだ提出していない
   const payloadA = Credential.deserialize(wireA) as { payload: unknown; source?: unknown };
-  const forged = Credential.serialize({ challenge: Challenge.deserialize(headerB), payload: payloadA.payload, ...(payloadA.source === undefined ? {} : { source: payloadA.source }) } as never);
+  const forged = Credential.serialize({ challenge: Challenge.deserialize(await challengeOf(url)), payload: payloadA.payload, ...(payloadA.source === undefined ? {} : { source: payloadA.source }) } as never);
   const swapped = await submit(url, forged);
   await swapped.text();
   expect(swapped.status).toBe(402);
-
-  // 3. 送金していない hash。
-  const headerC = await challengeOf(url);
-  const phantom = Credential.serialize({ challenge: Challenge.deserialize(headerC), payload: { type: "hash", hash: `0x${"cd".repeat(32)}` }, ...(payloadA.source === undefined ? {} : { source: payloadA.source }) } as never);
-  const missing = await submit(url, phantom);
-  await missing.text();
-  expect(missing.status).toBe(402);
-
-  expect(upstream.seen).toMatchObject({ verified: 1, rejected: 3 });
-  // 送金は最初の 1 回だけ。
+  // A は消費されていない。本来の credential はまだ通る（付け替えを落としたのは hash の使い回しの検査ではない）。
+  expect((await submit(url, wireA)).status).toBe(200);
+  // 通った後の 2 度目は、hash の使い回しとして落ちる。
+  const again = await submit(url, wireA);
+  await again.text();
+  expect(again.status).toBe(402);
+  expect(upstream.seen).toMatchObject({ verified: 1, rejected: 2 });
   expect(rpc.sentRaw).toHaveLength(1);
 });
 
-test("MPP: 額の違う送金・失敗した送金の receipt は、上流が落とす（RPC の fixture に直接登録して確かめる）", async () => {
-  const { rpc, upstream, account, challengeOf, credentialFor, submit } = await mppHarness();
+test("MPP: 登録した receipt でも、正しく束縛されていれば通る。そこから額・状態・memo・送り主を 1 つだけ変えると落ちる", async () => {
+  const { rpc, upstream, account, challengeOf, submit } = await mppHarness();
   const url = "https://provider.test/v1/report";
-  // 正の対照として 1 件通し、その memo の作り方を借りる（memo は challenge ごとに違うので、下では使い回せない）。
-  const header = await challengeOf(url);
-  const wire = await credentialFor(header);
-  expect((await submit(url, wire)).status).toBe(200);
+  const source = `did:pkh:eip155:${MPP_FIXTURE_CHAIN_ID}:${account.address}`;
+  let counter = 0;
+  /** その challenge に束縛された memo を持つ receipt を登録し、credential を作る。`patch` で 1 箇所だけ変える。 */
+  const attempt = async (patch: { amount?: bigint; status?: "0x0"; memo?: "none" | "other"; from?: string } = {}): Promise<number> => {
+    const header = await challengeOf(url);
+    const challenge = Challenge.deserialize(header) as unknown as { id: string; realm: string };
+    counter += 1;
+    const hash = `0x${counter.toString(16).padStart(64, "c")}` as Hex;
+    const bound = Attribution.encode({ challengeId: challenge.id, serverId: challenge.realm }) as Hex;
+    const memo = patch.memo === "none" ? undefined : patch.memo === "other" ? (Attribution.encode({ challengeId: "another-challenge", serverId: challenge.realm }) as Hex) : bound;
+    rpc.register(hash, [{ token: MPP_FIXTURE_CURRENCY, from: patch.from ?? account.address, to: MPP_FIXTURE_RECIPIENT, amount: patch.amount ?? 1000n, memo }], patch.status === undefined ? {} : { status: patch.status });
+    const wire = Credential.serialize({ challenge: Challenge.deserialize(header), payload: { type: "hash", hash }, source } as never);
+    const response = await submit(url, wire);
+    await response.text();
+    return response.status;
+  };
+  // 正の対照: 何も変えなければ通る。
+  expect(await attempt()).toBe(200);
+  expect(await attempt({ amount: 999n })).toBe(402);
+  expect(await attempt({ status: "0x0" })).toBe(402);
+  expect(await attempt({ memo: "none" })).toBe(402);
+  expect(await attempt({ memo: "other" })).toBe(402);
+  // 送金したのが、credential の名乗る送り主と別の口座。
+  expect(await attempt({ from: "0x00000000000000000000000000000000000000e1" })).toBe(402);
+  // もう一度、何も変えないものが通る（上の拒否が状態を壊していない）。
+  expect(await attempt()).toBe(200);
+  expect(upstream.seen).toMatchObject({ verified: 2, rejected: 5 });
+});
 
-  const source = (Credential.deserialize(wire) as { source?: unknown }).source;
-  const credentialWith = (challengeHeader: string, hash: string): string =>
-    Credential.serialize({ challenge: Challenge.deserialize(challengeHeader), payload: { type: "hash", hash }, ...(source === undefined ? {} : { source }) } as never);
+test("MPP: 送金していない hash は落ちる", async () => {
+  const { upstream, account, challengeOf, submit } = await mppHarness();
+  const url = "https://provider.test/v1/report";
+  const phantom = Credential.serialize({
+    challenge: Challenge.deserialize(await challengeOf(url)),
+    payload: { type: "hash", hash: `0x${"cd".repeat(32)}` },
+    source: `did:pkh:eip155:${MPP_FIXTURE_CHAIN_ID}:${account.address}`,
+  } as never);
+  const missing = await submit(url, phantom);
+  await missing.text();
+  expect(missing.status).toBe(402);
+  expect(upstream.seen).toMatchObject({ verified: 0, rejected: 1 });
+});
 
-  // 額が 1 少ない送金（memo なし）。
-  const underpaidHash = `0x${"a1".repeat(32)}` as Hex;
-  rpc.register(underpaidHash, [{ token: MPP_FIXTURE_CURRENCY, from: account.address, to: MPP_FIXTURE_RECIPIENT, amount: 999n }]);
-  const underpaid = await submit(url, credentialWith(await challengeOf(url), underpaidHash));
-  await underpaid.text();
-  expect(underpaid.status).toBe(402);
+test("MPP の上流は、今の要求と合わない credential を落とす（額が変わった・別の URL の scope）", async () => {
+  const { upstream, challengeOf, credentialFor, submit } = await mppHarness();
+  // 額 1000 で発行された challenge に払った後、上流の額が 2000 になった。
+  const priced = "https://provider.test/v1/report";
+  const wire = await credentialFor(await challengeOf(priced));
+  upstream.state.amount = "2000";
+  const stale = await submit(priced, wire);
+  await stale.text();
+  expect(stale.status).toBe(402);
+  upstream.state.amount = "1000";
+  expect((await submit(priced, wire)).status).toBe(200);
 
-  // 額と宛先は合っているが memo が無い送金（この challenge に束縛されていない）。
-  const unboundHash = `0x${"a2".repeat(32)}` as Hex;
-  rpc.register(unboundHash, [{ token: MPP_FIXTURE_CURRENCY, from: account.address, to: MPP_FIXTURE_RECIPIENT, amount: 1000n }]);
-  const unbound = await submit(url, credentialWith(await challengeOf(url), unboundHash));
-  await unbound.text();
-  expect(unbound.status).toBe(402);
-
-  // 失敗した transaction。
-  const revertedHash = `0x${"a3".repeat(32)}` as Hex;
-  rpc.register(revertedHash, [{ token: MPP_FIXTURE_CURRENCY, from: account.address, to: MPP_FIXTURE_RECIPIENT, amount: 1000n }], { status: "0x0" });
-  const reverted = await submit(url, credentialWith(await challengeOf(url), revertedHash));
-  await reverted.text();
-  expect(reverted.status).toBe(402);
-
-  expect(upstream.seen.verified).toBe(1);
+  // scope つき: /a のために払った credential を /b に出す。
+  upstream.state.scope = "match";
+  const wireA = await credentialFor(await challengeOf("https://provider.test/a?x=1"));
+  const crossPath = await submit("https://provider.test/b?x=1", wireA);
+  await crossPath.text();
+  expect(crossPath.status).toBe(402);
+  expect((await submit("https://provider.test/a?x=1", wireA)).status).toBe(200);
 });
 
 test("RPC の fixture: 知らない hash には null を返す。登録した receipt は、その送金のログだけを持つ", async () => {
@@ -315,6 +404,7 @@ test("RPC の fixture: 知らない hash には null を返す。登録した re
   const known = `0x${"b1".repeat(32)}` as Hex;
   const unknown = `0x${"b2".repeat(32)}`;
   rpc.register(known, [{ token: MPP_FIXTURE_CURRENCY, from: MPP_FIXTURE_RECIPIENT, to: MPP_FIXTURE_RECIPIENT, amount: 5n, memo: `0x${"00".repeat(32)}` as Hex }]);
+  expect(rpc.lastSender).toBeUndefined();
   // 別の支払いの receipt を、知らない hash の答えとして返さない。
   expect(await call("eth_getTransactionReceipt", [unknown])).toBeNull();
   const receipt = (await call("eth_getTransactionReceipt", [known])) as { transactionHash: string; status: string; logs: { transactionHash: string }[] };

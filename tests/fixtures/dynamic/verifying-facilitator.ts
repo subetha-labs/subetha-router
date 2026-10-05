@@ -8,6 +8,10 @@
  *   - `/settle`: 同じ検証のうえで nonce を使用済みにし、合成の transaction を返す（同じ署名の 2 度目は失敗する）
  *
  * 資金は動かない。鍵も持たない。
+ *
+ * **実物との違い（この fixture が示せないこと）**: token の存在・残高・実際の transfer の実行は見ない（決済できるかは分からない）。
+ * 署名者は EOA だけ（コントラクトウォレットの署名は検証しない）。nonce の使用済みは `(network, asset, 送り主, nonce)` ごとに
+ * この fixture のメモリで持つ（チェーンの状態ではない）。
  */
 import { randomBytes } from "node:crypto";
 import http from "node:http";
@@ -47,6 +51,11 @@ async function check(body: unknown, used: Set<string>, nowSeconds: number): Prom
   const payload = body["paymentPayload"];
   const requirements = body["paymentRequirements"];
   if (!isRecord(payload) || !isRecord(requirements)) return { ok: false, reason: "malformed" };
+  // v2 の封筒: `accepted` が要る。実物は `accepted.scheme`・`accepted.network` を requirements と突き合わせる。
+  const accepted = payload["accepted"];
+  if (payload["x402Version"] !== 2 || !isRecord(accepted)) return { ok: false, reason: "not_v2" };
+  if (accepted["scheme"] !== "exact" || requirements["scheme"] !== "exact") return { ok: false, reason: "scheme" };
+  if (accepted["network"] !== requirements["network"]) return { ok: false, reason: "network_mismatch" };
   const inner = payload["payload"];
   if (!isRecord(inner) || !isRecord(inner["authorization"]) || typeof inner["signature"] !== "string") return { ok: false, reason: "malformed" };
   const authorization = inner["authorization"] as Record<string, unknown>;
@@ -74,8 +83,10 @@ async function check(body: unknown, used: Set<string>, nowSeconds: number): Prom
   if (!valid) return { ok: false, reason: "invalid_signature" };
   if (getAddress(a["to"]!) !== getAddress(String(requirements["payTo"]))) return { ok: false, reason: "recipient" };
   if (BigInt(a["value"]!) !== BigInt(String(requirements["amount"]))) return { ok: false, reason: "amount" };
-  if (BigInt(a["validAfter"]!) > BigInt(nowSeconds) || BigInt(a["validBefore"]!) <= BigInt(nowSeconds)) return { ok: false, reason: "validity" };
-  const key = `${getAddress(a["from"]!)}:${a["nonce"]!.toLowerCase()}`;
+  // 実物と同じ余裕: 6 秒以内に切れる authorization は受け付けない。
+  if (BigInt(a["validAfter"]!) > BigInt(nowSeconds) || BigInt(a["validBefore"]!) < BigInt(nowSeconds + 6)) return { ok: false, reason: "validity" };
+  // authorization の状態は「あるチェーンの、ある token」のもの。
+  const key = `${String(network)}:${getAddress(String(requirements["asset"]))}:${getAddress(a["from"]!)}:${a["nonce"]!.toLowerCase()}`;
   if (used.has(key)) return { ok: false, reason: "nonce_used" };
   return { ok: true, key, payer: getAddress(a["from"]!), network: String(network) };
 }

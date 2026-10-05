@@ -20,13 +20,24 @@ export function publicLookup(overrides: Readonly<Record<string, readonly string[
   };
 }
 
+/** 表に無いホスト名へ接続しようとした。**試験が外へ出ることを止める**ための失敗。 */
+export class UnmappedFixtureHostError extends Error {
+  readonly code = "ECONNREFUSED";
+
+  constructor() {
+    super("fixture dial has no route for this host");
+    this.name = "UnmappedFixtureHostError";
+  }
+}
+
 /**
- * ホスト名 → loopback のポート。表に無いホスト名は差し替えない（＝公開アドレスへ実際に接続しようとして失敗する。
- * 試験が意図しない宛先に出たことに気付ける）。
+ * ホスト名 → loopback のポート。**表に無いホスト名は接続させない**（例外にする）。
+ * 差し替えずに通すと、名前解決の fixture が返した公開アドレスへ実際に接続を試みてしまう（綴りの誤りや想定外の宛先で、
+ * 試験が外部に通信する）。
  */
 export function dialTo(routes: Readonly<Record<string, number>>): NonNullable<GuardedTransportOptions["dialForTest"]> {
   return (target) => {
-    const port = Object.hasOwn(routes, target.hostname) ? routes[target.hostname] : undefined;
-    return port === undefined ? undefined : { host: "127.0.0.1", port };
+    if (!Object.hasOwn(routes, target.hostname)) throw new UnmappedFixtureHostError();
+    return { host: "127.0.0.1", port: routes[target.hostname]! };
   };
 }

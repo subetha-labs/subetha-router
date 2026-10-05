@@ -10,7 +10,7 @@
 import https from "node:https";
 import type { AddressInfo } from "node:net";
 
-import { Challenge, Constants, Receipt } from "mppx";
+import { Challenge, Constants, Credential, Receipt } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import { createClient, http as viemHttp } from "viem";
 import { tempoModerato } from "viem/tempo/chains";
@@ -85,6 +85,18 @@ export async function startMppUpstream(tls: TlsMaterial, rpcUrl: string, host = 
       seen.credentials += 1;
       let receipt: unknown;
       try {
+        /**
+         * `broadcastCredential` は、提出された credential の中の challenge だけを検証し、**今の要求と合うか**は見ない
+         * （実物の middleware は現在の route の条件と突き合わせる）。ここで同じことをする: 額がこの上流の現在の額と同じこと、
+         * scope を付けているなら、この要求の URL のものであること。
+         */
+        const submitted = Credential.deserialize(authorization).challenge as unknown as { request?: { amount?: unknown }; opaque?: unknown };
+        if (submitted.request?.amount !== state.amount) throw new Error("amount is not the current price");
+        if (state.scope !== "none") {
+          const expected = state.scope === "match" ? `GET ${requestedUrl}` : state.scope;
+          const meta = typeof submitted.opaque === "string" ? (JSON.parse(Buffer.from(submitted.opaque, "base64url").toString("utf8")) as Record<string, unknown>) : (submitted.opaque as Record<string, unknown> | undefined);
+          if (meta?.["_mppx_scope"] !== expected) throw new Error("scope is not this resource");
+        }
         // 実 SDK の検証（challenge の HMAC、receipt のログ、memo の束縛、hash の使い回し）。
         receipt = await api.broadcastCredential(authorization);
       } catch {

@@ -8,12 +8,16 @@
  *   - `eth_getTransactionReceipt`: 登録済みの receipt を返す（無ければ null）
  *   - `register()`: raw を送らずに receipt を直接登録する（別の支払いを装う試験用）
  *
+ * raw の**送り主は署名から復元する**（secp256k1 の署名だけ）。試験が「誰が払ったことにするか」を決められると、
+ * 上流の SDK の送り主の照合が、試験の与えた値を確かめるだけになってしまう。
+ *
  * `eth_fillTransaction` は持たない（-32601）。viem は見積りの RPC に落ちる。チェーンも鍵も無い。
  */
 import http from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
 
+import { Address, Secp256k1 } from "ox";
 import { TxEnvelopeTempo } from "ox/tempo";
 import { decodeFunctionData, encodeAbiParameters, encodeEventTopics, getAddress, keccak256, type Hex } from "viem";
 import { Abis } from "viem/tempo";
@@ -36,8 +40,8 @@ export interface TempoRpc {
   readonly methods: string[];
   /** 送金の RPC で受けた raw transaction。 */
   readonly sentRaw: Hex[];
-  /** raw の送り主として扱うアドレス（署名からは復元しない。試験が設定する）。 */
-  sender: string;
+  /** 直近に受けた raw の送り主（署名から復元したもの）。 */
+  readonly lastSender: string | undefined;
   /** `balanceOf` の応答（token → 残高）。既定は十分な額。 */
   readonly balances: Map<string, bigint>;
   /** 送金の RPC を失敗させる（成否不明の再現）。 */
@@ -81,9 +85,17 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
   const sentRaw: Hex[] = [];
   const balances = new Map<string, bigint>();
 
-  const state = {
-    sender: "0x0000000000000000000000000000000000000B0b",
-    failSend: false,
+  const state: { lastSender: string | undefined; failSend: boolean } = { lastSender: undefined, failSend: false };
+
+  /** raw の署名から送り主を復元する。secp256k1 以外・署名なしは例外。 */
+  const signerOf = (raw: Hex): string => {
+    const envelope = TxEnvelopeTempo.deserialize(raw as never) as { signature?: { type?: string; signature?: unknown } } & Record<string, unknown>;
+    const { signature, ...unsigned } = envelope;
+    if (signature === undefined || signature.type !== "secp256k1" || signature.signature === undefined) {
+      throw new Error("fixture rpc only accepts secp256k1-signed transactions");
+    }
+    const publicKey = Secp256k1.recoverPublicKey({ payload: TxEnvelopeTempo.getSignPayload(unsigned as never), signature: signature.signature as never });
+    return getAddress(Address.fromPublicKey(publicKey));
   };
 
   const register: TempoRpc["register"] = (hash, transfers, registerOptions = {}) => {
@@ -93,7 +105,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
       transactionIndex: "0x0",
       blockHash: `0x${"11".repeat(32)}`,
       blockNumber: "0x1",
-      from: getAddress(registerOptions.from ?? transfers[0]?.from ?? state.sender),
+      from: getAddress(registerOptions.from ?? transfers[0]!.from),
       to: transfers[0]?.token ?? null,
       contractAddress: null,
       cumulativeGasUsed: "0xb65b",
@@ -106,7 +118,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
   };
 
   /** raw の Tempo transaction を復号し、token 送金の call を取り出す。 */
-  const transfersOf = (raw: Hex): TransferSpec[] => {
+  const transfersOf = (raw: Hex, sender: string): TransferSpec[] => {
     const envelope = TxEnvelopeTempo.deserialize(raw as never);
     const out: TransferSpec[] = [];
     for (const call of envelope.calls ?? []) {
@@ -115,7 +127,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
         const fn = decodeFunctionData({ abi: Abis.tip20, data: call.data });
         if (fn.functionName === "transfer" || fn.functionName === "transferWithMemo") {
           const args = fn.args as readonly unknown[];
-          out.push({ token: call.to, from: state.sender, to: args[0] as string, amount: args[1] as bigint, memo: fn.functionName === "transferWithMemo" ? (args[2] as Hex) : undefined });
+          out.push({ token: call.to, from: sender, to: args[0] as string, amount: args[1] as bigint, memo: fn.functionName === "transferWithMemo" ? (args[2] as Hex) : undefined });
         }
       } catch {
         // token 送金でない call はログを作らない。
@@ -149,7 +161,11 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
         sentRaw.push(raw);
         if (state.failSend) throw new Error("fixture send failure");
         const hash = keccak256(raw);
-        register(hash, transfersOf(raw), { from: state.sender });
+        const sender = signerOf(raw);
+        state.lastSender = sender;
+        const transfers = transfersOf(raw, sender);
+        if (transfers.length === 0) throw new Error("fixture rpc found no token transfer in the transaction");
+        register(hash, transfers, { from: sender });
         return method === "eth_sendRawTransaction" ? hash : receipts.get(hash.toLowerCase());
       }
       case "eth_getTransactionReceipt":
@@ -188,11 +204,8 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
     methods,
     sentRaw,
     balances,
-    get sender(): string {
-      return state.sender;
-    },
-    set sender(value: string) {
-      state.sender = value;
+    get lastSender(): string | undefined {
+      return state.lastSender;
     },
     get failSend(): boolean {
       return state.failSend;
