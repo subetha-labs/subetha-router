@@ -172,8 +172,8 @@ sudo systemctl enable --now docker
 sudo usermod -aG docker ec2-user && exec sudo su - ec2-user   # グループ反映
 
 # 2) 取得してビルド（インスタンス上でビルドするのでアーキテクチャは自動で合う）
-git clone https://github.com/subetha-labs/subetha-router-egt.git
-cd subetha-router-egt
+git clone https://github.com/subetha-labs/subetha-router.git
+cd subetha-router
 docker build -t subetha-router .
 
 # 3) 鍵を EnvironmentFile に置く（シェル履歴とプロセス一覧に残さない）
@@ -305,7 +305,7 @@ dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux di
 for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss cmp sha256sum awk tar sync findmnt readlink; do command -v $t >/dev/null || { echo "MISSING: $t"; exit 1; }; done
 
 # 1) 成果物（リポジトリの checkout の直下で実行する。sudo は cwd を保つ）
-[ -f deploy/egress/subetha-egress ] || { echo "run this from the subetha-router-egt checkout"; exit 1; }
+[ -f deploy/egress/subetha-egress ] || { echo "run this from the subetha-router checkout"; exit 1; }
 install -m 755 deploy/egress/subetha-egress deploy/egress/subetha-egress-verify /usr/local/sbin/
 mkdir -p /usr/local/lib/subetha-egress /etc/systemd/system/docker.service.d
 install -m 644 deploy/egress/egress-observer.py deploy/egress/egress-host-observer.service \
