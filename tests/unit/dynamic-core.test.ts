@@ -244,6 +244,9 @@ describe("換算と手数料（設計 §6.6）", () => {
     expect(perPurchaseLimitOf(config, reservationOf(PROFILE, priceOf(PROFILE, "5000")!))).toBeUndefined();
     expect(perPurchaseLimitOf(config, { legs: [{ network: SRC_NETWORK, asset: SRC_ASSET, amount: "200001" }] })).toBe("per_purchase_limit");
     expect(perPurchaseLimitOf(config, { legs: [{ network: SRC_NETWORK, asset: "0xother", amount: "1" }] })).toBe("bucket_not_allowed");
+    // 同じバケットに落ちる区分（mpp 送信の元本と手数料）は合算して見る。
+    expect(perPurchaseLimitOf(config, { legs: [{ network: SRC_NETWORK, asset: SRC_ASSET, amount: "150000" }, { network: SRC_NETWORK, asset: SRC_ASSET, amount: "50001" }] })).toBe("per_purchase_limit");
+    expect(perPurchaseLimitOf(config, { legs: [{ network: SRC_NETWORK, asset: SRC_ASSET, amount: "150000" }, { network: SRC_NETWORK, asset: SRC_ASSET, amount: "50000" }] })).toBeUndefined();
   });
 
   test("正規形でない額・溢れは価格にしない", () => {
@@ -352,6 +355,17 @@ describe("動的 quote", () => {
     const core2 = await (async () => { await core.close(); opened.length = 0; return boot({ ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets: buckets.filter((bucket) => bucket.asset !== SRC_ASSET) } } }); })();
     expect(await core2.quote({ principalId: "alice", requestId: "r2", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "alice" })).toMatchObject({ ok: false, code: "quote_failed", reason: "bucket_not_allowed" });
     expect(inbound.createOfferCalls).toBe(0);
+  });
+
+  test("mpp 送信: 元本と手数料の上限が同じバケットに落ちるとき、合算が maxPerPurchase を超える quote は作らない（受信 offer 0）", async () => {
+    const mpp: DynamicProfile = { ...PROFILE, profileId: "dyn-x402-to-mpp", sourceRail: "x402", rail: "mpp", source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000" } };
+    outbound.offers = [{ scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000", payTo: "0x0000000000000000000000000000000000000b22", extra: { realm: "r", terms: "{}" } }];
+    const config = baseConfig({ profile: mpp });
+    const buckets = config.dynamic!.budget.buckets.map((bucket) => (bucket.asset === SRC_ASSET ? { ...bucket, maxPerPurchase: "9999" } : bucket));
+    const core = await boot({ ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets } } });
+    expect(await core.quote({ principalId: "alice", requestId: "r1", routeId: mpp.profileId, upstream: { url: URL_A }, source: "alice" })).toMatchObject({ ok: false, code: "quote_failed", reason: "per_purchase_limit" });
+    expect(inbound.createOfferCalls).toBe(0);
+    expect(await ledgerText()).toBe("");
   });
 
   test("requestId の衝突（AC-7）: 動的は冪等に再取得できない。静的の requestId とも、控えの requestId とも衝突", async () => {

@@ -161,10 +161,18 @@ export function reservationOf(profile: DynamicProfile, pricing: DynamicPricing):
  */
 export function perPurchaseLimitOf(config: RouterConfig, reservation: DynamicReservation): string | undefined {
   const buckets = config.dynamic?.budget.buckets ?? [];
+  // 同じバケットに落ちる区分は合算する（昇格の検査と同じ見方。`budget.ts`）。
+  const requested = new Map<string, { network: string; asset: string; amount: bigint }>();
   for (const leg of reservation.legs) {
-    const bucket = buckets.find((candidate) => candidate.network === leg.network && candidate.asset === leg.asset);
+    const key = `${leg.network}\u0000${leg.asset}`;
+    const entry = requested.get(key) ?? { network: leg.network, asset: leg.asset, amount: 0n };
+    entry.amount += BigInt(leg.amount);
+    requested.set(key, entry);
+  }
+  for (const entry of requested.values()) {
+    const bucket = buckets.find((candidate) => candidate.network === entry.network && candidate.asset === entry.asset);
     if (bucket === undefined) return "bucket_not_allowed";
-    if (!AMOUNT_PATTERN.test(bucket.maxPerPurchase) || BigInt(leg.amount) > BigInt(bucket.maxPerPurchase)) return "per_purchase_limit";
+    if (!AMOUNT_PATTERN.test(bucket.maxPerPurchase) || entry.amount > BigInt(bucket.maxPerPurchase)) return "per_purchase_limit";
   }
   return undefined;
 }
