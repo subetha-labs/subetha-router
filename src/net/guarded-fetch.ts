@@ -395,7 +395,14 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
               return ((connect, callback) => {
                 // undici は既定のポートのとき `port` を空で渡す。
                 const port = connect.port === "" || connect.port == null ? (connect.protocol === "https:" ? 443 : 80) : Number(connect.port);
-                const target = dial({ hostname: connect.hostname, port });
+                let target: ReturnType<typeof dial>;
+                try {
+                  target = dial({ hostname: connect.hostname, port });
+                } catch (error) {
+                  // 差し替え側が拒否した。接続を作らずに失敗させる。
+                  callback(error as Error, null);
+                  return;
+                }
                 base(
                   target === undefined
                     ? connect

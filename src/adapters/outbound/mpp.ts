@@ -19,13 +19,8 @@ import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport, type TransportContext } from "../../net/guarded-fetch.js";
 import { guardedRpcTransport } from "../../net/guarded-rpc.js";
-import type {
-  DestinationOffer,
-  MppTempoCapability,
-  OutboundRail,
-  PayRequest,
-  PayResult,
-} from "../../ports/outbound.js";
+import type { DestinationOffer, MppTempoCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
+import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 
 /** mppx の `_mppx_scope` は `GET <canonical URL>`（クエリ無し）で cross-resource replay を防ぐ。 */
 const SCOPE_META_KEY = "_mppx_scope";
@@ -363,7 +358,9 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
 
   return {
     /** 上流の現在の challenge を読む（純粋読取・無課金・credential を作らない）。 */
-    async readChallenge(routeId: string): Promise<readonly DestinationOffer[]> {
+    async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
+      // 動的経路（T8・T9）はまだ無い。上流の URL を受け取ったら、設定の URL に黙って落とさない。
+      if (target !== undefined) throw new DynamicTargetUnsupportedError();
       const url = urlFor(routeId);
       const mppx = createClient({ routeId, operation: "challenge" });
       const init = baseInit();
@@ -393,6 +390,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     },
 
     async pay(request: PayRequest): Promise<PayResult> {
+      if (request.target !== undefined) throw new DynamicTargetUnsupportedError();
       const url = urlFor(request.routeId);
       const approved = request.offer;
       const approvedTerms = offerTermsOf(approved);
