@@ -18,7 +18,7 @@ import { getAddress } from "viem";
 
 import type { DynamicProfile } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
-import { DYNAMIC_RESPONSE_LIMITS, readBoundedBody } from "../../net/bounded-body.js";
+import { DYNAMIC_RESPONSE_LIMITS, readJsonObjectBody } from "../../net/bounded-body.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import { parseUpstreamUrl } from "../../net/upstream-url.js";
 import type { DestinationOffer, EvmSigningCapability, PayRequest, PayResult } from "../../ports/outbound.js";
@@ -445,31 +445,21 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
   /** receipt が整合した 200 の本文。対応するのは `application/json` の JSON object だけ（設計 §3.4）。 */
   async function deliveredBodyOf(response: Response, receipt: { header: string; transaction: string }, ctx: { routeId: string; operation: string }): Promise<PayResult> {
     const noData = (reason: string): PayResult => ({ outcome: "paid_no_data", reason, receiptRef: receipt.header });
-    const mediaType = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-    if (mediaType !== "application/json") {
-      discardBody(response);
-      return noData("unsupported_response");
-    }
-    let read;
+    let delivered;
     try {
-      read = await readBoundedBody(response, DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes);
+      delivered = await readJsonObjectBody(response, DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes);
     } catch (error) {
       // 支払いは receipt で確かめてある。取れなかったのはデータだけ。
       transport.report(error, ctx);
       return noData("paid_data_unavailable");
     }
-    if (!read.ok) {
+    if (delivered.kind === "too_large") {
       return noData("response_too_large");
     }
-    let body: unknown;
-    try {
-      body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(read.bytes));
-    } catch {
+    if (delivered.kind === "unsupported") {
       return noData("unsupported_response");
     }
-    if (!isRecord(body)) {
-      return noData("unsupported_response");
-    }
+    const body = delivered.body;
     return { outcome: "paid", body, contentType: "application/json", txRef: receipt.transaction, receiptRef: receipt.header };
   }
 

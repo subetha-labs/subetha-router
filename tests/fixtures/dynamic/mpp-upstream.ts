@@ -25,6 +25,8 @@ export interface MppUpstreamState {
   amount: string;
   /** challenge の `request` に足す・上書きする欄（範囲外の challenge を作る試験用）。発行後の challenge に手を入れる。 */
   mutateChallenge: ((challenge: Record<string, unknown>, requestedUrl: string) => Record<string, unknown>) | undefined;
+  /** 本物の challenge の**前に**並べる challenge（1 つのヘッダに複数の challenge を返す上流の形）。 */
+  prependChallenges: ((requestedUrl: string) => Record<string, unknown>[]) | undefined;
   /** scope を付けるか。`"match"` は要求された URL、文字列ならその値。 */
   scope: "none" | "match" | string;
   /** 成功時の本文と content type。 */
@@ -48,7 +50,7 @@ export interface MppUpstream {
 export async function startMppUpstream(tls: TlsMaterial, rpcUrl: string, host = "provider.test"): Promise<MppUpstream> {
   const realm = "dynamic-mpp-fixture";
   const seen = { challenges: 0, credentials: 0, verified: 0, rejected: 0, urls: [] as string[] };
-  const state: MppUpstreamState = { amount: "1000", mutateChallenge: undefined, scope: "none", body: JSON.stringify({ ok: true }), contentType: "application/json", afterVerify: undefined, delayMs: 0 };
+  const state: MppUpstreamState = { amount: "1000", mutateChallenge: undefined, prependChallenges: undefined, scope: "none", body: JSON.stringify({ ok: true }), contentType: "application/json", afterVerify: undefined, delayMs: 0 };
   const client = createClient({ chain: { ...tempoModerato, id: MPP_FIXTURE_CHAIN_ID } as never, transport: viemHttp(rpcUrl, { retryCount: 0 }) });
   const mppx = Mppx.create({
     secretKey: "fixture-secret-0123456789abcdef0123456789abcdef",
@@ -79,7 +81,8 @@ export async function startMppUpstream(tls: TlsMaterial, rpcUrl: string, host = 
           ...(scope === undefined ? {} : { scope, meta: { _mppx_scope: scope } }),
         });
         if (state.mutateChallenge !== undefined) challenge = state.mutateChallenge(challenge, requestedUrl);
-        send(402, { "content-type": "application/problem+json", "www-authenticate": Challenge.serialize(challenge as never) }, JSON.stringify({ title: "Payment Required", status: 402 }));
+        const all = [...(state.prependChallenges?.(requestedUrl) ?? []), challenge];
+        send(402, { "content-type": "application/problem+json", "www-authenticate": all.map((each) => Challenge.serialize(each as never)).join(", ") }, JSON.stringify({ title: "Payment Required", status: 402 }));
         return;
       }
       seen.credentials += 1;

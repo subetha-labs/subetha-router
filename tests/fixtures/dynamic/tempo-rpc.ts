@@ -36,6 +36,10 @@ export interface TransferSpec {
 export interface TempoRpc {
   readonly url: string;
   readonly port: number;
+  /** TLS なしの URL（同じ状態を見る）。上流の fixture が検証に使う。TLS を指定しなければ `url` と同じ。 */
+  readonly plainUrl: string;
+  /** 見積りの応答（手数料の上限の試験用）。 */
+  readonly quote: { gas: bigint; baseFeePerGas: bigint };
   /** 受けた RPC の method（順に）。 */
   readonly methods: string[];
   /** 送金の RPC で受けた raw transaction。 */
@@ -86,6 +90,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
   const balances = new Map<string, bigint>();
 
   const state: { lastSender: string | undefined; failSend: boolean } = { lastSender: undefined, failSend: false };
+  const quote = { gas: 0xd412n, baseFeePerGas: 0x23c34600n };
 
   /** raw の署名から送り主を復元する。secp256k1 以外・署名なしは例外。 */
   const signerOf = (raw: Hex): string => {
@@ -143,13 +148,13 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
       case "eth_getTransactionCount":
         return "0x0";
       case "eth_estimateGas":
-        return "0xd412";
+        return `0x${quote.gas.toString(16)}`;
       case "eth_maxPriorityFeePerGas":
         return "0x1";
       case "eth_gasPrice":
         return "0x23c34601";
       case "eth_getBlockByNumber":
-        return { number: "0x1", baseFeePerGas: "0x23c34600", timestamp: "0x1", gasLimit: "0x1c9c380", transactions: [] };
+        return { number: "0x1", baseFeePerGas: `0x${quote.baseFeePerGas.toString(16)}`, timestamp: "0x1", gasLimit: "0x1c9c380", transactions: [] };
       case "eth_call": {
         // `balanceOf(address)` だけに答える。
         const to = String((params[0] as { to?: string } | undefined)?.to ?? "").toLowerCase();
@@ -195,12 +200,17 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
       response.end(text);
     });
   };
-  const server = options.tls === undefined ? http.createServer(handler) : https.createServer({ key: options.tls.other.key, cert: options.tls.other.cert }, handler);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const plain = http.createServer(handler);
+  await new Promise<void>((resolve) => plain.listen(0, "127.0.0.1", () => resolve()));
+  const plainUrl = `http://127.0.0.1:${(plain.address() as AddressInfo).port}`;
+  const server = options.tls === undefined ? plain : https.createServer({ key: options.tls.other.key, cert: options.tls.other.cert }, handler);
+  if (server !== plain) await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const port = (server.address() as AddressInfo).port;
   return {
-    url: options.tls === undefined ? `http://127.0.0.1:${port}` : "https://other.test",
+    url: options.tls === undefined ? plainUrl : "https://other.test",
     port,
+    plainUrl,
+    quote,
     methods,
     sentRaw,
     balances,
@@ -214,9 +224,11 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
       state.failSend = value;
     },
     register,
-    close: () => {
-      server.closeAllConnections();
-      return new Promise<void>((resolve) => server.close(() => resolve()));
+    close: async () => {
+      for (const each of new Set([server, plain])) {
+        each.closeAllConnections();
+        await new Promise<void>((resolve) => each.close(() => resolve()));
+      }
     },
   };
 }

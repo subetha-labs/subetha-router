@@ -400,7 +400,7 @@ T0-c の 6 件がすべて mainnet だったので、testnet で動いている�
 | 対象 | 上限 | 超過時 |
 |---|---|---|
 | 応答ヘッダ全体 | **32 KiB**（動的用 Agent に `maxHeaderSize` を**明示**。undici の既定は Node から継承され固定値ではない。実測で `PAYMENT-REQUIRED` だけで 10.6 KB のものがあった） | **未払いの要求**では transport の失敗。**支払いヘッダを付けた要求**では送金の有無が分からないので `unknown` |
-| 402 の本文 | x402 送信: **読まない**（下の「T8 で決めたこと」）。MPP 送信: 64 KiB（T9 で確定） | 中断。quote 不成立／`destination_challenge_unreadable` |
+| 402 の本文 | **読まない**（x402・MPP とも。支払い条件はヘッダにあり、本文は使わない。下の「T8 で決めたこと」「T9 で決めたこと」） | — |
 | `accepts`／challenge の個数 | 16 | 同上 |
 | 有料応答の本文 | 256 KiB | 下の順序で判定 |
 
@@ -431,6 +431,29 @@ journal に保存する本文は 256 KiB が上限。
 8. **adapter も URL の規則（`parseUpstreamUrl`）をもう一度掛ける。** core が渡した URL でも、規則を通らなければ接続しない
 9. **署名の境界は「違えば拒否」**: SDK が渡した typed data の `types`・`domain`（キーの集合まで）・`primaryType`・`from`・`to`・`value` が、
    プロファイルと承認済みの値から組んだものと一致しなければ署名しない。一致したうえで、署名器に渡すのは Router が組み直したもの（`EIP712Domain` の型定義も明示する）
+
+**T9 で決めたこと（MPP 送信の実装、`src/adapters/outbound/mpp-dynamic.ts`）**
+
+1. **SDK には HTTP をさせない。** 402 は adapter が自分で読み、`WWW-Authenticate` を SDK の解析関数（`Challenge.deserializeList`）に渡す。
+   検査を通して選んだ challenge **1 件だけ**を SDK の形に直列化し直して `createCredential` に渡す。上流への要求（未払い・credential つき）は adapter が 1 回ずつ出す。
+   402 の本文は読まない
+2. **challenge のトップレベルの未知のパラメータは、SDK の解析の時点で落ちる**（SDK のスキーマにある欄だけが残る）。したがって「未知の欄があれば拒否」は
+   `request` と `methodDetails` については行うが、トップレベルについては「SDK が認識する欄のうち `header` を拒否、それ以外の未知のパラメータは使われず、送り返されもしない」になる
+3. **期限切れ・日時として読めない `expires` の challenge は候補にしない**
+4. **transaction の欄の規則**: 引き継ぐ欄（`calls`・`chainId`・`gas`・`maxFeePerGas`・`maxPriorityFeePerGas`・`nonce`・`nonceKey`・`validBefore`・`type`・`feeToken`・`from`）と
+   捨てる欄（`account`・`chain`・`nonceManager`）以外に**値があれば拒否**（`false` や空の配列も「ある」とみなす）。`type` は `"tempo"` か `"eip1559"` だけ。
+   call の `data` は復号したうえで**組み直したものと一致**することまで見る（ABI の復号は末尾の余分なバイトを読み飛ばすため）
+5. **送信の境界は 2 つを確かめる**: RPC に出る raw が「署名の境界が返した raw そのもの」であることと、復号した中身（送り主・call・fee token・手数料・nonce・有効期限）が承認済みであること。
+   通す送金系のメソッドは raw の送信 2 つだけで、`eth_send*`・`eth_sign*`・`wallet_*`・`personal_*` の他のメソッドは RPC に出さない
+6. **receipt を束縛する取引の hash は、自分が署名して送った raw から計算する**（SDK が credential に入れた値は、それと一致することを確かめるだけ）
+7. **終端**: 署名の前に止まれば `not_sent`。署名した後は、送金の RPC の失敗・credential の不整合・上流の拒否（402）・receipt なしのどれも `unknown`
+   （push では credential を送る前に送金が済んでいる）。整合した receipt があれば、200 は本文の判定、200 以外は `paid_no_data`
+8. **能力**: `mode: "push"` の明示・local account・`kind: "real-key"`・loopback を許さない transport を、adapter の生成時に確かめる（違えば例外）。
+   client が viem の素の `http` transport であることは `assertDynamicMppCapability`（起動時に呼ぶ。T13）と支払い時の両方で確かめる
+9. **1 件の支払いで Router が出す RPC**（`eth_fillTransaction` を持たない fixture で固定）: `eth_fillTransaction`（未対応の応答）→ `eth_getBlockByNumber` → `eth_maxPriorityFeePerGas` →
+   `eth_estimateGas` → `eth_sendRawTransactionSync` の 5 回。送金は 1 回
+10. **RPC の期限は支払いの期限（30 秒）とは別**で、能力の http transport の設定（既定 10 秒／回）に従う。最悪の所要時間は「未払いの読取 5 秒＋RPC 最大 5 回＋credential つきの要求 30 秒」。
+    入口の 120 秒に収めるため、**動的プロファイルの能力は RPC の期限を短く（5 秒以下）設定する**ことを T13 の配線の条件にする
 
 ## 4. 受信の束縛（U-2・FR-6・AC-5）
 
