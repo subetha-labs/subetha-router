@@ -141,8 +141,12 @@ Because of that, **the meaning of `npm run sign` changes with the rail**:
 
 - **Real settlement of the SubEtha inbound leg** (still the synthetic facilitator). -> **AC-4 is not met**
 - Same-rail (x402 -> x402 / MPP -> MPP) is **not verified**
-- **Replay prevention for MPP inbound across restarts**. The replay state is in-process and is lost
-  on restart (the Router's own at-most-once is keyed on `quoteId`, not on the credential)
+- **Replay prevention for MPP inbound across restarts, on a real chain**. The SDK's replay state is in-process
+  and is lost on restart. The Router now refuses an MPP credential whose embedded challenge is not the one
+  issued for that quote, and a quote runs at most once (journal). Fixture tests cover the adapter's refusal
+  of another quote's credential; the check keeps no state, so it does not depend on the process surviving.
+  Replay across a restart has not been exercised end to end with real receipts or real funds, and the SDK
+  binds a transfer to its challenge through a 56-bit memo tag, not the full challenge id
 - finality (the mined/canonical determination)
 - **Real UI integration** with the existing chat (integration with the execution layer is confirmed. T5)
 
