@@ -12,7 +12,7 @@
 
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { isIP } from "node:net";
-import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
+import { Agent, buildConnector, fetch as undiciFetch, type Dispatcher } from "undici";
 
 import {
   classifyAddress,
@@ -27,6 +27,8 @@ export type TransportCode =
   | "connect_failed"
   | "upstream_timeout"
   | "aborted"
+  /** 動的経路の門が枠を出さなかった（`admit`）、または名前解決の同時実行の上限。接続は作っていない。 */
+  | "admission_refused"
   | "transport_failed";
 
 export interface TransportContext {
@@ -72,6 +74,31 @@ export interface GuardedTransportOptions {
   readonly interfaces?: () => readonly string[];
   /** 試験用の CA だけを足す。`rejectUnauthorized` は触らない。本番は未指定。 */
   readonly tls?: { readonly ca?: readonly string[] };
+
+  /*
+   * 以下は動的上流 URL の経路だけが指定する（設計 `docs/dynamic-upstream-design.md` §3.1・§3.4・§7.3）。
+   * **未指定なら、この transport の挙動は従来と 1 つも変わらない。**
+   */
+
+  /** 応答ヘッダ全体の上限（バイト）。未指定は undici の既定。 */
+  readonly maxHeaderSize?: number;
+  /**
+   * 名前解決の期限と同時実行の上限。期限か要求の中断で**待つのをやめる**。`dns.lookup` 自体は取り消せないので、
+   * 待つのをやめた解決も終わるまで枠を使い続ける。枠が埋まっていれば解決を始めずに拒否する。
+   */
+  readonly dns?: { readonly timeoutMs: number; readonly maxInFlight: number };
+  /**
+   * 宛先の判定を通った後・接続の前に呼ぶ。`addresses` は重複を除いた検査済みアドレスの正規化済み表記
+   * （`ParsedAddress.text`）の全部。`undefined` を返したら接続せずに拒否する。返った `release` は、
+   * 応答の本文を読み終えた・中断した・失敗したときに 1 回だけ呼ぶ。
+   */
+  readonly admit?: (addresses: readonly string[], context: TransportContext) => { release(): void } | undefined;
+  /**
+   * **試験専用。** 宛先の判定（解決・分類・拒否）は本番と同じコードがそのまま走り、判定を通った接続の
+   * **TCP の行き先だけ**を差し替える（loopback の fixture の任意のポートへ）。SNI・証明書の検証・`Host` は
+   * 元のホスト名のまま。本番の入口はこれを渡さない（静的検査で固定する）。
+   */
+  readonly dialForTest?: (target: { readonly hostname: string; readonly port: number }) => { readonly host: string; readonly port: number } | undefined;
 }
 
 export type GuardedFetch = (
@@ -136,6 +163,29 @@ function oneDispatch(): Dispatcher.DispatcherComposeInterceptor {
     used = true;
     return dispatch(opts, handler);
   };
+}
+
+/**
+ * 応答が終わった（本文を読み終えた・中断した・失敗した）ときに 1 回だけ `done` を呼ぶ。
+ * `fetch` は headers で戻るので、枠の返却を `finally` に置くと本文を読んでいる間の同時実行を数えられない。
+ */
+function onSettled(done: () => void): Dispatcher.DispatcherComposeInterceptor {
+  return (dispatch) => (opts, handler) =>
+    dispatch(
+      opts,
+      new Proxy(handler, {
+        get(target, property, receiver) {
+          const value: unknown = Reflect.get(target, property, receiver);
+          if ((property === "onResponseEnd" || property === "onResponseError") && typeof value === "function") {
+            return (...args: unknown[]): unknown => {
+              done();
+              return (value as (...inner: unknown[]) => unknown).apply(target, args);
+            };
+          }
+          return value;
+        },
+      }),
+    );
 }
 
 export interface GuardedTransport {
@@ -217,20 +267,73 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
     throw new TransportError(code, context, cause);
   }
 
+  /** 進行中の名前解決の数（`options.dns` があるときだけ数える）。 */
+  let resolving = 0;
+
+  function resolveAll(bare: string): Promise<string[]> {
+    return new Promise<string[]>((resolve, reject) => {
+      lookup(bare, { all: true, verbatim: true }, (error, addresses) => {
+        if (error) reject(error);
+        else resolve(addresses.map((entry) => entry.address));
+      });
+    });
+  }
+
+  /**
+   * 期限・同時実行の上限つきの名前解決（動的経路）。`dns.lookup` は取り消せないので、期限や中断で**待つのをやめても**
+   * 解決自体は続く。その間は枠（`resolving`）を持ち続け、終わったときに返す。
+   */
+  async function resolveBounded(
+    bare: string,
+    limits: { readonly timeoutMs: number; readonly maxInFlight: number },
+    signal: AbortSignal | undefined,
+    context: TransportContext,
+  ): Promise<string[]> {
+    if (signal?.aborted === true) return fail("aborted", context);
+    if (resolving >= limits.maxInFlight) return fail("admission_refused", context);
+    resolving += 1;
+    const pending = resolveAll(bare).finally(() => {
+      resolving -= 1;
+    });
+    // 待つのをやめた後で失敗しても、未処理の拒否にしない。
+    pending.catch(() => {});
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new TransportError("dns_failed", context)), limits.timeoutMs);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(new TransportError("aborted", context));
+          signal?.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof TransportError) {
+        emit(error.code, context);
+        throw error;
+      }
+      return fail("dns_failed", context, error);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   /** ホスト名を解決し、全アドレスを分類する。1 つでも禁止なら拒否（FR-A2）。 */
-  async function vet(host: string, context: TransportContext): Promise<readonly ParsedAddress[]> {
+  async function vet(host: string, context: TransportContext, signal?: AbortSignal): Promise<readonly ParsedAddress[]> {
     const bare = stripBrackets(host);
     let candidates: string[];
     if (isIP(bare) !== 0) {
       candidates = [bare];
+    } else if (options.dns !== undefined) {
+      candidates = await resolveBounded(bare, options.dns, signal, context);
+      if (candidates.length === 0) return fail("dns_failed", context);
     } else {
       try {
-        candidates = await new Promise<string[]>((resolve, reject) => {
-          lookup(bare, { all: true, verbatim: true }, (error, addresses) => {
-            if (error) reject(error);
-            else resolve(addresses.map((entry) => entry.address));
-          });
-        });
+        candidates = await resolveAll(bare);
       } catch (error) {
         return fail("dns_failed", context, error);
       }
@@ -255,16 +358,52 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
     if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") {
       return fail("destination_blocked", context);
     }
-    const vetted = await vet(url.hostname, context);
+    const vetted = await vet(url.hostname, context, options.dns === undefined ? undefined : (init?.signal ?? undefined));
 
+    /**
+     * 宛先の枠（動的経路の門）。重複を除いた**全アドレス**に対して取る（どれに接続するかは undici が決める）。
+     * 取れなければ接続しない。返すのは応答が終わったとき（下の `onSettled`）か、headers の前に失敗したとき。
+     */
+    let release = (): void => {};
+    if (options.admit !== undefined) {
+      const lease = options.admit([...new Set(vetted.map((entry) => entry.text))], context);
+      if (lease === undefined) return fail("admission_refused", context);
+      let released = false;
+      release = (): void => {
+        if (released) return;
+        released = true;
+        lease.release();
+      };
+    }
+
+    const connectOptions = {
+      lookup: createVettedLookup(vetted) as unknown as typeof dnsLookup,
+      ...(options.tls?.ca === undefined ? {} : { ca: [...options.tls.ca] }),
+    };
+    const dial = options.dialForTest;
     const agent = new Agent({
       // HTTP/1.1 だけ（設計 §3.3-8）。undici 8 は既定で h2 を許し、REFUSED_STREAM / GOAWAY で要求を自動で再送し得る。
       // 有料要求の「1 回だけ送る」契約を transport で守るため、ALPN で h2 を提示しない。
       allowH2: false,
-      connect: {
-        lookup: createVettedLookup(vetted) as unknown as typeof dnsLookup,
-        ...(options.tls?.ca === undefined ? {} : { ca: [...options.tls.ca] }),
-      },
+      ...(options.maxHeaderSize === undefined ? {} : { maxHeaderSize: options.maxHeaderSize }),
+      connect:
+        dial === undefined
+          ? connectOptions
+          : (() => {
+              // 試験専用: 判定は済んでいる。TCP の行き先だけを差し替え、SNI と証明書の検証は元のホスト名のまま。
+              const base = buildConnector({ ...connectOptions, allowH2: false });
+              return ((connect, callback) => {
+                // undici は既定のポートのとき `port` を空で渡す。
+                const port = connect.port === "" || connect.port == null ? (connect.protocol === "https:" ? 443 : 80) : Number(connect.port);
+                const target = dial({ hostname: connect.hostname, port });
+                base(
+                  target === undefined
+                    ? connect
+                    : { ...connect, hostname: target.host, port: String(target.port), servername: connect.servername ?? connect.hostname },
+                  callback,
+                );
+              }) as buildConnector.connector;
+            })(),
     });
 
     let response: Awaited<ReturnType<typeof undiciFetch>>;
@@ -273,9 +412,10 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
         ...(init as Parameters<typeof undiciFetch>[1]),
         redirect: "error",
         // 2 回目の dispatch（421 再試行）を拒む（§3.3-10）。
-        dispatcher: agent.compose(oneDispatch()),
+        dispatcher: options.admit === undefined ? agent.compose(oneDispatch()) : agent.compose(oneDispatch(), onSettled(release)),
       });
     } catch (error) {
+      release();
       agent.destroy().catch(() => {});
       return fail(classifyTransportError(error), context, error);
     }
