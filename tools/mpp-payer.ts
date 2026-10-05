@@ -23,6 +23,7 @@ import { Challenge, Credential } from "mppx";
 import { Mppx, tempo } from "mppx/client";
 import { createWalletClient, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { tempoModerato } from "viem/tempo/chains";
 
 export const TEMPO_MODERATO_CHAIN_ID = 42_431;
 export const TEMPO_MODERATO_RPC = "https://rpc.moderato.tempo.xyz";
@@ -102,6 +103,8 @@ export function createMppPayer(
 
       const client = createWalletClient({
         account,
+        // chain を持たせる（SDK は client の chain と challenge の chain を突き合わせる）。
+        chain: { ...tempoModerato, id: scope.chainId },
         transport: http(rpcUrl, { retryCount: 0 }),
       }).extend(publicActions);
 
@@ -112,7 +115,11 @@ export function createMppPayer(
             // **push 固定**: 自分で broadcast して hash を渡す。
             // 既定は local account だと `pull` なので、明示しないと未検証の経路に落ちる。
             mode: "push",
-            client: client as never,
+            /**
+             * SDK が読むのは `getClient`（`client` という欄は無く、渡しても**黙って無視され**、SDK の既定の RPC が使われる）。
+             * 以前は `client` で渡していたため、`rpcUrl` の指定が効いていなかった（既定の RPC が同じ testnet なので動いてはいた）。
+             */
+            getClient: () => client as never,
             // 送金先とチェーンを SDK 側にも伝え、challenge と食い違ったら SDK に止めさせる。
             allowedChainIds: [scope.chainId],
             expectedRecipients: [scope.payTo as `0x${string}`],
