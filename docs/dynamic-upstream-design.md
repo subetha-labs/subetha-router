@@ -269,8 +269,7 @@ MPP（3 件。`WWW-Authenticate: Payment`）:
 **ここから決めること**
 
 1. **調べた第三者の 6 件はすべて mainnet の資産を要求した**（x402 は Base `eip155:8453`、MPP は Tempo `4217`）。testnet の資産ペアしか持たない現在のプロファイルでは、
-   この 6 件はどれも `no_matching_offer` になる。testnet で動いている第三者の Provider があるかどうかは**調べていない**（discovery の一覧の先頭から選んだ 6 件だけ）。
-   確かなのは、testnet の間に動的 URL で買えると分かっているのが運用者の A・B だけ、ということ
+   この 6 件はどれも `no_matching_offer` になる。testnet で動いている第三者の Provider は別に探した（下の「testnet の第三者 Provider」）
 2. **offer の選択**: 第三者の x402 の 6 件は複数の offer を並べ、1 件目が EVM の `exact` だった（運用者の A は 1 件だけ）。MPP も 1 つのヘッダに複数の challenge を返すものがあった（1 件）ので、**x402・MPP とも**「上流の順に見て、検査を通る最初の 1 件」（§2.3）とする。
    `extra.assetTransferMethod`（Permit2）・`extra.feePayer`・`batch-settlement`、MPP の charge 以外の種類は検査で候補から外れる
 3. **x402 の offer に許す欄**（(i) の「トップレベルのキー」を次に改める）:
@@ -295,6 +294,40 @@ MPP（3 件。`WWW-Authenticate: Payment`）:
 
 この調査は**未払いの応答の形**だけを見ている。Router の動的 quote がこれらの URL で成立するかどうか（M-4。これも未払いの読取で測る）と、
 実際に支払って成立するかどうか（T16 の G-2・G-3）は、どちらもまだ測っていない。
+
+*testnet の第三者 Provider: 探索と試行*（2026-10-05。owner の依頼。`tools/dyn-challenge-survey.ts --profile base-sepolia-usdc` と `tools/dyn-testnet-provider-trial.ts`）
+
+T0-c の 6 件がすべて mainnet だったので、testnet で動いているものを別に探した。
+
+1. **探索**: 公開されている x402 の一覧（CDP の discovery）の**先頭 4,000 件**（全 34,474 件のうち）を読み、Base Sepolia（`eip155:84532`）の offer を持つものを集めた。**21 ホスト**。
+   読んだ範囲での network の内訳は、Base mainnet が最多で、testnet はごく一部である
+2. **未払いの読取**（各 URL に GET を 1 回）: 21 件中 **16 件が 402** を返した（残りは 404・405。POST 専用か、一覧の URL が古い）。
+   §3.3 (i) の検査を当てると、**12 件で「選べる offer がある」**。選べなかった 4 件の理由は、`maxTimeoutSeconds` が範囲外（1 件）、`resource.url` が要求した URL と違う（1 件）、
+   一覧では testnet だが実際の offer は別の network（2 件）、`extra.assetTransferMethod`（Permit2。1 件）
+3. **実際の支払い**（12 件のうち額の小さい 6 件に、Router の送信レールと同じコード（`createX402Outbound`、署名前の照合つき、SSRF 防御 A の transport）で 1 回ずつ。
+   Base Sepolia の testnet USDC、使い捨て口座、1 件 10000 以下・合計 19000 base units。Router 本体・journal・本番は通していない）:
+
+| Provider（ホスト） | 額 | 結果 | 所要 |
+|---|---|---|---|
+| `tollbooth-hello-testnet.sjwilliams8.workers.dev` | 1000 | **paid**（JSON object を受領） | 3.0 秒 |
+| `omniterminal.app` | 1000 | **paid**（offer 2 つのうち 1 つ目を選択） | 3.5 秒 |
+| `api.marketintelligenceapi.com` | 5000 | **paid**（offer 8 つのうち 8 つ目が testnet） | 2.7 秒 |
+| `x402-stablecoin-data-demo.ryan-ee4.workers.dev` | 10000 | **paid** | 4.2 秒 |
+| `wallets-demo-seller-server.calebgcarithers.workers.dev` | 1000 | **rejected**（上流が支払いを受け付けなかった。署名は 1 回） | 1.1 秒 |
+| `x402-test.genesisblock.ai` | 1000 | **unknown**（5 秒の期限で打ち切り） | 5.3 秒 |
+
+支払い口座の残高は 19,960,000 → 19,942,000（**18,000 減**）。`paid` の 4 件の合計は 17,000 なので、**`unknown` で終わった 1 件（1000）は実際には決済されていた**
+（`rejected` の 1 件が決済された可能性も残高だけでは否定できないが、応答が 1.1 秒で返っているので可能性は低い）。
+
+**分かったこと**
+
+- **testnet にも第三者の Provider はあり、現在の設計のままで買える**。4 件は、事前登録なしに URL を渡すだけで支払いからデータの受領まで成立した。
+  「testnet の間に買えると分かっているのは運用者の A・B だけ」という §11 の記述は改める
+- **`unknown` は実際に「払ったがデータが無い」になる**。5 秒では足りない Provider がある（上流側の決済の確認に時間がかかる）。
+  動的経路の**有料要求の期限は 5 秒より長くする**（T8 で 30 秒を既定にし、値を設定可能にする）。期限を延ばしても `unknown` は無くならないので、要件 §7 の受容と FR-10 の開示はそのまま要る
+- 複数の offer のうち**後ろの方**に testnet の offer を置く Provider がある（8 つ目）。「検査を通る最初の 1 件」の規則で正しく選べた
+- `rejected` の原因は分からない（上流の理由文字列は読まない方針）。この場合、動的購入では受信が成立した後なので**呼び出し側は払ったがデータが無い**ことになる
+- 探索は一覧の 12% しか読んでいない。成立率（未払いで 12／21、支払って 4／6）は**この標本での値**で、全体の割合ではない
 
 ### 3.4 上流から受け取るものの上限と、応答の扱い（FR-27・FR-28）
 
@@ -571,7 +604,7 @@ M-2 は SDK → 包んだ account → 固定の serializer → guarded RPC を**
 | 昇格後に settle が拒否された試行は動的予算を保持する | §6.5 |
 | 動的 quote は冪等に再取得できない。他人の `requestId` の先取りが可能 | §2.5 |
 | 上流が `resource` を fetch URL と 1 バイトでも違う形で申告すると使えない。許可した説明用の欄以外を足す Provider も使えない | 束縛と署名範囲を緩めないため。T0-c の 6 件では `resource.url` は全件一致、offer の欄は 5 件が通る見込み。**動的 quote の成立率（M-4、未払い）も、支払っての成立も未計測** |
-| testnet の間に動的 URL で買えると分かっているのは運用者の A・B だけ | T0-c で見た第三者 6 件はすべて mainnet の資産を要求した。testnet の第三者 Provider の有無は調べていない |
+| 第三者の Provider で成立するかは相手しだい | testnet の第三者 6 件に実際に支払った結果は、成立 4・上流が拒否 1・期限切れ（実際は決済済み）1（§3.3 の「testnet の第三者 Provider」）。mainnet の Provider では試していない |
 | MPP の第三者 Provider は既存の scope（`_mppx_scope`）を持たない | 動的経路では「あれば照合・無ければ不問」。保存した URL・guarded な TLS 接続・offer の照合が権威。静的は従来どおり必須 |
 | facilitator・RPC を別名で指す URL は拒否できない | §7.4 |
 | MPP 受信の束縛は SDK の 56 ビットの memo 要約に依る | SDK の仕様。衝突に依らない一意性は主張しない |
