@@ -186,7 +186,8 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     {
       description:
         "List the routes this Router exposes (routeId, canonical URL, and the asset " +
-        "metadata for both legs). Upstream provider URLs are never returned.",
+        "metadata for both legs). Upstream provider URLs are never returned. When the Router has dynamic " +
+        `profiles (for ${TOOL_NAMES.quoteUrl}), they are listed under \`dynamic\` with \`enabled\`.`,
       inputSchema: {},
     },
     async () => guarded(() => handlers.listRoutes()),
@@ -224,8 +225,10 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "verified). `profileId` selects which rail you pay with and which rail the upstream is paid on. " +
         "**This tool starts no payment.** The returned `subject` shows the upstream URL, the recipient, and the " +
         "price breakdown (upstream amount + Router fee = total). The quote document carries an `ownerKey`: pass " +
-        `the whole document to ${TOOL_NAMES.purchase} and to ${TOOL_NAMES.status}; without it the purchase cannot be ` +
-        "read or executed. Nothing is refunded if the upstream takes the payment and returns no usable data " +
+        `the whole document as ${TOOL_NAMES.purchase}'s \`quote\` argument, and pass its \`ownerKey\` field as ` +
+        `${TOOL_NAMES.status}'s \`ownerKey\` argument; without it the purchase cannot be executed or read. ` +
+        `Profiles are listed by ${TOOL_NAMES.listRoutes} under \`dynamic\`. ` +
+        "Nothing is refunded if the upstream takes the payment and returns no usable data " +
         "(only an application/json object up to 256 KiB is delivered). If `subject.fundsMoveOnCredential` is true, " +
         "building the credential already spends the funds and the Router may still refuse afterwards — get approval " +
         "BEFORE building the credential. Use a fresh `requestId` per quote.",

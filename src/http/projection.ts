@@ -11,9 +11,40 @@ export function canonicalUrlOf(canonicalBaseUrl: string, route: RouteConfig): st
   return `${canonicalBaseUrl}${route.canonicalPath}`;
 }
 
-/** R1: allowlist の `routeId`・canonical URL・資産メタのみ（上流 URL は返さない）。 */
-export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): unknown {
+/** R1 の動的プロファイルの一覧（設計 §1.1・§2.1）。呼び出し側が「自分の払えるレールのプロファイル」を選ぶための欄だけ。 */
+export function dynamicListingOf(config: RouterConfig): Record<string, unknown> | undefined {
+  const dynamic = config.dynamic;
+  if (dynamic === undefined) {
+    return undefined;
+  }
   return {
+    enabled: dynamic.enabled,
+    profiles: Object.values(dynamic.profiles).map((profile) => ({
+      profileId: profile.profileId,
+      source: { rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals },
+      destination: { rail: profile.rail, scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, decimals: profile.destination.decimals },
+      maxUpstreamAmount: profile.maxUpstreamAmount,
+      fee: { ...profile.fee },
+      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp"),
+    })),
+  };
+}
+
+/** R1: allowlist の `routeId`・canonical URL・資産メタのみ（上流 URL は返さない）。動的プロファイルの一覧は `dynamic` に（設定にあるときだけ）。 */
+export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): unknown {
+  const dynamic = dynamicListingOf(config);
+  return {
+    ...(dynamic === undefined
+      ? {}
+      : {
+          dynamic: {
+            ...dynamic,
+            profiles: (dynamic["profiles"] as Record<string, unknown>[]).map((profile) => ({
+              ...profile,
+              resource: { url: `${canonicalBaseUrl}${canonicalPathOf(profile["profileId"] as string)}`, method: "GET" },
+            })),
+          },
+        }),
     routes: Object.values(config.routes).map((route) => ({
       routeId: route.routeId,
       resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },

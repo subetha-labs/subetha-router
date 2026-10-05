@@ -14,7 +14,13 @@ export interface RouterClientOptions {
   readonly token: string;
   /** 差し替え可能な fetch（既定は `globalThis.fetch`）。 */
   readonly fetch?: typeof globalThis.fetch;
+  /** 1 要求の期限（quote・一覧・status）。既定 10 秒。 */
   readonly timeoutMs?: number;
+  /**
+   * 購入（R3）の期限。既定 90 秒。動的購入は上流の読み直し・受信の検証と決済・RPC・上流への有料要求を含み、
+   * 最悪で 66 秒ほどかかる（設計 §3.4）。短く切ると、Router が支払いを続けているのに `unknown` になる。
+   */
+  readonly executeTimeoutMs?: number;
   /**
    * **ステートレス運用の明示的な opt-in**（既定 `false`）。
    *
@@ -159,7 +165,8 @@ export type StatusResult =
   | { readonly found: false; readonly status: number; readonly reason?: string };
 
 export interface RouterClient {
-  listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[] }>;
+  /** `dynamic` は Router に動的プロファイルの設定があるときだけ（`enabled` と一覧）。 */
+  listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[]; readonly dynamic?: Readonly<Record<string, unknown>> }>;
   quote(input: { readonly routeId: string; readonly requestId: string }): Promise<QuoteResult>;
   /** 動的上流 URL の quote（設計 §2.1）。`profileId` はプロファイルの ID。 */
   quoteUrl(input: { readonly profileId: string; readonly url: string; readonly requestId: string }): Promise<QuoteResult>;

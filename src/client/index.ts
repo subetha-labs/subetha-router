@@ -193,6 +193,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   const origin = base.origin;
   const doFetch = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
+  const executeTimeoutMs = options.executeTimeoutMs ?? 90_000;
 
   /** principal 資格情報は**この origin への要求だけ**に付ける。 */
   function headers(extra: Readonly<Record<string, string>> = {}): Record<string, string> {
@@ -212,7 +213,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
 
   async function call(
     path: string,
-    init: { method: "GET" | "POST"; headers?: Record<string, string>; body?: string },
+    init: { method: "GET" | "POST"; headers?: Record<string, string>; body?: string; timeoutMs?: number },
   ): Promise<{ status: number; body: unknown; contentType: string; paymentId?: string }> {
     const response = await doFetch(new URL(path, origin), {
       method: init.method,
@@ -220,7 +221,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       ...(init.body === undefined ? {} : { body: init.body }),
       // リダイレクトは追わない（資格情報を別の宛先へ運ばない）。
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(init.timeoutMs ?? timeoutMs),
     });
     let body: unknown;
     try {
@@ -240,7 +241,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   }
 
   return {
-    async listRoutes(): Promise<{ ok: boolean; routes: readonly RouteListing[] }> {
+    async listRoutes(): Promise<{ ok: boolean; routes: readonly RouteListing[]; dynamic?: Readonly<Record<string, unknown>> }> {
       let result: Awaited<ReturnType<typeof call>>;
       try {
         result = await call("/v1/routes", { method: "GET" });
@@ -251,7 +252,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       if (result.status !== 200 || !isRecord(result.body) || !Array.isArray(result.body["routes"])) {
         return { ok: false, routes: [] };
       }
-      return { ok: true, routes: result.body["routes"] as readonly RouteListing[] };
+      const dynamic = result.body["dynamic"];
+      return { ok: true, routes: result.body["routes"] as readonly RouteListing[], ...(isRecord(dynamic) ? { dynamic } : {}) };
     },
 
     async quote(input): Promise<QuoteResult> {
@@ -409,6 +411,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
             // 動的 quote の持ち主の証明（quote 文書から運ぶ）。
             ...(quote.ownerKey === undefined ? {} : { "x-router-owner-key": quote.ownerKey }),
           },
+          // 購入は長い（動的は最悪 66 秒ほど）。短く切ると Router が続けているのに unknown になる。
+          timeoutMs: executeTimeoutMs,
         });
       } catch {
         // 送金の有無が分からない。paymentId を残して R4 で突き合わせられるようにする。

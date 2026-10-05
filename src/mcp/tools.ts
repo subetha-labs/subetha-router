@@ -250,7 +250,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
   return {
     async listRoutes(): Promise<Record<string, unknown>> {
       const result = await deps.client.listRoutes();
-      return withEvidence(deps, { ok: result.ok, routes: result.routes });
+      // 動的プロファイルの一覧は落とさず返す（設計 §1.1）。無ければ欄ごと無い。
+      return withEvidence(deps, { ok: result.ok, routes: result.routes, ...(result.dynamic === undefined ? {} : { dynamic: result.dynamic }) });
     },
 
     async quote(input): Promise<Record<string, unknown>> {
@@ -374,6 +375,15 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
 
     async status(input): Promise<Record<string, unknown>> {
       const result = await deps.client.status(input.paymentId, input.ownerKey);
+      if (result.found && result.projection.dynamic !== undefined && Object.hasOwn(result.projection, "result")) {
+        // 動的購入の結果は、再読取でも**信頼されない第三者のもの**として包む（purchase と同じ形）。
+        const { result: body, ...projection } = result.projection;
+        return withEvidence(deps, {
+          found: true,
+          projection: { ...projection, result: { untrusted: true, source: "upstream", contentType: "application/json", body } },
+          proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" },
+        });
+      }
       return withEvidence(deps, { ...result });
     },
 

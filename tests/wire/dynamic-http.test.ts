@@ -85,6 +85,7 @@ class SyntheticInbound implements InboundRail {
 class SyntheticOutbound implements OutboundRail {
   readonly targetsSeen: (UpstreamTarget | undefined)[] = [];
   readonly paidFor: PayRequest[] = [];
+  payDelayMs = 0;
   async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
     this.targetsSeen.push(target);
     if (routeId === STATIC_ROUTE) return [{ scheme: "exact", network: DST_NETWORK, asset: DST_ASSET, amount: "900", payTo: DST_PAY_TO }];
@@ -92,6 +93,7 @@ class SyntheticOutbound implements OutboundRail {
   }
   async pay(request: PayRequest): Promise<PayResult> {
     this.paidFor.push(request);
+    if (this.payDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.payDelayMs));
     return { outcome: "paid", body: BODY, contentType: "application/json", txRef: "dst-tx-1" };
   }
 }
@@ -107,12 +109,12 @@ let server: RunningServer;
 let outbound: SyntheticOutbound;
 let ids = 0;
 
-async function boot(cfg: RouterConfig = config()): Promise<{ baseUrl: string; client: (source?: string) => RouterClient }> {
+async function boot(cfg: RouterConfig = config()): Promise<{ baseUrl: string; client: (source?: string, timeouts?: { timeoutMs?: number; executeTimeoutMs?: number }) => RouterClient }> {
   outbound = new SyntheticOutbound();
   core = await createRouterCore({ journalPath: path.join(workDir, "journal.ndjson"), config: cfg, inbound: new SyntheticInbound(), outbound, nextPaymentId: () => `pay-${(ids += 1)}`, dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") } });
   server = await startHttpServer({ core, config: cfg, canonicalBaseUrl: CANONICAL, principals: new Map([["alice", "tok-alice"], ["bob", "tok-bob"]]), host: "127.0.0.1", port: 0 });
   const baseUrl = `http://127.0.0.1:${server.port}`;
-  return { baseUrl, client: (source) => createRouterClient({ baseUrl, principalId: "alice", token: "tok-alice", allowUnissuedQuotes: true, ...(source === undefined ? {} : { source }) }) };
+  return { baseUrl, client: (source, timeouts = {}) => createRouterClient({ baseUrl, principalId: "alice", token: "tok-alice", allowUnissuedQuotes: true, ...(source === undefined ? {} : { source }), ...timeouts }) };
 }
 
 async function raw(baseUrl: string, method: string, pathname: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; body: Record<string, unknown>; text: string }> {
@@ -204,6 +206,31 @@ describe("HTTP: R2 の動的 quote", () => {
     expect((await raw(baseUrl, "POST", "/v1/quotes", { "x-router-source": "fwd:1.1.1.1" }, { routeId: PROFILE_ID, requestId: "r3", upstream: { url: URL_A } })).status).toBe(429);
   });
 
+  test("R1: 動的プロファイルの一覧（enabled と、払うレール・払われるレール・資産・上限・手数料・開示）。無効でも一覧は出る", async () => {
+    const { baseUrl } = await boot(config({ enabled: false }));
+    const r = await raw(baseUrl, "GET", "/v1/routes");
+    expect(r.status).toBe(200);
+    expect((r.body["routes"] as unknown[]).length).toBe(1);
+    expect(r.body["dynamic"]).toEqual({
+      enabled: false,
+      profiles: [{
+        profileId: PROFILE_ID,
+        resource: { url: `${CANONICAL}/v1/routes/${PROFILE_ID}/resource`, method: "GET" },
+        source: { rail: "mpp", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6 },
+        destination: { rail: "x402", scheme: "exact", network: DST_NETWORK, asset: DST_ASSET, decimals: 6 },
+        maxUpstreamAmount: "100000",
+        fee: { flat: "1000", bps: 0, min: "1000" },
+        disclosures: expect.objectContaining({ fundsMoveOnCredential: true, refundOnFailure: false }),
+      }],
+    });
+    expect(r.text).not.toContain("payTo");
+    expect(r.text).not.toContain("tokenDomain");
+    await server.close();
+    await core.close();
+    const none = await boot(config({ noDynamic: true }));
+    expect((await raw(none.baseUrl, "GET", "/v1/routes")).body).not.toHaveProperty("dynamic");
+  });
+
   test("入口の受信期限が明示されている", async () => {
     await boot();
     expect(server.timeouts).toEqual({ headersTimeoutMs: HTTP_INGRESS_TIMEOUT_MS, requestTimeoutMs: HTTP_INGRESS_TIMEOUT_MS });
@@ -224,7 +251,7 @@ describe("HTTP: R3・R4 と持ち主の証明", () => {
     expect([re.status, re.body["error"]]).toEqual([402, "payment_required"]);
     expect((re.body["accepts"] as unknown[]).length).toBe(1);
     const credential = credentialFor((q["source"] as Record<string, unknown>)["offer"]);
-    const wrong = await raw(baseUrl, "GET", pathname, { "x-router-quote-id": quoteId, "x-router-request-id": "r1", "x-router-approval": quoteId, "x-payment": credential, "x-router-owner-key": `${ownerKey.slice(0, -1)}A` });
+    const wrong = await raw(baseUrl, "GET", pathname, { "x-router-quote-id": quoteId, "x-router-request-id": "r1", "x-router-approval": quoteId, "x-payment": credential, "x-router-owner-key": `${ownerKey.slice(0, -1)}${ownerKey.endsWith("A") ? "B" : "A"}` });
     expect([wrong.status, wrong.body["error"]]).toEqual([404, "unknown_quote"]);
     expect(wrong.text).not.toContain(ownerKey);
     const missing = await raw(baseUrl, "GET", pathname, { "x-router-quote-id": quoteId, "x-router-request-id": "r1", "x-router-approval": quoteId, "x-payment": credential });
@@ -292,6 +319,23 @@ describe("client", () => {
     expect(await tampered.quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r1" })).toEqual({ ok: false, error: "quote_malformed", status: 200 });
   });
 
+  test("listRoutes は dynamic を落とさない", async () => {
+    const { client } = await boot();
+    const listed = await client().listRoutes();
+    expect(listed.ok).toBe(true);
+    expect(listed.dynamic).toMatchObject({ enabled: true, profiles: [{ profileId: PROFILE_ID }] });
+  });
+
+  test("購入の期限は quote の期限と別: 上流の支払いが長くても delivered（Router が続けているのに unknown にしない）", async () => {
+    const { client } = await boot();
+    const c = client(undefined, { timeoutMs: 400, executeTimeoutMs: 5_000 });
+    const quoted = await c.quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r1" });
+    const quote = (quoted as { quote: QuoteView }).quote;
+    outbound.payDelayMs = 1_200;
+    const result = await c.execute({ quote, requestId: "r1", approval: { approved: true, quoteId: quote.quoteId }, credential: credentialFor(quote.source.offer) });
+    expect(result).toMatchObject({ outcome: "delivered", snapshot: BODY });
+  });
+
   test("quoteUrl は応答の upstream.url が頼んだ URL と違えば受け入れない", async () => {
     const { baseUrl } = await boot();
     const tampered = createRouterClient({
@@ -341,9 +385,12 @@ describe("MCP tool handlers", () => {
     const purchased = await handlers.purchase({ quoteId: quote.quoteId, requestId: "r1", approval: quote.quoteId, quote, credential: credentialFor(quote.source.offer) });
     expect(purchased).toMatchObject({ ok: true, outcome: "delivered", paymentId: quote.paymentId, result: { untrusted: true, source: "upstream", contentType: "application/json", body: BODY }, proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" } });
     expect(purchased).not.toHaveProperty("snapshot");
-    // status: 既存の引数だけでは見えず、ownerKey を足すと見える。
+    // status: 既存の引数だけでは見えず、ownerKey を足すと見える。再読取の結果も untrusted で包み、proof を添える。
     expect(await handlers.status({ paymentId: quote.paymentId })).toMatchObject({ found: false });
-    expect(await handlers.status({ paymentId: quote.paymentId, ownerKey: quote.ownerKey })).toMatchObject({ found: true, projection: { status: "delivered" } });
+    const reread = await handlers.status({ paymentId: quote.paymentId, ownerKey: quote.ownerKey });
+    expect(reread).toMatchObject({ found: true, projection: { status: "delivered", result: { untrusted: true, source: "upstream", contentType: "application/json", body: BODY } }, proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" } });
+    // 一覧にはプロファイルが出る。
+    expect(await handlers.listRoutes()).toMatchObject({ ok: true, dynamic: { enabled: true, profiles: [{ profileId: PROFILE_ID }] } });
   });
 
   test("既存 tool の互換: 静的 route の quote・purchase・status は既存の引数だけで従来どおり動き、結果の形も変わらない", async () => {
@@ -356,7 +403,9 @@ describe("MCP tool handlers", () => {
     const purchased = await handlers.purchase({ quoteId: quote.quoteId, requestId: "s1", approval: quote.quoteId });
     expect(purchased).toMatchObject({ ok: true, outcome: "delivered", snapshot: BODY });
     expect(purchased).not.toHaveProperty("proof");
-    expect(await handlers.status({ paymentId: quote.paymentId })).toMatchObject({ found: true });
+    const status = await handlers.status({ paymentId: quote.paymentId });
+    expect(status).toMatchObject({ found: true, projection: { result: BODY } });
+    expect(status).not.toHaveProperty("proof");
   });
 });
 
