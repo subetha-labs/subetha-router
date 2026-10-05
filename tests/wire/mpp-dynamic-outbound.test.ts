@@ -405,7 +405,7 @@ interface Harness {
   sends(): number;
 }
 
-async function harness(options: { paidTimeoutMs?: number; rpcBudgetMs?: number; rpcRetryCount?: number; offerFeePayer?: boolean; profile?: DynamicProfile; capability?: Partial<MppTempoCapability> } = {}): Promise<Harness> {
+async function harness(options: { paidTimeoutMs?: number; rpcTimeoutMs?: number; stallDnsFor?: string; rpcBudgetMs?: number; rpcRetryCount?: number; offerFeePayer?: boolean; profile?: DynamicProfile; capability?: Partial<MppTempoCapability> } = {}): Promise<Harness> {
   const rpc = await startTempoRpc({ tls: TLS });
   closers.push(rpc.close);
   const upstream = await startMppUpstream(TLS, rpc.plainUrl, "provider.test", { offerFeePayer: options.offerFeePayer === true });
@@ -425,9 +425,13 @@ async function harness(options: { paidTimeoutMs?: number; rpcBudgetMs?: number; 
     report: () => {},
     interfaces: () => [],
     tls: { ca: [TLS.ca] },
-    lookup: publicLookup(),
+    lookup: (hostname, lookupOptions, callback) => {
+      // 指定したホスト名だけ、名前解決が返ってこない。
+      if (hostname !== options.stallDnsFor) publicLookup()(hostname, lookupOptions, callback);
+    },
     dialForTest: dialTo({ "provider.test": upstream.port, "other.test": rpc.port }),
     maxHeaderSize: DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes,
+    dns: { timeoutMs: 2_000, maxInFlight: 16 },
     admit: () => {
       gate.admitted += 1;
       return { release: () => { gate.released += 1; } };
@@ -443,6 +447,7 @@ async function harness(options: { paidTimeoutMs?: number; rpcBudgetMs?: number; 
       transport,
       ...(options.paidTimeoutMs === undefined ? {} : { paidTimeoutMs: options.paidTimeoutMs }),
       ...(options.rpcBudgetMs === undefined ? {} : { rpcBudgetMs: options.rpcBudgetMs }),
+      ...(options.rpcTimeoutMs === undefined ? {} : { rpcTimeoutMs: options.rpcTimeoutMs }),
     },
   });
   return {
@@ -902,16 +907,35 @@ function serializedReceipt(receipt: unknown): string {
 
 /* ------------------------------------------------------------------ 能力と組み立て */
 
+test("能力が client を返さないまま止まっても、期限で打ち切って署名しない", async () => {
+  const h = await harness({ rpcTimeoutMs: 200, capability: { getClient: () => new Promise<never>(() => {}) } });
+  const offer = await h.quote();
+  const started = Date.now();
+  expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_capability_unsupported" });
+  expect(Date.now() - started).toBeLessThan(1500);
+  expect(h.innerSigned).toHaveLength(0);
+});
+
+test("RPC の名前解決が止まっても、期限で打ち切って署名しない（上流は解決でき、RPC のホストだけ止まる）", async () => {
+  const h = await harness({ rpcTimeoutMs: 200, stallDnsFor: "other.test" });
+  const offer = await h.quote();
+  const started = Date.now();
+  expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+  expect(Date.now() - started).toBeLessThan(4000);
+  expect(h.innerSigned).toHaveLength(0);
+  expect(h.rpc.http.requests).toBe(0);
+});
+
 describe("能力の条件（設計 §3.3 の「能力」）", () => {
   const account = privateKeyToAccount(generatePrivateKey());
   const plain = createClient({ chain: tempoModerato, transport: http("https://other.test", { retryCount: 0 }) });
   const capability = (patch: Partial<MppTempoCapability> = {}): MppTempoCapability => ({ chainId: MPP_FIXTURE_CHAIN_ID, account, getClient: () => plain, mode: "push", kind: "real-key", ...patch });
-  const build = (cap: MppTempoCapability, allowLoopback = false, profile: DynamicProfile = PROFILE) =>
+  const build = (cap: MppTempoCapability, allowLoopback = false, profile: DynamicProfile = PROFILE, dns = true) =>
     createMppOutbound({
       upstreams: {},
       transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
       capability: cap,
-      dynamic: { profiles: { [PROFILE_ID]: profile }, transport: createGuardedTransport({ allowLoopback, report: () => {} }) },
+      dynamic: { profiles: { [PROFILE_ID]: profile }, transport: createGuardedTransport({ allowLoopback, report: () => {}, ...(dns ? { dns: { timeoutMs: 2_000, maxInFlight: 16 } } : {}) }) },
     });
 
   test("push 明示・local account・実鍵・loopback を許さない transport でなければ起動失敗", () => {
@@ -922,6 +946,7 @@ describe("能力の条件（設計 §3.3 の「能力」）", () => {
     expect(() => build(capability({ account: { address: account.address, type: "json-rpc" } as never }))).toThrow("local account");
     expect(() => build(capability({ kind: "non-signing-fixture" }))).toThrow("non-signing fixture");
     expect(() => build(capability(), true)).toThrow("loopback");
+    expect(() => build(capability(), false, PROFILE, false)).toThrow("DNS deadline");
     expect(() => build(capability({ chainId: 4217 }))).toThrow("another chain");
     const { feeAsset: _fee, ...noFeeAsset } = PROFILE.destination;
     expect(() => build(capability(), false, { ...PROFILE, destination: noFeeAsset })).toThrow("feeAsset");

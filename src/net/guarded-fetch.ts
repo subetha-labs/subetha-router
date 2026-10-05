@@ -193,6 +193,11 @@ export interface GuardedTransport {
   /** headers 後の失敗（body の読み取り等）を adapter が報告する。`TransportError` は再報告しない。 */
   readonly report: (error: unknown, context: TransportContext) => void;
   readonly allowLoopback: boolean;
+  /**
+   * 名前解決に期限があるか（`dns` を指定して作ったか）。無い transport では、止まった名前解決が要求の期限
+   * （abort signal）を越えて待ち続ける。動的上流 URL の経路はこれが真の transport しか受け取らない。
+   */
+  readonly boundsDns: boolean;
 }
 
 const CONNECT_CODES = new Set([
@@ -448,5 +453,6 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
       emit(classifyTransportError(error), context);
     },
     allowLoopback: options.allowLoopback,
+    boundsDns: options.dns !== undefined,
   };
 }

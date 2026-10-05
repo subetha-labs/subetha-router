@@ -332,6 +332,10 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
   if (transport.allowLoopback) {
     throw new Error("the dynamic x402 path must not use a transport that allows loopback");
   }
+  if (!transport.boundsDns) {
+    // 名前解決に期限が無いと、未払い 5 秒・有料 30 秒の期限が効かない（止まった解決を待ち続ける）。
+    throw new Error("the dynamic x402 path requires a transport with a DNS deadline");
+  }
   const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
   const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
   const now = options.now ?? Date.now;

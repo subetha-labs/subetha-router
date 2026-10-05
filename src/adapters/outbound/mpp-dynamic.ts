@@ -58,6 +58,30 @@ const REQUEST_REQUIRED = ["amount", "currency", "recipient", "methodDetails"] as
 const REQUEST_KEYS: ReadonlySet<string> = new Set([...REQUEST_REQUIRED, "description"]);
 const METHOD_DETAILS_KEYS: ReadonlySet<string> = new Set(["chainId", "supportedModes", "feePayer"]);
 
+/** adapter が待つのをやめる期限。相手（能力・RPC）が応答しなくても、ここから先へは進む。 */
+class AdapterDeadlineError extends Error {
+  constructor() {
+    super("dynamic mpp adapter deadline exceeded");
+    this.name = "AdapterDeadlineError";
+  }
+}
+
+function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new AdapterDeadlineError()), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error("rejected"));
+      },
+    );
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -549,6 +573,10 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
   if (transport.allowLoopback) {
     throw new Error("the dynamic mpp path must not use a transport that allows loopback");
   }
+  if (!transport.boundsDns) {
+    // 名前解決に期限が無いと、上流と RPC の期限が効かない（止まった解決を待ち続ける）。
+    throw new Error("the dynamic mpp path requires a transport with a DNS deadline");
+  }
   assertCapabilityShape(capability);
   const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
   const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
@@ -653,7 +681,8 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
       let rpcRequest: RpcRequest;
       let chain: Client["chain"];
       try {
-        const client = await capability.getClient({ chainId });
+        // 能力が client を返すのを待つのにも期限を付ける（まだ何も署名していない）。
+        const client = await withDeadline(Promise.resolve(capability.getClient({ chainId })), rpcTimeoutMs);
         const plain = plainHttpTransportOf(client);
         if (plain === undefined || client.chain?.id !== chainId) {
           return { outcome: "not_sent", reason: "destination_capability_unsupported" };
@@ -669,7 +698,9 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
             timeout: Math.min(plain.timeout ?? rpcTimeoutMs, rpcTimeoutMs),
           }),
         });
-        rpcRequest = guarded.request.bind(guarded) as RpcRequest;
+        const guardedSend = guarded.request.bind(guarded) as RpcRequest;
+        // transport の期限（abort）に加えて、adapter 自身も 1 回ごとに待つのをやめる（少しの余裕つき）。
+        rpcRequest = (args, requestOptions) => withDeadline(guardedSend(args, requestOptions), rpcTimeoutMs + 1_000);
       } catch {
         return { outcome: "not_sent", reason: "destination_capability_unsupported" };
       }

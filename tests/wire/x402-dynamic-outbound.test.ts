@@ -103,6 +103,7 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
     lookup: publicLookup(),
     dialForTest: dialTo({ "provider.test": upstream.port }),
     maxHeaderSize: DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes,
+    dns: { timeoutMs: 2_000, maxInFlight: 16 },
     admit: () => {
       gate.admitted += 1;
       return {
@@ -682,4 +683,13 @@ test("動的経路は loopback を許す transport を受け取らない（起�
       dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: loopback },
     }),
   ).toThrow("loopback");
+  const unbounded = createGuardedTransport({ allowLoopback: false, report: () => {} });
+  expect(() =>
+    createX402Outbound({
+      upstreams: {},
+      transport: loopback,
+      capability: { network: FIXTURE_NETWORK, kind: "real-key", signer: { address: account.address, signTypedData: async () => "0x00" } },
+      dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: unbounded },
+    }),
+  ).toThrow("DNS deadline");
 });
