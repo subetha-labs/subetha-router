@@ -16,7 +16,7 @@
 
 import { reportStartupFailure, startRouter, type RouterCapabilities } from "../src/main.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
-import { createRealMppCapability } from "./real-mpp-capability.js";
+import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
 
 /** x402 送信用の鍵。無ければ x402 送信 route を設定してはいけない。 */
 const evmKey = process.env["SUBETHA_OUTBOUND_X402_KEY"];
@@ -42,6 +42,8 @@ if ((evmKey === undefined || evmKey === "") && (mppKey === undefined || mppKey =
 }
 
 const capabilities: RouterCapabilities = {
+  // 動的上流 URL の拒否ホスト（設計 §7.4）: 送信 MPP の RPC。URL は値ごと渡すが、使うのはホスト名だけ（ログには出ない）。
+  dependencyUrls: [mppRpcUrl === undefined || mppRpcUrl === "" ? TEMPO_MODERATO_RPC : mppRpcUrl],
   ...(evmKey === undefined || evmKey === ""
     ? {}
     : { evmSigning: createRealEvmCapability(evmKey).capability("eip155:84532") }),

@@ -19,52 +19,14 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createMcpIngress } from "../src/mcp/ingress.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
-
-/**
- * 経路 1（既存・変更しない）: **x402 で払って MPP の Provider B に届く**。
- * routeId は既に公開済みなので**改名しない**（審査員の手元の手順が壊れる）。
- */
-const ROUTE = "md-mpp-eth-snapshot";
-const UPSTREAM = "https://provider-mpp.subethalabs.com/v1/eth/snapshot";
-
-/**
- * 経路 2（新規）: **MPP で払って x402 の Provider A に届く**。逆向きの主張。
- * 送信レグに Base Sepolia USDC が要るので、その鍵が無い構成では**登録しない**。
- */
-const ROUTE_MPP_IN = "md-x402-eth-snapshot";
-const UPSTREAM_X402 = "https://provider-x402.subethalabs.com/v1/eth/snapshot";
-
-/** x402 受信（Base Sepolia USDC）。 */
-const INBOUND = {
-  network: "eip155:84532",
-  asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-  amount: "10000",
-  facilitator: "https://www.x402.org/facilitator",
-} as const;
-/** MPP 受信（Tempo pathUSD）。 */
-const INBOUND_MPP = {
-  network: "eip155:42431",
-  asset: "0x20c0000000000000000000000000000000000000",
-  amount: "10000",
-} as const;
-/** MPP 送信（Provider B）。 */
-const OUTBOUND = {
-  network: "eip155:42431",
-  asset: "0x20c0000000000000000000000000000000000000",
-  payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
-} as const;
-/** x402 送信（Provider A）。 */
-const OUTBOUND_X402 = {
-  network: "eip155:84532",
-  asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-  payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
-} as const;
+import { INBOUND, routerConfigOf } from "./remote-mcp-config.js";
 
 function note(message: string): void {
   process.stderr.write(`${message}\n`);
@@ -116,89 +78,7 @@ async function start(): Promise<void> {
   const journalPath =
     process.env["SUBETHA_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "journal.ndjson");
   await mkdir(path.dirname(journalPath), { recursive: true });
-  const config = {
-    router: {
-      /**
-       * 承認期限。**実効期限は `min(approvalTtlMs, offerExpiry)`** なので、
-       * offer 側（既定 600 秒）より短いとこちらが先に切れる。
-       * 人間が承認を挟む運用（収録・審査員のデモ）では、読み上げや確認で数分使うため
-       * 5 分だと**承認前に失効する**ことが実測で起きた。既定を offer と揃える。
-       */
-      approvalTtlMs: Number(process.env["SUBETHA_APPROVAL_TTL_SECONDS"] ?? "600") * 1000,
-      routes: {
-        [ROUTE]: {
-          routeId: ROUTE,
-          canonicalPath: `/v1/routes/${ROUTE}/resource`,
-          rail: "mpp",
-          sourceRail: "x402",
-          source: {
-            amount: INBOUND.amount,
-            asset: INBOUND.asset,
-            decimals: 6,
-            network: INBOUND.network,
-            payTo: receiver,
-          },
-          destination: {
-            scheme: "tempo/charge",
-            network: OUTBOUND.network,
-            asset: OUTBOUND.asset,
-            payTo: OUTBOUND.payTo,
-          },
-        },
-        // 逆向きの経路。鍵と秘密がそろっているときだけ公開する。
-        ...(mppInboundEnabled
-          ? {
-              [ROUTE_MPP_IN]: {
-                routeId: ROUTE_MPP_IN,
-                canonicalPath: `/v1/routes/${ROUTE_MPP_IN}/resource`,
-                rail: "x402",
-                sourceRail: "mpp",
-                source: {
-                  amount: INBOUND_MPP.amount,
-                  asset: INBOUND_MPP.asset,
-                  decimals: 6,
-                  network: INBOUND_MPP.network,
-                  payTo: receiver,
-                },
-                destination: {
-                  scheme: "exact",
-                  network: OUTBOUND_X402.network,
-                  asset: OUTBOUND_X402.asset,
-                  payTo: OUTBOUND_X402.payTo,
-                },
-              },
-            }
-          : {}),
-      },
-      // 「予算の続く限り」使えるように大きく取るが、暴走時に止まるようゼロにはしない。
-      // bucket は (network, asset) 単位。2 経路は同じ 2 組を向きだけ変えて使うので、
-      // この 2 本で両方をカバーする（経路ごとに増やす必要はない）。
-      budget: {
-        maxPurchases: Number(process.env["SUBETHA_MAX_PURCHASES"] ?? "100000"),
-        buckets: [
-          {
-            network: INBOUND.network,
-            asset: INBOUND.asset,
-            maxTotal: process.env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000",
-            maxPerPurchase: "10000",
-          },
-          {
-            network: OUTBOUND.network,
-            asset: OUTBOUND.asset,
-            maxTotal: process.env["SUBETHA_OUTBOUND_MAX_TOTAL"] ?? "1000000000",
-            maxPerPurchase: "10000",
-          },
-        ],
-      },
-    },
-    // 上流の節は rail に関係なく `x402` という名前（`src/config.ts`）。全 route 分が要る。
-    x402: {
-      upstreams: {
-        [ROUTE]: UPSTREAM,
-        ...(mppInboundEnabled ? { [ROUTE_MPP_IN]: UPSTREAM_X402 } : {}),
-      },
-    },
-  };
+  const config = routerConfigOf(process.env, receiver, mppInboundEnabled);
   const configPath = path.join(work, "router.config.json");
   await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
 
@@ -282,8 +162,12 @@ async function start(): Promise<void> {
   });
 }
 
-start().catch(() => {
-  // 固定文のみ（例外の文字列は子プロセスの出力や設定の値を含み得る）。
-  note("remote MCP failed");
-  process.exit(1);
-});
+// **このファイルが直接の起動エントリのときだけ**起動する（試験が `routerConfigOf` を import しても起動しない）。
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  start().catch(() => {
+    // 固定文のみ（例外の文字列は子プロセスの出力や設定の値を含み得る）。
+    note("remote MCP failed");
+    process.exit(1);
+  });
+}

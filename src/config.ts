@@ -304,6 +304,11 @@ export interface RealRailsConfig {
    * 渡さないと `expiresAt` が埋まらず失効検査が発火しない。
    */
   readonly mppInboundOfferSeconds?: number;
+  /**
+   * MPP 受信の JSON-RPC（`ROUTER_MPP_INBOUND_RPC_URL`、任意）。無ければ adapter が chain の既知の公開 RPC を使う。
+   * 動的上流 URL の拒否ホストにもこのホストを入れる（自分の依存先には向けない）。
+   */
+  readonly mppInboundRpcUrl?: string;
 }
 
 export interface RuntimeConfig {
@@ -748,6 +753,8 @@ function parseReal(
     }
     mppInboundSecret = mppInboundSecretRaw;
   }
+  const mppInboundRpcRaw = env["ROUTER_MPP_INBOUND_RPC_URL"];
+  const mppInboundRpcUrl = mppInboundRpcRaw === undefined || mppInboundRpcRaw === "" ? undefined : assertAbsoluteHttpUrl(mppInboundRpcRaw, "ROUTER_MPP_INBOUND_RPC_URL");
   const facilitatorUrl = env["ROUTER_SUBETHA_FACILITATOR_URL"];
   if (facilitatorUrl === undefined || facilitatorUrl === "") {
     throw new ConfigError("ROUTER_SUBETHA_FACILITATOR_URL is required when ROUTER_ADAPTER_MODE=real");
@@ -767,6 +774,7 @@ function parseReal(
   return {
     ...(inboundOfferSeconds === undefined ? {} : { x402InboundOfferSeconds: inboundOfferSeconds }),
     ...(mppInboundOfferSeconds === undefined ? {} : { mppInboundOfferSeconds }),
+    ...(mppInboundRpcUrl === undefined ? {} : { mppInboundRpcUrl }),
     ...(mppInboundSecret === undefined ? {} : { mppInboundSecret }),
     ...(inboundFacilitatorUrl === undefined
       ? {}

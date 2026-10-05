@@ -179,6 +179,16 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
   - `railByRoute`／`inboundByRoute` がプロファイルを引け、`target` が adapter まで届く。動的経路の transport は**すべて** `allowLoopback: false`（fixture 能力があっても）。`custom` transport の MPP 能力で動的プロファイルは起動失敗（unit）
   - **本番の入口が作る設定そのもの**を試験する: `tools/remote-mcp.ts` の設定生成を、鍵と子プロセスの起動から切り離した関数にし、**どの env を与えても `dynamic.enabled === false`** であること、その設定で動的 quote が**外部接続 0**で拒否されることを、実鍵なしで確かめる。T16 の G-4 で値を変えるのはこの関数の 1 箇所
   - 静的 route の既存テストが通る（AC-23）
+  - **実装で決めた細部**: 動的用 transport は `composeRails` が本番の選択肢（loopback 不可・DNS 期限 3 秒／同時 16・ヘッダ 32 KiB・門の `admit`）で組む。
+    試験は `RouterCapabilities.dynamicTransportForTest`（同じ選択肢を受け取り、宛先の差し替えを足して返す）で差し替え、返った transport が loopback を許す・DNS に期限が無いなら起動失敗。
+    拒否ホストには設定の値に加えて facilitator・上流・自分の canonical のホストを足す。プロファイルの受信 adapter は動的用 transport で作り、x402 受信は署名を quote に束縛する。
+    受信 offer の束縛 `dynamic|<profileId>|GET|<url>` からプロファイルを引く。残高の検査は全プロファイルの能力が `balanceOf` を持つときだけ core に渡す（今の本番の能力は持たない）。
+    合成レールに動的の設定は組めない（起動失敗）。本番の入口の設定生成は `tools/remote-mcp-config.ts` の `routerConfigOf`（SDK に依存しない純粋関数。`enabled: false` 固定、
+    プロファイル 2 つ、手数料・上限は G-1 の案の値）
+    レビューで直した点: 拒否ホストに受信 MPP の RPC（設定 `ROUTER_MPP_INBOUND_RPC_URL`、無ければ chain の既知の公開 RPC）と能力の依存先
+    （`RouterCapabilities.dependencyUrls`。起動時の確認で MPP 能力の RPC ホストがここに無ければ起動しない）を足す／本番の入口は公開ホスト名
+    `router.subethalabs.com` と `SUBETHA_DENY_HOSTS` を拒否ホストに入れる（canonical は内部の URL）／試験の差し替えは `dynamicTransportHooksForTest`
+    （名前解決・接続先・CA・インタフェースだけ。方針の欄は配線が上から重ねる）
 
 ### T14 — 統合試験（要件 §6 の AC のうち、複数の部品をまたぐもの）
 

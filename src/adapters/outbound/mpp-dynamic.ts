@@ -17,6 +17,7 @@ import { Mppx, tempo } from "mppx/client";
 import { TxEnvelopeTempo } from "ox/tempo";
 import { createClient as createViemClient, custom, decodeFunctionData, encodeFunctionData, keccak256, maxUint256, type Account, type Client, type Hex } from "viem";
 import { Abis, Transaction as TempoTransaction } from "viem/tempo";
+import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
 import type { DynamicProfile } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
@@ -524,6 +525,17 @@ function plainHttpTransportOf(client: Client): { url: string; fetchOptions?: Req
 }
 
 /**
+ * SDK に渡す client の chain。能力の client が chain を持てばそれ（ID が一致すること）、無ければ viem の既知の Tempo chain
+ * （serializer・formatter が要る。受信 adapter と同じ選び方）。どちらも無ければ `undefined`（動的経路は使えない）。
+ */
+function chainFor(client: Client, chainId: number): Client["chain"] | undefined {
+  if (client.chain !== undefined) {
+    return client.chain.id === chainId ? client.chain : undefined;
+  }
+  return [tempoMainnet, tempoModerato].find((candidate) => candidate.id === chainId) as Client["chain"] | undefined;
+}
+
+/**
  * 起動時の確認（設計 §3.3 の「能力」）。動的プロファイルの MPP 能力は、push を明示し、local account で、
  * 各プロファイルの chain について viem の素の `http` transport の client を返すこと。違えば例外。
  */
@@ -536,7 +548,7 @@ export async function assertDynamicMppCapability(capability: MppTempoCapability,
       throw new Error(`dynamic profile ${profile.profileId}: the MPP capability is for another chain`);
     }
     const client = await capability.getClient({ chainId });
-    if (plainHttpTransportOf(client) === undefined || client.chain?.id !== chainId) {
+    if (plainHttpTransportOf(client) === undefined || chainFor(client, chainId) === undefined) {
       throw new Error(`dynamic profile ${profile.profileId}: the MPP capability client must use viem's plain http transport on the profile's chain`);
     }
   }
@@ -684,13 +696,14 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
         // 能力が client を返すのを待つのにも期限を付ける（まだ何も署名していない）。
         const client = await withDeadline(Promise.resolve(capability.getClient({ chainId })), rpcTimeoutMs);
         const plain = plainHttpTransportOf(client);
-        if (plain === undefined || client.chain?.id !== chainId) {
+        const resolved = chainFor(client, chainId);
+        if (plain === undefined || resolved === undefined) {
           return { outcome: "not_sent", reason: "destination_capability_unsupported" };
         }
-        chain = client.chain;
+        chain = resolved;
         // 能力側の account は載せない。RPC は動的経路の transport（loopback を許さない）に乗せ直す。
         const guarded = createViemClient({
-          chain: client.chain,
+          chain: resolved,
           transport: guardedRpcTransport(transport, plain.url, () => ({ routeId: request.routeId, operation: "rpc" }), {
             fetchOptions: plain.fetchOptions,
             // 能力側の再試行は引き継がない（読取も含めて 1 回ずつ。所要時間を数えられる形にする）。
