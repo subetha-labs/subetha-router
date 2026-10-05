@@ -228,7 +228,9 @@ async function start(): Promise<void> {
         : {}),
     });
   } catch (error) {
-    note(`could not start the Router: ${error instanceof Error ? error.message : "unknown"}`);
+    // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
+    void error;
+    note("could not start the Router");
     process.exit(1);
   }
   const listening = router.stdout().trim();
@@ -279,7 +281,8 @@ async function start(): Promise<void> {
   });
 }
 
-start().catch((error: unknown) => {
-  note(`remote MCP failed: ${error instanceof Error ? error.message : "unknown"}`);
+start().catch(() => {
+  // 固定文のみ（例外の文字列は子プロセスの出力や設定の値を含み得る）。
+  note("remote MCP failed");
   process.exit(1);
 });

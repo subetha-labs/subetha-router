@@ -104,6 +104,19 @@ function asResult(body: Record<string, unknown>): {
 }
 
 /**
+ * tool の処理が例外を投げたときの固定の結果。**例外の文字列は返さない**
+ * （SDK に任せると `error.message` がそのまま tool の結果に載る。上流 URL・トークン・内部ホスト名が混ざり得る）。
+ */
+export async function guarded(run: () => Promise<Record<string, unknown>>): Promise<ReturnType<typeof asResult> & { isError?: true }> {
+  try {
+    return asResult(await run());
+  } catch {
+    note("subetha-router MCP tool failed");
+    return { ...asResult({ ok: false, error: "internal_error" }), isError: true };
+  }
+}
+
+/**
  * 受信レグの支払い能力は**起動側から渡す**（`src/**` は鍵を持たない／env からも読まない）。
  * 省略すると `real` モードの purchase は fail closed になる。
  */
@@ -153,7 +166,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "metadata for both legs). Upstream provider URLs are never returned.",
       inputSchema: {},
     },
-    async () => asResult(await handlers.listRoutes()),
+    async () => guarded(() => handlers.listRoutes()),
   );
 
   server.registerTool(
@@ -177,7 +190,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
           .describe("Keep the same value across retries; changing it can become a different purchase"),
       },
     },
-    async (args) => asResult(await handlers.quote(args)),
+    async (args) => guarded(() => handlers.quote(args)),
   );
 
   server.registerTool(
@@ -211,7 +224,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
           ),
       },
     },
-    async (args) => asResult(await handlers.purchase(args)),
+    async (args) => guarded(() => handlers.purchase(args)),
   );
 
   server.registerTool(
@@ -222,7 +235,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "Readable after a server restart, and reading it costs nothing.",
       inputSchema: { paymentId: z.string().min(1) },
     },
-    async (args) => asResult(await handlers.status(args)),
+    async (args) => guarded(() => handlers.status(args)),
   );
 
   note(

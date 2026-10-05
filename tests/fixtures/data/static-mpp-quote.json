@@ -1,0 +1,45 @@
+{
+ "quoteId": "hjYcOJbUuE6LYWsBGOLTcO5lWz3q4A6j43nfEQyGSMg",
+ "paymentId": "f8ac1789-445e-45d4-a313-853683e4c09c",
+ "routeId": "md-x402-eth-snapshot",
+ "resource": {
+  "url": "http://127.0.0.1:8500/v1/routes/md-x402-eth-snapshot/resource",
+  "method": "GET"
+ },
+ "source": {
+  "rail": "mpp",
+  "amount": "10000",
+  "asset": "0x20c0000000000000000000000000000000000000",
+  "decimals": 6,
+  "network": "eip155:42431",
+  "payTo": "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2",
+  "expiresAt": 1791188351,
+  "offer": {
+   "scheme": "tempo/charge",
+   "network": "eip155:42431",
+   "asset": "0x20c0000000000000000000000000000000000000",
+   "amount": "10000",
+   "payTo": "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2",
+   "maxTimeoutSeconds": 600,
+   "extra": {
+    "challengeNonce": "hjYcOJbUuE6LYWsBGOLTcO5lWz3q4A6j43nfEQyGSMg",
+    "expiresAt": 1791188351,
+    "routeBinding": "md-x402-eth-snapshot|GET|%2Fv1%2Froutes%2Fmd-x402-eth-snapshot%2Fresource",
+    "fundsMoveOnCredential": true,
+    "challenge": "Payment id=\"hjYcOJbUuE6LYWsBGOLTcO5lWz3q4A6j43nfEQyGSMg\", realm=\"MPP Payment\", method=\"tempo\", intent=\"charge\", request=\"eyJhbW91bnQiOiIxMDAwMCIsImN1cnJlbmN5IjoiMHgyMGMwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwibWV0aG9kRGV0YWlscyI6eyJjaGFpbklkIjo0MjQzMSwic3VwcG9ydGVkTW9kZXMiOlsicHVzaCJdfSwicmVjaXBpZW50IjoiMHg5YjEwNTg0RkU2ZEVFNTdFODQzMTA0RDJiQWMyMTRDNkQ1MDdGOGEyIn0\", expires=\"2026-10-05T08:19:11.992Z\", opaque=\"eyJfbXBweF9zY29wZSI6Im1kLXg0MDItZXRoLXNuYXBzaG90fEdFVHwlMkZ2MSUyRnJvdXRlcyUyRm1kLXg0MDItZXRoLXNuYXBzaG90JTJGcmVzb3VyY2UiLCJwYXltZW50SWQiOiJtZC14NDAyLWV0aC1zbmFwc2hvdDoxNzkxMTg3NzUxOTkyOmZmODBjNDYwLWE0NzEtNDA5YS05MmNlLTEwNmUyZWQ1NTQ4ZiIsInJvdXRlQmluZGluZyI6Im1kLXg0MDItZXRoLXNuYXBzaG90fEdFVHwlMkZ2MSUyRnJvdXRlcyUyRm1kLXg0MDItZXRoLXNuYXBzaG90JTJGcmVzb3VyY2UifQ\""
+   }
+  }
+ },
+ "destination": {
+  "rail": "x402",
+  "quoted": "10000",
+  "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "network": "eip155:84532",
+  "quoteFingerprint": "sha256:14e15c56a9d97cbf1ba43931ca2adf0da3065709a9d832b1a9ec2888213406d8"
+ },
+ "approval": {
+  "required": true,
+  "boundTo": "hjYcOJbUuE6LYWsBGOLTcO5lWz3q4A6j43nfEQyGSMg",
+  "deadlineMs": 1791188351000
+ }
+}

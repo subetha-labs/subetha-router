@@ -17,13 +17,23 @@ export interface McpIngressLimits {
   readonly receiveTimeoutMs: number;
   /** 同時に受け付ける接続数。超えた接続は Node が受け付けずに閉じる。 */
   readonly maxConnections: number;
+  /**
+   * 1 つの要求が接続を使える時間の上限（受信開始から応答の完了まで、ミリ秒）。
+   * 応答をわざと遅く読む相手が接続の枠を持ち続けられないようにする。purchase の所要時間より十分長く取る。
+   */
+  readonly maxRequestMs: number;
 }
 
 export const DEFAULT_MCP_INGRESS_LIMITS: McpIngressLimits = Object.freeze({
   maxBodyBytes: 64 * 1024,
   receiveTimeoutMs: 10_000,
   maxConnections: 64,
+  maxRequestMs: 120_000,
 });
+
+/** 拒否の応答を書き終えるまで待つ上限。過ぎたら接続を切る。 */
+const REJECT_FLUSH_MS = 2_000;
+const PROTOCOL_VERSION_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
 
 export interface McpIngressOptions {
   readonly limits?: McpIngressLimits;
@@ -35,7 +45,12 @@ export interface McpIngressOptions {
   readonly path?: string;
 }
 
-function sendJson(response: ServerResponse, status: number, error: string, close = false): void {
+function sendJson(
+  response: ServerResponse,
+  status: number,
+  error: string,
+  headers: Readonly<Record<string, string>> = {},
+): void {
   if (response.headersSent) {
     response.destroy();
     return;
@@ -44,9 +59,33 @@ function sendJson(response: ServerResponse, status: number, error: string, close
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
-    ...(close ? { connection: "close" } : {}),
+    ...headers,
   });
   response.end(text);
+}
+
+/**
+ * 本文を読み切らずに拒否する。**入力はすぐ止め**（これ以上読まない）、拒否の応答は書き終えるまで待ってから
+ * 接続を切る。すぐに切ると、応答が相手に届く前に消える（同じ接続で先に処理中の応答があればそれも巻き込む）。
+ * 待つのは `REJECT_FLUSH_MS` まで。
+ */
+function rejectAndClose(
+  request: IncomingMessage,
+  response: ServerResponse,
+  status: number,
+  error: string,
+  headers: Readonly<Record<string, string>> = {},
+): void {
+  request.pause();
+  const socket = request.socket;
+  const timer = setTimeout(() => socket.destroy(), REJECT_FLUSH_MS);
+  timer.unref();
+  response.once("finish", () => {
+    clearTimeout(timer);
+    socket.destroy();
+  });
+  response.once("close", () => clearTimeout(timer));
+  sendJson(response, status, error, { ...headers, connection: "close" });
 }
 
 type BodyResult =
@@ -98,7 +137,11 @@ function readBody(request: IncomingMessage, maxBytes: number, deadlineMs: number
 
 /**
  * 入口の HTTP サーバを作る（listen は呼び出し側）。
- * `GET /healthz` は従来どおり。`path` 以外は 404。
+ * `GET /healthz` は従来どおり。`path` 以外は 404。`path` は POST と DELETE だけ（GET の stream は出さない）。
+ *
+ * **この層が固定文にするもの**: 自分で返す拒否（404・405・400・408・413・500）と `note`。
+ * MCP の SDK が自分で作るエラー応答（JSON-RPC の形式エラーなど、呼び出し側自身の入力についての説明）は SDK の文面のまま。
+ * tool の中の例外を固定文にするのは `src/mcp/server.ts` の役目。
  */
 export function createMcpIngress(options: McpIngressOptions): Server {
   const limits = options.limits ?? DEFAULT_MCP_INGRESS_LIMITS;
@@ -113,29 +156,53 @@ export function createMcpIngress(options: McpIngressOptions): Server {
     },
     (request, response) => {
     const startedAt = Date.now();
+    // 要求 1 件が接続を使える時間の上限。応答が終われば解除する。
+    const lifetime = setTimeout(() => {
+      note("mcp ingress: request exceeded its lifetime");
+      request.socket.destroy();
+    }, limits.maxRequestMs);
+    lifetime.unref();
+    response.once("close", () => clearTimeout(lifetime));
     void (async () => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
-      if (request.method === "GET" && url.pathname === "/healthz") {
+      // 本文を持つ要求を、本文を読まずに終える経路では接続ごと閉じる（読み残しを Node に読ませ続けない）。
+      const hasBody = request.headers["content-length"] !== undefined || request.headers["transfer-encoding"] !== undefined;
+      const finishWithoutBody = (status: number, error: string, headers: Readonly<Record<string, string>> = {}): void => {
+        if (hasBody) rejectAndClose(request, response, status, error, headers);
+        else sendJson(response, status, error, headers);
+      };
+      if (request.method === "GET" && url.pathname === "/healthz" && !hasBody) {
         const text = JSON.stringify({ status: "ok", router: "up" });
         response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
         response.end(text);
         return;
       }
       if (url.pathname !== mcpPath) {
-        sendJson(response, 404, "not_found");
+        finishWithoutBody(404, "not_found");
+        return;
+      }
+      /**
+       * ステートレスなので、サーバから送り始める stream（GET）は持たない。受け付けると、応答を返さない接続を
+       * 開くだけで接続の枠を埋められる。仕様上、stream を出さないサーバは 405 を返してよい。
+       */
+      if (request.method !== "POST" && request.method !== "DELETE") {
+        finishWithoutBody(405, "method_not_allowed", { allow: "POST, DELETE" });
+        return;
+      }
+      // SDK は未対応の値を**そのまま**エラー本文に写す。日付の形でない値はここで固定文にする。
+      const protocolVersion = request.headers["mcp-protocol-version"];
+      if (protocolVersion !== undefined && (typeof protocolVersion !== "string" || !PROTOCOL_VERSION_PATTERN.test(protocolVersion))) {
+        finishWithoutBody(400, "unsupported_protocol_version");
         return;
       }
       const remaining = Math.max(1, limits.receiveTimeoutMs - (Date.now() - startedAt));
       const body = await readBody(request, limits.maxBodyBytes, remaining);
       if (body.kind === "too_large") {
-        // 残りは読まずに接続ごと閉じる（読み続けると上限の意味が無い）。
-        sendJson(response, 413, "body_too_large", true);
-        request.destroy();
+        rejectAndClose(request, response, 413, "body_too_large");
         return;
       }
       if (body.kind === "timeout") {
-        sendJson(response, 408, "request_timeout", true);
-        request.destroy();
+        rejectAndClose(request, response, 408, "request_timeout");
         return;
       }
       if (body.kind === "aborted") {
@@ -143,10 +210,17 @@ export function createMcpIngress(options: McpIngressOptions): Server {
         return;
       }
       let parsed: unknown;
-      try {
-        parsed = body.bytes.length === 0 ? undefined : JSON.parse(body.bytes.toString("utf8"));
-      } catch {
-        parsed = undefined;
+      if (body.bytes.length > 0) {
+        try {
+          parsed = JSON.parse(body.bytes.toString("utf8"));
+        } catch {
+          // SDK に渡すと、解析エラーの文字列がそのまま応答に載る。ここで固定文にする。
+          sendJson(response, 400, "invalid_json");
+          return;
+        }
+      } else if (request.method === "POST") {
+        sendJson(response, 400, "invalid_json");
+        return;
       }
       await options.handle(request, response, parsed);
     })().catch(() => {
