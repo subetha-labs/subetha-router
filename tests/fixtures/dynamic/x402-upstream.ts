@@ -5,6 +5,7 @@
  * こちらは**任意のパスとクエリ**を受け、`resource.url` に「要求された URL そのもの」を返す（動的経路の束縛の試験用）。
  * 署名は検証しない（検証は `verifying-facilitator.ts` の役目）。返す `transaction` は合成値。
  */
+import type { ServerResponse } from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
 
@@ -29,6 +30,14 @@ export interface X402UpstreamState {
   pay: (context: { payment: unknown; requestedUrl: string }) => PayResponse;
   /** 402 の本文に足すバイト数（上限の試験用）。 */
   challengeBodyPadding: number;
+  /** 402 の本文を、この総量になるまで少しずつ送る（「読まれた量」を測る試験用）。 */
+  challengeStreamBytes: number | undefined;
+  /** 402 の応答に足すヘッダ（ヘッダの上限の試験用）。 */
+  challengeHeaders: Record<string, string>;
+  /** 402 の代わりに返す状態コード（リダイレクトなどの試験用）。 */
+  challengeStatus: number;
+  /** 402 を返すまでの待ち（ミリ秒）。 */
+  challengeDelayMs: number;
 }
 
 export interface PayResponse {
@@ -41,14 +50,53 @@ export interface PayResponse {
   readonly delayMs?: number;
   /** 追加のヘッダ。 */
   readonly headers?: Record<string, string>;
+  /** `body` の代わりに、この総量になるまで本文を少しずつ送る（「読まれた量」を測る試験用）。 */
+  readonly streamBytes?: number;
 }
 
 export interface X402Upstream {
   readonly port: number;
   readonly host: string;
   readonly state: X402UpstreamState;
-  readonly seen: { challenges: number; payments: unknown[]; urls: string[]; connections: number };
+  readonly seen: { challenges: number; payments: unknown[]; urls: string[]; connections: number; streams: StreamRecord[] };
   close(): Promise<void>;
+}
+
+/** 少しずつ送った本文 1 本の記録。`written` は相手が受け取りを止めるまでにソケットへ渡せた量。 */
+export interface StreamRecord {
+  readonly total: number;
+  written: number;
+  completed: boolean;
+  closed: boolean;
+}
+
+/**
+ * 本文を 16 KiB ずつ、**相手が読んだ分だけ**送る（`write` が詰まったら `drain` を待つ）。相手が読むのをやめれば、
+ * 送れる量はソケットのバッファの分で止まる。総量よりずっと少ない `written` は「読み切られなかった」ことを示す。
+ */
+function streamBody(response: ServerResponse, total: number, records: StreamRecord[]): void {
+  const record: StreamRecord = { total, written: 0, completed: false, closed: false };
+  records.push(record);
+  const chunk = Buffer.alloc(16 * 1024, 0x20);
+  response.on("close", () => {
+    record.closed = true;
+  });
+  const pump = (): void => {
+    while (!record.closed && record.written < total) {
+      const size = Math.min(chunk.length, total - record.written);
+      const flowing = response.write(size === chunk.length ? chunk : chunk.subarray(0, size));
+      record.written += size;
+      if (!flowing) {
+        response.once("drain", pump);
+        return;
+      }
+    }
+    if (!record.closed) {
+      record.completed = true;
+      response.end();
+    }
+  };
+  pump();
 }
 
 export const FIXTURE_NETWORK = "eip155:84532";
@@ -76,7 +124,7 @@ export function paidOk(payer: string, body: unknown = { ok: true }): PayResponse
 }
 
 export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"): Promise<X402Upstream> {
-  const seen = { challenges: 0, payments: [] as unknown[], urls: [] as string[], connections: 0 };
+  const seen = { challenges: 0, payments: [] as unknown[], urls: [] as string[], connections: 0, streams: [] as StreamRecord[] };
   const state: X402UpstreamState = {
     accepts: [standardAccept()],
     topLevel: {},
@@ -84,6 +132,10 @@ export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"
     bodyAccepts: undefined,
     pay: () => ({ status: 500, body: "{}" }),
     challengeBodyPadding: 0,
+    challengeStreamBytes: undefined,
+    challengeHeaders: {},
+    challengeStatus: 402,
+    challengeDelayMs: 0,
   };
   const server = https.createServer({ key: tls.provider.key, cert: tls.provider.cert }, (request, response) => {
     // 既定のポート（443）として見せる: Router が接続した URL は `https://<host><path>`。
@@ -94,8 +146,13 @@ export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"
       seen.challenges += 1;
       const required = { x402Version: 2, error: "payment_required", resource: { url: state.resourceUrl(requestedUrl) }, accepts: state.accepts, ...state.topLevel };
       const body = JSON.stringify({ ...(state.bodyAccepts === undefined ? {} : { x402Version: 2, accepts: state.bodyAccepts }), pad: "p".repeat(state.challengeBodyPadding) });
-      response.writeHead(402, { "content-type": "application/json", "PAYMENT-REQUIRED": encodePaymentRequiredHeader(required as never) });
-      response.end(body);
+      const sendChallenge = (): void => {
+        response.writeHead(state.challengeStatus, { "content-type": "application/json", "PAYMENT-REQUIRED": encodePaymentRequiredHeader(required as never), ...state.challengeHeaders });
+        if (state.challengeStreamBytes === undefined) response.end(body);
+        else streamBody(response, state.challengeStreamBytes, seen.streams);
+      };
+      if (state.challengeDelayMs === 0) sendChallenge();
+      else setTimeout(sendChallenge, state.challengeDelayMs);
       return;
     }
     let payment: unknown;
@@ -112,7 +169,8 @@ export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"
         ...(reply.receipt === undefined ? {} : { "PAYMENT-RESPONSE": encodePaymentResponseHeader(reply.receipt as never) }),
         ...(reply.headers ?? {}),
       });
-      response.end(reply.body);
+      if (reply.streamBytes === undefined) response.end(reply.body);
+      else streamBody(response, reply.streamBytes, seen.streams);
     };
     if (reply.delayMs === undefined) send();
     else setTimeout(send, reply.delayMs);
