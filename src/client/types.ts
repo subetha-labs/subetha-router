@@ -29,6 +29,8 @@ export interface RouterClientOptions {
    * 改竄した quote を持ち込んでも、Router は自分が発行した値しか受け付けない。
    */
   readonly allowUnissuedQuotes?: boolean;
+  /** 送信元の識別（`x-router-source`）。MCP 層が要求ごとに導いた値を渡す。省略時は付けない。 */
+  readonly source?: string;
 }
 
 export interface ResourceRef {
@@ -70,6 +72,12 @@ export interface QuoteView {
     readonly boundTo: string;
     readonly deadlineMs: number;
   };
+  /** 動的 quote だけ（設計 §8）。 */
+  readonly upstream?: { readonly url: string; readonly method: string };
+  readonly pricing?: Readonly<Record<string, unknown>>;
+  readonly disclosures?: Readonly<Record<string, unknown>>;
+  /** 動的 quote の持ち主の証明。purchase・status で Router に返す。**表示・保存の対象ではない。** */
+  readonly ownerKey?: string;
 }
 
 export type QuoteResult =
@@ -137,6 +145,9 @@ export interface ProjectionView {
   readonly updatedAt: string;
   /** `delivered` のときだけ現れる上流 snapshot。 */
   readonly result?: unknown;
+  /** 動的購入だけ。 */
+  readonly upstream?: Readonly<Record<string, unknown>>;
+  readonly dynamic?: Readonly<Record<string, unknown>>;
 }
 
 export type StatusResult =
@@ -150,7 +161,10 @@ export type StatusResult =
 export interface RouterClient {
   listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[] }>;
   quote(input: { readonly routeId: string; readonly requestId: string }): Promise<QuoteResult>;
+  /** 動的上流 URL の quote（設計 §2.1）。`profileId` はプロファイルの ID。 */
+  quoteUrl(input: { readonly profileId: string; readonly url: string; readonly requestId: string }): Promise<QuoteResult>;
   /** 明示承認済みのときだけ R3 を 1 回呼ぶ（再試行・再 quote をしない）。 */
   execute(input: ExecuteInput): Promise<ExecutionResult>;
-  status(paymentId: string): Promise<StatusResult>;
+  /** 動的購入は持ち主の証明（`ownerKey`）が無いと読めない。 */
+  status(paymentId: string, ownerKey?: string): Promise<StatusResult>;
 }

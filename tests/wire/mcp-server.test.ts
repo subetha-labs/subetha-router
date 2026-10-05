@@ -28,6 +28,7 @@ const TIMEOUT = 90_000;
 const TOOLS = [
   "subetha_router_list_routes",
   "subetha_router_quote",
+  "subetha_router_quote_url",
   "subetha_router_purchase",
   "subetha_router_status",
 ];
@@ -52,7 +53,7 @@ async function expectNoUpstreamPay(h: McpHarness): Promise<void> {
 
 describe("T6-mcp-nopay: Router の MCP ラッパ", () => {
   it(
-    "T6-01: tools/list に 4 つの tool が出る",
+    "T6-01: tools/list に 5 つの tool が出る",
     async () => {
       await withHarness({}, async (h) => {
         const listed = await h.client.listTools();

@@ -6,11 +6,11 @@
 import http from "node:http";
 import { once } from "node:events";
 
-import { resolveRoute, type RouterConfig } from "../config.js";
+import { canonicalPathOf, resolveProfile, resolveRoute, type RouterConfig } from "../config.js";
 import type { PurchaseOutcome, RouterCore } from "../core/orchestrator.js";
 import type { InboundOffer, PaymentCredential } from "../ports/inbound.js";
 import { authenticate, singleHeader } from "./auth.js";
-import { paymentRequiredBody, projectionBody, quoteBody, routeListBody } from "./projection.js";
+import { dynamicQuoteBody, paymentRequiredBody, projectionBody, quoteBody, routeListBody } from "./projection.js";
 
 export interface AppOptions {
   readonly core: RouterCore;
@@ -106,6 +106,8 @@ const REJECTED_STATUS: Readonly<Record<string, number>> = {
   approval_expired: 409,
   preflight_unavailable: 503,
   payment_id_collision: 409,
+  quote_unreadable: 409,
+  dynamic_unavailable: 503,
 };
 
 /** 受信 settle 前に終わった失敗（課金は起きていない）。 */
@@ -119,6 +121,23 @@ const AWAITING_STATUS: Readonly<Record<string, number>> = {
   bucket_not_allowed: 429,
   invalid_amount: 400,
   invalid_budget_limit: 503,
+  // 動的（設計 §2・§6）。
+  rate_limited: 429,
+  operator_funds_unavailable: 503,
+  source_verify_unavailable: 503,
+};
+
+/** 動的 quote の失敗コード → HTTP。 */
+const DYNAMIC_QUOTE_STATUS: Readonly<Record<string, number>> = {
+  dynamic_disabled: 404,
+  unknown_route: 404,
+  invalid_upstream_url: 400,
+  request_id_conflict: 409,
+  rate_limited: 429,
+  dynamic_capacity: 429,
+  dynamic_unavailable: 503,
+  source_terms_mismatch: 502,
+  quote_failed: 502,
 };
 
 /** preflight 由来は「支払いをやり直せる」意味の 402 にまとめる。 */
@@ -238,7 +257,7 @@ export function createRequestListener(options: AppOptions): http.RequestListener
         sendError(response, 405, "method_not_allowed", {}, { allow: "GET" });
         return;
       }
-      const projection = options.core.status(segments[2] ?? "", principalId);
+      const projection = options.core.status(segments[2] ?? "", principalId, singleHeader(request.headers, "x-router-owner-key"));
       // 所有 principal 以外には存在も明かさない。全件ダンプの口は無い。
       if (projection === undefined) {
         sendError(response, 404, "not_found");
@@ -283,6 +302,11 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       sendError(response, 400, "request_id_required");
       return;
     }
+    const upstream = body["upstream"];
+    if (upstream !== undefined) {
+      await handleDynamicQuote(request, response, principalId, routeId, requestId, upstream);
+      return;
+    }
     const route = resolveRoute(options.config, routeId);
     if (route === undefined) {
       sendError(response, 404, "unknown_route");
@@ -298,6 +322,40 @@ export function createRequestListener(options: AppOptions): http.RequestListener
     sendJson(response, 200, quoteBody(outcome, route, options.canonicalBaseUrl));
   }
 
+  /** 送信元の識別（門の鍵）。MCP 層が必ず上書きするヘッダ。無ければ principal。 */
+  function sourceOf(request: http.IncomingMessage, principalId: string): string {
+    const source = singleHeader(request.headers, "x-router-source");
+    return source === undefined || source === "" || source.length > 128 ? principalId : source;
+  }
+
+  /** R2（動的）: `upstream.url` を持つ quote。`routeId` はプロファイル ID。 */
+  async function handleDynamicQuote(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    principalId: string,
+    profileId: string,
+    requestId: string,
+    upstream: unknown,
+  ): Promise<void> {
+    const url = typeof upstream === "object" && upstream !== null && !Array.isArray(upstream) ? (upstream as Record<string, unknown>)["url"] : undefined;
+    if (typeof url !== "string" || url === "") {
+      sendError(response, 400, "upstream_url_required");
+      return;
+    }
+    const profile = options.config.dynamic?.enabled === true ? resolveProfile(options.config, profileId) : undefined;
+    if (profile === undefined) {
+      // 機能が無い・無効・無いプロファイルは、どれも「無い」と答える（接続 0）。
+      sendError(response, 404, options.config.dynamic === undefined || !options.config.dynamic.enabled ? "dynamic_disabled" : "unknown_route");
+      return;
+    }
+    const outcome = await options.core.quote({ principalId, requestId, routeId: profileId, upstream: { url }, source: sourceOf(request, principalId) });
+    if (!outcome.ok) {
+      sendError(response, DYNAMIC_QUOTE_STATUS[outcome.code] ?? 502, outcome.code, outcome.reason === undefined ? {} : { reason: outcome.reason });
+      return;
+    }
+    sendJson(response, 200, dynamicQuoteBody(outcome, profile, options.canonicalBaseUrl));
+  }
+
   async function handleResource(
     request: http.IncomingMessage,
     response: http.ServerResponse,
@@ -309,26 +367,29 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       sendError(response, 405, "method_not_allowed", {}, { allow: "GET" });
       return;
     }
-    // allowlist 外の routeId は存在しない。
+    // allowlist 外の routeId は存在しない（動的プロファイルの ID は、機能が有効なときだけ）。
     const route = resolveRoute(options.config, routeId);
-    if (route === undefined) {
+    const profile = route === undefined && options.config.dynamic?.enabled === true ? resolveProfile(options.config, routeId) : undefined;
+    if (route === undefined && profile === undefined) {
       sendError(response, 404, "unknown_route");
       return;
     }
     // R2 が提示した canonical path そのものでなければ購入口として扱わない。
-    if (rawPath !== route.canonicalPath) {
+    if (rawPath !== (route?.canonicalPath ?? canonicalPathOf(routeId))) {
       sendError(response, 404, "not_found");
       return;
     }
 
     const quoteId = singleHeader(request.headers, "x-router-quote-id");
     const rawCredential = singleHeader(request.headers, "x-payment");
+    // 動的 quote の持ち主の証明。静的 route では見ない。ログ・エラー本文には出さない。
+    const ownerKey = singleHeader(request.headers, "x-router-owner-key");
 
     // 資格情報なしは「既存 offer の再提示」か「R2 で quote を取れ」の指示だけ。
     // ここでは core の購入経路に入らないので、journal には 1 行も書かない。
     if (rawCredential === undefined) {
       const offer =
-        quoteId === undefined ? undefined : options.core.offerFor(quoteId, principalId, routeId);
+        quoteId === undefined ? undefined : options.core.offerFor(quoteId, principalId, routeId, ownerKey);
       respondPaymentRequired(
         response,
         routeId,
@@ -361,6 +422,8 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       routeId,
       ...(approval === undefined ? {} : { approval }),
       credential,
+      ...(ownerKey === undefined ? {} : { ownerKey }),
+      source: sourceOf(request, principalId),
     });
 
     if (outcome.status === "delivered") {
@@ -389,7 +452,7 @@ export function createRequestListener(options: AppOptions): http.RequestListener
     };
     // 402 は支払いのやり直しに必要な offer を添える（新しい quote は作らない）。
     if (status === 402) {
-      const offer = options.core.offerFor(quoteId, principalId, routeId);
+      const offer = options.core.offerFor(quoteId, principalId, routeId, ownerKey);
       sendJson(response, 402, {
         ...(paymentRequiredBody(routeId, quoteUrl, offer, code) as Record<string, unknown>),
         ...extra,
@@ -400,8 +463,13 @@ export function createRequestListener(options: AppOptions): http.RequestListener
   }
 }
 
+/** 入口の受信期限（設計 §7.1）。ヘッダと本文の受信に明示する。 */
+export const HTTP_INGRESS_TIMEOUT_MS = 10_000;
+
 export interface RunningServer {
   readonly port: number;
+  /** 実際に適用された受信期限（試験で確かめる）。 */
+  readonly timeouts: { readonly headersTimeoutMs: number; readonly requestTimeoutMs: number };
   close(): Promise<void>;
 }
 
@@ -409,11 +477,15 @@ export async function startHttpServer(
   options: AppOptions & { readonly host: string; readonly port: number },
 ): Promise<RunningServer> {
   const server = http.createServer(createRequestListener(options));
+  // 入口の資源上限（設計 §7.1）: ヘッダと本文の受信に期限を明示する。
+  server.headersTimeout = HTTP_INGRESS_TIMEOUT_MS;
+  server.requestTimeout = HTTP_INGRESS_TIMEOUT_MS;
   server.listen(options.port, options.host);
   await once(server, "listening");
   const address = server.address();
   return {
     port: typeof address === "object" && address !== null ? address.port : options.port,
+    timeouts: { headersTimeoutMs: server.headersTimeout, requestTimeoutMs: server.requestTimeout },
     async close(): Promise<void> {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

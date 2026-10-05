@@ -69,6 +69,7 @@ function bindingOf(quote: QuoteView): string {
     source: quote.source,
     destination: quote.destination,
     approval: quote.approval,
+    ...(quote.upstream === undefined ? {} : { upstream: quote.upstream, pricing: quote.pricing, ownerKey: quote.ownerKey }),
   });
 }
 
@@ -106,6 +107,21 @@ function quoteViewOf(body: unknown): QuoteView | undefined {
   if (url === undefined || method === undefined || boundTo === undefined) {
     return undefined;
   }
+  const upstream = body["upstream"];
+  const ownerKey = body["ownerKey"];
+  const dynamic: Partial<QuoteView> = {};
+  if (upstream !== undefined) {
+    // 動的 quote: `upstream.url`・`ownerKey` が揃っていなければ quote として扱わない。
+    if (!isRecord(upstream) || requireString(upstream, "url") === undefined || requireString(upstream, "method") === undefined || typeof ownerKey !== "string" || ownerKey === "") {
+      return undefined;
+    }
+    Object.assign(dynamic, {
+      upstream: { url: upstream["url"] as string, method: upstream["method"] as string },
+      ...(isRecord(body["pricing"]) ? { pricing: body["pricing"] } : {}),
+      ...(isRecord(body["disclosures"]) ? { disclosures: body["disclosures"] } : {}),
+      ownerKey,
+    });
+  }
   return {
     quoteId,
     paymentId,
@@ -118,6 +134,7 @@ function quoteViewOf(body: unknown): QuoteView | undefined {
       boundTo,
       deadlineMs: typeof approval["deadlineMs"] === "number" ? approval["deadlineMs"] : 0,
     },
+    ...dynamic,
   };
 }
 
@@ -152,6 +169,8 @@ function projectionViewOf(body: unknown): ProjectionView | undefined {
     ...(terminalReason === undefined ? {} : { terminalReason }),
     updatedAt,
     ...(Object.hasOwn(body, "result") ? { result: body["result"] } : {}),
+    ...(isRecord(body["upstream"]) ? { upstream: body["upstream"] } : {}),
+    ...(isRecord(body["dynamic"]) ? { dynamic: body["dynamic"] } : {}),
   };
 }
 
@@ -180,6 +199,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
     return {
       "x-router-principal": options.principalId,
       authorization: `Bearer ${options.token}`,
+      ...(options.source === undefined ? {} : { "x-router-source": options.source }),
       ...extra,
     };
   }
@@ -258,6 +278,33 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { ok: false, error: "quote_malformed", status: result.status };
       }
       // 発行時の値を凍結して渡し、束縛スナップショットを控える（後の改変を検知する）。
+      const quote = frozenClone(parsed);
+      issued.set(quote.quoteId, { binding: bindingOf(quote), requestId });
+      return { ok: true, quote };
+    },
+
+    async quoteUrl(input): Promise<QuoteResult> {
+      const profileId = input.profileId;
+      const url = input.url;
+      const requestId = input.requestId;
+      let result: Awaited<ReturnType<typeof call>>;
+      try {
+        result = await call("/v1/quotes", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ routeId: profileId, requestId, upstream: { url } }),
+        });
+      } catch {
+        return { ok: false, error: "transport_failed", status: 0 };
+      }
+      if (result.status !== 200) {
+        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status };
+      }
+      const parsed = quoteViewOf(result.body);
+      // 動的 quote の応答として `upstream`・`ownerKey` を持たないもの、頼んだ URL・プロファイルと違うものは受け入れない。
+      if (parsed === undefined || parsed.upstream === undefined || parsed.upstream.url !== url || parsed.routeId !== profileId) {
+        return { ok: false, error: "quote_malformed", status: result.status };
+      }
       const quote = frozenClone(parsed);
       issued.set(quote.quoteId, { binding: bindingOf(quote), requestId });
       return { ok: true, quote };
@@ -359,6 +406,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
             "x-router-request-id": requestId,
             "x-router-approval": approval.quoteId,
             "x-payment": credential,
+            // 動的 quote の持ち主の証明（quote 文書から運ぶ）。
+            ...(quote.ownerKey === undefined ? {} : { "x-router-owner-key": quote.ownerKey }),
           },
         });
       } catch {
@@ -447,10 +496,13 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       };
     },
 
-    async status(paymentId: string) {
+    async status(paymentId: string, ownerKey?: string) {
       let result: Awaited<ReturnType<typeof call>>;
       try {
-        result = await call(`/v1/purchases/${encodeURIComponent(paymentId)}`, { method: "GET" });
+        result = await call(`/v1/purchases/${encodeURIComponent(paymentId)}`, {
+          method: "GET",
+          ...(ownerKey === undefined || ownerKey === "" ? {} : { headers: { "x-router-owner-key": ownerKey } }),
+        });
       } catch {
         return { found: false as const, status: 0, reason: "transport_failed" };
       }

@@ -791,8 +791,9 @@ function mutableQuoteClient(
       }
       return { ok: true, quote: transform(structuredClone(result.quote) as QuoteView) };
     },
+    quoteUrl: (input) => inner.quoteUrl(input),
     execute: (input) => inner.execute(input),
-    status: (paymentId) => inner.status(paymentId),
+    status: (paymentId, ownerKey) => inner.status(paymentId, ownerKey),
   };
 }
 

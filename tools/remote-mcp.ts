@@ -23,7 +23,7 @@ import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createMcpIngress } from "../src/mcp/ingress.js";
-import { buildServer } from "../src/mcp/server.js";
+import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 
 /**
@@ -258,7 +258,8 @@ async function start(): Promise<void> {
     handle: async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
       // ステートレス。セッションを跨いで状態を持たない。
       // リモートはステートレス: 呼び出し側が quote を持ち回る（慣行に合わせる）。
-      const mcp = await buildServer({ stateless: true });
+      // 送信元は入口が自分で導く（外から来た `x-router-source` は使わない）。
+      const mcp = await buildServer({ stateless: true, source: sourceOfRequest(req.headers, req.socket.remoteAddress) });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         void transport.close();
