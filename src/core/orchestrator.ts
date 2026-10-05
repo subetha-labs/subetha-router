@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 
 import {
   authoritativeTermsOf,
@@ -15,6 +16,9 @@ import {
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
 import type { DestinationOffer, OutboundRail } from "../ports/outbound.js";
 import { Budget } from "./budget.js";
+import { createDynamicCore, ownerKeyMatches, type DynamicCore, type DynamicPricing, type DynamicQuoteFields } from "./dynamic.js";
+import { DynamicGate } from "./dynamic-gate.js";
+import { QuoteLedger } from "./quote-ledger.js";
 import {
   fingerprintOf,
   isTerminal,
@@ -30,7 +34,12 @@ import { IntentCollisionError, IntentStore } from "./store.js";
 export interface QuoteRequest {
   readonly principalId: string;
   readonly requestId: string;
+  /** 静的 route の ID、または動的プロファイルの ID（`upstream` があるとき）。 */
   readonly routeId: string;
+  /** 動的上流 URL（設計 `docs/dynamic-upstream-design.md` §2.1）。無ければ静的の処理。 */
+  readonly upstream?: { readonly url: string };
+  /** 送信元の識別（門の鍵）。無ければ principal。 */
+  readonly source?: string;
 }
 
 export interface QuoteDocument {
@@ -54,6 +63,10 @@ export interface QuoteDocument {
     readonly boundTo: string;
     readonly deadlineMs: number;
   };
+  /** 動的 quote だけ。`ownerKey` は**この応答にしか載らない**。 */
+  readonly upstream?: DynamicQuoteFields["upstream"];
+  readonly dynamic?: DynamicQuoteFields["dynamic"];
+  readonly ownerKey?: string;
 }
 
 export type QuoteOutcome =
@@ -69,6 +82,9 @@ export interface PurchaseRequest {
   /** 承認は `quoteId` に束縛される。 */
   readonly approval?: string;
   readonly credential?: PaymentCredential;
+  /** 動的 quote の持ち主の証明。静的 route では見ない。 */
+  readonly ownerKey?: string;
+  readonly source?: string;
 }
 
 export interface PurchaseOutcome {
@@ -103,6 +119,9 @@ export interface Projection {
   readonly terminalReason?: string;
   readonly updatedAt: string;
   readonly result?: unknown;
+  /** 動的購入だけ。 */
+  readonly upstream?: { readonly url: string; readonly method: "GET" };
+  readonly dynamic?: { readonly profileId: string; readonly pricing: DynamicPricing; readonly fundsMoveOnCredential: boolean; readonly promoted: boolean };
 }
 
 export interface RouterCoreOptions {
@@ -119,17 +138,26 @@ export interface RouterCoreOptions {
    * 省略時は何も出さない（core は I/O 先を知らない）。
    */
   readonly note?: (message: string) => void;
+  /**
+   * 動的上流 URL（`config.dynamic` があるときだけ使う）。控えの置き場所は省略時 `<journal のディレクトリ>/dynamic-quotes`。
+   * `balanceOf` は支払い元の残高（省略時は検査しない）。
+   */
+  readonly dynamic?: {
+    readonly ledgerDir?: string;
+    readonly gate?: DynamicGate;
+    readonly balanceOf?: (profileId: string, asset: string) => Promise<bigint>;
+  };
 }
 
 export interface RouterCore {
   quote(request: QuoteRequest): Promise<QuoteOutcome>;
   purchase(request: PurchaseRequest): Promise<PurchaseOutcome>;
-  status(paymentId: string, principalId: string): Projection | undefined;
+  status(paymentId: string, principalId: string, ownerKey?: string): Projection | undefined;
   /**
    * 資格情報なしの R3 に対して発行済み offer を再提示するための読み取り専用アクセサ。
    * 所有 principal・経路一致・未開始の quote のときだけ返し、**journal には何も書かない**。
    */
-  offerFor(quoteId: string, principalId: string, routeId?: string): InboundOffer | undefined;
+  offerFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): InboundOffer | undefined;
   close(): Promise<void>;
 }
 
@@ -162,6 +190,17 @@ function projectionOf(intent: Intent): Projection {
     ...(intent.status === "delivered" && intent.result !== undefined
       ? { result: intent.result.body }
       : {}),
+    ...(intent.upstream === undefined || intent.dynamic === undefined
+      ? {}
+      : {
+          upstream: { url: intent.upstream.url, method: "GET" },
+          dynamic: {
+            profileId: intent.dynamic.profileId,
+            pricing: intent.dynamic.pricing,
+            fundsMoveOnCredential: (intent.dynamic.profile as { sourceRail?: unknown })["sourceRail"] === "mpp",
+            promoted: intent.dynamic.reservation !== undefined,
+          },
+        }),
   };
   return projection;
 }
@@ -229,6 +268,8 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "invalid_amount",
   "invalid_budget_limit",
   "approval_expired",
+  "unsupported_response",
+  "response_too_large",
 ]);
 
 /** adapter が返してよい preflight 理由。これ以外は固定コードに置き換える。 */
@@ -273,6 +314,45 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
   // 既定の id は再起動でリセットされない（カウンタは履歴を上書きし得る）。
   const nextPaymentId = options.nextPaymentId ?? (() => randomUUID());
 
+  /** 動的上流 URL（設定にあるときだけ）。控え・動的予算・門はここで持つ。 */
+  let dynamicCore: DynamicCore | undefined;
+  let ledger: QuoteLedger | undefined;
+  let sweepTimer: NodeJS.Timeout | undefined;
+  if (config.dynamic !== undefined) {
+    try {
+      ledger = await QuoteLedger.open({
+        dir: options.dynamic?.ledgerDir ?? join(dirname(options.journalPath), "dynamic-quotes"),
+        now,
+        retentionDays: config.dynamic.limits.ledgerRetentionDays,
+        isPromoted: (quoteId) => store.byQuoteId(quoteId) !== undefined,
+      });
+      const dynamicBudget = Budget.loadDynamic(config.dynamic.budget, journal);
+      const gate = options.dynamic?.gate ?? new DynamicGate({ limits: config.dynamic.limits, now });
+      dynamicCore = createDynamicCore({
+        config,
+        store,
+        ledger,
+        budget: dynamicBudget,
+        gate,
+        inbound: options.inbound,
+        outbound: options.outbound,
+        now,
+        nextPaymentId,
+        note: options.note,
+        balanceOf: options.dynamic?.balanceOf,
+        deliver,
+      });
+      // 期限切れの控えと古いファイルの定期的な削除（設計 §6.1）。
+      const sweeping = ledger;
+      sweepTimer = setInterval(() => sweeping.sweep(), 60 * 60 * 1000);
+      sweepTimer.unref();
+    } catch (error) {
+      await ledger?.close();
+      await journal.close();
+      throw error;
+    }
+  }
+
   /** キー単位の直列化。同じ quote / 同じ購入の並行要求を重ねない。 */
   const locks = new Map<string, Promise<void>>();
   function withKey<T>(key: string, run: () => Promise<T>): Promise<T> {
@@ -304,10 +384,14 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       if (existing === undefined) {
         return { ok: false, code: "quote_failed" };
       }
-      if (existing.routeId !== request.routeId) {
+      // 動的 quote は冪等に再取得できない（持ち主の証明が要る）。
+      if (existing.routeId !== request.routeId || existing.dynamic !== undefined || existing.dynamicInvalid === true) {
         return { ok: false, code: "request_id_conflict" };
       }
       return { ok: true, ...quoteDocumentOf(existing) };
+    }
+    if (dynamicCore?.requestInUse(request.principalId, request.requestId) === true) {
+      return { ok: false, code: "request_id_conflict" };
     }
 
     // 先に上流を quote（純粋読取・無課金）してから受信 offer を発行する。
@@ -384,6 +468,10 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
   async function purchaseLocked(request: PurchaseRequest): Promise<PurchaseOutcome> {
     const intent = store.byQuoteId(request.quoteId);
     if (intent === undefined) {
+      return outcomeOf("rejected", "unknown_quote");
+    }
+    // 動的の intent は静的の流れで実行しない（持ち主の証明・昇格の規則が違う）。
+    if (intent.dynamic !== undefined || intent.dynamicInvalid === true) {
       return outcomeOf("rejected", "unknown_quote");
     }
     // 所有 principal 以外は開始も参照もできない。
@@ -629,6 +717,11 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 送金直前にもう一度上流の現在の challenge を読み直す（手順 4 の後に起きた
     // 変更へのレース対策）。ここで外れたら署名も送信もしない。受信レグは成立済みな
     // ので終了状態は `paid_undelivered`（理由 `quote_changed`）で、再課金も再購入もしない。
+    // 動的の intent で上流が読めない形なら、送信しない（読めない値で払わない）。
+    if (intent.dynamicInvalid === true) {
+      await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason: "quote_changed" });
+      return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
+    }
     let stillOffered: boolean;
     try {
       stillOffered = await readAndMatchDestination(intent);
@@ -659,6 +752,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         offer: intent.destination.selectedOffer,
         paymentId,
         attempt,
+        ...(intent.upstream === undefined ? {} : { target: { url: intent.upstream.url } }),
       });
     } catch {
       // 送金有無が不明。例外文字列は残さず固定の理由コードだけ記録する。
@@ -729,7 +823,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
   /** 送金直前・settle 直前の再照合（凍結した accepts をそのまま使わない）。 */
   async function readAndMatchDestination(intent: Intent): Promise<boolean> {
-    const offers = await options.outbound.readChallenge(intent.routeId);
+    const offers = await options.outbound.readChallenge(intent.routeId, intent.upstream === undefined ? undefined : { url: intent.upstream.url });
     const target = stableJson(intent.destination.selectedOffer);
     return offers.some((offer) => stableJson(offer) === target);
   }
@@ -747,28 +841,68 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     };
   }
 
+  /** 動的 quote／intent の読取。持ち主の証明が無い・合わないものは存在しないのと同じ。 */
+  function readable(intent: Intent | undefined, principalId: string, ownerKey: string | undefined): Intent | undefined {
+    if (intent === undefined || intent.principalId !== principalId) {
+      return undefined;
+    }
+    if (intent.dynamic !== undefined || intent.dynamicInvalid === true) {
+      if (intent.dynamic === undefined || !ownerKeyMatches(ownerKey, intent.dynamic.ownerKeyHash)) {
+        return undefined;
+      }
+    }
+    return intent;
+  }
+
+  async function quoteDispatch(input: QuoteRequest): Promise<QuoteOutcome> {
+    if (input.upstream === undefined) {
+      return quoteLocked(input);
+    }
+    if (dynamicCore === undefined) {
+      return { ok: false, code: "dynamic_disabled" };
+    }
+    const outcome = await dynamicCore.quote({
+      principalId: input.principalId,
+      requestId: input.requestId,
+      profileId: input.routeId,
+      url: input.upstream.url,
+      source: input.source ?? input.principalId,
+    });
+    if (!outcome.ok) {
+      return outcome;
+    }
+    return { ok: true, ...quoteDocumentOf(outcome.intent), ...outcome.fields };
+  }
+
+  async function purchaseDispatch(input: PurchaseRequest): Promise<PurchaseOutcome> {
+    const intent = store.byQuoteId(input.quoteId);
+    const dynamic = intent === undefined ? dynamicCore?.ledgerIntent(input.quoteId) !== undefined : intent.dynamic !== undefined || intent.dynamicInvalid === true;
+    if (!dynamic) {
+      return purchaseLocked(input);
+    }
+    if (dynamicCore === undefined) {
+      return outcomeOf("rejected", "unknown_quote");
+    }
+    return dynamicCore.purchase({ ...input, source: input.source ?? input.principalId });
+  }
+
   return {
     quote(request: QuoteRequest): Promise<QuoteOutcome> {
       // キューに入る前に入力を切り離す（await 中の呼び出し側の変更を持ち込まない）。
       const input = snapshotInput(request);
-      return withKey(`quote\u0000${input.principalId}\u0000${input.requestId}`, () =>
-        quoteLocked(input),
-      );
+      return withKey(`quote\u0000${input.principalId}\u0000${input.requestId}`, () => quoteDispatch(input));
     },
     purchase(request: PurchaseRequest): Promise<PurchaseOutcome> {
       const input = snapshotInput(request);
-      return withKey(`purchase\u0000${input.quoteId}`, () => purchaseLocked(input));
+      return withKey(`purchase\u0000${input.quoteId}`, () => purchaseDispatch(input));
     },
-    status(paymentId: string, principalId: string): Projection | undefined {
-      const intent = store.byPaymentId(paymentId);
-      if (intent === undefined || intent.principalId !== principalId) {
-        return undefined;
-      }
-      return projectionOf(intent);
+    status(paymentId: string, principalId: string, ownerKey?: string): Projection | undefined {
+      const intent = readable(store.byPaymentId(paymentId) ?? dynamicCore?.ledgerIntentByPaymentId(paymentId), principalId, ownerKey);
+      return intent === undefined ? undefined : projectionOf(intent);
     },
-    offerFor(quoteId: string, principalId: string, routeId?: string): InboundOffer | undefined {
-      const intent = store.byQuoteId(quoteId);
-      if (intent === undefined || intent.principalId !== principalId) {
+    offerFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): InboundOffer | undefined {
+      const intent = readable(store.byQuoteId(quoteId) ?? dynamicCore?.ledgerIntent(quoteId), principalId, ownerKey);
+      if (intent === undefined) {
         return undefined;
       }
       if (routeId !== undefined && intent.routeId !== routeId) {
@@ -778,6 +912,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return intent.status === "created" ? intent.source.offer : undefined;
     },
     async close(): Promise<void> {
+      if (sweepTimer !== undefined) clearInterval(sweepTimer);
+      await ledger?.close();
       await journal.close();
     },
   };
