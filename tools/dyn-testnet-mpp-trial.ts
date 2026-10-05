@@ -8,7 +8,9 @@
  * 範囲はコードで強制する:
  *   - chain は Tempo Moderato（42431）、通貨は testnet の pathUSD だけ、額は `CAP` 以下、支払いは 1 回
  *   - 署名するのは「token への call 1 つ・`transferWithMemo`／`transfer`・受取先と額が challenge と一致・
- *     手数料の資産は pathUSD・手数料の上限は `MAX_FEE` 以下」の transaction だけ（設計の facade と同じ検査）
+ *     手数料の資産は pathUSD・手数料の上限は `MAX_FEE` 以下」の transaction だけ。**設計の facade の検査の一部**であり、
+ *     nonce・有効期限・優先手数料の範囲、渡された `type`、`accessList` と未知の欄の拒否は見ていない（製品では必須）
+ *   - 「1 回だけ」はこのプロセスの中での制限（実行し直せばもう 1 回払う）
  *   - `--pay` が無ければ 402 を読むだけ
  *
  * usage: T7_PAYER_PRIVATE_KEY=0x… npx tsx tools/dyn-testnet-mpp-trial.ts [--pay] https://…
@@ -139,9 +141,20 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify(out, null, 1)}\n`);
 }
 
+/** この tool が自分で投げる停止理由（固定文）。これ以外の例外の文字列は出さない。 */
+const STOP_REASONS = new Set([
+  "no MPP challenge",
+  "not tempo/charge",
+  "not Tempo Moderato",
+  "currency is not testnet pathUSD",
+  "amount over the trial cap",
+  "push not supported",
+  "challenge uses splits",
+  "challenge uses machineTokenEnabled",
+]);
+
 main().catch((error: unknown) => {
-  // 範囲の検査で止めた理由は固定文（自分で投げた Error）。それ以外は種類の名前だけ。
   const message = error instanceof Error ? error.message : "";
-  process.stderr.write(`trial stopped: ${/^[A-Za-z0-9 ./()-]{1,80}$/.test(message) ? message : "error"}\n`);
+  process.stderr.write(`trial stopped: ${STOP_REASONS.has(message) ? message : "error"}\n`);
   process.exit(1);
 });

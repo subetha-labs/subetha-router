@@ -283,12 +283,17 @@ MPP（3 件。`WWW-Authenticate: Payment`）:
      その欄を上流がどう解釈するかは分からないので、**許した欄があっても成立するとは限らない**
    - この規則で 1 件目の offer が通るのは、第三者 6 件中 **5 件**（標準の欄だけに絞ると 3 件）。network が合えば、の話である
 4. **MPP の challenge に許す欄**: challenge は `id`・`realm`・`method`・`intent`・`request`・`expires` と、任意の `opaque`・`description`・`digest`。
-   `request` は `amount`・`currency`・`recipient`・`methodDetails` と、任意の `description`。`methodDetails` は `chainId` と、任意の `supportedModes`。
+   `request` は `amount`・`currency`・`recipient`・`methodDetails` と、任意の `description`。`methodDetails` は `chainId` と、任意の `supportedModes`・`feePayer`（真偽値。**許すが使わない**。下の「Tempo 側の Provider」）。
    SDK が認識する他の欄は**拒否する**: challenge の `header`（credential の送り先を変える）、`request.externalId`、`methodDetails` の `splits`・`machineTokenEnabled`・`memo`
    （`methodDetails.feePayer` は**後の調査で「許すが使わない」に改めた**。下の「Tempo 側の Provider」）
    （`memo` は SDK が challenge から作った値で上書きするので、上流が指定する意味が無い）。`digest` は要求本文の束縛で、本文の無い GET では使われない。
-   `supportedModes` が `pull` だけのもの（今回 1 件）は拒否。**第三者の 2 件はどちらも `opaque`（scope）を持たない**ので、§11 の「あれば照合・無ければ不問」が必要であることが確かめられた。
-   これは動的経路で**新しく作る**振る舞いで、既存の adapter は scope を必須にしている（`src/adapters/outbound/mpp.ts`）。`opaque` があるときは中身を変えずに保ち、復号した scope を照合する
+   `supportedModes` が `pull` だけのもの（今回 1 件）は拒否。**第三者の 2 件はどちらも `opaque` を持たない**ので、§11 の「あれば照合・無ければ不問」が必要であることが確かめられた。
+   これは動的経路で**新しく作る**振る舞いで、既存の adapter は scope を必須にしている（`src/adapters/outbound/mpp.ts`）。動的経路の規則:
+   - `opaque` は**中身を変えずに保つ**（credential に入れて送り返す）
+   - `opaque` が無い、または復号した meta に `_mppx_scope` の**キーが無い** → scope の照合はしない（保存した URL・guarded な TLS 接続・offer の照合が権威）。
+     **`opaque` があることと scope があることは別**（後の調査で 30 個中 27 個が `opaque` を持っていたが、その中に `_mppx_scope` があるかは見ていない）
+   - `_mppx_scope` のキーが**ある** → 値が文字列で `GET <保存した URL>` と一致することを要求する。不一致・文字列でない値は拒否
+   - `opaque` が**復号できない**（SDK の形式でない）→ その challenge は候補にしない（中身を確かめられないものを送り返さない）
 5. **ヘッダの上限**: `PAYMENT-REQUIRED` だけで最大 10.6 KB あった。応答ヘッダ全体の大きさは測っていないので 16 KiB で足りないと示したわけではないが、
    余裕を取って §3.4 の上限を **16 KiB から 32 KiB に上げる**
 6. 同じ URL が x402 と MPP の両方を返すエンドポイントが 2 件あった。プロファイルは送信レールを 1 つ決めているので、使うのはそのレールの方だけ
@@ -362,7 +367,10 @@ T0-c の 6 件がすべて mainnet だったので、testnet で動いている�
    つまり、**匿名で使える Tempo testnet の MPP Provider として確認できたのは、公式の試験用 endpoint と運用者の B の 2 つ**である（探したのは公式の一覧と検索で、網羅ではない）
 
 3. **実際の支払い**（`mpp.dev/api/ping/paid` に 1 回。Tempo testnet の pathUSD 100000、使い捨て口座。Router 本体・journal・本番は通していない）。
-   SDK に見せたのは設計の facade と同じ検査を持つ署名口だけ（call 1 つ・token 宛て・`transferWithMemo`・受取先と額が challenge と一致・`feeToken` は pathUSD・手数料の上限 5000 以下）、**mode は push**:
+   SDK に見せたのは、設計の facade の検査の**一部**を持つ署名口だけ（call 1 つ・token 宛て・`transferWithMemo`・受取先と額が challenge と一致・`feeToken` は pathUSD・手数料の上限 5000 以下。
+   transaction は組み直し、`type` を `"tempo"` に固定し、渡された serializer は使わない）、**mode は push**。
+   **この試行の署名口が見ていないもの**（製品の facade では必須。§3.3 の「組み直しの契約」）: `nonceKey`・`nonce` の値、`validBefore` の範囲、`maxPriorityFeePerGas` の範囲、
+   渡された `type`、`accessList` と未知の欄の拒否、空の `authorizationList` の拒否。RPC の呼び出しも記録していない:
 
    | 項目 | 結果 |
    |---|---|
@@ -374,12 +382,15 @@ T0-c の 6 件がすべて mainnet だったので、testnet で動いている�
 
 **分かったこと**
 
-- **`feePayer` を申し出ている Provider も、push の credential を受け付けた。** 一覧の 30 個中 23 個が `feePayer` を持つので、これを理由に拒否すると MPP の Provider の大半を使えなくなる。
+- **`feePayer` を申し出ている Provider も、push の credential を受け付けた**（この 1 件。導入済みの `mppx` の server は、`supportedModes` が無いか push を含むなら hash の credential を受け付ける作りだが、
+  外部の各サーバの方針までは分からない）。読んだ `tempo/charge` の challenge 30 個中 23 個が `feePayer` を持つので、これを理由に拒否すると、読んだ範囲の challenge の大半を使えなくなる。
   §3.3 の MPP の検査を改める: **challenge の `methodDetails.feePayer`（真偽値）は許す**。ただし Router は使わない——mode は push に固定し、署名の境界は
   transaction の `feePayer`・`feePayerSignature` を引き続き拒否する。SDK が `feePayer` を読むのは pull の分岐だけである（`mppx/dist/tempo/client/Charge.js` の push の分岐は手前で戻る）
-- **T0-a の未実測だった部分が実ノードで通った**: 実 SDK → 検査つきの署名口 → Router が選んだ serializer → 実ノードへの送金、の全体。署名に渡る欄と RPC は T0-a の記録どおりだった
+- **T0-a の未実測だった部分が、実ノードで 1 回通った**: 実 SDK → 検査つきの署名口 → Router が選んだ serializer → 実ノードへの送金。これは 1 つの Provider への 1 回の成功であり、
+  製品の署名の境界の全体（上の「見ていないもの」）を確かめたものではない。RPC の順序はこの試行では記録していない
 - **T0-b の式が、`feeToken` を明示した transaction でも一致した**（14 件目。これまでの 13 件は未指定）。保証としての位置づけ（§3.3 の「観測と一致した段階」）は変わらない
-- **公式の試験用 endpoint の応答はテキスト**で、§3.4 の「対応する応答は JSON object」に当たらない。動的購入でこの URL を買うと「支払い済み・データなし（`unsupported_response`）」になる。
+- **公式の試験用 endpoint の応答はテキスト**で、§3.4 の「対応する応答は JSON object」に当たらない。動的購入でこの URL を買うと、**receipt の検証が通った場合に**「支払い済み・データなし（`unsupported_response`）」になる
+  （receipt が無い・整合しない場合は、本文の分類より前に `unknown`。今回見たのは receipt ヘッダが**ある**ことだけで、検証はしていない）。
   応答の規則を緩めるかどうかは別の判断で、本書では緩めない（FR-28 のとおり開示する）
 - 一覧の Provider は、`request.expires`・`request.extra` を持つもの（各 1 個）と、`evm/charge` など別の method を併記するものがある。前者は未知の欄として拒否、後者は「検査を通る最初の 1 件」で `tempo/charge` を選ぶ
 - **testnet の MPP は選択肢が少ない**。testnet での実地確認（G-2）は、MPP 送信側については運用者の B と公式の試験用 endpoint が相手になる
