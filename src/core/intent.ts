@@ -95,6 +95,30 @@ export interface IntentResult {
   readonly contentType: string;
 }
 
+/** 動的購入の上流（設計 `docs/dynamic-upstream-design.md` §2.4）。検査済みの URL そのもの。 */
+export interface IntentUpstream {
+  readonly url: string;
+  readonly method: "GET";
+}
+
+/** 動的購入の、quote 時に固定した条件。承認対象に出す値はすべてここから組む。 */
+export interface IntentDynamic {
+  readonly profileId: string;
+  /** 適用したプロファイルの写し（表示と、後からの照合のため）。 */
+  readonly profile: Readonly<Record<string, unknown>>;
+  /** 上流額・換算後・手数料・受信額（すべて base units の 10 進文字列）。 */
+  readonly pricing: {
+    readonly upstreamAmount: string;
+    readonly converted: string;
+    readonly fee: string;
+    readonly total: string;
+  };
+  /** 持ち主の証明のハッシュ（`sha256:<hex>`）。証明そのものは保存しない。 */
+  readonly ownerKeyHash: string;
+  /** 昇格（journal への記録）のときに付く予約。控えの段階では無い。 */
+  readonly reservation?: { readonly legs: readonly { readonly network: string; readonly asset: string; readonly amount: string }[] };
+}
+
 export interface Intent {
   readonly paymentId: string;
   readonly quoteId: string;
@@ -114,6 +138,12 @@ export interface Intent {
   readonly routeFingerprint?: string;
   /** 指紋欄が存在するが読めない形だった。legacy と区別する（設計 §11.3）。 */
   readonly routeFingerprintInvalid?: boolean;
+  /** 動的購入の上流。静的 route の intent には無い。 */
+  readonly upstream?: IntentUpstream;
+  /** 動的購入の条件。静的 route の intent には無い。 */
+  readonly dynamic?: IntentDynamic;
+  /** `upstream`／`dynamic` の欄があるのに読めない形だった。**この intent は実行しない。** */
+  readonly dynamicInvalid?: boolean;
   /** 承認の絶対期限（ミリ秒）。発行 offer の失効時刻で上限を切る。 */
   readonly approvalDeadlineMs: number;
   readonly result?: IntentResult;

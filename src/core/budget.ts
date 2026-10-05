@@ -22,6 +22,14 @@ export type ReservationResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: string };
 
+/**
+ * 動的購入の予約（設計 `docs/dynamic-upstream-design.md` §6.2・§6.4）。受信額・送信元本・送信手数料の上限を
+ * それぞれの `(network, asset)` のバケットに数える。額 0 の区分（手数料の無いレール）は書かない。
+ */
+export interface DynamicReservation {
+  readonly legs: readonly BucketAmount[];
+}
+
 function bucketKey(network: string, asset: string): string {
   return `${network}\u0000${asset}`;
 }
@@ -45,6 +53,17 @@ export type AppendReservation = (
   patch: Readonly<Record<string, unknown>>,
 ) => Promise<void>;
 
+/**
+ * 昇格の `write` が「**1 バイトも書いていない**」と断定できる失敗を伝えるための包み。
+ * これ以外の失敗は成否不明として扱い、以後の昇格を止める。
+ */
+export class PromotionNotWrittenError extends Error {
+  constructor(cause: unknown) {
+    super("promotion aborted before any write", { cause });
+    this.name = "PromotionNotWrittenError";
+  }
+}
+
 export class Budget {
   readonly #limits: BudgetLimits;
   readonly #append: AppendReservation;
@@ -52,10 +71,157 @@ export class Budget {
   #purchases = 0;
   /** 予約は単一 mutex 下で「検査 → 予約行 append+fsync」を不可分に行う。 */
   #queue: Promise<void> = Promise.resolve();
+  /** 動的購入の予算か（`loadDynamic`）。静的の `reserve` と動的の `promote` を取り違えさせない。 */
+  #dynamic = false;
+  /** 数が journal と食い違い得る状態。以後の昇格を拒否する（再起動して journal から数え直すまで）。 */
+  #blocked: string | undefined;
 
   private constructor(limits: BudgetLimits, append: AppendReservation) {
     this.#limits = limits;
     this.#append = append;
+  }
+
+  /**
+   * **動的購入の予算**を journal から復元する。数えるのは `created` 行のうち `dynamic.reservation` を持つものだけ
+   * （静的の `budget_reserved` は数えない。逆に静的の `load` は `created` を数えない。互いに干渉しない）。
+   *
+   * 予約と昇格は 1 行なので、「予約はあるが intent が無い」状態が journal に存在しない。
+   * 形の壊れた区分は無視せず**その購入を 1 件として数える**（額は読めた分だけ）。枠を復活させる側には倒さない。
+   */
+  static loadDynamic(limits: BudgetLimits, journal: Journal): Budget {
+    const budget = new Budget(limits, async () => {
+      throw new Error("the dynamic budget does not append reservation rows; use promote()");
+    });
+    budget.#dynamic = true;
+    for (const record of journal.records) {
+      if (record.event !== "created") {
+        continue;
+      }
+      const dynamic = record.patch["dynamic"];
+      if (dynamic === undefined) {
+        continue; // 静的 route の購入
+      }
+      /**
+       * journal にある動的購入は**必ず予約を持つ**（昇格は予約と同じ 1 行）。予約が無い・形が違う・額が読めない行は
+       * 「あり得ない状態」で、いくら使ったのか分からない。件数は数えるが、**以後の昇格は止める**
+       * （読めた分だけ足して続けると、通算の上限が効かなくなる）。
+       */
+      budget.#purchases += 1;
+      const reservation = typeof dynamic === "object" && dynamic !== null ? (dynamic as Record<string, unknown>)["reservation"] : undefined;
+      const legs = typeof reservation === "object" && reservation !== null ? (reservation as Record<string, unknown>)["legs"] : undefined;
+      if (!Array.isArray(legs) || legs.length === 0) {
+        budget.#blocked = "unreadable_reservation";
+        continue;
+      }
+      for (const entry of legs) {
+        const leg = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
+        const { network, asset, amount } = leg;
+        const parsed = typeof amount === "string" ? parseAmount(amount) : undefined;
+        if (typeof network !== "string" || typeof asset !== "string" || parsed === undefined) {
+          budget.#blocked = "unreadable_reservation";
+          continue;
+        }
+        budget.#add(network, asset, parsed);
+      }
+    }
+    return budget;
+  }
+
+  /**
+   * **昇格**: 残枠の検査と、journal への 1 行（`write`）を同じ mutex の中で行う。
+   *
+   * - 検査が通らなければ `write` を呼ばない（1 バイトも書かない）
+   * - `write` には**検査したのと同じ予約**（凍結済み）を渡す。書く行にはこれをそのまま入れること
+   * - `write` が `PromotionNotWrittenError` で失敗したら、何も書かれていないので数を進めず、次の昇格は通る
+   * - `write` が**それ以外**で失敗したら成否不明。行が journal に残ったかもしれないので、**以後の昇格を止める**
+   *   （再起動すれば journal から数え直せる）
+   * - 並行する 2 件で枠が 1 つなら、片方だけが書く
+   */
+  promote(reservation: DynamicReservation, write: (reservation: DynamicReservation) => Promise<void>): Promise<ReservationResult> {
+    const promoted = this.#queue.then(() => this.#promoteLocked(reservation, write));
+    this.#queue = promoted.then(
+      () => undefined,
+      () => undefined,
+    );
+    return promoted;
+  }
+
+  async #promoteLocked(
+    reservation: DynamicReservation,
+    write: (reservation: DynamicReservation) => Promise<void>,
+  ): Promise<ReservationResult> {
+    if (!this.#dynamic) {
+      throw new Error("promote() is only available on the dynamic budget");
+    }
+    if (this.#blocked !== undefined) {
+      return { ok: false, reason: "budget_unavailable" };
+    }
+    // 検査するものと書くものを同じ値にする（呼び出し側が後から書き換えられない写し）。
+    const frozen: DynamicReservation = Object.freeze({
+      legs: Object.freeze(reservation.legs.map((leg) => Object.freeze({ network: leg.network, asset: leg.asset, amount: leg.amount }))),
+    });
+    const checked = this.#check(frozen.legs);
+    if (!checked.ok) {
+      return checked;
+    }
+    try {
+      await write(frozen);
+    } catch (error) {
+      if (!(error instanceof PromotionNotWrittenError)) {
+        this.#blocked = "uncertain_write";
+      }
+      throw error;
+    }
+    this.#purchases += 1;
+    for (const entry of checked.requested.values()) {
+      this.#add(entry.network, entry.asset, entry.amount);
+    }
+    return { ok: true };
+  }
+
+  /** 昇格が止まっている理由（止まっていなければ `undefined`）。 */
+  get blocked(): string | undefined {
+    return this.#blocked;
+  }
+
+  /** 残枠の検査だけ（状態を変えない）。同じバケットに落ちる区分は合算する。 */
+  #check(
+    legs: readonly BucketAmount[],
+  ): { readonly ok: true; readonly requested: Map<string, { network: string; asset: string; amount: bigint }> } | { readonly ok: false; readonly reason: string } {
+    if (this.#purchases + 1 > this.#limits.maxPurchases) {
+      return { ok: false, reason: "purchase_count_limit" };
+    }
+    const requested = new Map<string, { network: string; asset: string; amount: bigint }>();
+    for (const side of legs) {
+      const amount = parseAmount(side.amount);
+      if (amount === undefined) {
+        return { ok: false, reason: "invalid_amount" };
+      }
+      const key = bucketKey(side.network, side.asset);
+      const current = requested.get(key);
+      requested.set(key, { network: side.network, asset: side.asset, amount: (current?.amount ?? 0n) + amount });
+    }
+    if (requested.size === 0) {
+      return { ok: false, reason: "invalid_amount" };
+    }
+    for (const [key, entry] of requested) {
+      const bucket = this.#bucketFor(entry.network, entry.asset);
+      if (bucket === undefined) {
+        return { ok: false, reason: "bucket_not_allowed" };
+      }
+      const perPurchase = parseAmount(bucket.maxPerPurchase);
+      const maxTotal = parseAmount(bucket.maxTotal);
+      if (perPurchase === undefined || maxTotal === undefined) {
+        return { ok: false, reason: "invalid_budget_limit" };
+      }
+      if (entry.amount > perPurchase) {
+        return { ok: false, reason: "per_purchase_limit" };
+      }
+      if ((this.#spent.get(key) ?? 0n) + entry.amount > maxTotal) {
+        return { ok: false, reason: "bucket_limit" };
+      }
+    }
+    return { ok: true, requested };
   }
 
   static load(limits: BudgetLimits, journal: Journal, append: AppendReservation): Budget {
@@ -104,6 +270,9 @@ export class Budget {
   }
 
   async #reserveLocked(request: ReservationRequest): Promise<ReservationResult> {
+    if (this.#dynamic) {
+      throw new Error("reserve() is only available on the static budget; use promote()");
+    }
     if (this.#purchases + 1 > this.#limits.maxPurchases) {
       return { ok: false, reason: "purchase_count_limit" };
     }
