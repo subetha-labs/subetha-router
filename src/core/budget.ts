@@ -53,6 +53,17 @@ export type AppendReservation = (
   patch: Readonly<Record<string, unknown>>,
 ) => Promise<void>;
 
+/**
+ * 昇格の `write` が「**1 バイトも書いていない**」と断定できる失敗を伝えるための包み。
+ * これ以外の失敗は成否不明として扱い、以後の昇格を止める。
+ */
+export class PromotionNotWrittenError extends Error {
+  constructor(cause: unknown) {
+    super("promotion aborted before any write", { cause });
+    this.name = "PromotionNotWrittenError";
+  }
+}
+
 export class Budget {
   readonly #limits: BudgetLimits;
   readonly #append: AppendReservation;
@@ -60,6 +71,10 @@ export class Budget {
   #purchases = 0;
   /** 予約は単一 mutex 下で「検査 → 予約行 append+fsync」を不可分に行う。 */
   #queue: Promise<void> = Promise.resolve();
+  /** 動的購入の予算か（`loadDynamic`）。静的の `reserve` と動的の `promote` を取り違えさせない。 */
+  #dynamic = false;
+  /** 数が journal と食い違い得る状態。以後の昇格を拒否する（再起動して journal から数え直すまで）。 */
+  #blocked: string | undefined;
 
   private constructor(limits: BudgetLimits, append: AppendReservation) {
     this.#limits = limits;
@@ -77,32 +92,36 @@ export class Budget {
     const budget = new Budget(limits, async () => {
       throw new Error("the dynamic budget does not append reservation rows; use promote()");
     });
+    budget.#dynamic = true;
     for (const record of journal.records) {
       if (record.event !== "created") {
         continue;
       }
       const dynamic = record.patch["dynamic"];
-      if (typeof dynamic !== "object" || dynamic === null) {
-        continue;
+      if (dynamic === undefined) {
+        continue; // 静的 route の購入
       }
-      const reservation = (dynamic as Record<string, unknown>)["reservation"];
-      if (typeof reservation !== "object" || reservation === null) {
-        continue;
-      }
+      /**
+       * journal にある動的購入は**必ず予約を持つ**（昇格は予約と同じ 1 行）。予約が無い・形が違う・額が読めない行は
+       * 「あり得ない状態」で、いくら使ったのか分からない。件数は数えるが、**以後の昇格は止める**
+       * （読めた分だけ足して続けると、通算の上限が効かなくなる）。
+       */
       budget.#purchases += 1;
-      const legs = (reservation as Record<string, unknown>)["legs"];
-      for (const entry of Array.isArray(legs) ? legs : []) {
-        if (typeof entry !== "object" || entry === null) {
+      const reservation = typeof dynamic === "object" && dynamic !== null ? (dynamic as Record<string, unknown>)["reservation"] : undefined;
+      const legs = typeof reservation === "object" && reservation !== null ? (reservation as Record<string, unknown>)["legs"] : undefined;
+      if (!Array.isArray(legs) || legs.length === 0) {
+        budget.#blocked = "unreadable_reservation";
+        continue;
+      }
+      for (const entry of legs) {
+        const leg = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
+        const { network, asset, amount } = leg;
+        const parsed = typeof amount === "string" ? parseAmount(amount) : undefined;
+        if (typeof network !== "string" || typeof asset !== "string" || parsed === undefined) {
+          budget.#blocked = "unreadable_reservation";
           continue;
         }
-        const { network, asset, amount } = entry as Record<string, unknown>;
-        if (typeof network !== "string" || typeof asset !== "string" || typeof amount !== "string") {
-          continue;
-        }
-        const parsed = parseAmount(amount);
-        if (parsed !== undefined) {
-          budget.#add(network, asset, parsed);
-        }
+        budget.#add(network, asset, parsed);
       }
     }
     return budget;
@@ -110,10 +129,15 @@ export class Budget {
 
   /**
    * **昇格**: 残枠の検査と、journal への 1 行（`write`）を同じ mutex の中で行う。
-   * 検査が通らなければ `write` を呼ばない（1 バイトも書かない）。`write` が失敗したら数を進めない。
-   * 並行する 2 件で枠が 1 つなら、片方だけが書く。
+   *
+   * - 検査が通らなければ `write` を呼ばない（1 バイトも書かない）
+   * - `write` には**検査したのと同じ予約**（凍結済み）を渡す。書く行にはこれをそのまま入れること
+   * - `write` が `PromotionNotWrittenError` で失敗したら、何も書かれていないので数を進めず、次の昇格は通る
+   * - `write` が**それ以外**で失敗したら成否不明。行が journal に残ったかもしれないので、**以後の昇格を止める**
+   *   （再起動すれば journal から数え直せる）
+   * - 並行する 2 件で枠が 1 つなら、片方だけが書く
    */
-  promote(reservation: DynamicReservation, write: () => Promise<void>): Promise<ReservationResult> {
+  promote(reservation: DynamicReservation, write: (reservation: DynamicReservation) => Promise<void>): Promise<ReservationResult> {
     const promoted = this.#queue.then(() => this.#promoteLocked(reservation, write));
     this.#queue = promoted.then(
       () => undefined,
@@ -122,17 +146,42 @@ export class Budget {
     return promoted;
   }
 
-  async #promoteLocked(reservation: DynamicReservation, write: () => Promise<void>): Promise<ReservationResult> {
-    const checked = this.#check(reservation.legs);
+  async #promoteLocked(
+    reservation: DynamicReservation,
+    write: (reservation: DynamicReservation) => Promise<void>,
+  ): Promise<ReservationResult> {
+    if (!this.#dynamic) {
+      throw new Error("promote() is only available on the dynamic budget");
+    }
+    if (this.#blocked !== undefined) {
+      return { ok: false, reason: "budget_unavailable" };
+    }
+    // 検査するものと書くものを同じ値にする（呼び出し側が後から書き換えられない写し）。
+    const frozen: DynamicReservation = Object.freeze({
+      legs: Object.freeze(reservation.legs.map((leg) => Object.freeze({ network: leg.network, asset: leg.asset, amount: leg.amount }))),
+    });
+    const checked = this.#check(frozen.legs);
     if (!checked.ok) {
       return checked;
     }
-    await write();
+    try {
+      await write(frozen);
+    } catch (error) {
+      if (!(error instanceof PromotionNotWrittenError)) {
+        this.#blocked = "uncertain_write";
+      }
+      throw error;
+    }
     this.#purchases += 1;
     for (const entry of checked.requested.values()) {
       this.#add(entry.network, entry.asset, entry.amount);
     }
     return { ok: true };
+  }
+
+  /** 昇格が止まっている理由（止まっていなければ `undefined`）。 */
+  get blocked(): string | undefined {
+    return this.#blocked;
   }
 
   /** 残枠の検査だけ（状態を変えない）。同じバケットに落ちる区分は合算する。 */
@@ -221,6 +270,9 @@ export class Budget {
   }
 
   async #reserveLocked(request: ReservationRequest): Promise<ReservationResult> {
+    if (this.#dynamic) {
+      throw new Error("reserve() is only available on the static budget; use promote()");
+    }
     if (this.#purchases + 1 > this.#limits.maxPurchases) {
       return { ok: false, reason: "purchase_count_limit" };
     }

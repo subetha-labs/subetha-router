@@ -9,7 +9,7 @@ import path from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 
 import type { BudgetLimits } from "../../src/config.js";
-import { Budget, type DynamicReservation } from "../../src/core/budget.js";
+import { Budget, PromotionNotWrittenError, type DynamicReservation } from "../../src/core/budget.js";
 import { openJournal, type Journal } from "../../src/core/journal.js";
 import { dynamicFieldsOf, IntentStore } from "../../src/core/store.js";
 
@@ -127,17 +127,84 @@ test("promote: 検査が通らなければ write を呼ばず、1 バイトも�
   expect(await bytes()).toBe(0);
 });
 
-test("promote: write が失敗したら数を進めず、次の promote は通る", async () => {
+test("promote: 「1 バイトも書いていない」と断定できる失敗なら、数を進めず、次の promote は通る", async () => {
   const journal = await journalOf();
   const budget = Budget.loadDynamic(limits({ maxPurchases: 1 }), journal);
   await expect(
     budget.promote(reservation(), async () => {
-      throw new Error("disk full");
+      throw new PromotionNotWrittenError(new Error("identity collision"));
     }),
-  ).rejects.toThrow("disk full");
+  ).rejects.toBeInstanceOf(PromotionNotWrittenError);
   expect(budget.purchases).toBe(0);
-  expect(budget.spentOf(USDC.network, USDC.asset)).toBe("0");
+  expect(budget.blocked).toBeUndefined();
   expect(await budget.promote(reservation(), async () => {})).toEqual({ ok: true });
+});
+
+test("promote: 書いた後で失敗した（成否不明の）昇格の後は、以後の昇格を止める。再起動で journal から数え直せる", async () => {
+  const journal = await journalOf();
+  const budget = Budget.loadDynamic(limits({ maxPurchases: 2 }), journal);
+  await expect(
+    budget.promote(reservation(), async (frozen) => {
+      await journal.append(dynamicCreated(1, frozen));
+      throw new Error("lost the acknowledgement");
+    }),
+  ).rejects.toThrow("lost the acknowledgement");
+  // 行は journal にあるが、メモリの数は進んでいない。このまま続けると上限を 1 件超えて使える。
+  expect(budget.purchases).toBe(0);
+  expect(budget.blocked).toBe("uncertain_write");
+  let writes = 0;
+  expect(
+    await budget.promote(reservation(), async () => {
+      writes += 1;
+    }),
+  ).toEqual({ ok: false, reason: "budget_unavailable" });
+  expect(writes).toBe(0);
+  // 再起動（journal から数え直す）と、書かれた 1 件が数えられ、昇格が再開できる。
+  const rebuilt = Budget.loadDynamic(limits({ maxPurchases: 2 }), journal);
+  expect(rebuilt.purchases).toBe(1);
+  expect(rebuilt.blocked).toBeUndefined();
+  expect(await rebuilt.promote(reservation(), async () => {})).toEqual({ ok: true });
+});
+
+test("promote: write に渡るのは検査したのと同じ予約で、呼び出し側が後から書き換えても変わらない", async () => {
+  const journal = await journalOf();
+  const budget = Budget.loadDynamic(limits(), journal);
+  const mutable = { legs: [{ ...USDC, amount: "11000" }, { ...PATHUSD, amount: "10000" }] };
+  let seen: DynamicReservation | undefined;
+  const pending = budget.promote(mutable, async (frozen) => {
+    seen = frozen;
+    mutable.legs[0]!.amount = "1";
+    expect(() => ((frozen.legs[0] as { amount: string }).amount = "1")).toThrow();
+  });
+  expect(await pending).toEqual({ ok: true });
+  expect(seen).toEqual({ legs: [{ ...USDC, amount: "11000" }, { ...PATHUSD, amount: "10000" }] });
+  expect(budget.spentOf(USDC.network, USDC.asset)).toBe("11000");
+});
+
+test("promote: 手数料の資産が元本と別なら、別のバケットに数える", async () => {
+  const FEE = { network: "eip155:42431", asset: "0xfeetoken" };
+  const journal = await journalOf();
+  const config = limits({ buckets: [...limits().buckets, { ...FEE, maxTotal: "9000", maxPerPurchase: "5000" }] });
+  const budget = Budget.loadDynamic(config, journal);
+  const request = { legs: [{ ...USDC, amount: "11000" }, { ...PATHUSD, amount: "10000" }, { ...FEE, amount: "5000" }] };
+  expect(await budget.promote(request, async () => {})).toEqual({ ok: true });
+  expect(budget.spentOf(PATHUSD.network, PATHUSD.asset)).toBe("10000");
+  expect(budget.spentOf(FEE.network, FEE.asset)).toBe("5000");
+  // 手数料のバケットだけが尽きる。
+  expect(await budget.promote(request, async () => {})).toEqual({ ok: false, reason: "bucket_limit" });
+});
+
+test("静的の予算では promote を使えず、write も呼ばれない", async () => {
+  const journal = await journalOf();
+  const fixed = Budget.load(limits(), journal, async () => {});
+  let writes = 0;
+  await expect(
+    fixed.promote(reservation(), async () => {
+      writes += 1;
+    }),
+  ).rejects.toThrow("dynamic budget");
+  expect(writes).toBe(0);
+  expect(fixed.purchases).toBe(0);
 });
 
 test("promote: 並行する 2 件で枠が 1 つなら、片方だけが書く", async () => {
@@ -159,10 +226,9 @@ test("promote: 並行する 2 件で枠が 1 つなら、片方だけが書く",
 
 test("再起動: 動的予算は `created` 行の予約だけから復元する。静的予算は動的の行を数えず、逆も数えない", async () => {
   const journal = await journalOf();
-  // 動的 2 件（昇格済み）、控えから昇格していない形の created 1 件（予約なし）、静的 1 件。
+  // 動的 2 件（昇格済み）、静的 1 件。
   await journal.append(dynamicCreated(1, reservation()));
   await journal.append(dynamicCreated(2, reservation("12000", "10000", "5000")));
-  await journal.append(dynamicCreated(3, undefined));
   await journal.append({ paymentId: "static-1", event: "created", patch: { quoteId: "sq-1", routeId: "md-static", principalId: "judge", requestId: "s-1", approvalDeadlineMs: 1 } });
   await journal.append({ paymentId: "static-1", event: "budget_reserved", patch: { source: { ...USDC, amount: "7000" }, destination: { ...PATHUSD, amount: "7000" } } });
   await journal.close();
@@ -187,18 +253,40 @@ test("再起動: 動的予算は `created` 行の予約だけから復元する�
   expect(await tight.promote(reservation(), async () => {})).toEqual({ ok: false, reason: "purchase_count_limit" });
 });
 
-test("再起動: 予約の形が壊れた行は、件数として数える（枠を復活させない）。読めた額だけ足す", async () => {
+test.each<[string, unknown]>([
+  ["予約が無い", undefined],
+  ["予約が null", null],
+  ["予約が文字列", "legs"],
+  ["legs が無い", {}],
+  ["legs が空", { legs: [] }],
+  ["額が読めない区分がある", { legs: [{ ...USDC, amount: "11000" }, { ...PATHUSD, amount: "oops" }] }],
+  ["区分が object でない", { legs: [{ ...USDC, amount: "11000" }, "junk"] }],
+  ["network が無い区分", { legs: [{ asset: "0xusdc", amount: "1" }] }],
+])("再起動: 予約を信用できない動的の行があれば、件数は数え、以後の昇格を止める（%s）", async (_name, raw) => {
   const journal = await journalOf();
   const broken = dynamicCreated(1, reservation());
-  (broken.patch["dynamic"] as Record<string, unknown>)["reservation"] = { legs: [{ ...USDC, amount: "11000" }, { ...PATHUSD, amount: "oops" }, "junk"] };
+  const dynamic = broken.patch["dynamic"] as Record<string, unknown>;
+  if (raw === undefined) delete dynamic["reservation"];
+  else dynamic["reservation"] = raw;
   await journal.append(broken);
-  const noLegs = dynamicCreated(2, reservation());
-  (noLegs.patch["dynamic"] as Record<string, unknown>)["reservation"] = {};
-  await journal.append(noLegs);
   const budget = Budget.loadDynamic(limits(), journal);
-  expect(budget.purchases).toBe(2);
-  expect(budget.spentOf(USDC.network, USDC.asset)).toBe("11000");
-  expect(budget.spentOf(PATHUSD.network, PATHUSD.asset)).toBe("0");
+  expect(budget.purchases).toBe(1);
+  expect(budget.blocked).toBe("unreadable_reservation");
+  let writes = 0;
+  expect(
+    await budget.promote(reservation(), async () => {
+      writes += 1;
+    }),
+  ).toEqual({ ok: false, reason: "budget_unavailable" });
+  expect(writes).toBe(0);
+});
+
+test("再起動: dynamic の欄が object でない行も、静的として読み飛ばさずに止める", async () => {
+  const journal = await journalOf();
+  const broken = dynamicCreated(1, reservation());
+  broken.patch["dynamic"] = "yes";
+  await journal.append(broken);
+  expect(Budget.loadDynamic(limits(), journal).blocked).toBe("unreadable_reservation");
 });
 
 test("動的予算は予約行（budget_reserved）を書かない: reserve は使えない", async () => {
@@ -206,8 +294,19 @@ test("動的予算は予約行（budget_reserved）を書かない: reserve は�
   const budget = Budget.loadDynamic(limits(), journal);
   await expect(
     budget.reserve({ paymentId: "p", source: { ...USDC, amount: "1" }, destination: { ...PATHUSD, amount: "1" } }),
-  ).rejects.toThrow("promote");
+  ).rejects.toThrow("only available on the static budget");
   expect(await bytes()).toBe(0);
+});
+
+test("journal にある動的の行が予約を持たなければ、intent は実行しない印付きで復元される", async () => {
+  const journal = await journalOf();
+  await journal.append(dynamicCreated(1, undefined));
+  await journal.close();
+  const store = await IntentStore.load(await journalOf());
+  const intent = store.byPaymentId("pay-1")!;
+  expect(intent.dynamicInvalid).toBe(true);
+  expect(intent.upstream).toBeUndefined();
+  expect(intent.dynamic).toBeUndefined();
 });
 
 test("intent の復元: 動的の欄（upstream・dynamic・予約）が消えずに戻る。静的の intent には付かない", async () => {
@@ -245,10 +344,28 @@ test.each<[string, (patch: Record<string, unknown>) => void]>([
   ["予約の legs が空", (p) => { (p["dynamic"] as Record<string, unknown>)["reservation"] = { legs: [] }; }],
   ["予約の額が不正", (p) => { (p["dynamic"] as Record<string, unknown>)["reservation"] = { legs: [{ ...USDC, amount: "1.5" }] }; }],
   ["dynamic が null", (p) => { p["dynamic"] = null; }],
+  ["journal の行なのに予約が無い", (p) => { delete (p["dynamic"] as Record<string, unknown>)["reservation"]; }],
 ])("intent の復元: 形の違う動的の欄は静的にも動的にもせず、実行しない印を付ける（%s）", (_name, mutate) => {
   const patch = dynamicCreated(1, reservation()).patch;
   mutate(patch);
-  expect(dynamicFieldsOf(patch)).toEqual({ dynamicInvalid: true });
+  expect(dynamicFieldsOf(patch, { requireReservation: true })).toEqual({ dynamicInvalid: true });
+});
+
+test("控えの quote（昇格前）は予約を持たなくてよい。journal の行は予約が必須", () => {
+  const patch = dynamicCreated(1, undefined).patch;
+  expect(dynamicFieldsOf(patch).dynamic?.profileId).toBe("dyn-x402-to-mpp");
+  expect(dynamicFieldsOf(patch).dynamicInvalid).toBeUndefined();
+  expect(dynamicFieldsOf(patch, { requireReservation: true })).toEqual({ dynamicInvalid: true });
+});
+
+test("intent の動的な欄は、追記した直後（再起動の前）にも読める", async () => {
+  const store = await IntentStore.load(await journalOf());
+  const created = dynamicCreated(1, reservation());
+  await store.append(created.paymentId, created.event, created.patch);
+  const intent = store.byPaymentId("pay-1")!;
+  expect(intent.upstream?.url).toBe("https://provider.test/v1/1");
+  expect(intent.dynamic?.reservation).toEqual(reservation());
+  expect(store.byQuoteId("q-1")?.dynamic?.ownerKeyHash).toBe(HASH);
 });
 
 test("動的の行を含む journal を、動的を知らない読み方（静的の予算と intent 表）で再生できる", async () => {

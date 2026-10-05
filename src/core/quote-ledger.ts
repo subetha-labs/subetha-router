@@ -46,6 +46,11 @@ export interface LedgerQuote {
 /** 「この quote に credential が提出された」事実（最初の 1 回だけ）。credential そのものは持たない。 */
 export interface LedgerAttempt {
   readonly quoteId: string;
+  /**
+   * その quote の `paymentId`。期限切れの `quoteId` が別の quote に使い回されても、古い attempt が
+   * 新しい quote に付かないよう、両方が一致するものだけを結び付ける。
+   */
+  readonly paymentId: string;
   readonly at: string;
   /** 提出された credential の要約（`sha256:<hex>`）。 */
   readonly credentialDigest: string;
@@ -69,6 +74,16 @@ export class LedgerLifetimeError extends Error {
   }
 }
 
+/** 直前の書き込みが成否不明で終わった。控えの内容とメモリが食い違い得るので、以後は書かない。 */
+export class LedgerUnusableError extends Error {
+  readonly code = "ledger_unusable";
+
+  constructor(cause: unknown) {
+    super("quote ledger writer stopped after a failed append", { cause });
+    this.name = "LedgerUnusableError";
+  }
+}
+
 export class LedgerDuplicateError extends Error {
   readonly code = "ledger_duplicate";
 
@@ -86,6 +101,18 @@ export interface OpenQuoteLedgerOptions {
   readonly retentionDays: number;
   /** journal に昇格済みの quote か。昇格済みの行は読み飛ばす（journal が正）。 */
   readonly isPromoted?: (quoteId: string) => boolean;
+  /** **試験専用。** 書き込みの前・fsync の前に呼ばれ、例外を投げると I/O の失敗を再現できる。 */
+  readonly ioForTest?: { readonly beforeWrite?: () => void; readonly beforeSync?: () => void };
+}
+
+/** directory の fsync（新しく作ったファイル名を耐久化する。journal と同じ扱い）。 */
+async function syncDirectory(dir: string): Promise<void> {
+  const handle = await open(dir, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 function dateOf(ms: number): string {
@@ -135,6 +162,8 @@ export class QuoteLedger {
   #handleDate = "";
   #queue: Promise<void> = Promise.resolve();
   #closed = false;
+  #failure: unknown;
+  readonly #io: NonNullable<OpenQuoteLedgerOptions["ioForTest"]>;
   #skipped = 0;
   #linesRead = 0;
   #loaded = 0;
@@ -143,6 +172,7 @@ export class QuoteLedger {
     this.#dir = options.dir;
     this.#now = options.now ?? (() => Date.now());
     this.#retentionDays = options.retentionDays;
+    this.#io = options.ioForTest ?? {};
   }
 
   static async open(options: OpenQuoteLedgerOptions): Promise<QuoteLedger> {
@@ -151,6 +181,8 @@ export class QuoteLedger {
     }
     const ledger = new QuoteLedger(options);
     await mkdir(options.dir, { recursive: true });
+    // 作ったばかりの directory の名前を耐久化する。
+    await syncDirectory(path.dirname(options.dir));
     await ledger.#prune();
     await ledger.#load(options.isPromoted ?? (() => false));
     return ledger;
@@ -185,12 +217,20 @@ export class QuoteLedger {
     const nowMs = this.#now();
     const attempts: LedgerAttempt[] = [];
     const oldest = dateOf(nowMs - MAX_QUOTE_LIFETIME_MS);
+    const today = dateOf(nowMs);
     for (const name of await this.#files()) {
-      if (FILE_PATTERN.exec(name)![1]! < oldest) continue;
+      const date = FILE_PATTERN.exec(name)![1]!;
+      // 前日と当日だけ。未来の日付のファイル（時計が戻った）も読まない。
+      if (date < oldest || date > today) continue;
       const lines = createInterface({ input: createReadStream(path.join(this.#dir, name), { encoding: "utf8" }), crlfDelay: Infinity });
       for await (const raw of lines) {
         if (raw === "") continue;
         this.#linesRead += 1;
+        // 書き込み時の上限を超える行は、この実装が書いたものではない。読まない。
+        if (Buffer.byteLength(raw, "utf8") + 1 > MAX_QUOTE_LINE_BYTES) {
+          this.#skipped += 1;
+          continue;
+        }
         let line: unknown;
         try {
           line = JSON.parse(raw);
@@ -208,6 +248,11 @@ export class QuoteLedger {
             this.#skipped += 1;
             continue;
           }
+          // 寿命の上限を超える期限は書き込み時に拒否している。そういう行は読まない（時計が戻った場合を含む）。
+          if (quote.deadlineMs - nowMs > MAX_QUOTE_LIFETIME_MS) {
+            this.#skipped += 1;
+            continue;
+          }
           if (quote.deadlineMs <= nowMs || isPromoted(quote.quoteId)) continue;
           // 同じ識別子の 2 つ目は載せない（最初のものが正）。
           if (this.#collides(quote)) {
@@ -216,12 +261,12 @@ export class QuoteLedger {
           }
           this.#index(quote);
         } else if (line["kind"] === "attempt") {
-          const { quoteId, at, credentialDigest } = line;
-          if (typeof quoteId !== "string" || typeof at !== "string" || typeof credentialDigest !== "string") {
+          const { quoteId, paymentId, at, credentialDigest } = line;
+          if (typeof quoteId !== "string" || typeof paymentId !== "string" || typeof at !== "string" || typeof credentialDigest !== "string") {
             this.#skipped += 1;
             continue;
           }
-          attempts.push({ quoteId, at, credentialDigest });
+          attempts.push({ quoteId, paymentId, at, credentialDigest });
         } else {
           this.#skipped += 1;
         }
@@ -230,7 +275,8 @@ export class QuoteLedger {
     this.#loaded = this.#quotes.size;
     for (const attempt of attempts) {
       // 最初の 1 行だけ。メモリに無い（期限切れ・昇格済み）quote の attempt は載せない。
-      if (this.#quotes.has(attempt.quoteId) && !this.#attempts.has(attempt.quoteId)) {
+      // `quoteId` と `paymentId` の両方が一致するものだけ（使い回された `quoteId` に古い attempt を付けない）。
+      if (this.#quotes.get(attempt.quoteId)?.paymentId === attempt.paymentId && !this.#attempts.has(attempt.quoteId)) {
         this.#attempts.set(attempt.quoteId, attempt);
       }
     }
@@ -276,19 +322,50 @@ export class QuoteLedger {
     return result;
   }
 
-  /** 当日のファイルに 1 行を append + fsync する。日付が替わっていたらファイルを替え、古いものを削除する。 */
+  /**
+   * 当日のファイルに 1 行を append + fsync する。日付が替わっていたらファイルを替え、古いものを削除する。
+   *
+   * **成否不明の失敗の後は書かない**: 途中まで書けた行や、書けたが fsync に失敗した行は、ファイルにあるのに
+   * メモリに無い状態を作る。そのまま続けると、同じ識別子の 2 つ目や「最初の」attempt の 2 つ目を書いてしまう。
+   */
   async #append(line: string): Promise<void> {
     if (this.#closed) throw new Error("quote ledger is closed");
-    const date = dateOf(this.#now());
-    if (this.#handle === undefined || this.#handleDate !== date) {
-      await this.#handle?.close().catch(() => {});
-      this.#handle = await open(path.join(this.#dir, `${date}.ndjson`), "a");
-      const rolled = this.#handleDate !== "";
-      this.#handleDate = date;
-      if (rolled) await this.#prune();
+    if (this.#failure !== undefined) throw new LedgerUnusableError(this.#failure);
+    try {
+      const date = dateOf(this.#now());
+      if (this.#handle === undefined || this.#handleDate !== date) {
+        await this.#handle?.close().catch(() => {});
+        this.#handle = undefined;
+        const file = path.join(this.#dir, `${date}.ndjson`);
+        const handle = await open(file, "a+");
+        /**
+         * 既存のファイルが改行で終わっていなければ（前回の書き込みが途中で切れた）、**先に改行を書く**。
+         * そうしないと次の行が切れた断片に続いてしまい、fsync まで済んだ記録が読み戻せなくなる。
+         */
+        const { size } = await handle.stat();
+        if (size > 0) {
+          const tail = Buffer.alloc(1);
+          await handle.read(tail, 0, 1, size - 1);
+          if (tail[0] !== 0x0a) {
+            await handle.appendFile("\n", "utf8");
+            await handle.sync();
+          }
+        }
+        this.#handle = handle;
+        const rolled = this.#handleDate !== "";
+        this.#handleDate = date;
+        // 新しいファイル名を耐久化する（ファイルの fsync だけでは、システムの異常終了で名前ごと消え得る）。
+        if (size === 0) await syncDirectory(this.#dir);
+        if (rolled) await this.#prune();
+      }
+      this.#io.beforeWrite?.();
+      await this.#handle.appendFile(`${line}\n`, "utf8");
+      this.#io.beforeSync?.();
+      await this.#handle.sync();
+    } catch (error) {
+      this.#failure = error;
+      throw new LedgerUnusableError(error);
     }
-    await this.#handle.appendFile(`${line}\n`, "utf8");
-    await this.#handle.sync();
   }
 
   /**
@@ -318,8 +395,9 @@ export class QuoteLedger {
    */
   recordAttempt(quoteId: string, credentialDigest: string): Promise<boolean> {
     return this.#serialize(async () => {
-      if (!this.#quotes.has(quoteId) || this.#attempts.has(quoteId)) return false;
-      const attempt: LedgerAttempt = { quoteId, at: new Date(this.#now()).toISOString(), credentialDigest };
+      const quote = this.#quotes.get(quoteId);
+      if (quote === undefined || this.#attempts.has(quoteId)) return false;
+      const attempt: LedgerAttempt = { quoteId, paymentId: quote.paymentId, at: new Date(this.#now()).toISOString(), credentialDigest };
       const line = JSON.stringify({ kind: "attempt", ...attempt });
       const bytes = Buffer.byteLength(line, "utf8") + 1;
       if (bytes > MAX_ATTEMPT_LINE_BYTES) throw new LedgerRecordTooLargeError(bytes, MAX_ATTEMPT_LINE_BYTES);
@@ -369,6 +447,11 @@ export class QuoteLedger {
   /** 起動時に読んだ行数、読めずに飛ばした行数、メモリに載せた quote の数（診断用）。 */
   get loadStats(): { readonly linesRead: number; readonly skipped: number; readonly loaded: number } {
     return { linesRead: this.#linesRead, skipped: this.#skipped, loaded: this.#loaded };
+  }
+
+  /** 書き込みが成否不明で止まっているか。 */
+  get unusable(): boolean {
+    return this.#failure !== undefined;
   }
 
   async close(): Promise<void> {

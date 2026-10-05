@@ -13,6 +13,7 @@ import {
   LedgerDuplicateError,
   LedgerLifetimeError,
   LedgerRecordTooLargeError,
+  LedgerUnusableError,
   MAX_ATTEMPT_LINE_BYTES,
   MAX_QUOTE_LINE_BYTES,
   QuoteLedger,
@@ -39,8 +40,16 @@ afterEach(async () => {
   await rm(path.dirname(dir), { recursive: true, force: true });
 });
 
-async function open(options: { retentionDays?: number; isPromoted?: (quoteId: string) => boolean } = {}): Promise<QuoteLedger> {
-  const ledger = await QuoteLedger.open({ dir, now: () => clock, retentionDays: options.retentionDays ?? 7, ...(options.isPromoted === undefined ? {} : { isPromoted: options.isPromoted }) });
+async function open(
+  options: { retentionDays?: number; isPromoted?: (quoteId: string) => boolean; ioForTest?: { beforeWrite?: () => void; beforeSync?: () => void } } = {},
+): Promise<QuoteLedger> {
+  const ledger = await QuoteLedger.open({
+    dir,
+    now: () => clock,
+    retentionDays: options.retentionDays ?? 7,
+    ...(options.isPromoted === undefined ? {} : { isPromoted: options.isPromoted }),
+    ...(options.ioForTest === undefined ? {} : { ioForTest: options.ioForTest }),
+  });
   opened.push(ledger);
   return ledger;
 }
@@ -164,7 +173,7 @@ test("attempt は再起動後も読め、期限内の quote はメモリに戻�
   clock += 60_000;
   const reopened = await open();
   expect(reopened.get("q-1")?.quoteId).toBe("q-1");
-  expect(reopened.attemptOf("q-1")).toMatchObject({ quoteId: "q-1", credentialDigest: "sha256:first" });
+  expect(reopened.attemptOf("q-1")).toMatchObject({ quoteId: "q-1", paymentId: "pay-1", credentialDigest: "sha256:first" });
   // 再起動後も 2 行目は書かない。
   expect(await reopened.recordAttempt("q-1", "sha256:second")).toBe(false);
   expect((await lines("2026-10-05.ndjson")).filter((line) => line["kind"] === "attempt")).toHaveLength(1);
@@ -211,6 +220,8 @@ test("起動時に読むのは当日と前日のファイルだけ。期限内�
     `${JSON.stringify({ kind: "quote", at: "x", ...quote(n, { deadlineMs }) })}\n`;
   // 3 日前のファイルに「期限内」と書かれた行があっても読まない（寿命 24 時間の規則から、あり得ない行）。
   await writeFile(path.join(dir, "2026-10-02.ndjson"), row(1, clock + 600_000));
+  // 未来の日付のファイル（時計が戻った）も読まない。
+  await writeFile(path.join(dir, "2026-10-06.ndjson"), row(7, clock + 600_000));
   await writeFile(path.join(dir, "2026-10-04.ndjson"), Array.from({ length: 300 }, (_, i) => row(100 + i, clock - 1)).join("") + row(2, clock + 600_000));
   await writeFile(path.join(dir, "2026-10-05.ndjson"), Array.from({ length: 300 }, (_, i) => row(500 + i, clock - 1)).join("") + row(3, clock + 600_000));
   const ledger = await open();
@@ -218,27 +229,139 @@ test("起動時に読むのは当日と前日のファイルだけ。期限内�
   expect(ledger.loadStats).toEqual({ linesRead: 602, skipped: 0, loaded: 2 });
   expect(ledger.outstanding()).toBe(2);
   expect(ledger.get("q-1")).toBeUndefined();
+  expect(ledger.get("q-7")).toBeUndefined();
   expect(ledger.get("q-2")?.quoteId).toBe("q-2");
   expect(ledger.get("q-3")?.quoteId).toBe("q-3");
 });
 
-test("読めない行は起動を止めずに飛ばし、数える（途中で切れた最後の行・JSON でない行・形の違う行・重複）", async () => {
+test("起動時: 寿命の上限を超える期限の行と、行の上限を超える行は読まない（この実装が書かない行）", async () => {
+  await mkdir(dir, { recursive: true });
+  const tooLong = JSON.stringify({ kind: "quote", at: "x", ...quote(1, { deadlineMs: clock + DAY + 1 }) });
+  const tooBig = JSON.stringify({ kind: "quote", at: "x", ...quote(2, { record: { pad: "a".repeat(MAX_QUOTE_LINE_BYTES) } }) });
+  const fine = JSON.stringify({ kind: "quote", at: "x", ...quote(3) });
+  await writeFile(path.join(dir, "2026-10-05.ndjson"), `${tooLong}\n${tooBig}\n${fine}\n`);
+  const ledger = await open();
+  expect(ledger.loadStats).toEqual({ linesRead: 3, skipped: 2, loaded: 1 });
+  expect(ledger.get("q-3")?.quoteId).toBe("q-3");
+});
+
+test("読めない行は起動を止めずに飛ばし、数える（JSON でない行・形の違う行・重複・paymentId の無い attempt）", async () => {
   await mkdir(dir, { recursive: true });
   const good = JSON.stringify({ kind: "quote", at: "x", ...quote(1) });
   const duplicate = JSON.stringify({ kind: "quote", at: "x", ...quote(9, { quoteId: "q-1" }) });
   await writeFile(
     path.join(dir, "2026-10-05.ndjson"),
-    [good, "not json", JSON.stringify({ kind: "quote", quoteId: 5 }), JSON.stringify({ kind: "mystery" }), JSON.stringify([1]), duplicate, JSON.stringify({ kind: "attempt", quoteId: "q-1" })].join("\n") +
-      "\n" +
-      good.slice(0, 40),
+    [good, "not json", JSON.stringify({ kind: "quote", quoteId: 5 }), JSON.stringify({ kind: "mystery" }), JSON.stringify([1]), duplicate, JSON.stringify({ kind: "attempt", quoteId: "q-1" })].join("\n") + "\n",
   );
   const ledger = await open();
   expect(ledger.get("q-1")?.paymentId).toBe("pay-1");
-  expect(ledger.loadStats).toEqual({ linesRead: 8, skipped: 7, loaded: 1 });
-  // 切れた行の後ろにも書き続けられる。
-  await appendFile(path.join(dir, "2026-10-05.ndjson"), "\n");
+  expect(ledger.loadStats).toEqual({ linesRead: 7, skipped: 6, loaded: 1 });
+});
+
+test.each<[string, (complete: string) => string]>([
+  ["途中で切れた断片", (complete) => complete.slice(0, 40)],
+  ["JSON としては完結しているが改行が無い行", (complete) => complete],
+])("前回の書き込みが改行なしで終わっていても、次に書いた記録は再起動後に読める（%s）", async (_name, tail) => {
+  await mkdir(dir, { recursive: true });
+  const first = JSON.stringify({ kind: "quote", at: "x", ...quote(1) });
+  const torn = JSON.stringify({ kind: "quote", at: "x", ...quote(8) });
+  // 手で直さない: ファイルは改行なしで終わったまま。
+  await writeFile(path.join(dir, "2026-10-05.ndjson"), `${first}\n${tail(torn)}`);
+  const ledger = await open();
   await ledger.put(quote(2));
-  expect(ledger.get("q-2")?.quoteId).toBe("q-2");
+  expect(await ledger.recordAttempt("q-1", "sha256:first")).toBe(true);
+  await ledger.close();
+  // 2 度目の起動。fsync まで済んだ quote と attempt が、前の断片に巻き込まれずに読める。
+  const reopened = await open();
+  expect(reopened.get("q-1")?.quoteId).toBe("q-1");
+  expect(reopened.get("q-2")?.quoteId).toBe("q-2");
+  expect(reopened.attemptOf("q-1")?.credentialDigest).toBe("sha256:first");
+  const text = await readFile(path.join(dir, "2026-10-05.ndjson"), "utf8");
+  expect(text.endsWith("\n")).toBe(true);
+});
+
+test("書き込みの失敗（途中まで書けたかもしれない）の後は、控えは書かなくなる", async () => {
+  let fail = false;
+  const ledger = await open({
+    ioForTest: {
+      beforeWrite: () => {
+        if (fail) throw new Error("EIO");
+      },
+    },
+  });
+  await ledger.put(quote(1));
+  fail = true;
+  await expect(ledger.put(quote(2))).rejects.toBeInstanceOf(LedgerUnusableError);
+  fail = false;
+  expect(ledger.unusable).toBe(true);
+  expect(ledger.get("q-2")).toBeUndefined();
+  // 失敗が解消しても、同じプロセスでは書かない（メモリとファイルが食い違っているかもしれない）。
+  await expect(ledger.put(quote(3))).rejects.toBeInstanceOf(LedgerUnusableError);
+  await expect(ledger.recordAttempt("q-1", "sha256:a")).rejects.toBeInstanceOf(LedgerUnusableError);
+  // 読むことはできる。
+  expect(ledger.get("q-1")?.quoteId).toBe("q-1");
+});
+
+test("fsync の失敗（行は書けたが耐久化が不明）の後も書かなくなる。再起動すればファイルにある行が正", async () => {
+  let fail = false;
+  const ledger = await open({
+    ioForTest: {
+      beforeSync: () => {
+        if (fail) throw new Error("fsync failed");
+      },
+    },
+  });
+  await ledger.put(quote(1));
+  fail = true;
+  await expect(ledger.recordAttempt("q-1", "sha256:first")).rejects.toBeInstanceOf(LedgerUnusableError);
+  fail = false;
+  // メモリには載っていない。同じプロセスで「最初の」attempt をもう 1 つ書かせない。
+  expect(ledger.attemptOf("q-1")).toBeUndefined();
+  await expect(ledger.recordAttempt("q-1", "sha256:second")).rejects.toBeInstanceOf(LedgerUnusableError);
+  await ledger.close();
+  // 行はファイルにある。再起動後はそれが最初の attempt。
+  const reopened = await open();
+  expect(reopened.attemptOf("q-1")?.credentialDigest).toBe("sha256:first");
+  expect(await reopened.recordAttempt("q-1", "sha256:third")).toBe(false);
+});
+
+test("検査での拒否（大きすぎる・重複・寿命）は失敗として扱わず、その後も書ける", async () => {
+  const ledger = await open();
+  await ledger.put(quote(1));
+  await expect(ledger.put(quote(1))).rejects.toBeInstanceOf(LedgerDuplicateError);
+  await expect(ledger.put(quote(2, { record: { pad: "a".repeat(MAX_QUOTE_LINE_BYTES) } }))).rejects.toBeInstanceOf(LedgerRecordTooLargeError);
+  await expect(ledger.put(quote(3, { deadlineMs: clock }))).rejects.toBeInstanceOf(LedgerLifetimeError);
+  expect(ledger.unusable).toBe(false);
+  await ledger.put(quote(4));
+});
+
+test("期限切れの quoteId が別の quote に使い回されても、古い attempt は新しい quote に付かない", async () => {
+  const ledger = await open();
+  await ledger.put(quote(1));
+  await ledger.recordAttempt("q-1", "sha256:old");
+  clock += 600_000; // q-1 は期限切れ
+  // 同じ quoteId で、別の paymentId・別の条件の quote。
+  await ledger.put(quote(2, { quoteId: "q-1" }));
+  expect(ledger.attemptOf("q-1")).toBeUndefined();
+  await ledger.close();
+  const reopened = await open();
+  expect(reopened.get("q-1")?.paymentId).toBe("pay-2");
+  // 古い attempt（pay-1 のもの）は結び付かない。新しい quote の最初の attempt が書ける。
+  expect(reopened.attemptOf("q-1")).toBeUndefined();
+  expect(await reopened.recordAttempt("q-1", "sha256:new")).toBe(true);
+  expect(reopened.attemptOf("q-1")).toMatchObject({ paymentId: "pay-2", credentialDigest: "sha256:new" });
+});
+
+test("容量: 期限内の 200 件を持ったまま再起動すると、200 行を読んで 200 件を載せる", async () => {
+  const ledger = await open();
+  for (let n = 0; n < 200; n += 1) {
+    await ledger.put(quote(n));
+  }
+  await ledger.close();
+  clock += 60_000;
+  const reopened = await open();
+  expect(reopened.loadStats).toEqual({ linesRead: 200, skipped: 0, loaded: 200 });
+  expect(reopened.outstanding()).toBe(200);
 });
 
 test("容量: 上限（200 件）まで発行しても、メモリは期限内の件数だけ。期限が切れれば 0 に戻る", async () => {
