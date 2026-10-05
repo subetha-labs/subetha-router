@@ -92,7 +92,8 @@ function railByRoute(
     return rail;
   };
   return {
-    readChallenge: (routeId) => railFor(routeId).readChallenge(routeId),
+    // 上流の URL（動的購入）はそのまま渡す。動的経路を持たない adapter は受け取ると例外にする（fail closed）。
+    readChallenge: (routeId, target) => railFor(routeId).readChallenge(routeId, target),
     pay: (request) => railFor(request.routeId).pay(request),
   };
 }

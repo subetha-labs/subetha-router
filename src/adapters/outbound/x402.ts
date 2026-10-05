@@ -19,13 +19,8 @@ import { getAddress } from "viem";
 import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
-import type {
-  DestinationOffer,
-  EvmSigningCapability,
-  OutboundRail,
-  PayRequest,
-  PayResult,
-} from "../../ports/outbound.js";
+import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
+import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 
 export interface SyntheticX402Options {
   /** `routeId` → 上流 canonical URL（loopback の fixture に限る）。 */
@@ -85,7 +80,9 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
 
   return {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
-    async readChallenge(routeId: string): Promise<readonly DestinationOffer[]> {
+    async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
+      // 動的経路（T8・T9）はまだ無い。上流の URL を受け取ったら、設定の URL に黙って落とさない。
+      if (target !== undefined) throw new DynamicTargetUnsupportedError();
       const ctx = { routeId, operation: "challenge" };
       const response = await transport.fetch(urlFor(routeId), {
         method: "GET",
@@ -117,6 +114,7 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
     },
 
     async pay(request: PayRequest): Promise<PayResult> {
+      if (request.target !== undefined) throw new DynamicTargetUnsupportedError();
       // 合成の支払いトークン。**署名ではない**ことがそのまま読み取れる形にする。
       const credential = Buffer.from(
         JSON.stringify({
@@ -353,11 +351,14 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
 
   return {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
-    async readChallenge(routeId: string): Promise<readonly DestinationOffer[]> {
+    async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
+      // 動的経路（T8・T9）はまだ無い。上流の URL を受け取ったら、設定の URL に黙って落とさない。
+      if (target !== undefined) throw new DynamicTargetUnsupportedError();
       return offersOf(await getChallenge(urlFor(routeId), { routeId, operation: "challenge" }));
     },
 
     async pay(request: PayRequest): Promise<PayResult> {
+      if (request.target !== undefined) throw new DynamicTargetUnsupportedError();
       const url = urlFor(request.routeId);
       const approved = request.offer;
       const approvedJson = stableJson(approved);

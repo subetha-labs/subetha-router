@@ -35,6 +35,11 @@ export interface MppTempoCapability {
   /** `push`（client が broadcast）/ `pull`（server が broadcast）。 */
   readonly mode?: "push" | "pull";
   readonly kind: "real-key" | "non-signing-fixture";
+  /**
+   * 支払い元の残高（base units）を読む。省略可。あるとき、動的購入は受信 settle の前に残高を確かめる
+   * （設計 `docs/dynamic-upstream-design.md` §6.6）。読取だけで、署名も送金もしない。
+   */
+  readonly balanceOf?: (asset: string) => Promise<bigint>;
 }
 
 export interface EvmSigningCapability {
@@ -43,6 +48,8 @@ export interface EvmSigningCapability {
   /** 公式 `@x402/evm` の `ClientEvmSigner`（`address` + `signTypedData`）。 */
   readonly signer: ClientEvmSigner;
   readonly kind: "real-key" | "non-signing-fixture";
+  /** 支払い元の残高（base units）を読む。省略可（上の `MppTempoCapability.balanceOf` と同じ）。 */
+  readonly balanceOf?: (asset: string) => Promise<bigint>;
 }
 
 export interface DestinationOffer {
@@ -54,12 +61,33 @@ export interface DestinationOffer {
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * 動的購入の上流（設計 `docs/dynamic-upstream-design.md` §3）。`url` は `parseUpstreamUrl` を通った文字列そのもの。
+ * これを受け取った adapter は、起動時に設定された URL ではなく**この URL**に接続する。
+ * 動的経路を持たない adapter は、受け取ったら例外にする（静的の URL に黙って落とさない）。
+ */
+export interface UpstreamTarget {
+  readonly url: string;
+}
+
+/** 動的経路を持たない adapter に上流の URL が渡された。 */
+export class DynamicTargetUnsupportedError extends Error {
+  readonly code = "dynamic_target_unsupported";
+
+  constructor() {
+    super("this outbound adapter has no dynamic path");
+    this.name = "DynamicTargetUnsupportedError";
+  }
+}
+
 export interface PayRequest {
   readonly routeId: string;
   /** 承認済み `selectedOffer`。凍結した accepts をそのまま渡さない。 */
   readonly offer: DestinationOffer;
   readonly paymentId: string;
   readonly attempt: number;
+  /** 動的購入のときだけ。静的 route では付けない。 */
+  readonly target?: UpstreamTarget;
 }
 
 export type PayResult =
@@ -81,6 +109,6 @@ export type PayResult =
 
 export interface OutboundRail {
   /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
-  readChallenge(routeId: string): Promise<readonly DestinationOffer[]>;
+  readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]>;
   pay(request: PayRequest): Promise<PayResult>;
 }
