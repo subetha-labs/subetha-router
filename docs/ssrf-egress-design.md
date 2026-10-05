@@ -1493,3 +1493,37 @@ journal 欠落と archive 読み出し失敗が削除境界まで到達するこ
 
 実装フェーズの受け入れ: **B の運用手順と成果物は、この commit でレビュア承認**（AL2023 での実行が配備の受け入れとして残る: 全 verify モード、
 waiver 無し、実機の再起動と IMDS、Linux の外部 observer、証拠の保存）。A + B のリリース門は別。
+
+## 27. 本番（AL2023）での受け入れ（2026-10-05）
+
+対象: AL2023 arm64（kernel 6.18、systemd 252、iptables 1.8.8 nf_tables）、Docker CE 28.5.2 / containerd.io 2.3.6、外部 observer は VPC 内の別 host
+（AL2023、`ss` あり、Docker 無し。検証の全期間で session 不変）。免除（`ALLOW_NO_BACKLOG` / `ALLOW_NO_IMDS`）なし。成果物は `a8bf5e4`
+（host 上の `subetha-egress` / `subetha-egress-verify` の sha256 が repo と一致）。
+
+| モード | 結果 |
+|---|---|
+| 既定（Router 稼働） | 70 passed / 0 failed |
+| `--adversarial`（Router 停止） | 68 / 0 |
+| `--fail-closed` | 3 / 0 |
+| `--reboot-prepare` → **実 reboot** → `--post-boot` | 20 / 0 |
+| `--reboot-cleanup` | 1 / 0 |
+
+受け入れは**既存の本番 host ではなく、新しく作った host**で行った。既存 host は AL2023 同梱の Docker 25.0.16 で、runner の前提
+（`FirewallBackend`）を満たさない。その場での入れ替えは手順を書いてリハーサルしたが独立レビューで 2 回 REJECT され、採用しなかった
+（DEPLOY.md §8b.0）。新 host への切り替えは DEPLOY.md §8b.6（レビュー 3 回目で APPROVE）。**切り替えが済むまで、公開中の Router は B の外にある。**
+
+本番で見つかり、直したもの（いずれも Ubuntu の手元環境では出ない移植性の不備。規則の内容は変えていない）:
+
+| # | 不備 | 対応 |
+|---|---|---|
+| 1 | `dnf install docker` は 25.0.x（AL2023） | Docker 公式 el9 リポジトリの 28.5.2 に固定（指紋照合、versionlock） |
+| 2 | §8b.2 の `dnf install ... curl` が同梱の `curl-minimal` と衝突 | パッケージ指定から外す（存在検査は残る） |
+| 3 | V7-1 の uplink 判定が host 自身の IMDS 宛て（`169.254.169.254:80`）を probe と数える | 転送されたものだけを数える（TTL）+ **namespace の SYN のシーケンス番号が uplink に現れないこと**（TTL 非依存）+ 許可された接続での正の対照 + TTL 書き換え規則が無いことの検査 |
+| 4 | `journalctl -S <ISO T 形式>` を systemd 252 が解釈しない | `@<epoch>` |
+| 5 | 補助 unit の `/usr/bin/tcpdump` 決め打ち（AL2023 は `/usr/sbin`）。Docker が起動せず、片付けが socket 待ちで止まる | runner が絶対パスを解決。片付けは依存を外してから Docker に問い合わせ、全操作に時間制限 |
+| 6 | `subetha-egress remove` の「消えた」判定がエラー文言（`no chain`）依存 | テーブル全体の一覧に定義が無いことで判定 |
+| 7 | guard の停止が 30 秒 timer と競合して `failed` 表示になる | 停止が原因の `signal` だけを消す。元から failed なら失敗 |
+| 8 | 正の対照の捕捉を 0.5 秒で止めるとパケットが書かれない（libpcap の buffer timeout） | 2 秒待つ |
+
+レビュー: 実装レビュー 3 回（REJECT → REJECT → **APPROVE**、`gpt-6-astra`）。要件 §9 の **B + A** の release gate は、切り替え後にこの host が
+本番になった時点で B 側が満たされる。
