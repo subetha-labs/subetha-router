@@ -78,13 +78,24 @@ function rejectAndClose(
 ): void {
   request.pause();
   const socket = request.socket;
-  const timer = setTimeout(() => socket.destroy(), REJECT_FLUSH_MS);
-  timer.unref();
+  let timer: NodeJS.Timeout | undefined;
+  /**
+   * 書き終えを待つ時計は、**この応答の番が来てから**動かす。同じ接続で先に処理中の応答がある間、
+   * この応答は後ろに並んでいるだけで（Node は `response.socket` をまだ割り当てない）、そこで時計を動かすと
+   * 先の正当な応答ごと接続を切ってしまう。先の応答の長さは、それ自身の要求の時間の上限が縛る。
+   */
+  const arm = (): void => {
+    if (timer !== undefined) return;
+    timer = setTimeout(() => socket.destroy(), REJECT_FLUSH_MS);
+    timer.unref();
+  };
   response.once("finish", () => {
     clearTimeout(timer);
     socket.destroy();
   });
   response.once("close", () => clearTimeout(timer));
+  if (response.socket === null) response.once("socket", arm);
+  else arm();
   sendJson(response, status, error, { ...headers, connection: "close" });
 }
 

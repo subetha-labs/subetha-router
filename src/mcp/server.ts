@@ -262,6 +262,7 @@ const invokedDirectly =
 
 if (invokedDirectly) {
   main({}).catch((error: unknown) => {
+    // 起動時の設定の誤り（env の不足など）だけを伝える。ローカルの stdio 用で、匿名の相手には届かない。
     note(`subetha-router MCP server failed: ${error instanceof Error ? error.message : "unknown"}`);
     process.exit(1);
   });

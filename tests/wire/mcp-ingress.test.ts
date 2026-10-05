@@ -225,6 +225,69 @@ test("拒否の応答は、同じ接続で先に処理中の応答の後ろに�
   expect(result.closed).toBe(true);
 });
 
+test("先の応答が拒否の待ち時間（2 秒）より長くかかっても、先の応答と拒否の両方が届く", async () => {
+  let release: (() => void) | undefined;
+  const harness = await start({ maxBodyBytes: 1024 }, async () => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  });
+  const result = await raw(
+    harness.port,
+    async (socket) => {
+      socket.write(post('{"first":true}').replace("Connection: close\r\n", ""));
+      socket.write("POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 999999\r\n\r\n");
+      // 2 件目の拒否が決まってから 2.6 秒後に 1 件目を終える。
+      await new Promise((resolve) => setTimeout(resolve, 2_600));
+      release?.();
+    },
+    8_000,
+  );
+  const statuses = [...result.text.matchAll(/HTTP\/1\.1 (\d{3})/g)].map((m) => Number(m[1]));
+  expect(statuses).toEqual([200, 413]);
+  expect(result.text).toContain('{"handled":true}');
+  expect(result.closed).toBe(true);
+  expect(result.elapsedMs).toBeGreaterThanOrEqual(2_500);
+}, 15_000);
+
+test("先の応答を相手が読むのを止めていても（backpressure）、読み始めれば先の応答と拒否の両方が届く", async () => {
+  const big = "x".repeat(8 * 1024 * 1024);
+  const server = createMcpIngress({
+    limits: { ...DEFAULT_MCP_INGRESS_LIMITS, maxBodyBytes: 1024 },
+    handle: async (_request, response) => {
+      response.writeHead(200, { "content-type": "text/plain", "content-length": big.length });
+      response.end(big);
+    },
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  servers.push(server);
+  const port = (server.address() as AddressInfo).port;
+
+  const socket = net.connect(port, "127.0.0.1");
+  sockets.push(socket);
+  await once(socket, "connect");
+  socket.on("error", () => {});
+  let received = 0;
+  let tail = "";
+  socket.on("data", (chunk: Buffer) => {
+    received += chunk.length;
+    tail = (tail + chunk.toString("latin1")).slice(-400);
+  });
+  const closed = once(socket, "close");
+  // 読まずに 2 件を送る。8 MiB の応答は送りきれず、サーバ側で詰まる。
+  socket.pause();
+  socket.write(post('{"first":true}').replace("Connection: close\r\n", ""));
+  socket.write("POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 999999\r\n\r\n");
+  await new Promise((resolve) => setTimeout(resolve, 2_600));
+  socket.resume();
+  await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 8_000))]);
+  // 1 件目の本文が全部届き、その後ろに 413 が届いている。
+  expect(received).toBeGreaterThan(big.length);
+  expect(tail).toContain("HTTP/1.1 413");
+  expect(tail).toContain('{"error":"body_too_large"}');
+}, 20_000);
+
 test("少しずつ送り続けても、期限は延びない（受信全体の期限）", async () => {
   const harness = await start({ receiveTimeoutMs: 400 });
   const result = await raw(harness.port, async (socket) => {
