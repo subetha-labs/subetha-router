@@ -5,8 +5,9 @@
  * ここで決めるのは「どの文字列を URL として受け付けるか」だけ。
  *
  * **独自の正規化をしない。** `new URL()` が書き換える入力（大文字のホスト、既定ポートの明示、dot segment、
- * 空白、Unicode のホストなど）は拒否し、呼び出し側に直させる。こうすると、呼び出し側が渡した文字列・
- * 承認時の表示・保存・fetch・上流の申告との比較が**すべて同じバイト列**になり、同値規則を持たずに済む。
+ * 空白、Unicode のホストなど）は拒否し、呼び出し側に直させる。保証するのは「**受け付けた綴りが、解析しても
+ * 変わらない**」ことで、以後の表示・保存・fetch・上流の申告との比較はその文字列をそのまま使う。
+ * 「同じ資源に綴りが 1 つしか無い」ことは保証しない（`/a` と `/%61` はどちらも通り、別の URL として扱う）。
  */
 
 export const MAX_UPSTREAM_URL_LENGTH = 2048;
@@ -91,7 +92,8 @@ export function denyHostsOf(configured: readonly string[], urls: readonly (strin
   for (const raw of urls) {
     if (raw === undefined) continue;
     try {
-      hosts.add(new URL(raw).hostname.toLowerCase());
+      // 末尾のルートドットは同じ DNS 名の別の綴りなので落とす（`host.` で設定されていても `host` を拒否する）。
+      hosts.add(new URL(raw).hostname.toLowerCase().replace(/\.$/, ""));
     } catch {
       // URL でない値は拒否ホストにしない（設定の検証は別の場所の仕事）。
     }

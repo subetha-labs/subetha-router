@@ -9,13 +9,18 @@ import { denyHostsOf, MAX_UPSTREAM_URL_LENGTH, parseUpstreamUrl } from "../../sr
 
 const NONE = { denyHosts: [] as string[] };
 
-test("通る URL は、渡した文字列がそのまま唯一の表現になる（クエリは並べ替えない）", () => {
+test("通る URL は、渡した綴りのまま返る（解析で書き換わらない。クエリは並べ替えない）", () => {
   for (const raw of [
     "https://api.example.com/v1/price",
     "https://api.example.com/",
     "https://api.example.com/v1/price?symbol=ETH&b=2&a=1",
     "https://api.example.com/a%2Fb/c?q=%E3%81%82",
     "https://xn--r8jz45g.example/path",
+    "https://api.example.com/v1?",
+    "https://intranet/v1",
+    "https://123.example/v1",
+    "https://api.example.com/%61",
+    "https://api.example.com/a",
   ]) {
     const parsed = parseUpstreamUrl(raw, NONE);
     expect(parsed, raw).toEqual({ ok: true, url: raw, host: new URL(raw).hostname });
@@ -49,6 +54,21 @@ test.each<[string, unknown, string]>([
   ["Unicode のホスト", "https://例え.example/v1", "not_canonical"],
   ["バックスラッシュ", "https://api.example.com\\v1", "not_canonical"],
   ["タブ", "https://api.example.com/v\t1", "not_canonical"],
+  ["改行", "https://api.example.com/v\n1", "not_canonical"],
+  ["CR", "https://api.example.com/v\r1", "not_canonical"],
+  ["空の userinfo", "https://@api.example.com/v1", "not_canonical"],
+  ["空の userinfo（コロン付き）", "https://:@api.example.com/v1", "not_canonical"],
+  ["パスワードだけの userinfo", "https://:pw@api.example.com/v1", "userinfo"],
+  ["空のポート", "https://api.example.com:/v1", "not_canonical"],
+  ["スラッシュなしの https:host", "https:api.example.com/v1", "not_canonical"],
+  ["スラッシュ 1 つの https:/host", "https:/api.example.com/v1", "not_canonical"],
+  ["ホスト名のパーセントエンコード", "https://api%2eexample.com/v1", "not_canonical"],
+  ["8 進表記の IPv4", "https://0177.0.0.1/v1", "ip_literal"],
+  ["短縮表記の IPv4", "https://127.1/v1", "ip_literal"],
+  ["IPv6 の zone id", "https://[fe80::1%25eth0]/v1", "not_absolute"],
+  ["エンコードされた dot segment", "https://api.example.com/a/%2e%2e/b", "not_canonical"],
+  ["大文字の scheme", "HTTPS://api.example.com/v1", "not_canonical"],
+  ["大文字の punycode", "https://XN--R8JZ45G.example/v1", "not_canonical"],
 ])("拒否: %s", (_name, raw, reason) => {
   expect(parseUpstreamUrl(raw, NONE)).toEqual({ ok: false, reason });
 });
@@ -72,6 +92,27 @@ test("拒否ホストはそのホストとサブドメインを拒否し、接�
     "https://x402.org.example/",
   ]) {
     expect(parseUpstreamUrl(raw, options).ok, raw).toBe(true);
+  }
+});
+
+test("長さの境界: ちょうど上限は通り、1 文字超えると拒否", () => {
+  const base = "https://api.example.com/";
+  const exact = base + "a".repeat(MAX_UPSTREAM_URL_LENGTH - base.length);
+  expect(exact).toHaveLength(MAX_UPSTREAM_URL_LENGTH);
+  expect(parseUpstreamUrl(exact, NONE).ok).toBe(true);
+  expect(parseUpstreamUrl(`${exact}a`, NONE)).toEqual({ ok: false, reason: "too_long" });
+});
+
+test("依存先の URL から作った拒否ホストが、そのホストとサブドメインを拒否する（末尾ドット・Unicode の綴りでも）", () => {
+  const denyHosts = denyHostsOf([], ["https://router.example.com./mcp", "https://例え.example/rpc"]);
+  expect(denyHosts).toEqual(["router.example.com", "xn--r8jz45g.example"]);
+  for (const raw of [
+    "https://router.example.com/",
+    "https://a.router.example.com/",
+    "https://xn--r8jz45g.example/",
+    "https://rpc.xn--r8jz45g.example/",
+  ]) {
+    expect(parseUpstreamUrl(raw, { denyHosts }), raw).toEqual({ ok: false, reason: "denied_host" });
   }
 });
 
