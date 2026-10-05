@@ -5,7 +5,14 @@
 
 import type { InboundOffer } from "../ports/inbound.js";
 import type { DestinationOffer } from "../ports/outbound.js";
-import { isInterrupted, type DestinationOutcome, type Intent, type InternalStatus } from "./intent.js";
+import {
+  isInterrupted,
+  type DestinationOutcome,
+  type Intent,
+  type IntentDynamic,
+  type IntentUpstream,
+  type InternalStatus,
+} from "./intent.js";
 import type { Journal } from "./journal.js";
 
 type Patch = Readonly<Record<string, unknown>>;
@@ -48,6 +55,93 @@ function routeFingerprintOf(patch: Patch): {
   return { routeFingerprintInvalid: true };
 }
 
+const AMOUNT = /^(0|[1-9][0-9]{0,29})$/;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 動的購入の欄を**生の値から**復元する（`routeFingerprintOf` と同じ考え方）。
+ *
+ * - 両方とも無い → 静的 route の intent（何も足さない）
+ * - 両方あって形が正しい → 復元する
+ * - **片方だけ・形が違う → `dynamicInvalid`**。静的として扱うと上流 URL の無い動的購入が静的の経路に流れ、
+ *   動的として扱うと検査していない値を実行してしまう。どちらにも倒さず、実行しない印を付ける
+ */
+export function dynamicFieldsOf(patch: Patch): {
+  readonly upstream?: IntentUpstream;
+  readonly dynamic?: IntentDynamic;
+  readonly dynamicInvalid?: boolean;
+} {
+  const rawUpstream = patch["upstream"];
+  const rawDynamic = patch["dynamic"];
+  if (rawUpstream === undefined && rawDynamic === undefined) {
+    return {};
+  }
+  if (!isPlainRecord(rawUpstream) || !isPlainRecord(rawDynamic)) {
+    return { dynamicInvalid: true };
+  }
+  const pricing = rawDynamic["pricing"];
+  const profile = rawDynamic["profile"];
+  const ownerKeyHash = rawDynamic["ownerKeyHash"];
+  const profileId = rawDynamic["profileId"];
+  if (
+    typeof rawUpstream["url"] !== "string" ||
+    rawUpstream["url"] === "" ||
+    rawUpstream["method"] !== "GET" ||
+    typeof profileId !== "string" ||
+    profileId === "" ||
+    !isPlainRecord(profile) ||
+    !isPlainRecord(pricing) ||
+    typeof ownerKeyHash !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(ownerKeyHash)
+  ) {
+    return { dynamicInvalid: true };
+  }
+  const amounts = ["upstreamAmount", "converted", "fee", "total"] as const;
+  if (!amounts.every((key) => typeof pricing[key] === "string" && AMOUNT.test(pricing[key]))) {
+    return { dynamicInvalid: true };
+  }
+  let reservation: IntentDynamic["reservation"];
+  const rawReservation = rawDynamic["reservation"];
+  if (rawReservation !== undefined) {
+    const legs = isPlainRecord(rawReservation) ? rawReservation["legs"] : undefined;
+    if (
+      !Array.isArray(legs) ||
+      legs.length === 0 ||
+      !legs.every(
+        (leg) =>
+          isPlainRecord(leg) &&
+          typeof leg["network"] === "string" &&
+          typeof leg["asset"] === "string" &&
+          typeof leg["amount"] === "string" &&
+          AMOUNT.test(leg["amount"]),
+      )
+    ) {
+      return { dynamicInvalid: true };
+    }
+    reservation = {
+      legs: (legs as Record<string, string>[]).map((leg) => ({ network: leg["network"]!, asset: leg["asset"]!, amount: leg["amount"]! })),
+    };
+  }
+  return {
+    upstream: { url: rawUpstream["url"], method: "GET" },
+    dynamic: {
+      profileId,
+      profile,
+      pricing: {
+        upstreamAmount: pricing["upstreamAmount"] as string,
+        converted: pricing["converted"] as string,
+        fee: pricing["fee"] as string,
+        total: pricing["total"] as string,
+      },
+      ownerKeyHash,
+      ...(reservation === undefined ? {} : { reservation }),
+    },
+  };
+}
+
 function intentFromCreated(paymentId: string, at: string, patch: Patch): Intent {
   const source = asObject(patch["source"]);
   const destination = asObject(patch["destination"]);
@@ -76,6 +170,8 @@ function intentFromCreated(paymentId: string, at: string, patch: Patch): Intent 
     // **spread ではなく明示的に復元する。** この関数はフィールドを列挙するので、
     // 足し忘れると append 直後に欄が消え、照合が一切効かなくなる（設計 §8.1）。
     ...routeFingerprintOf(patch),
+    // 動的購入の欄も明示的に復元する（足し忘れると、上流 URL と条件が消えた intent になる）。
+    ...dynamicFieldsOf(patch),
     approvalDeadlineMs: asNumber(patch["approvalDeadlineMs"]),
     updatedAt: at,
   };
