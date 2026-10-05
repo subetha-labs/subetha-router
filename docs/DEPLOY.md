@@ -702,6 +702,8 @@ sudo -E subetha-egress-verify --reboot-cleanup
 
 ### 8b.5 運用規則
 
+- **イメージのビルドは `docker build --network host` で行う。** 既定 bridge のビルド用コンテナは DNS を host の nameserver（VPC の内部アドレス）へ
+  直接問い合わせ、egress 制御に落とされる（`apt-get` が失敗する。2026-10-05 の本番で確認）。規則を緩めない
 - **Router 稼働中に firewall と host のアドレスを触らない**（`iptables -F`、firewalld の導入、他の管理ツール、
   Elastic IP の付け替え、インタフェースへのアドレス追加）。guard timer は 30 秒毎に復旧するが**その間は開く**。保証ではない
 - 保守とアドレス変更は次の順序で: `docker stop subetha-router` → `systemctl stop subetha-egress-guard.timer subetha-egress-guard.service`

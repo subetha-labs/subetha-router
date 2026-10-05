@@ -499,3 +499,20 @@ viem の size 上限で buffered Response が未読のまま拒まれる場合�
   この機械には AWS の資格情報が無い）。
 - したがって「AI が上流 URL を指定する」機能の release gate（B と A の**両方**の受け入れ）は、**B の本番受け入れが済むまで閉じたまま**。
   現在の Router（運用者が設定した固定 route）はこの gate の対象外で、A の配線は本番に入れられる（Node ≥ 22.19.0、`undici@8.11.2`）。
+
+## 16. 本番への投入（2026-10-05）
+
+A を含むイメージ（commit `42414d2`、Node 22.23.3、`undici` 8.11.2）を、B の受け入れを通した AL2023 host（`ssrf-egress-design.md` §27）で
+`docker build --network host` によりビルドし、本番の Router を入れ替えた。
+
+| 確認 | 結果 |
+|---|---|
+| 試し起動（別の空 journal、port 非公開） | `healthy`、mode / label は real |
+| 入れ替え（入口を閉じ、旧コンテナは停止・別名で保持、同じ引数と journal） | `healthy`。開いている journal は `journal.ndjson`、入れ替え前の写しと先頭 46825 バイトが一致 |
+| `subetha-egress-verify`（既定、入口を閉じたまま） | 68 passed / 0 failed |
+| 外から | `/healthz`、MCP の route 一覧 |
+| 両経路の quote（資金は動かない） | `md-mpp-eth-snapshot`（上流 MPP の challenge）、`md-x402-eth-snapshot`（上流 x402 の challenge）とも成功 = 経路 1・4 が本番の実上流に対して guarded transport 越しに通る |
+| 運用者向けの `outbound transport` 行 | 起動から確認時点まで 0 件 |
+
+未実施: 実購入（有料要求の経路 3・6、受信 facilitator の経路 9・10、RPC の経路 11・12 の本番での通過）。testnet の資金が動くので、人の承認を得て別途行う。
+これで要件 §9 の release gate（B と A の両方の受け入れ）は、本番の構成として満たされた。
