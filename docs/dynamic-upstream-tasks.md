@@ -122,7 +122,7 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
 
 - **範囲**: `src/adapters/outbound/mpp.ts`
 - **完了条件（wire）**:
-  - challenge の許可リスト（T0-c）と `splits`・`feePayer`・`machineTokenEnabled`・額 0・`pull` のみの拒否
+  - challenge の許可リスト（T0-c）と `splits`・`machineTokenEnabled`・額 0・`pull` のみの拒否。**`methodDetails.feePayer`（真偽値）は許すが使わない**: `feePayer: true` の challenge でも push で払い、transaction に `feePayer`・`feePayerSignature` が現れたら署名しない（設計 §3.3 の「Tempo 側の Provider」）
   - 能力が `push` 明示・`account.type === "local"`・素の `http` transport でなければ**起動失敗**
   - **署名の facade（AC-16）**: `sign({hash})`・`signMessage`・`signTypedData`・`signAuthorization`・渡された serializer・call 2 つ・別の `to`・額違い・`feeToken` 未指定／別資産・手数料上限超過・`keyAuthorization` で**元の account の呼び出しが 0**。元の account が `tempo.charge` の `account` からも SDK に返す client からも到達できない。nonce と有効期限の欄は範囲を確かめて引き継ぐ
   - 送信の境界が同じ欄をもう一度見る／送金系は 2 メソッドだけ／読取はそのまま通る／1 支払い 1 回
