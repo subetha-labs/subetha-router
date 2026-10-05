@@ -21,6 +21,7 @@ import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
 import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
+import { createX402DynamicPath, type X402DynamicOptions } from "./x402-dynamic.js";
 
 export interface SyntheticX402Options {
   /** `routeId` → 上流 canonical URL（loopback の fixture に限る）。 */
@@ -196,6 +197,11 @@ export interface X402OutboundOptions {
   /** 上流へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
   readonly transport: GuardedTransport;
   readonly timeoutMs?: number;
+  /**
+   * 動的上流 URL の経路（`x402-dynamic.ts`）。**省略時は動的経路が無く**、上流の URL を受け取ったら例外にする。
+   * 静的 route の挙動はこの有無で変わらない。
+   */
+  readonly dynamic?: X402DynamicOptions;
 }
 
 /** 照合に使う承認済み offer の必須フィールド（field 単位で見る）。 */
@@ -268,6 +274,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 5_000;
   const capability = options.capability;
   const transport = options.transport;
+  const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, options.dynamic);
 
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
   const upstreams = new Map<string, string>();
@@ -352,13 +359,19 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   return {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
     async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
-      // 動的経路（T8・T9）はまだ無い。上流の URL を受け取ったら、設定の URL に黙って落とさない。
-      if (target !== undefined) throw new DynamicTargetUnsupportedError();
+      if (target !== undefined) {
+        // 動的経路を持たないなら、設定の URL に黙って落とさない。
+        if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+        return dynamic.readChallenge(routeId, target.url);
+      }
       return offersOf(await getChallenge(urlFor(routeId), { routeId, operation: "challenge" }));
     },
 
     async pay(request: PayRequest): Promise<PayResult> {
-      if (request.target !== undefined) throw new DynamicTargetUnsupportedError();
+      if (request.target !== undefined) {
+        if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+        return dynamic.pay({ ...request, target: request.target });
+      }
       const url = urlFor(request.routeId);
       const approved = request.offer;
       const approvedJson = stableJson(approved);

@@ -400,7 +400,7 @@ T0-c の 6 件がすべて mainnet だったので、testnet で動いている�
 | 対象 | 上限 | 超過時 |
 |---|---|---|
 | 応答ヘッダ全体 | **32 KiB**（動的用 Agent に `maxHeaderSize` を**明示**。undici の既定は Node から継承され固定値ではない。実測で `PAYMENT-REQUIRED` だけで 10.6 KB のものがあった） | **未払いの要求**では transport の失敗。**支払いヘッダを付けた要求**では送金の有無が分からないので `unknown` |
-| 402 の本文 | 64 KiB | 中断。quote 不成立／`destination_challenge_unreadable` |
+| 402 の本文 | x402 送信: **読まない**（下の「T8 で決めたこと」）。MPP 送信: 64 KiB（T9 で確定） | 中断。quote 不成立／`destination_challenge_unreadable` |
 | `accepts`／challenge の個数 | 16 | 同上 |
 | 有料応答の本文 | 256 KiB | 下の順序で判定 |
 
@@ -411,6 +411,26 @@ receipt が不整合・無い → 本文は読まずに捨て、`unknown`（既�
 
 **対応する応答**: `content-type` が `application/json`（パラメータ可）で、**最上位が JSON object**。配列・文字列・数値・text は対応外（AC-15 のとおり）。
 journal に保存する本文は 256 KiB が上限。
+
+**T8 で決めたこと（x402 送信の実装、`src/adapters/outbound/x402-dynamic.ts`）**
+
+設計の表に無かった細部を、実装のときに次のように決めた。どれも「上流を信頼しない」側に倒している。
+
+1. **402 の本文は 1 バイトも読まない。** x402 v2 では `PAYMENT-REQUIRED` ヘッダが権威で、本文の `accepts` は使わない。使わないものは読まないので、
+   本文の上限（64 KiB）は x402 送信では不要になった。大きな本文（HTML の支払い案内など）を返す上流でも quote は成立する
+2. **保存する offer は、上流の `accepts` の要素そのもの**（許した説明の欄を含む全体）。§3.2 の一致はこの全体で見るので、
+   quote の後に上流が `description` を書き換えただけでも「offer が変わった」として署名しない
+3. **説明だけの欄（`description`・`mimeType`・`resource`）は文字列に限る。** `amount` は正の整数（`"0"` は候補にしない）
+4. **上流のトップレベルの欄は SDK に渡さない。** SDK に渡すのは `x402Version: 2`・`resource`（`url` と文字列の `description`・`mimeType`）・選んだ offer 1 件だけ。
+   `extensions`・`error` は上流に送り返さない（`extensions` の echo を要求する上流とは成立しない可能性がある。G-3 で観測する）
+5. **receipt の `transaction` は 32 バイトのハッシュ（`0x` ＋ 64 桁）に限る。** 静的経路は「空でない文字列」だが、動的では上流の任意の文字列を記録・表示に入れない。
+   形が違えば receipt は無いものとして扱う（200 なら `unknown`）
+6. **整合した receipt があれば、状態コードが 200 でなくても `rejected` にしない。** 200 以外は `paid_no_data`（`paid_data_unavailable`）。
+   receipt が無い場合は、2xx は `unknown`、4xx は `rejected`、5xx は `unknown`
+7. **receipt を確かめた後の本文の読み取り失敗（切断・期限）は `paid_no_data`**（`paid_data_unavailable`）。支払いは receipt で確かめてあり、取れなかったのはデータだけ
+8. **adapter も URL の規則（`parseUpstreamUrl`）をもう一度掛ける。** core が渡した URL でも、規則を通らなければ接続しない
+9. **署名の境界は「違えば拒否」**: SDK が渡した typed data の `types`・`domain`（キーの集合まで）・`primaryType`・`from`・`to`・`value` が、
+   プロファイルと承認済みの値から組んだものと一致しなければ署名しない。一致したうえで、署名器に渡すのは Router が組み直したもの（`EIP712Domain` の型定義も明示する）
 
 ## 4. 受信の束縛（U-2・FR-6・AC-5）
 
