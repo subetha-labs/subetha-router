@@ -30,6 +30,8 @@ import {
   type RouteConfig,
   type RuntimeConfig,
 } from "./config.js";
+import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
+
 import { DynamicGate } from "./core/dynamic-gate.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
@@ -76,8 +78,19 @@ export interface RouterCapabilities {
    * から fixture 側が組む（宛先の差し替えを足すため）。本番の入口は渡さない。返った transport が loopback を許す・DNS に期限が
    * 無いものなら起動を止める。
    */
-  readonly dynamicTransportForTest?: (base: GuardedTransportOptions) => GuardedTransport;
+  readonly dynamicTransportHooksForTest?: DynamicTransportHooks;
+  /**
+   * 能力が接続する依存先（送信 MPP の RPC など）の URL。動的上流 URL の**拒否ホスト**に入れる（設計 §7.4）。
+   * 起動時の確認で、MPP 能力の client の RPC ホストがここに含まれていなければ起動を止める。
+   */
+  readonly dependencyUrls?: readonly string[];
 }
+
+/**
+ * **試験専用。** 動的用 transport に fixture が足せるのは、名前解決・接続先の差し替え・試験用 CA・インタフェース一覧だけ。
+ * 方針の欄（loopback 不可・DNS の期限・ヘッダの上限・門の `admit`）は配線が後から重ねるので、fixture は変えられない。
+ */
+export type DynamicTransportHooks = Omit<GuardedTransportOptions, "allowLoopback" | "report" | "maxHeaderSize" | "dns" | "admit">;
 
 /** 動的上流 URL の配線が core に渡すもの。 */
 export interface DynamicWiring {
@@ -261,13 +274,20 @@ export function composeRails(
         return admitted.ok ? admitted.lease : undefined;
       },
     };
-    const transport = capabilities.dynamicTransportForTest === undefined ? createGuardedTransport(base) : capabilities.dynamicTransportForTest(base);
+    // fixture の差し替え（あれば）の**上に**方針の欄を重ねる。方針は fixture から変えられない。
+    const transport = createGuardedTransport({ ...(capabilities.dynamicTransportHooksForTest ?? {}), ...base });
     if (transport.allowLoopback || !transport.boundsDns) {
       throw new ConfigError("the dynamic transport must not allow loopback and must bound DNS");
     }
     return transport;
   })();
-  // 自分自身と依存先には向けない（設計 §7.4）: facilitator・上流・自分の canonical の各ホスト名。
+  /** MPP 受信の RPC（設定が無ければ chain の既知の公開 RPC）。拒否ホストにも入れる。 */
+  const mppInboundRpcUrlFor = (chainId: number): string | undefined => real.mppInboundRpcUrl ?? [tempoMainnet, tempoModerato].find((chain) => chain.id === chainId)?.rpcUrls.default.http[0];
+  const mppInboundChains = [
+    ...Object.values(config.router.routes).filter((route) => route.sourceRail === "mpp").map((route) => Number(route.source.network.replace(/^eip155:/, ""))),
+    ...Object.values(profiles).filter((profile) => profile.sourceRail === "mpp").map((profile) => Number(profile.source.network.replace(/^eip155:/, ""))),
+  ];
+  // 自分自身と依存先には向けない（設計 §7.4）: facilitator・上流・自分の canonical・受信 MPP の RPC・能力の依存先の各ホスト名。
   const denyHosts =
     dynamicConfig === undefined
       ? []
@@ -276,6 +296,8 @@ export function composeRails(
           real.x402InboundFacilitatorUrl,
           config.http.canonicalBaseUrl,
           ...Object.values(real.upstreams),
+          ...mppInboundChains.map((chainId) => mppInboundRpcUrlFor(chainId)),
+          ...(capabilities.dependencyUrls ?? []),
         ]);
   const dynamicOptionsFor = (rail: "x402" | "mpp") => {
     if (dynamicTransport === undefined) return {};
@@ -405,6 +427,7 @@ export function composeRails(
         recipient: payTo,
         currency: route.source.asset,
         chainId,
+        ...(real.mppInboundRpcUrl === undefined ? {} : { rpcUrl: real.mppInboundRpcUrl }),
         // SDK の JSON-RPC も guarded transport を通る（設計 A §3.5 経路 11）。fixture 例外は他の受信と同じ能力で決まる。
         transport: transportFor(inboundLoopback, report),
         // 承認期限は `min(approvalTtlMs, offerExpiry)` で切られる。既定は x402 受信と揃える。
@@ -423,6 +446,7 @@ export function composeRails(
         recipient: profile.source.payTo,
         currency: profile.source.asset,
         chainId,
+        ...(real.mppInboundRpcUrl === undefined ? {} : { rpcUrl: real.mppInboundRpcUrl }),
         transport: dynamicTransport,
         maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
       });
@@ -444,9 +468,18 @@ export function composeRails(
             return capability.balanceOf(asset);
           },
           verify: async () => {
-            const mpp = Object.values(profiles).some((profile) => profile.rail === "mpp");
-            if (mpp && capabilities.mppTempo !== undefined) {
+            const mppProfiles = Object.values(profiles).filter((profile) => profile.rail === "mpp");
+            if (mppProfiles.length > 0 && capabilities.mppTempo !== undefined) {
               await assertDynamicMppCapability(capabilities.mppTempo, profiles);
+              // 能力の RPC ホストは拒否ホストに入っていること（`dependencyUrls` で申告する）。
+              for (const profile of mppProfiles) {
+                const client = await capabilities.mppTempo.getClient({ chainId: Number(profile.destination.network.replace(/^eip155:/, "")) });
+                const url = (client.transport as { url?: unknown }).url;
+                const host = typeof url === "string" ? new URL(url).hostname.toLowerCase().replace(/\.$/, "") : undefined;
+                if (host === undefined || !denyHosts.includes(host)) {
+                  throw new ConfigError("the MPP capability's RPC host must be declared in RouterCapabilities.dependencyUrls (dynamic deny hosts)");
+                }
+              }
             }
           },
         };

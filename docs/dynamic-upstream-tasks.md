@@ -185,6 +185,10 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
     受信 offer の束縛 `dynamic|<profileId>|GET|<url>` からプロファイルを引く。残高の検査は全プロファイルの能力が `balanceOf` を持つときだけ core に渡す（今の本番の能力は持たない）。
     合成レールに動的の設定は組めない（起動失敗）。本番の入口の設定生成は `tools/remote-mcp-config.ts` の `routerConfigOf`（SDK に依存しない純粋関数。`enabled: false` 固定、
     プロファイル 2 つ、手数料・上限は G-1 の案の値）
+    レビューで直した点: 拒否ホストに受信 MPP の RPC（設定 `ROUTER_MPP_INBOUND_RPC_URL`、無ければ chain の既知の公開 RPC）と能力の依存先
+    （`RouterCapabilities.dependencyUrls`。起動時の確認で MPP 能力の RPC ホストがここに無ければ起動しない）を足す／本番の入口は公開ホスト名
+    `router.subethalabs.com` と `SUBETHA_DENY_HOSTS` を拒否ホストに入れる（canonical は内部の URL）／試験の差し替えは `dynamicTransportHooksForTest`
+    （名前解決・接続先・CA・インタフェースだけ。方針の欄は配線が上から重ねる）
 
 ### T14 — 統合試験（要件 §6 の AC のうち、複数の部品をまたぐもの）
 

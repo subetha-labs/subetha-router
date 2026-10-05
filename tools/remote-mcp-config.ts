@@ -44,6 +44,9 @@ const OUTBOUND_X402 = {
   payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
 } as const;
 
+/** 本番の公開ホスト名（`docs/DEPLOY.md`）。動的上流 URL の拒否ホストに入れる（自分自身には向けない）。 */
+export const PUBLIC_HOSTNAME = "router.subethalabs.com";
+
 /** 動的上流 URL の手数料・上限の案（G-1 で owner が決める）。設計 §3.3 の T0-b。 */
 const DYNAMIC_MAX_FEE = "5000";
 const DYNAMIC_FEE = { flat: "1000", bps: 0, min: "1000" } as const;
@@ -170,7 +173,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
             { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
           ],
         },
-        denyHosts: [],
+        // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
+        denyHosts: [PUBLIC_HOSTNAME, ...(env["SUBETHA_DENY_HOSTS"] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter((host) => host !== "")],
       },
     },
     // 上流の節は rail に関係なく `x402` という名前（`src/config.ts`）。全 route 分が要る。

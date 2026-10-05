@@ -756,9 +756,11 @@ describe("動的 purchase", () => {
     const q1 = await quoteOk(core, "r1");
     const q2 = await quoteOk(core, "r2", URL_A, "bob");
     let release: (() => void) | undefined;
-    inbound.settleImpl = () => new Promise((resolve) => { release = () => resolve({ outcome: "settled", txRef: "t" }); });
+    const reached = new Promise<void>((resolve) => {
+      inbound.settleImpl = () => new Promise((settle) => { release = () => settle({ outcome: "settled", txRef: "t" }); resolve(); });
+    });
     const first = core.purchase(purchaseArgs(q1));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await reached;
     expect(gate.activeOfHost("provider.test")).toBe(1);
     // 同じホストへの 2 件目は、1 件目が送信を終えるまで枠が無い（接続 0）。
     const before = connections();
@@ -782,9 +784,11 @@ describe("動的 purchase", () => {
     const q1 = await quoteOk(core, "r1");
     const q2 = await quoteOk(core, "r2");
     let release: (() => void) | undefined;
-    inbound.settleImpl = () => new Promise((resolve) => { release = () => resolve({ outcome: "settled", txRef: "t" }); });
+    const reached = new Promise<void>((resolve) => {
+      inbound.settleImpl = () => new Promise((settle) => { release = () => settle({ outcome: "settled", txRef: "t" }); resolve(); });
+    });
     const first = core.purchase(purchaseArgs(q1));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await reached;
     expect(gate.activeOfSource("alice")).toBe(1);
     expect(await core.purchase(purchaseArgs(q2, { requestId: "r2" }))).toMatchObject({ code: "rate_limited", terminalReason: "concurrency_source" });
     release!();
