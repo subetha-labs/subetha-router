@@ -108,6 +108,21 @@ test("x402: 別の quote の署名の nonce 欄だけを書き換えると、pre
   expect(facilitator.used.size).toBe(0);
 });
 
+test("x402: 別の quote（別の額）の署名の nonce と額を両方書き換えても、verify で落ちる", async () => {
+  const { rail, facilitator } = await x402Harness(true);
+  const a = await issueX402(rail, "10000");
+  const b = await issueX402(rail, "20000");
+  const forged = rewrap(b, await signX402(a), { nonce: b.extra.challengeNonce, value: "20000" });
+  expect(rail.preflight(b, forged, Date.now())).toEqual({ ok: true });
+  expect(await rail.verify(b, forged, { routeId: ROUTE_ID })).toEqual({ isValid: false });
+  expect(facilitator.calls.reasons).toEqual(["invalid_signature"]);
+  // nonce の大文字小文字を変えただけの本物の署名は、verify まで通る（同じ値として署名されている）。
+  const real = await signX402(b);
+  const upper = rewrap(b, real, { nonce: `0x${b.extra.challengeNonce.slice(2).toUpperCase()}` });
+  expect(rail.preflight(b, upper, Date.now())).toEqual({ ok: true });
+  expect(await rail.verify(b, upper, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+});
+
 test("x402: 署名した額・受取先・期限が quote と違う authorization は preflight で落ちる", async () => {
   const { rail } = await x402Harness(true);
   const offer = await issueX402(rail);
@@ -118,9 +133,16 @@ test("x402: 署名した額・受取先・期限が quote と違う authorizatio
     ["受取先が違う", { to: "0x000000000000000000000000000000000000dEaD" }],
     ["期限が quote より後", { validBefore: String(offer.extra.expiresAt + 1) }],
     ["期限が数値でない", { validBefore: "soon" }],
+    ["額に先頭ゼロ", { value: "010000" }],
+    ["額が数値型", { value: 10000 }],
+    ["nonce が文字列でない", { nonce: 1 }],
+    ["受取先が文字列でない", { to: null }],
+    ["期限が数値型", { validBefore: offer.extra.expiresAt }],
   ];
   for (const [name, patch] of cases) {
-    expect(rail.preflight(offer, rewrap(offer, credential, patch), Date.now()), name).toEqual({ ok: false, reason: "credential_mismatch" });
+    const result = rail.preflight(offer, rewrap(offer, credential, patch), Date.now());
+    expect(result.ok, name).toBe(false);
+    expect(result, name).toEqual({ ok: false, reason: "nonce" in patch ? "nonce_mismatch" : "credential_mismatch" });
   }
   // authorization が無い credential。
   const bare = { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, signature: "0x00" } } as PaymentCredential;
@@ -223,6 +245,12 @@ test.each([["同額", "10000", "10000"], ["異額", "10000", "20000"]])(
     expect(rpc.sentRaw).toHaveLength(1);
   },
 );
+
+test("支払い用ツールは、知らない chain では支払わない（別の chain の定義を流用しない）", () => {
+  expect(() => createMppPayer(generatePrivateKey(), { chainId: 31337, asset: PATHUSD, payTo: PAY_TO, maxAmount: 1n })).toThrow("unsupported Tempo chain id");
+  // 知っている chain は作れる（mainnet の scope は mainnet の定義と RPC になる。ここでは作るだけ）。
+  expect(createMppPayer(generatePrivateKey(), { chainId: 4217, asset: PATHUSD, payTo: PAY_TO, maxAmount: 1n }).address).toMatch(/^0x/);
+});
 
 test("MPP: 一度受領した送金は、同じ quote にもう一度出しても受領されない", async () => {
   const { rail, pay } = await mppHarness();

@@ -23,7 +23,7 @@ import { Challenge, Credential } from "mppx";
 import { Mppx, tempo } from "mppx/client";
 import { createWalletClient, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { tempoModerato } from "viem/tempo/chains";
+import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
 export const TEMPO_MODERATO_CHAIN_ID = 42_431;
 export const TEMPO_MODERATO_RPC = "https://rpc.moderato.tempo.xyz";
@@ -70,7 +70,15 @@ export function createMppPayer(
     throw new Error("payer private key must be a 0x-prefixed 32-byte hex string");
   }
   const account = privateKeyToAccount(privateKey as `0x${string}`);
-  const rpcUrl = options.rpcUrl ?? TEMPO_MODERATO_RPC;
+  /**
+   * chain は**知っているものから選ぶ**（別の chain の定義に id だけ付け替えない。定義には hardfork などその chain 固有の値がある）。
+   * RPC の既定もその chain のもの。知らない chain id は、ここでは支払わない。
+   */
+  const chain = [tempoMainnet, tempoModerato].find((candidate) => candidate.id === scope.chainId);
+  if (chain === undefined) {
+    throw new Error(`unsupported Tempo chain id ${scope.chainId}`);
+  }
+  const rpcUrl = options.rpcUrl ?? chain.rpcUrls.default.http[0];
 
   return {
     address: account.address,
@@ -104,7 +112,7 @@ export function createMppPayer(
       const client = createWalletClient({
         account,
         // chain を持たせる（SDK は client の chain と challenge の chain を突き合わせる）。
-        chain: { ...tempoModerato, id: scope.chainId },
+        chain,
         transport: http(rpcUrl, { retryCount: 0 }),
       }).extend(publicActions);
 
