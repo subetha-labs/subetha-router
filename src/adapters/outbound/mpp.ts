@@ -21,6 +21,7 @@ import { discardBody, type GuardedTransport, type TransportContext } from "../..
 import { guardedRpcTransport } from "../../net/guarded-rpc.js";
 import type { DestinationOffer, MppTempoCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
 import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
+import { createMppDynamicPath, type MppDynamicOptions } from "./mpp-dynamic.js";
 
 /** mppx の `_mppx_scope` は `GET <canonical URL>`（クエリ無し）で cross-resource replay を防ぐ。 */
 const SCOPE_META_KEY = "_mppx_scope";
@@ -33,6 +34,11 @@ export interface MppOutboundOptions {
   /** 上流へ出る全要求（`mppx.rawFetch` を含む）が通る transport（SSRF 防御 A。必須）。 */
   readonly transport: GuardedTransport;
   readonly timeoutMs?: number;
+  /**
+   * 動的上流 URL の経路（`mpp-dynamic.ts`）。**省略時は動的経路が無く**、上流の URL を受け取ったら例外にする。
+   * 静的 route の挙動はこの有無で変わらない。
+   */
+  readonly dynamic?: MppDynamicOptions;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -198,6 +204,7 @@ function payerMatches(payer: unknown, chainId: number, address: string): boolean
 export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 10_000;
   const capability = options.capability;
+  const dynamic = options.dynamic === undefined ? undefined : createMppDynamicPath(capability, options.dynamic);
 
   const upstreams = new Map<string, string>();
   for (const [routeId, raw] of Object.entries(options.upstreams)) {
@@ -359,8 +366,11 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
   return {
     /** 上流の現在の challenge を読む（純粋読取・無課金・credential を作らない）。 */
     async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
-      // 動的経路（T8・T9）はまだ無い。上流の URL を受け取ったら、設定の URL に黙って落とさない。
-      if (target !== undefined) throw new DynamicTargetUnsupportedError();
+      if (target !== undefined) {
+        // 動的経路を持たないなら、設定の URL に黙って落とさない。
+        if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+        return dynamic.readChallenge(routeId, target.url);
+      }
       const url = urlFor(routeId);
       const mppx = createClient({ routeId, operation: "challenge" });
       const init = baseInit();
@@ -390,7 +400,10 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     },
 
     async pay(request: PayRequest): Promise<PayResult> {
-      if (request.target !== undefined) throw new DynamicTargetUnsupportedError();
+      if (request.target !== undefined) {
+        if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+        return dynamic.pay({ ...request, target: request.target });
+      }
       const url = urlFor(request.routeId);
       const approved = request.offer;
       const approvedTerms = offerTermsOf(approved);

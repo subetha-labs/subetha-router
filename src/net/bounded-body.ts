@@ -55,3 +55,35 @@ export async function readBoundedBody(
   }
   return { ok: true, bytes };
 }
+
+export type DeliveredBody =
+  | { readonly kind: "object"; readonly body: Record<string, unknown> }
+  /** `application/json` の JSON object ではない（text・配列・文字列・読めない JSON）。 */
+  | { readonly kind: "unsupported" }
+  | { readonly kind: "too_large" };
+
+/**
+ * 有料応答の本文（設計 §3.4）。対応するのは `content-type` が `application/json`（パラメータ可）で、最上位が JSON object の
+ * ものだけ。対応外の content-type は**読まずに**中断する。読み取りの失敗は例外。
+ */
+export async function readJsonObjectBody(response: Response, maxBytes: number): Promise<DeliveredBody> {
+  const mediaType = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    await response.body?.cancel().catch(() => {});
+    return { kind: "unsupported" };
+  }
+  const read = await readBoundedBody(response, maxBytes);
+  if (!read.ok) {
+    return { kind: "too_large" };
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(read.bytes));
+  } catch {
+    return { kind: "unsupported" };
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { kind: "unsupported" };
+  }
+  return { kind: "object", body: body as Record<string, unknown> };
+}

@@ -87,6 +87,7 @@ function denyAt(target: string | undefined, events: TransportEvent[], timeoutMs?
   void timeoutMs;
   return {
     allowLoopback: true,
+    boundsDns: false,
     fetch: (url, init, ctx) => (ctx.operation === target ? strict : fixture).fetch(url, init, ctx),
     report: (error, ctx) => fixture.report(error, ctx),
   };
