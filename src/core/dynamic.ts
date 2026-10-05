@@ -98,18 +98,6 @@ export type DynamicQuoteOutcome =
   | { readonly ok: true; readonly intent: Intent; readonly fields: DynamicQuoteFields }
   | { readonly ok: false; readonly code: string; readonly reason?: string };
 
-/** 公開してよい理由コード（adapter の任意文字列は通さない）。 */
-const SAFE_GATE_REASONS: ReadonlySet<string> = new Set([
-  "rate_global",
-  "rate_source",
-  "concurrency_global",
-  "concurrency_source",
-  "outstanding_quotes",
-  "rate_host",
-  "concurrency_host",
-  "gate_capacity",
-]);
-
 export function ownerKeyHashOf(ownerKey: string): string {
   return `sha256:${createHash("sha256").update(ownerKey, "utf8").digest("hex")}`;
 }
@@ -122,19 +110,23 @@ export function ownerKeyMatches(ownerKey: unknown, ownerKeyHash: string): boolea
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** 受信額（元本の換算＋手数料）。設計 §6.6。溢れ（30 桁超）は `undefined`。 */
+/**
+ * 受信額（元本の換算＋手数料）。設計 §6.6。溢れ（30 桁超）と、受信の桁で**正確に表せない**額は `undefined`
+ * （切り上げ・切り捨てで額を変えない）。
+ */
 export function priceOf(profile: DynamicProfile, upstreamAmount: string): DynamicPricing | undefined {
   if (!AMOUNT_PATTERN.test(upstreamAmount)) return undefined;
   const amount = BigInt(upstreamAmount);
   const sourceDecimals = BigInt(profile.source.decimals);
   const destinationDecimals = BigInt(profile.destination.decimals);
-  // par（1:1）。桁が違えば桁を合わせる。切り捨てが起きる向き（受信の桁が少ない）は切り上げる。
+  // par（1:1）。桁が違えば桁を合わせる。割り切れない額は扱わない。
   let converted: bigint;
   if (sourceDecimals >= destinationDecimals) {
     converted = amount * 10n ** (sourceDecimals - destinationDecimals);
   } else {
     const divisor = 10n ** (destinationDecimals - sourceDecimals);
-    converted = (amount + divisor - 1n) / divisor;
+    if (amount % divisor !== 0n) return undefined;
+    converted = amount / divisor;
   }
   const bps = BigInt(profile.fee.bps);
   const proportional = (converted * bps + 9_999n) / 10_000n;
@@ -161,6 +153,20 @@ export function reservationOf(profile: DynamicProfile, pricing: DynamicPricing):
     legs.push({ network: profile.destination.network, asset: profile.destination.feeAsset, amount: profile.destination.maxFee });
   }
   return { legs };
+}
+
+/**
+ * 1 件あたりの固定の上限（設計 §6.6）: 予約の各区分が、動的予算のバケットの `maxPerPurchase` 以内であること。
+ * quote の時点で見る（受信 offer を発行してから、昇格で拒否するのでは、MPP 受信の呼び出し側は払った後になる）。
+ */
+export function perPurchaseLimitOf(config: RouterConfig, reservation: DynamicReservation): string | undefined {
+  const buckets = config.dynamic?.budget.buckets ?? [];
+  for (const leg of reservation.legs) {
+    const bucket = buckets.find((candidate) => candidate.network === leg.network && candidate.asset === leg.asset);
+    if (bucket === undefined) return "bucket_not_allowed";
+    if (!AMOUNT_PATTERN.test(bucket.maxPerPurchase) || BigInt(leg.amount) > BigInt(bucket.maxPerPurchase)) return "per_purchase_limit";
+  }
+  return undefined;
 }
 
 function profileCopyOf(profile: DynamicProfile): Record<string, unknown> {
@@ -208,19 +214,13 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     }
   }
 
-  /** 宛先ホストの枠を取って上流を読む。枠が無ければ接続しない。 */
-  async function readOffers(profileId: string, url: string, host: string): Promise<{ readonly ok: true; readonly offers: readonly DestinationOffer[] } | { readonly ok: false; readonly code: string }> {
-    const admitted = gate.admitHost(host);
-    if (!admitted.ok) {
-      return { ok: false, code: admitted.reason };
+  /** 上流を読む。**呼び出し側が宛先ホストの枠を持っていること。** */
+  async function readOffers(profileId: string, url: string): Promise<{ readonly ok: true; readonly offers: readonly DestinationOffer[] } | { readonly ok: false; readonly code: string }> {
+    try {
+      return { ok: true, offers: await outbound.readChallenge(profileId, { url }) };
+    } catch {
+      return { ok: false, code: "offer_unavailable" };
     }
-    return withLease(admitted.lease, async () => {
-      try {
-        return { ok: true, offers: await outbound.readChallenge(profileId, { url }) };
-      } catch {
-        return { ok: false, code: "offer_unavailable" };
-      }
-    });
   }
 
   async function quote(request: DynamicQuoteRequest): Promise<DynamicQuoteOutcome> {
@@ -248,9 +248,14 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       return { ok: false, code: admitted.reason === "outstanding_quotes" ? "dynamic_capacity" : "rate_limited", reason: admitted.reason };
     }
     return withLease(admitted.lease, async () => {
-      const read = await readOffers(profile.profileId, parsed.url, parsed.host);
+      // 宛先ホストの枠（名前解決の前に取る）。無ければ接続しない。
+      const host = gate.admitHost(parsed.host);
+      if (!host.ok) {
+        return { ok: false, code: "rate_limited", reason: host.reason };
+      }
+      const read = await withLease(host.lease, () => readOffers(profile.profileId, parsed.url));
       if (!read.ok) {
-        return SAFE_GATE_REASONS.has(read.code) ? { ok: false, code: "rate_limited", reason: read.code } : { ok: false, code: "quote_failed", reason: read.code };
+        return { ok: false, code: "quote_failed", reason: read.code };
       }
       // adapter が検査を通したものだけを返す。core はその先頭を取り、支払いの欄だけもう一度見る。
       const selected = read.offers.find(
@@ -266,7 +271,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       }
       const pricing = priceOf(profile, selected.amount);
       if (pricing === undefined) {
-        return { ok: false, code: "quote_failed", reason: "amount_overflow" };
+        return { ok: false, code: "quote_failed", reason: "amount_unrepresentable" };
+      }
+      // 1 件あたりの上限は quote の時点で見る（払ってから拒否しない）。
+      const overLimit = perPurchaseLimitOf(config, reservationOf(profile, pricing));
+      if (overLimit !== undefined) {
+        return { ok: false, code: "quote_failed", reason: overLimit };
       }
 
       const ownerKey = randomBytes(32).toString("base64url");
@@ -424,9 +434,20 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         return awaiting("operator_funds_unavailable");
       }
     }
-    const read = await readOffers(profile.profileId, url, parsed.host);
+    // 宛先ホストの枠は、ここから送信の終わりまで持つ（settle 後の読み直し・送信もこの枠の中。設計 §7.3）。
+    const host = gate.admitHost(parsed.host);
+    if (!host.ok) {
+      return { paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: host.reason };
+    }
+    return withLease(host.lease, () => purchaseWithHost(intent, profile, credential, isPromoted, url));
+  }
+
+  async function purchaseWithHost(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, url: string): Promise<DynamicPurchaseOutcome> {
+    const paymentId = intent.paymentId;
+    const awaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
+    const read = await readOffers(profile.profileId, url);
     if (!read.ok) {
-      return SAFE_GATE_REASONS.has(read.code) ? { paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: read.code } : awaiting("offer_unavailable");
+      return awaiting("offer_unavailable");
     }
     const target = stableJson(intent.destination.selectedOffer);
     if (!read.offers.some((offer) => stableJson(offer) === target)) {
@@ -472,7 +493,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         return { paymentId, status: "rejected", code: "dynamic_unavailable" };
       }
       if (!result.ok) {
-        return awaiting(result.reason);
+        return result.reason === "budget_unavailable" ? { paymentId, status: "rejected", code: "dynamic_unavailable" } : awaiting(result.reason);
       }
       ledger.markPromoted(intent.quoteId);
     }
@@ -491,18 +512,18 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
     }
     const outcome = isRecord(settled) ? settled["outcome"] : undefined;
-    if (outcome === "rejected") {
-      const reason = safeSettleReason(isRecord(settled) ? settled["reason"] : undefined);
-      await store.append(paymentId, "source_failed", { outcome: "rejected", reason });
-      return { paymentId, status: "awaiting_payment", code: reason };
-    }
     const txRef = isRecord(settled) ? settled["txRef"] : undefined;
     if (outcome === "settled" && typeof txRef === "string" && txRef !== "") {
       await store.append(paymentId, "source_settled", { txRef });
       return options.deliver(paymentId);
     }
-    await store.append(paymentId, "unknown", { outcome: "none", reason: "source_settle_unknown" });
-    return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
+    /**
+     * 昇格後の settle の失敗は**すべて `unknown`**（設計 §6.5）。facilitator・RPC は、送金の前に拒否したのか後に拒否したのかを
+     * 応答で確実には区別できないので、`rejected` を「未払い」と確定しない。予約は保持する。
+     */
+    const reason = outcome === "rejected" ? safeSettleReason(isRecord(settled) ? settled["reason"] : undefined) : "source_settle_unknown";
+    await store.append(paymentId, "unknown", { outcome: "none", reason });
+    return { paymentId, status: "unknown", terminalReason: reason };
   }
 
   /** 残高の事前確認（設計 §6.6）。元本の資産と手数料の資産を別々に（同じなら合算で）。読めなければ不足とみなす。 */

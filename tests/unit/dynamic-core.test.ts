@@ -9,7 +9,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
-import { dynamicBindingOf, ownerKeyHashOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
+import { dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import { stableJson } from "../../src/core/intent.js";
 import { createRouterCore, type QuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
@@ -231,12 +231,19 @@ describe("換算と手数料（設計 §6.6）", () => {
     expect(priceOf({ ...PROFILE, fee: { flat: "0", bps: 0, min: "0" } }, "5000")).toEqual({ upstreamAmount: "5000", converted: "5000", fee: "0", total: "5000" });
   });
 
-  test("桁が違えば桁を合わせる。切り捨てが起きる向きは切り上げ", () => {
+  test("桁が違えば桁を合わせる。受信の桁で正確に表せない額は扱わない（設計 §6.6）", () => {
     const to18 = { ...PROFILE, source: { ...PROFILE.source, decimals: 18 }, fee: { flat: "0", bps: 0, min: "0" } };
     expect(priceOf(to18, "5")!.converted).toBe("5000000000000");
     const to2 = { ...PROFILE, source: { ...PROFILE.source, decimals: 2 }, fee: { flat: "0", bps: 0, min: "0" } };
-    expect(priceOf(to2, "123456")!.converted).toBe("13");
+    expect(priceOf(to2, "123456")).toBeUndefined();
     expect(priceOf(to2, "120000")!.converted).toBe("12");
+  });
+
+  test("1 件あたりの上限（設計 §6.6）: 予約の各区分がバケットの maxPerPurchase 以内。無いバケットは不可", () => {
+    const config = baseConfig();
+    expect(perPurchaseLimitOf(config, reservationOf(PROFILE, priceOf(PROFILE, "5000")!))).toBeUndefined();
+    expect(perPurchaseLimitOf(config, { legs: [{ network: SRC_NETWORK, asset: SRC_ASSET, amount: "200001" }] })).toBe("per_purchase_limit");
+    expect(perPurchaseLimitOf(config, { legs: [{ network: SRC_NETWORK, asset: "0xother", amount: "1" }] })).toBe("bucket_not_allowed");
   });
 
   test("正規形でない額・溢れは価格にしない", () => {
@@ -331,7 +338,20 @@ describe("動的 quote", () => {
   test("桁あふれ: 受信額が 30 桁を超える quote は作らない", async () => {
     const core = await boot(baseConfig({ profile: { ...PROFILE, source: { ...PROFILE.source, decimals: 30 }, maxUpstreamAmount: "9".repeat(30) } }));
     outbound.offers = [{ ...outbound.offers[0]!, amount: "9".repeat(30) }];
-    expect(await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "alice" })).toMatchObject({ ok: false, code: "quote_failed", reason: "amount_overflow" });
+    expect(await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "alice" })).toMatchObject({ ok: false, code: "quote_failed", reason: "amount_unrepresentable" });
+  });
+
+  test("1 件あたりの上限を超える quote は作らない（受信 offer を発行してから昇格で拒否しない）", async () => {
+    const config = baseConfig();
+    const buckets = config.dynamic!.budget.buckets.map((bucket) => (bucket.asset === SRC_ASSET ? { ...bucket, maxPerPurchase: "6049" } : bucket));
+    const core = await boot({ ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets } } });
+    expect(await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "alice" })).toMatchObject({ ok: false, code: "quote_failed", reason: "per_purchase_limit" });
+    expect(inbound.createOfferCalls).toBe(0);
+    expect(await ledgerText()).toBe("");
+    // バケットの無い資産のプロファイルも同じ。
+    const core2 = await (async () => { await core.close(); opened.length = 0; return boot({ ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets: buckets.filter((bucket) => bucket.asset !== SRC_ASSET) } } }); })();
+    expect(await core2.quote({ principalId: "alice", requestId: "r2", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "alice" })).toMatchObject({ ok: false, code: "quote_failed", reason: "bucket_not_allowed" });
+    expect(inbound.createOfferCalls).toBe(0);
   });
 
   test("requestId の衝突（AC-7）: 動的は冪等に再取得できない。静的の requestId とも、控えの requestId とも衝突", async () => {
@@ -703,12 +723,36 @@ describe("動的 purchase", () => {
     expect(inbound.verifyCalls).toBe(1);
   });
 
-  test("受信 settle の拒否: 理由は固定のコードに写し、上流の文字列を記録しない", async () => {
-    const core = await boot();
+  test("昇格後の settle の拒否は unknown（設計 §6.5）: 未払いと確定しない。理由は固定のコードで、上流の文字列を記録しない。予約は保持", async () => {
+    const core = await boot(baseConfig({ maxPurchases: 1 }));
     const quote = await quoteOk(core);
+    const q2 = await quoteOk(core, "r2");
     inbound.settleImpl = async () => ({ outcome: "rejected", reason: "https://leak.example/token" });
-    expect(await core.purchase(purchaseArgs(quote))).toEqual({ paymentId: quote.paymentId, status: "awaiting_payment", code: "source_rejected" });
+    expect(await core.purchase(purchaseArgs(quote))).toEqual({ paymentId: quote.paymentId, status: "unknown", terminalReason: "source_rejected" });
     expect(await readFile(journalPath, "utf8")).not.toContain("leak.example");
+    expect((await journalLines()).map((line) => line.event)).toEqual(["created", "source_pending", "unknown"]);
+    expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "unknown" });
+    inbound.settleImpl = async () => ({ outcome: "settled", txRef: "t" });
+    expect(await core.purchase(purchaseArgs(q2, { requestId: "r2" }))).toMatchObject({ code: "purchase_count_limit" });
+  });
+
+  test("宛先ホストの枠は settle の前に取り、送信の終わりまで持つ（settle 後の読み直し・送信もその枠の中）", async () => {
+    const gate = new DynamicGate({ limits: { ...DEFAULT_DYNAMIC_LIMITS, perHostConcurrent: 1 }, now: () => clock });
+    const core = await boot(baseConfig(), { gate });
+    const q1 = await quoteOk(core, "r1");
+    const q2 = await quoteOk(core, "r2", URL_A, "bob");
+    let release: (() => void) | undefined;
+    inbound.settleImpl = () => new Promise((resolve) => { release = () => resolve({ outcome: "settled", txRef: "t" }); });
+    const first = core.purchase(purchaseArgs(q1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(gate.activeOfHost("provider.test")).toBe(1);
+    // 同じホストへの 2 件目は、1 件目が送信を終えるまで枠が無い（接続 0）。
+    const before = connections();
+    expect(await core.purchase({ ...purchaseArgs(q2, { requestId: "r2", principalId: "bob", source: "bob" }), ownerKey: q2.ownerKey! })).toMatchObject({ code: "rate_limited", terminalReason: "concurrency_host" });
+    expect(connections()).toEqual(before);
+    release!();
+    expect((await first).status).toBe("delivered");
+    expect(gate.activeOfHost("provider.test")).toBe(0);
   });
 
   test("静的の流れに動的の quote を持ち込めない: 静的の引数だけ（ownerKey 無し）では unknown_quote", async () => {
