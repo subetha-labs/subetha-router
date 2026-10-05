@@ -250,7 +250,9 @@ egress 制御を入れない構成用）。29 系は未測定なので 28 系に
 
 **既存ホストの Docker をその場で入れ替えない。** 入れ替えと降格の手順を書いてリハーサルしたが（同じコンテナ ID で復帰、戻しも通った）、
 独立レビューで中断・再起動・作り直しの経路に未解決の指摘が残った（2 回 REJECT）。**新しいホストを作り、受け入れを通してから切り替える**
-（§8b.6）。新しいホストでは Router を作る前に次を行う（root）:
+（§8b.6）。新しいホストでは Router を作る前に、次のブロックを**ファイルに保存して `sudo bash -e <file>` で実行する**（shebang を貼るだけでは
+失敗で止まらない）。Docker の公式手順が対象にするのは CentOS Stream で、AL2023 は対象外: これは **運用者が検証した別ディストリビューションへの導入**であり、
+根拠は §8b.4 をこの版・この host で通した結果だけである（28.3.3 での実測は代わりにならない）:
 
 ```sh
 #!/bin/bash -e
@@ -714,37 +716,49 @@ sudo -E subetha-egress-verify --reboot-cleanup
 ### 8b.6 既存ホストから新しいホストへの切り替え
 
 既定 bridge・Docker 25 で動いている既存ホスト（旧）を、§8b.0〜§8b.4 を通した新しいホスト（新）に置き換える。
-**旧ホストは切り替えが確定するまで変更しない**（止めるだけ）。戻すときは Elastic IP を戻す。
+**旧ホストは切り替えが確定するまで変更しない**（止めるだけ）。
+
+**journal の原則**: 書き手は常に 1 つ。**新の Router が要求を受けられる状態になった時点から、新の journal が正**（完了した購入だけでなく、
+保留・unknown・起動時の復旧記録も含む。起動しただけで追記され得る）。以後、旧を使うには両方を止めて新の journal を旧へ写す。
+
+**MPP 受信の既知の制約**: 資格情報の再生防止ストアはプロセス内（`p5-inbound-rails-design.md`）で、**切り替えは再起動と同じく消える**。
+journal を写しても移らない。Router 自身の at-most-once は journal（quote の直列化と intent の状態）に依る。この制約が解消されるまで、
+MPP 受信で実価値を扱わない（testnet のみ）という既存の前提は切り替え後も変わらない。
 
 準備（公開に影響しない）:
 
 1. 新: 旧と同じ VPC・サブネット・SG、AL2023、IMDSv2 必須 + hop limit 1（§9）。§8b.0 → §8b.2
-2. 旧 → 新へ、**イメージ**（`docker save <イメージ ID>` を `docker load`。ID が一致すること）と `/etc/subetha-router.env`（600、sha256 が一致すること）を
-   端から端まで暗号化した経路で写す（秘密を作業端末のディスクに置かない）。Caddy の設定と証明書（`/etc/caddy/Caddyfile`、`/var/lib/caddy`）も同様
-3. 新: §6 手順 4 で Router を起動（**空の journal**。`127.0.0.1:8787` のみ。Caddy は**入れても起動しない**: `systemctl disable --now caddy`）
+2. 旧 → 新へ、**イメージ**（`docker save <イメージ ID>` を `docker load`。ID が一致すること）と `/etc/subetha-router.env`（root 600、sha256 が一致）を
+   端から端まで暗号化した経路で写す（秘密を作業端末のディスクに置かない）
+3. 新: §6 手順 4 で Router を起動（**空の journal**、`127.0.0.1:8787` のみ）。同じ支払い鍵を持つ 2 つ目のプロセスなので、**購入の経路を一切持たせない**:
+   入口（Caddy）を起動しない、8787 を転送しない、購入を出す client を向けない。**検証中の journal は空のままであること**を切り替え直前に確かめる
+   （1 行でもあれば調べ終わるまで切り替えない）
 4. 新: §8b.4 を全モード `failed 0`（外部 observer、免除なし、実 reboot）。証拠を保存
+5. 新: Caddy を入れ、設定と証明書（`/etc/caddy/Caddyfile`、Caddy の data directory）を旧から同じ経路で写す。所有者と権限を service の実行ユーザに合わせ、
+   `caddy validate` を通す。**起動はしない**（`systemctl disable caddy`、`is-active` が `inactive`）
+6. 旧へ **プライベート IP で SSH できること**を新ホスト経由（ProxyJump）で実際に試す（Elastic IP を外すと旧は公開 IP を失う）
 
 切り替え（公開が止まる。数分）。各行は前の行が成功してから:
 
-1. 新: `docker stop subetha-router`（検証中の journal は `/var/lib/subetha-router.verify-<時刻>` に退避し、`/var/lib/subetha-router` を空にする）
-2. 旧: 入口を閉じる `systemctl disable --now caddy` → `docker stop -t 60 subetha-router` → `docker update --restart no subetha-router`
-   （再起動しても旧 Router が勝手に上がらない）
-3. 旧: journal の全行が JSON として読め、末尾が改行で終わること、行数と sha256 を記録
-4. 旧 → 新へ journal の directory を写す（`journal.ndjson` の sha256 と行数が一致。所有者 10001:10001）
-5. Elastic IP を旧から新へ付け替える
-6. 新: 公開 IPv4 が変わったので §8b.5 の順序で `HOST_ADDRS4` を更新する: guard timer と service を止める → `subetha-egress-verify --public-ipv4`
-   の値で `/etc/subetha-egress.env` を書き換える → `subetha-egress apply` → guard timer を起動して `is-active`
-7. 新: `docker start subetha-router` → `healthy`、`/healthz`、起動ログの mode / label、コンテナから journal が読み書きできること、
-   **journal の sha256 が写した時点から変わっていないか、追記だけであること**
-8. 新: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz` と MCP の `tools/list`
-9. 新: `subetha-egress-verify`（既定モード）を再実行して `failed 0`（公開 IPv4 の照合を含む）
+1. 新: `docker stop subetha-router`。検証中の journal が空であることを確かめ、directory を `/var/lib/subetha-router.verify-<時刻>` に退避して空にする
+2. 旧: 入口を閉じる `systemctl disable --now caddy`（`is-active` が `inactive`）→ `docker stop -t 60 subetha-router` → `docker update --restart no subetha-router`
+3. 旧: journal の全行が JSON として読め、末尾が改行で終わること。行数・バイト数・sha256 を記録（**引き渡し時点の写し**）
+4. 旧 → 新へ journal の directory を写す（`journal.ndjson` の sha256・行数・バイト数が一致。所有者 10001:10001）。引き渡し時点の写しを新にも別名で残す
+5. Elastic IP を旧から新へ付け替える（**付け替える EIP のアドレスを控えておく**）
+6. 新: §8b.5 の順序で `HOST_ADDRS4` を更新: guard timer と service を止める → `subetha-egress-verify --public-ipv4` の値が**控えた EIP と一致する**まで
+   進まない（404 や旧アドレスは「付け替え未完了」）→ `/etc/subetha-egress.env` を書き換える → `subetha-egress apply` → guard timer を起動して `is-active`
+7. 新: `docker start subetha-router` → `healthy`、`/healthz`、起動ログの mode / label。**アプリ自身が journal を replay して起動したこと**が受け入れ条件
+   （JSON の検査は予備）。journal は引き渡し時点の写しと**先頭バイト列が一致**（`cmp -n <写しのバイト数>`）= 追記だけ
+8. 新: **入口を閉じたまま** `subetha-egress-verify`（既定モード）を `failed 0`（公開 IPv4 の照合、DNS、行列を含む）
+9. 新: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz` と MCP の `tools/list`（AAAA や別の入口が無いことも確認）
 
-戻す（手順 8 より前、または 8 の後でも**新で 1 件も購入が成立していない間**）: 新の Caddy と Router を止める → Elastic IP を旧へ戻す →
-旧で `docker update --restart unless-stopped subetha-router`、`docker start`、healthy を確認して `systemctl enable --now caddy`。
-**新で購入が成立した後は、新の journal が正**。旧を再び使うなら、新を止めて journal を旧へ写してからにする（古い journal で起動しない）。
+戻す:
 
-切り替え後: 旧ホストは Router と Caddy を止めたまま数日置き、問題が無ければ journal の最終写しを確認して終了する。
-Elastic IP を外した旧ホストには公開 IP が無いので、SSH は新ホスト経由（SG 内の 22 を許可）で行う。
+- **手順 7 より前**（新の Router をまだ起動していない）: Elastic IP を旧へ戻し、旧で `docker update --restart unless-stopped`、`docker start`、healthy、`systemctl enable --now caddy`
+- **手順 7 以降**: 新の Router と Caddy を止める。新の journal が引き渡し時点の写しと**バイト単位で同一**（`cmp`）なら上と同じ。**1 バイトでも増えていれば新が正**:
+  旧の journal を退避し、新の journal を旧へ写して（sha256 一致）から旧を起動する。古い journal のまま旧を起動しない
+
+切り替え後: 旧ホストは Router と Caddy を止めたまま数日置き、問題が無ければ終了する。
 
 ## 9. EC2 側で必要なこと（このリポジトリの範囲外）
 

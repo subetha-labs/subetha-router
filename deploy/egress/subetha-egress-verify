@@ -166,10 +166,20 @@ capture_start() { rm -f "$3"; tcpdump -Z root -i "$1" -w "$3" -U "$2" >/dev/null
   for i in $(seq 1 30); do grep -q 'listening on' "$3.err" 2>/dev/null && return 0; sleep 0.1; done; echo "capture on $1 not ready" >&2; return 1; }
 capture_stop() { kill -INT "$(cat "$1.pid")" 2>/dev/null; wait "$(cat "$1.pid")" 2>/dev/null; rm -f "$1.pid"; sleep 1; cp -f "$1" "$EVID/" 2>/dev/null; }
 pkts()   { [ -s "$1" ] || { echo ERR; return; }; local o; o=$(tcpdump -nn -r "$1" ${2:+"$2"} 2>/dev/null) || { echo ERR; return; }; printf '%s' "$o" | grep -c .; }
-guard_pause()  { systemctl stop subetha-egress-guard.timer subetha-egress-guard.service || return 1
-  # If the 30 s timer had just fired, our stop kills the running guard and systemd records the unit as "failed" (result: signal).
-  # That state is ours, not a guard failure: clear it, then require "inactive" from both units.
-  systemctl reset-failed subetha-egress-guard.service 2>/dev/null || true
+# absolute TCP sequence numbers of the initial SYNs in a capture (NAT and forwarding keep them): the identity of a probe packet
+syn_seqs() { [ -s "$1" ] || return 1; tcpdump -nn -S -r "$1" "tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn${2:+ and ($2)}" 2>/dev/null | sed -n 's/.* seq \([0-9][0-9]*\),.*/\1/p' | sort -u; }
+# rules that rewrite TTL / hop limit would break "forwarded packets have a lower TTL than host-originated ones"
+ttl_rewrite_rules() { local a b; a=$(iptables-save 2>/dev/null) || return 1; b=$(ip6tables-save 2>/dev/null) || return 1
+  printf '%s\n%s\n' "$a" "$b" | grep -cE -- '-j (TTL|HL)( |$)' || true; }
+guard_pause()  { local pre res st u
+  pre=$(systemctl show subetha-egress-guard.service -p ActiveState --value) || return 1
+  # a guard that had ALREADY failed (e.g. a repair that did not work) is a finding, not something to clear
+  [ "$pre" != failed ] || { echo "subetha-egress-guard.service was already failed before the pause (result $(systemctl show subetha-egress-guard.service -p Result --value))" >&2; return 1; }
+  systemctl stop subetha-egress-guard.timer subetha-egress-guard.service || return 1
+  # If the 30 s timer had just fired, our stop kills the running guard and systemd records "failed" with result "signal".
+  # Only that stop-induced state is cleared; any other failure result is left in place and fails the check below.
+  res=$(systemctl show subetha-egress-guard.service -p Result --value) || return 1
+  if [ "$(systemctl is-active subetha-egress-guard.service)" = failed ]; then [ "$res" = signal ] && [ "$pre" != inactive ] || return 1; systemctl reset-failed subetha-egress-guard.service || return 1; fi
   local u st; for u in subetha-egress-guard.timer subetha-egress-guard.service; do st=$(systemctl is-active "$u"); [ $? = 3 ] && [ "$st" = inactive ] || return 1; done; }
 guard_resume() { systemctl start subetha-egress-guard.timer; }
 
@@ -298,9 +308,16 @@ matrix() {
   [ "$vttl" = 0 ] && ok V7-1 "no namespace attempt exceeds the default TTL $dttl on the veth (a forwarded copy shows at most $((dttl - 1)) on the uplink; multicast leaves with TTL 1)" || ng V7-1 "namespace attempts with a TTL above $dttl on the veth: $vttl (the forwarded/host-originated discriminator does not hold)"
   probe_pkts=$(pkts /var/tmp/ev-uplink.pcap "($pf) and ip and ip[8] < $dttl"); hostprobe=$(pkts /var/tmp/ev-uplink.pcap "($pf) and ip and ip[8] >= $dttl")
   isnum "$probe_pkts" && isnum "$hostprobe" || { ng V7-1 "uplink capture unreadable (forwarded=$probe_pkts host=$hostprobe)"; return; }
-  other_pkts=$((u - probe_pkts)); [ "$hostprobe" = 0 ] || note V7-1 "uplink $UPLINK: $hostprobe host-originated packets on probe ports (TTL $dttl; e.g. the metadata service) are not probes"
+  other_pkts=$((u - probe_pkts)); [ "$hostprobe" = 0 ] || note V7-1 "uplink $UPLINK: $hostprobe packets on probe ports with TTL >= $dttl (on EC2: the metadata service, used by this runner and host agents); not counted by the TTL rule, covered by the sequence-number rule below for TCP"
+  # The TTL rule assumes nothing rewrites TTL. Gate that, and do not rely on TTL alone: an escaped TCP probe is identified by its
+  # own SYN sequence number, whatever its TTL (IPv4 only; IPv6 is disabled on the network, V7-14).
+  local trw vs us common; trw=$(ttl_rewrite_rules) || { ng V7-1 "cannot read the rule set to look for TTL rewriting"; return; }
+  [ "$trw" = 0 ] && ok V7-1 "no TTL/HL rewriting rule in iptables/ip6tables (the TTL rule's assumption)" || ng V7-1 "$trw TTL/HL rewriting rules present: the TTL rule proves nothing here"
+  vs=$(syn_seqs /var/tmp/ev-veth.pcap "src net $(subnet)") && us=$(syn_seqs /var/tmp/ev-uplink.pcap) || { ng V7-1 "cannot extract SYN sequence numbers"; return; }
+  common=$(comm -12 <(printf '%s\n' "$vs") <(printf '%s\n' "$us") | grep -c . || true)
+  [ -n "$vs" ] && [ "$common" = 0 ] && ok V7-1 "none of the namespace's $(printf '%s\n' "$vs" | grep -c .) SYN sequence numbers appears on the uplink (identity of the probe packets, independent of TTL)" || ng V7-1 "namespace SYNs on the veth: $(printf '%s\n' "$vs" | grep -c .); of those seen on the uplink: $common"
   [ "$a" -ge 16 ] && ok V7-1 "attempts seen on the veth: $a packets" || ng V7-1 "only $a attempt packets on the veth"
-  [ "$probe_pkts" = 0 ] && [ "$other_pkts" -ge 1 ] && ok V7-1 "uplink $UPLINK: 0 probe packets to deny ranges; $other_pkts host-originated packets to those ranges prove the capture was live" || ng V7-1 "uplink $UPLINK: probe packets=$probe_pkts, other=$other_pkts (a live capture must see some host traffic to those ranges)"
+  [ "$probe_pkts" = 0 ] && [ "$other_pkts" -ge 1 ] && ok V7-1 "uplink $UPLINK: 0 forwarded (TTL < $dttl) packets to deny ranges on the probe ports; $other_pkts other packets to those ranges prove the capture was live" || ng V7-1 "uplink $UPLINK: probe packets=$probe_pkts, other=$other_pkts (a live capture must see some host traffic to those ranges)"
   synack=$(pkts /var/tmp/ev-veth.pcap "dst net $(subnet) and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)")
   [ "$synack" = 0 ] && ok V7-1 "no SYN-ACK from any denied source returned to the namespace (capture includes the return direction)" || ng V7-1 "$synack SYN-ACKs from denied sources seen on the veth"
   local ctl; ctl=$(conntrack -L 2>/dev/null) || { ng V7-1 "conntrack -L failed"; return; }
@@ -348,7 +365,16 @@ controls() {
   [ "$h" = 200 ] && ok V7-7 "host -> Router $HEALTH_URL: 200 (the path Caddy uses as its upstream; not end-to-end TLS)" || ng V7-7 "host -> Router $HEALTH_URL: $h"
   local c0 c1; c0=$(cnt_reply); curl -s -o /dev/null -m 3 "$HEALTH_URL"; c1=$(cnt_reply)
   [ "$c1" -gt "$c0" ] && ok V7-7 "reply-direction exemption counted (+$((c1-c0)))" || ng V7-7 "reply exemption line did not count"
-  r=$(curlx "https://example.com/" 6); [ "${r%% *}" = 0 ] && ok V7-7 "namespace -> public HTTPS: ${r#* }" || ng V7-7 "namespace -> public HTTPS: '$r'"
+  # positive control for the V7-1 identity rule: an ALLOWED connection's SYN must be found on both the veth and the uplink
+  local V cv cu cc; V=$(veth_of "$NS") || V=""
+  if [ -n "$V" ] && capture_start "$UPLINK" "tcp dst port 443" /var/tmp/ev-ctl-uplink.pcap && capture_start "$V" "tcp dst port 443" /var/tmp/ev-ctl-veth.pcap; then
+    # wait past libpcap's buffer timeout (about 1 s) before stopping: a capture interrupted sooner reports the packets as
+    # "received by filter" but writes none of them (measured on AL2023)
+    r=$(curlx "https://example.com/" 6); sleep 2; capture_stop /var/tmp/ev-ctl-veth.pcap; capture_stop /var/tmp/ev-ctl-uplink.pcap
+    cv=$(syn_seqs /var/tmp/ev-ctl-veth.pcap "src net $(subnet)") && cu=$(syn_seqs /var/tmp/ev-ctl-uplink.pcap) && cc=$(comm -12 <(printf '%s\n' "$cv") <(printf '%s\n' "$cu") | grep -c . || true) || cc=ERR
+    [ "$cc" != ERR ] && [ "$cc" -ge 1 ] && ok V7-7 "an allowed namespace SYN is found by sequence number on the uplink ($cc; the correlator used by V7-1 detects a forwarded packet)" || ng V7-7 "correlator control: allowed SYN not matched on the uplink ($cc)"
+  else ng V7-7 "correlator control: captures not ready"; r=$(curlx "https://example.com/" 6); fi
+  [ "${r%% *}" = 0 ] && ok V7-7 "namespace -> public HTTPS: ${r#* }" || ng V7-7 "namespace -> public HTTPS: '$r'"
   dns_check V7-8
 }
 dns_check() {
@@ -711,10 +737,10 @@ reboot_cleanup() {
   systemctl disable --now egress-host-observer.service egress-boot-capture.service >/dev/null 2>&1 || bad=1
   rm -f /etc/systemd/system/egress-host-observer.service /etc/systemd/system/egress-boot-capture.service || bad=1; systemctl daemon-reload || bad=1
   if [ "$(systemctl is-active docker.service)" != active ]; then systemctl reset-failed docker.service 2>/dev/null; timeout 60 systemctl start docker.service || { ng V7-11 "docker.service did not start after the aid units were removed"; return; }; fi
-  names=$(timeout 30 docker ps -a --format '{{.Names}}') || { ng V7-11 "cannot list containers"; bad=1; }
-  printf '%s\n' "$names" | grep -qx subetha-egress-probe && { docker rm -f subetha-egress-probe >/dev/null 2>&1 || { ng V7-11 "cannot remove the probe container"; bad=1; }; }
+  names=$(timeout 30 docker ps -a --format '{{.Names}}') || { ng V7-11 "cannot list containers within 30 s; cleanup incomplete (aid units and the test dependency are already removed)"; return; }
+  printf '%s\n' "$names" | grep -qx subetha-egress-probe && { timeout 60 docker rm -f subetha-egress-probe >/dev/null 2>&1 || { ng V7-11 "cannot remove the probe container"; bad=1; }; }
   for u in egress-host-observer.service egress-boot-capture.service; do st=$(systemctl is-active "$u" 2>/dev/null); rc=$?; case "$rc:$st" in 3:inactive|4:*) ;; *) ng V7-11 "$u is '$st' (exit $rc) after cleanup"; bad=1 ;; esac; done
-  names=$(docker ps -a --format '{{.Names}}') || bad=1; printf '%s\n' "$names" | grep -qx subetha-egress-probe && { ng V7-11 "probe container still present"; bad=1; }
+  names=$(timeout 30 docker ps -a --format '{{.Names}}') || bad=1; printf '%s\n' "$names" | grep -qx subetha-egress-probe && { ng V7-11 "probe container still present"; bad=1; }
   [ "$(systemctl is-active docker.service)" = active ] || { ng V7-11 "docker.service is not active after cleanup"; bad=1; }
   "$SCRIPT" check >/dev/null 2>&1 || { ng V7-11 "policy does not verify after cleanup"; bad=1; }
   [ "$bad" = 0 ] && ok V7-11 "cleanup verified by fresh queries: probe absent, test dependency gone, aid units inactive, docker active, policy verified" || ng V7-11 "cleanup incomplete; inspect the host"
