@@ -721,6 +721,12 @@ sudo -E subetha-egress-verify --reboot-cleanup
 **journal の原則**: 書き手は常に 1 つ。**新の Router が要求を受けられる状態になった時点から、新の journal が正**（完了した購入だけでなく、
 保留・unknown・起動時の復旧記録も含む。起動しただけで追記され得る）。以後、旧を使うには両方を止めて新の journal を旧へ写す。
 
+**この手順が扱う journal の配置は 1 つだけ**: `SUBETHA_JOURNAL_PATH` を設定しておらず、Router が**実際に開いている**ファイルが
+mount した directory 直下の `journal.ndjson` であること。旧を止める前に確かめる: `docker inspect` の `Config.Env` に `SUBETHA_JOURNAL_PATH` が無いこと、
+Router のプロセスが開いている journal（host の `/proc/<pid>/fd` の `readlink`）が `/app/runtime/journal.ndjson` の 1 つだけであること、その dev:inode が
+host の `<mount 元>/journal.ndjson` と同じこと（`stat -L -c %d:%i`）。**満たさなければこの手順は使わない。** 新でも起動後に同じ確認をする。
+以下の「journal」「写し」「比較」はすべてこのファイルを指す。
+
 **MPP 受信の既知の制約**: 資格情報の再生防止ストアはプロセス内（`p5-inbound-rails-design.md`）で、**切り替えは再起動と同じく消える**。
 journal を写しても移らない。Router 自身の at-most-once は journal（quote の直列化と intent の状態）に依る。この制約が解消されるまで、
 MPP 受信で実価値を扱わない（testnet のみ）という既存の前提は切り替え後も変わらない。
@@ -742,21 +748,26 @@ MPP 受信で実価値を扱わない（testnet のみ）という既存の前�
 
 1. 新: `docker stop subetha-router`。検証中の journal が空であることを確かめ、directory を `/var/lib/subetha-router.verify-<時刻>` に退避して空にする
 2. 旧: 入口を閉じる `systemctl disable --now caddy`（`is-active` が `inactive`）→ `docker stop -t 60 subetha-router` → `docker update --restart no subetha-router`
-3. 旧: journal の全行が JSON として読め、末尾が改行で終わること。行数・バイト数・sha256 を記録（**引き渡し時点の写し**）
+3. 旧（止める前に済ませておく確認の再掲）: 上の「journal の配置」の確認が通っていること。旧: journal の全行が JSON として読め、末尾が改行で終わること。行数・バイト数・sha256 を記録（**引き渡し時点の写し**）
 4. 旧 → 新へ journal の directory を写す（`journal.ndjson` の sha256・行数・バイト数が一致。所有者 10001:10001）。引き渡し時点の写しを新にも別名で残す
 5. Elastic IP を旧から新へ付け替える（**付け替える EIP のアドレスを控えておく**）
 6. 新: §8b.5 の順序で `HOST_ADDRS4` を更新: guard timer と service を止める → `subetha-egress-verify --public-ipv4` の値が**控えた EIP と一致する**まで
    進まない（404 や旧アドレスは「付け替え未完了」）→ `/etc/subetha-egress.env` を書き換える → `subetha-egress apply` → guard timer を起動して `is-active`
 7. 新: `docker start subetha-router` → `healthy`、`/healthz`、起動ログの mode / label。**アプリ自身が journal を replay して起動したこと**が受け入れ条件
-   （JSON の検査は予備）。journal は引き渡し時点の写しと**先頭バイト列が一致**（`cmp -n <写しのバイト数>`）= 追記だけ
+   （JSON の検査は予備）。**新の Router が開いている journal が `<mount 元>/journal.ndjson` であること**（上の確認を新で行う）。
+   その journal は引き渡し時点の写しと**先頭バイト列が一致**（`cmp -n <写しのバイト数>`）= 追記だけ
 8. 新: **入口を閉じたまま** `subetha-egress-verify`（既定モード）を `failed 0`（公開 IPv4 の照合、DNS、行列を含む）
 9. 新: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz` と MCP の `tools/list`（AAAA や別の入口が無いことも確認）
 
-戻す:
+戻す（どの時点でも、次の 1 本の順序に合流する）:
 
-- **手順 7 より前**（新の Router をまだ起動していない）: Elastic IP を旧へ戻し、旧で `docker update --restart unless-stopped`、`docker start`、healthy、`systemctl enable --now caddy`
-- **手順 7 以降**: 新の Router と Caddy を止める。新の journal が引き渡し時点の写しと**バイト単位で同一**（`cmp`）なら上と同じ。**1 バイトでも増えていれば新が正**:
-  旧の journal を退避し、新の journal を旧へ写して（sha256 一致）から旧を起動する。古い journal のまま旧を起動しない
+1. 新: Caddy と Router を止める（`systemctl disable --now caddy`、`docker stop -t 60 subetha-router`。未起動なら不要）
+2. **使う journal を決める**: 新の Router を一度も起動していない（切り替え手順 7 より前）なら旧の journal のまま。起動していたなら、新の journal
+   （上で確かめた、Router が開いていたファイル）を引き渡し時点の写しと `cmp` する。**バイト単位で同一なら旧の journal のまま。1 バイトでも増えていれば新が正**:
+   旧の journal を別名に退避し、新の journal を旧へ写して sha256・バイト数が一致することを確かめる。古い journal のまま旧を起動しない
+3. Elastic IP を旧へ戻し、旧で `subetha-egress` を使っていなければそのまま、公開 IPv4 が戻ったことを IMDS で確かめる
+4. 旧: `docker update --restart unless-stopped subetha-router` → `docker start` → `healthy`、`/healthz`、Router が開いている journal が手順 2 で決めたファイルであること
+5. 旧: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz`
 
 切り替え後: 旧ホストは Router と Caddy を止めたまま数日置き、問題が無ければ終了する。
 

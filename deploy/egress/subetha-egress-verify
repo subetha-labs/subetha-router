@@ -167,7 +167,9 @@ capture_start() { rm -f "$3"; tcpdump -Z root -i "$1" -w "$3" -U "$2" >/dev/null
 capture_stop() { kill -INT "$(cat "$1.pid")" 2>/dev/null; wait "$(cat "$1.pid")" 2>/dev/null; rm -f "$1.pid"; sleep 1; cp -f "$1" "$EVID/" 2>/dev/null; }
 pkts()   { [ -s "$1" ] || { echo ERR; return; }; local o; o=$(tcpdump -nn -r "$1" ${2:+"$2"} 2>/dev/null) || { echo ERR; return; }; printf '%s' "$o" | grep -c .; }
 # absolute TCP sequence numbers of the initial SYNs in a capture (NAT and forwarding keep them): the identity of a probe packet
-syn_seqs() { [ -s "$1" ] || return 1; tcpdump -nn -S -r "$1" "tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn${2:+ and ($2)}" 2>/dev/null | sed -n 's/.* seq \([0-9][0-9]*\),.*/\1/p' | sort -u; }
+# The decoder's exit status is checked before its output is parsed: a failed read must not look like "no SYNs".
+syn_seqs() { [ -s "$1" ] || return 1; local o; o=$(tcpdump -nn -S -r "$1" "tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn${2:+ and ($2)}" 2>/dev/null) || return 1
+  printf '%s\n' "$o" | sed -n 's/.* seq \([0-9][0-9]*\),.*/\1/p' | sort -u; }
 # rules that rewrite TTL / hop limit would break "forwarded packets have a lower TTL than host-originated ones"
 ttl_rewrite_rules() { local a b; a=$(iptables-save 2>/dev/null) || return 1; b=$(ip6tables-save 2>/dev/null) || return 1
   printf '%s\n%s\n' "$a" "$b" | grep -cE -- '-j (TTL|HL)( |$)' || true; }
