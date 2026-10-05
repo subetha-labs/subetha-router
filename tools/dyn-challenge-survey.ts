@@ -11,7 +11,12 @@
  * MPP の challenge は 2 通りに記録する: 生の `WWW-Authenticate` の**パラメータ名**（未知の欄も見える）と、
  * SDK（`Challenge.deserialize`）が正規化した後の形（SDK が認識する欄だけ。未知の欄は落ちる）。
  *
- * usage: npx tsx tools/dyn-challenge-survey.ts https://… [https://… ...]
+ * `--profile base-sepolia-usdc` を付けると、設計 §3.3 (i) の offer の検査（T0-c の 3）を**この probe の中で**当てて、
+ * 各 offer が通るか・通らないならどの規則かを出す（製品の実装ではない。T8 が同じ規則を実装する）。
+ * **設計の検査の一部である**: 「`payTo` が運用者自身でない」は見ない（運用者のアドレスを持たない）。`asset` はアドレスとして
+ * 大文字小文字を無視して比べる（保存した offer との照合は別で、そちらはバイト単位）。
+ *
+ * usage: npx tsx tools/dyn-challenge-survey.ts [--profile base-sepolia-usdc] https://… [https://… ...]
  */
 import { Challenge } from "mppx";
 
@@ -83,6 +88,59 @@ function decodeBase64Json(raw: string): unknown {
   }
 }
 
+/** x402 送信のプロファイル（testnet）。運用者の本番の設定と同じ資産。 */
+const PROFILES: Readonly<Record<string, { network: string; asset: string; decimals: number; name: string; version: string; maxUpstreamAmount: bigint }>> = {
+  "base-sepolia-usdc": {
+    network: "eip155:84532",
+    asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+    decimals: 6,
+    name: "USDC",
+    version: "2",
+    maxUpstreamAmount: 100_000n,
+  },
+};
+const PROFILE = process.argv.includes("--profile") ? PROFILES[process.argv[process.argv.indexOf("--profile") + 1] ?? ""] : undefined;
+
+const REQUIRED = ["scheme", "network", "asset", "amount", "payTo", "maxTimeoutSeconds"];
+const DESCRIPTIVE = new Set(["description", "mimeType", "resource"]);
+
+/** 設計 §3.3 (i)・T0-c の 3 の規則。通れば `"pass"`、通らなければ最初に当たった規則の名前。 */
+function checkOffer(offer: unknown, profile: NonNullable<typeof PROFILE>): string {
+  if (typeof offer !== "object" || offer === null || Array.isArray(offer)) return "not_an_object";
+  const o = offer as Record<string, unknown>;
+  if (o["scheme"] !== "exact") return "scheme";
+  if (o["network"] !== profile.network) return "network";
+  if (typeof o["asset"] !== "string" || o["asset"].toLowerCase() !== profile.asset) return "asset";
+  if (typeof o["amount"] !== "string" || !/^(0|[1-9][0-9]{0,29})$/.test(o["amount"]) || o["amount"] === "0") return "amount_format";
+  if (BigInt(o["amount"]) > profile.maxUpstreamAmount) return "amount_over_limit";
+  if (typeof o["payTo"] !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(o["payTo"])) return "payTo";
+  // 設計は「ゼロ・運用者自身・token コントラクトでない」を求める。運用者のアドレスはこの probe には無いので見ない。
+  if (/^0x0{40}$/.test(o["payTo"])) return "payTo_zero";
+  if (o["payTo"].toLowerCase() === profile.asset) return "payTo_is_token";
+  if (typeof o["maxTimeoutSeconds"] !== "number" || !Number.isInteger(o["maxTimeoutSeconds"]) || o["maxTimeoutSeconds"] < 1 || o["maxTimeoutSeconds"] > 600) return "maxTimeoutSeconds";
+  for (const key of Object.keys(o)) {
+    if (REQUIRED.includes(key) || key === "extra" || DESCRIPTIVE.has(key)) continue;
+    if (key === "maxAmountRequired") {
+      if (o[key] !== o["amount"]) return "maxAmountRequired_differs";
+      continue;
+    }
+    return `unknown_field:${key.slice(0, 24)}`;
+  }
+  const extra = o["extra"];
+  if (typeof extra !== "object" || extra === null || Array.isArray(extra)) return "extra_missing";
+  const e = extra as Record<string, unknown>;
+  if (e["name"] !== profile.name || e["version"] !== profile.version) return "token_domain";
+  for (const key of Object.keys(e)) {
+    if (key === "name" || key === "version" || key === "bazaar") continue;
+    if (key === "decimals") {
+      if (e[key] !== profile.decimals) return "extra_decimals_differs";
+      continue;
+    }
+    return `unknown_extra:${key.slice(0, 24)}`;
+  }
+  return "pass";
+}
+
 async function survey(url: string): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = { host: new URL(url).host, pathLength: new URL(url).pathname.length, hasQuery: new URL(url).search !== "" };
   let response: Response;
@@ -104,6 +162,24 @@ async function survey(url: string): Promise<Record<string, unknown>> {
     out["x402Header"] = { bytes: paymentRequired.length, shape: shapeOf(decoded) };
     out["x402ResourceUrlEqualsRequestUrl"] = decoded?.resource?.url === url;
     out["x402AcceptsCount"] = Array.isArray(decoded?.accepts) ? decoded.accepts.length : null;
+    if (PROFILE !== undefined && Array.isArray(decoded?.accepts)) {
+      const verdicts = decoded.accepts.map((offer) => checkOffer(offer, PROFILE));
+      out["offerVerdicts"] = verdicts;
+      // 「上流の順に見て、検査を通る最初の 1 件」。その前に、応答全体の条件（402・v2・個数・resource の束縛）。
+      const version = (decoded as { x402Version?: unknown }).x402Version;
+      out["quoteWouldSelect"] =
+        response.status !== 402
+          ? "none (not a 402)"
+          : version !== 2
+            ? "none (not x402 v2)"
+            : decoded.accepts.length > 16
+              ? "none (more than 16 offers)"
+              : decoded.resource?.url !== url
+                ? "none (resource.url differs)"
+                : verdicts.indexOf("pass") === -1
+                  ? "none"
+                  : `offer #${verdicts.indexOf("pass") + 1}`;
+    }
   }
   // MPP: WWW-Authenticate: Payment …（複数の challenge・他の方式との併記もある）
   const authenticate = response.headers.get("www-authenticate");
