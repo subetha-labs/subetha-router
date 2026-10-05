@@ -13,6 +13,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { Challenge, Credential } from "mppx";
+
 import { createMppInbound, MPP_INBOUND_SCHEME } from "../../src/adapters/inbound/mpp.js";
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -63,8 +65,17 @@ async function issue(
   });
 }
 
+/**
+ * 発行 offer の challenge を**中に持つ** wire credential（公式の直列化。送金はしていないので hash は偽）。
+ * 封筒だけでなく wire の中身がどの quote のものかを adapter が見るので、試験も本物の形で作る。
+ */
+function wireFor(offer: InboundOffer, hash = `0x${"ab".repeat(32)}`): string {
+  const challenge = Challenge.deserialize(offer.extra["challenge"] as string);
+  return Credential.serialize({ challenge, payload: { hash, type: "hash" } } as Parameters<typeof Credential.serialize>[0]);
+}
+
 /** 発行 offer に対応する「正しい形」の credential（署名内容までは作らない）。 */
-function credentialFor(offer: InboundOffer, wire = "synthetic-wire"): PaymentCredential {
+function credentialFor(offer: InboundOffer, wire = wireFor(offer)): PaymentCredential {
   return {
     x402Version: 2,
     accepted: offer,
@@ -206,6 +217,27 @@ describe("mpp inbound adapter", () => {
       expect(rail.preflight(offer, credentialFor(offer), Date.now())).toEqual({ ok: true });
     });
 
+    it("rejects another quote's payment wrapped in this quote's envelope", async () => {
+      // 同じ route の quote A・B。A の支払い（wire）を、B の封筒（nonce・accepted）に入れて出す。
+      // 封筒だけを見る検査はすべて通る。止めるのは wire の中の challenge id の照合だけ。
+      const rail = railOf();
+      const [a, b] = await Promise.all([issue(rail), issue(rail)]);
+      const wrapped = credentialFor(b, wireFor(a));
+      expect(wrapped.payload.challengeNonce).toBe(b.extra.challengeNonce);
+      expect(rail.preflight(b, wrapped, Date.now())).toEqual({ ok: false, reason: "nonce_mismatch" });
+      // 正しい組み合わせは通る（検査が全拒否になっていないこと）。
+      expect(rail.preflight(a, credentialFor(a), Date.now())).toEqual({ ok: true });
+    });
+
+    it("rejects a wire credential that cannot be read", async () => {
+      const rail = railOf();
+      const offer = await issue(rail);
+      expect(rail.preflight(offer, credentialFor(offer, "not-a-real-credential"), Date.now())).toEqual({
+        ok: false,
+        reason: "nonce_mismatch",
+      });
+    });
+
     it("is synchronous (core does not await it)", async () => {
       // async にすると `.ok` が undefined になり全購入が preflight_failed で落ちる。
       const rail = railOf();
@@ -270,6 +302,23 @@ describe("mpp inbound adapter", () => {
         reason: "source_rejected",
       });
     });
+  });
+
+  it("verify and settle refuse another quote's payment even when called directly", async () => {
+    // core は必ず preflight を先に呼ぶが、adapter 単体でも同じ束縛を保つ。
+    let broadcasts = 0;
+    const rail = railOf({
+      broadcastForTest: async () => {
+        broadcasts += 1;
+        return { status: "success", reference: "0xdeadbeef" };
+      },
+    });
+    const [a, b] = await Promise.all([issue(rail), issue(rail)]);
+    const wrapped = credentialFor(b, wireFor(a));
+    expect(await rail.verify(b, wrapped)).toEqual({ isValid: false });
+    expect(await rail.settle(b, wrapped)).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    // 受領処理（SDK の claim）に進んでいない。
+    expect(broadcasts).toBe(0);
   });
 
   it("verify fails closed when the credential is unusable", async () => {

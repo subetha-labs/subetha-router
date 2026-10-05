@@ -17,7 +17,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 
-import { Challenge } from "mppx";
+import { Challenge, Credential } from "mppx";
 import { Mppx, tempo } from "mppx/server";
 import { Store } from "mppx";
 import { createClient as createViemClient } from "viem";
@@ -98,6 +98,24 @@ function unixSecondsOf(expires: unknown): number {
     throw new Error("mppx challenge expiry is not a positive instant");
   }
   return seconds;
+}
+
+/**
+ * wire credential が**中に持つ** challenge の id。読めなければ `undefined`。
+ *
+ * 封筒の `payload.challengeNonce` と `accepted` は**呼び出し側が自由に書ける**。SDK が検証するのは
+ * wire の中の challenge（HMAC・scope・memo）であって、封筒ではない。だから「封筒は quote B、中身は quote A の
+ * 支払い」という credential は、**中の id を発行 offer と突き合わせない限り**通ってしまう
+ * （同じ route の quote は scope が同じ。SDK の replay ストアはプロセス内なので、再起動後は同じ支払いが
+ * 別の quote で 2 度使える）。
+ */
+function embeddedChallengeIdOf(wire: string): string | undefined {
+  try {
+    const id: unknown = Credential.deserialize(wire).challenge.id;
+    return typeof id === "string" && id !== "" ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function createMppInbound(options: MppInboundOptions): InboundRail {
@@ -282,6 +300,12 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
       if (stableJson(accepted) !== stableJson(offer)) {
         return { ok: false, reason: "offer_mismatch" };
       }
+      // 封筒ではなく **wire の中の challenge** がこの quote のものであること（上の `embeddedChallengeIdOf`）。
+      // 同期・ローカルの復号だけで、SDK も RPC も呼ばない。
+      const wire = credential.payload["credential"];
+      if (typeof wire !== "string" || embeddedChallengeIdOf(wire) !== offer.extra.challengeNonce) {
+        return { ok: false, reason: "nonce_mismatch" };
+      }
       return { ok: true };
     },
 
@@ -293,6 +317,10 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
       const wire = credential.payload["credential"];
       if (typeof wire !== "string" || wire === "") {
+        return { isValid: false };
+      }
+      // preflight と同じ束縛をここでも見る（core の呼び出し順に依存させない）。
+      if (embeddedChallengeIdOf(wire) !== offer.extra.challengeNonce) {
         return { isValid: false };
       }
       try {
@@ -319,6 +347,13 @@ export function createMppInbound(options: MppInboundOptions): InboundRail {
       const wire = credential.payload["credential"];
       if (typeof wire !== "string" || wire === "") {
         // 資格情報の形が違う。**課金は起きていないと断定できる**数少ない場合。
+        return { outcome: "rejected", reason: "source_rejected" };
+      }
+      const embedded = embeddedChallengeIdOf(wire);
+      if (embedded !== undefined && embedded !== offer.extra.challengeNonce) {
+        // 中の challenge がこの quote のものではない。**この credential ではこの quote を受領できない**ので、
+        // 受領処理（SDK の claim）に進ませない（id は未認証の値なので「支払いが無い」ことの証明ではない）。
+        // 読めない wire は下で SDK に渡り `unknown` になる。
         return { outcome: "rejected", reason: "source_rejected" };
       }
       let receipt: unknown;
