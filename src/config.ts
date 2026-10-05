@@ -571,12 +571,31 @@ function parseDynamicLimits(value: unknown): DynamicLimits {
     if (!Object.hasOwn(DEFAULT_DYNAMIC_LIMITS, key)) {
       throw new ConfigError(`dynamic.limits.${key} is not a known limit`);
     }
-    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) {
       throw new ConfigError(`dynamic.limits.${key} must be a positive integer`);
     }
     limits[key] = raw;
   }
   return limits as unknown as DynamicLimits;
+}
+
+/**
+ * 動的側の予算。形は静的と同じだが、**起動時に**額と件数を検査する
+ * （静的の `parseBudget` は空でない文字列しか見ず、不正な額は予約のときに初めて落ちる。静的の挙動は変えない）。
+ */
+function parseDynamicBudget(value: Record<string, unknown>): BudgetLimits {
+  const budget = parseBudget(value);
+  if (!Number.isSafeInteger(budget.maxPurchases) || budget.maxPurchases < 1) {
+    throw new ConfigError("dynamic.budget.maxPurchases must be a positive integer");
+  }
+  budget.buckets.forEach((bucket, index) => {
+    for (const key of ["maxTotal", "maxPerPurchase"] as const) {
+      if (!AMOUNT_PATTERN.test(bucket[key]) || bucket[key] === "0") {
+        throw new ConfigError(`dynamic.budget.buckets[${index}].${key} must be a positive base-unit integer string`);
+      }
+    }
+  });
+  return budget;
 }
 
 function parseDynamic(value: unknown, routes: Readonly<Record<string, unknown>>): DynamicConfig {
@@ -590,14 +609,15 @@ function parseDynamic(value: unknown, routes: Readonly<Record<string, unknown>>)
   if (profiles.length === 0) {
     throw new ConfigError("dynamic.profiles must not be empty");
   }
-  const denyHosts = value["denyHosts"] ?? [];
+  // 既定にするのは**省略したときだけ**（`null` で拒否リストが黙って空になるのを防ぐ）。
+  const denyHosts = value["denyHosts"] === undefined ? [] : value["denyHosts"];
   if (!Array.isArray(denyHosts) || denyHosts.some((host) => typeof host !== "string" || !HOSTNAME_PATTERN.test(host))) {
     throw new ConfigError("dynamic.denyHosts must be an array of lowercase hostnames");
   }
   return {
     enabled: value["enabled"],
     profiles: Object.fromEntries(profiles.map(([profileId, profile]) => [profileId, parseDynamicProfile(profile, profileId, routes)])),
-    budget: parseBudget(requireRecord(value, "budget", "dynamic")),
+    budget: parseDynamicBudget(requireRecord(value, "budget", "dynamic")),
     limits: parseDynamicLimits(value["limits"]),
     denyHosts: denyHosts as string[],
   };

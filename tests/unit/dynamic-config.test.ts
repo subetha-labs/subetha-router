@@ -161,6 +161,17 @@ test.each<[string, unknown]>([
   ["denyHosts に URL", withDynamic(dynamicOf({ denyHosts: ["https://router.example.com/"] }))],
   ["limits に未知の欄", withDynamic(dynamicOf({ limits: { quotesPerMinuteGlobl: 1 } }))],
   ["limits が 0", withDynamic(dynamicOf({ limits: { maxOutstandingQuotes: 0 } }))],
+  ["limits が安全な整数の範囲外", withDynamic(dynamicOf({ limits: { maxOutstandingQuotes: 1e100 } }))],
+  ["limits が null", withDynamic(dynamicOf({ limits: null }))],
+  ["denyHosts が null", withDynamic(dynamicOf({ denyHosts: null }))],
+  ["動的予算の maxTotal が負", withDynamic(dynamicOf({ budget: { maxPurchases: 5, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "-1", maxPerPurchase: "1" }] } }))],
+  ["動的予算の maxPerPurchase が 0", withDynamic(dynamicOf({ budget: { maxPurchases: 5, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "10", maxPerPurchase: "0" }] } }))],
+  ["動的予算の maxPurchases が小数", withDynamic(dynamicOf({ budget: { maxPurchases: 1.5, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "10", maxPerPurchase: "1" }] } }))],
+  ["maxUpstreamAmount が 31 桁", withProfilePatch((p) => { p["maxUpstreamAmount"] = "1".repeat(31); })],
+  ["maxUpstreamAmount に先頭ゼロ", withProfilePatch((p) => { p["maxUpstreamAmount"] = "0100"; })],
+  ["decimals が小数", withProfilePatch((p) => { p["source"] = { ...(p["source"] as object), decimals: 6.5 }; })],
+  ["maxFee が不正", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), maxFee: "1.5" }; })],
+  ["fee.min が不正", withProfilePatch((p) => { p["fee"] = { flat: "0", bps: 0, min: "abc" }; })],
 ])("起動しない設定: %s", (_name, raw) => {
   expect(() => parseRouterConfig(raw)).toThrow(ConfigError);
 });
@@ -203,10 +214,58 @@ test("指紋はプロファイルのどの欄を変えても、enabled を変え
   expect(fingerprintOf(dynamicAuthoritativeTermsOf(domainChanged.dynamic!, domainChanged.dynamic!.profiles["dyn-mpp-to-x402"]!))).not.toBe(x402Base);
 });
 
+test("プロファイルの ID・送信レール・tokenDomain の名前も指紋を変える。キーの順序と省略／undefined は変えない", () => {
+  const base = parseRouterConfig(withDynamic(dynamicOf()));
+  const fpOf = (config: RouterConfig, id: string): string =>
+    fingerprintOf(dynamicAuthoritativeTermsOf(config.dynamic!, config.dynamic!.profiles[id]!));
+  const x402Base = fpOf(base, "dyn-mpp-to-x402");
+
+  // 同じ中身で ID だけ違うプロファイル。
+  const renamed = parseRouterConfig(withDynamic(dynamicOf({ profiles: { renamed: { ...mppToX402(), profileId: "renamed" } } })));
+  expect(fpOf(renamed, "renamed")).not.toBe(x402Base);
+  // tokenDomain の名前。
+  const named = parseRouterConfig(
+    withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": { ...mppToX402(), destination: { ...(mppToX402()["destination"] as object), tokenDomain: { name: "USD Coin", version: "2" } } } } })),
+  );
+  expect(fpOf(named, "dyn-mpp-to-x402")).not.toBe(x402Base);
+  // 送信レール（x402 → mpp。mpp に必要な欄も足す）。
+  const railChanged = parseRouterConfig(
+    withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": { ...mppToX402(), rail: "mpp", destination: { ...(mppToX402()["destination"] as object), feeAsset: PATHUSD, maxFee: "1" } } } })),
+  );
+  expect(fpOf(railChanged, "dyn-mpp-to-x402")).not.toBe(x402Base);
+
+  // キーの順序を逆にしても同じ。
+  const reversed = (value: unknown): unknown =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).reverse().map(([k, v]) => [k, reversed(v)]))
+      : value;
+  const reordered = parseRouterConfig(withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": reversed(mppToX402()) } })));
+  expect(fpOf(reordered, "dyn-mpp-to-x402")).toBe(x402Base);
+  // そのレールで使わない欄は解析で落ちるので、書いても書かなくても同じ。
+  const extra = parseRouterConfig(
+    withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": { ...mppToX402(), destination: { ...(mppToX402()["destination"] as object), feeAsset: undefined } } } })),
+  );
+  expect(fpOf(extra, "dyn-mpp-to-x402")).toBe(x402Base);
+});
+
+test("自分のプロパティとしての `constructor` は ID として引ける（継承したものは引けない）", () => {
+  const config = parseRouterConfig(
+    withDynamic(dynamicOf({ profiles: { constructor: { ...x402ToMpp(), profileId: "constructor" } } })),
+  );
+  expect(resolveProfile(config, "constructor")?.profileId).toBe("constructor");
+  expect(resolveProfile(config, "hasOwnProperty")).toBeUndefined();
+});
+
 test("頻度の上限・拒否ホスト・動的予算は指紋に入らない（支払いの条件ではない）", () => {
   const base = parseRouterConfig(withDynamic(dynamicOf()));
   const changed = parseRouterConfig(
-    withDynamic(dynamicOf({ limits: { maxOutstandingQuotes: 7 }, denyHosts: ["other.example.com"] })),
+    withDynamic(
+      dynamicOf({
+        limits: { maxOutstandingQuotes: 7 },
+        denyHosts: ["other.example.com"],
+        budget: { maxPurchases: 99, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "5", maxPerPurchase: "5" }] },
+      }),
+    ),
   );
   const fp = (config: RouterConfig): string =>
     fingerprintOf(dynamicAuthoritativeTermsOf(config.dynamic!, config.dynamic!.profiles["dyn-x402-to-mpp"]!));
