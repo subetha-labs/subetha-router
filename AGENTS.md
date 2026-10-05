@@ -1,6 +1,6 @@
-# SubEtha Router — ETHGlobal Tokyo
+# SubEtha Router
 
-- This submission implementation is distinct from the earlier technical feasibility PoC.
+- This implementation is distinct from the earlier technical feasibility PoC.
 - One controller, one dedicated worktree/branch, one writer. Before working: `git status --short --branch` and `git worktree list`. Never edit the PoC, chat, Provider, or video worktrees.
 - Requirements → independent review → design → independent review → tasks → independent review → implementation. Claude Code authors; Codex independently reviews read-only. Parent verifies artifacts and real execution.
 - Work locally on `subetha/tokyo-20260925`. Worktree-local `.claude_workflow/state.json` records current task, next action, actual worker and evidence; raw logs/prompts are ignored under `.claude_workflow/local/`.

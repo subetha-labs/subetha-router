@@ -1,6 +1,6 @@
 # SubEtha Router
 
-ETHGlobal Tokyo submission. A Router for when **the payment method an agent holds** does not match
+A Router for when **the payment method an agent holds** does not match
 **the payment method an API provider demands**.
 
 **Hold only x402? You can still use a provider that accepts only MPP.**
