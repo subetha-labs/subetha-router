@@ -164,7 +164,7 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
     `dynamic_unavailable` 503・それ以外 502。client は `quoteUrl` を足し、応答に `upstream`・`ownerKey` が無い・頼んだ URL と違う quote は受け入れない。
     MCP の送信元は入口が `X-Forwarded-For` の最後の値（無ければ接続元）から導いて client に渡し、client が `x-router-source` を付ける（外から来た同名のヘッダは読まない）。
     動的購入の結果は `result: { untrusted, source, contentType, body }` と `proof` で返し、静的の結果の形は変えない
-    レビューで直した点: status の再読取でも動的の結果は untrusted で包む／client の購入（R3）の期限は 90 秒（既定の 10 秒では Router が支払いを続けているのに `unknown` になる）／
+    レビューで直した点: status の再読取でも動的の結果は untrusted で包む／client の**動的**購入（R3）の期限は 120 秒（Router 側の最悪 96 秒に余裕。既定の 10 秒では Router が支払いを続けているのに `unknown` になる。静的の購入は従来どおり `timeoutMs`）／
     R1 に `dynamic`（`enabled` とプロファイルの一覧: レール・資産・桁・上限・手数料・開示。`payTo`・`tokenDomain` は出さない）を足し、client・MCP が落とさず返す
 
 ### T12 — 入口の資源上限（設計 §7.1、要件 FR-31・FR-35 の例外）

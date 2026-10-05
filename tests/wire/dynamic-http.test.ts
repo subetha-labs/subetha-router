@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { createRouterClient } from "../../src/client/index.js";
+import { createRouterClient, DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS } from "../../src/client/index.js";
 import type { QuoteView, RouterClient } from "../../src/client/types.js";
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
 import { createRouterCore, type RouterCore } from "../../src/core/orchestrator.js";
@@ -326,14 +326,20 @@ describe("client", () => {
     expect(listed.dynamic).toMatchObject({ enabled: true, profiles: [{ profileId: PROFILE_ID }] });
   });
 
-  test("購入の期限は quote の期限と別: 上流の支払いが長くても delivered（Router が続けているのに unknown にしない）", async () => {
+  test("動的購入の期限は quote の期限と別（既定 120 秒）: 上流の支払いが長くても delivered。静的の購入は従来どおり timeoutMs", async () => {
+    expect(DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS).toBe(120_000);
     const { client } = await boot();
-    const c = client(undefined, { timeoutMs: 400, executeTimeoutMs: 5_000 });
+    // 既定（executeTimeoutMs 未指定）でも、quote の期限 400 ms より長い支払いが通る。
+    const c = client(undefined, { timeoutMs: 400 });
     const quoted = await c.quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r1" });
     const quote = (quoted as { quote: QuoteView }).quote;
     outbound.payDelayMs = 1_200;
     const result = await c.execute({ quote, requestId: "r1", approval: { approved: true, quoteId: quote.quoteId }, credential: credentialFor(quote.source.offer) });
     expect(result).toMatchObject({ outcome: "delivered", snapshot: BODY });
+    // 静的 route の購入は timeoutMs のまま（同じ遅さなら unknown になる）。
+    const s = await c.quote({ routeId: STATIC_ROUTE, requestId: "s1" });
+    const sq = (s as { quote: QuoteView }).quote;
+    expect(await c.execute({ quote: sq, requestId: "s1", approval: { approved: true, quoteId: sq.quoteId }, credential: credentialFor(sq.source.offer) })).toMatchObject({ outcome: "unknown", reason: "transport_uncertain" });
   });
 
   test("quoteUrl は応答の upstream.url が頼んだ URL と違えば受け入れない", async () => {

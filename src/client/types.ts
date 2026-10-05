@@ -17,8 +17,9 @@ export interface RouterClientOptions {
   /** 1 要求の期限（quote・一覧・status）。既定 10 秒。 */
   readonly timeoutMs?: number;
   /**
-   * 購入（R3）の期限。既定 90 秒。動的購入は上流の読み直し・受信の検証と決済・RPC・上流への有料要求を含み、
-   * 最悪で 66 秒ほどかかる（設計 §3.4）。短く切ると、Router が支払いを続けているのに `unknown` になる。
+   * **動的購入**（R3）の期限。既定 120 秒（`DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS`）。静的 route の購入は従来どおり `timeoutMs`。
+   * 動的購入は、settle 前の上流の読み直し（5 秒）・受信 verify と settle（各 10 秒）・送信前の読み直し（5 秒）・送信（最悪 66 秒。設計 §3.4）を
+   * 含み、合計で 96 秒ほどになり得る。短く切ると、Router が支払いを続けているのに `unknown` になる。
    */
   readonly executeTimeoutMs?: number;
   /**

@@ -185,6 +185,9 @@ function errorCodeOf(body: unknown, fallback: string): string {
   return fallback;
 }
 
+/** 動的購入の期限の既定。Router 側の最悪の所要時間（約 96 秒）に余裕を足したもの。 */
+export const DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS = 120_000;
+
 export function createRouterClient(options: RouterClientOptions): RouterClient {
   const base = new URL(options.baseUrl);
   if (base.protocol !== "http:" && base.protocol !== "https:") {
@@ -193,7 +196,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   const origin = base.origin;
   const doFetch = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
-  const executeTimeoutMs = options.executeTimeoutMs ?? 90_000;
+  const executeTimeoutMs = options.executeTimeoutMs ?? DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS;
 
   /** principal 資格情報は**この origin への要求だけ**に付ける。 */
   function headers(extra: Readonly<Record<string, string>> = {}): Record<string, string> {
@@ -411,8 +414,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
             // 動的 quote の持ち主の証明（quote 文書から運ぶ）。
             ...(quote.ownerKey === undefined ? {} : { "x-router-owner-key": quote.ownerKey }),
           },
-          // 購入は長い（動的は最悪 66 秒ほど）。短く切ると Router が続けているのに unknown になる。
-          timeoutMs: executeTimeoutMs,
+          // 動的購入は長い（最悪 96 秒ほど）。短く切ると Router が続けているのに unknown になる。静的は従来どおり。
+          ...(quote.upstream === undefined ? {} : { timeoutMs: executeTimeoutMs }),
         });
       } catch {
         // 送金の有無が分からない。paymentId を残して R4 で突き合わせられるようにする。
