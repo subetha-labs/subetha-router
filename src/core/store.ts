@@ -150,7 +150,8 @@ export function dynamicFieldsOf(
   };
 }
 
-function intentFromCreated(paymentId: string, at: string, patch: Patch): Intent {
+/** `created` 行（控えの記録も同じ形）から intent を組む。動的の欄は予約が無くても読む側（控え）があるので、呼び出し側が `requireReservation` を決める。 */
+export function intentFromCreated(paymentId: string, at: string, patch: Patch, options: { readonly requireReservation?: boolean } = { requireReservation: true }): Intent {
   const source = asObject(patch["source"]);
   const destination = asObject(patch["destination"]);
   return {
@@ -179,7 +180,7 @@ function intentFromCreated(paymentId: string, at: string, patch: Patch): Intent 
     // 足し忘れると append 直後に欄が消え、照合が一切効かなくなる（設計 §8.1）。
     ...routeFingerprintOf(patch),
     // 動的購入の欄も明示的に復元する（足し忘れると、上流 URL と条件が消えた intent になる）。
-    ...dynamicFieldsOf(patch, { requireReservation: true }),
+    ...dynamicFieldsOf(patch, { requireReservation: options.requireReservation !== false }),
     approvalDeadlineMs: asNumber(patch["approvalDeadlineMs"]),
     updatedAt: at,
   };

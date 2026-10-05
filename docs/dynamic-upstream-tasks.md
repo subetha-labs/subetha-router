@@ -144,6 +144,12 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
   - **MPP の昇格前（設計 §6.3）**: verify が RPC の失敗で `false` → `attempt`（最初の credential の要約）が残り、quote は潰れず、**同じ credential で期限内に再試行して成立**する。再起動を挟んでも同じ。期限後は再試行できない
   - クラッシュ点（昇格の前・後・settle の途中）ごとの再起動後の状態（AC-21）
   - 持ち主: `quoteId`・`requestId`・`paymentId` を知っていても `ownerKey` 無しでは purchase・status・`offerFor`・終端状態の読取ができない。再起動後も（AC-20）
+  - **実装で決めた細部**: core の動的の流れは `src/core/dynamic.ts`（`createDynamicCore`）。入口は既存の `quote`／`purchase`／`status`／`offerFor` に
+    省略可能な引数（`upstream`・`source`・`ownerKey`）を足した形で、`upstream` が無ければ静的の処理のまま。持ち主の証明が合わない要求と別 principal の要求は
+    どちらも `unknown_quote`。門の拒否は `rate_limited`（理由は `terminalReason`／`reason`）、控えの上限は `dynamic_capacity`、控え・動的予算が使えない状態は
+    `dynamic_unavailable`。受信 offer の束縛は `dynamic|<profileId>|GET|<url>`。残高の事前確認は `RouterCoreOptions.dynamic.balanceOf`（T13 で能力から配線）
+    レビューで直した点: 1 件あたりの上限（`maxPerPurchase`）は quote の時点で見る（受信 offer を発行してから昇格で拒否しない）／受信の桁で正確に表せない額は拒否／
+    **昇格後の settle の拒否は `unknown`**（§6.5。未払いと確定しない）／宛先ホストの枠は settle の前に取り、送信の終わりまで持つ（settle 後の読み直し・送信も枠の中）
 
 ### T11 — HTTP・client・MCP（設計 §1.1・§2.1・§5・§8）
 
