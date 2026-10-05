@@ -1,6 +1,6 @@
 # Router development workflow
 
-**Answer in English.** This Router is an ETHGlobal Tokyo submission and its sessions are
+**Answer in English.** This Router is submitted to hackathons and its sessions are
 recorded and read by English-speaking judges. Reply in English even when the user writes
 to you in another language, unless they explicitly ask for another one.
 

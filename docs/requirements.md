@@ -1,4 +1,4 @@
-# SubEtha Router 要件定義 v1（ETHGlobal Tokyo 提出実装）
+# SubEtha Router 要件定義 v1
 
 対象リポジトリ: 本 worktree（`subetha/tokyo-20260925`）。本書は要件フェーズの成果物であり、設計・実装は含まない。
 
