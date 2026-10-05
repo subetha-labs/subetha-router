@@ -187,38 +187,55 @@ purchase 時の読み直しで比較するのは**保存した `DestinationOffer
 
 | 問い | 結果 |
 |---|---|
-| 最小の facade（`address`・`type: "local"`・`signTransaction` だけ）で支払いが通るか | **通る**。`signTransaction` は 1 回。`sign`・`signMessage`・`signTypedData`・`signAuthorization` は 1 度も呼ばれない |
+| 最小の facade（自分のプロパティは `address`・`type: "local"`・`signTransaction` の 3 つだけ）で支払いが通るか | **通る**。`signTransaction` は 1 回。SDK は facade に無い `keyType`・`source`・`nonceManager` も読みに来るが、`undefined` で先へ進む。`sign`・`signMessage`・`signTypedData`・`signAuthorization` は**読まれもしない** |
+| 迂回の試み（オフライン。呼び出し側を直接演じた） | 生の署名口は facade に**存在しない**（`typeof` が `undefined`）。別の受取先・100 倍の額を出力する serializer を `signTransaction` に渡しても、**署名されるのは検査した transaction**。対照として、渡された serializer を使う素の account は差し替えた中身に署名した |
 | SDK は `serializer` 引数を渡すか | **渡す**。したがって facade は渡された serializer を無視し、Router が選んだ Tempo の serializer（`viem/tempo` の `Transaction.serialize`）を使う。そうして署名した raw は送金の RPC に渡る raw と一致し、`0x76` の Tempo transaction として復号できる |
 | `signTransaction` に渡る欄 | `calls`（1 つ。`to`＝token、`data`＝`transferWithMemo(recipient, amount, memo)`。SDK は `abi`・`functionName`・`args`・`address` も付ける）、`chainId`、`from`、`gas`、`maxFeePerGas`、`maxPriorityFeePerGas`、`nonce: 0`、`nonceKey: 2^256−1`（expiring nonce）、`validBefore`（現在＋25 秒）、`type`、`feeToken`（下記）。ほかに `account`・`chain`・`nonceManager` と、値が無い `accessList`・`authorizationList`・`blobs`・`data`・`gasPrice`・`maxFeePerBlobGas`・`to`・`value` |
 | chain に `feeToken` を設定すると入るか | **入る**（署名に渡る transaction にも、送る raw にも）。設定しないと**欄ごと無い** |
-| 1 件の支払いで出る RPC | 実ノード（Tempo testnet、読取だけを転送）では **`eth_fillTransaction` → `eth_sendRawTransactionSync` の 2 回**。ノードが `gas`・`maxFeePerGas`・`maxPriorityFeePerGas` を埋める（実測: `gas 54278`、`type: "tempo"`）。`eth_fillTransaction` を持たないノードでは `eth_getBlockByNumber`・`eth_maxPriorityFeePerGas`・`eth_estimateGas` に落ちて計 5 回。**送金の RPC はどちらも 1 回** |
+| 1 件の支払いで出る RPC | **実ノードで測ったのは署名の手前まで**: 読取の RPC は `eth_fillTransaction` の 1 回で、そこで `gas`・`maxFeePerGas`・`maxPriorityFeePerGas` が埋まって署名に到達する（実測: `gas 54278`、`type: "tempo"`）。その後の送金（`eth_sendRawTransactionSync`）は**実ノードでは実行していない**（ソースからの見込みで計 2 回）。`eth_fillTransaction` を持たない stub では `eth_getBlockByNumber`・`eth_maxPriorityFeePerGas`・`eth_estimateGas` を経て送金まで計 5 回（実行して確認）。`eth_maxPriorityFeePerGas` も無いノードでは `eth_gasPrice` に落ちて 6 回になり得る（ソースから。未実行）。**送金の RPC は 1 回**で、viem は送金の RPC を再試行しない |
 | 残高の無い送信者 | `eth_fillTransaction` の段で `InsufficientBalance` になり、**署名に到達しない** |
 
-帰結: **gas と手数料の単価を決めるのは RPC ノード**（`eth_fillTransaction`）であり、Router は署名の境界で上限と照合する以外にそれを抑える手段を持たない。
+帰結: **gas と手数料の単価は RPC ノードの応答から決まる**（`eth_fillTransaction`、または手数料の見積り。viem は見積りに既定で 1.2 倍の係数を掛ける）。Router は署名の境界で上限と照合する以外にそれを抑える手段を持たない。
+上限は**損失の上限**であって、経済的な値や成功を保証しない: ノードは上限の内側で高い手数料を提案でき、少なすぎる gas を提案すれば手数料だけ取られて失敗する。
+上流の challenge は gas や単価を直接は指定できないが、支払いの内容（宛先・額・memo）を通して見積りに影響し得る。
 facade が組み直すときに引き継ぐのは、SDK・ノードが決めた `gas`・`maxFeePerGas`・`maxPriorityFeePerGas`・`nonce`・`nonceKey`・`validBefore` で、
 それぞれ範囲を確かめる（`nonceKey` は `2^256−1`、`nonce` は 0、`validBefore` は現在＋60 秒以内、`maxPriorityFeePerGas <= maxFeePerGas`）。
-T9 の試験が固定する RPC の回数は「送金 1 回、全体 5 回以下」とする（ノードの対応で 2 回か 5 回かが変わるため、等号では固定しない）。
+T9 の試験が固定する RPC の回数は、**再試行なし・成功する指定の fixture に対して**「送金 1 回、全体 5 回以下」とする（ノードの対応で回数が変わるため等号では固定しない。`eth_gasPrice` への落ち方は別の fixture で記録する）。
+
+**組み直しの契約（T9）**:
+- call は検証した `to`・`data`・`value`（0）だけを写す。SDK が付ける `abi`・`functionName`・`args`・`address` は捨てる（直列化に使われるのは前の 3 つだけ）
+- `account`・`chain`・`nonceManager` と、値の無い欄は捨てる。**値のある未対応の欄**（`feePayerSignature`、署名・multisig、`authorizationList`、`keyAuthorization`、`accessList`、`validAfter` など）があれば拒否する
+- `type` は、対応する形であることを確かめたうえで `"tempo"` に揃える（見積りに落ちた経路では SDK が `"eip1559"` と付けてくるが、`calls` があれば Tempo として直列化される）
+- 数値は有限の整数であること。`now < validBefore <= now + 60`、`gas > 0`、`maxFeePerGas > 0`、`0 <= maxPriorityFeePerGas <= maxFeePerGas`、`nonceKey === 2^256 − 1`、`nonce === 0`
 
 *T0-b: 手数料の実額と換算*（`tools/dyn-mpp-fee-probe.ts`。本番の journal にある**既に送った** MPP 送信 13 件の transaction と receipt を公開 RPC から読んだだけ）
 
 | 項目 | 結果 |
 |---|---|
 | 手数料の徴収の現れ方 | receipt に、送信者から fee manager（`0xfeec…`）への Transfer として出る。receipt は `feeToken`・`feePayer` を持つ |
-| 換算 | **手数料（6 桁の資産の base units）= ceil(gasUsed × effectiveGasPrice / 10^12)**。13 件すべてで実額と**一致** |
+| 換算 | **手数料（6 桁の資産の base units）= ceil(gasUsed × effectiveGasPrice / 10^12)**。13 件すべてで実額と**一致**（fee manager の正確なアドレス宛て・receipt の `feeToken`・送信者から、の Transfer が各 1 件。fee manager からの戻りは 0 件） |
 | 署名前に分かる上限 | **ceil(gas × maxFeePerGas / 10^12)**。13 件すべてで実額以上（実額 29〜478 に対し上限 79〜706） |
 | 実額の幅 | 元本 10000（0.01）に対し **29・276〜277・478 base units**（0.000029〜0.000478）。`gasUsed` は 13 件とも 46683 で、差は単価（`effectiveGasPrice` 6.0e8〜1.02e10、約 17 倍）による |
 | 手数料の資産 | 過去の 13 件は transaction に `feeToken` を**指定していない**が、receipt の `feeToken` は 13 件とも pathUSD（`0x20c0…`）。指定が無いときの決まり方はチェーン側の規則で、**本書はそれに依らず `feeToken` の明示を要求する** |
 
-換算の限界: 10^12 は「単価は 18 桁、手数料の資産は 6 桁」という関係から来ており、**6 桁の資産でしか確かめていない**。
-`feeAsset` の decimals が 6 でないプロファイルは、同じ測定をするまで有効にしない。式は 13 件の標本と一致しただけで、Tempo の仕様書と突き合わせた証明ではない。
-署名の境界は「**ceil(gas × maxFeePerGas / 10^12) <= maxFee**」を確かめる。実額はこの上限を超えない（`gasUsed <= gas`、`effectiveGasPrice <= maxFeePerGas`）。
+**この換算と上限は「観測と一致した」段階で、保証としては未確立**（M-1 は**一部だけ済**）:
+
+- 10^12 は「単価は 18 桁、手数料の資産は 6 桁」という関係に合い、優先手数料は `maxFeePerGas` に含まれる（別に足さない）。ここまでは手元のコードと矛盾しない
+- しかし手数料の**徴収そのもの**（Fee AMM を通す換算、その差額、丸め、返金）は導入済みのパッケージには実装が無く、チェーン側の規則である。
+  `feeToken` が検証者の受け取る資産と違う場合に送信者の負担が増えるかどうかを、手元では確かめられない
+- 観測したのは **pathUSD を手数料に使った 13 件だけ**。他の資産（6 桁であっても）には当てはめない
+
+したがって: 署名の境界は「ceil(gas × maxFeePerGas / 10^12) <= maxFee」を確かめるが、**これが実際の負担の上限であることは、Tempo の手数料の仕様で
+AMM と返金の扱いを確認するまで主張しない**。確認が済むまで、MPP 送信のプロファイルは `feeAsset` = pathUSD に限り、
+T16 の G-2（testnet の実決済）で receipt の実額が上限以下であることを毎件確かめる。仕様で上限が確立できなければ、MPP 送信のプロファイルは有効にしない。
 
 値の案（G-1 で owner が決める）: `maxFee` は **5000 base units**（0.005。観測した上限の最大 706 の約 7 倍。単価がさらに上がると支払いを拒否する側に倒れる）。
 手数料規則は、元本 10000 に対し送信手数料が最大 478（約 4.8%）だったことから、**定額で賄う**のが分かりやすい（例: `flat 1000`・`bps 0`・`min 1000`。
 0.001 を上乗せし、観測した最大の約 2 倍）。率で取ると少額の購入で送信手数料を賄えない。
+**`flat 1000` が賄うのは観測した範囲であって、許可する上限（`maxFee 5000`）ではない**: 単価が上がった支払いでは、1 件あたり最大 4000 base units の送信手数料が運用者の持ち出しになり得る。持ち出しを無くすなら `flat` を `maxFee` 以上にする。
 
-**まだ示していないこと**: facade が**拒否すべき入力**（call 2 つ、別の `to`、`feeToken` の不一致、`keyAuthorization`、serializer の差し替え、生の署名）で
-元の account が呼ばれないこと。これは T9 の試験で確かめる。実ノードでの**新しい**送金は行っていない。
+**まだ示していないこと**: 製品の facade が**拒否すべき入力**（call 2 つ、別の `to`、`feeToken` の不一致、`keyAuthorization` など）で元の account を呼ばないこと。
+probe が示したのは「生の署名口が無い」「serializer の差し替えが効かない」の 2 点で、欄ごとの拒否は T9 の実装と試験で確かめる。実ノードでの**新しい**送金は行っていない。
 
 ### 3.4 上流から受け取るものの上限と、応答の扱い（FR-27・FR-28）
 
@@ -476,7 +493,7 @@ MCP の `subject` はこれらをそのまま含め、`nextStep` に同じ内容
 
 | ID | 内容 | 方法 | 使い道 |
 |---|---|---|---|
-| M-1（**済**。§3.3 の T0-b） | MPP 送信の実手数料と、`gas × maxFeePerGas` から `feeAsset` の額への換算 | **既存の**送信 tx の receipt を読む（新しい支払いはしない） | `maxFee`・手数料規則、§3.3 |
+| M-1（**一部済**: pathUSD での観測と換算式。**仕様での上限の確立は未了**。§3.3 の T0-b） | MPP 送信の実手数料と、`gas × maxFeePerGas` から `feeAsset` の額への換算 | **既存の**送信 tx の receipt を読む（新しい支払いはしない） | `maxFee`・手数料規則、§3.3 |
 | M-2（**済**。§3.3 の T0-a） | SDK が包んだ account の `signTransaction` と送金 RPC に渡す実物の形、chain の `feeToken` が入ること | fixture（署名のみ・送信しない）。足りなければ **testnet で 1 件の新しい支払い**（owner の了承済みの範囲: testnet・使い捨て口座） | §3.3 (ii)(iii) |
 | M-3 | 実 challenge の欄の一覧（Provider A・B と、公開されている第三者の x402／MPP エンドポイント数件） | 未払いの読取のみ | §3.3 (i) の許可キー |
 | M-4 | 第三者 Provider での quote 成立率 | 未払いの読取のみ | §11 の互換性の制約が実用に耐えるか |

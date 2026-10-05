@@ -60,18 +60,20 @@ async function forward(method: string, params: unknown): Promise<unknown> {
 async function run(options: { chainFeeToken: boolean }): Promise<Record<string, unknown>> {
   const inner = privateKeyToAccount(generatePrivateKey());
   const signCalls: Record<string, unknown>[] = [];
-  const refused: string[] = [];
   let signedRaw: string | undefined;
 
-  /** SDK に見せる最小の account。持つのは address・type・signTransaction だけ。 */
-  const facade = {
+  /**
+   * SDK に見せる最小の account。**自分のプロパティは address・type・signTransaction の 3 つだけ**。
+   * Proxy で包み、SDK が読もうとしたプロパティ名をすべて記録する（無いものは `undefined` が返る）。
+   */
+  const propertyReads = new Set<string>();
+  const target = {
     address: FROM ?? inner.address,
     type: "local" as const,
-    source: "probe",
-    publicKey: inner.publicKey,
     async signTransaction(transaction: Record<string, unknown>, args?: { serializer?: unknown }): Promise<Hex> {
       signCalls.push({
         keys: Object.keys(transaction).sort(),
+        definedKeys: Object.keys(transaction).filter((key) => transaction[key] !== undefined).sort(),
         transaction: jsonSafe(transaction),
         serializerPassed: typeof args?.serializer === "function",
       });
@@ -84,13 +86,12 @@ async function run(options: { chainFeeToken: boolean }): Promise<Record<string, 
       return signedRaw as Hex;
     },
   };
-  // 存在しないはずの署名口を呼ばれたら記録して拒否する（呼ばれないことを確かめる）。
-  for (const name of ["sign", "signMessage", "signTypedData", "signAuthorization"]) {
-    (facade as Record<string, unknown>)[name] = async () => {
-      refused.push(name);
-      throw new Error(`facade refuses ${name}`);
-    };
-  }
+  const facade = new Proxy(target, {
+    get(object, property, receiver) {
+      if (typeof property === "string") propertyReads.add(property);
+      return Reflect.get(object, property, receiver);
+    },
+  });
 
   const rpc: { method: string; params: unknown }[] = [];
   const txHash = `0x${"b0".repeat(32)}`;
@@ -199,7 +200,9 @@ async function run(options: { chainFeeToken: boolean }): Promise<Record<string, 
     credentialCarriesTheSentHash: credentialHash === txHash,
     signTransactionCalls: signCalls.length,
     signTransactionInput: signCalls[0],
-    refusedSigningEntrypointsCalled: refused,
+    // facade に無いプロパティのうち、SDK が読みに来たもの（`undefined` を受け取って先へ進めた）。
+    propertiesReadByTheSdk: [...propertyReads].sort(),
+    ownPropertiesOfTheFacade: Object.keys(target).sort(),
     rpcMethods: rpc.map((c) => c.method),
     sendCalls: sent.length,
     sentRawEqualsSignedRaw: raw !== undefined && raw === signedRaw,
@@ -207,4 +210,53 @@ async function run(options: { chainFeeToken: boolean }): Promise<Record<string, 
   };
 }
 
-console.log(JSON.stringify({ realRpcReads: REAL_RPC_READS, withChainFeeToken: await run({ chainFeeToken: true }), withoutChainFeeToken: await run({ chainFeeToken: false }) }, null, 1));
+/**
+ * 迂回の試み（オフライン）。SDK ではなく「範囲外の署名をさせようとする呼び出し側」を直接演じる。
+ * 1. 生の署名（`sign({hash})`）とその他の署名口は、facade に**存在しない**
+ * 2. `signTransaction` に別の transaction を出力する serializer を渡しても、署名されるのは検査した transaction
+ */
+async function bypassAttempts(): Promise<Record<string, unknown>> {
+  const inner = privateKeyToAccount(generatePrivateKey());
+  const facade = {
+    address: inner.address,
+    type: "local" as const,
+    async signTransaction(transaction: Record<string, unknown>): Promise<Hex> {
+      // 2 番目の引数（serializer）は受け取らない。
+      return (await inner.signTransaction(transaction as never, { serializer: TempoTransaction.serialize as never })) as Hex;
+    },
+  };
+  const { encodeFunctionData } = await import("viem");
+  const transfer = (recipient: `0x${string}`, amount: bigint) => ({
+    to: TOKEN,
+    data: encodeFunctionData({ abi, functionName: "transfer", args: [recipient, amount] }),
+  });
+  const approved = {
+    chainId: CHAIN_ID,
+    calls: [transfer(RECIPIENT, 10000n)],
+    gas: 100000n,
+    maxFeePerGas: 2_000_000_000n,
+    maxPriorityFeePerGas: 1n,
+    nonceKey: 2n ** 256n - 1n,
+    nonce: 0,
+    validBefore: Math.floor(Date.now() / 1000) + 25,
+    feeToken: TOKEN,
+    type: "tempo",
+  };
+  const attacker = "0x000000000000000000000000000000000000dEaD" as const;
+  // 検査をすり抜けた後で中身を差し替える serializer（別の受取先・100 倍の額）。
+  const maliciousSerializer = (_tx: unknown, signature?: unknown): Hex =>
+    TempoTransaction.serialize({ ...approved, calls: [transfer(attacker, 1_000_000n)] } as never, signature as never) as Hex;
+  const raw = await (facade.signTransaction as (tx: unknown, args: unknown) => Promise<Hex>)(approved, { serializer: maliciousSerializer });
+  const decoded = TxEnvelopeTempo.deserialize(raw as never);
+  const fn = decodeFunctionData({ abi, data: decoded.calls?.[0]?.data ?? "0x" });
+  // 比較: 渡された serializer をそのまま使う account なら、差し替えた中身に署名してしまう。
+  const naive = await inner.signTransaction(approved as never, { serializer: maliciousSerializer as never });
+  const naiveFn = decodeFunctionData({ abi, data: TxEnvelopeTempo.deserialize(naive as never).calls?.[0]?.data ?? "0x" });
+  return {
+    signingEntrypointsOnTheFacade: ["sign", "signMessage", "signTypedData", "signAuthorization"].map((name) => `${name}: ${typeof (facade as Record<string, unknown>)[name]}`),
+    withSubstitutedSerializer: { recipient: fn.args?.[0], amount: String(fn.args?.[1]), signedTheApprovedTransaction: fn.args?.[0] === RECIPIENT && fn.args?.[1] === 10000n },
+    positiveControl_accountThatHonoursTheSerializer: { recipient: naiveFn.args?.[0], amount: String(naiveFn.args?.[1]) },
+  };
+}
+
+console.log(JSON.stringify({ realRpcReads: REAL_RPC_READS, bypassAttempts: REAL_RPC_READS ? "skipped (offline only)" : await bypassAttempts(), withChainFeeToken: await run({ chainFeeToken: true }), withoutChainFeeToken: await run({ chainFeeToken: false }) }, null, 1));
