@@ -17,15 +17,20 @@ import { createSubethaInbound } from "./adapters/inbound/subetha.js";
 import { createMppInbound } from "./adapters/inbound/mpp.js";
 import { createX402Inbound } from "./adapters/inbound/x402.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
+import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
-import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type TransportEvent } from "./net/guarded-fetch.js";
+import { DYNAMIC_RESPONSE_LIMITS } from "./net/bounded-body.js";
+import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
+import { denyHostsOf } from "./net/upstream-url.js";
 import {
   ConfigError,
   loadRuntimeConfig,
   routeBindingOf,
+  type DynamicProfile,
   type RouteConfig,
   type RuntimeConfig,
 } from "./config.js";
+import { DynamicGate } from "./core/dynamic-gate.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
 import type { InboundOffer, InboundRail } from "./ports/inbound.js";
@@ -66,6 +71,31 @@ export interface RouterCapabilities {
    * `tests/fixtures/router-*-process.ts` のような fixture 起動だけが渡す。本番の入口は渡さない。
    */
   readonly fixtureFacilitators?: true;
+  /**
+   * **試験専用。** 動的上流 URL の経路の transport を、本番と同じ選択肢（loopback 不可・DNS の期限・ヘッダの上限・門の `admit`）
+   * から fixture 側が組む（宛先の差し替えを足すため）。本番の入口は渡さない。返った transport が loopback を許す・DNS に期限が
+   * 無いものなら起動を止める。
+   */
+  readonly dynamicTransportForTest?: (base: GuardedTransportOptions) => GuardedTransport;
+}
+
+/** 動的上流 URL の配線が core に渡すもの。 */
+export interface DynamicWiring {
+  readonly gate: DynamicGate;
+  readonly balanceOf?: (profileId: string, asset: string) => Promise<bigint>;
+  /** 起動時の非同期の確認（MPP 能力の client）。 */
+  readonly verify: () => Promise<void>;
+}
+
+/** 受信 offer の束縛から動的プロファイルの ID を読む（`dynamicBindingOf` の逆）。動的でなければ `undefined`。 */
+function profileIdOfBinding(binding: string): string | undefined {
+  const parts = binding.split("|");
+  if (parts.length !== 4 || parts[0] !== "dynamic" || parts[2] !== "GET") return undefined;
+  try {
+    return decodeURIComponent(parts[1]!);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -75,6 +105,7 @@ export interface RouterCapabilities {
 function railByRoute(
   routes: Readonly<Record<string, { readonly rail?: string }>>,
   rails: Readonly<Record<string, OutboundRail>>,
+  profiles: Readonly<Record<string, DynamicProfile>> = {},
 ): OutboundRail {
   const byRoute = new Map<string, OutboundRail>();
   for (const [routeId, route] of Object.entries(routes)) {
@@ -83,6 +114,14 @@ function railByRoute(
       throw new SignerNotAuthorizedError();
     }
     byRoute.set(routeId, rail);
+  }
+  // 動的プロファイルも同じ Map で引く（ID の名前空間は route と共通）。
+  for (const [profileId, profile] of Object.entries(profiles)) {
+    const rail = rails[profile.rail];
+    if (rail === undefined) {
+      throw new SignerNotAuthorizedError();
+    }
+    byRoute.set(profileId, rail);
   }
   const railFor = (routeId: string): OutboundRail => {
     const rail = byRoute.get(routeId);
@@ -110,9 +149,18 @@ function railByRoute(
 function inboundByRoute(
   routes: Readonly<Record<string, RouteConfig>>,
   rails: Readonly<Record<string, InboundRail>>,
+  profiles: Readonly<Record<string, DynamicProfile>> = {},
 ): InboundRail {
   const byRoute = new Map<string, InboundRail>();
   const byBinding = new Map<string, InboundRail>();
+  for (const profile of Object.values(profiles)) {
+    const rail = rails[`${profile.sourceRail}:${profile.profileId}`];
+    if (rail === undefined) {
+      throw new ConfigError(`dynamic.profiles.${profile.profileId}.sourceRail has no configured inbound rail`);
+    }
+    // 動的の束縛は URL ごとに違うので、束縛からプロファイル ID を読んで引く（`forOffer`）。
+    byRoute.set(profile.profileId, rail);
+  }
   for (const route of Object.values(routes)) {
     const sourceRail = route.sourceRail ?? "subetha";
     // x402 / mpp 受信は受取先が route ごとなので `<rail>:<routeId>` で引く。
@@ -138,7 +186,8 @@ function inboundByRoute(
     return rail;
   };
   const forOffer = (offer: InboundOffer): InboundRail => {
-    const rail = byBinding.get(offer.extra.routeBinding);
+    const profileId = profileIdOfBinding(offer.extra.routeBinding);
+    const rail = profileId === undefined ? byBinding.get(offer.extra.routeBinding) : profiles[profileId] === undefined ? undefined : byRoute.get(profileId);
     if (rail === undefined) {
       // 発行していない束縛の offer は扱わない。
       throw new Error("no inbound rail for offer route binding");
@@ -172,11 +221,15 @@ export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
-): { inbound: InboundRail; outbound: OutboundRail } {
+): { inbound: InboundRail; outbound: OutboundRail; dynamic?: DynamicWiring } {
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
       throw new SignerNotAuthorizedError();
+    }
+    if (config.router.dynamic !== undefined) {
+      // 合成レールには動的経路が無い（上流の URL を受け取ると例外になる）。設定があっても組まない。
+      throw new ConfigError("dynamic upstream URLs are not available with the synthetic rails");
     }
     return {
       inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl, transport: transportFor(true, report) }),
@@ -189,10 +242,52 @@ export function composeRails(
     throw new SignerNotAuthorizedError();
   }
 
-  // 経路ごとに必要な能力だけを要求する（レール B だけの構成でも A の鍵を要求しない）。
-  const railsInUse = new Set(
-    Object.values(config.router.routes).map((route) => route.rail ?? "x402"),
-  );
+  /**
+   * 動的上流 URL（設計 §3.1・§7.3）。transport は route 用とは別のインスタンスで、**loopback を許さず**、名前解決に期限、
+   * 応答ヘッダに上限、接続の前に宛先アドレスの枠（門）。上流・facilitator・RPC のすべてがこれを通る。
+   */
+  const dynamicConfig = config.router.dynamic;
+  const profiles = dynamicConfig?.profiles ?? {};
+  const gate = dynamicConfig === undefined ? undefined : new DynamicGate({ limits: dynamicConfig.limits });
+  const dynamicTransport = ((): GuardedTransport | undefined => {
+    if (dynamicConfig === undefined || gate === undefined) return undefined;
+    const base: GuardedTransportOptions = {
+      allowLoopback: false,
+      report,
+      maxHeaderSize: DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes,
+      dns: { timeoutMs: 3_000, maxInFlight: 16 },
+      admit: (addresses) => {
+        const admitted = gate.admitAddresses(addresses);
+        return admitted.ok ? admitted.lease : undefined;
+      },
+    };
+    const transport = capabilities.dynamicTransportForTest === undefined ? createGuardedTransport(base) : capabilities.dynamicTransportForTest(base);
+    if (transport.allowLoopback || !transport.boundsDns) {
+      throw new ConfigError("the dynamic transport must not allow loopback and must bound DNS");
+    }
+    return transport;
+  })();
+  // 自分自身と依存先には向けない（設計 §7.4）: facilitator・上流・自分の canonical の各ホスト名。
+  const denyHosts =
+    dynamicConfig === undefined
+      ? []
+      : denyHostsOf(dynamicConfig.denyHosts, [
+          real.subethaFacilitatorUrl,
+          real.x402InboundFacilitatorUrl,
+          config.http.canonicalBaseUrl,
+          ...Object.values(real.upstreams),
+        ]);
+  const dynamicOptionsFor = (rail: "x402" | "mpp") => {
+    if (dynamicTransport === undefined) return {};
+    const own = Object.fromEntries(Object.entries(profiles).filter(([, profile]) => profile.rail === rail));
+    return Object.keys(own).length === 0 ? {} : { dynamic: { profiles: own, transport: dynamicTransport, denyHosts } };
+  };
+
+  // 経路ごとに必要な能力だけを要求する（レール B だけの構成でも A の鍵を要求しない）。プロファイルのレールも数える。
+  const railsInUse = new Set([
+    ...Object.values(config.router.routes).map((route) => route.rail ?? "x402"),
+    ...Object.values(profiles).map((profile) => profile.rail),
+  ]);
   /** そのレールが担当する経路の上流だけを渡す（A の検査を B の URL に掛けない）。 */
   const upstreamsFor = (rail: string): Record<string, string> =>
     Object.fromEntries(
@@ -213,6 +308,7 @@ export function composeRails(
         upstreams: upstreamsFor(rail),
         capability,
         transport: transportFor(capability.kind === "non-signing-fixture", report),
+        ...dynamicOptionsFor("x402"),
       });
       continue;
     }
@@ -225,6 +321,7 @@ export function composeRails(
         upstreams: upstreamsFor(rail),
         capability,
         transport: transportFor(capability.kind === "non-signing-fixture", report),
+        ...dynamicOptionsFor("mpp"),
       });
       continue;
     }
@@ -240,9 +337,9 @@ export function composeRails(
       transport: transportFor(inboundLoopback, report),
     }),
   };
-  const usesX402Inbound = Object.values(config.router.routes).some(
-    (route) => route.sourceRail === "x402",
-  );
+  const usesX402Inbound =
+    Object.values(config.router.routes).some((route) => route.sourceRail === "x402") ||
+    Object.values(profiles).some((profile) => profile.sourceRail === "x402");
   if (usesX402Inbound) {
     if (real.x402InboundFacilitatorUrl === undefined) {
       throw new ConfigError(
@@ -267,11 +364,22 @@ export function composeRails(
           : { maxTimeoutSeconds: real.x402InboundOfferSeconds }),
       });
     }
+    // 動的プロファイルの受信（x402）: 署名を quote に束縛し、transport は動的用（loopback 不可）。
+    for (const profile of Object.values(profiles)) {
+      if (profile.sourceRail !== "x402" || dynamicTransport === undefined) continue;
+      inboundRails[`x402:${profile.profileId}`] = createX402Inbound({
+        facilitatorUrl: real.x402InboundFacilitatorUrl,
+        payTo: profile.source.payTo,
+        transport: dynamicTransport,
+        bindAuthorizationNonce: true,
+        ...(real.x402InboundOfferSeconds === undefined ? {} : { maxTimeoutSeconds: real.x402InboundOfferSeconds }),
+      });
+    }
   }
 
-  const usesMppInbound = Object.values(config.router.routes).some(
-    (route) => route.sourceRail === "mpp",
-  );
+  const usesMppInbound =
+    Object.values(config.router.routes).some((route) => route.sourceRail === "mpp") ||
+    Object.values(profiles).some((profile) => profile.sourceRail === "mpp");
   if (usesMppInbound) {
     const secretKey = real.mppInboundSecret;
     if (secretKey === undefined) {
@@ -303,11 +411,50 @@ export function composeRails(
         maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
       });
     }
+    // 動的プロファイルの受信（MPP）: transport は動的用（loopback 不可）。
+    for (const profile of Object.values(profiles)) {
+      if (profile.sourceRail !== "mpp" || dynamicTransport === undefined) continue;
+      const chainId = Number(profile.source.network.replace(/^eip155:/, ""));
+      if (!Number.isInteger(chainId) || chainId <= 0) {
+        throw new ConfigError(`dynamic.profiles.${profile.profileId}.source.network must be eip155:<chainId> for mpp inbound`);
+      }
+      inboundRails[`mpp:${profile.profileId}`] = createMppInbound({
+        secretKey,
+        recipient: profile.source.payTo,
+        currency: profile.source.asset,
+        chainId,
+        transport: dynamicTransport,
+        maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
+      });
+    }
   }
 
+  const dynamic: DynamicWiring | undefined =
+    gate === undefined
+      ? undefined
+      : {
+          gate,
+          balanceOf: async (profileId, asset) => {
+            const profile = profiles[profileId];
+            const capability = profile?.rail === "x402" ? capabilities.evmSigning : profile?.rail === "mpp" ? capabilities.mppTempo : undefined;
+            if (capability?.balanceOf === undefined) {
+              // `dynamicCoreOptionsOf` が全プロファイルに能力があるときだけ渡すので、ここには来ない。来たら不足として扱う。
+              throw new Error("balance unavailable");
+            }
+            return capability.balanceOf(asset);
+          },
+          verify: async () => {
+            const mpp = Object.values(profiles).some((profile) => profile.rail === "mpp");
+            if (mpp && capabilities.mppTempo !== undefined) {
+              await assertDynamicMppCapability(capabilities.mppTempo, profiles);
+            }
+          },
+        };
+
   return {
-    inbound: inboundByRoute(config.router.routes, inboundRails),
-    outbound: railByRoute(config.router.routes, rails),
+    inbound: inboundByRoute(config.router.routes, inboundRails, profiles),
+    outbound: railByRoute(config.router.routes, rails, profiles),
+    ...(dynamic === undefined ? {} : { dynamic }),
   };
 }
 
@@ -400,6 +547,8 @@ export function warnIfInternalUpstream(
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
   const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"));
   const rails = composeRails(config, capabilities);
+  // 動的プロファイルの MPP 能力の起動時の確認（client が素の http transport で、プロファイルの chain のものか）。
+  await rails.dynamic?.verify();
 
   mkdirSync(path.dirname(path.resolve(config.journalPath)), { recursive: true });
   if (config.adapterMode === "real" && config.real !== undefined) {
@@ -413,6 +562,7 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     outbound: rails.outbound,
     // 拒否の理由を運用者に伝える（固定文のみ。値は渡さない）。
     note: (message) => process.stderr.write(`${message}\n`),
+    ...(rails.dynamic === undefined ? {} : { dynamic: dynamicCoreOptionsOf(rails.dynamic, capabilities, config) }),
   });
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。
@@ -468,6 +618,18 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+}
+
+/**
+ * core に渡す動的の配線。残高の検査（設計 §6.6）は core では「`balanceOf` があれば検査、無ければしない」の 1 本なので、
+ * **全プロファイルの能力が `balanceOf` を持つときだけ**渡す（一部だけだと、持たない方の購入が常に残高不足になる）。
+ */
+export function dynamicCoreOptionsOf(wiring: DynamicWiring, capabilities: RouterCapabilities, config: RuntimeConfig): { gate: DynamicGate; balanceOf?: (profileId: string, asset: string) => Promise<bigint> } {
+  const profiles = Object.values(config.router.dynamic?.profiles ?? {});
+  const allBalance =
+    profiles.length > 0 &&
+    profiles.every((profile) => (profile.rail === "x402" ? capabilities.evmSigning?.balanceOf !== undefined : capabilities.mppTempo?.balanceOf !== undefined));
+  return { gate: wiring.gate, ...(allBalance && wiring.balanceOf !== undefined ? { balanceOf: wiring.balanceOf } : {}) };
 }
 
 /** 起動失敗は固定コードとメッセージだけを出す（秘密もスタックも載せない）。 */
