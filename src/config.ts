@@ -57,10 +57,131 @@ export interface BudgetLimits {
   readonly buckets: readonly BucketLimit[];
 }
 
+/**
+ * 動的上流 URL のプロファイル（設計 `docs/dynamic-upstream-design.md` §1）。
+ * 運用者が宣言する「**宛先だけが空いた route**」。額と受取先（送信側）は quote ごとに上流が決め、
+ * それ以外（レール・資産・受信の受取先・手数料・上限）はここが権威。
+ */
+export interface DynamicProfile {
+  /** `routeId` と同じ文字種・同じ名前空間（route と重複したら起動しない）。 */
+  readonly profileId: string;
+  /** 受信レール。SubEtha 受信は対象外。 */
+  readonly sourceRail: "x402" | "mpp";
+  /** 受信条件。**額は持たない**（上流額＋手数料で quote ごとに決まる）。 */
+  readonly source: {
+    readonly network: string;
+    readonly asset: string;
+    readonly decimals: number;
+    readonly payTo: string;
+  };
+  /** 送信レール。 */
+  readonly rail: "x402" | "mpp";
+  readonly destination: {
+    readonly scheme: string;
+    readonly network: string;
+    readonly asset: string;
+    readonly decimals: number;
+    /** x402 送信: EIP-712 domain の権威（上流の offer ではなくここ）。 */
+    readonly tokenDomain?: { readonly name: string; readonly version: string };
+    /** mpp 送信: 手数料に使ってよい資産。 */
+    readonly feeAsset?: string;
+    /** mpp 送信: 1 件の手数料の上限（`feeAsset` の base units）。 */
+    readonly maxFee?: string;
+  };
+  /** 受信資産と送信資産を 1:1 とみなす宣言。`true` 以外は起動しない。 */
+  readonly par: true;
+  /** 上流額の上限（送信資産の base units）。 */
+  readonly maxUpstreamAmount: string;
+  /** 手数料規則（受信資産の base units）。`max(min, flat + ceil(額 × bps / 10000))`。 */
+  readonly fee: { readonly flat: string; readonly bps: number; readonly min: string };
+}
+
+/** 匿名利用の上限（設計 §7.3）。頻度は 1 分あたり。 */
+export interface DynamicLimits {
+  readonly quotesPerMinuteGlobal: number;
+  readonly quotesPerMinutePerSource: number;
+  readonly purchasesPerMinuteGlobal: number;
+  readonly purchasesPerMinutePerSource: number;
+  readonly concurrentGlobal: number;
+  readonly concurrentPerSource: number;
+  readonly maxOutstandingQuotes: number;
+  readonly perHostPerMinute: number;
+  readonly perHostConcurrent: number;
+  readonly perAddressPerMinute: number;
+  readonly perAddressConcurrent: number;
+  /** quote 控えの保持日数。 */
+  readonly ledgerRetentionDays: number;
+}
+
+export const DEFAULT_DYNAMIC_LIMITS: DynamicLimits = Object.freeze({
+  quotesPerMinuteGlobal: 10,
+  quotesPerMinutePerSource: 3,
+  purchasesPerMinuteGlobal: 10,
+  purchasesPerMinutePerSource: 3,
+  concurrentGlobal: 8,
+  concurrentPerSource: 2,
+  maxOutstandingQuotes: 200,
+  perHostPerMinute: 10,
+  perHostConcurrent: 2,
+  perAddressPerMinute: 60,
+  perAddressConcurrent: 4,
+  ledgerRetentionDays: 7,
+});
+
+export interface DynamicConfig {
+  /** 既定は無効。**設定ファイルでだけ**有効にできる（env・呼び出し側の入力からは変わらない）。 */
+  readonly enabled: boolean;
+  readonly profiles: Readonly<Record<string, DynamicProfile>>;
+  /** 静的 route とは別に数える通算の上限。 */
+  readonly budget: BudgetLimits;
+  readonly limits: DynamicLimits;
+  /** 動的 URL の宛先にできないホスト名（サブドメインを含む）。 */
+  readonly denyHosts: readonly string[];
+}
+
 export interface RouterConfig {
   readonly routes: Readonly<Record<string, RouteConfig>>;
   readonly budget: BudgetLimits;
   readonly approvalTtlMs: number;
+  /** 動的上流 URL。**省略時は機能そのものが無い。** */
+  readonly dynamic?: DynamicConfig;
+}
+
+/**
+ * プロファイルを引く。**`enabled` に関わらず解決できる**（無効化した後も、発行済みの quote と
+ * journal の記録がどのプロファイルのものかを判定するため）。有効かどうかは呼び出し側が見る。
+ */
+export function resolveProfile(config: RouterConfig, profileId: string): DynamicProfile | undefined {
+  const profiles = config.dynamic?.profiles;
+  return profiles !== undefined && Object.hasOwn(profiles, profileId) ? profiles[profileId] : undefined;
+}
+
+/**
+ * プロファイルの**支払いの権威**にあたる部分（静的 route の `authoritativeTermsOf` に対応）。
+ * 「変わったら、変更前の quote で払ってはいけない」欄をすべて含める: プロファイルの全欄と `enabled`。
+ * 頻度の上限・拒否ホスト・動的予算は支払いの条件ではないので含めない。
+ */
+export function dynamicAuthoritativeTermsOf(dynamic: DynamicConfig, profile: DynamicProfile): unknown {
+  return {
+    dynamic: true,
+    enabled: dynamic.enabled,
+    profileId: profile.profileId,
+    sourceRail: profile.sourceRail,
+    source: { ...profile.source },
+    rail: profile.rail,
+    destination: {
+      scheme: profile.destination.scheme,
+      network: profile.destination.network,
+      asset: profile.destination.asset,
+      decimals: profile.destination.decimals,
+      tokenDomain: profile.destination.tokenDomain,
+      feeAsset: profile.destination.feeAsset,
+      maxFee: profile.destination.maxFee,
+    },
+    par: profile.par,
+    maxUpstreamAmount: profile.maxUpstreamAmount,
+    fee: { ...profile.fee },
+  };
 }
 
 export function resolveRoute(config: RouterConfig, routeId: string): RouteConfig | undefined {
@@ -337,6 +458,151 @@ function parseBudget(value: Record<string, unknown>): BudgetLimits {
   };
 }
 
+/** 10 進の非負整数（先頭ゼロ・符号・指数・小数を受け付けない）。30 桁まで。 */
+const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
+/** ホスト名（小文字・数字・ハイフンのラベルをドットでつないだもの）。URL・ポート・末尾ドットは不可。 */
+const HOSTNAME_PATTERN = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+function requireAmount(source: Record<string, unknown>, key: string, at: string, positive: boolean): string {
+  const value = requireString(source, key, at);
+  if (!AMOUNT_PATTERN.test(value) || (positive && value === "0")) {
+    throw new ConfigError(`${at}.${key} must be a ${positive ? "positive" : "non-negative"} base-unit integer string`);
+  }
+  return value;
+}
+
+function requireDecimals(source: Record<string, unknown>, at: string): number {
+  const value = requireNumber(source, "decimals", at);
+  if (!Number.isInteger(value) || value < 0 || value > 36) {
+    throw new ConfigError(`${at}.decimals must be an integer in 0..36`);
+  }
+  return value;
+}
+
+function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly<Record<string, unknown>>): DynamicProfile {
+  const at = `dynamic.profiles.${profileId}`;
+  if (!isRecord(value)) {
+    throw new ConfigError(`${at} must be an object`);
+  }
+  if (!ROUTE_ID_PATTERN.test(profileId)) {
+    throw new ConfigError(`${at}: profileId must match ${ROUTE_ID_PATTERN.source}`);
+  }
+  if (requireString(value, "profileId", at) !== profileId) {
+    throw new ConfigError(`${at}.profileId must match its key`);
+  }
+  // route と同じ名前空間（購入口のパス・起動時の Map を共有する）。
+  if (Object.hasOwn(routes, profileId)) {
+    throw new ConfigError(`${at}: profileId collides with a routeId`);
+  }
+  const sourceRail = value["sourceRail"];
+  if (sourceRail !== "x402" && sourceRail !== "mpp") {
+    throw new ConfigError(`${at}.sourceRail must be "x402" or "mpp"`);
+  }
+  const rail = value["rail"];
+  if (rail !== "x402" && rail !== "mpp") {
+    throw new ConfigError(`${at}.rail must be "x402" or "mpp"`);
+  }
+  if (value["par"] !== true) {
+    throw new ConfigError(`${at}.par must be true (the operator declares the pair as 1:1)`);
+  }
+  const source = requireRecord(value, "source", at);
+  const payTo = requireString(source, "payTo", `${at}.source`);
+  if (!ADDRESS_PATTERN.test(payTo)) {
+    throw new ConfigError(`${at}.source.payTo must be a 0x address`);
+  }
+  const destination = requireRecord(value, "destination", at);
+  let tokenDomain: { name: string; version: string } | undefined;
+  let feeAsset: string | undefined;
+  let maxFee: string | undefined;
+  if (rail === "x402") {
+    const domain = requireRecord(destination, "tokenDomain", `${at}.destination`);
+    tokenDomain = {
+      name: requireString(domain, "name", `${at}.destination.tokenDomain`),
+      version: requireString(domain, "version", `${at}.destination.tokenDomain`),
+    };
+  } else {
+    feeAsset = requireString(destination, "feeAsset", `${at}.destination`);
+    maxFee = requireAmount(destination, "maxFee", `${at}.destination`, false);
+  }
+  const fee = requireRecord(value, "fee", at);
+  const bps = requireNumber(fee, "bps", `${at}.fee`);
+  if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) {
+    throw new ConfigError(`${at}.fee.bps must be an integer in 0..10000`);
+  }
+  return {
+    profileId,
+    sourceRail,
+    source: {
+      network: requireString(source, "network", `${at}.source`),
+      asset: requireString(source, "asset", `${at}.source`),
+      decimals: requireDecimals(source, `${at}.source`),
+      payTo,
+    },
+    rail,
+    destination: {
+      scheme: requireString(destination, "scheme", `${at}.destination`),
+      network: requireString(destination, "network", `${at}.destination`),
+      asset: requireString(destination, "asset", `${at}.destination`),
+      decimals: requireDecimals(destination, `${at}.destination`),
+      ...(tokenDomain === undefined ? {} : { tokenDomain }),
+      ...(feeAsset === undefined ? {} : { feeAsset }),
+      ...(maxFee === undefined ? {} : { maxFee }),
+    },
+    par: true,
+    maxUpstreamAmount: requireAmount(value, "maxUpstreamAmount", at, true),
+    fee: {
+      flat: requireAmount(fee, "flat", `${at}.fee`, false),
+      bps,
+      min: requireAmount(fee, "min", `${at}.fee`, false),
+    },
+  };
+}
+
+function parseDynamicLimits(value: unknown): DynamicLimits {
+  if (value === undefined) {
+    return DEFAULT_DYNAMIC_LIMITS;
+  }
+  if (!isRecord(value)) {
+    throw new ConfigError("dynamic.limits must be an object when present");
+  }
+  const limits: Record<string, number> = { ...DEFAULT_DYNAMIC_LIMITS };
+  for (const [key, raw] of Object.entries(value)) {
+    // 綴りを間違えた上限が黙って既定値になるのを防ぐ。
+    if (!Object.hasOwn(DEFAULT_DYNAMIC_LIMITS, key)) {
+      throw new ConfigError(`dynamic.limits.${key} is not a known limit`);
+    }
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+      throw new ConfigError(`dynamic.limits.${key} must be a positive integer`);
+    }
+    limits[key] = raw;
+  }
+  return limits as unknown as DynamicLimits;
+}
+
+function parseDynamic(value: unknown, routes: Readonly<Record<string, unknown>>): DynamicConfig {
+  if (!isRecord(value)) {
+    throw new ConfigError("dynamic must be an object when present");
+  }
+  if (typeof value["enabled"] !== "boolean") {
+    throw new ConfigError("dynamic.enabled must be a boolean");
+  }
+  const profiles = Object.entries(requireRecord(value, "profiles", "dynamic"));
+  if (profiles.length === 0) {
+    throw new ConfigError("dynamic.profiles must not be empty");
+  }
+  const denyHosts = value["denyHosts"] ?? [];
+  if (!Array.isArray(denyHosts) || denyHosts.some((host) => typeof host !== "string" || !HOSTNAME_PATTERN.test(host))) {
+    throw new ConfigError("dynamic.denyHosts must be an array of lowercase hostnames");
+  }
+  return {
+    enabled: value["enabled"],
+    profiles: Object.fromEntries(profiles.map(([profileId, profile]) => [profileId, parseDynamicProfile(profile, profileId, routes)])),
+    budget: parseBudget(requireRecord(value, "budget", "dynamic")),
+    limits: parseDynamicLimits(value["limits"]),
+    denyHosts: denyHosts as string[],
+  };
+}
+
 /** allowlist・上限・canonical だけを持つ非秘密の構成ファイル。 */
 export function parseRouterConfig(raw: unknown): RouterConfig {
   if (!isRecord(raw)) {
@@ -351,6 +617,7 @@ export function parseRouterConfig(raw: unknown): RouterConfig {
     approvalTtlMs: requireNumber(raw, "approvalTtlMs", "router"),
     routes: Object.fromEntries(entries.map(([routeId, route]) => [routeId, parseRoute(route, routeId)])),
     budget: parseBudget(requireRecord(raw, "budget", "router")),
+    ...(raw["dynamic"] === undefined ? {} : { dynamic: parseDynamic(raw["dynamic"], routes) }),
   };
 }
 
