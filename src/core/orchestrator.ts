@@ -56,6 +56,8 @@ export interface QuoteDocument {
     readonly quoted: string;
     readonly asset: string;
     readonly network: string;
+    /** 承認対象の受取先（動的では呼び出し側が毎回承認する）。 */
+    readonly payTo: string;
     readonly quoteFingerprint: string;
   };
   readonly approval: {
@@ -220,6 +222,7 @@ function quoteDocumentOf(intent: Intent): QuoteDocument {
       quoted: intent.destination.quoted,
       asset: intent.destination.asset,
       network: intent.destination.network,
+      payTo: intent.destination.selectedOffer.payTo,
       quoteFingerprint: intent.quoteFingerprint,
     },
     // 承認期限は quote 時に確定した絶対時刻（journal に永続化した値）。

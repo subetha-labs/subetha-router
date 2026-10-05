@@ -128,6 +128,28 @@ export interface McpServerOptions {
    * 呼び出し側が quote を持ち回る前提にする。stdio（ローカル）では渡さない。
    */
   readonly stateless?: boolean;
+  /**
+   * 送信元の識別（動的 quote の門の鍵）。リモートの入口が**要求ごとに自分で導いた値**を渡す
+   * （外から来た `x-router-source` ヘッダは使わない）。省略時は付けない（Router 側は principal で数える）。
+   */
+  readonly source?: string;
+}
+
+/**
+ * 入口が受けた要求から送信元を導く（設計 §7.2）: Caddy が付ける `X-Forwarded-For` の**最後の値**。
+ * 無ければ接続元のアドレス。どちらも無ければ固定値（1 つの送信元として数える）。
+ */
+export function sourceOfRequest(headers: Readonly<Record<string, string | string[] | undefined>>, remoteAddress: string | undefined): string {
+  const forwarded = headers["x-forwarded-for"];
+  const raw = Array.isArray(forwarded) ? forwarded.at(-1) : forwarded;
+  const last = raw?.split(",").at(-1)?.trim();
+  if (last !== undefined && last !== "" && last.length <= 64) {
+    return `fwd:${last}`;
+  }
+  if (remoteAddress !== undefined && remoteAddress !== "") {
+    return `addr:${remoteAddress}`;
+  }
+  return "unknown";
 }
 
 /**
@@ -147,6 +169,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     principalId,
     token,
     ...(options.stateless === true ? { allowUnissuedQuotes: true } : {}),
+    ...(options.source === undefined ? {} : { source: options.source }),
   });
   const handlers = createToolHandlers({
     client,
@@ -163,7 +186,8 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     {
       description:
         "List the routes this Router exposes (routeId, canonical URL, and the asset " +
-        "metadata for both legs). Upstream provider URLs are never returned.",
+        "metadata for both legs). Upstream provider URLs are never returned. When the Router has dynamic " +
+        `profiles (for ${TOOL_NAMES.quoteUrl}), they are listed under \`dynamic\` with \`enabled\`.`,
       inputSchema: {},
     },
     async () => guarded(() => handlers.listRoutes()),
@@ -191,6 +215,30 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
       },
     },
     async (args) => guarded(() => handlers.quote(args)),
+  );
+
+  server.registerTool(
+    TOOL_NAMES.quoteUrl,
+    {
+      description:
+        "Quote a purchase from an upstream URL the caller chooses (a third-party provider the operator has NOT " +
+        "verified). `profileId` selects which rail you pay with and which rail the upstream is paid on. " +
+        "**This tool starts no payment.** The returned `subject` shows the upstream URL, the recipient, and the " +
+        "price breakdown (upstream amount + Router fee = total). The quote document carries an `ownerKey`: pass " +
+        `the whole document as ${TOOL_NAMES.purchase}'s \`quote\` argument, and pass its \`ownerKey\` field as ` +
+        `${TOOL_NAMES.status}'s \`ownerKey\` argument; without it the purchase cannot be executed or read. ` +
+        `Profiles are listed by ${TOOL_NAMES.listRoutes} under \`dynamic\`. ` +
+        "Nothing is refunded if the upstream takes the payment and returns no usable data " +
+        "(only an application/json object up to 256 KiB is delivered). If `subject.fundsMoveOnCredential` is true, " +
+        "building the credential already spends the funds and the Router may still refuse afterwards — get approval " +
+        "BEFORE building the credential. Use a fresh `requestId` per quote.",
+      inputSchema: {
+        profileId: z.string().min(1).describe("Dynamic profile id (shares the routeId namespace)"),
+        url: z.string().min(1).describe("The upstream https URL exactly as it should be fetched (query allowed)"),
+        requestId: z.string().min(1),
+      },
+    },
+    async (args) => guarded(() => handlers.quoteUrl(args)),
   );
 
   server.registerTool(
@@ -233,7 +281,10 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
       description:
         "Fetch the public projection for a paymentId (equivalent to saving and reopening). " +
         "Readable after a server restart, and reading it costs nothing.",
-      inputSchema: { paymentId: z.string().min(1) },
+      inputSchema: {
+        paymentId: z.string().min(1),
+        ownerKey: z.string().optional().describe("For purchases quoted with subetha_router_quote_url: the quote document's ownerKey"),
+      },
     },
     async (args) => guarded(() => handlers.status(args)),
   );

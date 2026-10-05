@@ -159,6 +159,13 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
   新 tool `subetha_router_quote_url`／purchase が quote 文書の `ownerKey` を運ぶ／
   **既存 tool の変更は「status に省略可能な `ownerKey`」「purchase の内部で `ownerKey` を運ぶ」だけ**で、既存の引数だけの呼び出しが従来どおり動く（互換の試験）／
   `ownerKey` と要求ヘッダが journal・控え・ログ・エラー本文に出ない／`x-router-source` は MCP が必ず上書きする／HTTP の `headersTimeout`・`requestTimeout`
+  - **実装で決めた細部**: HTTP は R2 の本文 `upstream.url`、R3・R4 のヘッダ `x-router-owner-key`・`x-router-source`。動的プロファイルの購入口（`/v1/routes/<profileId>/resource`）は
+    機能が有効なときだけ存在する。動的 quote の失敗は `dynamic_disabled`／`unknown_route` 404・`invalid_upstream_url` 400・`request_id_conflict` 409・`rate_limited`／`dynamic_capacity` 429・
+    `dynamic_unavailable` 503・それ以外 502。client は `quoteUrl` を足し、応答に `upstream`・`ownerKey` が無い・頼んだ URL と違う quote は受け入れない。
+    MCP の送信元は入口が `X-Forwarded-For` の最後の値（無ければ接続元）から導いて client に渡し、client が `x-router-source` を付ける（外から来た同名のヘッダは読まない）。
+    動的購入の結果は `result: { untrusted, source, contentType, body }` と `proof` で返し、静的の結果の形は変えない
+    レビューで直した点: status の再読取でも動的の結果は untrusted で包む／client の**動的**購入（R3）の期限は 120 秒（Router 側の最悪 96 秒に余裕。既定の 10 秒では Router が支払いを続けているのに `unknown` になる。静的の購入は従来どおり `timeoutMs`）／
+    R1 に `dynamic`（`enabled` とプロファイルの一覧: レール・資産・桁・上限・手数料・開示。`payTo`・`tokenDomain` は出さない）を足し、client・MCP が落とさず返す
 
 ### T12 — 入口の資源上限（設計 §7.1、要件 FR-31・FR-35 の例外）
 

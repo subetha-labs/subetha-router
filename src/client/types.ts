@@ -14,7 +14,14 @@ export interface RouterClientOptions {
   readonly token: string;
   /** 差し替え可能な fetch（既定は `globalThis.fetch`）。 */
   readonly fetch?: typeof globalThis.fetch;
+  /** 1 要求の期限（quote・一覧・status）。既定 10 秒。 */
   readonly timeoutMs?: number;
+  /**
+   * **動的購入**（R3）の期限。既定 120 秒（`DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS`）。静的 route の購入は従来どおり `timeoutMs`。
+   * 動的購入は、settle 前の上流の読み直し（5 秒）・受信 verify と settle（各 10 秒）・送信前の読み直し（5 秒）・送信（最悪 66 秒。設計 §3.4）を
+   * 含み、合計で 96 秒ほどになり得る。短く切ると、Router が支払いを続けているのに `unknown` になる。
+   */
+  readonly executeTimeoutMs?: number;
   /**
    * **ステートレス運用の明示的な opt-in**（既定 `false`）。
    *
@@ -29,6 +36,8 @@ export interface RouterClientOptions {
    * 改竄した quote を持ち込んでも、Router は自分が発行した値しか受け付けない。
    */
   readonly allowUnissuedQuotes?: boolean;
+  /** 送信元の識別（`x-router-source`）。MCP 層が要求ごとに導いた値を渡す。省略時は付けない。 */
+  readonly source?: string;
 }
 
 export interface ResourceRef {
@@ -70,6 +79,12 @@ export interface QuoteView {
     readonly boundTo: string;
     readonly deadlineMs: number;
   };
+  /** 動的 quote だけ（設計 §8）。 */
+  readonly upstream?: { readonly url: string; readonly method: string };
+  readonly pricing?: Readonly<Record<string, unknown>>;
+  readonly disclosures?: Readonly<Record<string, unknown>>;
+  /** 動的 quote の持ち主の証明。purchase・status で Router に返す。**表示・保存の対象ではない。** */
+  readonly ownerKey?: string;
 }
 
 export type QuoteResult =
@@ -137,6 +152,9 @@ export interface ProjectionView {
   readonly updatedAt: string;
   /** `delivered` のときだけ現れる上流 snapshot。 */
   readonly result?: unknown;
+  /** 動的購入だけ。 */
+  readonly upstream?: Readonly<Record<string, unknown>>;
+  readonly dynamic?: Readonly<Record<string, unknown>>;
 }
 
 export type StatusResult =
@@ -148,9 +166,13 @@ export type StatusResult =
   | { readonly found: false; readonly status: number; readonly reason?: string };
 
 export interface RouterClient {
-  listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[] }>;
+  /** `dynamic` は Router に動的プロファイルの設定があるときだけ（`enabled` と一覧）。 */
+  listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[]; readonly dynamic?: Readonly<Record<string, unknown>> }>;
   quote(input: { readonly routeId: string; readonly requestId: string }): Promise<QuoteResult>;
+  /** 動的上流 URL の quote（設計 §2.1）。`profileId` はプロファイルの ID。 */
+  quoteUrl(input: { readonly profileId: string; readonly url: string; readonly requestId: string }): Promise<QuoteResult>;
   /** 明示承認済みのときだけ R3 を 1 回呼ぶ（再試行・再 quote をしない）。 */
   execute(input: ExecuteInput): Promise<ExecutionResult>;
-  status(paymentId: string): Promise<StatusResult>;
+  /** 動的購入は持ち主の証明（`ownerKey`）が無いと読めない。 */
+  status(paymentId: string, ownerKey?: string): Promise<StatusResult>;
 }

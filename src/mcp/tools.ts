@@ -67,6 +67,7 @@ export interface ToolDeps {
 export const TOOL_NAMES = {
   listRoutes: "subetha_router_list_routes",
   quote: "subetha_router_quote",
+  quoteUrl: "subetha_router_quote_url",
   purchase: "subetha_router_purchase",
   status: "subetha_router_status",
 } as const;
@@ -140,6 +141,44 @@ function fundsMoveBeforePurchase(quote: QuoteView): boolean {
   return extra["fundsMoveOnCredential"] !== false;
 }
 
+/** 動的 quote の `subject` に足す欄（設計 §8）。上流 URL・受取先・価格の内訳・開示の前提。 */
+function dynamicSubjectFields(quote: QuoteView): Record<string, unknown> {
+  if (quote.upstream === undefined) {
+    return {};
+  }
+  const destination = quote.destination as Record<string, unknown>;
+  return {
+    upstream: quote.upstream,
+    destinationPayTo: destination["payTo"],
+    destinationDecimals: destination["decimals"],
+    pricing: quote.pricing,
+    disclosures: quote.disclosures,
+  };
+}
+
+/** 動的 quote の `nextStep`（FR-10）。開示の前提を文でも書く。 */
+function dynamicNextStep(quote: QuoteView): string {
+  const fundsMove = fundsMoveBeforePurchase(quote);
+  const disclosures = quote.disclosures ?? {};
+  const pricing = quote.pricing ?? {};
+  const lines = [
+    "Explicit human approval is required for THIS upstream URL and THIS recipient: the operator has not " +
+      "verified the destination, and nothing is refunded if the upstream takes the payment and returns no data. " +
+      `Show the human the upstream URL (${quote.upstream?.url ?? ""}), the recipient, and the price breakdown ` +
+      `(upstream amount ${String(pricing["upstreamAmount"])}, fee ${String(pricing["fee"])}, total ${String(pricing["total"])} base units).`,
+    `Only ${String(disclosures["supportedResponse"] ?? "an application/json object up to 256 KiB")} is delivered; ` +
+      "any other response is reported as paid without data.",
+    fundsMove
+      ? "**On this route, building the credential already spends the funds, and that cannot be undone.** " +
+        "The Router can still refuse after the funds moved (expired quote, upstream changed, feature disabled, budget " +
+        "exhausted, operator funds unavailable); `awaiting_payment` then does NOT mean unpaid. Get approval FIRST, then " +
+        `build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
+      : `If the human approves, call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key) and ` +
+        "this quoteId as `approval`. If not, do not call it.",
+  ];
+  return lines.join(" ");
+}
+
 function approvalSubject(quote: QuoteView): Record<string, unknown> {
   const source = quote.source as Record<string, unknown>;
   const destination = quote.destination as Record<string, unknown>;
@@ -172,12 +211,15 @@ function approvalSubject(quote: QuoteView): Record<string, unknown> {
      * true なら「承認＝支払い」で、取り消せない。
      */
     fundsMoveOnCredential: fundsMoveBeforePurchase(quote),
+    ...dynamicSubjectFields(quote),
   };
 }
 
 export interface ToolHandlers {
   listRoutes(): Promise<Record<string, unknown>>;
   quote(input: { routeId: string; requestId: string }): Promise<Record<string, unknown>>;
+  /** 動的上流 URL の quote（設計 §2.1）。 */
+  quoteUrl(input: { profileId: string; url: string; requestId: string }): Promise<Record<string, unknown>>;
   purchase(input: {
     quoteId: string;
     requestId: string;
@@ -196,7 +238,7 @@ export interface ToolHandlers {
      */
     quote?: unknown;
   }): Promise<Record<string, unknown>>;
-  status(input: { paymentId: string }): Promise<Record<string, unknown>>;
+  status(input: { paymentId: string; ownerKey?: string | undefined }): Promise<Record<string, unknown>>;
   /** テスト用: 発行済み quote の数（プロセス内保持の確認）。 */
   issuedCount(): number;
 }
@@ -208,7 +250,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
   return {
     async listRoutes(): Promise<Record<string, unknown>> {
       const result = await deps.client.listRoutes();
-      return withEvidence(deps, { ok: result.ok, routes: result.routes });
+      // 動的プロファイルの一覧は落とさず返す（設計 §1.1）。無ければ欄ごと無い。
+      return withEvidence(deps, { ok: result.ok, routes: result.routes, ...(result.dynamic === undefined ? {} : { dynamic: result.dynamic }) });
     },
 
     async quote(input): Promise<Record<string, unknown>> {
@@ -245,6 +288,22 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
             "If the human does not approve, do not build it."
           : "Explicit human approval is required. If the human approves, call " +
             `${TOOL_NAMES.purchase} with this quoteId as \`approval\`. If not, do not call it.`,
+        subject: approvalSubject(result.quote),
+      });
+    },
+
+    async quoteUrl(input): Promise<Record<string, unknown>> {
+      const result = await deps.client.quoteUrl({ profileId: input.profileId, url: input.url, requestId: input.requestId });
+      if (!result.ok) {
+        return withEvidence(deps, { ok: false, error: result.error });
+      }
+      issued.set(result.quote.quoteId, result.quote);
+      return withEvidence(deps, {
+        ok: true,
+        approvalRequired: true,
+        // quote 文書そのもの。`ownerKey` を含む。**purchase の `quote` 引数にそのまま渡す。**
+        quote: result.quote,
+        nextStep: dynamicNextStep(result.quote),
         subject: approvalSubject(result.quote),
       });
     },
@@ -301,11 +360,30 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
         approval: { approved: true, quoteId: input.approval ?? "" },
         credential,
       });
+      if (quote.upstream !== undefined && result.outcome === "delivered") {
+        // 動的購入の結果: 上流の本文は**信頼されない第三者のもの**として包む（設計 §8）。静的 route の結果の形は変えない。
+        return withEvidence(deps, {
+          ok: true,
+          outcome: "delivered",
+          paymentId: result.paymentId,
+          result: { untrusted: true, source: "upstream", contentType: "application/json", body: result.snapshot },
+          proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" },
+        });
+      }
       return withEvidence(deps, { ok: result.outcome === "delivered", ...result });
     },
 
     async status(input): Promise<Record<string, unknown>> {
-      const result = await deps.client.status(input.paymentId);
+      const result = await deps.client.status(input.paymentId, input.ownerKey);
+      if (result.found && result.projection.dynamic !== undefined && Object.hasOwn(result.projection, "result")) {
+        // 動的購入の結果は、再読取でも**信頼されない第三者のもの**として包む（purchase と同じ形）。
+        const { result: body, ...projection } = result.projection;
+        return withEvidence(deps, {
+          found: true,
+          projection: { ...projection, result: { untrusted: true, source: "upstream", contentType: "application/json", body } },
+          proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" },
+        });
+      }
       return withEvidence(deps, { ...result });
     },
 

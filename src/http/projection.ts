@@ -3,7 +3,7 @@
  * 上流 URL・principal トークン・内部ヘッダ・例外文字列は決して載せない。
  */
 
-import type { RouteConfig, RouterConfig } from "../config.js";
+import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig } from "../config.js";
 import type { Projection, QuoteDocument } from "../core/orchestrator.js";
 import type { InboundOffer } from "../ports/inbound.js";
 
@@ -11,9 +11,40 @@ export function canonicalUrlOf(canonicalBaseUrl: string, route: RouteConfig): st
   return `${canonicalBaseUrl}${route.canonicalPath}`;
 }
 
-/** R1: allowlist の `routeId`・canonical URL・資産メタのみ（上流 URL は返さない）。 */
-export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): unknown {
+/** R1 の動的プロファイルの一覧（設計 §1.1・§2.1）。呼び出し側が「自分の払えるレールのプロファイル」を選ぶための欄だけ。 */
+export function dynamicListingOf(config: RouterConfig): Record<string, unknown> | undefined {
+  const dynamic = config.dynamic;
+  if (dynamic === undefined) {
+    return undefined;
+  }
   return {
+    enabled: dynamic.enabled,
+    profiles: Object.values(dynamic.profiles).map((profile) => ({
+      profileId: profile.profileId,
+      source: { rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals },
+      destination: { rail: profile.rail, scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, decimals: profile.destination.decimals },
+      maxUpstreamAmount: profile.maxUpstreamAmount,
+      fee: { ...profile.fee },
+      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp"),
+    })),
+  };
+}
+
+/** R1: allowlist の `routeId`・canonical URL・資産メタのみ（上流 URL は返さない）。動的プロファイルの一覧は `dynamic` に（設定にあるときだけ）。 */
+export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): unknown {
+  const dynamic = dynamicListingOf(config);
+  return {
+    ...(dynamic === undefined
+      ? {}
+      : {
+          dynamic: {
+            ...dynamic,
+            profiles: (dynamic["profiles"] as Record<string, unknown>[]).map((profile) => ({
+              ...profile,
+              resource: { url: `${canonicalBaseUrl}${canonicalPathOf(profile["profileId"] as string)}`, method: "GET" },
+            })),
+          },
+        }),
     routes: Object.values(config.routes).map((route) => ({
       routeId: route.routeId,
       resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },
@@ -70,6 +101,60 @@ export function quoteBody(
   };
 }
 
+/** 動的 quote の応答で開示する前提（設計 §8）。固定値。 */
+export function dynamicDisclosuresOf(fundsMoveOnCredential: boolean): Record<string, unknown> {
+  return {
+    destinationVerifiedByOperator: false,
+    refundOnFailure: false,
+    fundsMoveOnCredential,
+    ...(fundsMoveOnCredential
+      ? { routerMayRejectAfterFundsMoved: ["expired", "upstream_changed", "dynamic_disabled", "budget_exhausted", "operator_funds_unavailable"] }
+      : {}),
+    awaitingPaymentDoesNotMeanUnpaid: fundsMoveOnCredential,
+    unsupportedResponseIsPaidWithoutData: true,
+    supportedResponse: "application/json object, <= 256 KiB",
+  };
+}
+
+/**
+ * R2: 動的 quote の文書（設計 §8）。静的の文書に `upstream`・`pricing`・`disclosures`・`ownerKey` を足し、
+ * 受信・送信の `decimals`・`payTo` はプロファイルから。**`ownerKey` はこの応答にしか載らない。**
+ */
+export function dynamicQuoteBody(quote: QuoteDocument, profile: DynamicProfile, canonicalBaseUrl: string): unknown {
+  const fundsMoveOnCredential = quote.dynamic?.fundsMoveOnCredential === true;
+  const pricing = quote.dynamic?.pricing;
+  return {
+    quoteId: quote.quoteId,
+    paymentId: quote.paymentId,
+    routeId: quote.routeId,
+    resource: { url: `${canonicalBaseUrl}${canonicalPathOf(profile.profileId)}`, method: "GET" },
+    upstream: quote.upstream,
+    source: {
+      rail: profile.sourceRail,
+      amount: quote.source.amount,
+      asset: quote.source.asset,
+      decimals: profile.source.decimals,
+      network: quote.source.network,
+      payTo: quote.source.offer.payTo,
+      expiresAt: quote.source.offer.extra.expiresAt,
+      offer: quote.source.offer,
+    },
+    destination: {
+      rail: profile.rail,
+      quoted: quote.destination.quoted,
+      asset: quote.destination.asset,
+      decimals: profile.destination.decimals,
+      network: quote.destination.network,
+      payTo: quote.destination.payTo,
+      quoteFingerprint: quote.destination.quoteFingerprint,
+    },
+    pricing: { ...pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
+    disclosures: dynamicDisclosuresOf(fundsMoveOnCredential),
+    approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
+    ownerKey: quote.ownerKey,
+  };
+}
+
 /**
  * R3 の 402。既存 quote があればその発行 offer をそのまま再提示し、無ければ
  * 「R2 で quote を取得せよ」という指示（`quoteUrl` と `routeId` のみ）を返す。
@@ -123,5 +208,18 @@ export function projectionBody(projection: Projection): unknown {
     ...(projection.status === "delivered" && projection.result !== undefined
       ? { result: projection.result }
       : {}),
+    // 動的購入だけ。昇格前の `awaiting_payment` は、MPP 受信では「未払い」を意味しない（設計 §6.3・§8）。
+    ...(projection.upstream === undefined || projection.dynamic === undefined
+      ? {}
+      : {
+          upstream: projection.upstream,
+          dynamic: {
+            profileId: projection.dynamic.profileId,
+            pricing: projection.dynamic.pricing,
+            promoted: projection.dynamic.promoted,
+            fundsMoveOnCredential: projection.dynamic.fundsMoveOnCredential,
+            awaitingPaymentDoesNotMeanUnpaid: projection.dynamic.fundsMoveOnCredential && projection.status === "awaiting_payment",
+          },
+        }),
   };
 }
