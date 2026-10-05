@@ -168,7 +168,7 @@ purchase 時の読み直しで比較するのは**保存した `DestinationOffer
 
 | 段 | 内容 |
 |---|---|
-| (i) offer | トップレベルのキーは `scheme・network・asset・amount・payTo・maxTimeoutSeconds・extra` のみ。`extra` は `name・version` のみで**プロファイルの `tokenDomain` と一致**。`scheme === "exact"`、`network`・`asset` はプロファイルと一致、`amount <= maxUpstreamAmount`、`payTo` は EVM アドレスでゼロ・運用者自身・token コントラクトでない、`maxTimeoutSeconds` は 1〜600 |
+| (i) offer | 許す欄は下の T0-c の 3 のとおり（標準の 7 欄＋説明だけの欄。未知の欄は拒否）。`extra.name`・`extra.version` は**プロファイルの `tokenDomain` と一致**。`scheme === "exact"`、`network`・`asset` はプロファイルと一致、`amount <= maxUpstreamAmount`、`payTo` は EVM アドレスでゼロ・運用者自身・token コントラクトでない、`maxTimeoutSeconds` は 1〜600 |
 | (ii) 署名（`x402.ts:399-424` の `guardedSigner` を置き換え） | SDK が渡した typed data から**取り出すのは `validAfter`・`validBefore`・`nonce` だけ**。`validAfter <= now`、`now < validBefore <= now + 660`、`nonce` は 32 バイトであることを確かめ、それ以外の値が承認済みと一致すること（`to`・`from`・`value`・`chainId`・`verifyingContract`）も確かめたうえで、**`domain = {name, version, chainId, verifyingContract}`（プロファイルから）、固定の `EIP712Domain`／`TransferWithAuthorization` 型定義、`message` を Router が組み直して署名器に渡す**。SDK が渡した `types`・`domain`・`primaryType` はそのまま使わない（`types.EIP712Domain` の差し替えで署名対象を変えられるため。`viem/_esm/utils/signature/hashTypedData.js:9`） |
 
 **MPP 送信（Tempo charge・push・local account）**
@@ -176,7 +176,7 @@ purchase 時の読み直しで比較するのは**保存した `DestinationOffer
 | 段 | 内容 |
 |---|---|
 | 能力 | 動的プロファイルの MPP 能力は `mode: "push"` を明示し、**`account.type === "local"`** であること。違えば起動失敗（JSON-RPC account は `sendCallsSync` に行き、署名の境界を Router が持てない。`mppx/dist/tempo/client/Charge.js:200-219`） |
-| (i) challenge | `method === "tempo"`・`intent === "charge"`。`request` と `methodDetails` のキーは許可リスト（実 challenge から列挙して固定。M-3）。**`splits`・`feePayer`・`machineTokenEnabled`・未知のキーは拒否**。`amount > 0`（0 は送金ではなく proof 署名になる。`Charge.js:80-97`）、`supportedModes` が無いか `push` を含む、`currency`・`chainId` はプロファイルと一致 |
+| (i) challenge | `method === "tempo"`・`intent === "charge"`。`request` と `methodDetails` のキーは許可リスト（下の T0-c の 4）。**`splits`・`feePayer`・`machineTokenEnabled`・未知のキーは拒否**。`amount > 0`（0 は送金ではなく proof 署名になる。`Charge.js:80-97`）、`supportedModes` が無いか `push` を含む、`currency`・`chainId` はプロファイルと一致 |
 | (ii) 署名 | SDK に渡す account を **包んだ local account** にする。`signTransaction(tx)` は次を確かめてから、**確かめた欄だけで組み直した transaction** を元の account に署名させる: Tempo 型、`chainId` 一致、**call はちょうど 1 つ**で `to === asset`・`value === 0`・`data` が `transferWithMemo(recipient, amount, memo)` か `transfer(recipient, amount)` で `recipient`・`amount` が保存した offer と一致、**`feeToken === feeAsset`（未指定は拒否）**、`gas > 0`・`maxFeePerGas > 0` で手数料の上限が `maxFee` 以下、`validBefore <= now + 60`、`feePayer`・`authorizationList`・`keyAuthorization`・`accessList` が無い。1 支払いにつき署名は 1 回。**SDK に見せる account は最小の facade**: 持つのは `address`・`type: "local"`・この `signTransaction` だけ。`sign({hash})`（生の署名）・`signMessage`・`signTypedData`・`signAuthorization` は**存在しないか常に拒否**。`signTransaction` に渡された `serializer` 引数は**使わず**、Router が選んだ Tempo の serializer で直列化する（viem は serializer の出力のハッシュに署名するため。`viem/_esm/accounts/utils/signTransaction.js`）。元の account は `tempo.charge` の `account` にも、SDK に返す client にも**載せない**（今は両方に載っている。`mpp.ts:285`・`:332`）。組み直すとき、SDK が決めた nonce（expiring nonce）と有効期限の欄は範囲を確かめたうえで引き継ぐ |
 | fee token の固定 | adapter が SDK に渡す client の chain に `feeToken: feeAsset` を設定する（viem は未指定のとき chain の値を入れる。`viem/_esm/tempo/chainConfig.js:123-124`）。入らなかった場合は (ii) が拒否する |
 | (iii) 送信（既存の RPC guard に追加。`mpp.ts:307-321`） | **送金系のメソッド**のうち通すのは `eth_sendRawTransactionSync`／`eth_sendRawTransaction` のみ（見積り・nonce・receipt などの読取はそのまま通す）。raw を `ox/tempo` の `TxEnvelopeTempo.deserialize` で復号し、(ii) と同じ欄を**もう一度**確かめる。1 支払い 1 回 |
@@ -237,11 +237,70 @@ T16 の G-2（testnet の実決済）で receipt の実額が上限以下であ�
 **まだ示していないこと**: 製品の facade が**拒否すべき入力**（call 2 つ、別の `to`、`feeToken` の不一致、`keyAuthorization` など）で元の account を呼ばないこと。
 probe が示したのは「生の署名口が無い」「serializer の差し替えが効かない」の 2 点で、欄ごとの拒否は T9 の実装と試験で確かめる。実ノードでの**新しい**送金は行っていない。
 
+*T0-c: 実在のエンドポイントが未払いの GET に返す欄*（`tools/dyn-challenge-survey.ts`、2026-10-05T11:12Z と 11:16Z の 2 回。各回、各 URL に支払いヘッダなしの GET を 1 回。欄の名前と型だけを記録し、本文は保存していない。**標本は 8 件（うち第三者 6 件）で、以下の結論はこの 8 件についてのもの**）
+
+x402（8 件中 7 件。すべて v2 で `PAYMENT-REQUIRED` ヘッダを返し、**`resource.url` は要求した URL と一致**）:
+
+| エンドポイント | ヘッダ | offer（順に） | 標準の 7 欄と `extra.{name,version}` 以外 |
+|---|---|---|---|
+| `provider-x402.subethalabs.com/v1/eth/snapshot`（運用者の A） | 620 B | `exact` Base Sepolia | なし |
+| `crypto.apitoll.cloud/v1/crypto/price` | 3.8 KB | `exact` Base／`exact` Solana | 1 件目: なし。2 件目: `extra.feePayer` |
+| `x402.ottoai.services/crypto-news` | 10.6 KB | `exact` Base／`exact` Base／`exact` Solana | 1 件目: なし。2 件目: `extra.assetTransferMethod`。3 件目: `extra.feePayer` |
+| `rubric-protocol.com/v1/x402/hedera-facts/exchange-rate` | 4.1 KB | `exact` Base／Solana／Algorand | 1 件目: なし。他: `extra.feePayer` |
+| `api.oblique.markets/api/v1/paid/time` | 4.5 KB | `exact` Base／Solana | 1 件目: `description`・`maxAmountRequired`・`resource`、`extra.bazaar` |
+| `hypernatt.com/api/m2m/liq-radar` | 5.0 KB | `exact` Base／Solana | 1 件目: `description`・`maxAmountRequired`・`mimeType`・`resource`、`extra.decimals` |
+| `api.onesource.io/api/chain/erc20-balance` | 4.2 KB | `exact` Base／`batch-settlement` Base | 1 件目: `currency`・`maxAmountRequired`・`recipient`、`extra.credentialTypes`。2 件目: `extra.receiverAuthorizer`・`withdrawDelay` |
+
+`PAYMENT-REQUIRED` のトップレベルは `accepts`・`error`・`resource`・`x402Version` に加えて `extensions`（6 件）、`contact`・`free_demo`・`gateway`・`outputSchema`（1 件）。
+`resource` は `url`・`description`・`mimeType` に加えて `serviceName`・`tags`・`iconUrl`。
+**トップレベルの `resource.url` は要求した URL との完全一致を要求する**（§3.2・§11。これが resource の束縛）。それ以外の `resource` の欄と、上のトップレベルの追加の欄は、署名にも照合にも使わない。
+offer の中の `resource`（一部の Provider が残している旧い形）は説明用の欄として扱い、束縛には使わない。
+
+MPP（3 件。`WWW-Authenticate: Payment`）:
+
+| エンドポイント | challenge の欄 | `request` の欄 | `methodDetails` |
+|---|---|---|---|
+| `provider-mpp.subethalabs.com/v1/eth/snapshot`（運用者の B） | `id`・`realm`・`method`・`intent`・`request`・`expires`・`opaque` | `amount`・`currency`・`recipient`・`methodDetails` | `chainId: 42431` |
+| `api.oblique.markets/…`（x402 と同じ URL） | `opaque` なし | 上に加えて `description` | `chainId: 4217`、`supportedModes: ["pull"]` |
+| `api.onesource.io/…`（x402 と同じ URL） | `opaque` なし、`description` あり。**1 つのヘッダに challenge が 3 つ** | 上に加えて `description`。3 つ目は `suggestedDeposit` も | `chainId: 4217`。3 つ目は `escrowContract`・`minVoucherDelta`（charge ではない別の種類） |
+
+生の `WWW-Authenticate` のパラメータ名と、SDK が正規化した後の欄は、3 件とも一致した（SDK が落とした未知の欄は無かった）。
+
+**ここから決めること**
+
+1. **調べた第三者の 6 件はすべて mainnet の資産を要求した**（x402 は Base `eip155:8453`、MPP は Tempo `4217`）。testnet の資産ペアしか持たない現在のプロファイルでは、
+   この 6 件はどれも `no_matching_offer` になる。testnet で動いている第三者の Provider があるかどうかは**調べていない**（discovery の一覧の先頭から選んだ 6 件だけ）。
+   確かなのは、testnet の間に動的 URL で買えると分かっているのが運用者の A・B だけ、ということ
+2. **offer の選択**: 第三者の x402 の 6 件は複数の offer を並べ、1 件目が EVM の `exact` だった（運用者の A は 1 件だけ）。MPP も 1 つのヘッダに複数の challenge を返すものがあった（1 件）ので、**x402・MPP とも**「上流の順に見て、検査を通る最初の 1 件」（§2.3）とする。
+   `extra.assetTransferMethod`（Permit2）・`extra.feePayer`・`batch-settlement`、MPP の charge 以外の種類は検査で候補から外れる
+3. **x402 の offer に許す欄**（(i) の「トップレベルのキー」を次に改める）:
+   - 必須: `scheme`・`network`・`asset`・`amount`・`payTo`・`maxTimeoutSeconds`・`extra.name`・`extra.version`
+   - **説明だけの欄として許す**（署名は Router が組み直すので、これらは署名の内容に影響しない）: `description`・`mimeType`・`resource`、`extra.bazaar`。
+     値が支払いの条件と重なる欄は**一致するときだけ**許す: `maxAmountRequired === amount`、`extra.decimals === プロファイルの decimals`
+   - それ以外（`currency`・`recipient`・`extra.credentialTypes`・`extra.assetTransferMethod`・`extra.paymentFlow`・`extra.feePayer` など未知の欄）は拒否。
+     このうち `assetTransferMethod`（転送方法を Permit2 に切り替える）と `paymentFlow` は、SDK が**支払いの仕方そのもの**を変える欄である
+   - 前提は **x402 v2**（`x402Version === 2`）。`maxAmountRequired` は v1 の欄で、v2 では意味を持たないので「`amount` と同じ値のときだけ許す」にしている
+   - 選んだ offer は、許した欄を含めて**そのまま上流に送り返される**（SDK が `accepted` に入れる）。署名の権限は広がらないが、
+     その欄を上流がどう解釈するかは分からないので、**許した欄があっても成立するとは限らない**
+   - この規則で 1 件目の offer が通るのは、第三者 6 件中 **5 件**（標準の欄だけに絞ると 3 件）。network が合えば、の話である
+4. **MPP の challenge に許す欄**: challenge は `id`・`realm`・`method`・`intent`・`request`・`expires` と、任意の `opaque`・`description`・`digest`。
+   `request` は `amount`・`currency`・`recipient`・`methodDetails` と、任意の `description`。`methodDetails` は `chainId` と、任意の `supportedModes`。
+   SDK が認識する他の欄は**拒否する**: challenge の `header`（credential の送り先を変える）、`request.externalId`、`methodDetails` の `splits`・`feePayer`・`machineTokenEnabled`・`memo`
+   （`memo` は SDK が challenge から作った値で上書きするので、上流が指定する意味が無い）。`digest` は要求本文の束縛で、本文の無い GET では使われない。
+   `supportedModes` が `pull` だけのもの（今回 1 件）は拒否。**第三者の 2 件はどちらも `opaque`（scope）を持たない**ので、§11 の「あれば照合・無ければ不問」が必要であることが確かめられた。
+   これは動的経路で**新しく作る**振る舞いで、既存の adapter は scope を必須にしている（`src/adapters/outbound/mpp.ts`）。`opaque` があるときは中身を変えずに保ち、復号した scope を照合する
+5. **ヘッダの上限**: `PAYMENT-REQUIRED` だけで最大 10.6 KB あった。応答ヘッダ全体の大きさは測っていないので 16 KiB で足りないと示したわけではないが、
+   余裕を取って §3.4 の上限を **16 KiB から 32 KiB に上げる**
+6. 同じ URL が x402 と MPP の両方を返すエンドポイントが 2 件あった。プロファイルは送信レールを 1 つ決めているので、使うのはそのレールの方だけ
+
+この調査は**未払いの応答の形**だけを見ている。Router の動的 quote がこれらの URL で成立するかどうか（M-4。これも未払いの読取で測る）と、
+実際に支払って成立するかどうか（T16 の G-2・G-3）は、どちらもまだ測っていない。
+
 ### 3.4 上流から受け取るものの上限と、応答の扱い（FR-27・FR-28）
 
 | 対象 | 上限 | 超過時 |
 |---|---|---|
-| 応答ヘッダ全体 | 16 KiB（動的用 Agent に `maxHeaderSize` を**明示**。undici の既定は Node から継承され固定値ではない） | **未払いの要求**では transport の失敗。**支払いヘッダを付けた要求**では送金の有無が分からないので `unknown` |
+| 応答ヘッダ全体 | **32 KiB**（動的用 Agent に `maxHeaderSize` を**明示**。undici の既定は Node から継承され固定値ではない。実測で `PAYMENT-REQUIRED` だけで 10.6 KB のものがあった） | **未払いの要求**では transport の失敗。**支払いヘッダを付けた要求**では送金の有無が分からないので `unknown` |
 | 402 の本文 | 64 KiB | 中断。quote 不成立／`destination_challenge_unreadable` |
 | `accepts`／challenge の個数 | 16 | 同上 |
 | 有料応答の本文 | 256 KiB | 下の順序で判定 |
@@ -495,7 +554,7 @@ MCP の `subject` はこれらをそのまま含め、`nextStep` に同じ内容
 |---|---|---|---|
 | M-1（**一部済**: pathUSD での観測と換算式。**仕様での上限の確立は未了**。§3.3 の T0-b） | MPP 送信の実手数料と、`gas × maxFeePerGas` から `feeAsset` の額への換算 | **既存の**送信 tx の receipt を読む（新しい支払いはしない） | `maxFee`・手数料規則、§3.3 |
 | M-2（**済**。§3.3 の T0-a） | SDK が包んだ account の `signTransaction` と送金 RPC に渡す実物の形、chain の `feeToken` が入ること | fixture（署名のみ・送信しない）。足りなければ **testnet で 1 件の新しい支払い**（owner の了承済みの範囲: testnet・使い捨て口座） | §3.3 (ii)(iii) |
-| M-3 | 実 challenge の欄の一覧（Provider A・B と、公開されている第三者の x402／MPP エンドポイント数件） | 未払いの読取のみ | §3.3 (i) の許可キー |
+| M-3（**済**。§3.3 の T0-c） | 実 challenge の欄の一覧（Provider A・B と、公開されている第三者の x402／MPP エンドポイント数件） | 未払いの読取のみ | §3.3 (i) の許可キー |
 | M-4 | 第三者 Provider での quote 成立率 | 未払いの読取のみ | §11 の互換性の制約が実用に耐えるか |
 
 **順序は M-2 → M-1 → M-3**（M-4 はタスク分割を止めないが、第三者 Provider 対応を公表する前に必要）。
@@ -510,7 +569,8 @@ M-2 は SDK → 包んだ account → 固定の serializer → guarded RPC を**
 |---|---|
 | 昇格後に settle が拒否された試行は動的予算を保持する | §6.5 |
 | 動的 quote は冪等に再取得できない。他人の `requestId` の先取りが可能 | §2.5 |
-| 上流が `resource` を fetch URL と 1 バイトでも違う形で申告すると使えない。標準外の欄を足す Provider も使えない | 束縛と署名範囲を緩めないため。実在の Provider での成立率は未計測（M-4） |
+| 上流が `resource` を fetch URL と 1 バイトでも違う形で申告すると使えない。許可した説明用の欄以外を足す Provider も使えない | 束縛と署名範囲を緩めないため。T0-c の 6 件では `resource.url` は全件一致、offer の欄は 5 件が通る見込み。**動的 quote の成立率（M-4、未払い）も、支払っての成立も未計測** |
+| testnet の間に動的 URL で買えると分かっているのは運用者の A・B だけ | T0-c で見た第三者 6 件はすべて mainnet の資産を要求した。testnet の第三者 Provider の有無は調べていない |
 | MPP の第三者 Provider は既存の scope（`_mppx_scope`）を持たない | 動的経路では「あれば照合・無ければ不問」。保存した URL・guarded な TLS 接続・offer の照合が権威。静的は従来どおり必須 |
 | facilitator・RPC を別名で指す URL は拒否できない | §7.4 |
 | MPP 受信の束縛は SDK の 56 ビットの memo 要約に依る | SDK の仕様。衝突に依らない一意性は主張しない |
