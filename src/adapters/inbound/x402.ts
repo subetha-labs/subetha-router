@@ -69,6 +69,16 @@ export interface X402InboundOptions {
    */
   readonly assetDomain?: { readonly name: string; readonly version: string };
   readonly timeoutMs?: number;
+  /**
+   * **署名を quote に束縛する**（動的購入のプロファイル用。設計 `docs/dynamic-upstream-design.md` §4）。
+   * 有効にすると、preflight が EIP-3009 の `authorization` について次を要求する:
+   * `nonce === offer.extra.challengeNonce`、`to === offer.payTo`、`value === offer.amount`、`validBefore <= offer.extra.expiresAt`。
+   *
+   * 署名は `nonce` を含むので、ある quote のために作った署名は、`challengeNonce` の違う別の quote では通らない:
+   * そのまま持ち込めば preflight が落とし、`nonce` 欄だけ書き換えれば facilitator の署名検証が落とす。
+   * **既定は無効**（静的 route は、乱数の nonce を使う標準のクライアントを従来どおり受け付ける）。
+   */
+  readonly bindAuthorizationNonce?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -215,6 +225,31 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
         }
       }
       // `accepted` トップレベルの未知キー（`resource` / `extensions` 等）は束縛対象外。
+      if (options.bindAuthorizationNonce === true) {
+        const authorization = credential.payload["authorization"];
+        if (!isRecord(authorization)) {
+          return { ok: false, reason: "credential_mismatch" };
+        }
+        // 署名に入る `nonce` が、この quote の `challengeNonce` であること（大文字小文字は hex として同一視する）。
+        const nonce = authorization["nonce"];
+        if (typeof nonce !== "string" || nonce.toLowerCase() !== offer.extra.challengeNonce.toLowerCase()) {
+          return { ok: false, reason: "nonce_mismatch" };
+        }
+        const to = authorization["to"];
+        const value = authorization["value"];
+        const validBefore = authorization["validBefore"];
+        if (
+          typeof to !== "string" ||
+          to.toLowerCase() !== offer.payTo.toLowerCase() ||
+          typeof value !== "string" ||
+          value !== offer.amount ||
+          typeof validBefore !== "string" ||
+          !/^[0-9]{1,15}$/.test(validBefore) ||
+          Number(validBefore) > offer.extra.expiresAt
+        ) {
+          return { ok: false, reason: "credential_mismatch" };
+        }
+      }
       return { ok: true };
     },
 
