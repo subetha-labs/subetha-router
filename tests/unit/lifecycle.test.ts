@@ -633,6 +633,103 @@ test("verify が false を返したら settle せず、送信レグにも進ま�
   expect(outcomeOfDestination(core, quote.paymentId)).toBe("none");
 });
 
+test("verify が成立しない credential を繰り返しても通算予算は減らない（再起動後も）", async () => {
+  // 予約は回復しないので、verify より前に取ると「署名の無効な credential」だけで枠が尽きる。
+  const config = baseConfig();
+  const limited = { ...config, budget: { ...config.budget, maxPurchases: 1 } };
+  const core = await boot(limited);
+
+  inbound.verifyImpl = async () => ({ isValid: false });
+  for (const requestId of ["bad-1", "bad-2", "bad-3"]) {
+    const quote = await core.quote({ principalId: "alice", requestId, routeId: ROUTE_ID });
+    expect(quote.ok).toBe(true);
+    if (!quote.ok) {
+      return;
+    }
+    expect((await core.purchase(purchaseArgs(quote, requestId))).code).toBe("verify_failed");
+  }
+  expect(inbound.verifyCalls).toBe(3);
+  expect(await countEvents("budget_reserved")).toBe(0);
+  await core.close();
+
+  // 件数上限は 1。無効な 3 件が枠を使っていれば、正当な 1 件は `purchase_count_limit` で止まる。
+  const restarted = await boot(limited);
+  delete inbound.verifyImpl;
+  const paid = await restarted.quote({ principalId: "alice", requestId: "good", routeId: ROUTE_ID });
+  expect(paid.ok).toBe(true);
+  if (!paid.ok) {
+    return;
+  }
+  expect((await restarted.purchase(purchaseArgs(paid, "good"))).status).toBe("delivered");
+  expect(await countEvents("budget_reserved")).toBe(1);
+});
+
+test("verify の応答が取れない試行は settle を呼ばず、予約も取らない", async () => {
+  const core = await boot();
+  const quote = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) {
+    return;
+  }
+
+  inbound.verifyImpl = async () => {
+    throw new Error("facilitator unavailable");
+  };
+  const result = await core.purchase(purchaseArgs(quote));
+
+  expect(result.status).toBe("unknown");
+  expect(result.terminalReason).toBe("source_verify_unavailable");
+  expect(inbound.settleCalls).toBe(0);
+  expect(await countEvents("budget_reserved")).toBe(0);
+});
+
+test("verify の間に期限が切れた試行は settle を呼ばず、予約も取らない", async () => {
+  let clock = 1_700_000_000_000;
+  const core = await createRouterCore({
+    journalPath,
+    config: baseConfig(),
+    inbound,
+    outbound,
+    now: () => clock,
+    nextPaymentId: () => "pay-1",
+  });
+  opened.push(core);
+  const quote = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) {
+    return;
+  }
+
+  inbound.verifyImpl = async () => {
+    clock = quote.approval.deadlineMs;
+    return { isValid: true };
+  };
+  const result = await core.purchase(purchaseArgs(quote));
+
+  expect(result.code).toBe("approval_expired");
+  expect(inbound.settleCalls).toBe(0);
+  expect(await countEvents("budget_reserved")).toBe(0);
+});
+
+test("settle を呼ぶ時点では予約行が journal に書かれている", async () => {
+  const core = await boot();
+  const quote = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+  expect(quote.ok).toBe(true);
+  if (!quote.ok) {
+    return;
+  }
+
+  let reservedAtSettle = -1;
+  inbound.settleImpl = async () => {
+    reservedAtSettle = await countEvents("budget_reserved");
+    return { outcome: "unknown", reason: "timeout" } as unknown as SettleResult;
+  };
+  const result = await core.purchase(purchaseArgs(quote));
+
+  expect(result.status).toBe("unknown");
+  expect(reservedAtSettle).toBe(1);
+});
+
 test("同じ id を返す並行 quote は 1 件しか成立せず、journal も壊れない", async () => {
   const core = await bootWithIds(() => "pay-1");
   inbound.fixedNonce = "0xnoncefixed";
