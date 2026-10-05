@@ -227,6 +227,105 @@ test("キーの上限は送信元とアドレスにも効く", () => {
   expect(addresses.snapshot().addresses).toBe(1);
 });
 
+test("キーの上限は窓をまたいでも超えない（掃除で消えた自分のキーを数え直す）", () => {
+  // 前の窓の記録が残っている a・b を含む 3 つを、上限 2 の表に要求する。
+  // 掃除は a・b を捨てるので、掃除の前に数えた「新しいキーは 1 つ」をそのまま使うと 3 つ入ってしまう。
+  const gate = gateWith({}, 2);
+  pass(gate.admitAddresses(["203.0.113.1", "203.0.113.2"]));
+  for (let round = 0; round < 3; round += 1) {
+    clock += 60_000;
+    expect(gate.admitAddresses(["203.0.113.1", "203.0.113.2", "203.0.113.3"])).toEqual({ ok: false, reason: "gate_capacity" });
+    expect(gate.snapshot().addresses).toBeLessThanOrEqual(2);
+    for (const address of ["203.0.113.1", "203.0.113.2", "203.0.113.3"]) expect(gate.activeOfAddress(address)).toBe(0);
+    // 上限に収まる要求は通る。
+    pass(gate.admitAddresses(["203.0.113.1", "203.0.113.2"]));
+    expect(gate.snapshot().addresses).toBe(2);
+  }
+});
+
+test("未払い quote の上限は進行中の quote も数える（空きが 1 つなら並行する 2 件目は通さない）", () => {
+  const gate = gateWith({ maxOutstandingQuotes: 3 });
+  // 控えに 2 件。空きは 1 つ。
+  const first = leaseOf(gate.admitQuote("a", 2));
+  expect(gate.snapshot().pendingQuotes).toBe(1);
+  expect(gate.admitQuote("b", 2)).toEqual({ ok: false, reason: "outstanding_quotes" });
+  // 1 件目が失敗して控えに入らなければ、空きは戻る。
+  first.release();
+  expect(gate.snapshot().pendingQuotes).toBe(0);
+  const second = leaseOf(gate.admitQuote("b", 2));
+  // 2 件目が控えに入った（控えは 3 件）。lease を返す前後どちらでも次は通らない。
+  expect(gate.admitQuote("c", 3)).toEqual({ ok: false, reason: "outstanding_quotes" });
+  second.release();
+  second.release();
+  expect(gate.snapshot().pendingQuotes).toBe(0);
+  expect(gate.admitQuote("c", 3)).toEqual({ ok: false, reason: "outstanding_quotes" });
+  // purchase は未払い quote の上限と無関係。
+  pass(gate.admitPurchase("c"));
+});
+
+test("頻度の回復: purchase とアドレスも窓が替わると回復する", () => {
+  const gate = gateWith({ purchasesPerMinuteGlobal: 1, perAddressPerMinute: 1 });
+  pass(gate.admitPurchase("a"));
+  expect(gate.admitPurchase("b")).toEqual({ ok: false, reason: "rate_global" });
+  pass(gate.admitAddresses(["203.0.113.10"]));
+  expect(gate.admitAddresses(["203.0.113.10"])).toEqual({ ok: false, reason: "rate_address" });
+  clock += 60_000;
+  pass(gate.admitPurchase("b"));
+  pass(gate.admitAddresses(["203.0.113.10"]));
+});
+
+test("窓をまたいで持っていた lease を返しても、取り直した同じキーの数は狂わない", () => {
+  const gate = gateWith({ perHostConcurrent: 2, perAddressConcurrent: 2 });
+  const oldHost = leaseOf(gate.admitHost("h.example"));
+  const oldAddress = leaseOf(gate.admitAddresses(["203.0.113.10"]));
+  clock += 5 * 60_000;
+  const newHost = leaseOf(gate.admitHost("h.example"));
+  const newAddress = leaseOf(gate.admitAddresses(["203.0.113.10"]));
+  expect(gate.activeOfHost("h.example")).toBe(2);
+  expect(gate.activeOfAddress("203.0.113.10")).toBe(2);
+  // 古い lease を 2 回返しても、減るのは 1 回分だけ。
+  oldHost.release();
+  oldHost.release();
+  oldAddress.release();
+  oldAddress.release();
+  expect(gate.activeOfHost("h.example")).toBe(1);
+  expect(gate.activeOfAddress("203.0.113.10")).toBe(1);
+  newHost.release();
+  newAddress.release();
+  expect(gate.activeOfHost("h.example")).toBe(0);
+  expect(gate.activeOfAddress("203.0.113.10")).toBe(0);
+});
+
+test("送信元のキーの上限は quote と purchase のどちらから来ても効き、拒否は何も残さない", () => {
+  const gate = gateWith({}, 1);
+  const held = leaseOf(gate.admitPurchase("a"));
+  expect(gate.admitQuote("b", 0)).toEqual({ ok: false, reason: "gate_capacity" });
+  expect(gate.admitPurchase("b")).toEqual({ ok: false, reason: "gate_capacity" });
+  expect(gate.snapshot()).toMatchObject({ activeGlobal: 1, pendingQuotes: 0, sources: 1 });
+  // 覚えている送信元は quote も通る（表が別でも同じキーなら余地がある）。
+  pass(gate.admitQuote("a", 0));
+  held.release();
+});
+
+test("lease を finally で返せば、成功・失敗・例外のどれでも枠が戻る", async () => {
+  const gate = gateWith({ concurrentGlobal: 1 });
+  const run = async (body: () => Promise<void>): Promise<void> => {
+    const lease = leaseOf(gate.admitPurchase("a"));
+    try {
+      await body();
+    } finally {
+      lease.release();
+    }
+  };
+  await run(async () => {});
+  expect(gate.snapshot().activeGlobal).toBe(0);
+  await expect(run(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+  expect(gate.snapshot().activeGlobal).toBe(0);
+  await run(async () => { await Promise.reject(new Error("handled")).catch(() => {}); });
+  expect(gate.snapshot().activeGlobal).toBe(0);
+  expect(gate.activeOfSource("a")).toBe(0);
+});
+
 test("既定の上限でも、返し忘れが無ければ数は 0 に戻る", () => {
   const gate = new DynamicGate({ limits: DEFAULT_DYNAMIC_LIMITS, now: () => clock });
   const leases: GateLease[] = [];

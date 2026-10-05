@@ -75,20 +75,19 @@ class KeyedCounters {
     rateReason: GateRejection,
     concurrencyReason: GateRejection,
   ): GateRejection | undefined {
-    let fresh = 0;
     for (const key of keys) {
       const entry = this.#entries.get(key);
-      if (entry === undefined) {
-        fresh += 1;
-        continue;
-      }
+      if (entry === undefined) continue;
       const count = entry.window === window ? entry.count : 0;
       if (count + 1 > perMinute) return rateReason;
       if (entry.active + 1 > concurrent) return concurrencyReason;
     }
-    if (fresh > 0 && this.#entries.size + fresh > this.#maxKeys) {
+    const missing = (): number => keys.reduce((n, key) => n + (this.#entries.has(key) ? 0 : 1), 0);
+    if (this.#entries.size + missing() > this.#maxKeys) {
+      // 掃除は要求したキー自身も捨て得る（前の窓の使われていない記録）。**掃除の後で数え直す**
+      // （数え直さないと、捨てたキーを `take` が作り直して上限を超える）。
       this.#sweep(window);
-      if (this.#entries.size + fresh > this.#maxKeys) return "gate_capacity";
+      if (this.#entries.size + missing() > this.#maxKeys) return "gate_capacity";
     }
     return undefined;
   }
@@ -147,6 +146,8 @@ export class DynamicGate {
   readonly #now: () => number;
   /** 動的操作（quote・purchase）の同時実行。全体と送信元ごと。 */
   #activeGlobal = 0;
+  /** 進行中の quote（まだ控えに入っていない）。未払い quote の上限に先取りで数える。 */
+  #pendingQuotes = 0;
   readonly #sourceActive: KeyedCounters;
   readonly #quoteGlobal: Counter = { window: -1, count: 0, active: 0 };
   readonly #purchaseGlobal: Counter = { window: -1, count: 0, active: 0 };
@@ -214,20 +215,33 @@ export class DynamicGate {
   }
 
   /**
-   * 動的 quote を 1 件始める。`outstandingQuotes` は期限内の未払い quote の現在数（控えが持つ）。
-   * 返った lease は quote の処理が終わったら（成功・失敗・例外のどれでも）1 回返す。
+   * 動的 quote を 1 件始める。`outstandingQuotes` は**控えに入っている**期限内の未払い quote の現在数。
+   *
+   * 未払い quote の上限は「控えの数 ＋ 進行中の quote の数」で見る。進行中の分を数えないと、
+   * 空きが 1 つしか無いときに並行する quote が全部通り、上流への接続だけが先に起きる。
+   * **lease は quote を控えに書き終えてから返す**（成功・失敗・例外のどれでも 1 回）。書いた直後は
+   * 控えと進行中の両方に数えられるが、厳しい側に倒れるだけ。
    */
   admitQuote(source: string, outstandingQuotes: number): GateResult {
-    if (outstandingQuotes + 1 > this.#limits.maxOutstandingQuotes) {
+    if (outstandingQuotes + this.#pendingQuotes + 1 > this.#limits.maxOutstandingQuotes) {
       return { ok: false, reason: "outstanding_quotes" };
     }
-    return this.#operation(
+    const admitted = this.#operation(
       source,
       this.#quoteGlobal,
       this.#quoteBySource,
       this.#limits.quotesPerMinuteGlobal,
       this.#limits.quotesPerMinutePerSource,
     );
+    if (!admitted.ok) return admitted;
+    this.#pendingQuotes += 1;
+    return {
+      ok: true,
+      lease: leaseOf(() => {
+        this.#pendingQuotes -= 1;
+        admitted.lease.release();
+      }),
+    };
   }
 
   /**
@@ -264,6 +278,9 @@ export class DynamicGate {
    * 検査済みアドレスの枠（接続の前に取る）。**重複を除いた全アドレス**が枠内のときだけ通し、
    * 1 つでも枠が無ければ何も取らない。どのアドレスに接続するかは HTTP クライアントが決めるので、
    * 候補の全部を数える。別名を増やしても同じアドレスなら同じ枠を使う。
+   *
+   * キーは**渡された文字列そのもの**。同じアドレスの別の綴り（IPv6 の省略形、IPv4-mapped）を別の枠に
+   * しないよう、呼び出し側（transport）は正規化済みの表記（`ParsedAddress.text`）を渡すこと。
    */
   admitAddresses(addresses: readonly string[]): GateResult {
     const keys = distinct(addresses);
@@ -284,12 +301,14 @@ export class DynamicGate {
   /** 試験と診断用: 現在の同時実行数と、覚えているキーの数。 */
   snapshot(): {
     readonly activeGlobal: number;
+    readonly pendingQuotes: number;
     readonly sources: number;
     readonly hosts: number;
     readonly addresses: number;
   } {
     return {
       activeGlobal: this.#activeGlobal,
+      pendingQuotes: this.#pendingQuotes,
       sources: this.#sourceActive.size,
       hosts: this.#hosts.size,
       addresses: this.#addresses.size,
