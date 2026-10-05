@@ -16,12 +16,13 @@
  * usage: SUBETHA_OUTBOUND_PRIVATE_KEY=0x... PORT=8787 tsx tools/remote-mcp.ts
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
+import { createMcpIngress } from "../src/mcp/ingress.js";
 import { buildServer } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 
@@ -227,7 +228,9 @@ async function start(): Promise<void> {
         : {}),
     });
   } catch (error) {
-    note(`could not start the Router: ${error instanceof Error ? error.message : "unknown"}`);
+    // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
+    void error;
+    note("could not start the Router");
     process.exit(1);
   }
   const listening = router.stdout().trim();
@@ -246,19 +249,13 @@ async function start(): Promise<void> {
   // ステートレス運用なので **要求ごとに server と transport を作る**
   // （1 つの `McpServer` は同時に複数 transport へ connect できない）。
 
-  const http = createServer((req: IncomingMessage, res: ServerResponse) => {
-    void (async () => {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1");
-      if (req.method === "GET" && url.pathname === "/healthz") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", router: "up" }));
-        return;
-      }
-      if (url.pathname !== "/mcp") {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
+  /**
+   * 入口の資源上限（本文 64 KiB・受信 10 秒・同時接続数）は `createMcpIngress` が持つ。
+   * 例外の文字列は外にもログにも出さない（固定文のみ）。
+   */
+  const http = createMcpIngress({
+    note,
+    handle: async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
       // ステートレス。セッションを跨いで状態を持たない。
       // リモートはステートレス: 呼び出し側が quote を持ち回る（慣行に合わせる）。
       const mcp = await buildServer({ stateless: true });
@@ -268,22 +265,8 @@ async function start(): Promise<void> {
         void mcp.close();
       });
       await mcp.connect(transport);
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(chunk as Buffer);
-      let body: unknown;
-      try {
-        body = chunks.length === 0 ? undefined : JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      } catch {
-        body = undefined;
-      }
       await transport.handleRequest(req, res, body);
-    })().catch((error: unknown) => {
-      note(`request failed: ${error instanceof Error ? error.message : "unknown"}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "internal_error" }));
-      }
-    });
+    },
   });
 
   const stop = (): void => {
@@ -298,7 +281,8 @@ async function start(): Promise<void> {
   });
 }
 
-start().catch((error: unknown) => {
-  note(`remote MCP failed: ${error instanceof Error ? error.message : "unknown"}`);
+start().catch(() => {
+  // 固定文のみ（例外の文字列は子プロセスの出力や設定の値を含み得る）。
+  note("remote MCP failed");
   process.exit(1);
 });
