@@ -167,6 +167,9 @@ capture_start() { rm -f "$3"; tcpdump -Z root -i "$1" -w "$3" -U "$2" >/dev/null
 capture_stop() { kill -INT "$(cat "$1.pid")" 2>/dev/null; wait "$(cat "$1.pid")" 2>/dev/null; rm -f "$1.pid"; sleep 1; cp -f "$1" "$EVID/" 2>/dev/null; }
 pkts()   { [ -s "$1" ] || { echo ERR; return; }; local o; o=$(tcpdump -nn -r "$1" ${2:+"$2"} 2>/dev/null) || { echo ERR; return; }; printf '%s' "$o" | grep -c .; }
 guard_pause()  { systemctl stop subetha-egress-guard.timer subetha-egress-guard.service || return 1
+  # If the 30 s timer had just fired, our stop kills the running guard and systemd records the unit as "failed" (result: signal).
+  # That state is ours, not a guard failure: clear it, then require "inactive" from both units.
+  systemctl reset-failed subetha-egress-guard.service 2>/dev/null || true
   local u st; for u in subetha-egress-guard.timer subetha-egress-guard.service; do st=$(systemctl is-active "$u"); [ $? = 3 ] && [ "$st" = inactive ] || return 1; done; }
 guard_resume() { systemctl start subetha-egress-guard.timer; }
 
@@ -286,7 +289,16 @@ matrix() {
   capture_stop /var/tmp/ev-veth.pcap; capture_stop /var/tmp/ev-uplink.pcap
   local a u probe_pkts other_pkts obsport synack; a=$(pkts /var/tmp/ev-veth.pcap "src net $(subnet)"); u=$(pkts /var/tmp/ev-uplink.pcap); obsport=${OBSERVER#*:}
   isnum "$a" && isnum "$u" || { ng V7-1 "captures unreadable (veth=$a uplink=$u)"; return; }
-  probe_pkts=$(pkts /var/tmp/ev-uplink.pcap "dst port 80 or dst port 9 or icmp or dst port $OBS_PORT${obsport:+ or dst port $obsport}"); other_pkts=$((u - probe_pkts))
+  # A probe that escaped would be FORWARDED, so its TTL on the uplink is below the host's default. Host-originated traffic to the
+  # same ranges and ports (on EC2: the metadata service at 169.254.169.254:80, used by this runner and by host agents) keeps the
+  # default TTL and is counted separately. The discriminator is checked: the namespace's own attempts must carry the default TTL on the veth.
+  local dttl pf vttl hostprobe; dttl=$(cat /proc/sys/net/ipv4/ip_default_ttl); isnum "$dttl" || { ng V7-1 "cannot read ip_default_ttl"; return; }
+  pf="dst port 80 or dst port 9 or icmp or dst port $OBS_PORT${obsport:+ or dst port $obsport}"
+  vttl=$(pkts /var/tmp/ev-veth.pcap "src net $(subnet) and ip and ip[8] > $dttl")
+  [ "$vttl" = 0 ] && ok V7-1 "no namespace attempt exceeds the default TTL $dttl on the veth (a forwarded copy shows at most $((dttl - 1)) on the uplink; multicast leaves with TTL 1)" || ng V7-1 "namespace attempts with a TTL above $dttl on the veth: $vttl (the forwarded/host-originated discriminator does not hold)"
+  probe_pkts=$(pkts /var/tmp/ev-uplink.pcap "($pf) and ip and ip[8] < $dttl"); hostprobe=$(pkts /var/tmp/ev-uplink.pcap "($pf) and ip and ip[8] >= $dttl")
+  isnum "$probe_pkts" && isnum "$hostprobe" || { ng V7-1 "uplink capture unreadable (forwarded=$probe_pkts host=$hostprobe)"; return; }
+  other_pkts=$((u - probe_pkts)); [ "$hostprobe" = 0 ] || note V7-1 "uplink $UPLINK: $hostprobe host-originated packets on probe ports (TTL $dttl; e.g. the metadata service) are not probes"
   [ "$a" -ge 16 ] && ok V7-1 "attempts seen on the veth: $a packets" || ng V7-1 "only $a attempt packets on the veth"
   [ "$probe_pkts" = 0 ] && [ "$other_pkts" -ge 1 ] && ok V7-1 "uplink $UPLINK: 0 probe packets to deny ranges; $other_pkts host-originated packets to those ranges prove the capture was live" || ng V7-1 "uplink $UPLINK: probe packets=$probe_pkts, other=$other_pkts (a live capture must see some host traffic to those ranges)"
   synack=$(pkts /var/tmp/ev-veth.pcap "dst net $(subnet) and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)")
@@ -575,13 +587,13 @@ fail_closed() {
   echo "== V7-12 fail-closed (stops Docker; observed through the restart retries in the journal) =="
   cp "$ENV_FILE" /var/tmp/egress-verify-env.bak || { ng V7-12 "cannot back up $ENV_FILE"; return; }
   systemctl stop docker.socket docker.service || { ng V7-12 "cannot stop docker"; return; }
-  local t0; t0=$(date -u +%Y-%m-%dT%H:%M:%S)
+  local t0; t0=@$(date -u +%s)      # epoch form: systemd 252 (AL2023) rejects the ISO "T" form in journalctl -S
   printf 'IFACES="%s"\nHOST_ADDRS4="not-an-address"\n' "$(env_value IFACES)" > "$ENV_FILE"
   systemctl start docker.service >/dev/null 2>&1; sleep 20
   local jl attempts; jl=$(TZ=UTC journalctl -q -S "$t0" -u docker.service -o cat); printf '%s\n' "$jl" > "$EVID/journal-failclosed-1.txt"
   attempts=$(printf '%s\n' "$jl" | grep -c "subetha-egress: not an IPv4 address/CIDR: 'not-an-address'")
   [ "$(pgrep -c dockerd)" -eq 0 ] && [ "$(pgrep -c containerd-shim)" -eq 0 ] && [ "$attempts" -ge 2 ] && ok V7-12 "bad HOST_ADDRS4: 0 dockerd and 0 container shims after 20 s; $attempts start attempts each failed in the policy with the expected diagnostic" || ng V7-12 "dockerd=$(pgrep -c dockerd) shims=$(pgrep -c containerd-shim) diagnostic attempts=$attempts"
-  printf 'TYPO_KEY=1\n' >> "$ENV_FILE"; systemctl reset-failed docker.service; t0=$(date -u +%Y-%m-%dT%H:%M:%S); systemctl start docker.service >/dev/null 2>&1; sleep 10
+  printf 'TYPO_KEY=1\n' >> "$ENV_FILE"; systemctl reset-failed docker.service; t0=@$(date -u +%s); systemctl start docker.service >/dev/null 2>&1; sleep 10
   jl=$(TZ=UTC journalctl -q -S "$t0" -u docker.service -o cat); printf '%s\n' "$jl" > "$EVID/journal-failclosed-2.txt"
   [ "$(pgrep -c dockerd)" -eq 0 ] && printf '%s\n' "$jl" | grep -q "unknown key 'TYPO_KEY'" && ok V7-12 "unknown key: docker.service failed with the expected diagnostic (unknown key 'TYPO_KEY')" || ng V7-12 "unknown key: dockerd=$(pgrep -c dockerd), diagnostic present: $(printf '%s\n' "$jl" | grep -c 'unknown key')"
   cp /var/tmp/egress-verify-env.bak "$ENV_FILE" || ng V7-12 "cannot restore $ENV_FILE"; rm -f /var/tmp/egress-verify-env.bak; systemctl reset-failed docker.service; systemctl start docker.service || ng V7-12 "docker did not start after restoring the env"; sleep 8
@@ -597,8 +609,12 @@ reboot_prepare() {
   docker rm -f subetha-egress-probe >/dev/null 2>&1
   docker run -d --name subetha-egress-probe --restart unless-stopped --network "$NET" --entrypoint sh "$PROBE_IMAGE" -c "while true; do for t in \"deny http://$OBSERVER/\" \"host http://$gw:$OBS_PORT/\" \"pub http://1.1.1.1/\"; do set -- \$t; r=\$(curl -s -o /dev/null -m 1 -w \"%{exitcode} %{http_code}\" \$2 2>/dev/null); echo \"\$1 \$r\"; done; sleep 0.2; done" >/dev/null || { ng V7-11 "cannot start the probe container"; return; }
   local filter="dst host ${OBSERVER%%:*}"
-  sed "s|@UPLINK@|$UPLINK|; s|@FILTER@|$filter|; s|@SECONDS@|$CAPTURE_SECONDS|" "$UNIT_DIR/egress-boot-capture.service" > /etc/systemd/system/egress-boot-capture.service
-  sed "s|@UNIT_DIR@|$UNIT_DIR|; s|@PORT@|$OBS_PORT|; s|@REPORT@|$OBS_REPORT|" "$UNIT_DIR/egress-host-observer.service" > /etc/systemd/system/egress-host-observer.service
+  # absolute paths differ between distributions (tcpdump is /usr/sbin on AL2023, /usr/bin on Ubuntu): resolve them here
+  local p_timeout p_tcpdump p_python3
+  p_timeout=$(command -v timeout) && p_tcpdump=$(command -v tcpdump) && p_python3=$(command -v python3) || { ng V7-11 "timeout, tcpdump or python3 not found"; return; }
+  sed "s|@UPLINK@|$UPLINK|; s|@FILTER@|$filter|; s|@SECONDS@|$CAPTURE_SECONDS|; s|@TIMEOUT@|$p_timeout|; s|@TCPDUMP@|$p_tcpdump|" "$UNIT_DIR/egress-boot-capture.service" > /etc/systemd/system/egress-boot-capture.service
+  sed "s|@UNIT_DIR@|$UNIT_DIR|; s|@PORT@|$OBS_PORT|; s|@REPORT@|$OBS_REPORT|; s|@PYTHON3@|$p_python3|" "$UNIT_DIR/egress-host-observer.service" > /etc/systemd/system/egress-host-observer.service
+  grep -q '@[A-Z0-9_]*@' /etc/systemd/system/egress-boot-capture.service /etc/systemd/system/egress-host-observer.service && { ng V7-11 "an aid unit still has an unresolved placeholder"; return; }
   mkdir -p /etc/systemd/system/docker.service.d; cp "$UNIT_DIR/99-egress-verify.conf" /etc/systemd/system/docker.service.d/
   rm -f /var/tmp/host-observer.log /var/tmp/boot-capture.pcap /var/tmp/boot-capture.log
   systemctl daemon-reload; systemctl enable egress-host-observer.service egress-boot-capture.service >/dev/null 2>&1
@@ -686,15 +702,17 @@ post_boot() {
 
 reboot_cleanup() {
   local bad=0 names req st rc u
-  names=$(docker ps -a --format '{{.Names}}') || { ng V7-11 "cannot list containers"; bad=1; }
-  printf '%s\n' "$names" | grep -qx subetha-egress-probe && { docker rm -f subetha-egress-probe >/dev/null 2>&1 || { ng V7-11 "cannot remove the probe container"; bad=1; }; }
-  # drop the test-only Requires= first and reload; only then may the aid units be stopped
+  # Do not talk to Docker first: while the test-only Requires= is in place and an aid unit cannot start, docker.service never
+  # starts and any docker command blocks on the socket forever (seen on AL2023). Drop the Requires=, reload, then use Docker.
   rm -f /etc/systemd/system/docker.service.d/99-egress-verify.conf "$PREP" || bad=1
   systemctl daemon-reload || { ng V7-11 "daemon-reload failed; aid units left running to avoid stopping docker.service"; return; }
   req=$(systemctl show docker.service -p Requires --value) || { ng V7-11 "cannot read docker.service's Requires; aid units left running"; return; }
   printf '%s\n' "$req" | grep -q egress && { ng V7-11 "docker.service still requires the aid units after reload; aid units left running"; return; }
   systemctl disable --now egress-host-observer.service egress-boot-capture.service >/dev/null 2>&1 || bad=1
   rm -f /etc/systemd/system/egress-host-observer.service /etc/systemd/system/egress-boot-capture.service || bad=1; systemctl daemon-reload || bad=1
+  if [ "$(systemctl is-active docker.service)" != active ]; then systemctl reset-failed docker.service 2>/dev/null; timeout 60 systemctl start docker.service || { ng V7-11 "docker.service did not start after the aid units were removed"; return; }; fi
+  names=$(timeout 30 docker ps -a --format '{{.Names}}') || { ng V7-11 "cannot list containers"; bad=1; }
+  printf '%s\n' "$names" | grep -qx subetha-egress-probe && { docker rm -f subetha-egress-probe >/dev/null 2>&1 || { ng V7-11 "cannot remove the probe container"; bad=1; }; }
   for u in egress-host-observer.service egress-boot-capture.service; do st=$(systemctl is-active "$u" 2>/dev/null); rc=$?; case "$rc:$st" in 3:inactive|4:*) ;; *) ng V7-11 "$u is '$st' (exit $rc) after cleanup"; bad=1 ;; esac; done
   names=$(docker ps -a --format '{{.Names}}') || bad=1; printf '%s\n' "$names" | grep -qx subetha-egress-probe && { ng V7-11 "probe container still present"; bad=1; }
   [ "$(systemctl is-active docker.service)" = active ] || { ng V7-11 "docker.service is not active after cleanup"; bad=1; }

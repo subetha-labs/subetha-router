@@ -9,7 +9,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/timeout @SECONDS@ /usr/bin/tcpdump -Z root -i @UPLINK@ -w /var/tmp/boot-capture.pcap -U @FILTER@
+ExecStart=@TIMEOUT@ @SECONDS@ @TCPDUMP@ -Z root -i @UPLINK@ -w /var/tmp/boot-capture.pcap -U @FILTER@
 ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do grep -q "listening on" /var/tmp/boot-capture.log 2>/dev/null && exit 0; sleep 0.2; done; exit 1'
 SuccessExitStatus=124
 StandardError=append:/var/tmp/boot-capture.log

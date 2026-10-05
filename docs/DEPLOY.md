@@ -241,49 +241,41 @@ namespace 内の宛先（loopback、自アドレス）は host から見えな�
 **B だけでは要件 INV-1'' は完成しない**（`ssrf-requirements.md` §9）。AI が上流 URL を指定する機能は、
 B と A の両方が通るまで出さない。
 
-### 8b.0 Docker の版（本番受け入れで見つかった前提。2026-10-05）
+### 8b.0 Docker の版と、既存ホストの扱い（本番受け入れで見つかった前提。2026-10-05）
 
 **egress 制御は Docker 28.2 以上を前提にする**（設計の実測は 28.3.3。runner の V7-15 は `docker info` の `FirewallBackend.Driver` が
 `iptables` であることを要求する。このフィールドは 28.1.0 で入った。28.2 以上はこの手順の方針。DNS の出所は V7-8 が稼働版で再測定する）。
 **AL2023 のリポジトリの `docker` は 25.0.x しか無く、そのままでは受け入れは通らない**（§6 手順 1 の `dnf install -y docker` は
-egress 制御を入れない構成用）。AL2023（arm64）では Docker 公式の CentOS 9 用パッケージに入れ替える。29 系は未測定なので
-**`docker-ce` / `docker-ce-cli` 28.5.2-1.el9、`containerd.io` 2.3.6-1.el9 に固定**し、versionlock を掛ける
-（セキュリティ更新は、新しい版をリハーサルしてから固定を付け替える。自動では上がらない）。
+egress 制御を入れない構成用）。29 系は未測定なので 28 系に固定する。
 
-手順は 2 本のスクリプト（`deploy/docker/replace-docker.sh`、`deploy/docker/rollback-docker.sh`。root で `bash` 実行）。
-**前提: journal が host の mount（`/app/runtime`）にあること**（無ければ止まる。その場合は入れ替えを後回しにできない: 先に相談）。
-8787 が外から直接届かないこと（SG は 443 と 22 のみ。§5）。入口は `caddy.service`。
+**既存ホストの Docker をその場で入れ替えない。** 入れ替えと降格の手順を書いてリハーサルしたが（同じコンテナ ID で復帰、戻しも通った）、
+独立レビューで中断・再起動・作り直しの経路に未解決の指摘が残った（2 回 REJECT）。**新しいホストを作り、受け入れを通してから切り替える**
+（§8b.6）。新しいホストでは Router を作る前に次を行う（root）:
 
-`replace-docker.sh` がすること（どの段階でも失敗すれば止まり、段階と次の行動を表示する）:
+```sh
+#!/bin/bash -e
+set -o pipefail
+# Docker 公式の署名鍵は指紋を照合してから登録する（docs.docker.com/engine/install/centos）
+curl -fsS -m 30 https://download.docker.com/linux/centos/gpg -o /tmp/docker.gpg
+FP=$(gpg --show-keys --with-colons /tmp/docker.gpg | awk -F: '$1=="fpr"{print $10; exit}')
+[ "$FP" = 060A61C51B558A7F742B77AAC52FEB6B621E9F35 ]
+install -m 644 /tmp/docker.gpg /etc/pki/rpm-gpg/docker-ce.gpg
+rpm --import /etc/pki/rpm-gpg/docker-ce.gpg
+# CentOS 9 用のリポジトリ（AL2023 の $releasever は使えないので 9 に固定）
+printf '[docker-ce-stable]\nname=Docker CE Stable (el9)\nbaseurl=https://download.docker.com/linux/centos/9/$basearch/stable\nenabled=1\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/docker-ce.gpg\n' > /etc/yum.repos.d/docker-ce.repo
+dnf install -y --setopt=install_weak_deps=False docker-ce-28.5.2-1.el9 docker-ce-cli-28.5.2-1.el9 containerd.io-2.3.6-1.el9
+dnf install -y 'dnf-command(versionlock)'
+dnf versionlock add docker-ce docker-ce-cli containerd.io
+LOCKS=$(dnf versionlock list | grep -cE '^(docker-ce|docker-ce-cli|containerd\.io)-' || true)
+[ "$LOCKS" = 3 ]
+systemctl enable --now docker
+V=$(docker version --format '{{.Server.Version}}'); [ "$V" = 28.5.2 ]
+FB=$(docker info --format '{{.FirewallBackend.Driver}}'); [ "$FB" = iptables ]
+LR=$(docker info --format '{{.LiveRestoreEnabled}}'); [ "$LR" = false ]
+echo "docker-ce $V installed (backend $FB) and version-locked"
+```
 
-1. **事前検査（サービスに触れない）**: 現在のパッケージ、コンテナ ID・イメージ ID、journal の場所、空き容量（3 GiB）と inode、
-   SELinux と Docker の security options の記録。Docker の署名鍵を取得して**指紋を照合**してから登録。入れ替えるパッケージを
-   先にダウンロード。**戻すための材料を `/root/docker-replace-<時刻>/`（700）に保存**: 元の 3 パッケージ、`docker save` したイメージ、
-   `docker inspect` の全文（環境変数を含むので root のみ）
-2. **入口を閉じる**（Caddy を止める）→ Router を 60 秒の猶予で止める。終了コードは記録するだけで、**journal の全行が JSON として
-   読めること**を条件にする（追記専用・1 行 1 文書）。停止状態の journal を保存先に写して `cmp`、sha256 を記録
-3. **入れ替え**（`--allowerasing`、weak dependency 無し）→ パッケージの版、daemon の版（28.5.2）、backend（`iptables`）、
-   live-restore（`false`）、**同じコンテナ ID・同じイメージ ID**、journal の sha256 が不変、を確認。versionlock が 3 件あることを確認
-4. **入口を閉じたまま** Router を起動 → healthy、`/healthz`、コンテナから journal が読み書きできる → **その後で**入口を開ける
-
-終わると Router は稼働、入口は開いている。**続けて §8b.2 を行うときは、§8b.2 の指示どおり先に Router を止める**
-（`docker stop subetha-router`。§8b.2 は Docker を再起動し、既定 bridge の Router に規則を掛ける。§8b.3 は旧 Router が動いている状態から始め、
-入口は §8b.3 のスクリプトが閉じる）。
-
-戻すとき（入れ替え後に Docker が上がらない、検査が通らない等）は `rollback-docker.sh <保存先>` → **host を再起動**
-（新しい daemon の network 規則を消す。Docker の案内どおり）→ `rollback-docker.sh <保存先> --after-reboot`。
-1 回目は入口を閉じて無効化し（再起動をまたいで閉じたまま）、この 3 パッケージの versionlock だけを外し、保存した元のパッケージに戻す。
-2 回目は、旧 daemon がコンテナを覚えていればそれを起動し、覚えていなければ**保存したイメージ ID と記録した設定**（環境変数、port、
-mount、再起動ポリシー、init、healthcheck、command）で作り直す。**journal が元の場所に無ければ起動しない**（空の directory を
-作らせない）。保存した停止時の journal は、より新しい journal を上書きしてはならない。daemon の降格は Docker の保証外なので、
-この経路は最後の手段であり、通ったら §8b の作業は中止して原因を調べる。
-
-リハーサル（2026-10-05、本番と同じ AL2023 arm64、`docker-25.0.16` / `containerd-2.2.7` / `runc-1.3.6`、healthcheck・再起動ポリシー・
-公開 port・bind mount・環境変数付きのコンテナと、入口の代役 unit）: 入れ替え 2 回（同じコンテナ ID、journal 不変、検査後に入口再開）、
-戻し（コンテナが残る場合。再起動中は入口が閉じたまま）、戻し（コンテナとイメージを消した状態から作り直し。設定と環境変数が一致）、
-鍵の指紋を変えた場合に事前検査で止まりサービスに触れないこと、を確認した。入れ替え後の host 再起動で Docker とコンテナが戻ること、
-Docker 自身の `mangle` の規則が 0 件であることも確認した。本番の Router の PID 1 は `npm exec` で、停止時の終了コードは未確認
-（そのため終了コードではなく journal の検査を条件にしている）。
+セキュリティ更新は、新しい版で §8b.4 を通してから固定を付け替える（自動では上がらない）。
 
 ### 8b.1 前提（runner が検証する。満たさなければ運用に入らない）
 
@@ -306,7 +298,8 @@ Docker 自身の `mangle` の規則が 0 件であることも確認した。本
 ```sh
 #!/bin/bash -e
 # 0) 依存（runner と補助 unit が使う）と preflight。無いものがあれば終了
-dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux curl diffutils
+# curl は入れない: AL2023 は curl-minimal が同梱で、`curl` パッケージを指定すると衝突して止まる（本番受け入れで判明）。直後の検査が存在を確かめる
+dnf install -y iptables-nft tcpdump conntrack-tools strace python3 util-linux diffutils
 for t in iptables ip6tables iptables-restore tcpdump conntrack strace flock python3 curl ss cmp sha256sum awk tar sync findmnt readlink; do command -v $t >/dev/null || { echo "MISSING: $t"; exit 1; }; done
 
 # 1) 成果物（リポジトリの checkout の直下で実行する。sudo は cwd を保つ）
@@ -717,6 +710,41 @@ sudo -E subetha-egress-verify --reboot-cleanup
 - IANA の special-purpose レジストリが更新されたら（runner が検出して FAIL にする）`DENY4` / `DENY6` を見直す
 - 起動直後、guard の初回実行までは bridge の gateway アドレスが目録に無い（network の subnet が RFC1918 なので
   レジストリ行が落とす。runner はそれを前提として検査する）。`check` はその間だけ差分を報告する
+
+### 8b.6 既存ホストから新しいホストへの切り替え
+
+既定 bridge・Docker 25 で動いている既存ホスト（旧）を、§8b.0〜§8b.4 を通した新しいホスト（新）に置き換える。
+**旧ホストは切り替えが確定するまで変更しない**（止めるだけ）。戻すときは Elastic IP を戻す。
+
+準備（公開に影響しない）:
+
+1. 新: 旧と同じ VPC・サブネット・SG、AL2023、IMDSv2 必須 + hop limit 1（§9）。§8b.0 → §8b.2
+2. 旧 → 新へ、**イメージ**（`docker save <イメージ ID>` を `docker load`。ID が一致すること）と `/etc/subetha-router.env`（600、sha256 が一致すること）を
+   端から端まで暗号化した経路で写す（秘密を作業端末のディスクに置かない）。Caddy の設定と証明書（`/etc/caddy/Caddyfile`、`/var/lib/caddy`）も同様
+3. 新: §6 手順 4 で Router を起動（**空の journal**。`127.0.0.1:8787` のみ。Caddy は**入れても起動しない**: `systemctl disable --now caddy`）
+4. 新: §8b.4 を全モード `failed 0`（外部 observer、免除なし、実 reboot）。証拠を保存
+
+切り替え（公開が止まる。数分）。各行は前の行が成功してから:
+
+1. 新: `docker stop subetha-router`（検証中の journal は `/var/lib/subetha-router.verify-<時刻>` に退避し、`/var/lib/subetha-router` を空にする）
+2. 旧: 入口を閉じる `systemctl disable --now caddy` → `docker stop -t 60 subetha-router` → `docker update --restart no subetha-router`
+   （再起動しても旧 Router が勝手に上がらない）
+3. 旧: journal の全行が JSON として読め、末尾が改行で終わること、行数と sha256 を記録
+4. 旧 → 新へ journal の directory を写す（`journal.ndjson` の sha256 と行数が一致。所有者 10001:10001）
+5. Elastic IP を旧から新へ付け替える
+6. 新: 公開 IPv4 が変わったので §8b.5 の順序で `HOST_ADDRS4` を更新する: guard timer と service を止める → `subetha-egress-verify --public-ipv4`
+   の値で `/etc/subetha-egress.env` を書き換える → `subetha-egress apply` → guard timer を起動して `is-active`
+7. 新: `docker start subetha-router` → `healthy`、`/healthz`、起動ログの mode / label、コンテナから journal が読み書きできること、
+   **journal の sha256 が写した時点から変わっていないか、追記だけであること**
+8. 新: 入口を開ける `systemctl enable --now caddy` → 外から `https://<domain>/healthz` と MCP の `tools/list`
+9. 新: `subetha-egress-verify`（既定モード）を再実行して `failed 0`（公開 IPv4 の照合を含む）
+
+戻す（手順 8 より前、または 8 の後でも**新で 1 件も購入が成立していない間**）: 新の Caddy と Router を止める → Elastic IP を旧へ戻す →
+旧で `docker update --restart unless-stopped subetha-router`、`docker start`、healthy を確認して `systemctl enable --now caddy`。
+**新で購入が成立した後は、新の journal が正**。旧を再び使うなら、新を止めて journal を旧へ写してからにする（古い journal で起動しない）。
+
+切り替え後: 旧ホストは Router と Caddy を止めたまま数日置き、問題が無ければ journal の最終写しを確認して終了する。
+Elastic IP を外した旧ホストには公開 IP が無いので、SSH は新ホスト経由（SG 内の 22 を許可）で行う。
 
 ## 9. EC2 側で必要なこと（このリポジトリの範囲外）
 
