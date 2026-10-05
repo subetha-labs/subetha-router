@@ -499,28 +499,6 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "offer_changed" };
     }
 
-    // 予算予約が成立しない限り受信 settle を開始しない。
-    const reservation = await budget.reserve({
-      paymentId: intent.paymentId,
-      source: {
-        network: intent.source.network,
-        asset: intent.source.asset,
-        amount: intent.source.amount,
-      },
-      destination: {
-        network: intent.destination.network,
-        asset: intent.destination.asset,
-        amount: intent.destination.quoted,
-      },
-    });
-    if (!reservation.ok) {
-      await store.append(intent.paymentId, "source_failed", {
-        outcome: "not_sent",
-        reason: reservation.reason,
-      });
-      return { paymentId: intent.paymentId, status: "awaiting_payment", code: reservation.reason };
-    }
-
     await store.append(intent.paymentId, "source_pending", {});
 
     let verified: { isValid: boolean };
@@ -561,6 +539,36 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         status: "awaiting_payment",
         code: "approval_expired",
       };
+    }
+
+    /**
+     * 予算予約が成立しない限り受信 settle を開始しない。
+     *
+     * **予約は verify が成立した後、settle の直前に行う。** 予約は通算で回復しないので、
+     * verify より前に置くと、**署名の無効な credential を出すだけで**（preflight は呼び出し側が
+     * 写せる項目しか見ない）誰でも払わずに枠を使い切れる。settle を呼び得る経路は必ずここを
+     * 通るので、「settle されたのに予約が無い」状態は作らない。期限の再検査より後に置くのは、
+     * 期限切れで終わる試行にも枠を使わせないため。
+     */
+    const reservation = await budget.reserve({
+      paymentId: intent.paymentId,
+      source: {
+        network: intent.source.network,
+        asset: intent.source.asset,
+        amount: intent.source.amount,
+      },
+      destination: {
+        network: intent.destination.network,
+        asset: intent.destination.asset,
+        amount: intent.destination.quoted,
+      },
+    });
+    if (!reservation.ok) {
+      await store.append(intent.paymentId, "source_failed", {
+        outcome: "not_sent",
+        reason: reservation.reason,
+      });
+      return { paymentId: intent.paymentId, status: "awaiting_payment", code: reservation.reason };
     }
 
     // 宣言型ではなく実際の値として扱う（相手の振る舞いは型では保証されない）。

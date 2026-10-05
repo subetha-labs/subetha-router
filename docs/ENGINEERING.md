@@ -81,8 +81,8 @@ npm run test -- tests/wire/mcp-server.test.ts      # MCP wrapper (tool exposure,
 
 ## Current purchase lifecycle (synthetic rail only)
 
-`quote -> approval -> strict preflight -> re-check of the upstream offer -> budget reservation -> verify ->
-inbound settle -> outbound write-ahead -> pay -> durable storage of the result` runs as one path on a real
+`quote -> approval -> strict preflight -> re-check of the upstream offer -> verify -> deadline re-check ->
+budget reservation -> inbound settle -> outbound write-ahead -> pay -> durable storage of the result` runs as one path on a real
 journal. The core does not branch on rail name, and this path also runs **over a real CLI and real TCP**
 (with synthetic fixtures on the other end).
 
@@ -93,7 +93,14 @@ journal. The core does not branch on rail name, and this path also runs **over a
 - Budgets are totaled per `(network, asset)` bucket, and inbound and outbound that fall into the same bucket
   are summed. After passing the count cap, the per-item cap and the amount format check, "check -> append+fsync
   of the reservation row" is done indivisibly under a single mutex, and the inbound settle is not started
-  unless it succeeds. `unknown` keeps holding the allocation.
+  unless it succeeds. A reservation that was taken is never released, including when the purchase ends in
+  `unknown`; failures and interruptions before the reservation hold no allocation.
+  **The reservation is taken only after `verify` succeeds, directly before the settle.** Reservations never
+  come back, and the strict preflight only compares fields a caller can copy, so reserving before `verify`
+  let anyone exhaust the budget with credentials that carry an invalid signature, without paying. An attempt
+  that ends at `verify` (rejected, unavailable, or expired meanwhile) never reached the settle and holds no
+  allocation. **Not covered**: a settle that the rail rejects after a successful `verify` still keeps its
+  allocation.
 - Twice, right before the inbound settle and right before the transfer, the upstream presentation is re-read
   and checked against the approved offer. The check uses **the entire set of top-level fields of the verified
   offer**, so a change in anything other than the amount (`maxTimeoutSeconds`, etc.) is detected too. A
