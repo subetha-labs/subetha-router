@@ -514,5 +514,12 @@ A を含むイメージ（commit `42414d2`、Node 22.23.3、`undici` 8.11.2）�
 | 両経路の quote（資金は動かない） | `md-mpp-eth-snapshot`（上流 MPP の challenge）、`md-x402-eth-snapshot`（上流 x402 の challenge）とも成功 = 経路 1・4 が本番の実上流に対して guarded transport 越しに通る |
 | 運用者向けの `outbound transport` 行 | 起動から確認時点まで 0 件 |
 
-未実施: 実購入（有料要求の経路 3・6、受信 facilitator の経路 9・10、RPC の経路 11・12 の本番での通過）。testnet の資金が動くので、人の承認を得て別途行う。
+実購入（2026-10-05、testnet、使い捨ての payer。owner 承認済み）: 両経路とも **delivered**、`outbound transport` 行は 0 件のまま。
+
+| 経路 | 受信 | 送信 | 結果 |
+|---|---|---|---|
+| `md-mpp-eth-snapshot` | x402（Base Sepolia USDC 10000。facilitator の verify / settle = 経路 10） | MPP（Tempo pathUSD。challenge・有料要求・能力の RPC = 経路 1〜3、12） | delivered（paymentId `f801cb73-8251-49f4-867d-edc171b13b98`） |
+| `md-x402-eth-snapshot` | MPP（Tempo pathUSD 10000、tx `0xa38ff75b8ba890138f109b0898fb79e83e014376e0c49be97991df2b08237bfc`。SDK の receipt 照合 RPC = 経路 11） | x402（Base Sepolia USDC。challenge・有料要求 = 経路 4〜6） | delivered（paymentId `beefbeff-8093-432a-b20b-5c6bf0772000`） |
+
+本番で通っていないのは、この構成で使っていない経路（合成 x402 の 7・8、受信 subetha の 9）だけである。
 これで要件 §9 の release gate（B と A の両方の受け入れ）は、本番の構成として満たされた。
