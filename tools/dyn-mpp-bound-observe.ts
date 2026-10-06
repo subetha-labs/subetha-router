@@ -4,17 +4,19 @@
  * 問い: quote から purchase までの最大 10 分の間に、署名前の bound（`ceil(gas × maxFeePerGas / 10^12)`）はどれだけ上がり得るか。
  * `feeMargin` 2 倍（仮の値）が足りるかを見る材料。
  *
- * `observe`: 一定間隔で Router の見積りと同じ経路（viem の `prepareTransactionRequest`、同じ transaction の形）で bound を読み、
- * 1 行 1 サンプルの JSON（ts・gas・maxFeePerGas・baseFee・bound）をファイルに追記する。**署名も送金もしない。**
+ * `observe`: 一定間隔で Router の見積りと同じ経路（最新ブロックの baseFee を読み、Router の単価 `feePerGasOf(baseFee)`・priority 1 を渡して
+ * viem の `prepareTransactionRequest`。同じ transaction の形）で bound を読み、1 行 1 サンプルの JSON（ts・gas・maxFeePerGas・baseFee・bound）を
+ * ファイルに追記する。**署名も送金もしない。** `--node-policy` を付けると手数料を渡さず、ノードの提案（priority を含む）をそのまま記録する（設計 §8.1 ②の
+ * 第 1 版の観測はこの形だった）。
  * `report`: 記録を読み、Δ ∈ {1, 2, 5, 10 分} ごとに bound(t+Δ) / bound(t) の分布（最大・p99・2 倍超の件数）を出す。
  *
  * `history`: `eth_feeHistory` でブロックごとの baseFee を過去に遡って読み（1 回 1,024 ブロック、ページの境界のブロックの timestamp を読んで補間）、
- * 同じ形の 1 行 1 ブロックの JSON を書く。bound は `ceil(gas × maxFeePerGas / 10^12)` で、`maxFeePerGas` はノードの fill（`2 × baseFee + priority`）に
- * viem の 1.2 倍を掛けたもの（`observe` で実測した形）として計算する。gas は `--gas`（既定 48,945。`observe` の実測）。
+ * 同じ形の 1 行 1 ブロックの JSON を書く。bound は `ceil(gas × maxFeePerGas / 10^12)` で、`maxFeePerGas` は Router の単価 `feePerGasOf(baseFee)`
+ * （設計 §8.2。priority は 1 固定なのでノードの提案は入らない）。gas は `--gas`（既定 48,945。`observe` の実測）。
  *
  * usage:
  *   T7_PAYER_PRIVATE_KEY=0x… npx tsx tools/dyn-mpp-bound-observe.ts observe <file> [--interval 30] [--hours 6] [--to 0x…] [--amount 10000]
- *   npx tsx tools/dyn-mpp-bound-observe.ts history <file> [--hours 72] [--gas 48945] [--priority 1]
+ *   npx tsx tools/dyn-mpp-bound-observe.ts history <file> [--hours 72] [--gas 48945]
  *   npx tsx tools/dyn-mpp-bound-observe.ts report <file>
  */
 import { appendFileSync, readFileSync } from "node:fs";
@@ -59,7 +61,16 @@ async function rpc(method: string, params: unknown[]): Promise<unknown> {
 async function observe(file: string): Promise<void> {
   const key = process.env["T7_PAYER_PRIVATE_KEY"];
   const fromArg = argOf("--from");
-  const from = (fromArg ?? (key === undefined ? undefined : privateKeyToAccount(key as Hex).address)) as Hex | undefined;
+  let from: Hex | undefined = fromArg as Hex | undefined;
+  if (from === undefined && key !== undefined) {
+    try {
+      from = privateKeyToAccount(key as Hex).address;
+    } catch {
+      // 鍵の値を例外の文字列に出さない。
+      console.error("T7_PAYER_PRIVATE_KEY could not be turned into an address; pass --from 0x… instead");
+      process.exit(2);
+    }
+  }
   if (from === undefined) {
     console.error("set T7_PAYER_PRIVATE_KEY (only the address is used) or pass --from 0x…");
     process.exit(2);
@@ -77,21 +88,24 @@ async function observe(file: string): Promise<void> {
     const started = Date.now();
     let sample: Sample;
     try {
+      const block = (await rpc("eth_getBlockByNumber", ["latest", false])) as { baseFeePerGas?: string };
+      const baseFee = BigInt(block.baseFeePerGas ?? "0x0");
+      const nodePolicy = process.argv.includes("--node-policy");
       const prepared = (await prepareTransactionRequest(client as never, {
         account: facade as never,
         calls: [{ to: PATHUSD, data, value: 0n }],
         feeToken: PATHUSD,
         nonceKey: "expiring",
         validBefore: Math.floor(Date.now() / 1000) + 25,
+        ...(nodePolicy ? {} : { maxFeePerGas: feePerGasOf(baseFee), maxPriorityFeePerGas: 1n }),
       } as never)) as { gas?: bigint; maxFeePerGas?: bigint };
-      const block = (await rpc("eth_getBlockByNumber", ["latest", false])) as { baseFeePerGas?: string };
       const gas = prepared.gas ?? 0n;
       const maxFeePerGas = prepared.maxFeePerGas ?? 0n;
       sample = {
         ts: started,
         gas: gas.toString(),
         maxFeePerGas: maxFeePerGas.toString(),
-        baseFeePerGas: BigInt(block.baseFeePerGas ?? "0x0").toString(),
+        baseFeePerGas: baseFee.toString(),
         bound: ceilDiv(gas * maxFeePerGas, SCALE).toString(),
       };
     } catch (error) {
@@ -103,17 +117,17 @@ async function observe(file: string): Promise<void> {
   }
 }
 
-/** ノードの fill は `maxFeePerGas = 2 × baseFee + priority`（実測）、viem はそれに 1.2 倍（`fillTransaction.ts` の baseFeeMultiplier）。 */
-function boundFromBaseFee(gas: bigint, baseFee: bigint, priority: bigint): bigint {
-  const filled = 2n * baseFee + priority;
-  const maxFeePerGas = (filled * 12n) / 10n;
-  return ceilDiv(gas * maxFeePerGas, SCALE);
+/** Router の単価（`src/adapters/outbound/mpp-dynamic.ts` の `feePerGasOf` と同じ式）。 */
+function feePerGasOf(baseFee: bigint): bigint {
+  return (baseFee * 24n + 9n) / 10n + 1n;
+}
+function boundFromBaseFee(gas: bigint, baseFee: bigint): bigint {
+  return ceilDiv(gas * feePerGasOf(baseFee), SCALE);
 }
 
 async function history(file: string): Promise<void> {
   const hours = Number(argOf("--hours", "72"));
   const gas = BigInt(argOf("--gas", "48945")!);
-  const priority = BigInt(argOf("--priority", "1")!);
   const head = Number(BigInt((await rpc("eth_blockNumber", [])) as string));
   const headBlock = (await rpc("eth_getBlockByNumber", ["latest", false])) as { timestamp: string };
   const headTs = Number(BigInt(headBlock.timestamp));
@@ -135,8 +149,8 @@ async function history(file: string): Promise<void> {
       const number = oldest + k;
       const ts = Math.round(oldestTs + ((newestTs - oldestTs) * k) / Math.max(1, count - 1));
       const baseFee = BigInt(fees[k]!);
-      const bound = boundFromBaseFee(gas, baseFee, priority);
-      lines.push(JSON.stringify({ ts: ts * 1000, block: number, gas: gas.toString(), maxFeePerGas: (((2n * baseFee + priority) * 12n) / 10n).toString(), baseFeePerGas: baseFee.toString(), bound: bound.toString() }));
+      const bound = boundFromBaseFee(gas, baseFee);
+      lines.push(JSON.stringify({ ts: ts * 1000, block: number, gas: gas.toString(), maxFeePerGas: feePerGasOf(baseFee).toString(), baseFeePerGas: baseFee.toString(), bound: bound.toString() }));
     }
     // ファイルは古い順に読めるよう、ページごとに先頭へ積む代わりに、最後に並べ替える（report はソートする）。
     appendFileSync(file, `${lines.join("\n")}\n`);

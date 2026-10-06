@@ -573,6 +573,7 @@ function isSendOrSignMethod(method: string): boolean {
 }
 
 type RpcRequest = (args: { method: string; params?: unknown }, options?: Record<string, unknown>) => Promise<unknown>;
+const guardedSendOf = (request: RpcRequest) => (args: { method: string; params?: unknown }): Promise<unknown> => request(args, { retryCount: 0 });
 
 /** 能力の client が、SSRF 防御 A に乗せ直せる viem の素の `http` transport か。 */
 function plainHttpTransportOf(client: Client): { url: string; fetchOptions?: RequestInit; retryCount?: number; retryDelay?: number; timeout?: number } | undefined {
@@ -914,10 +915,14 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
         return { outcome: "not_sent", reason: "destination_capability_unsupported" };
       }
 
-      // 署名の直前の baseFee（単価は Router が決める。設計 §8.2）。RPC の予算の中で 1 回。
+      // 1 件の支払いで RPC に使える時間の予算。baseFee の読取もこの中。
+      const rpcDeadline = Date.now() + rpcBudgetMs;
+      // 署名の直前の baseFee（単価は Router が決める。設計 §8.2）。予算の残りを期限にして 1 回。
       let baseFee: bigint;
       try {
-        baseFee = baseFeeOf(await rpcRequest({ method: "eth_getBlockByNumber", params: ["latest", false] }, { retryCount: 0 }));
+        const remaining = rpcDeadline - Date.now();
+        if (remaining <= 0) throw new TempoSigningRefusedError("destination_rpc_budget_exhausted");
+        baseFee = baseFeeOf(await withDeadline(guardedSendOf(rpcRequest)({ method: "eth_getBlockByNumber", params: ["latest", false] }), Math.min(remaining, rpcTimeoutMs + 1_000)));
       } catch {
         return { outcome: "not_sent", reason: "destination_rejected" };
       }
@@ -925,7 +930,6 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
       let sends = 0;
       /** 送金の RPC が接続の前に断られた（raw は出ていない）。署名後でも `not_sent` と言える唯一の場合。 */
       let sendRefusedBeforeDispatch = false;
-      const rpcDeadline = Date.now() + rpcBudgetMs;
       /**
        * SDK・viem からの RPC。**検査した値と、実際に送る値を同じものにする**: `method` は文字列の原始値として 1 度だけ読み、
        * `params` は JSON の写し（getter・`toJSON`・Proxy を持たない素の値）にしてから分類・検査し、その写しだけを送る。

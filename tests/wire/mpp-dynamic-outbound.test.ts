@@ -943,8 +943,8 @@ describe("支払い", () => {
     const offer = await h.quote();
     h.rpc.http.delayMs = 200;
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
-    // baseFee の読取（200 ms）＋ fill の失敗（200 ms）で予算を超え、3 回目以降は出ない。
-    expect(h.rpc.http.requests).toBeLessThanOrEqual(3);
+    // baseFee の読取（200 ms。予算の中）＋ fill の失敗（200 ms）で予算 250 ms を超え、3 回目は出ない。
+    expect(h.rpc.http.requests).toBeLessThanOrEqual(2);
     expect(h.innerSigned).toHaveLength(0);
     expect(h.sends()).toBe(0);
   });
@@ -1155,6 +1155,17 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
     expect(BigInt(high.bound)).toBeGreaterThan(BigInt(low.bound) * 9n);
   });
 
+  test("pay: baseFee の読取も RPC の予算の中（予算が尽きていれば読まずに not_sent）", async () => {
+    const h = await harness({ rpcBudgetMs: 150, rpcTimeoutMs: 1_000 });
+    const offer = await h.quote();
+    h.rpc.http.delayMs = 400; // 予算 150 ms < 1 回の上限 1,000 ms: 残りの予算で打ち切る。
+    const started = Date.now();
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_rejected" });
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(h.rpc.http.requests).toBe(1);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
   test("RPC が応答しない: 1 回の期限 = min(1 回の上限, 残りの予算)。合計の予算を超えて待たず、期限後は次の RPC を出さない", async () => {
     const h = await harness({ estimateRpcTimeoutMs: 1_000, estimateRpcBudgetMs: 1_200 });
     const offer = await h.quote();
@@ -1310,9 +1321,9 @@ describe("pay: 署名時の上限は request.maxFee（quote の cap）", () => {
   });
 
   test("送金の RPC の予算が署名後に尽きていても、出していなければ not_sent", async () => {
-    const h = await harness({ rpcBudgetMs: 250 });
+    const h = await harness({ rpcBudgetMs: 450 });
     const offer = await h.quote();
-    // fill の応答を遅らせ、署名の後の送金の RPC の時点で予算切れにする（fill 1 回なので予算の検査は送金の前）。
+    // 応答を遅らせ、baseFee（300 ms）＋ fill（300 ms）の後、署名の後の送金の RPC の時点で予算切れにする。
     h.rpc.http.delayMs = 300;
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_send_refused_before_dispatch" });
     expect(h.innerSigned).toHaveLength(1);
