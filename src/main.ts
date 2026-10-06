@@ -294,7 +294,11 @@ export function composeRails(
     ...Object.values(config.router.routes).filter((route) => route.sourceRail === "mpp").map((route) => Number(route.source.network.replace(/^eip155:/, ""))),
     ...Object.values(profiles).filter((profile) => profile.sourceRail === "mpp").map((profile) => Number(profile.source.network.replace(/^eip155:/, ""))),
   ];
-  // 自分自身と依存先には向けない（設計 §7.4）: facilitator・上流・自分の canonical・受信 MPP の RPC・能力の依存先の各ホスト名。
+  /**
+   * 自分自身と依存先には向けない（設計 §7.4）: facilitator・自分の canonical・受信 MPP の RPC・能力の依存先の各ホスト名。
+   * **静的 route の上流は入れない**（owner の決定 2026-10-06）: 上流は運営の内側ではなく、静的 route で誰でも買える公開サービスで、
+   * 動的に向けても内側への経路は開かない。増えるのは接続の頻度だけで、宛先ホストの枠（§7.3）で抑える。
+   */
   const denyHosts =
     dynamicConfig === undefined
       ? []
@@ -302,7 +306,6 @@ export function composeRails(
           real.subethaFacilitatorUrl,
           real.x402InboundFacilitatorUrl,
           config.http.canonicalBaseUrl,
-          ...Object.values(real.upstreams),
           ...mppInboundChains.map((chainId) => mppInboundRpcUrlFor(chainId)),
           ...(capabilities.dependencyUrls ?? []),
         ]);

@@ -179,10 +179,9 @@ with a 29 base-unit fee; MPP→x402: inbound `0xff82c44f…d8b`, outbound `0x64f
 step succeeded for 11 of 21 third-party Base Sepolia providers with unpaid reads.
 
 What is **not** done: it is **off in production** (`dynamic.enabled: false`, one line in
-`tools/remote-mcp-config.ts`), the fee and limit values are a proposal, the MPP-outbound fee bound is
-observed rather than established from the Tempo fee specification, and in the production config the
-operator's own providers are denied as dynamic targets (they are static upstreams). The design and the
-task record live in `docs/dynamic-upstream-*.md`.
+`tools/remote-mcp-config.ts`), and the MPP-outbound fee bound is observed rather than established from
+the Tempo fee specification (the caller's fee covers it under that assumption, which the Router checks at
+startup). The design and the task record live in `docs/dynamic-upstream-*.md`.
 
 ## Not verified yet
 

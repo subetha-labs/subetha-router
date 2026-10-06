@@ -39,7 +39,7 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_JOURNAL_PATH` | | journal の置き場。既定 `runtime/journal.ndjson`。**ボリュームの中を指すこと** |
 | `SUBETHA_DYNAMIC_MAX_PURCHASES` | | 動的上流 URL の通算の件数上限。既定 `1000`（§2b） |
 | `SUBETHA_DYNAMIC_MAX_TOTAL` | | 動的上流 URL の通算の額の上限（受信・送信の各バケット、base units）。既定 `100000000` |
-| `SUBETHA_DENY_HOSTS` | | 動的上流 URL の宛先にできないホスト名（カンマ区切り）。公開ホスト名・facilitator・上流・RPC の**ホスト名**（とそのサブドメイン）は設定に関係なく拒否する。別の名前で同じサービスに解決する宛先は拒否できない（設計 §7.4 の限界） |
+| `SUBETHA_DENY_HOSTS` | | 動的上流 URL の宛先にできないホスト名（カンマ区切り）。公開ホスト名・facilitator・RPC の**ホスト名**（とそのサブドメイン）は設定に関係なく拒否する。運用者の Provider A・B（静的 route の上流）は拒否しない。別の名前で同じサービスに解決する宛先は拒否できない（設計 §7.4 の限界） |
 
 ### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番では無効**
 
