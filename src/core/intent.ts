@@ -112,6 +112,10 @@ export interface IntentDynamic {
     readonly converted: string;
     readonly fee: string;
     readonly total: string;
+    /** MPP 送信だけ: quote が決めた署名時の手数料の上限（cap。`docs/dynamic-gas-fee-design.md` §2）。 */
+    readonly maxFee?: string;
+    /** MPP 送信だけ: quote 時の見積りの証跡（変えない。§3.1）。 */
+    readonly estimate?: { readonly gas: string; readonly maxFeePerGas: string; readonly bound: string; readonly atMs: number };
   };
   /** 持ち主の証明のハッシュ（`sha256:<hex>`）。証明そのものは保存しない。 */
   readonly ownerKeyHash: string;
@@ -144,6 +148,11 @@ export interface Intent {
   readonly dynamic?: IntentDynamic;
   /** `upstream`／`dynamic` の欄があるのに読めない形だった。**この intent は実行しない。** */
   readonly dynamicInvalid?: boolean;
+  /**
+   * MPP 送信の記録なのに cap（`pricing.maxFee`・`pricing.estimate`）が無い・形が違う・手数料 < cap。`dynamic` は保たれる
+   * （状態の照会・予算の集計は通る）が、**purchase は実行しない**（`docs/dynamic-gas-fee-design.md` §3.2）。
+   */
+  readonly dynamicCapInvalid?: boolean;
   /** 承認の絶対期限（ミリ秒）。発行 offer の失効時刻で上限を切る。 */
   readonly approvalDeadlineMs: number;
   readonly result?: IntentResult;

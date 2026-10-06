@@ -165,7 +165,13 @@ function dynamicNextStep(quote: QuoteView): string {
     "Explicit human approval is required for THIS upstream URL and THIS recipient: the operator has not " +
       "verified the destination, and nothing is refunded if the upstream takes the payment and returns no data. " +
       `Show the human the upstream URL (${quote.upstream?.url ?? ""}), the recipient, and the price breakdown ` +
-      `(upstream amount ${String(pricing["upstreamAmount"])}, fee ${String(pricing["fee"])}, total ${String(pricing["total"])} base units).`,
+      `(upstream amount ${String(pricing["upstreamAmount"])}, fee ${String(pricing["fee"])}, total ${String(pricing["total"])} base units).` +
+      (typeof pricing["maxFee"] === "string"
+        ? ` The fee was set from a gas-cost estimate taken at quote time (upstream chain fee cap ${String(pricing["maxFee"])} base units, ` +
+          `estimated at ${estimateTimeOf(pricing)}; this quote expires at ${new Date(quote.approval.deadlineMs).toISOString()}). ` +
+          "The estimate is not a delivery guarantee: if the chain fee rises above the cap before the Router signs, the Router refuses " +
+          "(`fee_too_high`) — after the inbound payment settled, that leaves the payment made and nothing delivered, with no refund."
+        : ""),
     `Only ${String(disclosures["supportedResponse"] ?? "an application/json object up to 256 KiB")} is delivered; ` +
       "any other response is reported as paid without data.",
     fundsMove
@@ -177,6 +183,12 @@ function dynamicNextStep(quote: QuoteView): string {
         "this quoteId as `approval`. If not, do not call it.",
   ];
   return lines.join(" ");
+}
+
+function estimateTimeOf(pricing: Record<string, unknown>): string {
+  const estimate = pricing["estimate"];
+  const atMs = typeof estimate === "object" && estimate !== null ? (estimate as Record<string, unknown>)["atMs"] : undefined;
+  return typeof atMs === "number" && Number.isFinite(atMs) ? new Date(atMs).toISOString() : "an unknown time";
 }
 
 function approvalSubject(quote: QuoteView): Record<string, unknown> {

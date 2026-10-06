@@ -88,6 +88,21 @@ export interface PayRequest {
   readonly attempt: number;
   /** 動的購入のときだけ。静的 route では付けない。 */
   readonly target?: UpstreamTarget;
+  /**
+   * 動的 MPP 送信のときだけ: quote が決めた署名時の手数料の上限（cap。`pricing.maxFee`。`feeAsset` の base units の 10 進文字列）。
+   * MPP の動的経路はこれが無ければ送らない。静的・x402 送信では付けない（`docs/dynamic-gas-fee-design.md` §3.4）。
+   */
+  readonly maxFee?: string;
+}
+
+/** quote 時のガス代の見積り（`docs/dynamic-gas-fee-design.md` §1）。すべて 10 進文字列。 */
+export interface FeeEstimate {
+  readonly gas: string;
+  readonly maxFeePerGas: string;
+  /** `ceil(gas × maxFeePerGas / 10^12)`（`feeAsset` の base units）。 */
+  readonly bound: string;
+  /** ノードの `eth_fillTransaction` で埋まったか（対応ノード: 1 回の RPC）。非対応ノードは運用の条件から外す（設計 §4）。 */
+  readonly viaFillTransaction: boolean;
 }
 
 export type PayResult =
@@ -111,4 +126,9 @@ export interface OutboundRail {
   /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
   readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]>;
   pay(request: PayRequest): Promise<PayResult>;
+  /**
+   * 動的 MPP 送信だけ: `offer` への送金のガス代を**署名も送金もせずに**見積もる（読取の RPC だけ）。
+   * 失敗は例外（呼び出し側が quote を不成立にする）。
+   */
+  estimateFee?(routeId: string, offer: DestinationOffer, target: UpstreamTarget): Promise<FeeEstimate>;
 }

@@ -37,6 +37,8 @@ export interface VerifyingFacilitator {
   readonly baseUrl: string;
   readonly port: number;
   readonly calls: { verify: number; settle: number; reasons: string[] };
+  /** settle が成功する直前に呼ぶ（settle の後に状況を変える試験用）。 */
+  onSettle?: (() => void) | undefined;
   /** 使用済みの nonce（`from:nonce`）。 */
   readonly used: Set<string>;
   close(): Promise<void>;
@@ -94,6 +96,7 @@ async function check(body: unknown, used: Set<string>, nowSeconds: number): Prom
 export async function startVerifyingFacilitator(options: { tls?: TlsMaterial; now?: () => number } = {}): Promise<VerifyingFacilitator> {
   const calls = { verify: 0, settle: 0, reasons: [] as string[] };
   const used = new Set<string>();
+  const state: { onSettle: (() => void) | undefined } = { onSettle: undefined };
   const now = options.now ?? (() => Date.now());
   const handler = (request: http.IncomingMessage, response: http.ServerResponse): void => {
     const chunks: Buffer[] = [];
@@ -125,6 +128,7 @@ export async function startVerifyingFacilitator(options: { tls?: TlsMaterial; no
             return;
           }
           used.add(result.key);
+          state.onSettle?.();
           send(200, { success: true, network: result.network, transaction: `0x${randomBytes(32).toString("hex")}`, payer: result.payer });
           return;
         }
@@ -141,6 +145,12 @@ export async function startVerifyingFacilitator(options: { tls?: TlsMaterial; no
     port,
     calls,
     used,
+    get onSettle(): (() => void) | undefined {
+      return state.onSettle;
+    },
+    set onSettle(value: (() => void) | undefined) {
+      state.onSettle = value;
+    },
     close: () => {
       server.closeAllConnections();
       return new Promise<void>((resolve) => server.close(() => resolve()));

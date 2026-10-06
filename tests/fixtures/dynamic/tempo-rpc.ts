@@ -11,7 +11,9 @@
  * raw の**送り主は署名から復元する**（secp256k1 の署名だけ）。試験が「誰が払ったことにするか」を決められると、
  * 上流の SDK の送り主の照合が、試験の与えた値を確かめるだけになってしまう。
  *
- * `eth_fillTransaction` は持たない（-32601）。viem は見積りの RPC に落ちる。チェーンも鍵も無い。
+ * `eth_fillTransaction` は既定で**持つ**（本番の RPC と同じ。要求の transaction に `gas`・`maxFeePerGas`・`maxPriorityFeePerGas` を埋めて返す。
+ * `docs/dynamic-gas-fee-design.md` §1.3）。`fillTransaction = false` にすると -32601 を返し、viem は見積りの RPC に落ちる。
+ * `priorityFee = false` にすると `eth_maxPriorityFeePerGas` も無く、viem は `eth_gasPrice` に落ちる。チェーンも鍵も無い。
  */
 import http from "node:http";
 import https from "node:https";
@@ -38,8 +40,14 @@ export interface TempoRpc {
   readonly port: number;
   /** TLS なしの URL（同じ状態を見る）。上流の fixture が検証に使う。TLS を指定しなければ `url` と同じ。 */
   readonly plainUrl: string;
-  /** 見積りの応答（手数料の上限の試験用）。 */
+  /** 見積りの応答（手数料の上限の試験用）。`eth_fillTransaction` は `gas` と `maxFeePerGas = baseFeePerGas + 1`（priority 1）を返す。 */
   readonly quote: { gas: bigint; baseFeePerGas: bigint };
+  /** `eth_fillTransaction` を持つか（既定 true）。 */
+  fillTransaction: boolean;
+  /** `eth_maxPriorityFeePerGas` を持つか（既定 true）。 */
+  priorityFee: boolean;
+  /** `eth_fillTransaction` で受けた transaction（RPC の形のまま、順に）。 */
+  readonly filled: Record<string, unknown>[];
   /** 受けた RPC の method（順に）。 */
   readonly methods: string[];
   /** 送金の RPC で受けた raw transaction。 */
@@ -91,7 +99,13 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
   const sentRaw: Hex[] = [];
   const balances = new Map<string, bigint>();
 
-  const state: { lastSender: string | undefined; failSend: boolean } = { lastSender: undefined, failSend: false };
+  const state: { lastSender: string | undefined; failSend: boolean; fillTransaction: boolean; priorityFee: boolean } = {
+    lastSender: undefined,
+    failSend: false,
+    fillTransaction: true,
+    priorityFee: true,
+  };
+  const filled: Record<string, unknown>[] = [];
   const httpState: { requests: number; status: number | undefined; delayMs: number } = { requests: 0, status: undefined, delayMs: 0 };
   const quote = { gas: 0xd412n, baseFeePerGas: 0x23c34600n };
 
@@ -153,7 +167,27 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
       case "eth_estimateGas":
         return `0x${quote.gas.toString(16)}`;
       case "eth_maxPriorityFeePerGas":
+        if (!state.priorityFee) throw Object.assign(new Error("method not found"), { code: -32601 });
         return "0x1";
+      case "eth_fillTransaction": {
+        if (!state.fillTransaction) throw Object.assign(new Error("method not found"), { code: -32601 });
+        const request = (params[0] ?? {}) as Record<string, unknown>;
+        filled.push(request);
+        // 要求の欄をそのまま返し、手数料の欄だけ埋める（viem はこの応答の maxFeePerGas に 1.2 倍を掛ける）。
+        const tx = {
+          ...request,
+          type: "0x76",
+          gas: `0x${quote.gas.toString(16)}`,
+          maxFeePerGas: `0x${(quote.baseFeePerGas + 1n).toString(16)}`,
+          maxPriorityFeePerGas: "0x1",
+          input: "0x",
+          hash: `0x${"22".repeat(32)}`,
+          blockHash: null,
+          blockNumber: null,
+          transactionIndex: null,
+        };
+        return { tx, raw: "0x" };
+      }
       case "eth_gasPrice":
         return "0x23c34601";
       case "eth_getBlockByNumber":
@@ -237,6 +271,19 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
     set failSend(value: boolean) {
       state.failSend = value;
     },
+    get fillTransaction(): boolean {
+      return state.fillTransaction;
+    },
+    set fillTransaction(value: boolean) {
+      state.fillTransaction = value;
+    },
+    get priorityFee(): boolean {
+      return state.priorityFee;
+    },
+    set priorityFee(value: boolean) {
+      state.priorityFee = value;
+    },
+    filled,
     register,
     close: async () => {
       for (const each of new Set([server, plain])) {

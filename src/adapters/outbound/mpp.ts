@@ -19,7 +19,7 @@ import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport, type TransportContext } from "../../net/guarded-fetch.js";
 import { guardedRpcTransport } from "../../net/guarded-rpc.js";
-import type { DestinationOffer, MppTempoCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
+import type { DestinationOffer, FeeEstimate, MppTempoCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
 import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 import { createMppDynamicPath, type MppDynamicOptions } from "./mpp-dynamic.js";
 
@@ -397,6 +397,13 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
         }
       }
       return offers;
+    },
+
+    /** 動的経路だけ（静的 route は手数料を quote 時に見積もらない）。 */
+    async estimateFee(routeId: string, offer: DestinationOffer, target: UpstreamTarget): Promise<FeeEstimate> {
+      if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+      void target;
+      return dynamic.estimateFee(routeId, offer);
     },
 
     async pay(request: PayRequest): Promise<PayResult> {

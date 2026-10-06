@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { createRouterClient, DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS } from "../../src/client/index.js";
+import { createRouterClient, DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS, DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS } from "../../src/client/index.js";
 import type { QuoteView, RouterClient } from "../../src/client/types.js";
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
 import { createRouterCore, type RouterCore } from "../../src/core/orchestrator.js";
@@ -16,7 +16,7 @@ import { HTTP_INGRESS_TIMEOUT_MS, startHttpServer, type RunningServer } from "..
 import { sourceOfRequest } from "../../src/mcp/server.js";
 import { createToolHandlers, TOOL_NAMES } from "../../src/mcp/tools.js";
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
-import type { DestinationOffer, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
+import type { DestinationOffer, FeeEstimate, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
 
 const PROFILE_ID = "dyn-mpp-to-x402";
 const STATIC_ROUTE = "md-static";
@@ -30,6 +30,19 @@ const BODY = { price: "3000" };
 const CANONICAL = "http://127.0.0.1:8500";
 const runtimeRoot = path.resolve(import.meta.dirname, "../../runtime");
 
+/** MPP 送信のプロファイル（x402 受信）。手数料は quote 時のガス代の見積りから（`docs/dynamic-gas-fee-design.md`）。 */
+const MPP_OUT_PROFILE_ID = "dyn-x402-to-mpp";
+const MPP_OUT_PROFILE: DynamicProfile = {
+  profileId: MPP_OUT_PROFILE_ID,
+  sourceRail: "x402",
+  source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" },
+  rail: "mpp",
+  destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000", feeMargin: 20_000 },
+  par: true,
+  maxUpstreamAmount: "100000",
+  fee: { flat: "1000", bps: 0, min: "1000" },
+};
+
 const PROFILE: DynamicProfile = {
   profileId: PROFILE_ID,
   sourceRail: "mpp",
@@ -41,7 +54,7 @@ const PROFILE: DynamicProfile = {
   fee: { flat: "1000", bps: 0, min: "1000" },
 };
 
-function config(overrides: { enabled?: boolean; limits?: Partial<typeof DEFAULT_DYNAMIC_LIMITS>; noDynamic?: boolean } = {}): RouterConfig {
+function config(overrides: { enabled?: boolean; limits?: Partial<typeof DEFAULT_DYNAMIC_LIMITS>; noDynamic?: boolean; mppOut?: boolean } = {}): RouterConfig {
   return {
     approvalTtlMs: 60_000,
     routes: {
@@ -58,7 +71,7 @@ function config(overrides: { enabled?: boolean; limits?: Partial<typeof DEFAULT_
       : {
           dynamic: {
             enabled: overrides.enabled ?? true,
-            profiles: { [PROFILE_ID]: PROFILE },
+            profiles: { [PROFILE_ID]: PROFILE, ...(overrides.mppOut === true ? { [MPP_OUT_PROFILE_ID]: MPP_OUT_PROFILE } : {}) },
             budget: { maxPurchases: 3, buckets: [{ network: SRC_NETWORK, asset: SRC_ASSET, maxTotal: "1000000", maxPerPurchase: "200000" }, { network: DST_NETWORK, asset: DST_ASSET, maxTotal: "1000000", maxPerPurchase: "200000" }] },
             limits: { ...DEFAULT_DYNAMIC_LIMITS, ...overrides.limits },
             denyHosts: [],
@@ -86,10 +99,18 @@ class SyntheticOutbound implements OutboundRail {
   readonly targetsSeen: (UpstreamTarget | undefined)[] = [];
   readonly paidFor: PayRequest[] = [];
   payDelayMs = 0;
+  /** MPP 送信のプロファイル用（quote 時の見積り）。 */
+  estimateDelayMs = 0;
+  estimateBound = "300";
   async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
     this.targetsSeen.push(target);
     if (routeId === STATIC_ROUTE) return [{ scheme: "exact", network: DST_NETWORK, asset: DST_ASSET, amount: "900", payTo: DST_PAY_TO }];
+    if (routeId === MPP_OUT_PROFILE_ID) return [{ scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000", payTo: DST_PAY_TO, extra: { realm: "r", terms: "{}" } }];
     return [{ scheme: "exact", network: DST_NETWORK, asset: DST_ASSET, amount: "5000", payTo: DST_PAY_TO, extra: { name: "USDC", version: "2" } }];
+  }
+  async estimateFee(): Promise<FeeEstimate> {
+    if (this.estimateDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.estimateDelayMs));
+    return { gas: "50000", maxFeePerGas: "6000000000", bound: this.estimateBound, viaFillTransaction: true };
   }
   async pay(request: PayRequest): Promise<PayResult> {
     this.paidFor.push(request);
@@ -109,7 +130,7 @@ let server: RunningServer;
 let outbound: SyntheticOutbound;
 let ids = 0;
 
-async function boot(cfg: RouterConfig = config()): Promise<{ baseUrl: string; client: (source?: string, timeouts?: { timeoutMs?: number; executeTimeoutMs?: number }) => RouterClient }> {
+async function boot(cfg: RouterConfig = config()): Promise<{ baseUrl: string; client: (source?: string, timeouts?: { timeoutMs?: number; executeTimeoutMs?: number; quoteTimeoutMs?: number }) => RouterClient }> {
   outbound = new SyntheticOutbound();
   core = await createRouterCore({ journalPath: path.join(workDir, "journal.ndjson"), config: cfg, inbound: new SyntheticInbound(), outbound, nextPaymentId: () => `pay-${(ids += 1)}`, dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") } });
   server = await startHttpServer({ core, config: cfg, canonicalBaseUrl: CANONICAL, principals: new Map([["alice", "tok-alice"], ["bob", "tok-bob"]]), host: "127.0.0.1", port: 0 });
@@ -342,6 +363,18 @@ describe("client", () => {
     expect(await c.execute({ quote: sq, requestId: "s1", approval: { approved: true, quoteId: sq.quoteId }, credential: credentialFor(sq.source.offer) })).toMatchObject({ outcome: "unknown", reason: "transport_uncertain" });
   });
 
+  test("動的 quote の期限は quoteTimeoutMs（既定 30 秒）: timeoutMs 400 ms でも見積りの長い quote が通る。静的 quote は timeoutMs のまま", async () => {
+    expect(DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS).toBe(30_000);
+    const { client } = await boot(config({ mppOut: true }));
+    const c = client(undefined, { timeoutMs: 400 });
+    outbound.estimateDelayMs = 900;
+    const quoted = await c.quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r1" });
+    expect(quoted.ok).toBe(true);
+    expect((quoted as { quote: QuoteView }).quote.pricing).toMatchObject({ fee: "1000", maxFee: "600", estimate: { bound: "300" } });
+    // 明示した quoteTimeoutMs はそれが効く。
+    expect(await client(undefined, { timeoutMs: 400, quoteTimeoutMs: 300 }).quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r2" })).toMatchObject({ ok: false, error: "transport_failed" });
+  });
+
   test("quoteUrl は応答の upstream.url が頼んだ URL と違えば受け入れない", async () => {
     const { baseUrl } = await boot();
     const tampered = createRouterClient({
@@ -397,6 +430,27 @@ describe("MCP tool handlers", () => {
     expect(reread).toMatchObject({ found: true, projection: { status: "delivered", result: { untrusted: true, source: "upstream", contentType: "application/json", body: BODY } }, proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" } });
     // 一覧にはプロファイルが出る。
     expect(await handlers.listRoutes()).toMatchObject({ ok: true, dynamic: { enabled: true, profiles: [{ profileId: PROFILE_ID }] } });
+  });
+
+  test("MPP 送信のプロファイルの nextStep は cap・見積りの時刻・期限と「配達の保証ではない」を書き、一覧には手数料の決め方が出る", async () => {
+    const { client } = await boot(config({ mppOut: true }));
+    const handlers = deps(client("fwd:1.2.3.4"));
+    outbound.estimateBound = "1500"; // cap 3,000 > 定額 1,000
+    const quoted = await handlers.quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "m1" });
+    expect(quoted["ok"]).toBe(true);
+    const quote = quoted["quote"] as QuoteView;
+    expect(quote.pricing).toMatchObject({ fee: "3000", total: "8000", maxFee: "3000" });
+    const nextStep = quoted["nextStep"] as string;
+    for (const fragment of ["gas-cost estimate taken at quote time", "fee cap 3000", `estimated at ${new Date((quote.pricing!["estimate"] as { atMs: number }).atMs).toISOString()}`, "expires at", "not a delivery guarantee", "fee_too_high", "no refund"]) {
+      expect(nextStep).toContain(fragment);
+    }
+    expect((quoted["subject"] as Record<string, unknown>)["disclosures"]).toMatchObject({ routerMayRejectAfterSettle: ["fee_too_high"], feeEstimateIsNotADeliveryGuarantee: true });
+    // x402 送信の quote には cap の文は無い。
+    const other = await handlers.quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "m2" });
+    expect(other["nextStep"] as string).not.toContain("gas-cost estimate");
+    const listing = (await handlers.listRoutes()) as { dynamic: { profiles: Record<string, unknown>[] } };
+    expect(listing.dynamic.profiles.find((profile) => profile["profileId"] === MPP_OUT_PROFILE_ID)).toMatchObject({ feePolicy: { kind: "gas-indexed", feeMargin: 20_000, maxFeeCeiling: "5000" } });
+    expect(listing.dynamic.profiles.find((profile) => profile["profileId"] === PROFILE_ID)).not.toHaveProperty("feePolicy");
   });
 
   test("既存 tool の互換: 静的 route の quote・purchase・status は既存の引数だけで従来どおり動き、結果の形も変わらない", async () => {

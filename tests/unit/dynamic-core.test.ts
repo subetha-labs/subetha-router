@@ -9,12 +9,12 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
-import { dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
+import { capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import { stableJson } from "../../src/core/intent.js";
 import { createRouterCore, type QuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
-import type { DestinationOffer, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
+import type { DestinationOffer, FeeEstimate, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
 
 const PROFILE_ID = "dyn-mpp-to-x402";
 const STATIC_ROUTE = "md-static";
@@ -143,6 +143,15 @@ class SyntheticOutbound implements OutboundRail {
     this.paidFor.push(request);
     return this.payResult;
   }
+
+  estimateCalls = 0;
+  /** 見積り（MPP 送信）。既定は bound 2,500（cap は feeMargin 2 倍で 5,000 = 天井）。`undefined` なら失敗。 */
+  estimateBound: string | undefined = "2500";
+  async estimateFee(_routeId: string, _offer: DestinationOffer, _target: UpstreamTarget): Promise<FeeEstimate> {
+    this.estimateCalls += 1;
+    if (this.estimateBound === undefined) throw new Error("rpc down https://secret.internal/");
+    return { gas: "50000", maxFeePerGas: "50000000000", bound: this.estimateBound, viaFillTransaction: true };
+  }
 }
 
 let workDir: string;
@@ -259,9 +268,12 @@ describe("換算と手数料（設計 §6.6）", () => {
 
   test("予約: 受信額・送信元本、mpp 送信なら手数料の上限", () => {
     expect(reservationOf(PROFILE, priceOf(PROFILE, "5000")!)).toEqual({ legs: [{ network: SRC_NETWORK, asset: SRC_ASSET, amount: "6050" }, { network: DST_NETWORK, asset: DST_ASSET, amount: "5000" }] });
-    const mpp: DynamicProfile = { ...PROFILE, rail: "mpp", destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000" } };
-    expect(reservationOf(mpp, priceOf(mpp, "5000")!).legs).toHaveLength(3);
-    expect(reservationOf(mpp, priceOf(mpp, "5000")!).legs[2]).toEqual({ network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000" });
+    const mpp: DynamicProfile = { ...PROFILE, rail: "mpp", destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000", feeMargin: 20_000 } };
+    // 手数料の区分は quote が決めた cap（プロファイルの天井 5,000 ではない）。cap が無ければ区分も無い。
+    const cap = { maxFee: "1200", estimate: { gas: "50000", maxFeePerGas: "12000000000", bound: "600", atMs: 1 } };
+    expect(reservationOf(mpp, priceOf(mpp, "5000", cap)!).legs).toHaveLength(3);
+    expect(reservationOf(mpp, priceOf(mpp, "5000", cap)!).legs[2]).toEqual({ network: SRC_NETWORK, asset: SRC_ASSET, amount: "1200" });
+    expect(reservationOf(mpp, priceOf(mpp, "5000")!).legs).toHaveLength(2);
   });
 
   test("ownerKey のハッシュは sha256、束縛はプロファイルと URL を結ぶ", () => {
@@ -358,7 +370,7 @@ describe("動的 quote", () => {
   });
 
   test("mpp 送信: 元本と手数料の上限が同じバケットに落ちるとき、合算が maxPerPurchase を超える quote は作らない（受信 offer 0）", async () => {
-    const mpp: DynamicProfile = { ...PROFILE, profileId: "dyn-x402-to-mpp", sourceRail: "x402", rail: "mpp", source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000" } };
+    const mpp: DynamicProfile = { ...PROFILE, profileId: "dyn-x402-to-mpp", sourceRail: "x402", rail: "mpp", source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000", feeMargin: 20_000 } };
     outbound.offers = [{ scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000", payTo: "0x0000000000000000000000000000000000000b22", extra: { realm: "r", terms: "{}" } }];
     const config = baseConfig({ profile: mpp });
     const buckets = config.dynamic!.budget.buckets.map((bucket) => (bucket.asset === SRC_ASSET ? { ...bucket, maxPerPurchase: "9999" } : bucket));
@@ -499,7 +511,7 @@ describe("動的 purchase", () => {
   });
 
   test("残高の事前確認（mpp 送信）: 元本と手数料が同じ資産なら合算。読めなければ不足", async () => {
-    const mpp: DynamicProfile = { ...PROFILE, profileId: "dyn-x402-to-mpp", sourceRail: "x402", rail: "mpp", source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000" } };
+    const mpp: DynamicProfile = { ...PROFILE, profileId: "dyn-x402-to-mpp", sourceRail: "x402", rail: "mpp", source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000", feeMargin: 20_000 } };
     outbound.offers = [{ scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000", payTo: "0x0000000000000000000000000000000000000b22", extra: { realm: "r", terms: "{}" } }];
     let balance = 9999n;
     let fail = false;
@@ -513,7 +525,8 @@ describe("動的 purchase", () => {
     expect(await core.purchase(args)).toMatchObject({ code: "operator_funds_unavailable" });
     fail = false;
     expect((await core.purchase(args)).status).toBe("delivered");
-    expect((await journalLines())[0]!.patch["dynamic"]).toMatchObject({ reservation: { legs: [{ amount: "6050" }, { amount: "5000" }, { asset: SRC_ASSET, amount: "5000" }] } });
+    // 手数料 = max(規則の 1,050, cap 5,000) = 5,000。受信額 10,000。手数料の区分は cap。
+    expect((await journalLines())[0]!.patch["dynamic"]).toMatchObject({ pricing: { fee: "5000", total: "10000", maxFee: "5000" }, reservation: { legs: [{ amount: "10000" }, { amount: "5000" }, { asset: SRC_ASSET, amount: "5000" }] } });
   });
 
   test("AC-18: 無効な credential・verify 不成立・verify 後の期限切れの反復で journal は 1 行も増えず、予算も減らない", async () => {
@@ -796,3 +809,170 @@ describe("動的 purchase", () => {
     expect(gate.activeOfSource("alice")).toBe(0);
   });
 });
+
+/* ------------------------------------------------------------------ MPP 送信の手数料 = quote 時のガス代（docs/dynamic-gas-fee-design.md） */
+
+describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dynamic-gas-fee-design §1〜§3）", () => {
+  const MPP: DynamicProfile = {
+    ...PROFILE,
+    profileId: "dyn-x402-to-mpp",
+    sourceRail: "x402",
+    rail: "mpp",
+    source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" },
+    destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000", feeMargin: 20_000 },
+    fee: { flat: "1000", bps: 0, min: "1000" },
+  };
+  const mppOffer = (): DestinationOffer => ({ scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000", payTo: "0x0000000000000000000000000000000000000b22", extra: { realm: "r", terms: "{}" } });
+  const quoteMpp = (core: RouterCore, requestId = "r1") => core.quote({ principalId: "alice", requestId, routeId: MPP.profileId, upstream: { url: URL_A }, source: "alice" });
+
+  test("cap = ceil(bound × feeMargin / 10000)。桁あふれは undefined。feeMargin が無ければ undefined", () => {
+    expect(capOf(MPP, "600")).toBe("1200");
+    expect(capOf(MPP, "1")).toBe("2");
+    expect(capOf({ ...MPP, destination: { ...MPP.destination, feeMargin: 10_001 } }, "10000")).toBe("10001");
+    expect(capOf(MPP, "9".repeat(30))).toBeUndefined();
+    expect(capOf(MPP, "x")).toBeUndefined();
+    const { feeMargin: _m, ...noMargin } = MPP.destination;
+    expect(capOf({ ...MPP, destination: noMargin }, "600")).toBeUndefined();
+  });
+
+  test("手数料 = max(規則, cap)。pricing に maxFee と見積りの証跡が入り、予約の手数料の区分は cap。受信 offer の額は total", async () => {
+    outbound.offers = [mppOffer()];
+    const core = await boot(baseConfig({ profile: MPP }));
+    // bound 300 → cap 600 < 規則の 1,000 → 手数料 1,000。
+    outbound.estimateBound = "300";
+    const low = (await quoteMpp(core, "low")) as OkQuote;
+    expect(low.ok).toBe(true);
+    expect(low.dynamic!.pricing).toMatchObject({ upstreamAmount: "5000", fee: "1000", total: "6000", maxFee: "600", estimate: { gas: "50000", maxFeePerGas: "50000000000", bound: "300", atMs: clock } });
+    expect(low.source.amount).toBe("6000");
+    // bound 1,500 → cap 3,000 > 規則 → 手数料 3,000（高騰時は高く提示する）。
+    outbound.estimateBound = "1500";
+    const high = (await quoteMpp(core, "high")) as OkQuote;
+    expect(high.dynamic!.pricing).toMatchObject({ fee: "3000", total: "8000", maxFee: "3000" });
+    expect(outbound.estimateCalls).toBe(2);
+    // 見積りは受信 offer の発行より前（失敗したら offer は作らない）。
+    outbound.estimateBound = undefined;
+    expect(inbound.createOfferCalls).toBe(2);
+    expect(await quoteMpp(core, "down")).toMatchObject({ ok: false, code: "quote_failed", reason: "fee_estimate_unavailable" });
+    expect(inbound.createOfferCalls).toBe(2);
+    expect(await ledgerText()).not.toContain("secret.internal");
+  });
+
+  test("cap が天井（destination.maxFee）を超える quote は出さない: fee_too_high。ちょうど天井なら出す", async () => {
+    outbound.offers = [mppOffer()];
+    const core = await boot(baseConfig({ profile: MPP }));
+    outbound.estimateBound = "2501"; // cap 5,002 > 5,000
+    expect(await quoteMpp(core, "over")).toMatchObject({ ok: false, code: "quote_failed", reason: "fee_too_high" });
+    outbound.estimateBound = "2500"; // cap 5,000
+    const edge = (await quoteMpp(core, "edge")) as OkQuote;
+    expect(edge.ok).toBe(true);
+    expect(edge.dynamic!.pricing).toMatchObject({ fee: "5000", maxFee: "5000" });
+    expect(inbound.createOfferCalls).toBe(1);
+  });
+
+  test("x402 送信のプロファイルは見積りを呼ばず、pricing に maxFee を持たない", async () => {
+    const core = await boot();
+    const quote = await quoteOk(core);
+    expect(outbound.estimateCalls).toBe(0);
+    expect(quote.dynamic!.pricing).not.toHaveProperty("maxFee");
+    expect(quote.dynamic!.pricing).not.toHaveProperty("estimate");
+  });
+
+  test("purchase: 上流の照合の後・受信 verify の前に再見積りする。bound が cap を超えていれば awaiting_payment / fee_too_high、見積りに失敗すれば fee_estimate_unavailable。何も書かず、verify は呼ばない。下がれば通り、pay に cap が渡る", async () => {
+    outbound.offers = [mppOffer()];
+    const core = await boot(baseConfig({ profile: MPP }));
+    outbound.estimateBound = "1500";
+    const quote = (await quoteMpp(core)) as OkQuote;
+    const args = { ...purchaseArgs(quote), requestId: "r1" };
+    outbound.estimateBound = "3001"; // > cap 3,000
+    expect(await core.purchase(args)).toEqual({ paymentId: quote.paymentId, status: "awaiting_payment", code: "fee_too_high" });
+    outbound.estimateBound = undefined;
+    expect(await core.purchase(args)).toEqual({ paymentId: quote.paymentId, status: "awaiting_payment", code: "fee_estimate_unavailable" });
+    expect(inbound.verifyCalls).toBe(0);
+    expect(await journalLines()).toEqual([]);
+    expect(outbound.readChallengeCalls).toBe(3); // quote 1 + 照合 2（見積りは照合の後）
+    // cap を黙って上げない: 記録の maxFee はそのまま。
+    expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ dynamic: { pricing: { maxFee: "3000", fee: "3000" } } });
+    outbound.estimateBound = "3000"; // = cap
+    expect((await core.purchase(args)).status).toBe("delivered");
+    expect(outbound.paidFor[0]).toMatchObject({ maxFee: "3000", target: { url: URL_A } });
+    // journal の created 行: pricing に maxFee・estimate、予約の手数料の区分は cap。
+    expect((await journalLines())[0]!.patch["dynamic"]).toMatchObject({
+      pricing: { fee: "3000", maxFee: "3000", estimate: { bound: "1500" } },
+      reservation: { legs: [{ amount: "8000" }, { amount: "5000" }, { asset: SRC_ASSET, amount: "3000" }] },
+    });
+  });
+
+  test("x402 送信の pay には maxFee を渡さない", async () => {
+    const core = await boot();
+    const quote = await quoteOk(core);
+    expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+    expect(outbound.paidFor[0]).not.toHaveProperty("maxFee");
+  });
+
+  test("昇格済みの再開（§3.3）: journal の記録で fee < maxFee、または予約の手数料の区分が足りなければ quote_unreadable（settle へ進まない）。状態の照会は通る", async () => {
+    outbound.offers = [mppOffer()];
+    let core = await boot(baseConfig({ profile: MPP }));
+    outbound.estimateBound = "1500";
+    const quote = (await quoteMpp(core)) as OkQuote;
+    inbound.settleImpl = async () => { throw new Error("crash"); };
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "unknown" });
+    const lines = (await readFile(journalPath, "utf8")).split("\n").filter((line) => line !== "");
+    await core.close();
+    opened.length = 0;
+    const { writeFile } = await import("node:fs/promises");
+    const created = JSON.parse(lines[0]!) as { patch: { dynamic: { pricing: Record<string, unknown>; reservation: { legs: { amount: string }[] } } } };
+    const tamper = (change: (row: typeof created) => void): string => {
+      const row = structuredClone(created);
+      change(row);
+      return `${JSON.stringify(row)}\n`;
+    };
+    inbound.settleImpl = async () => ({ outcome: "settled", txRef: "src-tx-2" });
+
+    // (a) 手数料 < cap
+    await writeFile(journalPath, tamper((row) => { row.patch.dynamic.pricing["fee"] = "2999"; }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "awaiting_payment", dynamic: { promoted: true } });
+    expect(core.offerFor(quote.quoteId, "alice", undefined, quote.ownerKey)).toBeUndefined();
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    expect(inbound.settleCalls).toBe(1);
+    await core.close();
+    opened.length = 0;
+
+    // (b) 予約の手数料の区分が足りない
+    await writeFile(journalPath, tamper((row) => { row.patch.dynamic.reservation.legs[2]!.amount = "2999"; }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    await core.close();
+    opened.length = 0;
+
+    // (c) cap が無い（旧い形）
+    await writeFile(journalPath, tamper((row) => { delete row.patch.dynamic.pricing["maxFee"]; delete row.patch.dynamic.pricing["estimate"]; }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "awaiting_payment" });
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    expect(inbound.settleCalls).toBe(1);
+    await core.close();
+    opened.length = 0;
+
+    // (d) 正の対照: そのままなら再開できる
+    await writeFile(journalPath, `${lines[0]!}\n`);
+    core = await boot(baseConfig({ profile: MPP }));
+    expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+    expect(inbound.settleCalls).toBe(2);
+  });
+
+  test("adapter の理由コード destination_fee_cap_invalid・destination_send_refused_before_dispatch は journal と応答に残る", async () => {
+    outbound.offers = [mppOffer()];
+    for (const reason of ["destination_fee_cap_invalid", "destination_send_refused_before_dispatch"] as const) {
+      const core = await boot(baseConfig({ profile: MPP }));
+      outbound.payResult = { outcome: "not_sent", reason };
+      const quote = (await quoteMpp(core, reason)) as OkQuote;
+      expect(await core.purchase({ ...purchaseArgs(quote), requestId: reason })).toMatchObject({ status: "paid_data_unavailable", terminalReason: reason });
+      expect((await journalLines()).at(-1)).toMatchObject({ event: "dest_failed", patch: { reason } });
+      await core.close();
+      opened.length = 0;
+      await rm(journalPath, { force: true });
+    }
+  });
+});
+

@@ -15,13 +15,13 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig } from "../config.js";
 import { parseUpstreamUrl } from "../net/upstream-url.js";
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
-import type { DestinationOffer, OutboundRail } from "../ports/outbound.js";
+import type { DestinationOffer, FeeEstimate, OutboundRail } from "../ports/outbound.js";
 import type { Budget, DynamicReservation } from "./budget.js";
 import { PromotionNotWrittenError } from "./budget.js";
 import type { DynamicGate, GateLease } from "./dynamic-gate.js";
 import { fingerprintOf, isTerminal, stableJson, toPublicStatus, type Intent } from "./intent.js";
 import { credentialDigestOf, LedgerDuplicateError, LedgerRecordTooLargeError, type LedgerQuote, type QuoteLedger } from "./quote-ledger.js";
-import { IntentCollisionError, intentFromCreated, type IntentStore } from "./store.js";
+import { capCoversFee, IntentCollisionError, intentFromCreated, type IntentStore } from "./store.js";
 
 const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
 const MAX_AMOUNT_DIGITS = 30;
@@ -41,6 +41,19 @@ export interface DynamicPricing {
   readonly converted: string;
   readonly fee: string;
   readonly total: string;
+  /** MPP 送信だけ: quote が決めた署名時の手数料の上限（cap。`docs/dynamic-gas-fee-design.md` §2）。 */
+  readonly maxFee?: string;
+  /** MPP 送信だけ: quote 時の見積りの証跡。 */
+  readonly estimate?: { readonly gas: string; readonly maxFeePerGas: string; readonly bound: string; readonly atMs: number };
+}
+
+/** 見積り（bound）から cap を決める: ceil(bound × feeMargin / 10000)。桁あふれは `undefined`。 */
+export function capOf(profile: DynamicProfile, bound: string): string | undefined {
+  if (!AMOUNT_PATTERN.test(bound)) return undefined;
+  const margin = profile.destination.feeMargin;
+  if (margin === undefined) return undefined;
+  const cap = (BigInt(bound) * BigInt(margin) + 9_999n) / 10_000n;
+  return cap.toString().length > MAX_AMOUNT_DIGITS ? undefined : cap.toString();
 }
 
 /** 動的 quote の応答に足す欄。`ownerKey` は**この応答にしか載らない**。 */
@@ -114,8 +127,14 @@ export function ownerKeyMatches(ownerKey: unknown, ownerKeyHash: string): boolea
  * 受信額（元本の換算＋手数料）。設計 §6.6。溢れ（30 桁超）と、受信の桁で**正確に表せない**額は `undefined`
  * （切り上げ・切り捨てで額を変えない）。
  */
-export function priceOf(profile: DynamicProfile, upstreamAmount: string): DynamicPricing | undefined {
+export function priceOf(
+  profile: DynamicProfile,
+  upstreamAmount: string,
+  /** MPP 送信: quote が決めた cap と見積りの証跡。手数料は `max(規則の手数料, cap)`。 */
+  cap?: { readonly maxFee: string; readonly estimate: NonNullable<DynamicPricing["estimate"]> },
+): DynamicPricing | undefined {
   if (!AMOUNT_PATTERN.test(upstreamAmount)) return undefined;
+  if (cap !== undefined && !AMOUNT_PATTERN.test(cap.maxFee)) return undefined;
   const amount = BigInt(upstreamAmount);
   const sourceDecimals = BigInt(profile.source.decimals);
   const destinationDecimals = BigInt(profile.destination.decimals);
@@ -132,10 +151,18 @@ export function priceOf(profile: DynamicProfile, upstreamAmount: string): Dynami
   const proportional = (converted * bps + 9_999n) / 10_000n;
   const computed = BigInt(profile.fee.flat) + proportional;
   const min = BigInt(profile.fee.min);
-  const fee = computed > min ? computed : min;
+  let fee = computed > min ? computed : min;
+  // 呼び出し側が先に払う手数料 ≥ Router が署名する transaction の手数料の上限（cap）。quote ごとに保つ。
+  if (cap !== undefined && BigInt(cap.maxFee) > fee) fee = BigInt(cap.maxFee);
   const total = converted + fee;
   if (total.toString().length > MAX_AMOUNT_DIGITS) return undefined;
-  return { upstreamAmount, converted: converted.toString(), fee: fee.toString(), total: total.toString() };
+  return {
+    upstreamAmount,
+    converted: converted.toString(),
+    fee: fee.toString(),
+    total: total.toString(),
+    ...(cap === undefined ? {} : { maxFee: cap.maxFee, estimate: { ...cap.estimate } }),
+  };
 }
 
 /** 受信 offer の束縛（静的の `routeBindingOf` に対応）。プロファイルと URL を結ぶ。 */
@@ -149,8 +176,9 @@ export function reservationOf(profile: DynamicProfile, pricing: DynamicPricing):
     { network: profile.source.network, asset: profile.source.asset, amount: pricing.total },
     { network: profile.destination.network, asset: profile.destination.asset, amount: pricing.upstreamAmount },
   ];
-  if (profile.rail === "mpp" && profile.destination.feeAsset !== undefined && profile.destination.maxFee !== undefined && profile.destination.maxFee !== "0") {
-    legs.push({ network: profile.destination.network, asset: profile.destination.feeAsset, amount: profile.destination.maxFee });
+  // 手数料の区分は quote が決めた cap（プロファイルの天井ではない）。
+  if (profile.rail === "mpp" && profile.destination.feeAsset !== undefined && pricing.maxFee !== undefined && pricing.maxFee !== "0") {
+    legs.push({ network: profile.destination.network, asset: profile.destination.feeAsset, amount: pricing.maxFee });
   }
   return { legs };
 }
@@ -231,6 +259,35 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     }
   }
 
+  /**
+   * MPP 送信の見積り（署名も送金もしない読取）。失敗は quote の不成立（`fee_estimate_unavailable`）、cap が天井を超えれば `fee_too_high`。
+   */
+  async function estimateFor(
+    profile: DynamicProfile,
+    offer: DestinationOffer,
+    url: string,
+  ): Promise<{ ok: true; cap: NonNullable<Parameters<typeof priceOf>[2]>; estimate: FeeEstimate } | { ok: false; reason: string }> {
+    if (typeof outbound.estimateFee !== "function" || profile.destination.maxFee === undefined) {
+      return { ok: false, reason: "fee_estimate_unavailable" };
+    }
+    let estimate: FeeEstimate;
+    try {
+      estimate = await outbound.estimateFee(profile.profileId, offer, { url });
+    } catch {
+      return { ok: false, reason: "fee_estimate_unavailable" };
+    }
+    if (!isRecord(estimate) || !AMOUNT_PATTERN.test(String(estimate.bound)) || !AMOUNT_PATTERN.test(String(estimate.gas)) || !AMOUNT_PATTERN.test(String(estimate.maxFeePerGas))) {
+      return { ok: false, reason: "fee_estimate_unavailable" };
+    }
+    const maxFee = capOf(profile, estimate.bound);
+    if (maxFee === undefined) {
+      return { ok: false, reason: "fee_estimate_unavailable" };
+    }
+    // 天井は quote の時に見る。purchase の再見積りは記録の cap と比べる（呼び出し側が天井を使う）。
+    const cap = { maxFee, estimate: { gas: estimate.gas, maxFeePerGas: estimate.maxFeePerGas, bound: estimate.bound, atMs: now() } };
+    return { ok: true, estimate, cap };
+  }
+
   async function quote(request: DynamicQuoteRequest): Promise<DynamicQuoteOutcome> {
     const dynamic = config.dynamic;
     if (dynamic === undefined || !dynamic.enabled) {
@@ -277,7 +334,19 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       if (selected === undefined) {
         return { ok: false, code: "quote_failed", reason: "no_matching_offer" };
       }
-      const pricing = priceOf(profile, selected.amount);
+      // MPP 送信: その送金のガス代を今見積もり、cap と手数料を決める（`docs/dynamic-gas-fee-design.md` §1・§2）。定額には落とさない。
+      let cap: Parameters<typeof priceOf>[2];
+      if (profile.rail === "mpp") {
+        const estimated = await estimateFor(profile, selected, parsed.url);
+        if (!estimated.ok) {
+          return { ok: false, code: "quote_failed", reason: estimated.reason };
+        }
+        if (BigInt(estimated.cap.maxFee) > BigInt(profile.destination.maxFee!)) {
+          return { ok: false, code: "quote_failed", reason: "fee_too_high" };
+        }
+        cap = estimated.cap;
+      }
+      const pricing = priceOf(profile, selected.amount, cap);
       if (pricing === undefined) {
         return { ok: false, code: "quote_failed", reason: "amount_unrepresentable" };
       }
@@ -336,7 +405,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         return { ok: false, code: "dynamic_unavailable" };
       }
       const intent = intentOfLedger(written);
-      if (intent.dynamic === undefined || intent.dynamicInvalid === true) {
+      if (intent.dynamic === undefined || intent.dynamicInvalid === true || intent.dynamicCapInvalid === true) {
         return { ok: false, code: "dynamic_unavailable" };
       }
       return { ok: true, intent, fields: fieldsOf(intent, ownerKey) };
@@ -369,7 +438,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     if (intent.dynamic === undefined || intent.principalId !== request.principalId || !ownerKeyMatches(request.ownerKey, intent.dynamic.ownerKeyHash)) {
       return missing();
     }
-    if (intent.dynamicInvalid === true) {
+    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true) {
       return { paymentId: intent.paymentId, status: "rejected", code: "quote_unreadable" };
     }
     if (request.routeId !== undefined && request.routeId !== intent.routeId) {
@@ -461,6 +530,20 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     if (!read.offers.some((offer) => stableJson(offer) === target)) {
       return awaiting("offer_changed");
     }
+    if (profile.rail === "mpp") {
+      // 昇格済みの再開: 記録の cap・手数料・予約を復元に頼らず見る（`docs/dynamic-gas-fee-design.md` §3.3）。
+      if (!capCoversFee(intent.dynamic!)) {
+        return { paymentId, status: "rejected", code: "quote_unreadable" };
+      }
+      // 再見積り（§1.4）: 今の bound が記録の cap を超えていれば verify に進まない。cap は上げない。記録にも書かない。
+      const current = await estimateFor(profile, intent.destination.selectedOffer, url);
+      if (!current.ok) {
+        return awaiting("fee_estimate_unavailable");
+      }
+      if (BigInt(current.estimate.bound) > BigInt(intent.dynamic!.pricing.maxFee!)) {
+        return awaiting("fee_too_high");
+      }
+    }
     let verified: { isValid: boolean };
     try {
       verified = await inbound.verify(intent.source.offer, credential, { routeId: intent.routeId });
@@ -506,7 +589,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       ledger.markPromoted(intent.quoteId);
     }
     const current = store.byPaymentId(paymentId);
-    if (current === undefined || current.dynamic === undefined || current.dynamicInvalid === true || current.status !== "created") {
+    if (current === undefined || current.dynamic === undefined || current.dynamicInvalid === true || current.dynamicCapInvalid === true || current.status !== "created") {
       return { paymentId, status: "rejected", code: "dynamic_unavailable" };
     }
 
@@ -542,8 +625,9 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       needed.set(key, (needed.get(key) ?? 0n) + amount);
     };
     add(profile.destination.asset, BigInt(intent.dynamic!.pricing.upstreamAmount));
-    if (profile.rail === "mpp" && profile.destination.feeAsset !== undefined && profile.destination.maxFee !== undefined) {
-      add(profile.destination.feeAsset, BigInt(profile.destination.maxFee));
+    const cap = intent.dynamic!.pricing.maxFee;
+    if (profile.rail === "mpp" && profile.destination.feeAsset !== undefined && cap !== undefined) {
+      add(profile.destination.feeAsset, BigInt(cap));
     }
     for (const [asset, amount] of needed) {
       let balance: bigint;

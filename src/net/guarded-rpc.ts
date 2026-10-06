@@ -16,8 +16,11 @@ export interface GuardedRpcOptions {
   /** 既定 0（RPC の自動再送をしない。送金系は adapter 側でも 1 回に制限している）。 */
   readonly retryCount?: number | undefined;
   readonly retryDelay?: number | undefined;
-  /** 応答全体（headers + body）の期限。既定 10 s（viem の既定と同じ）。 */
-  readonly timeout?: number | undefined;
+  /**
+   * 応答全体（headers + body）の期限。既定 10 s（viem の既定と同じ）。関数なら**要求ごとに**読む（残りの予算を期限にする用。
+   * 0 以下なら要求を出さずに失敗する）。
+   */
+  readonly timeout?: number | (() => number) | undefined;
   /** 能力の http transport が持っていた `fetchOptions`（認証ヘッダ等）。そのまま引き継ぐ。 */
   readonly fetchOptions?: RequestInit | undefined;
   /** body の上限。既定 10 MiB（viem の既定と同じ）。超えたら切って失敗（`transport_failed`）。 */
@@ -27,6 +30,14 @@ export interface GuardedRpcOptions {
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
+
+/** 要求ごとの期限が尽きている（`timeout` が 0 以下を返した）。要求は出していない。 */
+export class RpcBudgetExhaustedError extends Error {
+  override readonly name = "RpcBudgetExhaustedError";
+  constructor() {
+    super("rpc budget exhausted before the request");
+  }
+}
 
 export class RpcResponseTooLargeError extends Error {
   override readonly name = "RpcResponseTooLargeError";
@@ -68,10 +79,14 @@ export function guardedRpcTransport(
   context: () => TransportContext,
   options: GuardedRpcOptions = {},
 ): HttpTransport {
-  const timeoutMs = options.timeout ?? DEFAULT_TIMEOUT_MS;
+  const timeoutOf = typeof options.timeout === "function" ? options.timeout : (): number => (options.timeout as number | undefined) ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxResponseBytes ?? DEFAULT_MAX_BYTES;
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const ctx = context();
+    const timeoutMs = timeoutOf();
+    if (!(timeoutMs > 0)) {
+      throw new RpcBudgetExhaustedError();
+    }
     // 応答全体の期限。viem の timeout は headers で解除されるので、body の読み取りまでここで覆う。
     const deadline = AbortSignal.timeout(timeoutMs);
     const signal = init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline;

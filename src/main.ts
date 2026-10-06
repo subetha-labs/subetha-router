@@ -152,6 +152,14 @@ function railByRoute(
     // 上流の URL（動的購入）はそのまま渡す。動的経路を持たない adapter は受け取ると例外にする（fail closed）。
     readChallenge: (routeId, target) => railFor(routeId).readChallenge(routeId, target),
     pay: (request) => railFor(request.routeId).pay(request),
+    // 見積りを持たないレール（x402）には転送しない（core は `estimateFee` の有無で分岐しない。無ければ quote を不成立にする）。
+    estimateFee: (routeId, offer, target) => {
+      const rail = railFor(routeId);
+      if (typeof rail.estimateFee !== "function") {
+        return Promise.reject(new Error("outbound rail has no fee estimate"));
+      }
+      return rail.estimateFee(routeId, offer, target);
+    },
   };
 }
 
@@ -488,6 +496,20 @@ export function composeRails(
                 const host = typeof url === "string" ? new URL(url).hostname.toLowerCase().replace(/\.$/, "") : undefined;
                 if (host === undefined || !denyHosts.includes(host)) {
                   throw new ConfigError("the MPP capability's RPC host must be declared in RouterCapabilities.dependencyUrls (dynamic deny hosts)");
+                }
+              }
+              // RPC ノードは `eth_fillTransaction` に対応していること（見積りが 1 回の RPC で済む。非対応ノードは quote・purchase の RPC が
+              // 宛先アドレスの枠に収まらない。`docs/dynamic-gas-fee-design.md` §4）。読取だけ（署名も送金もしない。自分宛て 1 base unit の見積り）。
+              for (const profile of mppProfiles) {
+                const probe = { scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, amount: "1", payTo: capabilities.mppTempo.account.address };
+                let estimate;
+                try {
+                  estimate = await rails["mpp"]!.estimateFee!(profile.profileId, probe, { url: "https://startup.invalid/" });
+                } catch {
+                  throw new ConfigError(`dynamic profile ${profile.profileId}: the Tempo RPC did not answer a read-only fee estimate at startup`);
+                }
+                if (estimate.viaFillTransaction !== true) {
+                  throw new ConfigError(`dynamic profile ${profile.profileId}: the Tempo RPC must support eth_fillTransaction (dynamic-gas-fee-design §4)`);
                 }
               }
             }

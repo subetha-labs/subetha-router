@@ -273,6 +273,9 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "approval_expired",
   "unsupported_response",
   "response_too_large",
+  // 動的 MPP 送信の cap（`docs/dynamic-gas-fee-design.md` §3.4）。
+  "destination_fee_cap_invalid",
+  "destination_send_refused_before_dispatch",
 ]);
 
 /** adapter が返してよい preflight 理由。これ以外は固定コードに置き換える。 */
@@ -721,7 +724,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 変更へのレース対策）。ここで外れたら署名も送信もしない。受信レグは成立済みな
     // ので終了状態は `paid_undelivered`（理由 `quote_changed`）で、再課金も再購入もしない。
     // 動的の intent で上流が読めない形なら、送信しない（読めない値で払わない）。
-    if (intent.dynamicInvalid === true) {
+    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true) {
       await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason: "quote_changed" });
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
     }
@@ -756,6 +759,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         paymentId,
         attempt,
         ...(intent.upstream === undefined ? {} : { target: { url: intent.upstream.url } }),
+        // 動的 MPP 送信: quote が決めた署名時の上限（cap）。adapter は無ければ送らない。
+        ...(intent.dynamic?.pricing.maxFee === undefined ? {} : { maxFee: intent.dynamic.pricing.maxFee }),
       });
     } catch {
       // 送金有無が不明。例外文字列は残さず固定の理由コードだけ記録する。
@@ -911,8 +916,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       if (routeId !== undefined && intent.routeId !== routeId) {
         return undefined;
       }
-      // 既にライフサイクルが進んだ quote は再提示しない（二重支払いを誘わない）。
-      return intent.status === "created" ? intent.source.offer : undefined;
+      // 既にライフサイクルが進んだ quote は再提示しない（二重支払いを誘わない）。cap の無い動的 MPP 送信の記録も
+      // 再提示しない（Router が断ると分かっている記録に向けて払わせない。`docs/dynamic-gas-fee-design.md` §3.2）。
+      return intent.status === "created" && intent.dynamicCapInvalid !== true ? intent.source.offer : undefined;
     },
     async close(): Promise<void> {
       if (sweepTimer !== undefined) clearInterval(sweepTimer);

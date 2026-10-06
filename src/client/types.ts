@@ -14,12 +14,17 @@ export interface RouterClientOptions {
   readonly token: string;
   /** 差し替え可能な fetch（既定は `globalThis.fetch`）。 */
   readonly fetch?: typeof globalThis.fetch;
-  /** 1 要求の期限（quote・一覧・status）。既定 10 秒。 */
+  /** 1 要求の期限（静的 quote・一覧・status）。既定 10 秒。 */
   readonly timeoutMs?: number;
   /**
+   * **動的 quote**（`quoteUrl`）の期限。既定 30 秒（`DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS`）。動的 quote は上流の読取（5 秒）に加え、MPP 送信では
+   * ガス代の見積り（6 秒。`docs/dynamic-gas-fee-design.md` §1.2）を含む。明示した `timeoutMs` には影響しない。
+   */
+  readonly quoteTimeoutMs?: number;
+  /**
    * **動的購入**（R3）の期限。既定 120 秒（`DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS`）。静的 route の購入は従来どおり `timeoutMs`。
-   * 動的購入は、settle 前の上流の読み直し（5 秒）・受信 verify と settle（各 10 秒）・送信前の読み直し（5 秒）・送信（最悪 66 秒。設計 §3.4）を
-   * 含み、合計で 96 秒ほどになり得る。短く切ると、Router が支払いを続けているのに `unknown` になる。
+   * 動的購入は、settle 前の上流の読み直し（5 秒）・MPP 送信の再見積り（6 秒）・受信 verify と settle（各 10 秒）・送信前の読み直し（5 秒）・
+   * 送信（最悪 66 秒。設計 §3.4）を含み、合計で 102 秒ほどになり得る。短く切ると、Router が支払いを続けているのに `unknown` になる。
    */
   readonly executeTimeoutMs?: number;
   /**

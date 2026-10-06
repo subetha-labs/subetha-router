@@ -19,6 +19,7 @@ import { TransportError, type TransportEvent } from "../../src/net/guarded-fetch
 import { DynamicTargetUnsupportedError, type EvmSigningCapability, type MppTempoCapability } from "../../src/ports/outbound.js";
 import { dynamicProfilesOf, routerConfigOf } from "../../tools/remote-mcp-config.js";
 import { publicLookup, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
+import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 import { createPayerSpy } from "../fixtures/mpp-payer-spy.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
 
@@ -128,12 +129,14 @@ const REAL_EVM: EvmSigningCapability = createSignerSpy().capability("eip155:8453
  * 試験用の差し替え: 名前解決は公開アドレスを返し、接続先は**記録してから接続を断る**（表に無いホストと同じ失敗）。
  * 方針の欄（loopback 不可・DNS 期限・ヘッダ上限・門）は配線が重ねるので、ここからは変えられない。
  */
-function hooks(dialed: string[]): DynamicTransportHooks {
+function hooks(dialed: string[], routes: Readonly<Record<string, number>> = {}): DynamicTransportHooks {
   return {
     interfaces: () => [],
     lookup: publicLookup(),
     dialForTest: (target) => {
       dialed.push(target.hostname);
+      // 表にあるホスト名だけ loopback の fixture へ（起動時の見積りの probe が RPC に出る）。それ以外は接続を断る。
+      if (Object.hasOwn(routes, target.hostname)) return { host: "127.0.0.1", port: routes[target.hostname]! };
       throw new UnmappedFixtureHostError();
     },
   };
@@ -217,12 +220,27 @@ describe("composeRails（動的の配線）", () => {
     expect((await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://inbound-rpc.test/x" })) as DynamicChallengeError).reason).toBe("url");
   });
 
-  test("起動時の確認: 能力の RPC ホストが拒否ホストに無ければ起動しない", async () => {
+  test("起動時の確認: 能力の RPC ホストが拒否ホストに無ければ起動しない。RPC が eth_fillTransaction を持たなくても起動しない（読取の probe。署名も送金もしない）", async () => {
     const dialed: string[] = [];
-    const { rails } = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: hooks(dialed) });
-    await expect(rails.dynamic!.verify()).rejects.toThrow("dependencyUrls");
-    const declared = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES });
-    await expect(declared.rails.dynamic!.verify()).resolves.toBeUndefined();
+    const rpc = await startTempoRpc();
+    try {
+      const { rails } = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp("http", "http://rpc.test"), dynamicTransportHooksForTest: hooks(dialed, { "rpc.test": rpc.port }) });
+      await expect(rails.dynamic!.verify()).rejects.toThrow("dependencyUrls");
+      const declared = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp("http", "http://rpc.test"), dynamicTransportHooksForTest: hooks(dialed, { "rpc.test": rpc.port }), ...DEPENDENCIES });
+      await expect(declared.rails.dynamic!.verify()).resolves.toBeUndefined();
+      // 起動の probe は読取だけ（`eth_fillTransaction` 1 回。送金も署名も無い）。拒否ホストの検査で落ちた 1 回目は probe に至らない。
+      expect(rpc.methods).toEqual(["eth_fillTransaction"]);
+      expect(rpc.sentRaw).toEqual([]);
+      // 非対応ノードでは起動しない（設計 `dynamic-gas-fee-design.md` §4）。
+      rpc.fillTransaction = false;
+      const unsupported = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp("http", "http://rpc.test"), dynamicTransportHooksForTest: hooks(dialed, { "rpc.test": rpc.port }), ...DEPENDENCIES });
+      await expect(unsupported.rails.dynamic!.verify()).rejects.toThrow("eth_fillTransaction");
+      // 応答しない RPC でも起動しない。
+      const silent = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp("http", "http://rpc.test"), dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES });
+      await expect(silent.rails.dynamic!.verify()).rejects.toThrow("fee estimate");
+    } finally {
+      await rpc.close();
+    }
   });
 
   test("受信: プロファイルの offer が作れ、束縛（dynamic|…）から受信 adapter が引け、facilitator・RPC への接続は動的用 transport を通る", async () => {
@@ -254,8 +272,13 @@ describe("composeRails（動的の配線）", () => {
     expect(() => compose(envFor(), { ...base, mppTempo: createPayerSpy().capability() })).toThrow(/local account|non-signing fixture|push/);
     const { rails } = compose(envFor(), { ...base, mppTempo: realMpp("custom") });
     await expect(rails.dynamic!.verify()).rejects.toThrow("plain http transport");
-    const ok = compose(envFor(), { ...base, mppTempo: realMpp("http") });
-    await expect(ok.rails.dynamic!.verify()).resolves.toBeUndefined();
+    const rpc = await startTempoRpc();
+    try {
+      const ok = compose(envFor(), { ...base, dynamicTransportHooksForTest: hooks(dialed, { "rpc.test": rpc.port }), mppTempo: realMpp("http", "http://rpc.test") });
+      await expect(ok.rails.dynamic!.verify()).resolves.toBeUndefined();
+    } finally {
+      await rpc.close();
+    }
   });
 
   test("合成レールに動的の設定は組めない。設定に dynamic が無ければ配線は従来どおり（動的の transport を作らない）", () => {
