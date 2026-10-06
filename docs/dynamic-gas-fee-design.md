@@ -392,6 +392,20 @@ feePerGasOf(base) = ceil(base × 24 / 10) + 1                  // = 2.4 × baseF
 | `tests/fixtures/dynamic/tempo-rpc.ts` | ノードの提案（priority・fill の maxFee）を試験から動かせるように |
 | 試験 | wire: 提案が跳ねても見積りは baseFee だけで決まる（RPC 2／3 回、`viaFillTransaction` は fill の成否）、署名した raw の priority = 1・maxFee = feePerGasOf(baseFee)、baseFee が上がれば capPerGas に clamp、baseFee > capPerGas で署名しない、送信の境界が priority を照合、ノードが手数料の欄を返さなければ見積り失敗。unit: `pricingPolicy` v2 の指紋（v1 の quote は `quote_changed`、x402 は不変）、`perAddressPerMinute` の既定。統合: ノードの提案を跳ねさせた状態で quote → purchase が delivered、起動時の `verify` が block の読取で偽にならない |
 
-### 8.5 独立レビューと観測の追記
+### 8.5 testnet の試行（2026-10-06 09:26Z、owner の承認「1 を進めていただきたいです」）と観測の追記
 
-（レビューは §6 に続けて記録する。ライブ観測②の最終の集計はここに追記する）
+`tools/dyn-mpp-priority-trial.ts`（実鍵を扱う起動側。製品コードではない）で、**本番と同じ Router**（`startRouter` の実レール構成、起動時の probe は公開 RPC で `eth_fillTransaction` 対応を確認）に
+本番の MPP 送信プロファイルと同じ値（手数料 1,000・`feeMargin` 20,000・天井 50,000）を登録し、使い捨て口座で **x402（Base Sepolia USDC）→ MPP（Tempo pathUSD、Provider B）** の
+動的購入を 1 件。`--dry-run`（quote だけ。読取のみ）を先に通してから `--pay`。
+
+| 項目 | 値 |
+|---|---|
+| quote | 上流 10,000 ＋ 手数料 1,000 = 11,000。`pricing.maxFee`（cap）**158**、`estimate`: gas 54,399・maxFeePerGas **1,440,000,001**（= feePerGasOf(6e8)）・bound 79 |
+| 受信 | Base Sepolia USDC 11,000。tx `0x83bff282…8c5f` |
+| 送信（Tempo） | tx `0xd858ac56…bfd2`、**取り込まれ success**。署名した `maxPriorityFeePerGas` = **1**、`maxFeePerGas` = **1,440,000,001**（Router の単価。ノードの提案ではない）、gas 54,278。ブロックの baseFee 6e8、`effectiveGasPrice` 600,000,001、gasUsed 46,683、**請求額 29** |
+| 不変条件 | 請求額 29 ≤ 署名時の bound 79 ≤ cap 158 ≤ 先に払われた手数料 1,000 |
+| 結果 | `delivered`（JSON object、6.1 秒）。journal・控えに鍵は無い |
+
+- 署名した gas 54,278 は見積りの 54,399 より 121 少ない: 見積りの memo は全バイト非ゼロのダミー、実際の SDK の帰属 memo にはゼロのバイトがある（§1.1 のとおり、ダミーは上限側）
+- この 1 件は「priority 1 の transaction が、他人の p90 の tip が 2e10 に達する時間帯（§8.1 ④）にも取り込まれる」ことの実例であって、混雑時の挙動の証拠ではない（§8.3）
+- ライブ観測②（ノードの提案をそのまま写す経路）の最終の集計は、終了後にここに追記する
