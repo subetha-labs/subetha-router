@@ -166,7 +166,8 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
             sourceRail: "x402",
             source: { network: FIXTURE_NETWORK, asset: USDC, decimals: 6, payTo: RECEIVER },
             rail: "mpp",
-            destination: { scheme: "tempo/charge", network: `eip155:${MPP_FIXTURE_CHAIN_ID}`, asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "5000" },
+            // `fee.min >= maxFee`（運営がチェーン手数料を負担しない不変条件）。fixture の RPC の見積りでは手数料の上限は 100 未満。
+            destination: { scheme: "tempo/charge", network: `eip155:${MPP_FIXTURE_CHAIN_ID}`, asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "1000" },
             par: true,
             maxUpstreamAmount: "10000",
             fee: { flat: "1000", bps: 0, min: "1000" },

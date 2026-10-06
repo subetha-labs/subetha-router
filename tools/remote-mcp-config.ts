@@ -50,12 +50,13 @@ export const PUBLIC_HOSTNAME = "router.subethalabs.com";
 /**
  * 動的上流 URL の手数料・上限（G-1。owner が 2026-10-06 に決定）。設計 §3.3 の T0-b。
  * - x402 送信（Router にチェーン手数料がかからない）: 定額 1,000（0.001）
- * - MPP 送信（Router が Tempo の手数料を払う。実測 29〜478、上限 `maxFee` 5,000）: 定額 2,000（0.002）。持ち出しの最大は 1 件 3,000
- * 将来は、quote の時点で Tempo の単価を読んで手数料に反映する形を検討する（設計 §11 の「将来」）。
+ * - MPP 送信（Router が Tempo の手数料を払う。実測 29〜478、署名前の上限 `maxFee` 5,000）: 定額 5,000 = `maxFee`。
+ *   **不変条件 `fee.min >= maxFee`**（`src/config.ts` が起動時に確かめる）により、運営はチェーン手数料を負担しない。
+ * 次のスライス: quote の時点で Tempo の単価を読んで `maxFee` と手数料を決める（平時は安く、高騰時は断る。設計 §11 の「将来の課題」）。
  */
 const DYNAMIC_MAX_FEE = "5000";
 const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
-const DYNAMIC_FEE_MPP_OUT = { flat: "2000", bps: 0, min: "2000" } as const;
+const DYNAMIC_FEE_MPP_OUT = { flat: DYNAMIC_MAX_FEE, bps: 0, min: DYNAMIC_MAX_FEE } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 
 /**

@@ -584,6 +584,10 @@ total     = converted + fee                                                // Bi
 
 `upstreamAmount > maxUpstreamAmount`、`total` が受信側の 1 件上限を超える、は quote 不成立。**手数料の値は owner が決める**（M-1 の後に案を出す）。
 
+**不変条件（G-1 で owner が決定、2026-10-06）: MPP 送信のプロファイルでは `fee.min >= destination.maxFee`。** Router が実際に払う Tempo の手数料は署名前の
+検査で必ず `maxFee` 以下、呼び出し側が先に払う手数料は必ず `fee.min` 以上なので、件数や単価に関わらず運営がチェーン手数料で純減することは 1 件ごとに起きない。
+設定の値に頼らず `parseDynamic` が起動時に確かめる（違えば `config_invalid`）。x402 送信は Router にチェーン手数料がかからないので対象外。
+
 残高の事前確認: 送信能力に省略可能な `balanceOf(asset)`。あるとき、手順 3 で**元本の資産と手数料の資産を別々に**確かめ（同じ資産なら合算）、
 足りなければ `operator_funds_unavailable`。無いときは検査しない。検査と送信の間の競合は残る。MPP 受信の呼び出し側は守らない（FR-10 (c)）。
 

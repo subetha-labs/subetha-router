@@ -41,7 +41,7 @@ function profiles(mppToX402 = true): Record<string, unknown> {
       sourceRail: "x402",
       source: { network: "eip155:84532", asset: USDC, decimals: 6, payTo: RECEIVER },
       rail: "mpp",
-      destination: { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "5000" },
+      destination: { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "1000" },
       par: true,
       maxUpstreamAmount: "10000",
       fee: { flat: "1000", bps: 0, min: "1000" },
@@ -301,7 +301,7 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
       expect(parsed.dynamic?.enabled).toBe(false);
       expect(Object.keys(parsed.dynamic!.profiles).sort()).toEqual(mppInbound ? ["dyn-mpp-to-x402", "dyn-x402-to-mpp"] : ["dyn-x402-to-mpp"]);
       // G-1（2026-10-06 の owner の決定）: MPP 送信は定額 2,000、x402 送信は定額 1,000。
-      expect(parsed.dynamic!.profiles["dyn-x402-to-mpp"]).toMatchObject({ destination: { maxFee: "5000", feeAsset: PATHUSD }, maxUpstreamAmount: "10000", fee: { flat: "2000", bps: 0, min: "2000" } });
+      expect(parsed.dynamic!.profiles["dyn-x402-to-mpp"]).toMatchObject({ destination: { maxFee: "5000", feeAsset: PATHUSD }, maxUpstreamAmount: "10000", fee: { flat: "5000", bps: 0, min: "5000" } });
       if (mppInbound) expect(parsed.dynamic!.profiles["dyn-mpp-to-x402"]).toMatchObject({ maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } });
       // 自分の公開ホスト名は拒否ホストに入る（canonical は内部の URL なので配線では分からない）。
       expect(parsed.dynamic!.denyHosts).toContain("router.subethalabs.com");

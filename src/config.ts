@@ -534,6 +534,17 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
   if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) {
     throw new ConfigError(`${at}.fee.bps must be an integer in 0..10000`);
   }
+  const feeMin = requireAmount(fee, "min", `${at}.fee`, false);
+  /**
+   * **運営がチェーン手数料を負担しない不変条件**（G-1、owner の決定 2026-10-06）: MPP 送信では Router が Tempo の手数料を払う。
+   * 署名前に `ceil(gas × maxFeePerGas / 10^12) <= maxFee` を確かめて超えたら払わないので、実際に払う手数料は必ず `maxFee` 以下。
+   * 一方、呼び出し側は quote の手数料（`max(min, flat + ceil(額 × bps / 10000))` ≥ `min`）を先に払う。
+   * よって `fee.min >= maxFee` なら、件数や単価に関わらず、運営がガス代で純減することは 1 件ごとに起きない。
+   * 設定の値に頼らず、Router がこの不等式を起動時に確かめる。
+   */
+  if (maxFee !== undefined && BigInt(feeMin) < BigInt(maxFee)) {
+    throw new ConfigError(`${at}.fee.min must be at least destination.maxFee for an mpp outbound profile (the operator must not subsidize the chain fee)`);
+  }
   return {
     profileId,
     sourceRail,
@@ -558,7 +569,7 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     fee: {
       flat: requireAmount(fee, "flat", `${at}.fee`, false),
       bps,
-      min: requireAmount(fee, "min", `${at}.fee`, false),
+      min: feeMin,
     },
   };
 }

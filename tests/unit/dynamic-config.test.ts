@@ -57,7 +57,8 @@ function x402ToMpp(): Record<string, unknown> {
     },
     par: true,
     maxUpstreamAmount: "100000",
-    fee: { flat: "1000", bps: 100, min: "1000" },
+    // mpp 送信は `fee.min >= maxFee`（運営がチェーン手数料を負担しない不変条件）。
+    fee: { flat: "50000", bps: 100, min: "50000" },
   };
 }
 
@@ -156,6 +157,7 @@ test.each<[string, unknown]>([
   ["decimals が負", withProfilePatch((p) => { p["source"] = { ...(p["source"] as object), decimals: -1 }; })],
   ["decimals が大きすぎる", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), decimals: 37 }; })],
   ["x402 送信で tokenDomain が無い", withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": (() => { const p = mppToX402(); const { tokenDomain: _t, ...rest } = p["destination"] as Record<string, unknown>; return { ...p, destination: rest }; })() } }))],
+  ["mpp 送信で fee.min が maxFee より小さい（運営がチェーン手数料を負担する設定）", withProfilePatch((profile) => { (profile["fee"] as Record<string, unknown>)["min"] = "49999"; })],
   ["budget が無い", withDynamic((() => { const { budget: _b, ...rest } = dynamicOf(); return rest; })())],
   ["denyHosts が配列でない", withDynamic(dynamicOf({ denyHosts: "router.example.com" }))],
   ["denyHosts に URL", withDynamic(dynamicOf({ denyHosts: ["https://router.example.com/"] }))],
@@ -193,11 +195,11 @@ test("指紋はプロファイルのどの欄を変えても、enabled を変え
     ["destination.decimals", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), decimals: 8 }; })],
     ["destination.scheme", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), scheme: "tempo/session" }; })],
     ["destination.feeAsset", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), feeAsset: USDC }; })],
-    ["destination.maxFee", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), maxFee: "50001" }; })],
+    ["destination.maxFee", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), maxFee: "49999" }; })],
     ["maxUpstreamAmount", withProfilePatch((p) => { p["maxUpstreamAmount"] = "100001"; })],
-    ["fee.flat", withProfilePatch((p) => { p["fee"] = { flat: "1001", bps: 100, min: "1000" }; })],
-    ["fee.bps", withProfilePatch((p) => { p["fee"] = { flat: "1000", bps: 101, min: "1000" }; })],
-    ["fee.min", withProfilePatch((p) => { p["fee"] = { flat: "1000", bps: 100, min: "1001" }; })],
+    ["fee.flat", withProfilePatch((p) => { p["fee"] = { flat: "50001", bps: 100, min: "50000" }; })],
+    ["fee.bps", withProfilePatch((p) => { p["fee"] = { flat: "50000", bps: 101, min: "50000" }; })],
+    ["fee.min", withProfilePatch((p) => { p["fee"] = { flat: "50000", bps: 100, min: "50001" }; })],
   ];
   for (const [name, raw] of variants) {
     const config = parseRouterConfig(raw);
@@ -230,7 +232,7 @@ test("プロファイルの ID・送信レール・tokenDomain の名前も指�
   expect(fpOf(named, "dyn-mpp-to-x402")).not.toBe(x402Base);
   // 送信レール（x402 → mpp。mpp に必要な欄も足す）。
   const railChanged = parseRouterConfig(
-    withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": { ...mppToX402(), rail: "mpp", destination: { ...(mppToX402()["destination"] as object), feeAsset: PATHUSD, maxFee: "1" } } } })),
+    withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": { ...mppToX402(), rail: "mpp", destination: { ...(mppToX402()["destination"] as object), feeAsset: PATHUSD, maxFee: "0" } } } })),
   );
   expect(fpOf(railChanged, "dyn-mpp-to-x402")).not.toBe(x402Base);
 
