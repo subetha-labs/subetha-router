@@ -593,9 +593,10 @@ cap は quote 時にその送金のガス代を見積もって決め（`ceil(gas
 （`destination.maxFee` は cap の天井になった）。
 
 これは**条件つきの保証**である。成り立つ前提は「チェーンが実際に請求する額が、署名時の `ceil(gas × maxFeePerGas / 10^12)` 以下である」こと（§3.3 の T0-b。
-15 件の観測と一致）。**2026-10-06 に、Tempo の公開仕様・TIP-0001・ノードのソース（tag v1.16.0。testnet Moderato のノードと同じ版）でこの前提を確かめた**
-（`dynamic-gas-fee-design.md` §7: 請求額 = `ceil((gas_used − reservoir) × effective_gas_price / 10^12)`、Fee AMM の差額は validator 側、不足は invalid）。
-以後は「その版のノードについて仕様で裏付けられた前提」として扱い、hardfork で版が変われば読み直す（`docs/DEPLOY.md` §2b の条件 6）。また、この条件が守るのは運営のチェーン手数料だけで、呼び出し側の損失・`unknown` の終端・
+15 件の観測と一致）。**2026-10-06 に、Tempo の公開仕様・TIP-0001・ノードのソース（tag v1.16.0。testnet Moderato のノードが名乗る版と Tempo の crate・revm の版が同じ）で
+この前提を確かめた**（`dynamic-gas-fee-design.md` §7: 請求額 = `ceil(max(gas_used − reservoir, 0) × effective_gas_price / 10^12)`、Fee AMM の差額は validator 側、
+前払いの不足は invalid、実行後の失敗はブロックに載らない）。以後は「その版のソースについて仕様で裏付けられた前提」として扱い、版名が変わるか hardfork が有効になれば
+読み直す（`docs/DEPLOY.md` §2b の条件 6）。また、この条件が守るのは運営のチェーン手数料だけで、呼び出し側の損失・`unknown` の終端・
 片方の資産が減って他方が増えること（`maxTotal` で有界）・RPC や運用の費用は対象外。x402 送信は Router にチェーン手数料がかからないので対象外。
 
 残高の事前確認: 送信能力に省略可能な `balanceOf(asset)`。あるとき、手順 3 で**元本の資産と手数料の資産を別々に**確かめ（同じ資産なら合算）、

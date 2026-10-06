@@ -300,8 +300,9 @@ journal 87,192 バイトが不変の prefix → `subetha-egress check` rc 0 → 
 巻き戻し用に `-prev-` は直近 1 つだけ残した（`b-56265da` のものは削除）。
 
 **Tempo の手数料の仕様の確認（2026-10-06、owner の依頼。`DEPLOY.md` §2b 条件 6 の前提 1）**: 公開仕様・TIP-0001・ノードのソース tag `v1.16.0`（testnet のノードと同じ版）を読み、
-請求額 = `ceil((gas_used − reservoir) × effective_gas_price / 10^12)` ≤ `ceil(gas × maxFeePerGas / 10^12)`、Fee AMM の 0.3% は validator 側、残高・流動性の不足は invalid（手数料なし）
-を確かめた（`docs/dynamic-gas-fee-design.md` §7）。読取だけ。条件 6 の残り: quote 時と purchase 時の bound の観測記録（testnet の RPC）。
+請求額 = `ceil(max(gas_used − reservoir, 0) × effective_gas_price / 10^12)` ≤ `ceil(gas × maxFeePerGas / 10^12)`、Fee AMM の 0.3% は validator 側、前払いの段の不足は invalid（手数料なし）、
+実行後の失敗はブロックに載らない、を確かめた（`docs/dynamic-gas-fee-design.md` §7）。配備されたノード `v1.16.0-023f1d0` と tag の差は Reth の pin だけ（GitHub の compare と `Cargo.lock` の比較）。
+読取だけ。条件 6 の残り: quote 時と purchase 時の bound の観測記録（testnet の RPC）、版名・hardfork の変化時の読み直し。
 
 **レビュー**: 設計 3 回・実装 1 回目は REJECT（高 1: 復元の検査が払う額と結び付いていない。`docs/dynamic-gas-fee-design.md` §6 の 4 行目）→ 修正。2 回目も REJECT
 （`converted` と写しの `source.amount` の 2 つの抜け道。§6 の 5 行目）→ 修正（sabotage 2 つ追加: `converted` の束縛・写しへの束縛は復元と再開の両方を外す変異で落ちる）。3 回目（範囲限定）も REJECT（予約の区分を記録の写しで引いていた。§6 の 6 行目）

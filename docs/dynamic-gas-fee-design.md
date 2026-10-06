@@ -250,8 +250,12 @@ offer の抑止のため）ので、実行の守りは再開の検査。数値�
 
 owner の依頼（2026-10-06「1 を進めていきましょう」）で、「チェーンが実際に請求する手数料 ≤ 署名時の `ceil(gas × maxFeePerGas / 10^12)`」を**観測ではなく仕様とノードの実装**で確かめた。
 対象は Tempo testnet Moderato（chainId 42431）のノード `tempo/v1.16.0-023f1d0`（`web3_clientVersion`、2026-10-06）。読んだのは公開ドキュメント、TIP-0001、
-ノードのソース（`github.com/tempoxyz/tempo` の tag `v1.16.0`。`023f1d0` は v1.16.0 に Reth の依存の修正を backport した commit で、手数料の経路に差は無い。main `0b511ac` との
-diff も手数料の計算に変更なし）。すべて読取だけで、署名も送金もしていない。
+ノードのソース（`github.com/tempoxyz/tempo` の tag `v1.16.0`。tag object `b2b832e` → commit `74b6915`）。すべて読取だけで、署名も送金もしていない。
+
+**ソースの版と配備されたバイナリの結び付き**: 配備されたノードが名乗る commit `023f1d0`（release/v1.16.0 ブランチ。「fix(deps): backport Reth proof fix to v1.16.0」）は
+tag の commit `74b6915`（同じ変更を #8123 として取り込んだもの）と **GitHub の compare で `Cargo.lock`・`Cargo.toml` だけが違い**（Reth の git 依存の pin）、Tempo の crate は同一。
+依存の版も `revm 43.0.3`・`revm-handler 43.0.3`・`revm-interpreter 43.0.2`・`alloy-eips 2.5.0` で同じ（両方の `Cargo.lock` を比較）。したがって**手数料の経路のソースは配備された版と一致する**
+（バイナリそのものを検証したわけではない。公開された版名と commit を信じている）。main `0b511ac` との diff も手数料の計算に変更なし。
 
 ### 7.1 仕様（公開ドキュメント・TIP）
 
@@ -271,22 +275,36 @@ diff も手数料の計算に変更なし）。すべて読取だけで、署名
 | 単価 | `crates/primitives/src/transaction/tempo_transaction.rs:699-705` | `effective_gas_price = alloy_eips::eip1559::calc_effective_gas_price(max_fee_per_gas, max_priority_fee_per_gas, base_fee)` = `min(max_fee_per_gas, base_fee + max_priority_fee_per_gas)` |
 | 事前の検査 | `crates/revm/src/tx.rs:255-258`（revm-handler 43.0.3 `calculate_caller_fee` → `ensure_enough_balance`） | 残高 ≥ `ceil(gas_limit × max_fee_per_gas / 10^12) + value`。足りなければ invalid（含まれない） |
 | 前払い | `crates/revm/src/handler.rs:1236,1407-1420`、`crates/revm/src/tx.rs:261-269` | `gas_balance_spending = ceil(gas_limit × effective_gas_price / 10^12)` を fee manager に移す（`collect_fee_pre_tx`。`crates/precompiles/src/tip_fee_manager/mod.rs:158`、`tip20/mod.rs:1438`）。validator の token が違えば流動性を検査・予約し、無ければ **invalid**（`handler.rs:1431`。transaction は含まれず、手数料は無い） |
-| 実行後 | `crates/revm/src/handler.rs:1679-1700` | `actual_spending = ceil((gas_used − reservoir) × effective_gas_price / 10^12)`、`refund_amount = 前払い − actual_spending`。`collect_fee_post_tx`（`tip_fee_manager/mod.rs:234`）が返金し、TIP-20 の `Transfer(fee_payer → fee manager, actual_spending)` を出す（`tip20/mod.rs:1471-1481`。T0-b が receipt で見たもの） |
-| Fee AMM | `tip_fee_manager/mod.rs:250-253`、`amm.rs:15,28` | `fee_token == validator_token` なら validator は `actual_spending` をそのまま受ける。違えば `compute_amount_out(actual_spending) = actual_spending × 9970 / 10000` を受ける。**送信者の支払いは `actual_spending` のまま** |
+| 実行後 | `crates/revm/src/handler.rs:1679-1700` | `actual_spending = ceil(max(gas.used() − gas.reservoir(), 0) × effective_gas_price / 10^12)`（`saturating_sub`。`gas.used()` は handler が会計を終えた後の `Gas::used()` = spent − refunded で、receipt の `gasUsed` と同じ量だが本書はこちらで定義する）、`refund_amount = 前払い − actual_spending`。`collect_fee_post_tx`（`tip_fee_manager/mod.rs:234`）が返金し（残高の移動は `tip20/mod.rs:1507-1508`）、TIP-20 の `Transfer(fee_payer → fee manager, actual_spending)` を出す（`tip20/mod.rs:1471-1481`。T0-b が receipt で見たもの） |
+| Fee AMM | `tip_fee_manager/mod.rs:250-264`、`amm.rs:15,28-32,664-688` | `fee_token == validator_token` なら validator は `actual_spending` をそのまま受ける。違えば直接 swap で `floor(actual_spending × 9970 / 10000)`、T5 以降の two-hop ではそれを 2 回掛けた額を受ける。swap は pool の reserve を動かすだけで、**送信者からの転送は前払いの 1 回だけ**（`execute_fee_swap` は送信者に触れない） |
 | 既定の validator token | `tip_fee_manager/mod.rs:68-76`、`contracts/src/precompiles/mod.rs:44` | 未設定なら pathUSD（`DEFAULT_FEE_TOKEN`）。Router の `feeToken` も pathUSD なので、validator が別の token を選んでいなければ swap は起きない |
 
 ### 7.3 帰結
 
-送信者（Router。fee payer を使わないので `fee_payer = sender`）が払う額は `actual_spending = ceil((gas_used − reservoir) × effective_gas_price / 10^12)` で、
+送信者（Router。fee payer を使わないので `fee_payer = sender`）が払う額は `actual_spending = ceil(max(gas.used() − gas.reservoir(), 0) × effective_gas_price / 10^12)` で、
 
-- `gas_used − reservoir ≤ gas_used ≤ gas_limit`（reservoir は差し引く側にしか働かない）
+- `gas.used() = spent − refunded ≤ spent = limit − remaining ≤ gas_limit`（revm の `Gas`。reservoir は差し引く側にしか働かない）。AA（Tempo transaction）の実行は失敗時も
+  元の gas_limit を復元してから会計する（`handler.rs:619,655-661,697-733`、`normalize_failed_batch_result_gas` `:223-254`）ので、上限を超えて課金する経路は見つからなかった。
+  state gas（TIP-1016）は同じ gas の予算の中で消費され、別の token の請求ではない（`tips/tip-1016.md:122,152-172`）。TIP-1060 の storage credit は gas の返金を記録するだけで、
+  手数料のフックでは無効（`revm/src/gas_credits.rs:63-86`、`revm/src/fee_manager.rs:37-49`）。keychain の spending limit は認可の制約で、別の手数料ではない
 - `effective_gas_price = min(max_fee_per_gas, base_fee + max_priority_fee_per_gas) ≤ max_fee_per_gas`
 - `ceil(x / 10^12)` は単調
 
-なので **`actual_spending ≤ ceil(gas_limit × max_fee_per_gas / 10^12)` = 署名の境界が照合する bound**。Fee AMM の 0.3% は validator の受取から引かれ、送信者の支払いには乗らない。
-前払いの不足・流動性の不足・token の pause は transaction を **invalid（含まれない）** にし、手数料は発生しない。前払いと返金は同じ transaction の中で原子的に行われるので、
-返金が別に失敗して前払いだけ残る経路は無い。これで `dynamic-upstream-design.md` §3.3 T0-b の「観測と一致した」換算は、**この版のノードについて**仕様とソースで裏付けられた。
+なので **`actual_spending ≤ ceil(gas_limit × max_fee_per_gas / 10^12)` = 署名の境界が照合する bound**（`mpp-dynamic.ts` の `feeBoundOf` と `checkFeeAndValidity`。署名する transaction の
+`gas` は gas_limit の欄に置かれ、`maxFeePerGas` と共に raw の復号後にもう一度照合する）。Fee AMM の 0.3% は validator の受取から引かれ、送信者の支払いには乗らない。
 
-**限界**: (1) 将来の hardfork で変わり得る（本書が読んだのは v1.16.0。`DEPLOY.md` §2b は版を記録する）。(2) keychain の access key で署名する場合は spending limit の検査が加わるが、
+失敗の段ごとの扱い:
+
+| 失敗 | 段 | 結果 |
+|---|---|---|
+| fee token の残高が `ceil(gas_limit × max_fee_per_gas / 10^12)` 未満、Fee AMM の流動性不足、fee token が**既に** pause | 前払い（pre-tx） | checkpoint を戻して validation error（`handler.rs:1422-1464`）→ **invalid、含まれない、手数料なし** |
+| 返金・swap の失敗（post-tx） | 実行後 | `EVMError::Custom`（`handler.rs:1722-1737`）→ **実行の失敗**で結果は commit されない（`crates/evm/src/block.rs:558-610`）。payload builder はこれを内部エラーとして伝え、無効な transaction として飛ばすのではない（`crates/payload/builder/src/lib.rs:698-721`）。前払いだけ残った transaction を含むブロックは成立しない |
+| 送金そのものの失敗（元本の残高不足、call の途中で token が pause） | 実行中 | transaction は**含まれ、失敗し、gas は課金される**（上の bound の内側）。実行中に fee token が pause されても返金は行われる（`tip20/mod.rs:1438-1443,1467-1508`） |
+
+前払いと返金は同じ transaction の実行の中で行われ、返金だけが別に失敗して前払いが残る経路は無い。これで `dynamic-upstream-design.md` §3.3 T0-b の「観測と一致した」換算は、
+**この版のソース（配備されたバイナリと同じ版名・同じ依存の版）について**仕様とソースで裏付けられた。
+
+**限界**: (1) 将来の版や **hardfork の有効化**（版が変わらなくても挙動が変わり得る。`is_t5`・`is_t8` のような分岐がソースにある）で変わり得る。本書が読んだのは v1.16.0 のソースで、
+`DEPLOY.md` §2b は版と確認日を記録し、ノードの版名が変わるか hardfork が有効になれば読み直す。バイナリそのものは検証していない（公開された版名・commit・依存の pin を信じている）。(2) keychain の access key で署名する場合は spending limit の検査が加わるが、
 Router は root の secp256k1 鍵で署名するので対象外。(3) validator が pathUSD 以外を選ぶ環境では Fee AMM の流動性不足で transaction が含まれないことがあり得る（手数料は発生しないが、
 配達は `destination_rejected`／`unknown` になる。可用性の話で、運営の負担の話ではない）。(4) 「請求額 ≤ bound」は運営のチェーン手数料の上限であって、送金の成功を保証しない。
