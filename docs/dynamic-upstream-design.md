@@ -584,6 +584,16 @@ total     = converted + fee                                                // Bi
 
 `upstreamAmount > maxUpstreamAmount`、`total` が受信側の 1 件上限を超える、は quote 不成立。**手数料の値は owner が決める**（M-1 の後に案を出す）。
 
+**手数料の被覆の条件（G-1 で owner が決定、2026-10-06）: MPP 送信のプロファイルでは `fee.min >= destination.maxFee`、かつ `feeAsset` は送信資産そのもの、
+かつ受信と送信の桁が同じ。** `parseDynamic` が起動時に確かめる（違えば `config_invalid`）。意味: 呼び出し側が先に払う手数料（受信資産の base units、
+必ず `fee.min` 以上）が、Router が署名する transaction の手数料の上限 `maxFee`（送信資産の base units）以上になる。`par: true` は受信資産と送信資産が 1:1 という宣言で、
+第三の資産の価値は定めないので `feeAsset` は送信資産に限り、桁が違う base units は比べられないので桁も揃える。
+
+これは**条件つきの保証**である。成り立つ前提は「チェーンが実際に請求する額が、署名時の `ceil(gas × maxFeePerGas / 10^12)` 以下である」こと（§3.3 の T0-b。
+15 件の観測と一致しているが、Fee AMM・換算の差額・丸め・返金を含む Tempo の手数料の仕様としては未確立）。この前提が仕様で確立するまで、MPP 送信のプロファイルは
+本番で有効にしない（`docs/DEPLOY.md` §2b の条件 6）。また、この条件が守るのは運営のチェーン手数料だけで、呼び出し側の損失・`unknown` の終端・
+片方の資産が減って他方が増えること（`maxTotal` で有界）・RPC や運用の費用は対象外。x402 送信は Router にチェーン手数料がかからないので対象外。
+
 残高の事前確認: 送信能力に省略可能な `balanceOf(asset)`。あるとき、手順 3 で**元本の資産と手数料の資産を別々に**確かめ（同じ資産なら合算）、
 足りなければ `operator_funds_unavailable`。無いときは検査しない。検査と送信の間の競合は残る。MPP 受信の呼び出し側は守らない（FR-10 (c)）。
 

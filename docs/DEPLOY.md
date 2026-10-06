@@ -66,7 +66,9 @@ docker run -d --name subetha-router --restart unless-stopped \
 5. 控え（未払いの quote の記録）のディレクトリ `dynamic-quotes/` は journal と同じディレクトリに作られる。**ボリュームの中**にあること（`-v`）。
    7 日より古いファイルは Router が消す。最悪のディスク使用量は設計 §7.3（約 860 MiB）
 6. MPP 送信のプロファイルは、Tempo の手数料の仕様で上限（`maxFee`）が確立するまで有効にしない（設計 §3.3 の T0-b。**x402 送信のプロファイルだけ先に有効にできる**）
-7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000、MPP 送信は定額 2,000、`maxUpstreamAmount 10000`、`maxFee 5000`
+7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000、MPP 送信は定額 5,000（= `maxFee`。
+   `fee.min >= maxFee` を Router が起動時に確かめる。これで運営がチェーン手数料を負担しないのは、6 の前提——チェーンが請求する額が署名時の上限以下——が
+   成り立つ場合）、`maxUpstreamAmount 10000`、`maxFee 5000`
 
 **有効化の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf` にある `enabled: false` を `true` にして、§6 の手順でイメージを作り直して入れ替える。
 **x402 送信のプロファイルだけ先に有効にする**場合は、同じ関数の `profiles` から `dyn-x402-to-mpp`（MPP 送信）を外す（`enabled` は全プロファイルに掛かる）。

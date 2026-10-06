@@ -419,7 +419,7 @@ test("動的を無効にした実際の設定（enabled: false）でも、動的
           destination: { scheme: "tempo/charge", ...PATHUSD, decimals: 6, feeAsset: PATHUSD.asset, maxFee: "5000" },
           par: true,
           maxUpstreamAmount: "100000",
-          fee: { flat: "1000", bps: 0, min: "1000" },
+          fee: { flat: "5000", bps: 0, min: "5000" },
         },
       },
       budget: { maxPurchases: 1, buckets: [{ ...USDC, maxTotal: "100000", maxPerPurchase: "30000" }, { ...PATHUSD, maxTotal: "100000", maxPerPurchase: "30000" }] },
