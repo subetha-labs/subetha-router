@@ -154,10 +154,12 @@ export function dynamicFieldsOf(
    */
   if (profile["rail"] === "mpp") {
     const source = isPlainRecord(patch["source"]) ? patch["source"] : {};
+    const sourceOffer = isPlainRecord(source["offer"]) ? source["offer"] : {};
     const destination = isPlainRecord(patch["destination"]) ? patch["destination"] : {};
     const selected = isPlainRecord(destination["selectedOffer"]) ? destination["selectedOffer"] : {};
     const bound = {
-      sourceAmount: String(source["amount"]),
+      // settle に渡るのは `source.offer` そのもの。写しの `source.amount` ではなく offer の額に結び付ける。
+      sourceAmount: String(sourceOffer["amount"]),
       upstreamOfferAmount: String(selected["amount"]),
       requireReservation: options.requireReservation === true,
     };
@@ -184,13 +186,14 @@ function capFieldsOf(pricing: Record<string, unknown>): { maxFee: string; estima
 /**
  * MPP 送信の記録の cap が、**実際に払われる額**に結び付いているか（`docs/dynamic-gas-fee-design.md` §3.2・§3.3）。復元と昇格済みの再開が同じ検査を使う:
  * - `pricing.maxFee`・`pricing.estimate` が形どおり（`capFieldsOf`）で、`fee >= maxFee`
- * - `total = converted + fee`、受信 offer の額（呼び出し側が先に払う額）= `total`、`upstreamAmount` = 選んだ上流 offer の額
- *   （記録の `fee`・`maxFee` だけを書き換えて、払っていない手数料で大きな cap を通せないように）
+ * - `total = converted + fee`、`converted = upstreamAmount`（MPP 送信は受信と送信の桁が同じ・par なので換算は恒等）、
+ *   **実際の受信 offer**の額（呼び出し側が先に払う額。`source.amount` の写しではなく `source.offer.amount`）= `total`、`upstreamAmount` = 選んだ上流 offer の額
+ *   （記録の `fee`・`maxFee`・`converted`・`source.amount` を書き換えて、払っていない手数料で大きな cap を通せないように）
  * - 予約があれば、手数料の資産の区分の合計が `upstreamAmount + maxFee` 以上。`requireReservation` なら予約が無いのも不可（昇格済み）
  */
 export function capCoversFee(
   dynamic: IntentDynamic,
-  bound: { readonly sourceAmount: string; readonly upstreamOfferAmount: string; readonly requireReservation?: boolean },
+  bound: { /** 実際の受信 offer の額（`source.offer.amount`）。 */ readonly sourceAmount: string; readonly upstreamOfferAmount: string; readonly requireReservation?: boolean },
 ): boolean {
   const cap = capFieldsOf(dynamic.pricing as unknown as Record<string, unknown>);
   if (cap === undefined) return false;
@@ -199,6 +202,7 @@ export function capCoversFee(
   const maxFee = BigInt(cap.maxFee);
   if (BigInt(fee) < maxFee) return false;
   if (BigInt(converted) + BigInt(fee) !== BigInt(total)) return false;
+  if (BigInt(converted) !== BigInt(upstreamAmount)) return false;
   if (BigInt(bound.sourceAmount) !== BigInt(total) || BigInt(bound.upstreamOfferAmount) !== BigInt(upstreamAmount)) return false;
   if (dynamic.reservation === undefined) {
     return bound.requireReservation !== true;

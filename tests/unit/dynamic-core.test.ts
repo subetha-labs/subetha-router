@@ -850,6 +850,8 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
     // 記録の fee・maxFee だけを書き換えて、払っていない手数料で cap を通す: 受信 offer の額（払う額）と合わなければ不可。
     expect(capCoversFee({ ...base, pricing: { ...base.pricing, fee: "3000", total: "8000" } }, { ...bound, sourceAmount: "6000" })).toBe(false);
     expect(capCoversFee(base, { ...bound, upstreamOfferAmount: "4999" })).toBe(false);
+    // converted を下げて fee を上げる（total・受信 offer はそのまま）: converted = upstreamAmount でなければ不可。
+    expect(capCoversFee({ ...base, pricing: { ...base.pricing, converted: "4000", fee: "4000", maxFee: "4000" } }, bound)).toBe(false);
     const { maxFee: _m, ...noCap } = base.pricing;
     expect(capCoversFee({ ...base, pricing: noCap }, bound)).toBe(false);
     expect(capCoversFee({ ...base, pricing: { ...base.pricing, estimate: { ...base.pricing.estimate, atMs: -1 } } }, bound)).toBe(false);
@@ -994,6 +996,23 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
     await writeFile(journalPath, tamper((row) => { row.patch.dynamic.pricing["fee"] = "4000"; row.patch.dynamic.pricing["maxFee"] = "4000"; row.patch.dynamic.reservation.legs[2]!.amount = "4000"; }));
     core = await boot(baseConfig({ profile: MPP }));
     expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    await core.close();
+    opened.length = 0;
+
+    // (g) converted を下げて fee・maxFee を上げる（total・受信 offer はそのまま）
+    await writeFile(journalPath, tamper((row) => { row.patch.dynamic.pricing["converted"] = "4000"; row.patch.dynamic.pricing["fee"] = "4000"; row.patch.dynamic.pricing["maxFee"] = "4000"; row.patch.dynamic.reservation.legs[2]!.amount = "4000"; }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    await core.close();
+    opened.length = 0;
+    // (h) source.amount の写しも一緒に上げる（settle に渡る source.offer はそのまま）: offer の額に結び付けているので不可
+    await writeFile(journalPath, tamper((row) => {
+      (row.patch as unknown as { source: Record<string, unknown> }).source["amount"] = "9000";
+      row.patch.dynamic.pricing["fee"] = "4000"; row.patch.dynamic.pricing["maxFee"] = "4000"; row.patch.dynamic.pricing["total"] = "9000"; row.patch.dynamic.reservation.legs[2]!.amount = "4000";
+    }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    expect(inbound.settleCalls).toBe(1);
     await core.close();
     opened.length = 0;
 

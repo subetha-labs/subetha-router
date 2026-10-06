@@ -532,7 +532,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     }
     if (profile.rail === "mpp") {
       // 昇格済みの再開: 記録の cap・手数料・予約を復元に頼らず見る（`docs/dynamic-gas-fee-design.md` §3.3）。
-      if (!capCoversFee(intent.dynamic!, { sourceAmount: intent.source.amount, upstreamOfferAmount: intent.destination.selectedOffer.amount, requireReservation: isPromoted })) {
+      if (!capCoversFee(intent.dynamic!, { sourceAmount: intent.source.offer.amount, upstreamOfferAmount: intent.destination.selectedOffer.amount, requireReservation: isPromoted })) {
         return { paymentId, status: "rejected", code: "quote_unreadable" };
       }
       // 再見積り（§1.4）: 今の bound が記録の cap を超えていれば verify に進まない。cap は上げない。記録にも書かない。
