@@ -166,7 +166,8 @@ values, so the SDK and the upstream can only propose, never widen, what the oper
 What is in place: anonymous use behind rate limits (per source, global, per destination host and address),
 a quote ledger that keeps unpaid quotes out of the journal, an `ownerKey` that makes a dynamic quote
 readable and executable only by whoever took it, the SSRF defences applied to every dynamic connection
-(no loopback, DNS deadline, header and body caps, the Router's own dependencies denied as destinations),
+(no loopback, DNS deadline, header and body caps, the Router's own dependencies denied as destinations by
+hostname — another name resolving to the same service is not denied, a limitation the design accepts),
 and a dynamic budget counted separately from the static routes. All of this is covered by unit, wire and
 integration tests that run the product wiring with real keys and real SDKs against local fixtures
 (`tests/wire/dynamic-integration.test.ts`), on macOS and Linux.
