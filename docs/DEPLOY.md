@@ -87,7 +87,8 @@ G-2: `dynamic-upstream-tasks.md` T16、2026-10-06）。
 
 **有効化の記録（2026-10-06、2 回目）**: 条件 6 の前提（手数料の仕様の確立 `dynamic-gas-fee-design.md` §7・Router の単価での testnet の試行 §8.5・起動時の `eth_fillTransaction` の確認）が揃い、
 owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登録した（`MPP_OUTBOUND_PROFILE_ENABLED = true`）。記録は `tools/remote-mcp-config.ts` のコメントと
-`dynamic-upstream-tasks.md` T16・T18。
+`dynamic-upstream-tasks.md` T16・T18。配備は同日 10:07Z、イメージ `b-b1524b0`。起動時の probe は本番に設定した RPC で通り、公開 MCP から両方向の一覧・MPP 送信の quote・
+動的購入 1 件（delivered、請求額 29 ≤ cap 158）を確認した（T16 の記録）。
 
 **変更の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf`（`enabled`）と `MPP_OUTBOUND_PROFILE_ENABLED` だけを変えて、§6 の手順でイメージを作り直して入れ替える。
 戻し方は 2 段階: `MPP_OUTBOUND_PROFILE_ENABLED = false` は **MPP 送信のプロファイルだけ**を外す（journal の昇格済みの購入は予約を保ったまま再生され、`created` の購入は支払いの前に `quote_changed`）、
