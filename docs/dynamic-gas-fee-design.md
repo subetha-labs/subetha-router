@@ -1,6 +1,6 @@
 # 動的上流 URL — MPP 送信の手数料を quote 時のガス代で決める（設計）
 
-> 2026-10-06、第 3 版（独立レビュー #1〜#3 を反映。§6）。owner の方針（2026-10-06）: 「運営がガス代を負担するリスクは構造として排除する。
+> 2026-10-06、第 4 版（§8: Router が手数料の単価を決める。owner の決定 2026-10-06「a で進めましょう」。第 3 版までは独立レビュー #1〜#3 を反映。§6）。owner の方針（2026-10-06）: 「運営がガス代を負担するリスクは構造として排除する。
 > 上流の手数料が高騰する場合は、それに応じた価格を下流（呼び出し側）に提示する」。前提は `dynamic-upstream-design.md`（以下「本設計」）§3.3・§6.6・§11 と、
 > G-1 で入れた条件 `fee.min >= maxFee`（PR #30）。MPP 送信のプロファイルを本番で有効にする前提（`DEPLOY.md` §2b の条件 6）の一部。
 
@@ -310,3 +310,60 @@ tag の commit `74b6915`（同じ変更を #8123 として取り込んだもの�
 `DEPLOY.md` §2b は版と確認日を記録し、ノードの版名が変わるか hardfork が有効になれば読み直す。バイナリそのものは検証していない（公開された版名・commit・依存の pin を信じている）。(2) keychain の access key で署名する場合は spending limit の検査が加わるが、
 Router は root の secp256k1 鍵で署名するので対象外。(3) validator が pathUSD 以外を選ぶ環境では Fee AMM の流動性不足で transaction が含まれないことがあり得る（手数料は発生しないが、
 配達は `destination_rejected`／`unknown` になる。可用性の話で、運営の負担の話ではない）。(4) 「請求額 ≤ bound」は運営のチェーン手数料の上限であって、送金の成功を保証しない。
+
+## 8. Router が手数料の単価を決める（第 4 版。owner の決定 2026-10-06）
+
+### 8.1 観測（`DEPLOY.md` §2b 条件 6 の「quote 時と purchase 時の bound」。すべて読取だけ）
+
+`tools/dyn-mpp-bound-observe.ts`（`history`: `eth_feeHistory` でブロックごとの baseFee、`observe`: Router の見積りと同じ経路で 30 秒ごと、`report`: Δ ごとの比）。
+
+| 観測 | 範囲 | 結果 |
+|---|---|---|
+| ① baseFee の履歴 | 2026-10-03 07:38Z 〜 10-06 07:40Z、432,128 ブロック（約 0.6 秒/ブロック） | baseFee **6.0e8〜7.47e8（最大 1.24 倍）**。bound（gas 48,945、priority 1）は 71〜88。Δ = 1・2・5・10 分の窓の最悪は **1.24 倍**、2 倍超 0 件 |
+| ② ライブ（Router の経路） | 2026-10-06 06:55Z〜（30 秒ごと、6 時間の予定） | 途中経過: bound 71 で一定（ノードの fill は `maxFeePerGas = 2 × baseFee + priority`、viem が 1.2 倍。実測 1,440,000,001） |
+| ③ 本番 journal の Tempo 送金 18 件（RPC で transaction を読む） | 2026-09-26〜10-06 | 9/26〜27 の 10 件は `maxFeePerGas` 1.30e10・`maxPriorityFeePerGas` **9.6e9**（baseFee は当時も 6e8）。10 月の 8 件は `priority` 1（`maxFeePerGas` 1.44e9）。**T0-b の「約 17 倍」は baseFee ではなく、ノードが提案した priority fee の差** |
+| ④ 他人の tip（`eth_feeHistory` の reward パーセンタイル） | ①と同じ 72 時間 | p90 > 1e8 のブロックが **45,640 件（73 の時間帯すべて）**、最大 **2.44e10**。ノードの提案（reth の gas oracle: 直近 20 ブロックの各最安 3 件の tip の 60 パーセンタイル。Tempo は既定の提案を 0 に設定、`crates/node/src/rpc/mod.rs:605`）はこれに連動する |
+
+帰結: **bound を動かすのは baseFee（1.24 倍）ではなく、ノードが提案する priority fee（他人の tip。最大で 71 → 約 1,500、21 倍）**。`feeMargin` を広げても根本の対策にならない。
+
+### 8.2 方針: Router が自分で決める
+
+Tempo の仕様では、TIP-20 の送金は専用の payment lane で取り込まれ、tip で競わない（`eth_maxPriorityFeePerGas` は通常 0。`tempo.xyz/developers/docs` の gas pricing）。
+10 月の本番の送金 7 件は priority 1 で、同じ時間帯に他人の p90 の tip が 2e10 に達していても取り込まれた（ブロックの利用率は約 0.05%）。そこで Router は**ノードの提案を写さず**、
+手数料の単価を自分で決める:
+
+```
+ROUTER_PRIORITY   = 1 wei                                    // 固定
+feePerGasOf(base) = ceil(base × 24 / 10) + 1                  // = 2.4 × baseFee + 1。ノードの fill（2 × baseFee）× viem の 1.2 と同じ余裕を、priority 抜きで
+```
+
+- **見積り（quote・purchase の再見積り）**: `eth_getBlockByNumber("latest")` で baseFee を読み、`maxFeePerGas = feePerGasOf(baseFee)`・`maxPriorityFeePerGas = ROUTER_PRIORITY` を
+  **渡して** `prepareTransactionRequest` を呼ぶ（viem は渡された手数料を優先し、fill はノードの提案で上書きしない: `fillTransaction.ts` の「Preference supplied fees」。
+  手数料が両方あれば fallback の手数料の見積りも行わない）。ノードからは `gas` だけを受け取る。`bound = ceil(gas × maxFeePerGas / 10^12)`。
+  RPC は対応ノードで **2 回**（block ＋ fill）、非対応で 3 回（block ＋ fill の失敗 ＋ `eth_estimateGas`）。§1.3・§4 の容量の計算を R = 2 に改める（本番の最悪 `10 × 2 + 10 × (2 + 3 + 1)` = 80 > 60 ⇒ 同時に飽和したときは purchase の RPC が枠で `not_sent`／`fee_estimate_unavailable` になり得る。可用性の話で、§3.4 の分類は変わらない。quote の全体の上限を 10 → 8 にすると 72 ≤ … 同じく超える。**枠は RPC のアドレスに対して 100／分 に上げる**（`perAddressPerMinute` は設定の値。RPC のホストだけ別に上げる手段は無いので、動的の `limits.perAddressPerMinute` を 100 にする。上流のホストごとの枠（10／分）は別にあるので、第三者の 1 アドレスに対する頻度は従来どおり 10／分以下）
+- **署名の境界（§3.4 に追加）**: `pay` は credential を作る前に `eth_getBlockByNumber("latest")` を 1 回読み、`baseFee_now` を guard に渡す（RPC は block ＋ fill ＋ 送金の 3 回）。
+  facade は SDK が提案した `maxFeePerGas`・`maxPriorityFeePerGas` を**写さず**、
+  `maxPriorityFeePerGas = ROUTER_PRIORITY`、`maxFeePerGas = min(feePerGasOf(baseFee_now), capPerGas)`（`capPerGas = floor(cap × 10^12 / gas)`）で組み直す。
+  `maxFeePerGas < baseFee_now` なら署名しない（`destination_signing_fee_over_limit`。取り込まれない transaction に署名しない）。`gas` はノードの提案のまま。
+  既存の検査 `ceil(gas × maxFeePerGas / 10^12) ≤ cap` は組み直した値に対して**そのまま残す**（構成上必ず通るが、独立の門として）。送信の境界（raw の復号）は同じ値を照合し、
+  `maxPriorityFeePerGas === ROUTER_PRIORITY` も確かめる
+- **cap の性質は変わらない**: 呼び出し側が先に払う手数料 ≥ cap ≥ 署名する transaction の手数料の上限。変わるのは bound が他人の tip に連動しなくなること
+- **`feeMargin` 2 倍は妥当**（観測 ①: baseFee の 10 分の最悪 1.24 倍。さらに `feePerGasOf` 自体が 2.4 倍の余裕を持つので、署名時の clamp が効くのは baseFee が quote 時の約 4.8 倍を
+  超えたとき、取り込まれないのは約 11.5 倍を超えたとき）
+
+### 8.3 前提と限界
+
+- **前提「priority 1 でも取り込まれる」**: 仕様（payment lane）と本番の 7 件の実績（§8.1 ③、ブロックの利用率 0.05%）に基づく。ブロックが混み合う状況（利用率が高い、
+  mainnet）では tip が要る可能性があり、その場合は transaction が**取り込まれない**（手数料は発生しない。配達は `unknown` → 自動再送なし）。**mainnet の前提ではない**。
+  本番で MPP 送信を有効にする前に、testnet で priority 1 の送金が通ることを G-2 と同じ形で 1 件確かめる（実送金。owner の承認が要る）
+- ノードが `gas` を過小に提案すれば失敗して gas 分だけ請求される（§3.3 の「帰結」と同じ）
+- `eth_getBlockByNumber` が 1 回増える。期限は見積りの予算（6 秒）・支払いの予算（20 秒）の中
+
+### 8.4 変更するファイル（第 4 版で追加）
+
+| ファイル | 変更 |
+|---|---|
+| `src/adapters/outbound/mpp-dynamic.ts` | `ROUTER_PRIORITY`・`feePerGasOf`。`estimateFee` が block を読んで手数料を渡す。`pay` が block を読み、guard が単価を組み直す。`checkFeeAndValidity` に `maxPriorityFeePerGas === ROUTER_PRIORITY`・`maxFeePerGas ≥ baseFee_now`・`≤ capPerGas` |
+| `src/config.ts` | `limits.perAddressPerMinute` の既定を 100 に（`DEFAULT_DYNAMIC_LIMITS`。`dynamic-upstream-design.md` §7.3 の表を直す） |
+| `tests/fixtures/dynamic/tempo-rpc.ts` | ノードの提案（priority・fill の maxFee）を試験から動かせるように |
+| 試験 | wire: 提案が跳ねても見積りは baseFee だけで決まる（RPC 2／3 回）、署名した raw の priority = 1・maxFee = feePerGasOf(baseFee)、baseFee が上がれば capPerGas に clamp、baseFee > capPerGas で署名しない、送信の境界が priority を照合。統合: ノードの提案を跳ねさせた状態で quote → purchase が delivered |
