@@ -53,7 +53,7 @@ export const PUBLIC_HOSTNAME = "router.subethalabs.com";
  * - MPP 送信（Router が Tempo の手数料を払う。実測 29〜478、署名前の上限 `maxFee` 5,000）: 定額 5,000 = `maxFee`。
  *   `fee.min >= maxFee`（`src/config.ts` が起動時に確かめる）により、**チェーンが請求する額が署名時の上限以下である限り**運営はチェーン手数料を
  *   負担しない（条件つき。設計 §6.6）。その前提が Tempo の仕様で確立するまで、このプロファイルは本番で有効にしない（`docs/DEPLOY.md` §2b の条件 6）。
- * 次のスライス: quote の時点で Tempo の単価を読んで `maxFee` と手数料を決める（平時は安く、高騰時は断る。設計 §11 の「将来の課題」）。
+ * 次のスライス: quote の時点でその送金のガス代（ガス量×単価）を見積もって `maxFee` と手数料を決める（平時は安く、高騰時は断る。設計 §11）。
  */
 const DYNAMIC_MAX_FEE = "5000";
 const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
