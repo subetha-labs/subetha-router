@@ -320,23 +320,31 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
     { enabled: "true", "dynamic.enabled": "true", SUBETHA_DENY_HOSTS: "evil.test, Other.Test" },
   ];
 
-  test.each(envs.map((env, index) => [index, env] as const))("どの env（%i）でも、登録されるのは x402 送信のプロファイルだけ（G-4）。MPP 送信は無く、設定は検証を通る", (_index, env) => {
-    // MPP 受信の秘密と x402 送信の鍵がそろっているとき: x402 送信のプロファイルを有効で登録する。
+  test.each(envs.map((env, index) => [index, env] as const))("どの env（%i）でも、登録されるのは両方向のプロファイル（G-4 の 2 回目、2026-10-06）。設定は検証を通る", (_index, env) => {
+    // MPP 受信の秘密と x402 送信の鍵がそろっているとき: 両方向を有効で登録する。
     const withProfile = parseRouterConfig((routerConfigOf(env, RECEIVER, true) as { router: unknown }).router);
     expect(withProfile.dynamic?.enabled).toBe(true);
-    expect(Object.keys(withProfile.dynamic!.profiles)).toEqual(["dyn-mpp-to-x402"]);
+    expect(Object.keys(withProfile.dynamic!.profiles).sort()).toEqual(["dyn-mpp-to-x402", "dyn-x402-to-mpp"]);
     // G-1（2026-10-06 の owner の決定）: x402 送信は定額 1,000。
     expect(withProfile.dynamic!.profiles["dyn-mpp-to-x402"]).toMatchObject({ sourceRail: "mpp", rail: "x402", maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } });
+    // MPP 送信: quote 時のガス代の見積りから（`docs/dynamic-gas-fee-design.md`。天井 50,000・feeMargin 2 倍・定額 1,000）。
+    expect(withProfile.dynamic!.profiles["dyn-x402-to-mpp"]).toMatchObject({
+      sourceRail: "x402",
+      rail: "mpp",
+      maxUpstreamAmount: "10000",
+      fee: { flat: "1000", bps: 0, min: "1000" },
+      destination: { feeAsset: PATHUSD, maxFee: "50000", feeMargin: 20_000 },
+    });
     // 自分の公開ホスト名は拒否ホストに入る（canonical は内部の URL なので配線では分からない）。
     expect(withProfile.dynamic!.denyHosts).toContain("router.subethalabs.com");
-    // そろっていないとき: 登録できるプロファイルが無いので `dynamic` の節自体を書かない（機能は無い）。
+    // MPP 受信の秘密が無いとき: x402 送信のプロファイルは無く、MPP 送信だけ。
     const without = parseRouterConfig((routerConfigOf(env, RECEIVER, false) as { router: unknown }).router);
-    expect(without.dynamic).toBeUndefined();
+    expect(Object.keys(without.dynamic!.profiles)).toEqual(["dyn-x402-to-mpp"]);
     // env からは有効・無効もプロファイルの構成も変えられない。
     expect(dynamicProfilesOf({ SUBETHA_DYNAMIC_ENABLED: "false", MPP_OUTBOUND_PROFILE_ENABLED: "true" }, RECEIVER, true)).toEqual(dynamicProfilesOf({}, RECEIVER, true));
   });
 
-  test("その設定で、MPP 送信のプロファイルへの動的 quote は外部接続 0 で拒否される（unknown_route）。URL の規則を通らない quote も接続 0", async () => {
+  test("その設定で、未登録のプロファイルへの動的 quote は外部接続 0 で拒否される（unknown_route）。URL の規則を通らない quote も接続 0", async () => {
     const raw = routerConfigOf({}, RECEIVER, true) as { router: unknown };
     const config: RouterConfig = parseRouterConfig(raw.router);
     mkdirSync(runtimeRoot, { recursive: true });
@@ -351,7 +359,8 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
       dynamic: { ledgerDir: path.join(dir, "dynamic-quotes") },
     });
     try {
-      expect(await core.quote({ principalId: "judge", requestId: "r-mpp-out", routeId: "dyn-x402-to-mpp", upstream: { url: "https://provider.test/v1/price" }, source: "s" })).toEqual({ ok: false, code: "unknown_route" });
+      expect(await core.quote({ principalId: "judge", requestId: "r-none", routeId: "dyn-nope", upstream: { url: "https://provider.test/v1/price" }, source: "s" })).toEqual({ ok: false, code: "unknown_route" });
+      expect(await core.quote({ principalId: "judge", requestId: "r-mpp-out-self", routeId: "dyn-x402-to-mpp", upstream: { url: "https://router.subethalabs.com/mcp" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
       expect(await core.quote({ principalId: "judge", requestId: "r-self", routeId: "dyn-mpp-to-x402", upstream: { url: "https://router.subethalabs.com/mcp" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
       expect(connections).toBe(0);
     } finally {
