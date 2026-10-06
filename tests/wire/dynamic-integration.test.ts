@@ -37,6 +37,8 @@ const USDC = FIXTURE_ASSET;
 const X402_PROFILE = "dyn-mpp-to-x402";
 const MPP_PROFILE = "dyn-x402-to-mpp";
 const STATIC_ROUTE = "r-static";
+/** 動的 quote と同額（2000）の静的 route（AC-5 の静的↔動的の同額の対照用）。 */
+const STATIC_SMALL_ROUTE = "r-static-small";
 const X402_URL = "https://provider.test/v1/price?symbol=ETH";
 const MPP_URL = "https://mpp.provider.test/v1/price";
 const HOSTS = { x402: "provider.test", mpp: "mpp.provider.test", facilitator: "facilitator.other.test", rpc: "rpc.other.test", static: "static.provider.test" } as const;
@@ -146,6 +148,14 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
           source: { amount: "10000", asset: USDC, decimals: 6, network: FIXTURE_NETWORK, payTo: RECEIVER },
           destination: { scheme: "exact", network: FIXTURE_NETWORK, asset: USDC, payTo: "0x0000000000000000000000000000000000000a11" },
         },
+        [STATIC_SMALL_ROUTE]: {
+          routeId: STATIC_SMALL_ROUTE,
+          canonicalPath: `/v1/routes/${STATIC_SMALL_ROUTE}/resource`,
+          rail: "x402",
+          sourceRail: "x402",
+          source: { amount: "2000", asset: USDC, decimals: 6, network: FIXTURE_NETWORK, payTo: RECEIVER },
+          destination: { scheme: "exact", network: FIXTURE_NETWORK, asset: USDC, payTo: "0x0000000000000000000000000000000000000a11" },
+        },
       },
       budget: { maxPurchases: 8, buckets: [{ network: FIXTURE_NETWORK, asset: USDC, maxTotal: "1000000", maxPerPurchase: "20000" }] },
       dynamic: {
@@ -183,7 +193,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
         denyHosts: [],
       },
     },
-    x402: { upstreams: { [STATIC_ROUTE]: STATIC_URL } },
+    x402: { upstreams: { [STATIC_ROUTE]: STATIC_URL, [STATIC_SMALL_ROUTE]: `https://${HOSTS.static}/v1/small` } },
   };
   const configPath = path.join(dir, "router.config.json");
   writeFileSync(configPath, JSON.stringify(document));
@@ -257,7 +267,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
 /** 呼び出し側: quote に対する credential（x402 は署名だけ、MPP は fixture の RPC に実際に送金）。 */
 async function credentialFor(fixtures: Fixtures, quote: QuoteView): Promise<string> {
   const offer = quote.source.offer as { amount: string; payTo: string; asset: string; network: string; extra: Record<string, unknown> };
-  if (quote.routeId === MPP_PROFILE || quote.routeId === STATIC_ROUTE) {
+  if (quote.routeId === MPP_PROFILE || quote.routeId === STATIC_ROUTE || quote.routeId === STATIC_SMALL_ROUTE) {
     return createX402Payer(generatePrivateKey()).credentialFor(offer as never, 84532);
   }
   const payer = createMppPayer(generatePrivateKey(), { chainId: MPP_FIXTURE_CHAIN_ID, asset: PATHUSD, payTo: RECEIVER, maxAmount: 1_000_000n }, { rpcUrl: fixtures.rpc.plainUrl });
@@ -378,11 +388,19 @@ describe("AC-5: 1 回の受信支払いで送信の呼び出しは高々 1 回",
     expect(await purchase(router, b, forged, "b")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
     expect(fixtures.facilitator.calls).toMatchObject({ verify: 2, settle: 1 });
     expect(fixtures.facilitator.calls.reasons).toContain("invalid_signature");
-    // (5) 静的 route: A の署名を静的 quote の封筒に（静的の受信は nonce を束縛しない設定だが、facilitator の署名検証で落ちる）。
+    // (5) 静的 route（額 10000）: A の署名（額 2000）を静的 quote の封筒に。静的の受信は nonce を束縛しないので preflight は通り、
+    //     facilitator が額の不一致で落とす（署名そのものは有効）。
     const s = await router.client().quote({ routeId: STATIC_ROUTE, requestId: "s" });
     expect(s.ok).toBe(true);
     const sq = (s as { quote: QuoteView }).quote;
     expect(await purchase(router, sq, rebind(credential, sq), "s")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
+    expect(fixtures.facilitator.calls.reasons.at(-1)).toBe("amount");
+    // (5') 同額の静的 route（額 2000 の動的 quote の署名を、同額の静的 quote の封筒に）: 署名は有効で額も合うので facilitator は通すが、
+    //     A の nonce は既に使われている（settle 済み）ので replay として落ちる。静的の受信が nonce を束縛しない限界はここに現れる
+    //     （未使用の署名なら通る）。送信は増えない。
+    const sameAmountStatic = (await router.client().quote({ routeId: STATIC_SMALL_ROUTE, requestId: "ss" })) as { quote: QuoteView };
+    expect(await purchase(router, sameAmountStatic.quote, rebind(credential, sameAmountStatic.quote), "ss")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
+    expect(fixtures.facilitator.calls.reasons.at(-1)).toBe("nonce_used");
     // (6) 静的 quote の署名を動的 quote の封筒に → 束縛つき preflight が止める。
     const staticCredential = await credentialFor(fixtures, sq);
     expect(await purchase(router, b, rebind(staticCredential, b), "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
@@ -504,6 +522,9 @@ describe("AC-6: 上流が offer を変えたら受信 settle・送信の署名�
     ["request.description（条件の全文）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), description: "new" } }); }],
     ["methodDetails（feePayer の申し出が増えた）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), methodDetails: { chainId: MPP_FIXTURE_CHAIN_ID, feePayer: true } } }); }],
     ["meta（scope が付いた）", (u: MppUpstream) => { u.state.scope = "match"; }],
+    ["scheme（method/intent）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, method: "evm" }); }],
+    ["network（chainId）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), methodDetails: { chainId: 4217 } } }); }],
+    ["asset（currency）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), currency: "0x0000000000000000000000000000000000000abc" } }); }],
   ])("MPP の上流が %s を変えた: 受信 verify・settle 0・署名 0・送金 0・journal 0 行", async (_name, change) => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
@@ -643,14 +664,19 @@ describe("AC-17: purchase の上限でも超過分は外部接続 0", () => {
   test("宛先ホストの同時実行の上限: 同じホストへの 2 件目の purchase は、1 件目が終わるまで接続しない", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures, { limits: { perHostConcurrent: 1 } });
-    // 1 件目の有料要求を上流で止める（応答を遅らせる）。
-    fixtures.x402.state.pay = () => ({ ...paidOk(router.payerAddress.x402, { price: 1 }), delayMs: 800 });
+    // 1 件目の有料要求が上流に届いたことを待ってから、2 件目を出す（応答は少し遅らせて、1 件目が枠を持ち続ける間に 2 件目が来るようにする）。
+    const reached = new Promise<void>((resolve) => {
+      fixtures.x402.state.pay = () => {
+        resolve();
+        return { ...paidOk(router.payerAddress.x402, { price: 1 }), delayMs: 600 };
+      };
+    });
     const a = await quoteOf(router, X402_PROFILE, X402_URL, "a", "s1");
     const b = await quoteOf(router, X402_PROFILE, X402_URL, "b", "s2");
     const ca = await credentialFor(fixtures, a);
     const cb = await credentialFor(fixtures, b);
     const first = purchase(router, a, ca, "a", "s1");
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await reached;
     const dialed = fixtures.dialed.length;
     expect(await purchase(router, b, cb, "b", "s2")).toMatchObject({ outcome: "rejected", error: "rate_limited", status: 429 });
     expect(fixtures.dialed.length).toBe(dialed);

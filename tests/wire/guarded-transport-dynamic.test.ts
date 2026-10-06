@@ -41,7 +41,16 @@ interface Upstream {
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 type Mode = "ok" | "big-headers" | "stream" | "stall-body" | "misdirected" | "no-content" | "reset-body" | "never-respond";

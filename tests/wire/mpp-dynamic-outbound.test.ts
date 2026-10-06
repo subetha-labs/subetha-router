@@ -96,7 +96,16 @@ afterEach(async () => {
   sdk.wrapClient = undefined;
   sdk.accounts.length = 0;
   sdk.clients.length = 0;
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 async function settled(): Promise<void> {

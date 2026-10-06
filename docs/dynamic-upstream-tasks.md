@@ -202,9 +202,9 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
   - **受信が成立した後に送信が上流に拒否された場合**: 終端が耐久的に記録され、自動の再試行が起きない（送信の呼び出しは 1 回）
   - **AC-17**: 別名 2 つが同じアドレスの枠を共有。送信元・全体・宛先の各上限で超過分が外部接続 0
   - **AC-20・AC-22**: 再起動をまたぐ持ち主の分離。動的購入を含む journal を動的無効の Router が再生し、予算が保たれ、動的 quote は実行されない
-  - **実施の記録（2026-10-06）**: `tests/wire/dynamic-integration.test.ts`（43 件）。製品の配線（`composeRails`）をプロセス内で起動し、実鍵（乱数）・実 SDK・
+  - **実施の記録（2026-10-06）**: `tests/wire/dynamic-integration.test.ts`（46 件）。製品の配線（`composeRails`）をプロセス内で起動し、実鍵（乱数）・実 SDK・
     SSRF 防御 A の transport に名前解決と接続先の差し替えだけを足して、T6 の fixture（TLS の上流 2 つ・署名を検証する facilitator・実形の receipt を返す RPC）を相手にした。
-    呼び出し側は製品の client と `tools/x402-payer.ts`・`tools/mpp-payer.ts`。macOS と Linux（`node:22-bookworm`。全体 1044 件通過）の両方で実行。
+    呼び出し側は製品の client と `tools/x402-payer.ts`・`tools/mpp-payer.ts`。macOS と Linux（`node:22-bookworm`。全体 1060 件通過）の両方で実行。
     AC-12 は名前解決の fixture に内部アドレス（127.0.0.1・10/8・169.254/16・::1・172.16/12）を返させ、quote の読取・再読取・MPP 送信の RPC・受信の facilitator・受信の RPC の
     各接続点で接続 0（`destination_blocked`）を確かめた。AC-15 の増分は上限（256 KiB＋固定 16 KiB）内。
     **見つけた欠陥（tool）**: `tools/mpp-payer.ts` は SDK の既定（`polyfill: true`）で**プロセスの `globalThis.fetch` を「402 を受けたら自動で払う fetch」に置き換えていた**。
