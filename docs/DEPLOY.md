@@ -67,7 +67,9 @@ docker run -d --name subetha-router --restart unless-stopped \
 5. 控え（未払いの quote の記録）のディレクトリ `dynamic-quotes/` は journal と同じディレクトリに作られる。**ボリュームの中**にあること（`-v`）。
    7 日より古いファイルは Router が消す。最悪のディスク使用量は設計 §7.3（約 860 MiB）
 6. MPP 送信のプロファイルは、Tempo の手数料の仕様で「チェーンが請求する額が署名時の上限以下」が確立するまで有効にしない（設計 §3.3 の T0-b。
-   **x402 送信のプロファイルだけ先に有効にできる**）。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
+   **x402 送信のプロファイルだけ先に有効にできる**）。**2026-10-06 に確立**: 公開仕様・TIP-0001・ノードのソース tag `v1.16.0`（testnet Moderato のノード
+   `tempo/v1.16.0-023f1d0` と同じ版）で、請求額 = `ceil((gas_used − reservoir) × min(maxFeePerGas, baseFee + priority) / 10^12)` ≤ 署名時の上限
+   （`docs/dynamic-gas-fee-design.md` §7）。**ノードの版が変わったら（hardfork）読み直す**こと。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
    `docs/dynamic-gas-fee-design.md` §2・§4）と、RPC ノードが `eth_fillTransaction` に対応していること（起動時の `verify` が読取で確かめる。非対応ノードでは
    quote・purchase の RPC が宛先アドレスの枠に収まらない。同 §4）
 7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`・`feeMargin`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000。MPP 送信は quote 時のガス代の見積りから
