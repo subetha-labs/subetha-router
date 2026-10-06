@@ -1074,14 +1074,15 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
   });
 
   test("RPC が応答しない: 1 回の期限 = min(1 回の上限, 残りの予算)。合計の予算を超えて待たず、期限後は次の RPC を出さない", async () => {
-    const h = await harness({ estimateRpcTimeoutMs: 400, estimateRpcBudgetMs: 500 });
+    const h = await harness({ estimateRpcTimeoutMs: 1_000, estimateRpcBudgetMs: 1_200 });
     const offer = await h.quote();
     h.rpc.fillTransaction = false;
-    h.rpc.http.delayMs = 300;
+    h.rpc.http.delayMs = 800;
     const started = Date.now();
     await expect(h.estimate(offer)).rejects.toMatchObject({ name: "FeeEstimateError", reason: "fee_estimate_unavailable" });
-    expect(Date.now() - started).toBeLessThan(1_500);
-    // fill（300 ms）→ 2 回目は残り 200 ms で打ち切り。3 回目は出ない。
+    // fill（800 ms）→ 2 回目の期限は残り 400 ms（1 回の上限 1,000 ms ではなく）→ 合計 1,200 ms で終わる。1 回の上限で待つと 1,600 ms。
+    expect(Date.now() - started).toBeLessThan(1_400);
+    // 3 回目は出ない。
     expect(h.rpc.http.requests).toBeLessThanOrEqual(2);
     expect(h.innerSigned).toHaveLength(0);
   });
@@ -1120,6 +1121,11 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
       ...tempoModerato,
       prepareTransactionRequest: [
         async (request: unknown, context: { client: { request: (args: unknown) => Promise<unknown> } }) => {
+          // 見積りに渡る account は署名口を持たない facade。持っていれば、ここで署名できてしまう。
+          const account = (request as { account?: { signTransaction?: unknown } }).account;
+          if (typeof account?.signTransaction === "function") {
+            await (account.signTransaction as (tx: unknown) => Promise<unknown>)({ ...(request as object), type: "tempo" }).catch(() => undefined);
+          }
           await context.client.request({ method: "eth_sendRawTransaction", params: ["0x76deadbeef"] });
           return original(request, context);
         },
