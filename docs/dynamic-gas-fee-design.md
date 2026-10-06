@@ -1,87 +1,183 @@
 # 動的上流 URL — MPP 送信の手数料を quote 時のガス代で決める（設計）
 
-> 2026-10-06、第 1 版。owner の方針（2026-10-06）: 「運営がガス代を負担するリスクは構造として排除する。上流の手数料が高騰する場合は、
-> それに応じた価格を下流（呼び出し側）に提示する」。前提は `dynamic-upstream-design.md`（以下「本設計」）§3.3・§6.6・§11 と、
+> 2026-10-06、第 2 版（第 1 版への独立レビュー #1 を反映。§6）。owner の方針（2026-10-06）: 「運営がガス代を負担するリスクは構造として排除する。
+> 上流の手数料が高騰する場合は、それに応じた価格を下流（呼び出し側）に提示する」。前提は `dynamic-upstream-design.md`（以下「本設計」）§3.3・§6.6・§11 と、
 > G-1 で入れた条件 `fee.min >= maxFee`（PR #30）。MPP 送信のプロファイルを本番で有効にする前提（`DEPLOY.md` §2b の条件 6）の一部。
 
 ## 0. 一枚で
 
-- 今: MPP 送信の手数料は**定額**（`fee.min >= maxFee` を設定で固定。本番は 5,000 = `maxFee`）。平時のガス代は 29〜478 なので呼び出し側が払いすぎ、
+- 今: MPP 送信の手数料は**定額**（`fee.min >= maxFee` を設定で固定。本番は 5,000 = `maxFee`）。署名前の上限の実測は 79〜706 なので呼び出し側が払いすぎ、
   高騰時は `maxFee` で支払いが止まる。
 - 変更: quote の時点で**その送金のガス代を見積もり**、`maxFee` と手数料を quote ごとに決める。平時は安く、高騰時は高く提示し、天井を超えたら quote を出さない。
-- 保つもの: 「呼び出し側が先に払う手数料 ≥ Router が署名する transaction の手数料の上限」を **quote ごとに**保つ（構造は変えず、値を動的にする）。
-- 変えないもの: 署名の境界（§3.3 (ii)）は「quote が決めた `maxFee`」を使うだけで、検査の中身は同じ。x402 送信のプロファイルは対象外（Router にガス代がかからない）。
+- 保つもの: 「呼び出し側が先に払う手数料 ≥ Router が署名する transaction の手数料の上限」を **quote ごと、記録ごとに**保つ（構造は変えず、値を動的にする）。
+  この性質は quote の計算だけでなく、**記録の復元・昇格済みの再開・adapter の境界**のそれぞれが独立に確かめる（§3）。
+- 変えないもの: 署名の境界（本設計 §3.3 (ii)）は「quote が決めた `maxFee`」を使うだけで、検査の中身は同じ。x402 送信のプロファイルは対象外（Router にガス代がかからない）。
+- 言葉: **bound** = `ceil(gas × maxFeePerGas / 10^12)`（署名前に分かる手数料の上限。本設計 §3.3 T0-b）。**cap** = quote が決め、記録に固定する `pricing.maxFee`。
+  **ceiling** = プロファイルの `destination.maxFee`（cap がこれを超える quote は出さない）。
 
 ## 1. 見積り（quote の手順に足す段）
 
-MPP 送信のプロファイルで offer を選んだ直後（§2.3 の後、受信 offer を発行する前）に、送信 adapter の**動的経路**が RPC を読む。
+MPP 送信のプロファイルで offer を選んだ直後（本設計 §2.3 の後、受信 offer を発行する前）に、送信 adapter の**動的経路**が RPC を読む。
 
 ```
-estimate = adapter.estimateFee(profileId, offer)      // { gas, maxFeePerGas, bound: ceil(gas × maxFeePerGas / 10^12) }
+estimate = adapter.estimateFee(profileId, offer, target)      // { gas, maxFeePerGas, bound }
 ```
 
-- 見積もる transaction は**実際に署名するものと同じ形**: `transferWithMemo(offer.payTo, offer.amount, memo)` を 1 call、`feeToken = feeAsset`、
-  expiring nonce。memo は quote 時には無い（challenge の id から SDK が作る）ので、同じ長さのダミー（32 バイト）を入れる。ガス量は memo の値に依らない
-  （実測: 46,683 で一定。`dynamic-upstream-design.md` §3.3 T0-b）
-- 読み方は署名時と同じ経路: 能力の client を guarded RPC transport（動的用。loopback 不可・DNS 期限・門の `admit`）に乗せ直し、viem の
-  `prepareTransactionRequest`（Tempo chain の `eth_fillTransaction`、無ければ `eth_estimateGas` と手数料の見積り）で `gas`・`maxFeePerGas` を埋める。
-  **署名はしない**（account は address だけの facade。`signTransaction` を持たない）。送金系のメソッドは T9 の guard と同じ規則で拒否する
-- RPC の期限: 1 回 3 秒以下（`estimateRpcTimeoutMs`）、合計 6 秒（`estimateRpcBudgetMs`）、再試行なし。quote 全体の最悪は「上流の読取 5 秒＋見積り 6 秒＋1 回 3 秒」= 14 秒。
-  client の `quoteUrl` の期限を 30 秒にする（今は 10 秒）
-- 見積りに失敗したら quote は不成立（`quote_failed`、理由 `fee_estimate_unavailable`）。**定額に落とさない**（落とすと高騰時に負担が運営に戻る）
-- 1 件の quote で出る RPC の回数を試験で固定する（fixture では `eth_fillTransaction` 非対応 → `eth_getBlockByNumber`・`eth_maxPriorityFeePerGas`・`eth_estimateGas` の 3 回。
-  対応ノードでは `eth_fillTransaction` の 1 回）
+### 1.1 見積もる transaction
+
+**実際に署名するものと同じ形**（本設計 §3.3 T0-a「`signTransaction` に渡る欄」）:
+
+| 欄 | 値 |
+|---|---|
+| 送信者 | 能力の account のアドレス（`capability.account.address`） |
+| chain | `chainIdOf(profile.destination.network)`（能力の chainId と一致することは起動時に確認済み） |
+| `calls` | 1 つ。`to` = `profile.destination.asset`、`data` = `transferWithMemo(offer.payTo, offer.amount, memo)`、`value` = 0 |
+| `memo` | quote 時には無い（challenge の id から SDK が作る）ので、**同じ長さ（32 バイト）の非ゼロのダミー** |
+| `feeToken` | `profile.destination.feeAsset` |
+| nonce | expiring nonce（`nonce: 0`、`nonceKey: 2^256−1`）、`validBefore` = 現在＋25 秒（SDK と同じ） |
+| `type` | `"tempo"` |
+
+- 「ガス量は memo の値に依らない」は、**この形の transaction について実測で支持されている**事実であって、一般則ではない: 本番の 13 件は `gasUsed` が
+  46,683 で一定（本設計 §3.3 T0-b）。実装時に読取だけの probe（`tools/dyn-mpp-fee-probe.ts` の拡張。testnet の RPC に `eth_estimateGas` /
+  `eth_fillTransaction` を出すだけで、署名も送金もしない）で、memo がゼロ／非ゼロ／SDK が作る帰属 memo の 3 通りで `gas` が同じことを確かめ、本書 §6 に記録する。
+  違えば、見積りは最大の値を採る形に改める
+- 見積りで使う `gas` は **ノードが提案する値（prepared gas。T0-a の実測 54,278）** であって receipt の `gasUsed`（46,683）ではない。署名の境界が照合するのも
+  prepared gas なので、bound の定義は署名前の検査と同じ量で揃う
+- **署名の境界は見積りに依らず権威**: 見積りと署名時の値がどう違っても、署名時の bound が cap を超えれば署名しない（§3.4）
+
+### 1.2 読み方
+
+- 能力の client を guarded RPC transport（動的用。loopback 不可・DNS 期限・門の `admit`）に乗せ直し、**viem の `prepareTransactionRequest` を直接呼ぶ**
+  （`parameters: ["gas", "fees"]`。Tempo chain は `eth_fillTransaction` を先に試し、非対応なら `eth_estimateGas` と手数料の見積りに落ちる）。
+  **mppx の credential 作成は呼ばない**（その経路は署名・送金まで進む。`mppx/dist/tempo/client/Charge.js`）
+- **署名はしない**: account は `address` と `type: "local"` だけの facade で、`signTransaction` を持たない。transport の guard は
+  **署名・送金系のメソッドをすべて拒否する**（`eth_sendRawTransaction[Sync]` も含む。支払いの guard が検査済みの raw に限って許す例外は、ここには無い）。
+  読取のメソッドだけを、支払いの guard と同じ規則（method は原始値として 1 度読む、params は JSON の写し）で通す
+- RPC の期限: 1 回 3 秒以下（`estimateRpcTimeoutMs`）、合計 6 秒（`estimateRpcBudgetMs`）、再試行なし。**合計の期限は本当に 6 秒**: 各 RPC の期限を
+  `min(3 秒, 残り)` にする（`guardedRpcTransport` の `timeout` を関数にして要求ごとに残りを読む）ので、最後の 1 回が合計を超えて続くことはない。
+  期限後は次の RPC を出さない。能力から client を受け取る待ちも同じ予算の中
+- 見積りに失敗したら quote は不成立（`quote_failed`、理由 `fee_estimate_unavailable`）。**定額に落とさない**。これは「定額は危険」ではなく
+  （上限まで資金を積んだ定額の cap も構造としては安全）、**owner の方針（ガス代に応じた価格を提示する）から外れる**ため
+- quote 全体の最悪は「上流の読取 5 秒＋見積り 6 秒＋1 回 3 秒」= 14 秒。client の `quoteUrl` の既定の期限を 30 秒にする（今は 10 秒。**`quoteUrl` だけ**。
+  呼び出し側の明示の `timeoutMs` と静的の `quote` は変えない。`src/client/index.ts` の期限は今 quote と quoteUrl で共有されているので分ける）
+
+### 1.3 RPC の回数
+
+viem は `eth_fillTransaction` を先に試し、非対応（method not found）を **client の uid ごとに**憶える（`prepareTransactionRequest.ts`）。見積りは
+quote ごとに client を作る（支払いと同じ）ので、憶えたものは次の quote には引き継がれない。
+
+| ノード | RPC |
+|---|---|
+| `eth_fillTransaction` 対応（本番の RPC。T0-a） | 1 回 |
+| 非対応（fixture） | `eth_fillTransaction`（失敗）→ `eth_getBlockByNumber`・`eth_maxPriorityFeePerGas`・`eth_estimateGas` の **4 回** |
+| 非対応で `eth_maxPriorityFeePerGas` も無い | `eth_gasPrice` に落ちて **5 回** |
+
+試験は 4 通り（対応・非対応の新しい client・非対応を憶えた client・`eth_gasPrice` への落ち方）を別々に固定し、どの経路でも**送金・署名系の RPC が 0 回**、
+**`signTransaction` が存在しない**ことを確かめる。
+
+### 1.4 purchase 時の再見積り（§2 の後、受信 verify の前）
+
+purchase の手順 3（本設計 §6.2: 残高 → 上流の読み直し → 受信 verify）の「上流の読み直しと照合」の直後に、同じ `estimateFee` をもう一度呼ぶ。
+**現在の bound が記録の cap（`pricing.maxFee`）を超えていれば、受信 verify に進まず `awaiting_payment` / `fee_too_high`** で返す（昇格済みの再開も同じ経路なので同じ）。
+cap・価格を**黙って上げることはしない**。
+
+- x402 受信では、呼び出し側の資金はまだ動いていない（settle 前）。新しい quote を取り直せば、今の単価で払い直せる
+- MPP 受信では、資金は credential を作った時点で動いている（本設計 §6.3）。この検査は損失を防がない。**署名前に止めることで Router の送信は起きず**、
+  journal には記録が残る（返金しない。要件 FR-10）
+- この再見積りは**署名の境界の検査を置き換えない**（verify・settle の後に単価がさらに上がり得る）。署名前の検査も cap を使う（§3.4）
 
 ## 2. 値の決め方
 
 ```
-maxFee     = ceil(estimate.bound × feeMargin / 10000)        // feeMargin はプロファイルの欄（bps。既定 20000 = 2 倍）
-if maxFee > destination.maxFee → quote 不成立（quote_failed, fee_too_high）   // destination.maxFee は「天井」になる
-fee        = max(fee.min, fee.flat + ceil(converted × fee.bps / 10000), maxFee)
+cap        = ceil(estimate.bound × feeMargin / 10000)        // feeMargin はプロファイルの欄（bps。既定 20000 = 2 倍）
+if cap > destination.maxFee (ceiling) → quote 不成立（quote_failed, fee_too_high）
+fee        = max(fee.min, fee.flat + ceil(converted × fee.bps / 10000), cap)
 total      = converted + fee
 ```
 
-- `destination.maxFee` の意味が「署名時の上限」から「**quote が決められる上限の天井**」に変わる。署名時の上限は quote が決めた `maxFee`
-- 手数料の規則（`fee`）は運営の取り分として残る。`fee.min` は 0 でもよい（ガス代は `maxFee` が賄う）。G-1 の条件 `fee.min >= destination.maxFee` は
-  **この段に置き換える**: 保つ性質は同じ（手数料 ≥ 署名時の上限）で、設定ではなく quote ごとの計算で保証する。設定の検査は `feeAsset` = 送信資産・桁が同じ、を残す
-- 本番の値の案: `feeMargin 20000`（2 倍）、`destination.maxFee`（天井）50,000（0.05。実測の最大の約 100 倍。これを超える単価では断る）、`fee` は `flat 1000` に戻す
-  （x402 送信と同じ運営の取り分）。平時の手数料は `max(1000, 29×2=58)` = 1,000、単価が実測の最大なら `max(1000, 478×2)` = 1,000 で、1,000 を超えるのは
-  単価が実測の 2 倍超のとき
+- `destination.maxFee` の意味が「署名時の上限」から「**quote が決められる cap の天井**」に変わる。**署名時の上限は cap**。ceiling は運用者が決める
+  受け入れの上限で、見積りの精度の話ではない: ceiling を後から上げても、発行済みの quote の cap は変わらない
+- 手数料の規則（`fee`）は運営の取り分として残る。`fee.min` は 0 でもよい（ガス代は cap が賄う）。G-1 の条件 `fee.min >= destination.maxFee` は
+  **この段に置き換える**: 保つ性質は同じ（手数料 ≥ 署名時の上限）で、設定ではなく quote ごとの計算で保証し、記録・再開・adapter が各自で確かめる（§3）。
+  設定の検査は `feeAsset` = 送信資産・桁が同じ、を残す
+- `feeMargin`: **10,000 以上 1,000,000 以下の安全な整数**（1 倍〜100 倍。1 倍未満は、署名で必ず止まる quote を出すだけなので認めない）。
+  `cap` と `total` は桁数の上限（30 桁）の中で検査する。**支払いの権威の欄に入れる**（`dynamicAuthoritativeTermsOf` に `destination.feeMargin` と
+  `pricingPolicy: "gas-indexed-v1"` を足す。権威の欄は列挙なので、足さないと `feeMargin` の変更が発行済み quote を無効にしない。要件 FR-16）
+- **2 倍は見積りの前提ではなく、可用性の前提**: 運営の保護は「cap を超える署名を拒む」ことから来るのであって、予測の精度からではない。2 倍は
+  「quote から purchase までの最大 10 分で単価が 2 倍を超えなければ通る」という**仮の値**で、本番の RPC で quote 時と purchase 時の bound を並べて記録してから
+  見直す（§4）。超えれば purchase は `fee_too_high` で止まり、呼び出し側は新しい quote を取る
+- 本番の値の案: `feeMargin 20000`（2 倍）、ceiling 50,000（0.05。実測の bound の最大 706 の約 70 倍。これを超える cap では断る）、`fee` は `flat 1000` に戻す
+  （x402 送信と同じ運営の取り分）。**例は署名前の bound（79〜706）で**: cap は 158〜1,412、手数料は `max(1000, cap)` = 1,000〜**1,412**。
+  実測の最大の bound ではすでに `flat` を超える。実額（29〜478）は cap より小さい側の参考値で、計算には使わない
 
-## 3. 記録と署名
+## 3. 記録・復元・再開・adapter の境界
 
-- quote の記録（§2.4）の `pricing` に `maxFee` を足す（MPP 送信のときだけ。`^(0|[1-9][0-9]{0,29})$`）。控え → 昇格で journal にそのまま写る
-- 予約（§6.4）の手数料の区分は `pricing.maxFee`（プロファイルの天井ではなく）
-- quote 時の 1 件あたりの上限の検査（§6.6）も `pricing.maxFee` で
-- purchase: core は `pay` に `maxFee: pricing.maxFee` を渡す（`PayRequest.maxFee?`）。adapter の署名の境界は `min(request.maxFee, destination.maxFee)` を上限にする
-  （quote の値が天井を超えていたら記録が壊れている。天井で抑える）。`maxFee` の無い `PayRequest`（静的・x402）は従来どおり
-- 残高の事前確認（§6.6）の手数料の分も `pricing.maxFee`
+性質「手数料 ≥ cap」を保つ場所は 4 つ。どれか 1 つに頼らない。
+
+### 3.1 記録
+
+- quote の記録（本設計 §2.4）の `pricing` に `maxFee`（cap。`^(0|[1-9][0-9]{0,29})$`）を足す。MPP 送信のプロファイルでは**必須**。x402 送信では持たない。
+  控え → 昇格で journal にそのまま写る。journal の 1 行の上限（8 KiB。`quote-ledger.ts`）はそのままで、境界の試験に欄を足す
+- 予約（本設計 §6.4）の手数料の区分は `pricing.maxFee`（ceiling ではなく）。quote 時の 1 件あたりの上限の検査（§6.6）と残高の事前確認（§6.6）も `pricing.maxFee`
+
+### 3.2 復元（`store.ts`）
+
+MPP 送信のプロファイルの記録で `pricing.maxFee` が無い・形式が違う・`fee < maxFee`・（予約があるとき）予約の手数料の区分が `maxFee` 未満なら、
+**`dynamicInvalid`**（既存の印。状態の照会と予算の集計には載るが、purchase は `dynamic_unavailable` で拒否）。journal は読める。
+
+- 旧い記録の移行は**しない**: 本番は MPP 送信のプロファイルを一度も登録していない（G-4。`MPP_OUTBOUND_PROFILE_ENABLED = false`）ので、cap の無い MPP 送信の記録は
+  本番の journal に存在しない。試験・開発の journal にあれば `dynamicInvalid` のまま期限切れにする
+
+### 3.3 昇格済みの再開
+
+昇格済み（`created` ＋予約あり）の purchase は予約を取り直さない（本設計 §6.2 の 5）。そこで core は、再開の前に**記録から** `fee >= maxFee` と
+予約の手数料の区分 `>= maxFee` を確かめ、違えば `rejected` / `dynamic_unavailable`（settle 前なので資金は動かない）。復元で `dynamicInvalid` になるものと同じ条件を、
+復元に頼らず core でも見る。
+
+### 3.4 adapter の境界
+
+- core は `pay` に `maxFee: pricing.maxFee` を渡す（`PayRequest.maxFee?`。`orchestrator.ts` の `deliver` → `outbound.pay` が渡す。`dynamic.ts` は呼ばない）
+- MPP の動的経路（`target` あり）では **`request.maxFee` は必須**: 無い・形式が違う・ceiling を超える（記録が壊れている）なら `not_sent` / `destination_fee_cap_invalid`。
+  **ceiling に丸めない**（fingerprint が ceiling の変更を `quote_changed` で止めるので、超えているのは記録の破損だけ）
+- `ApprovedTransfer` は 1 件の `pay` で**1 度だけ**作り（`maxFee = request.maxFee`）、署名の境界と送信の境界（raw の復号後の再検査）は**同じ object**を使う。
+  今は `approvedTransferOf` がプロファイルから読むが、request から読む形に変える
+- `maxFee` の無い `PayRequest`（静的・x402 送信）は従来どおり。x402 の動的 adapter は `maxFee` を読まない
 
 ## 4. 変えないこと・限界
 
 - 署名の境界・送信の境界の検査の中身（T9）は変えない。変わるのは上限の値の出所だけ
-- quote と purchase の間（最大 10 分）に単価がさらに上がれば、署名前の検査で止まる（`destination_rejected`）。その場合、x402 受信なら呼び出し側の資金は動いていない。
-  MPP 受信なら動いている（本設計 §6.3 の既存の性質。`disclosures.routerMayRejectAfterFundsMoved` に `fee_too_high` を足す）
-- 「チェーンが実際に請求する額が署名時の上限以下」という Tempo 側の前提（本設計 §3.3 T0-b）はこのスライスでも変わらない。MPP 送信のプロファイルを本番で
-  有効にする条件 6 は、この実装の後も「前提の確認」が要る
-- RPC のホストへの接続は quote ごとに増える（最大 3 回）。宛先ホストの門は上流のホストにだけ掛かるが、RPC は guarded transport のアドレスの枠と quote の
-  頻度の上限（10 件／分）で抑えられる。RPC の負荷が問題になるなら、見積りを短時間キャッシュする（このスライスでは入れない）
+- quote と purchase の間（最大 10 分）に単価が上がれば、purchase の再見積り（§1.4）か署名前の検査（`destination_rejected`）で止まる。
+  **どちらの受信レールでも、受信 settle の後に止まれば呼び出し側は払っていて届かない**（本設計 §6.2 の順序: settle → 送信。返金しない。FR-10）。
+  再見積りは x402 受信でこれを避ける手段で、MPP 受信の前払いは取り消せない。`disclosures.routerMayRejectAfterFundsMoved` に `fee_too_high` を足し、
+  人への承認表示に **手数料・cap・見積りの時刻・期限**を出し、「見積りは配達の保証ではなく、払った後に拒否され得る」と書く
+- 「チェーンが実際に請求する額が署名時の bound 以下」という Tempo 側の前提（本設計 §3.3 T0-b）はこのスライスでも変わらない。MPP 送信のプロファイルを本番で
+  有効にする条件 6 は、この実装の後も「前提の確認」が要る。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（2 倍の見直し材料）を条件 6 の資料に加える
+- **RPC ホストの容量**（本設計 §7.3 の宛先アドレスごとの枠 60／分・同時 4 は RPC のアドレスにも掛かる）: 1 分の最悪は
+  `quote 10 × R + purchase 10 × (R + 送信の読取 R + 送金 1)`。R = 1（`eth_fillTransaction` 対応。本番の RPC）で **40 ≤ 60**。R = 4（非対応）では 130 > 60 で、
+  飽和時に purchase の RPC が枠で止まり得る（見積りなら `fee_estimate_unavailable`、送信なら `destination_rejected`。どちらも署名前）。
+  非対応のノードを使う運用では quote の全体の上限を下げる。試験: fixture で quote を全体の上限（10／分）まで出した直後に purchase が通ること
+  （10 × 4 ＋ 9 = 49 ≤ 60）。見積りの短時間キャッシュはこのスライスでは入れない
+- 見積りの RPC はノードの応答で決まる（本設計 §3.3「帰結」）。ノードが高い単価を返せば quote は高くなり、ceiling で断られる。運営はノードを選ぶ以外にそれを抑えない
 
 ## 5. 変更するファイル（見込み）
 
 | ファイル | 変更 |
 |---|---|
-| `src/config.ts` | `DynamicProfile.feeMargin?`（bps、既定 20000、1 以上）。`fee.min >= maxFee` の検査を外し、`feeAsset`・桁の検査は残す |
+| `src/config.ts` | `DynamicProfile.feeMargin?`（bps、既定 20000、10,000〜1,000,000 の安全な整数）。`fee.min >= maxFee` の検査を外し、`feeAsset`・桁の検査は残す。権威の欄に `feeMargin`・`pricingPolicy` |
 | `src/ports/outbound.ts` | `OutboundRail.estimateFee?(profileId, offer, target)`、`PayRequest.maxFee?` |
-| `src/adapters/outbound/mpp-dynamic.ts` | `estimateFee`（署名しない facade・読取だけの guard・期限）、`pay` が `request.maxFee` を上限に使う |
+| `src/net/guarded-rpc.ts` | `timeout` を関数でも受ける（要求ごとに残りの予算） |
+| `src/adapters/outbound/mpp-dynamic.ts` | `estimateFee`（署名しない facade・読取だけの guard・残り予算の期限）、`pay` が `request.maxFee` を必須にし `ApprovedTransfer` を 1 度だけ作る |
 | `src/adapters/outbound/mpp.ts`・`src/main.ts` | `estimateFee` の転送（`railByRoute`） |
-| `src/core/dynamic.ts` | quote の手順に見積りを足す。`priceOf(profile, amount, maxFee?)`、`reservationOf`・`perPurchaseLimitOf`・`fundsAvailable` が `pricing.maxFee` を使う、`pay` に渡す |
-| `src/core/store.ts` | `pricing.maxFee` の復元 |
-| `src/http/projection.ts`・`src/client`・`src/mcp` | `pricing.maxFee` の表示、`disclosures` の理由に `fee_too_high`、client の `quoteUrl` の期限 30 秒 |
-| `tools/remote-mcp-config.ts` | MPP 送信のプロファイル: `feeMargin 20000`、天井 50,000、`fee` を 1,000 に（登録は引き続き無効） |
-| 試験 | unit（config・priceOf・core の順序と RPC 0 の経路）、wire（adapter の見積り: RPC の回数・値・失敗・期限・送金系メソッドの拒否・署名器が呼ばれない）、統合（fixture の単価を変えて `maxFee`・手数料が動く、天井超えで断る、署名前の検査が quote の `maxFee` を使う） |
+| `src/core/dynamic.ts` | quote の手順に見積りを足す。`priceOf(profile, amount, cap?)`、`reservationOf`・`perPurchaseLimitOf`・`fundsAvailable` が `pricing.maxFee` を使う。purchase の再見積り（§1.4）と再開前の検査（§3.3） |
+| `src/core/orchestrator.ts` | `deliver` が `pay` に `maxFee` を渡す |
+| `src/core/store.ts` | `pricing.maxFee` の復元と `dynamicInvalid` の条件（§3.2） |
+| `src/http/projection.ts`・`src/client`・`src/mcp` | `pricing.maxFee`・見積りの時刻の表示、`disclosures` の理由に `fee_too_high`、client の `quoteUrl` の期限 30 秒 |
+| `tools/remote-mcp-config.ts` | MPP 送信のプロファイル: `feeMargin 20000`、ceiling 50,000、`fee` を 1,000 に（登録は引き続き無効） |
+| `tools/dyn-mpp-fee-probe.ts` | memo 3 通りの読取だけの見積り（§1.1） |
+| 試験 | unit（config・priceOf・権威の欄・store の復元・core の順序と再開前の検査・RPC 0 の経路）、wire（adapter の見積り: 4 通りの RPC の列・値・失敗・残り予算の期限・送金系メソッドの拒否・署名器が無い。`pay`: `maxFee` 無し／ceiling 超えの拒否、署名と送信が同じ cap）、統合（fixture の単価を変えて cap・手数料が動く、ceiling 超えで断る、purchase の再見積りで `fee_too_high`、署名前の検査が cap を使う、昇格済みの再開、journal の再読込、quote 飽和後の purchase） |
 
 ## 6. 独立レビューの記録
 
-| # | 日付 | レビュア | 結果 |
-|---|---|---|---|
+| # | 日付 | レビュア | 結果 | 反映 |
+|---|---|---|---|---|
+| 1 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 1 版 `3c5da30`） | **REJECT** | (1) cap を記録・復元・再開・adapter の 4 か所で必須に（§3。`orchestrator.ts` を変更対象に追加）。(2) 「x402 受信なら払っていない」は誤り（settle → 送信の順）。両レールの開示に直し、purchase 時の再見積りを足した（§1.4・§4）。(3) 例を署名前の bound（79〜706）で書き直し、2 倍を仮の値とした（§2）。(4) RPC の回数を `eth_fillTransaction` の失敗を含めて 4／5 回に直し、合計の期限を要求ごとの残り予算で本当に 6 秒にし、RPC ホストの容量を 60／分の枠で計算し直した（§1.3・§4）。(5) `feeMargin` を 10,000〜1,000,000 に限定し、権威の欄に入れた（§2）。(6) memo 非依存を「この形についての実測」に言い直し、prepared gas と `gasUsed` を区別し、memo 3 通りの probe を足した（§1.1）。ほか: 見積りは `prepareTransactionRequest` 直接呼び・credential 作成を呼ばない・送金系メソッドを例外なく拒否、30 秒は `quoteUrl` だけ、承認表示の項目、静的への fallback の表現を修正 |
