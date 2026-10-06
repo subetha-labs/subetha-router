@@ -17,7 +17,7 @@ import { createRouterCore } from "../../src/core/orchestrator.js";
 import { composeRails, dynamicCoreOptionsOf, type DynamicTransportHooks, type RouterCapabilities } from "../../src/main.js";
 import { TransportError, type TransportEvent } from "../../src/net/guarded-fetch.js";
 import { DynamicTargetUnsupportedError, type EvmSigningCapability, type MppTempoCapability } from "../../src/ports/outbound.js";
-import { routerConfigOf } from "../../tools/remote-mcp-config.js";
+import { dynamicProfilesOf, routerConfigOf } from "../../tools/remote-mcp-config.js";
 import { publicLookup, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
 import { createPayerSpy } from "../fixtures/mpp-payer-spy.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
@@ -297,21 +297,23 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
     { enabled: "true", "dynamic.enabled": "true", SUBETHA_DENY_HOSTS: "evil.test, Other.Test" },
   ];
 
-  test.each(envs.map((env, index) => [index, env] as const))("どの env（%i）でも dynamic.enabled === false で、設定は検証を通る", (_index, env) => {
-    for (const mppInbound of [true, false]) {
-      const raw = routerConfigOf(env, RECEIVER, mppInbound) as { router: unknown };
-      const parsed = parseRouterConfig(raw.router);
-      expect(parsed.dynamic?.enabled).toBe(false);
-      expect(Object.keys(parsed.dynamic!.profiles).sort()).toEqual(mppInbound ? ["dyn-mpp-to-x402", "dyn-x402-to-mpp"] : ["dyn-x402-to-mpp"]);
-      // G-1（2026-10-06 の owner の決定）: MPP 送信は定額 2,000、x402 送信は定額 1,000。
-      expect(parsed.dynamic!.profiles["dyn-x402-to-mpp"]).toMatchObject({ destination: { maxFee: "5000", feeAsset: PATHUSD }, maxUpstreamAmount: "10000", fee: { flat: "5000", bps: 0, min: "5000" } });
-      if (mppInbound) expect(parsed.dynamic!.profiles["dyn-mpp-to-x402"]).toMatchObject({ maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } });
-      // 自分の公開ホスト名は拒否ホストに入る（canonical は内部の URL なので配線では分からない）。
-      expect(parsed.dynamic!.denyHosts).toContain("router.subethalabs.com");
-    }
+  test.each(envs.map((env, index) => [index, env] as const))("どの env（%i）でも、登録されるのは x402 送信のプロファイルだけ（G-4）。MPP 送信は無く、設定は検証を通る", (_index, env) => {
+    // MPP 受信の秘密と x402 送信の鍵がそろっているとき: x402 送信のプロファイルを有効で登録する。
+    const withProfile = parseRouterConfig((routerConfigOf(env, RECEIVER, true) as { router: unknown }).router);
+    expect(withProfile.dynamic?.enabled).toBe(true);
+    expect(Object.keys(withProfile.dynamic!.profiles)).toEqual(["dyn-mpp-to-x402"]);
+    // G-1（2026-10-06 の owner の決定）: x402 送信は定額 1,000。
+    expect(withProfile.dynamic!.profiles["dyn-mpp-to-x402"]).toMatchObject({ sourceRail: "mpp", rail: "x402", maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } });
+    // 自分の公開ホスト名は拒否ホストに入る（canonical は内部の URL なので配線では分からない）。
+    expect(withProfile.dynamic!.denyHosts).toContain("router.subethalabs.com");
+    // そろっていないとき: 登録できるプロファイルが無いので `dynamic` の節自体を書かない（機能は無い）。
+    const without = parseRouterConfig((routerConfigOf(env, RECEIVER, false) as { router: unknown }).router);
+    expect(without.dynamic).toBeUndefined();
+    // env からは有効・無効もプロファイルの構成も変えられない。
+    expect(dynamicProfilesOf({ SUBETHA_DYNAMIC_ENABLED: "false", MPP_OUTBOUND_PROFILE_ENABLED: "true" }, RECEIVER, true)).toEqual(dynamicProfilesOf({}, RECEIVER, true));
   });
 
-  test("その設定で動的 quote は外部接続 0 で拒否される（dynamic_disabled）。静的 route はそのまま", async () => {
+  test("その設定で、MPP 送信のプロファイルへの動的 quote は外部接続 0 で拒否される（unknown_route）。URL の規則を通らない quote も接続 0", async () => {
     const raw = routerConfigOf({}, RECEIVER, true) as { router: unknown };
     const config: RouterConfig = parseRouterConfig(raw.router);
     mkdirSync(runtimeRoot, { recursive: true });
@@ -326,9 +328,8 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
       dynamic: { ledgerDir: path.join(dir, "dynamic-quotes") },
     });
     try {
-      for (const profileId of ["dyn-x402-to-mpp", "dyn-mpp-to-x402"]) {
-        expect(await core.quote({ principalId: "judge", requestId: `r-${profileId}`, routeId: profileId, upstream: { url: "https://provider.test/v1/price" }, source: "s" })).toEqual({ ok: false, code: "dynamic_disabled" });
-      }
+      expect(await core.quote({ principalId: "judge", requestId: "r-mpp-out", routeId: "dyn-x402-to-mpp", upstream: { url: "https://provider.test/v1/price" }, source: "s" })).toEqual({ ok: false, code: "unknown_route" });
+      expect(await core.quote({ principalId: "judge", requestId: "r-self", routeId: "dyn-mpp-to-x402", upstream: { url: "https://router.subethalabs.com/mcp" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
       expect(connections).toBe(0);
     } finally {
       await core.close();

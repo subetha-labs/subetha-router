@@ -154,7 +154,7 @@ Payments are **testnet only**. The market data reads mainnet reference values, b
 tradable quotes**. Providers A/B are **hosted by us**, and this is not a claim that Hyperliquid or
 Uniswap support these payment methods.
 
-## Dynamic upstream URLs (implemented, disabled on the hosted Router)
+## Dynamic upstream URLs (enabled on the hosted Router for one direction)
 
 A caller can name **its own upstream URL** (a third-party x402 or MPP provider) and pay for it over the
 other rail: pay in Base Sepolia USDC (x402) for an MPP upstream, or in Tempo pathUSD (MPP) for an x402
@@ -178,10 +178,11 @@ both chains** (x402→MPP: inbound `0x40c42b34…c4f` on Base Sepolia, outbound 
 with a 29 base-unit fee; MPP→x402: inbound `0xff82c44f…d8b`, outbound `0x64f7acde…a88`), and the quote
 step succeeded for 11 of 21 third-party Base Sepolia providers with unpaid reads.
 
-What is **not** done: it is **off in production** (`dynamic.enabled: false`, one line in
-`tools/remote-mcp-config.ts`), and the MPP-outbound fee bound is observed rather than established from
-the Tempo fee specification (the caller's fee covers it under that assumption, which the Router checks at
-startup). The design and the task record live in `docs/dynamic-upstream-*.md`.
+On the hosted Router (since 2026-10-06) the profile `dyn-mpp-to-x402` is enabled: pay in Tempo pathUSD
+for any x402 upstream on Base Sepolia. The reverse profile (pay in USDC for an MPP upstream) is **not**
+registered: the MPP-outbound fee bound is observed rather than established from the Tempo fee
+specification (the caller's fee covers it under that assumption, which the Router checks at startup).
+The design and the task record live in `docs/dynamic-upstream-*.md`.
 
 ## Not verified yet
 
@@ -206,8 +207,9 @@ outbound -- and each has been verified independently on chain (see the txs above
   **not confirmed** (it cannot be said that there is a guard).
 - **Same-rail coverage** (x402 -> x402 / MPP -> MPP) is **not verified**. Both *cross*-rail directions are
   settled on a real chain -- see the table above.
-- **Dynamic upstream URLs in production** (fee values G-1, enabling G-4) are **not done**; the testnet gates
-  G-2 and G-3 are recorded in `docs/dynamic-upstream-tasks.md`.
+- **Dynamic upstream URLs over MPP outbound** (paying an MPP upstream with USDC) are **not enabled in
+  production** until the Tempo fee bound is established; the x402-outbound profile is live. Gates are
+  recorded in `docs/dynamic-upstream-tasks.md`.
 
 ## Where the detail went
 

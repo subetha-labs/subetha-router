@@ -81,12 +81,14 @@ in `data.disclaimer`. Report it as a reference price, never as a tradable quote.
 No key yet? `npm run wallet:new`. Base Sepolia USDC balance: `npm run wallet:balance`.
 **That command does not show pathUSD** (needed only when paying over MPP).
 
-### Dynamic upstream URLs (`subetha_router_quote_url`) — currently disabled on the hosted Router
+### Dynamic upstream URLs (`subetha_router_quote_url`)
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`; while `enabled` is `false`, `subetha_router_quote_url` answers `dynamic_disabled`.
-When it is enabled, the steps differ from the static ones in these ways:
+with `enabled`. On the hosted Router the profile `dyn-mpp-to-x402` is enabled (you pay **Tempo
+pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**); a profile that is not listed, or
+`enabled: false`, means `subetha_router_quote_url` answers `unknown_route` / `dynamic_disabled`.
+The steps differ from the static ones in these ways:
 
 1. Pick the **profile** you can pay with (`dynamic.profiles[].source` is what you pay, `destination` is
    what the upstream receives) and call `subetha_router_quote_url` with `profileId`, the exact `url`
