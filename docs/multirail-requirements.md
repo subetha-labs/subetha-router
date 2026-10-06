@@ -11,13 +11,13 @@
 
 | 項目 | 事実 |
 |---|---|
-| レールの抽象 | core は `InboundRail`／`OutboundRail` の port 越しにだけ触り、レール名で分岐しない（`src/ports/{inbound,outbound}.ts`）。ただし **core にも EVM 前提が 1 つある**: 残高の事前確認が資産のアドレスを小文字にして能力に渡す（`src/core/dynamic.ts:631`）。SVM の識別子（base58）は大文字小文字を保つ必要があるので、ここは直す |
+| レールの抽象 | core は `InboundRail`／`OutboundRail` の port 越しにだけ外へ出る（`src/ports/{inbound,outbound}.ts`）。**レール名で分岐しないわけではない**: 動的 core は `profile.rail === "mpp"` で手数料の見積り・cap の検査・残高の区分を分ける（`src/core/dynamic.ts:339,533,636`）。EVM 前提も 1 つある: 残高の事前確認が資産のアドレスを小文字にして能力に渡す（`:631`）。SVM の識別子（base58）は大文字小文字を保つ必要があるので、ここは直す |
 | 設定の語彙 | `sourceRail` は `"subetha" \| "x402" \| "mpp"` に限る（`src/config.ts:420-427`）が、静的 route の `rail` は**空でない任意の文字列**（`:416`）、`network` は**空でない任意の文字列**で CAIP-2 の検証は無い（`:449`）。受取先 `payTo` は `0x` アドレスを要求（静的 `:431`、動的 `:533`）。動的 x402 の宛先は `tokenDomain` と `eip155:` が必須（`:541`、`src/adapters/outbound/x402-dynamic.ts:89,347`） |
 | x402 の adapter | **EVM 専用**: 受信は EIP-3009 `exact` を facilitator で verify/settle（`src/adapters/inbound/x402.ts`。network は要求の値を写すだけで `eip155:` を自分で確かめない `:164`）。送信は `@x402/evm` の signer で EIP-712 に署名（静的 `src/adapters/outbound/x402.ts:403-438`: **検査した typed data をそのまま signer に渡す**。動的 `x402-dynamic.ts:68-220`: 型と domain を固定して組み直す）。動的の receipt は EVM の tx hash の形を要求（`x402-dynamic.ts:438`） |
 | MPP の adapter | **Tempo 専用**。受信の RPC・chainId は `eip155:` から数値を取る（`src/main.ts:299-303,437,458`）。これは変えない（MPP を Solana に広げない。§3.3） |
 | 能力の注入 | `RouterCapabilities`: `evmSigning` **1 つ**（network 固定 `eip155:84532`、`tools/remote-router-process.ts:49`）、`mppTempo` 1 つ。受信 x402 の facilitator は **1 つ**（`ROUTER_X402_INBOUND_FACILITATOR_URL`、`src/main.ts:386`） |
 | 予算 | 予約は**両レグ**を `(network, asset)` の区分で数え、区分が無ければ `bucket_not_allowed`（`src/core/budget.ts:207`）。本番の区分は Base Sepolia USDC と Tempo pathUSD だけ（`tools/remote-mcp-config.ts:182,219`）。新しい `(network, asset)` ごとに静的・動的の区分が要る |
-| 呼び出し側の道具 | `npm run sign`（`tools/sign-payment.ts`）は x402 では **chainId 84532 を固定**して署名し（`:30,126`）、domain の name/version だけを offer から読む（`tools/x402-payer.ts:43`）。受信の上限 `MAX_AMOUNT = 10_000`（`:32`）は動的 quote の「上流額＋手数料」を超えることがある（本番の動的 quote は 11,000）。MPP は Tempo の送金を組む。MCP の payer interface も数値の chainId（`src/mcp/tools.ts:53,63`） |
+| 呼び出し側の道具 | `npm run sign`（`tools/sign-payment.ts`）は x402 では **chainId 84532 を固定**して署名し（`:30,126`）、domain の name/version だけを offer から読む（`tools/x402-payer.ts:43`）。受信の上限 `MAX_AMOUNT = 10_000`（`:32`）は動的 quote の「上流額＋手数料」より**小さい**ことがある（上流 10,000 に定額 1,000 で 11,000。MPP 送信の手数料はガス代で変わるのでさらに大きくなり得る）。MPP は Tempo の送金を組む。MCP の payer interface も数値の chainId（`src/mcp/tools.ts:53,63`） |
 | 本番の構成 | Base Sepolia USDC（x402）と Tempo Moderato pathUSD（MPP）、静的 route 2 本、動的プロファイル 2 本 |
 
 つまり「チェーンを足す」は、同じプロトコル（x402）の**別の EVM チェーン**なら「facilitator と署名能力を network ごとに持つ」一般化と設定で済み、**EVM でないチェーン**
@@ -61,9 +61,9 @@ network の族ごとに分ける必要がある。
 | # | 確認 | 方法（読取だけ、または testnet の少額） |
 |---|---|---|
 | V-1 | Circle Facilitator Service の trial: `/supported`・`/verify`・`/settle` の実際の要求と応答の形、売り手証明ヘッダの要求・`purpose`・鮮度の欄、エラーの形、制限 | 文書の版を記録し、鍵なし trial に対して `/supported` と `/verify`（署名は使い捨て口座）を実行 |
-| V-2 | x402.org の SVM `exact`: 受け付ける transaction の形（version、命令の数と順、Memo の扱い、token program）、`payTo` が ATA であること、fee の肩代わり、`/supported` の feePayer の安定性 | spec の revision を記録し、devnet で `/verify` を実行（settle は要件の受け入れで） |
+| V-2 | x402.org の SVM `exact`: 受け付ける transaction の形（version、命令の数と順、Memo の扱い、token program）、`payTo` が ATA であること、`/supported` の feePayer の安定性 | spec の revision を記録し、devnet で `/verify` を実行。**fee の肩代わりは `/verify` では分からない**ので、facilitator が `/supported` で名乗る feePayer を前提として置き、確証は AC-2 の settle（devnet、owner の確認の上）で取る |
 | V-3 | `@x402/svm` 2.28 と導入済みの `@x402/core` 2.27 の整合（型・ペイロードの版） | パッケージの読取。必要なら core/evm/fetch を 2.28 に揃える（別 PR） |
-| V-4 | Arc testnet の USDC（`0x3600…`）が EIP-3009 `transferWithAuthorization` を持ち、domain が "USDC"/"2" であること。ネイティブ USDC（18 桁）とは別であること | RPC の読取（`eth_call` で `name()`・`version()`・`DOMAIN_SEPARATOR()`） |
+| V-4 | Arc testnet の USDC（`0x3600…`）が EIP-3009 `transferWithAuthorization` を持ち、domain が "USDC"/"2" であること。ネイティブ USDC（18 桁）とは別であること | RPC の読取: `name()`・`version()`・`DOMAIN_SEPARATOR()`・`decimals()` と、contract の code に `transferWithAuthorization`・`authorizationState` の selector があること。**getter の読取は EIP-3009 の挙動の証明ではない**ので、確証は AC-1 の settle（testnet）で取る |
 | V-5 | Solana devnet の USDC の mint・decimals・token program、ATA の作成と rent の負担 | RPC の読取、devnet での ATA 作成（運用者の鍵） |
 
 ## 3. スコープ（選べる形）
@@ -82,7 +82,8 @@ network の族ごとに分ける必要がある。
 **S-1 → S-2 → S-3 → S-4**。理由と条件:
 
 - S-1・S-2 は「払う側の選択肢を増やす」話で、Router の主張（Pick the one you can pay with what you hold）にそのまま乗る。上流は既存の A・B で足りる
-- 受信だけなら**運用者の署名鍵は増えない**（Solana の受取先は鍵の ATA だが、署名するのは呼び出し側）。ただし**検査の重さは軽くならない**: 受信の成立を偽れば、Router は
+- 受信だけなら**運用者が資金を動かす署名は増えない**。増えるのは、Solana の受取先の鍵（ATA の owner。実行時に署名しない）と、Arc で Circle を使うなら売り手証明の署名（§4.3。
+  実行時に署名するが資金は動かさない——V-1 で確かめる）。ただし**検査の重さは軽くならない**: 受信の成立を偽れば、Router は
   既存の送信レグで**運用者の資金を払う**。したがって SVM の credential の検査（§4.4）と facilitator の信頼の境界（§4.5）は、送信の署名の境界と同じ重さで設計・レビューする
 - この順は §2.4 の確認（V-1〜V-5）が通ることが条件。通らなければ順を変えるか範囲を狭める
 - S-3 は Router 側は小さいが Provider を Arc に置く必要がある。S-4 は新しい署名の境界で、T9 と同じ重さ（独立レビュー 2 回以上）
@@ -109,7 +110,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 - **FR-3**: 許す network は**列挙**し、network ごとに「レール・資産（アドレス／mint）・桁・EIP-712 domain（EVM）・token program（SVM）・受取先の形（`0x`／ATA）」を**設定の表で束ねる**。
   表に無い network、表と違う資産・桁・domain は起動時に拒否。network だけの許可では足りない
 - **FR-4**: レール名は増やさない（`x402`・`mpp`・`subetha`）。x402 の中で EVM と SVM を network の族（`eip155:`／`solana:`）で振り分けるのは合成側（`src/main.ts`）。
-  core はレールで分岐しないままだが、**EVM 前提の実装は直す**（資産の小文字化 `dynamic.ts:631`、`0x` 必須の検査、数値 chainId の interface、tx hash の形）
+  core の既存のレール分岐（MPP の手数料）は増やさず、**EVM 前提の実装は直す**（資産の小文字化 `dynamic.ts:631`、`0x` 必須の検査、数値 chainId の interface、tx hash の形）
 - **FR-5**: 既存の route・プロファイル・MCP の tool と引数は**互換**。journal は**旧い記録を読めて**、レールの混在した記録の identity と予約を保ち、設定（権威の欄）が変わった
   quote は `quote_changed` で止まる（既存の指紋の規則）。未解決の支払いを自動で再開しない（既存どおり）
 - **FR-6**: 新しい `(network, asset)` ごとに**静的・動的の予算の区分**を持ち、owner が上限を決める（§8 D-7）。換算は桁で正確に（既存の規則）、再起動で保つ
@@ -151,10 +152,11 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 
 - **FR-19**: settle の要求が**出た後**の失敗（timeout・応答の喪失・エラー）は `unknown` とし、予約を保ち、**自動で再 settle しない**（既存の設計 §6.5 と同じ）。「facilitator が止まれば
   資金は動かない」とは**言わない**（要求が届いた後に止まり得る）
-- **FR-20**: settle の成功は、facilitator の応答の `transaction`（EVM の hash／SVM の signature）と `network` が発行 offer のものと一致することで判定し、形が合わなければ `unknown`。
-  Solana の `confirmed` は最終性の主張ではなく、`proof.onChainFinality: "not_checked"` のまま（既存どおり）。独立したチェーンの照合は範囲外（将来）
-- **FR-21**: facilitator の応答を**信じる範囲**を設計で明示する（verify の `isValid`・settle の成功）。偽の成功応答（loopback の fixture）に対して、Router が払う前に自分で確かめる
-  項目（FR-16）と、確かめられない項目（チェーン上の最終性）を分ける
+- **FR-20**: settle の成功は、facilitator の応答が**形どおり**であることで判定する: 成功の印、`network` が発行 offer の network と**一致**、`transaction` が **その network の識別子の形**
+  （EVM は 32 バイトの hash、SVM は base58 の signature）。形が違う・network が違う・識別子が無い応答は `unknown`（既存の MPP 受信の「証跡なしで settled にしない」と同じ）。
+  発行 offer は transaction の識別子を持たないので、識別子の**値**を offer と照合することはできない。Solana の `confirmed` は最終性の主張ではなく、`proof.onChainFinality: "not_checked"` のまま
+- **FR-21**: facilitator の応答を**信じる範囲**を明示する: Router が自分で確かめるのは credential の形（FR-16）と応答の形（FR-20）。**形の正しい偽の成功**（facilitator が嘘を言う）は、
+  チェーンを独立に読まない限り見分けられず、本書では**受容するリスク**（§7）。独立したチェーンの照合（受取先の残高・transaction の存在）は範囲外（将来の別紙）
 
 ### 4.6 Arc の送信（S-3）・Solana の送信（S-4）
 
@@ -190,8 +192,8 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
   Router の ATA に入金（`onChainFinality` は `not_checked` のまま）。静的・動的の両方
 - **AC-3**: 偽の credential は preflight で止まり、facilitator に届かない（外部接続 0）: 別の宛先・別の額・別の mint・別の桁・fee payer を Router に向けた tx・transfer が 2 つ・
   不明な program・memo を書き換えた tx（元の署名のまま）・同じ transaction の再提出（別の quote・別の route・並行・再起動後）・address lookup table の参照
-- **AC-4**: 決済の不確かさ: settle の応答の喪失・crash・偽の成功応答（loopback の fixture）に対して、`unknown` が耐久的に残り、再起動後に二重の支払いが起きない。facilitator の
-  fee payer が変わった後、発行済みの quote は verify で落ちて止まる
+- **AC-4**: 決済の不確かさ: settle の応答の喪失・crash・**形の違う／network の違う／識別子の無い**成功応答（loopback の fixture）に対して、`unknown` が耐久的に残り、再起動後に
+  二重の支払いが起きない。形の正しい偽の成功は検出の対象外（FR-21・§7）。facilitator の fee payer が変わった後、発行済みの quote は verify で落ちて止まる
 - **AC-5**: 既存の全試験が通る（Linux）。新しい adapter は fixture（loopback の facilitator・RPC、`dialForTest`）で試験し、実チェーンに依らない
 - **AC-6**: 公開 MCP の一覧に新しい route／プロファイルが出て、`subject` に network・asset・decimals・受取先が正しく出る。`ownerKey` の保護・結果の保存と再読取は既存どおり。
   CLAUDE.md の手順（`npm run sign`）が Arc・Solana でも通り、表に無い offer を拒否する（英語で書く）
@@ -199,7 +201,8 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 
 ### 6.2 S-3・S-4（設計で詰めるが、要件として置く）
 
-- **AC-8**（S-3）: 既存のレールで払って Arc の Provider A が `delivered`。署名した authorization の domain・chainId・額・宛先が承認済みの値（組み直し）。Base 用の鍵で Arc に署名しない
+- **AC-8**（S-3）: 既存のレールで払って Arc の Provider A が `delivered`。署名した authorization の domain・chainId・額・宛先が承認済みの値（組み直し）。署名は **Arc 用に注入した能力**
+  （network に束縛）で行い、Base 用の能力は Arc の offer を拒む。鍵の素材を共有するか（D-5）は能力の束縛とは別の話
 - **AC-9**（S-4）: 既存のレールで払って Solana の Provider が `delivered`。署名した transaction の命令が承認済みの値だけ（FR-24）、署名 1 回、fee payer ≠ Router。SDK の提案を
   変えても（別の宛先・額・追加の命令）署名しない
 
@@ -212,7 +215,8 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 | facilitator が送信するので、Router は「署名した」と「送られた」を直接は結べない | settle の応答の識別子と network の照合（FR-20）。最終性は主張しない |
 | 新しい依存の供給鎖 | SR-1 |
 | Arc のネイティブ USDC（18 桁）と ERC-20（6 桁）の取り違え | FR-7（設定で拒否、否定の試験） |
-| 受信の成立を偽られると運用者の送信資金が出る | FR-16・FR-21・AC-3。受信だからといって検査を軽くしない |
+| 受信の成立を偽られると運用者の送信資金が出る | FR-16・FR-20・AC-3。受信だからといって検査を軽くしない |
+| **facilitator が形の正しい嘘の成功を返す** | 見分けられない（FR-21）。facilitator は x402.org・Circle・CDP のいずれも運用者が選ぶ依存先で、既存の Base Sepolia の受信も同じ信頼に立っている。独立したチェーンの照合は将来の別紙 |
 
 ## 8. owner に決めてもらうこと
 
@@ -237,3 +241,4 @@ SVM facilitator）の形——設計で決める。
 | # | 日付 | レビュア | 結果 | 反映 |
 |---|---|---|---|---|
 | 1 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 1 版 `807793c`） | **REJECT**（高 4・中 5・低 1） | (1) SVM の preflight が緩い → FR-16 を命令・口座・program・桁・version・再提出まで明示、AC-3 を拡張。(2) 決済の不確かさと facilitator の信頼が未定義 → §4.5（FR-19〜21）、AC-4、§7 の誤り（「資金は動かない」）を直した。(3) Circle の証明の署名が設計送り → §4.3（FR-12・13）。(4) `npm run sign` が chainId 固定なのに「そのまま」と書いた → §1 を訂正、SR-7。(5) §1 の EVM 前提の漏れと FR-4 の「core 不変」の矛盾 → §1 に 7 点、FR-4 を「EVM 前提は直す」に。(6) 予算の区分が S-4 だけ → FR-6・FR-7、D-7。(7) SSRF の範囲が facilitator だけ → SR-2。(8) 外部の事実を保証に昇格 → §2.4 の確認（V-1〜V-5）を前提に。(9) 互換と受け入れが狭い → FR-5、AC-1〜7、§6.2。(10) 範囲・決定・手順の枠 → Arc → Base の明示、D-7・D-8、前文の許可と言語の扱い、S-1 の記述の訂正 |
+| 2 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 2 版 `85465bf`） | **REJECT**（高 1・中 2・低 1） | (1) FR-20 が offer に無い transaction の識別子を照合すると書き、AC-4 が形の正しい嘘を検出すると読めた → 「応答の形・network・識別子の形」の判定に直し、形の正しい嘘は受容するリスク（FR-21・§7）。(2) §1 の「core はレールで分岐しない」と 11,000 の記述の誤り → 訂正。(3) V-2・V-4 の確認では fee の肩代わり・EIP-3009 の挙動は証明できない → selector の確認を足し、確証は AC-1・AC-2 の settle に。(4) 鍵の記述の矛盾 → 「資金を動かす署名は増えない」に限定、AC-8 は network 束縛の能力で |
