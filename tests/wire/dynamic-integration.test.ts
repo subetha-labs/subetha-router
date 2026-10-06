@@ -9,6 +9,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getAddress, verifyTypedData } from "viem";
+import { TxEnvelopeTempo } from "ox/tempo";
 import { generatePrivateKey } from "viem/accounts";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
@@ -166,7 +167,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
             sourceRail: "x402",
             source: { network: FIXTURE_NETWORK, asset: USDC, decimals: 6, payTo: RECEIVER },
             rail: "mpp",
-            // 手数料は quote 時のガス代の見積りで決まる（`docs/dynamic-gas-fee-design.md`）。fixture の RPC の既定では bound 40 → cap 80（2 倍）。天井 5,000。
+            // 手数料は quote 時のガス代の見積りで決まる（`docs/dynamic-gas-fee-design.md`）。fixture の RPC の既定（baseFee 6e8）では bound 79 → cap 158（2 倍）。天井 5,000。
             destination: { scheme: "tempo/charge", network: `eip155:${MPP_FIXTURE_CHAIN_ID}`, asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "5000", feeMargin: 20_000 },
             par: true,
             maxUpstreamAmount: "10000",
@@ -241,8 +242,12 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
   const sentBefore = fixtures.rpc.sentRaw.length;
   await rails.dynamic!.verify();
   // 起動時の確認は RPC に読取の probe を 1 回出す（`eth_fillTransaction`。`docs/dynamic-gas-fee-design.md` §4）。要求ごとの接続の数え方に混ぜない。
-  expect(fixtures.dialed.splice(dialedBefore)).toEqual([HOSTS.rpc]);
-  expect(fixtures.rpc.methods.splice(methodsBefore)).toEqual(["eth_fillTransaction"]);
+  // 2 回の RPC（block・fill）はそれぞれ接続する。RPC のホスト以外には出ない。
+  const startupDials = fixtures.dialed.splice(dialedBefore);
+  expect(startupDials.length).toBeGreaterThanOrEqual(1);
+  expect(startupDials.every((host) => host === HOSTS.rpc)).toBe(true);
+  // 見積りは baseFee（block）＋ fill の 2 回（設計 §8.2）。
+  expect(fixtures.rpc.methods.splice(methodsBefore)).toEqual(["eth_getBlockByNumber", "eth_fillTransaction"]);
   expect(fixtures.rpc.sentRaw).toHaveLength(sentBefore);
   const core = await createRouterCore({
     journalPath,
@@ -618,10 +623,12 @@ describe("AC-17: 別名は同じアドレスの枠を共有し、超過分は外
     const fixtures = await startFixtures();
     // 起動時の probe（RPC）が同じアドレスの 1 枠を使わないよう、RPC だけ別のアドレスに解決する。
     fixtures.resolve.set(HOSTS.rpc, ["93.184.216.35"]);
-    const router = await startRouter(fixtures, { limits: { perAddressPerMinute: 1 } });
+    // 起動時の probe は RPC のアドレスに 2 回接続する（block ＋ fill）ので、枠は 2。上流のアドレスは同じ名前で 2 回使い切ってから別名で試す。
+    const router = await startRouter(fixtures, { limits: { perAddressPerMinute: 2 } });
     fixtures.ports.set("alias.provider.test", fixtures.x402.port);
     const first = await router.client().quoteUrl({ profileId: X402_PROFILE, url: X402_URL, requestId: "a" });
     expect(first.ok).toBe(true);
+    expect((await router.client().quoteUrl({ profileId: X402_PROFILE, url: X402_URL, requestId: "a2" })).ok).toBe(true);
     const dialedBefore = fixtures.dialed.length;
     const second = await router.client().quoteUrl({ profileId: X402_PROFILE, url: "https://alias.provider.test/v1/price", requestId: "b" });
     expect(second).toMatchObject({ ok: false, error: "quote_failed" });
@@ -850,8 +857,8 @@ describe("AC-12: 各接続点に loopback・内部に解決する公開名を当
     fixtures.resolve.set(HOSTS.facilitator, ["127.0.0.1"]);
     const dialed = fixtures.dialed.length;
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "unknown", reason: "source_verify_unavailable" });
-    // 読み直し（上流）と再見積り（RPC）には出るが、facilitator には接続しない。
-    expect(fixtures.dialed.slice(dialed)).toEqual([HOSTS.mpp, HOSTS.rpc]);
+    // 読み直し（上流）と再見積り（RPC: block ＋ fill）には出るが、facilitator には接続しない。
+    expect(fixtures.dialed.slice(dialed)).toEqual([HOSTS.mpp, HOSTS.rpc, HOSTS.rpc]);
     expect(blocked(router, "facilitator_verify")).toBe(1);
     expect(fixtures.facilitator.calls.verify).toBe(0);
     expect(journalEvents(router)).toEqual([]);
@@ -882,16 +889,20 @@ describe("MPP 送信: 手数料は quote 時のガス代の見積りから（dyn
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const normal = await quoteOf(router, MPP_PROFILE, MPP_URL, "normal");
-    // fixture: gas 54,290、maxFeePerGas = (600,000,001) × 1.2 → bound 40 → cap 80 < 定額 1,000。
-    expect(normal.pricing).toMatchObject({ upstreamAmount: "1000", fee: "1000", total: "2000", maxFee: "80", estimate: { gas: "54290", bound: "40" } });
-    expect(fixtures.rpc.methods).toEqual(["eth_fillTransaction"]);
+    // fixture: gas 54,290、単価は Router の feePerGasOf(6e8) = 1,440,000,001 → bound 79 → cap 158 < 定額 1,000。
+    expect(normal.pricing).toMatchObject({ upstreamAmount: "1000", fee: "1000", total: "2000", maxFee: "158", estimate: { gas: "54290", bound: "79" } });
+    expect(fixtures.rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction"]);
     expect(fixtures.rpc.sentRaw).toHaveLength(0);
     expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
-    fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 15n; // bound 587 → cap 1,174 > 定額
+    // ノードの提案（priority）が跳ねても quote は変わらない（設計 §8.2）。
+    fixtures.rpc.quote.priority = 24_400_000_000n;
+    expect((await quoteOf(router, MPP_PROFILE, MPP_URL, "spike")).pricing).toMatchObject({ fee: "1000", maxFee: "158" });
+    fixtures.rpc.quote.priority = 1n;
+    fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 15n; // feePerGasOf(9e9) → bound 1,173 → cap 2,346 > 定額
     const high = await quoteOf(router, MPP_PROFILE, MPP_URL, "high");
-    expect(high.pricing).toMatchObject({ fee: "1174", total: "2174", maxFee: "1174" });
-    expect((high.source as { amount: string }).amount).toBe("2174");
-    fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 100n; // bound 3,909 → cap 7,818 > 天井 5,000
+    expect(high.pricing).toMatchObject({ fee: "2346", total: "3346", maxFee: "2346" });
+    expect((high.source as { amount: string }).amount).toBe("3346");
+    fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 100n; // bound 7,818 → cap 15,636 > 天井 5,000
     expect(await router.client().quoteUrl({ profileId: MPP_PROFILE, url: MPP_URL, requestId: "over" })).toMatchObject({ ok: false, error: "quote_failed" });
     expect((high.disclosures as Record<string, unknown>)["routerMayRejectAfterSettle"]).toEqual(["fee_too_high"]);
     expect((high.disclosures as Record<string, unknown>)["feeEstimateIsNotADeliveryGuarantee"]).toBe(true);
@@ -906,7 +917,7 @@ describe("MPP 送信: 手数料は quote 時のガス代の見積りから（dyn
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, MPP_PROFILE, MPP_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
-    fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 3n; // bound 118 > cap 80
+    fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 3n; // bound 235 > cap 158
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "payment_required", error: "fee_too_high" });
     expect(fixtures.facilitator.calls).toMatchObject({ verify: 0, settle: 0 });
     expect(journalEvents(router)).toEqual([]);
@@ -915,17 +926,29 @@ describe("MPP 送信: 手数料は quote 時のガス代の見積りから（dyn
     expect(router.signatures()).toEqual({ x402: 0, mpp: 1 });
   });
 
-  test("署名前の検査は quote の cap を使う: settle の後に単価が上がると署名せず dest_failed（天井の内側でも）", async () => {
+  test("署名前: settle の後に baseFee が上がると、capPerGas まで clamp して払う（bound ≤ cap）。capPerGas を超えれば署名せず dest_failed（天井の内側でも）", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, MPP_PROFILE, MPP_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
-    // 再見積りは通し、settle の直前に単価を 3 倍にする（bound 118 > cap 80。天井 5,000 の内側）。
+    // cap 158 → capPerGas = floor(158e12 / 54290) = 2,910,296,555。baseFee × 3 = 1.8e9 → feePerGasOf = 4.32e9 > capPerGas ≥ baseFee → clamp。
     fixtures.facilitator.onSettle = () => { fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 3n; };
-    expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_rejected" });
-    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
-    expect(fixtures.rpc.sentRaw).toHaveLength(0);
-    expect(journalEvents(router)).toEqual(["created", "source_pending", "source_settled", "destination_pending", "dest_failed"]);
+    expect((await purchase(router, quote, credential, "r1")).outcome).toBe("delivered");
+    const raw = fixtures.rpc.sentRaw[0]!;
+    const envelope = TxEnvelopeTempo.deserialize(raw as never) as unknown as { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+    expect(envelope.maxFeePerGas).toBe((158n * 10n ** 12n) / 54_290n);
+    expect(envelope.maxPriorityFeePerGas).toBe(1n);
+    expect((envelope.gas * envelope.maxFeePerGas + 10n ** 12n - 1n) / 10n ** 12n).toBeLessThanOrEqual(158n);
+
+    // baseFee × 5 = 3e9 > capPerGas → 署名しない。
+    fixtures.rpc.quote.baseFeePerGas = BASE_FEE;
+    const second = await quoteOf(router, MPP_PROFILE, MPP_URL, "r2");
+    const credential2 = await credentialFor(fixtures, second);
+    fixtures.facilitator.onSettle = () => { fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 5n; };
+    expect(await purchase(router, second, credential2, "r2")).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_rejected" });
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 1 });
+    expect(fixtures.rpc.sentRaw).toHaveLength(1);
+    expect(journalEvents(router).slice(-5)).toEqual(["created", "source_pending", "source_settled", "destination_pending", "dest_failed"]);
   });
 
   test("quote が全体の上限まで出た直後でも purchase は通る（eth_fillTransaction 対応ノード。宛先アドレスの枠 60/分の内側）", async () => {

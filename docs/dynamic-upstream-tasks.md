@@ -308,6 +308,24 @@ journal 87,192 バイトが不変の prefix → `subetha-egress check` rc 0 → 
 （`converted` と写しの `source.amount` の 2 つの抜け道。§6 の 5 行目）→ 修正（sabotage 2 つ追加: `converted` の束縛・写しへの束縛は復元と再開の両方を外す変異で落ちる）。3 回目（範囲限定）も REJECT（予約の区分を記録の写しで引いていた。§6 の 6 行目）
 → 再開は設定のプロファイルの宛先で引くように修正（sabotage 1 つ追加）。4 回目（範囲限定）**APPROVE**（§6 の 7 行目）。
 
+### T18 — Router が MPP 送信の手数料の単価を決める（`docs/dynamic-gas-fee-design.md` §8。owner の決定 2026-10-06「a で進めましょう」）
+
+**内容**: 観測（§8.1: baseFee は 72 時間で最大 1.24 倍、動くのはノードが提案する priority fee）を受け、Router はノードの提案を写さず、priority 1 wei 固定・
+`maxFeePerGas = ceil(2.4 × baseFee) + 1`（最新ブロックの baseFee）で見積り・署名する。署名時は `min(feePerGasOf(baseFee), capPerGas)` に clamp し、`baseFee` を下回れば署名しない。
+送信の境界は priority = 1 を照合。`pricingPolicy` は `gas-indexed-v2`、`limits.perAddressPerMinute` の既定は 100。見積りの RPC は block ＋ fill の 2 回（非対応ノード 3 回）、
+支払いは block ＋ fill ＋ 送金の 3 回（非対応 6 回）。`viaFillTransaction` は fill の成功で立てる。
+
+**変更**: `src/adapters/outbound/mpp-dynamic.ts`・`src/config.ts`・`tests/fixtures/dynamic/tempo-rpc.ts`（ノードの提案 `quote.priority`）・`tools/dyn-mpp-bound-observe.ts`（観測。`observe`／`history`／`report`）・
+docs（設計 §8、`dynamic-upstream-design.md` §7.3）。
+
+**試験**: wire 195（Router の単価の describe: SDK の提案を写さない・baseFee で上がる・capPerGas への clamp・baseFee 未満で署名しない・gas 無しの拒否、
+RPC の列 2／3（見積り）・3／6（支払い）、提案が跳ねても quote 不変・支払いは Router の単価、chain のフックが手数料を書き換えれば見積り失敗、baseFee の読取は予算の中）、
+統合 51（跳ねても quote 不変、settle 後の clamp と 5 倍での拒否、起動の probe）、unit（`pricingPolicy` v2・`perAddressPerMinute` 100）。Linux で全体通過。
+**sabotage**: S1〜S10（priority を写す・clamp なし・baseFee 未満の拒否なし・見積りに手数料を渡さない・fill の印が常に真・raw の priority を見ない・prepare の手数料の照合なし・
+署名が SDK の単価を使う・`pricingPolicy` v1・baseFee の読取が予算の外）すべて検出（S7 は試験を足してから）。
+
+**レビュー**: 設計 2 回（APPROVE WITH CHANGES → APPROVE。設計 §6 の 10・11 行目）、実装 1 回目 REJECT（予算の外の読取。12 行目）→ 修正、2 回目 **APPROVE**（13 行目）。Linux で全体 1,103 件通過。
+
 ## 3. AC との対応
 
 | AC | タスク | AC | タスク |

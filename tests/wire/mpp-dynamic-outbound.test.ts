@@ -55,7 +55,7 @@ vi.mock("mppx/client", async (importOriginal) => {
 });
 
 import { createMppOutbound } from "../../src/adapters/outbound/mpp.js";
-import { approvedTransferOf, assertDynamicMppCapability, checkDynamicMppChallenge, checkRawTempoTransfer, createGuardedTempoAccount, TempoSigningRefusedError } from "../../src/adapters/outbound/mpp-dynamic.js";
+import { approvedTransferOf, assertDynamicMppCapability, checkDynamicMppChallenge, checkRawTempoTransfer, createGuardedTempoAccount, feePerGasOf, ROUTER_PRIORITY_FEE_PER_GAS, TempoSigningRefusedError } from "../../src/adapters/outbound/mpp-dynamic.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -79,6 +79,8 @@ const PROFILE: DynamicProfile = {
   fee: { flat: "1000", bps: 0, min: "1000" },
 };
 const URL_A = "https://provider.test/v1/price?symbol=ETH";
+/** 署名の境界に渡す baseFee（fixture の RPC と同じ 6e8）。Router の単価は feePerGasOf(6e8) = 1,440,000,001。 */
+const BASE_FEE = 600_000_000n;
 const OFFER: DestinationOffer = { scheme: "tempo/charge", network: `eip155:${MPP_FIXTURE_CHAIN_ID}`, asset: MPP_FIXTURE_CURRENCY, amount: "1000", payTo: MPP_FIXTURE_RECIPIENT };
 const MEMO = `0x${"ab".repeat(32)}` as Hex;
 
@@ -234,7 +236,7 @@ function sdkTx(from: string, patch: Tx = {}): Tx {
   };
 }
 
-function facadeHarness() {
+function facadeHarness(options: { maxFee?: bigint; baseFee?: bigint } = {}) {
   const real = privateKeyToAccount(generatePrivateKey());
   const inner: { tx: Tx; options: { serializer?: unknown } | undefined }[] = [];
   const account = {
@@ -244,8 +246,14 @@ function facadeHarness() {
       return real.signTransaction(tx as never, options as never);
     },
   };
-  const guard = createGuardedTempoAccount({ account: account as never, profile: PROFILE, offer: OFFER, maxFee: 5000n, now: () => NOW });
+  const guard = createGuardedTempoAccount({ account: account as never, profile: PROFILE, offer: OFFER, maxFee: options.maxFee ?? 5000n, baseFee: options.baseFee ?? BASE_FEE, now: () => NOW });
   return { real, inner, guard, tx: (patch: Tx = {}) => sdkTx(real.address, patch) };
+}
+
+/** 署名した raw の手数料の欄。 */
+function feesOf(raw: Hex): { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } {
+  const e = TxEnvelopeTempo.deserialize(raw as never) as unknown as { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+  return { gas: e.gas, maxFeePerGas: e.maxFeePerGas, maxPriorityFeePerGas: e.maxPriorityFeePerGas };
 }
 
 describe("署名の境界（設計 §3.3 (ii)、AC-16）", () => {
@@ -289,9 +297,10 @@ describe("署名の境界（設計 §3.3 (ii)、AC-16）", () => {
     ["call.value が 0n", call({ value: 0n })],
     ["from が無い", { from: undefined }],
     ["nonce が 0n", { nonce: 0n }],
-    ["手数料の上限がちょうど maxFee（5000）", { gas: 50_000n, maxFeePerGas: 100_000_000_000n }],
+    // SDK の提案の単価は写さない（設計 §8.2）: 提案が大きくても、無くても、Router の単価で署名する。
+    ["SDK の提案の単価が 1e15", { gas: 50_000n, maxFeePerGas: 10n ** 15n, maxPriorityFeePerGas: 10n ** 15n }],
+    ["SDK の提案に手数料の欄が無い", { maxFeePerGas: undefined, maxPriorityFeePerGas: undefined }],
     ["validBefore が now+60 秒ちょうど", { validBefore: NOW_S + 60 }],
-    ["maxPriorityFeePerGas が maxFeePerGas と同じ", { maxPriorityFeePerGas: 1_440_000_001n }],
   ])("署名する: %s", async (_name, patch) => {
     const h = facadeHarness();
     const raw = await h.guard.account.signTransaction(h.tx(patch as Tx));
@@ -317,12 +326,6 @@ describe("署名の境界（設計 §3.3 (ii)、AC-16）", () => {
     ["feeToken が別の資産", { feeToken: OTHER }],
     ["gas が 0", { gas: 0n }],
     ["gas が数値", { gas: 54_290 }],
-    ["maxFeePerGas が 0", { maxFeePerGas: 0n }],
-    ["maxFeePerGas が未指定", { maxFeePerGas: undefined }],
-    ["手数料の上限が maxFee を 1 超える", { gas: 50_000n, maxFeePerGas: 100_000_000_001n }],
-    ["maxPriorityFeePerGas が maxFeePerGas より大きい", { maxPriorityFeePerGas: 1_440_000_002n }],
-    ["maxPriorityFeePerGas が負", { maxPriorityFeePerGas: -1n }],
-    ["maxPriorityFeePerGas が未指定", { maxPriorityFeePerGas: undefined }],
     ["nonceKey が expiring でない", { nonceKey: 0n }],
     ["nonce が 1", { nonce: 1 }],
     ["validBefore が now+61 秒", { validBefore: NOW_S + 61 }],
@@ -354,7 +357,65 @@ describe("署名の境界（設計 §3.3 (ii)、AC-16）", () => {
   });
 
   test("local account でなければ作れない", () => {
-    expect(() => createGuardedTempoAccount({ account: { address: OTHER, type: "json-rpc" } as never, profile: PROFILE, offer: OFFER, maxFee: 5000n, now: () => NOW })).toThrow("local account");
+    expect(() => createGuardedTempoAccount({ account: { address: OTHER, type: "json-rpc" } as never, profile: PROFILE, offer: OFFER, maxFee: 5000n, baseFee: BASE_FEE, now: () => NOW })).toThrow("local account");
+  });
+});
+
+/* ------------------------------------------------------------------ 単価は Router が決める（docs/dynamic-gas-fee-design.md §8.2） */
+
+describe("署名の境界: 単価は Router が決める（priority 1、maxFeePerGas = min(feePerGasOf(baseFee), capPerGas)）", () => {
+  const GAS = 54_290n;
+  const capPerGasOf = (cap: bigint) => (cap * 10n ** 12n) / GAS;
+
+  test("feePerGasOf = ceil(2.4 × baseFee) + 1", () => {
+    expect(feePerGasOf(600_000_000n)).toBe(1_440_000_001n);
+    expect(feePerGasOf(1n)).toBe(4n);
+    expect(feePerGasOf(10n)).toBe(25n);
+    expect(ROUTER_PRIORITY_FEE_PER_GAS).toBe(1n);
+  });
+
+  test("SDK が priority 9.6e9・maxFee 1.3e10 を提案しても、署名するのは Router の単価", async () => {
+    const h = facadeHarness();
+    const raw = await h.guard.account.signTransaction(h.tx({ maxFeePerGas: 12_990_000_000n, maxPriorityFeePerGas: 9_625_000_000n }));
+    expect(feesOf(raw)).toEqual({ gas: GAS, maxFeePerGas: feePerGasOf(BASE_FEE), maxPriorityFeePerGas: 1n });
+    // 元の account に渡した transaction も同じ値（SDK の提案は写っていない）。
+    expect(h.inner[0]!.tx).toMatchObject({ maxFeePerGas: feePerGasOf(BASE_FEE), maxPriorityFeePerGas: 1n });
+  });
+
+  test("baseFee が上がれば単価も上がる（cap の内側）", async () => {
+    const h = facadeHarness({ baseFee: 1_200_000_000n });
+    const raw = await h.guard.account.signTransaction(h.tx());
+    expect(feesOf(raw).maxFeePerGas).toBe(feePerGasOf(1_200_000_000n));
+  });
+
+  test("feePerGasOf(baseFee) が capPerGas を超えれば capPerGas に clamp する（bound は cap ちょうど以下）", async () => {
+    // cap 60: capPerGas = floor(60e12 / 54290) = 1,105,174,434 < feePerGasOf(6e8) = 1,440,000,001、かつ ≥ baseFee。
+    const h = facadeHarness({ maxFee: 60n });
+    const raw = await h.guard.account.signTransaction(h.tx());
+    const fees = feesOf(raw);
+    expect(fees.maxFeePerGas).toBe(capPerGasOf(60n));
+    expect(boundOf(fees.gas, fees.maxFeePerGas)).toBeLessThanOrEqual(60n);
+    expect(fees.maxPriorityFeePerGas).toBe(1n);
+  });
+
+  test("capPerGas が baseFee 未満なら署名しない（取り込まれない transaction に署名しない）", async () => {
+    // cap 32: capPerGas = 589,427,150 < baseFee 6e8。
+    const h = facadeHarness({ maxFee: 32n });
+    await expect(h.guard.account.signTransaction(h.tx())).rejects.toMatchObject({ reason: "destination_signing_fee_over_limit" });
+    expect(h.inner).toHaveLength(0);
+    // cap 33: capPerGas = 607,846,748 ≥ baseFee → 署名する（bound 33）。
+    const ok = facadeHarness({ maxFee: 33n });
+    const raw = await ok.guard.account.signTransaction(ok.tx());
+    expect(boundOf(feesOf(raw).gas, feesOf(raw).maxFeePerGas)).toBe(33n);
+  });
+
+  test("gas が無い・0 なら単価を決めずに拒否する", async () => {
+    const a = facadeHarness();
+    await expect(a.guard.account.signTransaction(a.tx({ gas: undefined }))).rejects.toBeInstanceOf(TempoSigningRefusedError);
+    expect(a.inner).toHaveLength(0);
+    const b = facadeHarness();
+    await expect(b.guard.account.signTransaction(b.tx({ gas: 0n }))).rejects.toMatchObject({ reason: "destination_signing_fee_out_of_range" });
+    expect(b.inner).toHaveLength(0);
   });
 });
 
@@ -367,6 +428,11 @@ describe("送信の境界（設計 §3.3 (iii)）", () => {
     return { raw: await account.signTransaction(tx as never, { serializer: TempoTransaction.serialize as never }), sender: account.address };
   };
   const check = (raw: unknown, sender: string) => checkRawTempoTransfer(raw, approvedTransferOf(PROFILE, OFFER, sender, 5000n), NOW);
+
+  test("priority が Router の値（1）でない raw は送らない", async () => {
+    const { raw, sender } = await signRaw({ maxPriorityFeePerGas: 2n });
+    expect(() => check(raw, sender)).toThrow(TempoSigningRefusedError);
+  });
 
   test("承認済みの送金の raw は通る", async () => {
     const { raw, sender } = await signRaw();
@@ -597,11 +663,11 @@ describe("未払いの読取", () => {
 
 describe("支払い", () => {
   test.each([
-    // `eth_fillTransaction` 対応ノード（本番の RPC。T0-a）: 読取 1 回＋送金 1 回。
-    ["eth_fillTransaction 対応", true, ["eth_fillTransaction", "eth_sendRawTransactionSync"]],
-    // 非対応ノード: fill の失敗を含めて読取 4 回＋送金 1 回（設計 §3.3 T0-a）。
-    ["eth_fillTransaction 非対応", false, ["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas", "eth_sendRawTransactionSync"]],
-  ])("push で 1 回だけ送金し、上流の実 SDK の検証を通る。RPC は送金 1 回・全体 5 回以下（%s）", async (_label, fill, expectedCalls) => {
+    // `eth_fillTransaction` 対応ノード（本番の RPC。T0-a）: Router の baseFee の読取 1 回＋fill 1 回＋送金 1 回（設計 §8.2）。
+    ["eth_fillTransaction 対応", true, ["eth_getBlockByNumber", "eth_fillTransaction", "eth_sendRawTransactionSync"]],
+    // 非対応ノード: baseFee ＋ fill の失敗を含めて SDK の読取 4 回＋送金 1 回。
+    ["eth_fillTransaction 非対応", false, ["eth_getBlockByNumber", "eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas", "eth_sendRawTransactionSync"]],
+  ])("push で 1 回だけ送金し、上流の実 SDK の検証を通る。RPC は送金 1 回・全体 6 回以下（%s）", async (_label, fill, expectedCalls) => {
     const h = await harness();
     h.rpc.fillTransaction = fill;
     const offer = await h.quote();
@@ -616,7 +682,7 @@ describe("支払い", () => {
     // 送った raw: 承認済みの送金 1 つ、fee token は明示、送り主は元の account。
     const raw = h.rpc.sentRaw[0]!;
     const envelope = TxEnvelopeTempo.deserialize(raw as never) as unknown as Tx;
-    expect(envelope).toMatchObject({ type: "tempo", chainId: MPP_FIXTURE_CHAIN_ID, feeToken: MPP_FIXTURE_CURRENCY, nonceKey: maxUint256 });
+    expect(envelope).toMatchObject({ type: "tempo", chainId: MPP_FIXTURE_CHAIN_ID, feeToken: MPP_FIXTURE_CURRENCY, nonceKey: maxUint256, maxPriorityFeePerGas: 1n, maxFeePerGas: feePerGasOf(h.rpc.quote.baseFeePerGas) });
     expect(envelope["calls"]).toHaveLength(1);
     expect(h.rpc.lastSender?.toLowerCase()).toBe(h.address.toLowerCase());
     expect((result as { txRef: string }).txRef).toBe(keccak256(raw));
@@ -682,7 +748,6 @@ describe("支払い", () => {
     ["keyAuthorization を足す", (tx: Tx) => ({ ...tx, keyAuthorization: { address: OTHER } })],
     ["feePayer を立てる", (tx: Tx) => ({ ...tx, feePayer: true })],
     ["有効期限を延ばす", (tx: Tx) => ({ ...tx, validBefore: Math.floor(Date.now() / 1000) + 3600 })],
-    ["手数料の単価を上げる", (tx: Tx) => ({ ...tx, maxFeePerGas: 10n ** 15n })],
   ])("SDK が %s と、元の account は呼ばれず、送金も上流への credential も無い", async (_name, change) => {
     const h = await harness();
     const offer = await h.quote();
@@ -691,6 +756,16 @@ describe("支払い", () => {
     expect(h.innerSigned).toHaveLength(0);
     expect(h.sends()).toBe(0);
     expect(h.upstream.seen.credentials).toBe(0);
+  });
+
+  test("SDK（ノードの提案）が単価を上げても、Router の単価で署名して払う（設計 §8.2）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    // ノードの提案を跳ねさせる（fill の maxFee・priority と eth_maxPriorityFeePerGas）。
+    h.rpc.quote.priority = 9_625_000_000n;
+    tamperWith((tx) => ({ ...tx, maxFeePerGas: 10n ** 15n, maxPriorityFeePerGas: 10n ** 15n }));
+    expect((await h.pay(offer)).outcome).toBe("paid");
+    expect(feesOf(h.rpc.sentRaw[0]!)).toMatchObject({ maxFeePerGas: feePerGasOf(h.rpc.quote.baseFeePerGas), maxPriorityFeePerGas: 1n });
   });
 
   test("SDK が渡す serializer を差し替えても、署名されるのは検査した transaction", async () => {
@@ -853,7 +928,8 @@ describe("支払い", () => {
     const offer = await h.quote();
     h.rpc.http.status = 503;
     const started = Date.now();
-    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+    // 最初の RPC（baseFee の読取）が失敗する → 署名しない。
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_rejected" });
     expect(Date.now() - started).toBeLessThan(3000);
     // 見積りの各段が 1 回ずつ失敗するだけ（`Retry-After` も待たない）。
     expect(h.rpc.http.requests).toBeLessThanOrEqual(4);
@@ -867,6 +943,7 @@ describe("支払い", () => {
     const offer = await h.quote();
     h.rpc.http.delayMs = 200;
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+    // baseFee の読取（200 ms。予算の中）＋ fill の失敗（200 ms）で予算 250 ms を超え、3 回目は出ない。
     expect(h.rpc.http.requests).toBeLessThanOrEqual(2);
     expect(h.innerSigned).toHaveLength(0);
     expect(h.sends()).toBe(0);
@@ -967,7 +1044,7 @@ test("RPC の名前解決が止まっても、期限で打ち切って署名し�
   const h = await harness({ rpcTimeoutMs: 200, stallDnsFor: "other.test" });
   const offer = await h.quote();
   const started = Date.now();
-  expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+  expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_rejected" });
   expect(Date.now() - started).toBeLessThan(4000);
   expect(h.innerSigned).toHaveLength(0);
   expect(h.rpc.http.requests).toBe(0);
@@ -1020,14 +1097,19 @@ describe("能力の条件（設計 §3.3 の「能力」）", () => {
 /* ------------------------------------------------------------------ 見積り（docs/dynamic-gas-fee-design.md §1） */
 
 describe("見積り（quote 時のガス代。署名も送金もしない）", () => {
-  test("eth_fillTransaction 対応ノード: RPC は 1 回、bound = ceil(gas × maxFeePerGas / 10^12)（viem の 1.2 倍込み）、署名器は呼ばれない", async () => {
+  test("eth_fillTransaction 対応ノード: RPC は baseFee ＋ fill の 2 回、単価は Router の feePerGasOf(baseFee)、bound = ceil(gas × maxFeePerGas / 10^12)、署名器は呼ばれない", async () => {
     const h = await harness();
     const offer = await h.quote();
     h.rpc.methods.length = 0;
     const estimate = await h.estimate(offer);
-    expect(h.rpc.methods).toEqual(["eth_fillTransaction"]);
-    const maxFeePerGas = times12(h.rpc.quote.baseFeePerGas + 1n);
+    expect(h.rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction"]);
+    const maxFeePerGas = feePerGasOf(h.rpc.quote.baseFeePerGas);
     expect(estimate).toEqual({ gas: h.rpc.quote.gas.toString(), maxFeePerGas: maxFeePerGas.toString(), bound: boundOf(h.rpc.quote.gas, maxFeePerGas).toString(), viaFillTransaction: true });
+    // ノードの提案（priority）が跳ねても見積りは変わらない（設計 §8.2）。
+    h.rpc.quote.priority = 24_400_000_000n;
+    expect(await h.estimate(offer)).toEqual(estimate);
+    // fill に渡した手数料は Router の値。
+    expect(h.rpc.filled.at(-1)).toMatchObject({ maxFeePerGas: `0x${maxFeePerGas.toString(16)}`, maxPriorityFeePerGas: "0x1" });
     expect(h.innerSigned).toHaveLength(0);
     expect(h.rpc.sentRaw).toHaveLength(0);
     // 見積もった transaction は署名するものと同じ形: transferWithMemo(payTo, amount, 32 バイトの memo)、feeToken、expiring nonce。
@@ -1043,22 +1125,22 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
     expect(((decoded.args as readonly unknown[])[2] as string).length).toBe(66);
   });
 
-  test("非対応ノード: fill の失敗を含めて読取 4 回。次の見積りでも同じ（client ごとに憶えるので quote をまたいで引き継がない）。eth_maxPriorityFeePerGas も無ければ eth_gasPrice に落ちて 5 回", async () => {
+  test("非対応ノード: baseFee ＋ fill の失敗 ＋ eth_estimateGas の 3 回（手数料は Router が渡すので viem の手数料の見積りは走らない）。次の見積りでも同じ。eth_maxPriorityFeePerGas が無くても同じ", async () => {
     const h = await harness();
     const offer = await h.quote();
     h.rpc.fillTransaction = false;
     h.rpc.methods.length = 0;
     const first = await h.estimate(offer);
-    expect(h.rpc.methods).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas"]);
-    const maxFeePerGas = times12(h.rpc.quote.baseFeePerGas) + 1n;
+    expect(h.rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction", "eth_estimateGas"]);
+    const maxFeePerGas = feePerGasOf(h.rpc.quote.baseFeePerGas);
     expect(first).toEqual({ gas: h.rpc.quote.gas.toString(), maxFeePerGas: maxFeePerGas.toString(), bound: boundOf(h.rpc.quote.gas, maxFeePerGas).toString(), viaFillTransaction: false });
     h.rpc.methods.length = 0;
     await h.estimate(offer);
-    expect(h.rpc.methods).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas"]);
+    expect(h.rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction", "eth_estimateGas"]);
     h.rpc.priorityFee = false;
     h.rpc.methods.length = 0;
     const third = await h.estimate(offer);
-    expect(h.rpc.methods).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_gasPrice", "eth_estimateGas"]);
+    expect(h.rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction", "eth_estimateGas"]);
     expect(third.viaFillTransaction).toBe(false);
     expect(h.innerSigned).toHaveLength(0);
     expect(h.sends()).toBe(0);
@@ -1071,6 +1153,17 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
     h.rpc.quote.baseFeePerGas *= 10n;
     const high = await h.estimate(offer);
     expect(BigInt(high.bound)).toBeGreaterThan(BigInt(low.bound) * 9n);
+  });
+
+  test("pay: baseFee の読取も RPC の予算の中（予算が尽きていれば読まずに not_sent）", async () => {
+    const h = await harness({ rpcBudgetMs: 150, rpcTimeoutMs: 1_000 });
+    const offer = await h.quote();
+    h.rpc.http.delayMs = 400; // 予算 150 ms < 1 回の上限 1,000 ms: 残りの予算で打ち切る。
+    const started = Date.now();
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_rejected" });
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(h.rpc.http.requests).toBe(1);
+    expect(h.innerSigned).toHaveLength(0);
   });
 
   test("RPC が応答しない: 1 回の期限 = min(1 回の上限, 残りの予算)。合計の予算を超えて待たず、期限後は次の RPC を出さない", async () => {
@@ -1154,6 +1247,28 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
     expect(h.innerSigned).toHaveLength(0);
   });
 
+  test("prepare の結果の手数料の欄が Router の値と違えば（chain のフックが書き換える等）見積りは失敗する", async () => {
+    const h0 = await harness();
+    const offer = await h0.quote();
+    const [original, hookOptions] = (tempoModerato as unknown as { prepareTransactionRequest: [(r: unknown, c: unknown) => Promise<unknown>, unknown] }).prepareTransactionRequest;
+    const tampering = {
+      ...tempoModerato,
+      prepareTransactionRequest: [
+        async (request: unknown, context: { phase: string }) => {
+          const out = (await original(request, context)) as Record<string, unknown>;
+          // fill の後に単価を書き換える（ノードの提案に戻す、など）。
+          if (context.phase === "afterFillParameters") out["maxFeePerGas"] = 12_990_000_000n;
+          return out;
+        },
+        hookOptions,
+      ],
+    };
+    const client = createClient({ chain: tampering as never, transport: http(h0.rpc.url, { retryCount: 0 }) });
+    const h = await harness({ capability: { getClient: () => client } });
+    await expect(h.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
   test("offer の形が違えば RPC に出ない", async () => {
     const h = await harness();
     const offer = await h.quote();
@@ -1179,21 +1294,25 @@ describe("pay: 署名時の上限は request.maxFee（quote の cap）", () => {
     expect(h.upstream.seen.credentials).toBe(0);
   });
 
-  test("cap が bound 未満なら署名しない。cap がちょうど bound なら通る（プロファイルの天井ではなく cap で決まる）", async () => {
+  test("cap が quote の bound より小さくても、capPerGas ≥ baseFee なら clamp して払う（bound ≤ cap）。capPerGas < baseFee なら署名しない", async () => {
     const h = await harness();
     const offer = await h.quote();
-    const estimate = await h.estimate(offer);
-    expect(await h.pay(offer, URL_A, (BigInt(estimate.bound) - 1n).toString())).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
-    expect(h.innerSigned).toHaveLength(0);
-    expect((await h.pay(offer, URL_A, estimate.bound)).outcome).toBe("paid");
+    const estimate = await h.estimate(offer); // bound 71（baseFee 6e8、gas 54,290）
+    const lower = (BigInt(estimate.bound) - 1n).toString();
+    expect((await h.pay(offer, URL_A, lower)).outcome).toBe("paid");
+    const fees = feesOf(h.rpc.sentRaw[0]!);
+    expect(boundOf(fees.gas, fees.maxFeePerGas)).toBeLessThanOrEqual(BigInt(lower));
+    expect(fees.maxFeePerGas).toBeGreaterThanOrEqual(h.rpc.quote.baseFeePerGas);
+    // ceil(54290 × 6e8 / 1e12) = 33 が取り込まれる最小の cap。32 では署名しない。
+    expect(await h.pay(offer, URL_A, "32")).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
     expect(h.innerSigned).toHaveLength(1);
   });
 
   test("送金の RPC が接続の前に門で断られたら、署名はしたが not_sent（raw は出ていない。再署名・再送なし）", async () => {
-    // fill 対応: 読み直し（+1）→ fill（+2）→ 送金（+3）。送金の admit を断る。
+    // fill 対応: 読み直し（+1）→ baseFee（+2）→ fill（+3）→ 送金（+4）。送金の admit を断る。
     const h = await harness();
     const offer = await h.quote();
-    h.gate.refuseAt = h.gate.admitted + 3;
+    h.gate.refuseAt = h.gate.admitted + 4;
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_send_refused_before_dispatch" });
     expect(h.innerSigned).toHaveLength(1);
     expect(h.rpc.sentRaw).toHaveLength(0);
@@ -1202,9 +1321,9 @@ describe("pay: 署名時の上限は request.maxFee（quote の cap）", () => {
   });
 
   test("送金の RPC の予算が署名後に尽きていても、出していなければ not_sent", async () => {
-    const h = await harness({ rpcBudgetMs: 250 });
+    const h = await harness({ rpcBudgetMs: 450 });
     const offer = await h.quote();
-    // fill の応答を遅らせ、署名の後の送金の RPC の時点で予算切れにする（fill 1 回なので予算の検査は送金の前）。
+    // 応答を遅らせ、baseFee（300 ms）＋ fill（300 ms）の後、署名の後の送金の RPC の時点で予算切れにする。
     h.rpc.http.delayMs = 300;
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_send_refused_before_dispatch" });
     expect(h.innerSigned).toHaveLength(1);
