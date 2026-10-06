@@ -186,15 +186,18 @@ describe("composeRails（動的の配線）", () => {
     expect((second as TransportError).code).toBe("admission_refused");
   });
 
-  test("拒否ホスト: 設定の値・facilitator・上流・自分の canonical・受信 MPP の RPC・能力の依存先には向けない（接続 0）", async () => {
+  test("拒否ホスト: 設定の値・facilitator・自分の canonical・受信 MPP の RPC・能力の依存先には向けない（接続 0）。静的 route の上流は拒否しない", async () => {
     const dialed: string[] = [];
     const { rails } = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES });
+    // 静的 route の上流（運営の公開 Provider）は動的の宛先にできる: 判定を通って接続まで進む（差し替え先が無いので断られる）。
+    const upstream = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider-a.test/v1/eth/snapshot" }));
+    expect(upstream).not.toBeInstanceOf(DynamicChallengeError);
+    expect(dialed).toEqual(["provider-a.test"]);
     for (const url of [
       "https://denied.test/x",
       "https://api.denied.test/x",
       "https://facilitator.test/verify",
       "https://subetha-facilitator.test/x",
-      "https://provider-a.test/v1/eth/snapshot",
       "https://router.test/v1/routes",
       "https://rpc.moderato.tempo.xyz/",
       "https://sub.rpc.moderato.tempo.xyz/",
@@ -205,7 +208,7 @@ describe("composeRails（動的の配線）", () => {
       expect(error, url).toBeInstanceOf(DynamicChallengeError);
       expect((error as DynamicChallengeError).reason, url).toBe("url");
     }
-    expect(dialed).toEqual([]);
+    expect(dialed).toEqual(["provider-a.test"]);
   });
 
   test("受信 MPP の RPC を設定したときは、そのホストが拒否される（既知の公開 RPC の代わりに）", async () => {

@@ -199,8 +199,8 @@ The `router.dynamic` section of the config (optional; **absent means the feature
 profile carries `profileId` equal to its key, `sourceRail`, `source`, `rail`, `destination` incl. `tokenDomain` for x402 or `feeAsset`/`maxFee` for MPP, `par: true`,
 `maxUpstreamAmount`, `fee {flat,bps,min}`; the public R1 listing is an array derived from it), `budget` (counted
 separately from the static budget), `limits` (rates, concurrency, outstanding quotes, per host/address, ledger retention), `denyHosts`. The wiring adds the
-facilitators, the static upstreams, the canonical base, the MPP RPCs and `RouterCapabilities.dependencyUrls` to the deny list, and refuses to start when the MPP
-capability's RPC host is not denied.
+facilitators, the canonical base, the MPP RPCs and `RouterCapabilities.dependencyUrls` to the deny list (not the static upstreams: the operator's own providers
+may be dynamic targets), and refuses to start when the MPP capability's RPC host is not denied.
 
 - **By default (`ROUTER_ADAPTER_MODE=real`) it wires up the real adapters (official SDK wiring), but if no
   payment capability has been injected it aborts startup with `signer_not_authorized`. It does not fall back to
