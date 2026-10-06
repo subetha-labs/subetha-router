@@ -743,9 +743,15 @@ M-2 は SDK → 包んだ account → 固定の serializer → guarded RPC を**
 | 静的 route の無効な purchase 試行は従来どおり journal に行を残す | 静的の記録順を変えない。入口の資源上限（§7.1）だけが掛かる |
 | 昇格前に Router が落ちると、進行中だった試行は journal に残らない（控えの `attempt` だけ） | §6.3 |
 
-**将来の課題（G-1 で owner が示した方向、2026-10-06）**: MPP 送信の手数料を定額ではなく、quote の時点で Tempo の単価（`eth_maxPriorityFeePerGas`／基本料金）を読んで
-`fee` に反映する。今の設計は quote 時に RPC を読まない（RPC に出るのは purchase の送信の段だけ）ので、これを入れるには quote の手順に RPC の読取を足し、
-その読取にも門と期限を掛ける設計が要る。本スライスでは入れない。
+**次のスライス（G-1 で owner が決めた方向、2026-10-06。MPP 送信のプロファイルを本番で有効にする前提）**: MPP 送信の手数料を定額ではなく、
+quote の時点で**その送金にかかるガス代**を読んで決める。ガス代は `ceil(gas × maxFeePerGas / 10^12)`（base units）で、`gas` は送金の内容（宛先・額の
+`transferWithMemo`。実測ではほぼ一定）、`maxFeePerGas` はその時のチェーンの混み具合（実測で約 17 倍の幅）。quote の時点で宛先と額は分かっているので、
+その送金そのもので `eth_estimateGas`（または `eth_fillTransaction`）を RPC に読み、ガス量と単価の両方から見積りを出す。
+- `maxFee` = 見積り × 余裕（例 2 倍）。固定の天井（例 50,000）を超える見積りのときは quote を出さない（高い手数料を提示するより断る）
+- `fee` ≥ `maxFee`（§6.6 の条件は quote ごとに保つ。設定の `fee.min >= maxFee` の検査は「quote が決めた `maxFee`」に対して行う形に変える）
+- quote の記録に `maxFee` を含め、purchase の署名前の検査（§3.3 (ii)）はその値を使う
+- quote の手順に RPC の読取が増えるので、その読取にも門（§7.3）と期限を掛け、1 件の quote で出る RPC の回数を試験で固定する
+本スライスでは入れない。
 
 ## 12. 要件書に入れる改訂（本書と同じ commit）
 
