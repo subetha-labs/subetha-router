@@ -235,6 +235,27 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
 | G-3 第三者 Provider の互換性（M-4） | 未払いの読取で成立率を測る。低ければ設計 §11 の制約（`resource` の完全一致・未知の欄の拒否）を設計に戻して見直す | T0-c、T15 |
 | G-4 本番で有効にする | `enabled: true` で再デプロイ。B の受け入れの記録を確認。**x402 送信のプロファイルだけ先に有効にできる**（MPP 送信は T0-a・T0-b が揃ってから） | G-1・G-2 |
 
+**実施の記録（2026-10-06、G-2・G-3。G-1・G-4 は owner の判断待ち）**
+
+- **G-2（testnet の実決済）**: 本番の入口の設定生成（`routerConfigOf`。同じプロファイル・同じ手数料と上限の案）を**ローカルで** `enabled: true` にし、
+  実鍵（使い捨て口座。呼び出し側 `0xfCea…0bF1`、Router の送信 `0xEd5F…06C4`、受取先 `0xF88b…6405`）で、運用者の Provider A・B を動的に指定して両方向を各 1 件。
+  **本番の設定との違い**: 本番は静的 route の上流（A・B のホスト）を動的の拒否ホストに入れるので、A・B を動的に指定できない。この試行では静的 route の上流を
+  到達しないプレースホルダのホストに置き換えた（それ以外は同じ）。**A・B を動的に買える本番にするには、A・B を静的 route から外すか、拒否ホストの規則を変える必要がある**（owner の判断）
+
+  | 方向 | 受信（呼び出し側 → Router） | 送信（Router → 上流） | 結果 | 所要 |
+  |---|---|---|---|---|
+  | x402 → MPP（`dyn-x402-to-mpp`、上流 B） | Base Sepolia USDC 11,000（上流 10,000＋手数料 1,000）。tx `0x40c42b34…c4f`（block 47739312） | Tempo pathUSD 10,000。tx `0x4b117218…1a2`（手数料 **29** base units、`feeToken` pathUSD） | **delivered**（JSON object） | 7.4 秒 |
+  | MPP → x402（`dyn-mpp-to-x402`、上流 A） | Tempo pathUSD 11,000。tx `0xff82c44f…d8b`（呼び出し側の手数料 31） | Base Sepolia USDC 10,000。tx `0x64f7acde…a88`（block 47739319） | **delivered**（JSON object） | 3.6 秒 |
+
+  確かめたこと: 両方向が成立し、受信・送信の 4 件すべてがチェーン上で `success`（公開 RPC で読取）。MPP 送信の手数料の実額 29 は署名前の上限（`maxFee` 5000）以下で、
+  手数料規則の案（`flat 1000`）が送信費用を賄った（この 1 件について）。`delivered` の示す範囲: 上流の本文（JSON object）が届いたこと。receipt は上流の申告で、
+  最終性は確かめていない。journal・控えに鍵・`ownerKey` は無い（grep）
+- **G-3（第三者 Provider の互換性、M-4）**: 同じローカルの Router で、T0-c の testnet 探索で見つけた Base Sepolia の 21 ホストに**未払いの読取だけ**（`quote_url`、支払い無し）。
+  **11 件で quote が成立**（上流額 1,000〜10,000）。成立しなかった 10 件は `quote_failed`（402 を返さない・`resource.url` の不一致・別の network・`maxTimeoutSeconds` 範囲外・Permit2 など、
+  T0-c の probe と同じ理由）。成立した 11 件は probe が「選べる」と判定した 11 件と**完全に一致**した（probe の判定が製品の判定と同じであることの確認）。
+  §11 の制約（`resource` の完全一致・未知の欄の拒否）を緩める必要は、この標本では見つからなかった
+- **G-1・G-4**: owner の判断。G-4 の前提（B の受け入れの記録・公開ホスト名の拒否・MPP 送信のプロファイルの扱い）は `docs/DEPLOY.md` §2b
+
 ## 3. AC との対応
 
 | AC | タスク | AC | タスク |
