@@ -181,7 +181,7 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
   - 静的 route の既存テストが通る（AC-23）
   - **実装で決めた細部**: 動的用 transport は `composeRails` が本番の選択肢（loopback 不可・DNS 期限 3 秒／同時 16・ヘッダ 32 KiB・門の `admit`）で組む。
     試験は `RouterCapabilities.dynamicTransportForTest`（同じ選択肢を受け取り、宛先の差し替えを足して返す）で差し替え、返った transport が loopback を許す・DNS に期限が無いなら起動失敗。
-    拒否ホストには設定の値に加えて facilitator・上流・自分の canonical のホストを足す。プロファイルの受信 adapter は動的用 transport で作り、x402 受信は署名を quote に束縛する。
+    拒否ホストには設定の値に加えて facilitator・自分の canonical のホストを足す（T13 では静的 route の上流も足していたが、owner の決定 2026-10-06 で外した。設計 §7.4）。プロファイルの受信 adapter は動的用 transport で作り、x402 受信は署名を quote に束縛する。
     受信 offer の束縛 `dynamic|<profileId>|GET|<url>` からプロファイルを引く。残高の検査は全プロファイルの能力が `balanceOf` を持つときだけ core に渡す（今の本番の能力は持たない）。
     合成レールに動的の設定は組めない（起動失敗）。本番の入口の設定生成は `tools/remote-mcp-config.ts` の `routerConfigOf`（SDK に依存しない純粋関数。`enabled: false` 固定、
     プロファイル 2 つ、手数料・上限は G-1 の案の値）
