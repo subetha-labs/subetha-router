@@ -18,7 +18,7 @@ export interface RouterClientOptions {
   readonly timeoutMs?: number;
   /**
    * **動的 quote**（`quoteUrl`）の期限。既定 30 秒（`DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS`）。動的 quote は上流の読取（5 秒）に加え、MPP 送信では
-   * ガス代の見積り（6 秒。`docs/dynamic-gas-fee-design.md` §1.2）を含む。明示した `timeoutMs` には影響しない。
+   * ガス代の見積り（6 秒。`docs/dynamic-gas-fee-design.md` §1.2）を含む。優先順位: これ → 明示した `timeoutMs` → 既定（明示した `timeoutMs` は従来どおり効く）。
    */
   readonly quoteTimeoutMs?: number;
   /**

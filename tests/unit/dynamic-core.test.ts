@@ -13,6 +13,7 @@ import { capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, r
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import { stableJson } from "../../src/core/intent.js";
 import { createRouterCore, type QuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
+import { capCoversFee } from "../../src/core/store.js";
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
 
@@ -835,6 +836,32 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
     expect(capOf({ ...MPP, destination: noMargin }, "600")).toBeUndefined();
   });
 
+  test("capCoversFee（復元と再開が共有する検査）: cap の形・fee >= cap・total の整合・受信 offer の額 = total・上流 offer の額 = upstreamAmount・予約の区分", () => {
+    const base = {
+      profileId: MPP.profileId,
+      profile: JSON.parse(JSON.stringify(MPP)) as Record<string, unknown>,
+      pricing: { upstreamAmount: "5000", converted: "5000", fee: "3000", total: "8000", maxFee: "3000", estimate: { gas: "50000", maxFeePerGas: "60000000000", bound: "1500", atMs: 1 } },
+      ownerKeyHash: "sha256:" + "0".repeat(64),
+    };
+    const bound = { sourceAmount: "8000", upstreamOfferAmount: "5000" };
+    expect(capCoversFee(base, bound)).toBe(true);
+    expect(capCoversFee({ ...base, pricing: { ...base.pricing, fee: "2999" } }, bound)).toBe(false);
+    expect(capCoversFee({ ...base, pricing: { ...base.pricing, fee: "3000", total: "8001" } }, bound)).toBe(false);
+    // 記録の fee・maxFee だけを書き換えて、払っていない手数料で cap を通す: 受信 offer の額（払う額）と合わなければ不可。
+    expect(capCoversFee({ ...base, pricing: { ...base.pricing, fee: "3000", total: "8000" } }, { ...bound, sourceAmount: "6000" })).toBe(false);
+    expect(capCoversFee(base, { ...bound, upstreamOfferAmount: "4999" })).toBe(false);
+    const { maxFee: _m, ...noCap } = base.pricing;
+    expect(capCoversFee({ ...base, pricing: noCap }, bound)).toBe(false);
+    expect(capCoversFee({ ...base, pricing: { ...base.pricing, estimate: { ...base.pricing.estimate, atMs: -1 } } }, bound)).toBe(false);
+    expect(capCoversFee({ ...base, pricing: { ...base.pricing, maxFee: "3e3" } }, bound)).toBe(false);
+    // 予約: 無ければ requireReservation のときだけ不可。あれば手数料の資産の区分の合計 >= upstreamAmount + maxFee。
+    expect(capCoversFee(base, { ...bound, requireReservation: true })).toBe(false);
+    const legs = [{ network: DST_NETWORK, asset: DST_ASSET, amount: "8000" }, { network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000" }, { network: SRC_NETWORK, asset: SRC_ASSET, amount: "3000" }];
+    expect(capCoversFee({ ...base, reservation: { legs } }, { ...bound, requireReservation: true })).toBe(true);
+    expect(capCoversFee({ ...base, reservation: { legs: [legs[0]!, legs[1]!, { ...legs[2]!, amount: "2999" }] } }, bound)).toBe(false);
+    expect(capCoversFee({ ...base, reservation: { legs: [legs[0]!, legs[1]!, { ...legs[2]!, asset: DST_ASSET }] } }, bound)).toBe(false);
+  });
+
   test("手数料 = max(規則, cap)。pricing に maxFee と見積りの証跡が入り、予約の手数料の区分は cap。受信 offer の額は total", async () => {
     outbound.offers = [mppOffer()];
     const core = await boot(baseConfig({ profile: MPP }));
@@ -951,6 +978,22 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
     expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "awaiting_payment" });
     expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
     expect(inbound.settleCalls).toBe(1);
+    await core.close();
+    opened.length = 0;
+
+    // (e) fee と maxFee だけを上げる（受信 offer の 8,000 はそのまま）: 払っていない手数料で大きな cap を通せない
+    await writeFile(journalPath, tamper((row) => { row.patch.dynamic.pricing["fee"] = "4000"; row.patch.dynamic.pricing["maxFee"] = "4000"; row.patch.dynamic.pricing["total"] = "9000"; row.patch.dynamic.reservation.legs[2]!.amount = "4000"; }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "awaiting_payment" });
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    expect(inbound.settleCalls).toBe(1);
+    expect(outbound.paidFor).toHaveLength(0);
+    await core.close();
+    opened.length = 0;
+    // (f) total を書き換えずに fee と maxFee だけ上げる（total ≠ converted + fee）
+    await writeFile(journalPath, tamper((row) => { row.patch.dynamic.pricing["fee"] = "4000"; row.patch.dynamic.pricing["maxFee"] = "4000"; row.patch.dynamic.reservation.legs[2]!.amount = "4000"; }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
     await core.close();
     opened.length = 0;
 

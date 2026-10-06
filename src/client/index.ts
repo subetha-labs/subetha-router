@@ -199,7 +199,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   const doFetch = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const executeTimeoutMs = options.executeTimeoutMs ?? DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS;
-  const quoteTimeoutMs = options.quoteTimeoutMs ?? DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS;
+  // 動的 quote の期限: 明示の quoteTimeoutMs → 明示の timeoutMs → 既定 30 秒（明示した timeoutMs は従来どおり効く）。
+  const quoteTimeoutMs = options.quoteTimeoutMs ?? options.timeoutMs ?? DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS;
 
   /** principal 資格情報は**この origin への要求だけ**に付ける。 */
   function headers(extra: Readonly<Record<string, string>> = {}): Record<string, string> {

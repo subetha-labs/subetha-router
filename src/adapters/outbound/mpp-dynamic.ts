@@ -789,7 +789,8 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
             nonceKey: "expiring",
             validBefore: Math.floor(now() / 1000) + SDK_VALIDITY_SECONDS,
           } as never),
-          Math.max(1, deadline - Date.now()) + 1_000,
+          // 全体の期限は予算そのもの（余裕を足さない）。transport の abort とは別に、準備の経路が止まっても予算で打ち切る。
+          Math.max(1, deadline - Date.now()),
         )) as { gas?: unknown; maxFeePerGas?: unknown };
       } catch {
         throw new FeeEstimateError("fee_estimate_unavailable");

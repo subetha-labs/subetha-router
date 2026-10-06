@@ -363,16 +363,20 @@ describe("client", () => {
     expect(await c.execute({ quote: sq, requestId: "s1", approval: { approved: true, quoteId: sq.quoteId }, credential: credentialFor(sq.source.offer) })).toMatchObject({ outcome: "unknown", reason: "transport_uncertain" });
   });
 
-  test("動的 quote の期限は quoteTimeoutMs（既定 30 秒）: timeoutMs 400 ms でも見積りの長い quote が通る。静的 quote は timeoutMs のまま", async () => {
+  test("動的 quote の期限: quoteTimeoutMs → 明示の timeoutMs → 既定 30 秒。明示した timeoutMs は従来どおり効く", async () => {
     expect(DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS).toBe(30_000);
     const { client } = await boot(config({ mppOut: true }));
-    const c = client(undefined, { timeoutMs: 400 });
     outbound.estimateDelayMs = 900;
-    const quoted = await c.quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r1" });
+    // 既定（どちらも未指定）: 見積りの長い quote が通る（10 秒の旧既定より長い期限）。
+    // 送信元ごとの枠（3/分）に掛からないよう、送信元を分ける。
+    const quoted = await client("fwd:10.0.0.1").quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r1" });
     expect(quoted.ok).toBe(true);
     expect((quoted as { quote: QuoteView }).quote.pricing).toMatchObject({ fee: "1000", maxFee: "600", estimate: { bound: "300" } });
-    // 明示した quoteTimeoutMs はそれが効く。
-    expect(await client(undefined, { timeoutMs: 400, quoteTimeoutMs: 300 }).quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r2" })).toMatchObject({ ok: false, error: "transport_failed" });
+    // 明示した timeoutMs（quoteTimeoutMs 無し）はそのまま効く。
+    expect(await client("fwd:10.0.0.2", { timeoutMs: 400 }).quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r2" })).toMatchObject({ ok: false, error: "transport_failed" });
+    // 明示した quoteTimeoutMs は timeoutMs より優先。
+    expect((await client("fwd:10.0.0.3", { timeoutMs: 400, quoteTimeoutMs: 5_000 }).quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r3" })).ok).toBe(true);
+    expect(await client("fwd:10.0.0.4", { quoteTimeoutMs: 300 }).quoteUrl({ profileId: MPP_OUT_PROFILE_ID, url: URL_A, requestId: "r4" })).toMatchObject({ ok: false, error: "transport_failed" });
   });
 
   test("quoteUrl は応答の upstream.url が頼んだ URL と違えば受け入れない", async () => {

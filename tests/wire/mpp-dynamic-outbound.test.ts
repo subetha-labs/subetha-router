@@ -1141,6 +1141,19 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
     expect(h.innerSigned).toHaveLength(0);
   });
 
+  test("chain の prepare フックが止まっても、見積り全体は予算で終わる（余裕を足さない）", async () => {
+    const h0 = await harness();
+    const offer = await h0.quote();
+    const [, hookOptions] = (tempoModerato as unknown as { prepareTransactionRequest: [unknown, unknown] }).prepareTransactionRequest;
+    const stalled = { ...tempoModerato, prepareTransactionRequest: [() => new Promise(() => {}), hookOptions] };
+    const client = createClient({ chain: stalled as never, transport: http(h0.rpc.url, { retryCount: 0 }) });
+    const h = await harness({ estimateRpcBudgetMs: 500, capability: { getClient: () => client } });
+    const started = Date.now();
+    await expect(h.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
   test("offer の形が違えば RPC に出ない", async () => {
     const h = await harness();
     const offer = await h.quote();

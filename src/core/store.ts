@@ -152,14 +152,24 @@ export function dynamicFieldsOf(
    * MPP 送信の記録は cap を持つこと（`docs/dynamic-gas-fee-design.md` §3.2）。無い・形が違う・手数料 < cap なら `dynamicCapInvalid`:
    * `dynamic` は保つ（持ち主の証明・予約・結果はそのまま）が、purchase は実行しない。
    */
-  if (profile["rail"] === "mpp" && !capCoversFee(dynamic)) {
-    return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic, dynamicCapInvalid: true };
+  if (profile["rail"] === "mpp") {
+    const source = isPlainRecord(patch["source"]) ? patch["source"] : {};
+    const destination = isPlainRecord(patch["destination"]) ? patch["destination"] : {};
+    const selected = isPlainRecord(destination["selectedOffer"]) ? destination["selectedOffer"] : {};
+    const bound = {
+      sourceAmount: String(source["amount"]),
+      upstreamOfferAmount: String(selected["amount"]),
+      requireReservation: options.requireReservation === true,
+    };
+    if (!capCoversFee(dynamic, bound)) {
+      return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic, dynamicCapInvalid: true };
+    }
   }
   return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic };
 }
 
 /** `pricing.maxFee`・`pricing.estimate` を形どおりに読む。片方でも形が違えば `undefined`（両方無いのも `undefined`）。 */
-function capFieldsOf(pricing: Record<string, unknown>): Pick<IntentDynamic["pricing"], "maxFee" | "estimate"> | undefined {
+function capFieldsOf(pricing: Record<string, unknown>): { maxFee: string; estimate: NonNullable<IntentDynamic["pricing"]["estimate"]> } | undefined {
   const maxFee = pricing["maxFee"];
   const estimate = pricing["estimate"];
   if (typeof maxFee !== "string" || !AMOUNT.test(maxFee) || !isPlainRecord(estimate)) return undefined;
@@ -172,24 +182,36 @@ function capFieldsOf(pricing: Record<string, unknown>): Pick<IntentDynamic["pric
 }
 
 /**
- * MPP 送信の記録の cap が揃い、手数料がそれ以上か（`docs/dynamic-gas-fee-design.md` §3.2・§3.3）。予約があれば、
- * 手数料の資産の区分の合計が `upstreamAmount + maxFee` 以上であることも見る。
+ * MPP 送信の記録の cap が、**実際に払われる額**に結び付いているか（`docs/dynamic-gas-fee-design.md` §3.2・§3.3）。復元と昇格済みの再開が同じ検査を使う:
+ * - `pricing.maxFee`・`pricing.estimate` が形どおり（`capFieldsOf`）で、`fee >= maxFee`
+ * - `total = converted + fee`、受信 offer の額（呼び出し側が先に払う額）= `total`、`upstreamAmount` = 選んだ上流 offer の額
+ *   （記録の `fee`・`maxFee` だけを書き換えて、払っていない手数料で大きな cap を通せないように）
+ * - 予約があれば、手数料の資産の区分の合計が `upstreamAmount + maxFee` 以上。`requireReservation` なら予約が無いのも不可（昇格済み）
  */
-export function capCoversFee(dynamic: IntentDynamic): boolean {
-  const { maxFee, estimate, fee, upstreamAmount } = dynamic.pricing;
-  if (maxFee === undefined || estimate === undefined || BigInt(fee) < BigInt(maxFee)) return false;
-  if (dynamic.reservation !== undefined) {
-    const destination = dynamic.profile["destination"];
-    const network = isPlainRecord(destination) ? destination["network"] : undefined;
-    const feeAsset = isPlainRecord(destination) ? destination["feeAsset"] : undefined;
-    if (typeof network !== "string" || typeof feeAsset !== "string") return false;
-    let reserved = 0n;
-    for (const leg of dynamic.reservation.legs) {
-      if (leg.network === network && leg.asset.toLowerCase() === feeAsset.toLowerCase()) reserved += BigInt(leg.amount);
-    }
-    if (reserved < BigInt(upstreamAmount) + BigInt(maxFee)) return false;
+export function capCoversFee(
+  dynamic: IntentDynamic,
+  bound: { readonly sourceAmount: string; readonly upstreamOfferAmount: string; readonly requireReservation?: boolean },
+): boolean {
+  const cap = capFieldsOf(dynamic.pricing as unknown as Record<string, unknown>);
+  if (cap === undefined) return false;
+  const { fee, upstreamAmount, converted, total } = dynamic.pricing;
+  if (![fee, upstreamAmount, converted, total, bound.sourceAmount, bound.upstreamOfferAmount].every((value) => typeof value === "string" && AMOUNT.test(value))) return false;
+  const maxFee = BigInt(cap.maxFee);
+  if (BigInt(fee) < maxFee) return false;
+  if (BigInt(converted) + BigInt(fee) !== BigInt(total)) return false;
+  if (BigInt(bound.sourceAmount) !== BigInt(total) || BigInt(bound.upstreamOfferAmount) !== BigInt(upstreamAmount)) return false;
+  if (dynamic.reservation === undefined) {
+    return bound.requireReservation !== true;
   }
-  return true;
+  const destination = dynamic.profile["destination"];
+  const network = isPlainRecord(destination) ? destination["network"] : undefined;
+  const feeAsset = isPlainRecord(destination) ? destination["feeAsset"] : undefined;
+  if (typeof network !== "string" || typeof feeAsset !== "string") return false;
+  let reserved = 0n;
+  for (const leg of dynamic.reservation.legs) {
+    if (leg.network === network && leg.asset.toLowerCase() === feeAsset.toLowerCase()) reserved += BigInt(leg.amount);
+  }
+  return reserved >= BigInt(upstreamAmount) + maxFee;
 }
 
 /** `created` 行（控えの記録も同じ形）から intent を組む。動的の欄は予約が無くても読む側（控え）があるので、呼び出し側が `requireReservation` を決める。 */
