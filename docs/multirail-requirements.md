@@ -127,7 +127,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 
 ### 4.1 共通（レールの複数化と network の束縛）
 
-- **FR-1**: x402 の受信 facilitator は **network ごと**に設定できる（例: `eip155:84532` → x402.org、`eip155:5042002` → Circle、`solana:Et…` → x402.org）。URL は env（本番の入口）で与え、
+- **FR-1**: x402 の受信 facilitator は **network ごと**に設定できる（例: `eip155:84532` → x402.org、`eip155:5042002` → Circle、`solana:Et…` → x402.org）。URL は設定ファイル（`x402.inboundFacilitators`。既存の `eip155:84532` だけ env のまま。設計 §2 で決定、2026-10-06）で与え、
   **拒否ホスト**と `dependencyUrls` に自動で入る。API key は URL に含めず、ログに出さない
 - **FR-2**: x402 の送信署名能力（`evmSigning`）は **network ごと**に注入できる。承認済み offer の `network` と一致する能力だけを使い、無ければ fail closed（受信だけの S-1・S-2 では不要。**S-3 で設計**）
 - **FR-3**: 許す network は**列挙**し、network ごとに「レール・資産（アドレス／mint）・桁・EIP-712 domain（EVM）・token program（SVM）・受取先の形（`0x`／ATA）」を**設定の表で束ねる**。
