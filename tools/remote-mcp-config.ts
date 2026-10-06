@@ -1,6 +1,6 @@
 /**
  * 本番の入口（`tools/remote-mcp.ts`）が Router に渡す**設定の生成**。鍵と子プロセスの起動から切り離してある
- * （試験で、どの env を与えても `dynamic.enabled === false` であることを確かめる。T13）。
+ * （試験で、どの env を与えても動的機能の有効・無効とプロファイルの構成が変わらないことを確かめる。T13・G-4）。
  * このファイルは Router の SDK に依存しない（試験から import できる）。
  */
 
@@ -60,10 +60,6 @@ const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_FEE_MPP_OUT = { flat: DYNAMIC_MAX_FEE, bps: 0, min: DYNAMIC_MAX_FEE } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 
-/**
- * 本番の入口が Router に渡す設定。**鍵と子プロセスの起動から切り離した純粋関数**（試験で、どの env を与えても
- * `dynamic.enabled === false` であることを確かめる。T13）。
- */
 /** MPP 送信のプロファイルを登録するか。Tempo の手数料の仕様で上限が確立するまで `false`（`docs/DEPLOY.md` §2b の条件 6）。 */
 const MPP_OUTBOUND_PROFILE_ENABLED = false;
 
@@ -106,6 +102,10 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
   return Object.keys(profiles).length === 0 ? undefined : profiles;
 }
 
+/**
+ * 本番の入口が Router に渡す設定。**鍵と子プロセスの起動から切り離した純粋関数**。動的機能の有効・無効と
+ * プロファイルの構成はこの関数と `MPP_OUTBOUND_PROFILE_ENABLED` だけで決まり、env からは変えられない（予算の額・件数と追加の拒否ホストは env）。
+ */
 export function routerConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean): Record<string, unknown> {
   return {
     router: {
@@ -182,18 +182,12 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ],
       },
       /**
-       * 動的上流 URL（設計 `docs/dynamic-upstream-design.md`）。**本番の入口では常に無効**（`enabled: false`）。
-       * 有効にするのは T16 の G-4 で、変えるのはこの関数のこの 1 箇所だけ。env からは変えられない。
-       * プロファイルは 2 つ: Base Sepolia USDC で払って MPP（Tempo pathUSD）の上流に届く、Tempo pathUSD で払って x402（Base Sepolia USDC）の上流に届く。
-       * 手数料・上限の値は G-1 で owner が決める案（設計 §3.3 の T0-b）。
-       */
-      /**
        * 動的上流 URL（設計 `docs/dynamic-upstream-design.md`）。G-4（owner の決定 2026-10-06）で有効化。
        *
        * **受け入れの記録**（`docs/DEPLOY.md` §2b の条件）:
-       * - SSRF 防御 B（egress 制御）: 設計 `docs/ssrf-egress-design.md` §25、レビュー #10 で承認。本番ホスト `subetha-router`（AL2023）に
-       *   2026-10-05 に設置し、同日に新ホストで `subetha-egress check` を通したうえで両方の静的 route を購入して受け入れ（`docs/DEPLOY.md` §8b.0・§8b.6、
-       *   `docs/dynamic-upstream-tasks.md` の T12・T16 の記録）。2026-10-06 のデプロイ（`b-56265da`）でも check は正常
+       * - SSRF 防御 B（egress 制御）: 本番ホスト `subetha-router`（AL2023）での受け入れの結果は `docs/ssrf-egress-design.md` **§27**
+       *   （2026-10-05、全検証モードの実測）と **§27.1**（同日の切り替えと切り替え後の確認）。設計は同 §25、レビュー #10 で承認。
+       *   2026-10-06 のデプロイ（`b-56265da`）でも `subetha-egress check` は正常
        * - G-2（testnet の実決済、両方向）: `docs/dynamic-upstream-tasks.md` T16 の記録（2026-10-06）
        *
        * **有効にするのは x402 送信（`dyn-mpp-to-x402`: Tempo pathUSD で払って x402 の上流に届く）だけ。** MPP 送信（`dyn-x402-to-mpp`）は、
