@@ -1,6 +1,6 @@
 /**
  * 本番の入口（`tools/remote-mcp.ts`）が Router に渡す**設定の生成**。鍵と子プロセスの起動から切り離してある
- * （試験で、どの env を与えても `dynamic.enabled === false` であることを確かめる。T13）。
+ * （試験で、どの env を与えても動的機能の有効・無効とプロファイルの構成が変わらないことを確かめる。T13・G-4）。
  * このファイルは Router の SDK に依存しない（試験から import できる）。
  */
 
@@ -60,9 +60,51 @@ const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_FEE_MPP_OUT = { flat: DYNAMIC_MAX_FEE, bps: 0, min: DYNAMIC_MAX_FEE } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 
+/** MPP 送信のプロファイルを登録するか。Tempo の手数料の仕様で上限が確立するまで `false`（`docs/DEPLOY.md` §2b の条件 6）。 */
+const MPP_OUTBOUND_PROFILE_ENABLED = false;
+
 /**
- * 本番の入口が Router に渡す設定。**鍵と子プロセスの起動から切り離した純粋関数**（試験で、どの env を与えても
- * `dynamic.enabled === false` であることを確かめる。T13）。
+ * 登録する動的プロファイル。1 つも無ければ `undefined`（`dynamic` の節を書かない。空の `profiles` は設定の検証が拒否する）。
+ * x402 送信（`dyn-mpp-to-x402`）は MPP 受信の秘密と x402 送信の鍵がそろっているとき（経路 2 と同じ条件）だけ。
+ */
+export function dynamicProfilesOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean): Record<string, unknown> | undefined {
+  void env;
+  const profiles: Record<string, unknown> = {
+    ...(MPP_OUTBOUND_PROFILE_ENABLED
+      ? {
+          "dyn-x402-to-mpp": {
+            profileId: "dyn-x402-to-mpp",
+            sourceRail: "x402",
+            source: { network: INBOUND.network, asset: INBOUND.asset, decimals: 6, payTo: receiver },
+            rail: "mpp",
+            destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, decimals: 6, feeAsset: OUTBOUND.asset, maxFee: DYNAMIC_MAX_FEE },
+            par: true,
+            maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+            fee: DYNAMIC_FEE_MPP_OUT,
+          },
+        }
+      : {}),
+    ...(mppInboundEnabled
+      ? {
+          "dyn-mpp-to-x402": {
+            profileId: "dyn-mpp-to-x402",
+            sourceRail: "mpp",
+            source: { network: INBOUND_MPP.network, asset: INBOUND_MPP.asset, decimals: 6, payTo: receiver },
+            rail: "x402",
+            destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, decimals: 6, tokenDomain: { name: "USDC", version: "2" } },
+            par: true,
+            maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+            fee: DYNAMIC_FEE_X402_OUT,
+          },
+        }
+      : {}),
+  };
+  return Object.keys(profiles).length === 0 ? undefined : profiles;
+}
+
+/**
+ * 本番の入口が Router に渡す設定。**鍵と子プロセスの起動から切り離した純粋関数**。動的機能の有効・無効と
+ * プロファイルの構成はこの関数と `MPP_OUTBOUND_PROFILE_ENABLED` だけで決まり、env からは変えられない（予算の額・件数と追加の拒否ホストは env）。
  */
 export function routerConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean): Record<string, unknown> {
   return {
@@ -140,50 +182,35 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ],
       },
       /**
-       * 動的上流 URL（設計 `docs/dynamic-upstream-design.md`）。**本番の入口では常に無効**（`enabled: false`）。
-       * 有効にするのは T16 の G-4 で、変えるのはこの関数のこの 1 箇所だけ。env からは変えられない。
-       * プロファイルは 2 つ: Base Sepolia USDC で払って MPP（Tempo pathUSD）の上流に届く、Tempo pathUSD で払って x402（Base Sepolia USDC）の上流に届く。
-       * 手数料・上限の値は G-1 で owner が決める案（設計 §3.3 の T0-b）。
+       * 動的上流 URL（設計 `docs/dynamic-upstream-design.md`）。G-4（owner の決定 2026-10-06）で有効化。
+       *
+       * **受け入れの記録**（`docs/DEPLOY.md` §2b の条件）:
+       * - SSRF 防御 B（egress 制御）: 本番ホスト `subetha-router`（AL2023）での受け入れの結果は `docs/ssrf-egress-design.md` **§27**
+       *   （2026-10-05、全検証モードの実測）と **§27.1**（同日の切り替えと切り替え後の確認）。設計は同 §25、レビュー #10 で承認。
+       *   2026-10-06 のデプロイ（`b-56265da`）でも `subetha-egress check` は正常
+       * - G-2（testnet の実決済、両方向）: `docs/dynamic-upstream-tasks.md` T16 の記録（2026-10-06）
+       *
+       * **有効にするのは x402 送信（`dyn-mpp-to-x402`: Tempo pathUSD で払って x402 の上流に届く）だけ。** MPP 送信（`dyn-x402-to-mpp`）は、
+       * Tempo の手数料の仕様で署名時の上限が実額の上限であることが確立するまで登録しない（§2b の条件 6。`MPP_OUTBOUND_PROFILE_ENABLED`）。
+       * 値を変える場所はこの関数だけ。戻すのも同じ（`enabled: false`）。
        */
-      dynamic: {
-        enabled: false,
-        profiles: {
-          "dyn-x402-to-mpp": {
-            profileId: "dyn-x402-to-mpp",
-            sourceRail: "x402",
-            source: { network: INBOUND.network, asset: INBOUND.asset, decimals: 6, payTo: receiver },
-            rail: "mpp",
-            destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, decimals: 6, feeAsset: OUTBOUND.asset, maxFee: DYNAMIC_MAX_FEE },
-            par: true,
-            maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
-            fee: DYNAMIC_FEE_MPP_OUT,
-          },
-          // 逆向きは、MPP 受信の秘密と x402 送信の鍵がそろっているとき（経路 2 と同じ条件）だけ。
-          ...(mppInboundEnabled
-            ? {
-                "dyn-mpp-to-x402": {
-                  profileId: "dyn-mpp-to-x402",
-                  sourceRail: "mpp",
-                  source: { network: INBOUND_MPP.network, asset: INBOUND_MPP.asset, decimals: 6, payTo: receiver },
-                  rail: "x402",
-                  destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, decimals: 6, tokenDomain: { name: "USDC", version: "2" } },
-                  par: true,
-                  maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
-                  fee: DYNAMIC_FEE_X402_OUT,
-                },
-              }
-            : {}),
-        },
-        budget: {
-          maxPurchases: Number(env["SUBETHA_DYNAMIC_MAX_PURCHASES"] ?? "1000"),
-          buckets: [
-            { network: INBOUND.network, asset: INBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
-            { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
-          ],
-        },
-        // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
-        denyHosts: [PUBLIC_HOSTNAME, ...(env["SUBETHA_DENY_HOSTS"] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter((host) => host !== "")],
-      },
+      ...(dynamicProfilesOf(env, receiver, mppInboundEnabled) === undefined
+        ? {}
+        : {
+            dynamic: {
+              enabled: true,
+              profiles: dynamicProfilesOf(env, receiver, mppInboundEnabled),
+              budget: {
+                maxPurchases: Number(env["SUBETHA_DYNAMIC_MAX_PURCHASES"] ?? "1000"),
+                buckets: [
+                  { network: INBOUND.network, asset: INBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
+                  { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
+                ],
+              },
+              // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
+              denyHosts: [PUBLIC_HOSTNAME, ...(env["SUBETHA_DENY_HOSTS"] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter((host) => host !== "")],
+            },
+          }),
     },
     // 上流の節は rail に関係なく `x402` という名前（`src/config.ts`）。全 route 分が要る。
     x402: {

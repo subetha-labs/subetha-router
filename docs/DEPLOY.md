@@ -41,12 +41,13 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_DYNAMIC_MAX_TOTAL` | | 動的上流 URL の通算の額の上限（受信・送信の各バケット、base units）。既定 `100000000` |
 | `SUBETHA_DENY_HOSTS` | | 動的上流 URL の宛先にできないホスト名（カンマ区切り）。公開ホスト名・facilitator・RPC の**ホスト名**（とそのサブドメイン）は設定に関係なく拒否する。運用者の Provider A・B（静的 route の上流）は拒否しない。別の名前で同じサービスに解決する宛先は拒否できない（設計 §7.4 の限界） |
 
-### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番では無効**
+### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番では x402 送信のプロファイルだけ有効**（2026-10-06、G-4）
 
 呼び出し側が**自分で上流の URL を選んで**、x402 か MPP で払い、もう一方のレールで上流に届く機能
-（設計 `dynamic-upstream-design.md`、要件 `dynamic-upstream-requirements.md`）。実装と試験は済んでいるが、
-**本番の入口（`tools/remote-mcp.ts`）が作る設定は常に `dynamic.enabled: false`** で、env からは変えられない。
-無効でも `subetha_router_list_routes` の `dynamic` にプロファイルの一覧と `enabled: false` が出る（quote は 404 `dynamic_disabled`）。
+（設計 `dynamic-upstream-design.md`、要件 `dynamic-upstream-requirements.md`）。本番の入口（`tools/remote-mcp-config.ts`）が登録するのは
+**`dyn-mpp-to-x402`（Tempo pathUSD で払って、x402 の上流に Base Sepolia USDC で届く）だけ**。MPP 送信のプロファイル（`dyn-x402-to-mpp`）は
+条件 6 が満たされるまで登録しない（`MPP_OUTBOUND_PROFILE_ENABLED = false`）。有効・無効もプロファイルの構成も env からは変えられない。
+`subetha_router_list_routes` の `dynamic` に `enabled: true` と登録済みのプロファイルが出る。
 
 **有効にする条件**（T16 の G-4。owner の判断。7 つ）:
 
@@ -70,9 +71,12 @@ docker run -d --name subetha-router --restart unless-stopped \
    `fee.min >= maxFee` を Router が起動時に確かめる。これで運営がチェーン手数料を負担しないのは、6 の前提——チェーンが請求する額が署名時の上限以下——が
    成り立つ場合）、`maxUpstreamAmount 10000`、`maxFee 5000`
 
-**有効化の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf` にある `enabled: false` を `true` にして、§6 の手順でイメージを作り直して入れ替える。
-**x402 送信のプロファイルだけ先に有効にする**場合は、同じ関数の `profiles` から `dyn-x402-to-mpp`（MPP 送信）を外す（`enabled` は全プロファイルに掛かる）。
-変える場所はこの関数だけ。変更には B の受け入れと G-2 の記録（日付・場所）をコメントで添える。**戻すのも同じ 1 箇所**（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
+**有効化の記録（2026-10-06）**: 条件 1〜7 を満たして x402 送信のプロファイルだけ有効にした。受け入れの記録は `tools/remote-mcp-config.ts` の
+`routerConfigOf` のコメントに日付と場所を並べて書いてある（B: 設計 `ssrf-egress-design.md` §25・レビュー #10、本番ホストへの設置と受け入れ 2026-10-05、§8b.0・§8b.6。
+G-2: `dynamic-upstream-tasks.md` T16、2026-10-06）。
+
+**変更の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf`（`enabled`）と `MPP_OUTBOUND_PROFILE_ENABLED` だけを変えて、§6 の手順でイメージを作り直して入れ替える。
+MPP 送信のプロファイルを足すのは条件 6 が満たされてから。**戻すのも同じ 1 箇所**（`enabled: false`）（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
 静的 route はそのまま動く）。
 
 **有効にした後に見るもの**: stderr の `outbound transport destination_blocked`（動的 URL が内部や拒否ホストに向いた）、`rate_limited` の頻度、
