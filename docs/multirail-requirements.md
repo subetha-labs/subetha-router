@@ -15,7 +15,7 @@
 | D-2 | facilitator は **Arc = Circle の Facilitator Service（testnet の trial）**、**Solana = x402.org**（本番の受信と同じ事業者） |
 | D-3 | Provider を Arc／Solana に置くかは S-3・S-4 の時点で判断 |
 | D-4 | 資産ペア（Arc USDC ↔ Tempo pathUSD／Base USDC、Solana USDC ↔ Base USDC／Tempo pathUSD）は testnet では **par（1:1）** |
-| D-5 | 鍵: Arc は Base Sepolia と**同じ EVM 鍵**（受取先は同じアドレス）。Circle の証明の鍵は V-1 の結果で決める（資金が動かないと確かめられなければ専用の鍵）。Solana は**新しい ed25519 鍵** |
+| D-5 | 鍵: Arc は Base Sepolia と**同じ EVM 鍵**（受取先は同じアドレス）。Circle の証明の鍵は V-1 の結果で決める（資金が動かないと確かめられなければ専用の鍵）。Solana は**新しい ed25519 鍵**。**補足（V-1、設計 §3）: Arc の受取先は証明専用の新しい受取鍵。既存の受取鍵は使わない** |
 | D-6 | 静的 route と動的プロファイルの**両方**を足す |
 | D-7 | 予算は既存と同じ桁（動的 1 件 20,000、通算 100,000,000、件数 1,000）。`npm run sign` の受信の上限は **20,000** |
 | D-8 | testnet は trial で運用し、facilitator の応答の照合は形まで（FR-20・FR-21）。Circle の本番 API key は取らない（mainnet は対象外） |
@@ -53,7 +53,7 @@ network の族ごとに分ける必要がある。
 
 | 項目 | 読んだこと | 出所 |
 |---|---|---|
-| 支払いプロトコル | x402 `exact` の SVM 版: 呼び出し側が「ComputeBudget ＋ SPL `TransferChecked` ＋ Memo」の **versioned transaction を部分署名**して渡し、facilitator が fee payer として署名・送信する。`payTo` は受取先の **ATA**（owner と mint から導く PDA）、`extra.feePayer` は facilitator の公開鍵、`extra.memo` は売り手の照合用 | x402 spec `specs/schemes/exact/scheme_exact_svm.md`（main、2026-10-06） |
+| 支払いプロトコル | x402 `exact` の SVM 版: 呼び出し側が「ComputeBudget ＋ SPL `TransferChecked` ＋ Memo」の **versioned transaction を部分署名**して渡し、facilitator が fee payer として署名・送信する。`payTo` は受取先の **owner の公開鍵**で、宛先の ATA は owner と mint から facilitator・client が導く（**訂正 2026-10-06**: 第 3 版まで「ATA」と書いていた。`@x402/svm` 2.28.0 の client `chunk-C3NL2A6D.mjs:74` と facilitator `exact/facilitator/index.mjs:745` が `findAssociatedTokenPda({ owner: payTo })` で導く）、`extra.feePayer` は facilitator の公開鍵、`extra.memo` は売り手の照合用 | x402 spec `specs/schemes/exact/scheme_exact_svm.md`（main、2026-10-06） |
 | facilitator | x402.org の `/supported` が Solana devnet（`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`、feePayer `CKPK…WYp5`）を**列挙する**。CDP は devnet／mainnet（API key）。mainnet は `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | `/supported` の実読、CDP の一覧 |
 | SDK | `@x402/svm` 2.28.0（peer `@solana/kit` ≥ 5.1、`@solana-program/*` に依存）。Router は `@x402/{core,evm,fetch}` **2.27.0**（版の整合は確認が要る） | npm |
 | MPP | `mppx` 0.11.0（導入済み）にも 0.13.1（最新）にも Solana の client method は無い | `node_modules/mppx/dist`、npm |
@@ -78,6 +78,16 @@ network の族ごとに分ける必要がある。
 | V-3 | `@x402/svm` 2.28 と導入済みの `@x402/core` 2.27 の整合（型・ペイロードの版） | パッケージの読取。必要なら core/evm/fetch を 2.28 に揃える（別 PR） |
 | V-4 | Arc testnet の USDC（`0x3600…`）が EIP-3009 `transferWithAuthorization` を持ち、domain が "USDC"/"2" であること。ネイティブ USDC（18 桁）とは別であること | RPC の読取: `name()`・`version()`・`DOMAIN_SEPARATOR()`・`decimals()` と、contract の code に `transferWithAuthorization`・`authorizationState` の selector があること。**getter の読取は EIP-3009 の挙動の証明ではない**ので、確証は AC-1 の settle（testnet）で取る |
 | V-5 | Solana devnet の USDC の mint・decimals・token program、ATA の作成と rent の負担 | RPC の読取、devnet での ATA 作成（運用者の鍵） |
+
+### 2.5 確認の結果（2026-10-06。すべて読取だけ）
+
+| # | 結果 |
+|---|---|
+| V-1 | Circle の `/supported`（鍵なしで読める）: `eip155:5042002`（Arc testnet）・`eip155:5042`（Arc mainnet）・Base・Base Sepolia・Polygon・Amoy、すべて `exact`、USDC（6 桁）、`extra.name/version`。拡張 `payment-identifier`・`settlement-status`。OpenAPI（`developers.circle.com/openapi/facilitator-service.yaml`）: `/verify`・`/settle`・`/status/{paymentId}` は **API key か売り手証明のどちらか**が必須、`/supported` は不要。要求は x402 v2（`x402Version`・`paymentPayload{accepted,payload{signature,authorization}}`・`paymentRequirements{…,extra{name,version,assetTransferMethod:"eip3009"}}`）。応答: verify `isValid`/`invalidReason`/`payer`、settle `success`/`transaction`/`network`/`payer`/`errorReason`。**売り手証明**（`sign-seller-proof.md`）: EIP-712 domain `{name:"Circle Facilitator Seller Request", version:"1", chainId}`（verifyingContract 無し）、型 `SellerRequest{purpose, method, bodyHash, network, payTo, nonce, issuedAt, expiresAt}`、`purpose ∈ {settle, verify, status}`、`bodyHash = keccak256(body)`、`issuedAt` は現在＋30 秒以内、`expiresAt` は `issuedAt`＋5 分以内、nonce は `(network, payTo)`・purpose ごとに一意、**署名は `payTo` の鍵で**（EOA は recover、contract は ERC-1271）。header は base64url の JSON 封筒。鍵なし trial: `payTo` ごと・チェーンごとの枠で `/settle` でき、尽きると `403 registration_required`。**資金を動かす署名ではない**（`SellerRequest` 型のみ。EIP-3009 とは型・domain が別）が、`payTo` の秘密鍵を Router の起動側が持つことになる（D-5 の補足: 本番の受取先 `0xF88b…6405` の鍵は今ホストに無い。Arc の受取先は**証明専用の受取鍵**を新しく作り、その鍵は証明の能力だけに渡す） |
+| V-2 | spec `scheme_exact_svm.md` の最終 commit `ff1bc50`（2026-03-18、Memo の文書化）。x402.org の `/supported`: `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`、feePayer `CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5`、`features.smartWalletSupported`。devnet での `/verify` の実行は設計の中で（使い捨ての ed25519 鍵と devnet の USDC が要る） |
+| V-3 | `@x402/core` 2.27.0 と 2.28.0 の dist は**バイト単位で同一**（版だけ）。`@x402/{core,evm,fetch}` を 2.28.0 に揃えてから `@x402/svm` 2.28.0 を入れる。`@solana/kit` は 8.4.0 が最新（peer ≥ 5.1） |
+| V-4 | Arc testnet（chainId `0x4cef52` = 5042002）の `0x3600…`: `name()` "USDC"、`version()` "2"、`decimals()` 6、`DOMAIN_SEPARATOR()` あり。code は 1,798 バイトで selector を含まない（delegatecall で委譲する薄い contract）が、**`authorizationState(addr, nonce)` は 0 を返し、`transferWithAuthorization` を不正な署名で呼ぶと `ECRecover: invalid signature 'v' value` で revert**（関数が存在し、EIP-3009 の経路に入る）。未知の selector は理由なしの revert。ネイティブの USDC（18 桁）とは別の ERC-20 |
+| V-5 | Solana devnet: genesis `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`（CAIP-2 は先頭 32 文字）、Circle の devnet USDC mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`（decimals 6、token program `Tokenkeg…`、initialized）。ATA（165 バイト）の rent は 1,488,440 lamports |
 
 ## 3. スコープ（選べる形）
 
@@ -117,9 +127,9 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 
 ### 4.1 共通（レールの複数化と network の束縛）
 
-- **FR-1**: x402 の受信 facilitator は **network ごと**に設定できる（例: `eip155:84532` → x402.org、`eip155:5042002` → Circle、`solana:Et…` → x402.org）。URL は env（本番の入口）で与え、
+- **FR-1**: x402 の受信 facilitator は **network ごと**に設定できる（例: `eip155:84532` → x402.org、`eip155:5042002` → Circle、`solana:Et…` → x402.org）。URL は設定ファイル（`x402.inboundFacilitators`。既存の `eip155:84532` だけ env のまま。設計 §2 で決定、2026-10-06）で与え、
   **拒否ホスト**と `dependencyUrls` に自動で入る。API key は URL に含めず、ログに出さない
-- **FR-2**: x402 の送信署名能力（`evmSigning`）は **network ごと**に注入できる。承認済み offer の `network` と一致する能力だけを使い、無ければ fail closed
+- **FR-2**: x402 の送信署名能力（`evmSigning`）は **network ごと**に注入できる。承認済み offer の `network` と一致する能力だけを使い、無ければ fail closed（受信だけの S-1・S-2 では不要。**S-3 で設計**）
 - **FR-3**: 許す network は**列挙**し、network ごとに「レール・資産（アドレス／mint）・桁・EIP-712 domain（EVM）・token program（SVM）・受取先の形（`0x`／ATA）」を**設定の表で束ねる**。
   表に無い network、表と違う資産・桁・domain は起動時に拒否。network だけの許可では足りない
 - **FR-4**: レール名は増やさない（`x402`・`mpp`・`subetha`）。x402 の中で EVM と SVM を network の族（`eip155:`／`solana:`）で振り分けるのは合成側（`src/main.ts`）。
@@ -146,7 +156,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 
 ### 4.4 Solana の受信（S-2）
 
-- **FR-14**: Solana devnet の USDC（SPL。mint・decimals・token program は表で固定）を x402 `exact`（SVM）で受ける。受取先は Router の鍵の ATA。**起動時に ATA を読み、
+- **FR-14**: Solana devnet の USDC（SPL。mint・decimals・token program は表で固定）を x402 `exact`（SVM）で受ける。受取先は offer の `payTo` = Router の受取 **owner の公開鍵**（設定値。鍵は要らない）で、資金は owner の ATA に入る。**起動時に ATA を読み、
   owner・mint・token program が表と一致することを確かめる**（存在だけでは足りない）。無ければ起動しない（作るのは運用者。rent の負担も運用者）
 - **FR-15**: requirements の `extra.feePayer` は facilitator の `/supported` から**起動時に読んで固定**する。変われば再起動（発行済みの quote は verify で落ちる。自動で追随しない）
 - **FR-16**（preflight。facilitator に渡す前に Router が**自分で**確かめる。確かめられない形は有料ライフサイクルを始めない）:
@@ -156,7 +166,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
   - `TransferChecked` の宛先 = Router の ATA、mint = 表の mint、decimals = 表の桁、額 = offer の額（ちょうど）、authority（署名者）≠ fee payer
   - fee payer = 起動時に固定した facilitator の公開鍵。fee payer が命令の口座に現れない
   - Memo = Router の challengeNonce（offer ごとに 1 つ）。**memo を書き換えた transaction は署名が合わない**（署名は message 全体に掛かる）が、Router はそれに頼らず memo を照合する
-  - 同じ transaction・同じ nonce の再提出は preflight で止める（quote・route・並行・再起動をまたいでも。既存の nonce の規則に乗せる）
+  - 再提出（訂正 2026-10-06）: preflight は「同じ transaction の 2 度目」をそれ自体では拒まない。二重の settle を防ぐのは既存の規則（静的: verify 失敗で終端・settle 1 回、動的: 昇格前の再試行は許し昇格後は 1 回、quote ごとの lock）。別の quote への再提出は memo（= その quote の nonce）で落ちる
 - **FR-17**: 呼び出し側の道具（`npm run sign`）は Solana の offer を見分けて SVM の transaction を組み、部分署名する。ed25519 の鍵は env。**署名だけで資金は動かない**（facilitator が
   送信する）——x402/EVM と同じ開示（承認 → 署名の順は変えない）
 - **FR-18**: 受信で Router が Solana の RPC に出るのは起動時の ATA の検査だけ（quote・purchase の中では facilitator だけ）。`@x402/svm` の simulate 等は受信では使わない
