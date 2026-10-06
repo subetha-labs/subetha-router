@@ -79,6 +79,16 @@ network の族ごとに分ける必要がある。
 | V-4 | Arc testnet の USDC（`0x3600…`）が EIP-3009 `transferWithAuthorization` を持ち、domain が "USDC"/"2" であること。ネイティブ USDC（18 桁）とは別であること | RPC の読取: `name()`・`version()`・`DOMAIN_SEPARATOR()`・`decimals()` と、contract の code に `transferWithAuthorization`・`authorizationState` の selector があること。**getter の読取は EIP-3009 の挙動の証明ではない**ので、確証は AC-1 の settle（testnet）で取る |
 | V-5 | Solana devnet の USDC の mint・decimals・token program、ATA の作成と rent の負担 | RPC の読取、devnet での ATA 作成（運用者の鍵） |
 
+### 2.5 確認の結果（2026-10-06。すべて読取だけ）
+
+| # | 結果 |
+|---|---|
+| V-1 | Circle の `/supported`（鍵なしで読める）: `eip155:5042002`（Arc testnet）・`eip155:5042`（Arc mainnet）・Base・Base Sepolia・Polygon・Amoy、すべて `exact`、USDC（6 桁）、`extra.name/version`。拡張 `payment-identifier`・`settlement-status`。OpenAPI（`developers.circle.com/openapi/facilitator-service.yaml`）: `/verify`・`/settle`・`/status/{paymentId}` は **API key か売り手証明のどちらか**が必須、`/supported` は不要。要求は x402 v2（`x402Version`・`paymentPayload{accepted,payload{signature,authorization}}`・`paymentRequirements{…,extra{name,version,assetTransferMethod:"eip3009"}}`）。応答: verify `isValid`/`invalidReason`/`payer`、settle `success`/`transaction`/`network`/`payer`/`errorReason`。**売り手証明**（`sign-seller-proof.md`）: EIP-712 domain `{name:"Circle Facilitator Seller Request", version:"1", chainId}`（verifyingContract 無し）、型 `SellerRequest{purpose, method, bodyHash, network, payTo, nonce, issuedAt, expiresAt}`、`purpose ∈ {settle, verify, status}`、`bodyHash = keccak256(body)`、`issuedAt` は現在＋30 秒以内、`expiresAt` は `issuedAt`＋5 分以内、nonce は `(network, payTo)`・purpose ごとに一意、**署名は `payTo` の鍵で**（EOA は recover、contract は ERC-1271）。header は base64url の JSON 封筒。鍵なし trial: `payTo` ごと・チェーンごとの枠で `/settle` でき、尽きると `403 registration_required`。**資金を動かす署名ではない**（`SellerRequest` 型のみ。EIP-3009 とは型・domain が別）が、`payTo` の秘密鍵を Router の起動側が持つことになる（D-5 の補足: 本番の受取先 `0xF88b…6405` の鍵は今ホストに無い。Arc の受取先は**証明専用の受取鍵**を新しく作り、その鍵は証明の能力だけに渡す） |
+| V-2 | spec `scheme_exact_svm.md` の最終 commit `ff1bc50`（2026-03-18、Memo の文書化）。x402.org の `/supported`: `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`、feePayer `CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5`、`features.smartWalletSupported`。devnet での `/verify` の実行は設計の中で（使い捨ての ed25519 鍵と devnet の USDC が要る） |
+| V-3 | `@x402/core` 2.27.0 と 2.28.0 の dist は**バイト単位で同一**（版だけ）。`@x402/{core,evm,fetch}` を 2.28.0 に揃えてから `@x402/svm` 2.28.0 を入れる。`@solana/kit` は 8.4.0 が最新（peer ≥ 5.1） |
+| V-4 | Arc testnet（chainId `0x4cef52` = 5042002）の `0x3600…`: `name()` "USDC"、`version()` "2"、`decimals()` 6、`DOMAIN_SEPARATOR()` あり。code は 1,798 バイトで selector を含まない（delegatecall で委譲する薄い contract）が、**`authorizationState(addr, nonce)` は 0 を返し、`transferWithAuthorization` を不正な署名で呼ぶと `ECRecover: invalid signature 'v' value` で revert**（関数が存在し、EIP-3009 の経路に入る）。未知の selector は理由なしの revert。ネイティブの USDC（18 桁）とは別の ERC-20 |
+| V-5 | Solana devnet: genesis `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`（CAIP-2 は先頭 32 文字）、Circle の devnet USDC mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`（decimals 6、token program `Tokenkeg…`、initialized）。ATA（165 バイト）の rent は 1,488,440 lamports |
+
 ## 3. スコープ（選べる形）
 
 ### 3.1 方向の候補
