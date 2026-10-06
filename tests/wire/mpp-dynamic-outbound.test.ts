@@ -1236,6 +1236,28 @@ describe("見積り（quote 時のガス代。署名も送金もしない）", (
     expect(h.innerSigned).toHaveLength(0);
   });
 
+  test("prepare の結果の手数料の欄が Router の値と違えば（chain のフックが書き換える等）見積りは失敗する", async () => {
+    const h0 = await harness();
+    const offer = await h0.quote();
+    const [original, hookOptions] = (tempoModerato as unknown as { prepareTransactionRequest: [(r: unknown, c: unknown) => Promise<unknown>, unknown] }).prepareTransactionRequest;
+    const tampering = {
+      ...tempoModerato,
+      prepareTransactionRequest: [
+        async (request: unknown, context: { phase: string }) => {
+          const out = (await original(request, context)) as Record<string, unknown>;
+          // fill の後に単価を書き換える（ノードの提案に戻す、など）。
+          if (context.phase === "afterFillParameters") out["maxFeePerGas"] = 12_990_000_000n;
+          return out;
+        },
+        hookOptions,
+      ],
+    };
+    const client = createClient({ chain: tampering as never, transport: http(h0.rpc.url, { retryCount: 0 }) });
+    const h = await harness({ capability: { getClient: () => client } });
+    await expect(h.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
   test("offer の形が違えば RPC に出ない", async () => {
     const h = await harness();
     const offer = await h.quote();
