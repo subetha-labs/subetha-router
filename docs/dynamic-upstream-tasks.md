@@ -326,7 +326,15 @@ RPC の列 2／3（見積り）・3／6（支払い）、提案が跳ねても q
 
 **レビュー**: 設計 2 回（APPROVE WITH CHANGES → APPROVE。設計 §6 の 10・11 行目）、実装 1 回目 REJECT（予算の外の読取。12 行目）→ 修正、2 回目 **APPROVE**（13 行目）。Linux で全体 1,103 件通過。
 
-**G-4 の 2 回目（2026-10-06、owner の決定「1 も 2 も進めましょう」）**: `MPP_OUTBOUND_PROFILE_ENABLED = true`。本番の入口は両方向のプロファイルを登録する（次の配備で有効になる構成。配備の記録は配備後にここへ追記する）。
+**G-4 の 2 回目（2026-10-06、owner の決定「1 も 2 も進めましょう」）**: `MPP_OUTBOUND_PROFILE_ENABLED = true`（PR #40）。本番の入口は両方向のプロファイルを登録する。
+
+**本番への配備（2026-10-06 10:07Z）**: イメージ `b-b1524b0`（`main`。T18 ＋ G-4 の 2 回目）に入れ替え。手順は従来どおり（旧コンテナは `subetha-router-prev-20261006T100716Z`（`b-ff3c496`）、
+journal 87,192 バイトは不変の prefix、`subetha-egress check` rc 0、Caddy 再開。`b-960ddc3` の `-prev-` は削除）。**起動時の probe（`eth_fillTransaction`）は本番に設定した RPC で通った**
+（通らなければ Router は起動しない。DEPLOY §2b 条件 6）。
+確認（公開 MCP）: 一覧に `dyn-x402-to-mpp`（`feePolicy: gas-indexed, feeMargin 20000, maxFeeCeiling 50000`）と `dyn-mpp-to-x402`／Provider B への動的 quote が成立
+（上流 10,000 ＋ 手数料 1,000、cap 158、見積り gas 54,399・maxFeePerGas 1,440,000,001・bound 79）／**本番で x402 → MPP の動的購入 1 件が delivered**（3.2 秒。
+受信 USDC 11,000: tx `0x95b09c82…c2d6`、送信 pathUSD 10,000: tx `0x89be140f…a9b6`、block 38407602、署名した priority **1**・maxFeePerGas 1,440,000,001、gasUsed 46,683、
+**請求額 29 ≤ bound 79 ≤ cap 158 ≤ 手数料 1,000**）。使い捨て口座、testnet。
 
 **testnet の試行（2026-10-06 09:26Z、owner の承認）**: `tools/dyn-mpp-priority-trial.ts` で本番と同じ Router に本番の値の MPP 送信プロファイルを登録し、x402 → MPP（Provider B）の動的購入 1 件が
 **delivered**。Tempo の送金 `0xd858ac56…bfd2` は priority **1**・`maxFeePerGas` 1,440,000,001（Router の単価）で取り込まれ、請求額 29 ≤ bound 79 ≤ cap 158 ≤ 手数料 1,000（設計 §8.5）。
