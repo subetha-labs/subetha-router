@@ -1,6 +1,6 @@
 # 動的上流 URL — MPP 送信の手数料を quote 時のガス代で決める（設計）
 
-> 2026-10-06、第 3 版（独立レビュー #1・#2 を反映。§6）。owner の方針（2026-10-06）: 「運営がガス代を負担するリスクは構造として排除する。
+> 2026-10-06、第 3 版（独立レビュー #1〜#3 を反映。§6）。owner の方針（2026-10-06）: 「運営がガス代を負担するリスクは構造として排除する。
 > 上流の手数料が高騰する場合は、それに応じた価格を下流（呼び出し側）に提示する」。前提は `dynamic-upstream-design.md`（以下「本設計」）§3.3・§6.6・§11 と、
 > G-1 で入れた条件 `fee.min >= maxFee`（PR #30）。MPP 送信のプロファイルを本番で有効にする前提（`DEPLOY.md` §2b の条件 6）の一部。
 
@@ -142,8 +142,12 @@ MPP 送信のプロファイルの記録（`dynamic.profile.rail === "mpp"`）�
 | 記録 | 復元後 |
 |---|---|
 | 終端（`paid`・`rejected`・`unknown` 等）の履歴 | そのまま。状態の照会・予算の集計は従来どおり（予算は journal の予約から独立に集計する。`budget.ts`） |
-| 昇格済みの `created`（予約あり） | `ownerKeyHash`・予約・結果は保たれ、状態の照会は通る。**purchase は `rejected` / `quote_unreadable`**（settle へ進まない）。予約は通算の予算に数えられたまま（昇格済みで完了しない購入と同じ扱い） |
-| 控え（ledger）の quote | `intentOfLedger` も同じ検査。purchase は `rejected` / `quote_unreadable` |
+| 昇格済みの `created`（予約あり） | `ownerKeyHash`・予約・結果は保たれ、状態の照会は通る。**purchase は `rejected` / `quote_unreadable`**（settle へ進まない）。**受信 offer の再発行（`offerFor`。HTTP の offer 口）もしない**（Router が断ると分かっている記録に向けて MPP の呼び出し側が払うのを防ぐ）。予約は通算の予算に数えられたまま（昇格済みで完了しない購入と同じ扱い） |
+| 控え（ledger）の quote | `intentOfLedger` も同じ検査。purchase は `rejected` / `quote_unreadable`、offer の再発行もしない |
+
+core で `dynamicCapInvalid` を見る場所: 控えから組んだ直後（`dynamic.ts` の quote の応答）、purchase の検査（門・見積り・verify・settle の前）、昇格後の読み直し
+（`source_pending` の前）、配達（`orchestrator.ts` の `deliver`。settle 済みなら「払ったが届かない」結果を保つ）、offer の取得（`offerFor`）。状態の照会（`readable`）は
+`ownerKeyHash` で通す。
 
 - 旧い記録の移行は**しない**: 本番は MPP 送信のプロファイルを一度も登録していない（G-4。`MPP_OUTBOUND_PROFILE_ENABLED = false`）ので、cap の無い MPP 送信の記録は
   本番の journal に存在しない。試験・開発の journal にあれば `dynamicCapInvalid` のまま期限切れにする
@@ -153,7 +157,7 @@ MPP 送信のプロファイルの記録（`dynamic.profile.rail === "mpp"`）�
 昇格済み（`created` ＋予約あり）の purchase は予約を取り直さない（本設計 §6.2 の 5）。そこで core は、再開の前に**記録から**次を確かめ、
 違えば `rejected` / `quote_unreadable`（復元で `dynamicCapInvalid` になるものと同じ条件を、復元に頼らず core でも見る）:
 
-- `pricing.maxFee` が上の形で存在し、`fee >= maxFee`
+- `pricing.maxFee`・`pricing.estimate` が §3.1 の形で存在し、`fee >= maxFee`
 - 予約に `{ network: destination.network, asset: destination.feeAsset }` の区分があり、その合計が `upstreamAmount + maxFee` 以上（`feeAsset` = 送信資産なので、
   元本の区分と手数料の区分は同じ鍵に落ちる。`reservationOf` の形）
 
@@ -170,7 +174,11 @@ MPP 送信のプロファイルの記録（`dynamic.profile.rail === "mpp"`）�
 - **署名後・送信前の拒否は `not_sent`**: 送金の RPC（raw の送信 1 回）が**接続の前に**断られた場合——adapter の RPC の予算切れ、transport の門
   （`admission_refused`）、方針（`destination_blocked`）——は、raw は出ていないので `not_sent` / `destination_send_refused_before_dispatch`
   （署名した raw は捨てる。expiring nonce なので `validBefore` で死ぬ。再署名・再送はしない）。今はこれも `unknown` に落ちる（署名 1 回の後の失敗はすべて不明扱い）が、
-  門の拒否は socket を開く前に起きるので「送っていない」と言える。接続した後の失敗は従来どおり `unknown`
+  門の拒否は socket を開く前に起きるので「送っていない」と言える。接続した後の失敗は従来どおり `unknown`。
+  判定は**その送金の要求の失敗の `cause` を辿って** Router 自身の例外型（`TransportError` の code、`RpcBudgetExhaustedError`）を見る（viem は元の例外を `cause` に包む。
+  文字列や RPC 側のラベルでは判定しない）。**最初の送金の要求にだけ**結び付け、1 度目が接続した後に失敗していれば、以後どんな拒否があっても `unknown` のまま
+- 新しい理由コード `destination_fee_cap_invalid`・`destination_send_refused_before_dispatch` は core の理由の許可リスト（`orchestrator.ts` の `SAFE_REASONS`）に足す
+  （足さないと journal・応答で `destination_rejected` に潰れ、証跡が残らない）。core の試験で journal と応答に残ることを見る
 
 ## 4. 変えないこと・限界
 
@@ -205,7 +213,7 @@ MPP 送信のプロファイルの記録（`dynamic.profile.rail === "mpp"`）�
 | `src/adapters/outbound/mpp-dynamic.ts` | `estimateFee`（署名しない facade・読取だけの guard・残り予算の期限・client の取得も予算内）、`pay` が `request.maxFee` を必須にし `ApprovedTransfer` を 1 度だけ作る、送金の RPC の接続前の拒否を `not_sent` に |
 | `src/adapters/outbound/mpp.ts`・`src/main.ts` | `estimateFee` の転送（`railByRoute`） |
 | `src/core/dynamic.ts` | quote の手順に見積りを足す。`priceOf(profile, amount, cap?)`、`reservationOf`・`perPurchaseLimitOf`・`fundsAvailable` が `pricing.maxFee` を使う。purchase の再見積り（§1.4）と再開前の検査（§3.3）、`dynamicCapInvalid` の拒否 |
-| `src/core/orchestrator.ts` | `deliver` が `pay` に `maxFee` を渡す |
+| `src/core/orchestrator.ts` | `deliver` が `pay` に `maxFee` を渡す。`SAFE_REASONS` に新しい理由コード。`deliver`・`offerFor` が `dynamicCapInvalid` を見る |
 | `src/core/store.ts`・`src/core/intent.ts` | `pricing.maxFee`・`pricing.estimate` の復元と `dynamicCapInvalid`（§3.2） |
 | `src/http/projection.ts`・`src/client`・`src/mcp` | `pricing.maxFee`・`pricing.estimate` の表示、`disclosures` の `routerMayRejectAfterSettle`・`routerMayRejectAfterFundsMoved`、client の `quoteUrl` の期限 30 秒・`DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS` の注釈 |
 | `tools/remote-mcp-config.ts`・`src/main.ts`・`docs/DEPLOY.md` | MPP 送信のプロファイル: `feeMargin 20000`、ceiling 50,000、`fee` を 1,000 に（登録は引き続き無効）。`verify` で RPC の `eth_fillTransaction` 対応を読取で確かめる。§2b の条件に足す |
@@ -218,3 +226,4 @@ MPP 送信のプロファイルの記録（`dynamic.profile.rail === "mpp"`）�
 |---|---|---|---|---|
 | 1 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 1 版 `3c5da30`） | **REJECT** | (1) cap を記録・復元・再開・adapter の 4 か所で必須に（§3。`orchestrator.ts` を変更対象に追加）。(2) 「x402 受信なら払っていない」は誤り（settle → 送信の順）。両レールの開示に直し、purchase 時の再見積りを足した（§1.4・§4）。(3) 例を署名前の bound（79〜706）で書き直し、2 倍を仮の値とした（§2）。(4) RPC の回数を `eth_fillTransaction` の失敗を含めて 4／5 回に直し、合計の期限を要求ごとの残り予算で本当に 6 秒にし、RPC ホストの容量を 60／分の枠で計算し直した（§1.3・§4）。(5) `feeMargin` を 10,000〜1,000,000 に限定し、権威の欄に入れた（§2）。(6) memo 非依存を「この形についての実測」に言い直し、prepared gas と `gasUsed` を区別し、memo 3 通りの probe を足した（§1.1）。ほか: 見積りは `prepareTransactionRequest` 直接呼び・credential 作成を呼ばない・送金系メソッドを例外なく拒否、30 秒は `quoteUrl` だけ、承認表示の項目、静的への fallback の表現を修正 |
 | 2 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 2 版 `a92e8e3`） | **REJECT** | (1) `dynamicInvalid` は `ownerKeyHash` ごと捨てるので状態の照会が通らない → `dynamic` を保ったまま `dynamicCapInvalid` を立てる形に。終端・昇格済み・控えの各記録の扱いと、再開前の検査の内容（cap の形・予約の区分）を明記（§3.2・§3.3）。(2) 容量の計算が送信の RPC だけで、上流の GET・facilitator・受信の RPC・名前解決の全アドレスを数えていなかった。「署名前に止まる」も誤り（送金の RPC の門の拒否は署名後で `unknown`）→ 全消費者を数え、非対応ノードを運用条件から外し、**送金の RPC の接続前の拒否を `not_sent` に分類**（§3.4・§4）。(3) `pricingPolicy` を無条件に足すと発行済みの x402 送信の quote が `quote_changed` になる → MPP 送信だけに限定し x402 の直列化を不変に（§2）。(4) purchase 時の見積り失敗の結果、証跡の表現、再開の「資金は動いていない」、レール別の助言、x402 受信への開示を明記（§1.4・§3.3・§4）。(5) `timeout` 関数は `fetchFn` の中で読む、client の取得も予算内、purchase の最悪 102 秒、見積りの証跡 `pricing.estimate` を定義（§1.2・§3.1・§5）。`feeMargin` の位置を `destination.feeMargin` に統一 |
+| 3 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 3 版 `e575a84`） | **APPROVE WITH CHANGES** | (1) `dynamic` を保つと `offerFor` が受信 offer を再発行し、断ると分かっている記録に向けて払える → offer の取得でも `dynamicCapInvalid` を見る（§3.2 に core の検査点を列挙）。(2) 新しい理由コードが `SAFE_REASONS` に無いと `destination_rejected` に潰れる → 許可リストと core の試験（§3.4・§5）。ほか: 接続前の拒否の判定は `cause` を辿って Router の例外型で（viem が包む）、最初の送金の要求にだけ結び付ける（§3.4）。§3.3 に `pricing.estimate` の検査を明記。実装の前提になる設計上の障害は無し |
