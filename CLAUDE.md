@@ -85,9 +85,10 @@ No key yet? `npm run wallet:new`. Base Sepolia USDC balance: `npm run wallet:bal
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`. On the hosted Router the profile `dyn-mpp-to-x402` is enabled (you pay **Tempo
-pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**); a profile that is not listed, or
-`enabled: false`, means `subetha_router_quote_url` answers `unknown_route` / `dynamic_disabled`.
+with `enabled`. On the hosted Router both profiles are enabled: `dyn-mpp-to-x402` (you pay **Tempo
+pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**) and `dyn-x402-to-mpp` (you pay
+**Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); a profile that is not listed,
+or `enabled: false`, means `subetha_router_quote_url` answers `unknown_route` / `dynamic_disabled`.
 The steps differ from the static ones in these ways:
 
 1. Pick the **profile** you can pay with (`dynamic.profiles[].source` is what you pay, `destination` is

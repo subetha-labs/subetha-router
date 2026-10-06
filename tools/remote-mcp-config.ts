@@ -54,7 +54,8 @@ export const PUBLIC_HOSTNAME = "router.subethalabs.com";
  *   cap = ceil(bound × feeMargin / 10000)（`feeMargin` 20,000 = 2 倍。仮の値——quote 時と purchase 時の bound を本番で並べてから見直す）、
  *   手数料 = max(定額 1,000, cap)。cap が天井 `maxFee` 50,000（0.05。署名前の上限の実測 79〜706 の約 70 倍）を超える quote は出さない。
  *   呼び出し側が先に払う手数料 ≥ 署名時の上限、を quote ごとに保つ（設計 §2・§3）。
- *   「チェーンが請求する額が署名時の上限以下」という Tempo 側の前提が確立するまで、このプロファイルは本番で有効にしない（`docs/DEPLOY.md` §2b の条件 6）。
+ *   単価は Router が決める（priority 1 wei、`maxFeePerGas = ceil(2.4 × baseFee) + 1`。設計 §8）。
+ *   「チェーンが請求する額が署名時の上限以下」という Tempo 側の前提は 2026-10-06 に仕様とノードのソース（v1.16.0）で確立した（設計 §7）。
  */
 const DYNAMIC_MAX_FEE_CEILING = "50000";
 const DYNAMIC_FEE_MARGIN_BPS = 20_000;
@@ -62,8 +63,12 @@ const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_FEE_MPP_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 
-/** MPP 送信のプロファイルを登録するか。Tempo の手数料の仕様で上限が確立するまで `false`（`docs/DEPLOY.md` §2b の条件 6）。 */
-const MPP_OUTBOUND_PROFILE_ENABLED = false;
+/**
+ * MPP 送信のプロファイルを登録するか。**2026-10-06 に `true`**（G-4 の 2 回目、owner の決定「1 も 2 も進めましょう」）。
+ * `docs/DEPLOY.md` §2b の条件 6 の前提: 手数料の仕様の確立（`docs/dynamic-gas-fee-design.md` §7、ノード v1.16.0）、Router の単価での testnet の試行の成立（同 §8.5、2026-10-06 09:26Z、
+ * Tempo tx `0xd858ac56…bfd2`）、起動時の `eth_fillTransaction` の確認。ノードの版名が変わるか hardfork が有効になったら §7 を読み直す。戻すのはここを `false` に。
+ */
+const MPP_OUTBOUND_PROFILE_ENABLED = true;
 
 /**
  * 登録する動的プロファイル。1 つも無ければ `undefined`（`dynamic` の節を書かない。空の `profiles` は設定の検証が拒否する）。
@@ -200,9 +205,10 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
        *   2026-10-06 のデプロイ（`b-56265da`）でも `subetha-egress check` は正常
        * - G-2（testnet の実決済、両方向）: `docs/dynamic-upstream-tasks.md` T16 の記録（2026-10-06）
        *
-       * **有効にするのは x402 送信（`dyn-mpp-to-x402`: Tempo pathUSD で払って x402 の上流に届く）だけ。** MPP 送信（`dyn-x402-to-mpp`）は、
-       * Tempo の手数料の仕様で署名時の上限が実額の上限であることが確立するまで登録しない（§2b の条件 6。`MPP_OUTBOUND_PROFILE_ENABLED`）。
-       * 値を変える場所はこの関数だけ。戻すのも同じ（`enabled: false`）。
+       * - 2026-10-06（1 回目）: x402 送信（`dyn-mpp-to-x402`: Tempo pathUSD で払って x402 の上流に届く）だけ有効にした。
+       * - 2026-10-06（2 回目）: MPP 送信（`dyn-x402-to-mpp`: Base Sepolia USDC で払って MPP の上流に届く）も登録（`MPP_OUTBOUND_PROFILE_ENABLED`）。
+       *   条件 6: 手数料の仕様の確立（`docs/dynamic-gas-fee-design.md` §7）、Router の単価での testnet の試行（同 §8.5）
+       * 値を変える場所はこの関数と `MPP_OUTBOUND_PROFILE_ENABLED` だけ。戻すのも同じ（`enabled: false`／`false`）。
        */
       ...(dynamicProfilesOf(env, receiver, mppInboundEnabled) === undefined
         ? {}

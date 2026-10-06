@@ -41,12 +41,13 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_DYNAMIC_MAX_TOTAL` | | 動的上流 URL の通算の額の上限（受信・送信の各バケット、base units）。既定 `100000000` |
 | `SUBETHA_DENY_HOSTS` | | 動的上流 URL の宛先にできないホスト名（カンマ区切り）。公開ホスト名・facilitator・RPC の**ホスト名**（とそのサブドメイン）は設定に関係なく拒否する。運用者の Provider A・B（静的 route の上流）は拒否しない。別の名前で同じサービスに解決する宛先は拒否できない（設計 §7.4 の限界） |
 
-### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番では x402 送信のプロファイルだけ有効**（2026-10-06、G-4）
+### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番で両方向のプロファイルが有効**（2026-10-06、G-4 の 1 回目と 2 回目）
 
 呼び出し側が**自分で上流の URL を選んで**、x402 か MPP で払い、もう一方のレールで上流に届く機能
 （設計 `dynamic-upstream-design.md`、要件 `dynamic-upstream-requirements.md`）。本番の入口（`tools/remote-mcp-config.ts`）が登録するのは
-**`dyn-mpp-to-x402`（Tempo pathUSD で払って、x402 の上流に Base Sepolia USDC で届く）だけ**。MPP 送信のプロファイル（`dyn-x402-to-mpp`）は
-条件 6 が満たされるまで登録しない（`MPP_OUTBOUND_PROFILE_ENABLED = false`）。有効・無効もプロファイルの構成も env からは変えられない。
+**`dyn-mpp-to-x402`**（Tempo pathUSD で払って、x402 の上流に Base Sepolia USDC で届く。2026-10-06 の 1 回目）と
+**`dyn-x402-to-mpp`**（Base Sepolia USDC で払って、MPP の上流に Tempo pathUSD で届く。同日の 2 回目、`MPP_OUTBOUND_PROFILE_ENABLED = true`。
+手数料は quote 時のガス代の見積りから——`docs/dynamic-gas-fee-design.md`）。有効・無効もプロファイルの構成も env からは変えられない。
 `subetha_router_list_routes` の `dynamic` に `enabled: true` と登録済みのプロファイルが出る。
 
 **有効にする条件**（T16 の G-4。owner の判断。7 つ）:
@@ -71,7 +72,8 @@ docker run -d --name subetha-router --restart unless-stopped \
    （commit `74b6915`）で、請求額 = `ceil(max(gas_used − reservoir, 0) × min(maxFeePerGas, baseFee + priority) / 10^12)` ≤ 署名時の上限（`docs/dynamic-gas-fee-design.md` §7）。
    testnet Moderato のノードは `tempo/v1.16.0-023f1d0` を名乗り、`023f1d0` の tree は tag の commit `74b6915` と全ファイルの blob が一致する（直接比較）ので、
    手数料の経路のソースは配備された版と一致する（バイナリは未検証）。**ノードの版名が変わるか、hardfork が有効になったら読み直す**こと（版が変わらなくても挙動は変わり得る）。
-   **Router の単価（priority 1）での送金の testnet の試行は 2026-10-06 に 1 件成立**（`docs/dynamic-gas-fee-design.md` §8.5）。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
+   **Router の単価（priority 1）での送金の testnet の試行は 2026-10-06 に 1 件成立**（`docs/dynamic-gas-fee-design.md` §8.5。観測・試行は**公開の testnet RPC**に対して行った。
+   本番の Router に設定した RPC（`SUBETHA_TEMPO_RPC_URL`）については、配備時の起動 probe（`eth_fillTransaction`）が通ったことを配備の記録に書く）。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
    `docs/dynamic-gas-fee-design.md` §2・§4）と、RPC ノードが `eth_fillTransaction` に対応していること（起動時の `verify` が読取で確かめる。非対応ノードでは
    quote・purchase の RPC が宛先アドレスの枠に収まらない。同 §4）
 7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`・`feeMargin`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000。MPP 送信は quote 時のガス代の見積りから
@@ -83,8 +85,13 @@ docker run -d --name subetha-router --restart unless-stopped \
 `routerConfigOf` のコメントに日付と場所を並べて書いてある（B: 設計 `ssrf-egress-design.md` §25・レビュー #10、本番ホストへの設置と受け入れ 2026-10-05、§8b.0・§8b.6。
 G-2: `dynamic-upstream-tasks.md` T16、2026-10-06）。
 
+**有効化の記録（2026-10-06、2 回目）**: 条件 6 の前提（手数料の仕様の確立 `dynamic-gas-fee-design.md` §7・Router の単価での testnet の試行 §8.5・起動時の `eth_fillTransaction` の確認）が揃い、
+owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登録した（`MPP_OUTBOUND_PROFILE_ENABLED = true`）。記録は `tools/remote-mcp-config.ts` のコメントと
+`dynamic-upstream-tasks.md` T16・T18。
+
 **変更の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf`（`enabled`）と `MPP_OUTBOUND_PROFILE_ENABLED` だけを変えて、§6 の手順でイメージを作り直して入れ替える。
-MPP 送信のプロファイルを足すのは条件 6 が満たされてから。**戻すのも同じ 1 箇所**（`enabled: false`）（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
+戻し方は 2 段階: `MPP_OUTBOUND_PROFILE_ENABLED = false` は **MPP 送信のプロファイルだけ**を外す（journal の昇格済みの購入は予約を保ったまま再生され、`created` の購入は支払いの前に `quote_changed`）、
+`enabled: false` は**両方向**を止める。**戻すのも同じ 1 箇所**（`enabled: false`）（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
 静的 route はそのまま動く）。
 
 **有効にした後に見るもの**: stderr の `outbound transport destination_blocked`（動的 URL が内部や拒否ホストに向いた）、`rate_limited` の頻度、
