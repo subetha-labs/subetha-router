@@ -326,7 +326,7 @@ RPC の列 2／3（見積り）・3／6（支払い）、提案が跳ねても q
 
 **レビュー**: 設計 2 回（APPROVE WITH CHANGES → APPROVE。設計 §6 の 10・11 行目）、実装 1 回目 REJECT（予算の外の読取。12 行目）→ 修正、2 回目 **APPROVE**（13 行目）。Linux で全体 1,103 件通過。
 
-**G-4 の 2 回目（2026-10-06、owner の決定「1 も 2 も進めましょう」）**: `MPP_OUTBOUND_PROFILE_ENABLED = true`。本番の入口は両方向のプロファイルを登録する。配備の記録は下。
+**G-4 の 2 回目（2026-10-06、owner の決定「1 も 2 も進めましょう」）**: `MPP_OUTBOUND_PROFILE_ENABLED = true`。本番の入口は両方向のプロファイルを登録する（次の配備で有効になる構成。配備の記録は配備後にここへ追記する）。
 
 **testnet の試行（2026-10-06 09:26Z、owner の承認）**: `tools/dyn-mpp-priority-trial.ts` で本番と同じ Router に本番の値の MPP 送信プロファイルを登録し、x402 → MPP（Provider B）の動的購入 1 件が
 **delivered**。Tempo の送金 `0xd858ac56…bfd2` は priority **1**・`maxFeePerGas` 1,440,000,001（Router の単価）で取り込まれ、請求額 29 ≤ bound 79 ≤ cap 158 ≤ 手数料 1,000（設計 §8.5）。

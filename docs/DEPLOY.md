@@ -72,7 +72,8 @@ docker run -d --name subetha-router --restart unless-stopped \
    （commit `74b6915`）で、請求額 = `ceil(max(gas_used − reservoir, 0) × min(maxFeePerGas, baseFee + priority) / 10^12)` ≤ 署名時の上限（`docs/dynamic-gas-fee-design.md` §7）。
    testnet Moderato のノードは `tempo/v1.16.0-023f1d0` を名乗り、`023f1d0` の tree は tag の commit `74b6915` と全ファイルの blob が一致する（直接比較）ので、
    手数料の経路のソースは配備された版と一致する（バイナリは未検証）。**ノードの版名が変わるか、hardfork が有効になったら読み直す**こと（版が変わらなくても挙動は変わり得る）。
-   **Router の単価（priority 1）での送金の testnet の試行は 2026-10-06 に 1 件成立**（`docs/dynamic-gas-fee-design.md` §8.5）。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
+   **Router の単価（priority 1）での送金の testnet の試行は 2026-10-06 に 1 件成立**（`docs/dynamic-gas-fee-design.md` §8.5。観測・試行は**公開の testnet RPC**に対して行った。
+   本番の Router に設定した RPC（`SUBETHA_TEMPO_RPC_URL`）については、配備時の起動 probe（`eth_fillTransaction`）が通ったことを配備の記録に書く）。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
    `docs/dynamic-gas-fee-design.md` §2・§4）と、RPC ノードが `eth_fillTransaction` に対応していること（起動時の `verify` が読取で確かめる。非対応ノードでは
    quote・purchase の RPC が宛先アドレスの枠に収まらない。同 §4）
 7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`・`feeMargin`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000。MPP 送信は quote 時のガス代の見積りから
@@ -88,7 +89,9 @@ G-2: `dynamic-upstream-tasks.md` T16、2026-10-06）。
 owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登録した（`MPP_OUTBOUND_PROFILE_ENABLED = true`）。記録は `tools/remote-mcp-config.ts` のコメントと
 `dynamic-upstream-tasks.md` T16・T18。
 
-**変更の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf`（`enabled`）と `MPP_OUTBOUND_PROFILE_ENABLED` だけを変えて、§6 の手順でイメージを作り直して入れ替える。**戻すのも同じ 1 箇所**（`enabled: false`）（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
+**変更の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf`（`enabled`）と `MPP_OUTBOUND_PROFILE_ENABLED` だけを変えて、§6 の手順でイメージを作り直して入れ替える。
+戻し方は 2 段階: `MPP_OUTBOUND_PROFILE_ENABLED = false` は **MPP 送信のプロファイルだけ**を外す（journal の昇格済みの購入は予約を保ったまま再生され、`created` の購入は支払いの前に `quote_changed`）、
+`enabled: false` は**両方向**を止める。**戻すのも同じ 1 箇所**（`enabled: false`）（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
 静的 route はそのまま動く）。
 
 **有効にした後に見るもの**: stderr の `outbound transport destination_blocked`（動的 URL が内部や拒否ホストに向いた）、`rate_limited` の頻度、
