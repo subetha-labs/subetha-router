@@ -34,9 +34,48 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_INBOUND_MAX_TOTAL` / `SUBETHA_OUTBOUND_MAX_TOTAL` | | 既定 `1000000000` base units |
 | `SUBETHA_MPP_INBOUND_SECRET` | | **MPP 受信**を公開する場合のみ。challenge の HMAC 束縛鍵（**32 バイト以上**）。署名鍵ではない |
 | `SUBETHA_OUTBOUND_X402_KEY` | | x402 送信に別ウォレットを使う場合のみ。既定は `SUBETHA_OUTBOUND_PRIVATE_KEY` を流用 |
-| `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい** |
+| `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい**。MPP 送信と MPP 受信の照合の両方に使う。**注意: 2026-10-06 より前のイメージは、この値を Router の子プロセスに渡していなかった**（設定しても送信は公開 RPC を使っていた。起動ログの `tempo rpc: public` で分かる）。この診断行は Router の子プロセス（`tools/remote-router-process.ts`）の stderr に出るもので、hosted の入口はそれを転送しない。確かめるには `SUBETHA_TEMPO_RPC_URL` を与えて `tools/remote-router-process.ts` を直接起動する |
 | `SUBETHA_APPROVAL_TTL_SECONDS` | | 承認期限（秒）。既定 `600`。**`SUBETHA_OFFER_SECONDS` と揃える**こと |
 | `SUBETHA_JOURNAL_PATH` | | journal の置き場。既定 `runtime/journal.ndjson`。**ボリュームの中を指すこと** |
+| `SUBETHA_DYNAMIC_MAX_PURCHASES` | | 動的上流 URL の通算の件数上限。既定 `1000`（§2b） |
+| `SUBETHA_DYNAMIC_MAX_TOTAL` | | 動的上流 URL の通算の額の上限（受信・送信の各バケット、base units）。既定 `100000000` |
+| `SUBETHA_DENY_HOSTS` | | 動的上流 URL の宛先にできないホスト名（カンマ区切り）。公開ホスト名・facilitator・上流・RPC の**ホスト名**（とそのサブドメイン）は設定に関係なく拒否する。別の名前で同じサービスに解決する宛先は拒否できない（設計 §7.4 の限界） |
+
+### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番では無効**
+
+呼び出し側が**自分で上流の URL を選んで**、x402 か MPP で払い、もう一方のレールで上流に届く機能
+（設計 `dynamic-upstream-design.md`、要件 `dynamic-upstream-requirements.md`）。実装と試験は済んでいるが、
+**本番の入口（`tools/remote-mcp.ts`）が作る設定は常に `dynamic.enabled: false`** で、env からは変えられない。
+無効でも `subetha_router_list_routes` の `dynamic` にプロファイルの一覧と `enabled: false` が出る（quote は 404 `dynamic_disabled`）。
+
+**有効にする条件**（T16 の G-4。owner の判断。7 つ）:
+
+1. **G-2（testnet の実決済）が済んでいること**: 本番と同じ構成で、運用者の Provider A・B を動的に指定して両方向を各 1〜2 件、件数・額・口座を示してから行い、
+   成立・手数料が送信費用を賄うこと・`delivered` の示す範囲を確かめる。その記録が無ければ有効にしない
+2. SSRF 防御 B（egress 制御、§8b）が**このホストで受け入れ済み**で、その記録（受け入れの日付と証拠の場所）が**設定の変更と並べて**残っていること。
+   動的経路の transport は loopback を許さず、名前解決に期限を付け、宛先アドレスの枠を取ってから接続するが、**ホスト側の egress 制御はそれとは別の層**である。
+   拒否ホストは**ホスト名**（とそのサブドメイン）の一致で見る。別の名前で同じサービスに解決する宛先は拒否できない（設計 §7.4 の限界）
+3. Router の port（`8787` と Router 本体の HTTP）を **Caddy 以外に公開しない**（`-p 127.0.0.1:8787:8787`）。
+   送信元の識別は Caddy が付ける `X-Forwarded-For` の最後の値で、Router の HTTP に直接届くローカルのプロセスは任意の送信元を名乗れる。
+   **Router の HTTP に届くローカルのプロセスは信頼する**、という前提で運用する
+4. 動的の通算の上限（`SUBETHA_DYNAMIC_MAX_PURCHASES`・`SUBETHA_DYNAMIC_MAX_TOTAL`）が許容できる値であること。
+   この上限は**運用者の送信側の支出の上限**（送信の元本＋MPP 送信の手数料の上限 `maxFee`。手数料の上限が実際の負担の上限であることは 6 の前提）で、
+   実際の損失の集計ではなく、呼び出し側が purchase の前に送った MPP の送金を守るものでもない。
+   動的購入の予算は静的 route とは別に数え、journal の `created` 行（予約つき）から再起動で復元する。結果不明・昇格後の settle の拒否は予約を保持する。
+   上限に達したら `purchase_count_limit`／`bucket_limit` で止まり、**止まること自体が安全機構**
+5. 控え（未払いの quote の記録）のディレクトリ `dynamic-quotes/` は journal と同じディレクトリに作られる。**ボリュームの中**にあること（`-v`）。
+   7 日より古いファイルは Router が消す。最悪のディスク使用量は設計 §7.3（約 860 MiB）
+6. MPP 送信のプロファイルは、Tempo の手数料の仕様で上限（`maxFee`）が確立するまで有効にしない（設計 §3.3 の T0-b。**x402 送信のプロファイルだけ先に有効にできる**）
+7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`。G-1）を owner が決めていること。今の値は案（`flat 1000`、`maxUpstreamAmount 10000`、`maxFee 5000`）
+
+**有効化の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf` にある `enabled: false` を `true` にして、§6 の手順でイメージを作り直して入れ替える。
+**x402 送信のプロファイルだけ先に有効にする**場合は、同じ関数の `profiles` から `dyn-x402-to-mpp`（MPP 送信）を外す（`enabled` は全プロファイルに掛かる）。
+変える場所はこの関数だけ。変更には B の受け入れと G-2 の記録（日付・場所）をコメントで添える。**戻すのも同じ 1 箇所**（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
+静的 route はそのまま動く）。
+
+**有効にした後に見るもの**: stderr の `outbound transport destination_blocked`（動的 URL が内部や拒否ホストに向いた）、`rate_limited` の頻度、
+journal の `dynamic.reservation` を持つ `created` 行の数（通算の件数）、`unknown` の終端（MPP 受信では credential を作った時点で資金が動く。
+`awaiting_payment` は「未払い」を意味しない）。
 
 ### journal を残す（`-v` は必須）
 
