@@ -324,7 +324,7 @@ RPC の列 2／3（見積り）・3／6（支払い）、提案が跳ねても q
 **sabotage**: S1〜S10（priority を写す・clamp なし・baseFee 未満の拒否なし・見積りに手数料を渡さない・fill の印が常に真・raw の priority を見ない・prepare の手数料の照合なし・
 署名が SDK の単価を使う・`pricingPolicy` v1・baseFee の読取が予算の外）すべて検出（S7 は試験を足してから）。
 
-**レビュー**: 設計 2 回（APPROVE WITH CHANGES → APPROVE。設計 §6 の 10・11 行目）、実装 1 回目 REJECT（予算の外の読取。12 行目）→ 修正、2 回目は §6 に追記。
+**レビュー**: 設計 2 回（APPROVE WITH CHANGES → APPROVE。設計 §6 の 10・11 行目）、実装 1 回目 REJECT（予算の外の読取。12 行目）→ 修正、2 回目 **APPROVE**（13 行目）。Linux で全体 1,103 件通過。
 
 ## 3. AC との対応
 
