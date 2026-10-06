@@ -732,6 +732,10 @@ M-2 は SDK → 包んだ account → 固定の serializer → guarded RPC を**
 | 静的 route の無効な purchase 試行は従来どおり journal に行を残す | 静的の記録順を変えない。入口の資源上限（§7.1）だけが掛かる |
 | 昇格前に Router が落ちると、進行中だった試行は journal に残らない（控えの `attempt` だけ） | §6.3 |
 
+**将来の課題（G-1 で owner が示した方向、2026-10-06）**: MPP 送信の手数料を定額ではなく、quote の時点で Tempo の単価（`eth_maxPriorityFeePerGas`／基本料金）を読んで
+`fee` に反映する。今の設計は quote 時に RPC を読まない（RPC に出るのは purchase の送信の段だけ）ので、これを入れるには quote の手順に RPC の読取を足し、
+その読取にも門と期限を掛ける設計が要る。本スライスでは入れない。
+
 ## 12. 要件書に入れる改訂（本書と同じ commit）
 
 | 箇所 | 改訂 | 理由 |

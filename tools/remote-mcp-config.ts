@@ -47,9 +47,15 @@ const OUTBOUND_X402 = {
 /** 本番の公開ホスト名（`docs/DEPLOY.md`）。動的上流 URL の拒否ホストに入れる（自分自身には向けない）。 */
 export const PUBLIC_HOSTNAME = "router.subethalabs.com";
 
-/** 動的上流 URL の手数料・上限の案（G-1 で owner が決める）。設計 §3.3 の T0-b。 */
+/**
+ * 動的上流 URL の手数料・上限（G-1。owner が 2026-10-06 に決定）。設計 §3.3 の T0-b。
+ * - x402 送信（Router にチェーン手数料がかからない）: 定額 1,000（0.001）
+ * - MPP 送信（Router が Tempo の手数料を払う。実測 29〜478、上限 `maxFee` 5,000）: 定額 2,000（0.002）。持ち出しの最大は 1 件 3,000
+ * 将来は、quote の時点で Tempo の単価を読んで手数料に反映する形を検討する（設計 §11 の「将来」）。
+ */
 const DYNAMIC_MAX_FEE = "5000";
-const DYNAMIC_FEE = { flat: "1000", bps: 0, min: "1000" } as const;
+const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
+const DYNAMIC_FEE_MPP_OUT = { flat: "2000", bps: 0, min: "2000" } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 
 /**
@@ -148,7 +154,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
             destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, decimals: 6, feeAsset: OUTBOUND.asset, maxFee: DYNAMIC_MAX_FEE },
             par: true,
             maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
-            fee: DYNAMIC_FEE,
+            fee: DYNAMIC_FEE_MPP_OUT,
           },
           // 逆向きは、MPP 受信の秘密と x402 送信の鍵がそろっているとき（経路 2 と同じ条件）だけ。
           ...(mppInboundEnabled
@@ -161,7 +167,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                   destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, decimals: 6, tokenDomain: { name: "USDC", version: "2" } },
                   par: true,
                   maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
-                  fee: DYNAMIC_FEE,
+                  fee: DYNAMIC_FEE_X402_OUT,
                 },
               }
             : {}),

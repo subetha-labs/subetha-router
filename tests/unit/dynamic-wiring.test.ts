@@ -300,7 +300,9 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
       const parsed = parseRouterConfig(raw.router);
       expect(parsed.dynamic?.enabled).toBe(false);
       expect(Object.keys(parsed.dynamic!.profiles).sort()).toEqual(mppInbound ? ["dyn-mpp-to-x402", "dyn-x402-to-mpp"] : ["dyn-x402-to-mpp"]);
-      expect(parsed.dynamic!.profiles["dyn-x402-to-mpp"]).toMatchObject({ destination: { maxFee: "5000", feeAsset: PATHUSD }, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } });
+      // G-1（2026-10-06 の owner の決定）: MPP 送信は定額 2,000、x402 送信は定額 1,000。
+      expect(parsed.dynamic!.profiles["dyn-x402-to-mpp"]).toMatchObject({ destination: { maxFee: "5000", feeAsset: PATHUSD }, maxUpstreamAmount: "10000", fee: { flat: "2000", bps: 0, min: "2000" } });
+      if (mppInbound) expect(parsed.dynamic!.profiles["dyn-mpp-to-x402"]).toMatchObject({ maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } });
       // 自分の公開ホスト名は拒否ホストに入る（canonical は内部の URL なので配線では分からない）。
       expect(parsed.dynamic!.denyHosts).toContain("router.subethalabs.com");
     }
