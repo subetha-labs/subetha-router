@@ -31,7 +31,16 @@ const BINDING = [ROUTE_ID, "GET", `/v1/routes/${ROUTE_ID}/resource`].map(encodeU
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 /* ------------------------------------------------------------------ x402 */

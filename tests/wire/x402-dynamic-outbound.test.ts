@@ -10,7 +10,7 @@
  */
 import { getAddress } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 type TypedData = { domain: Record<string, unknown>; types: Record<string, unknown>; primaryType: string; message: Record<string, unknown> };
 
@@ -68,12 +68,24 @@ let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
 });
+afterAll(() => {
+  TLS.cleanup();
+});
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   sdk.tamper = undefined;
   sdk.extraSignatures = 0;
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 interface Harness {

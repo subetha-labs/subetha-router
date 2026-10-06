@@ -8,7 +8,7 @@ import https from "node:https";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo } from "node:net";
 
-import { afterEach, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS } from "../../src/config.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
@@ -30,6 +30,9 @@ let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
 });
+afterAll(() => {
+  TLS.cleanup();
+});
 
 interface Upstream {
   readonly port: number;
@@ -38,7 +41,16 @@ interface Upstream {
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 type Mode = "ok" | "big-headers" | "stream" | "stall-body" | "misdirected" | "no-content" | "reset-body" | "never-respond";

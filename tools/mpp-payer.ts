@@ -133,6 +133,13 @@ export function createMppPayer(
             expectedRecipients: [scope.payTo as `0x${string}`],
           } as never),
         ],
+        /**
+         * **`globalThis.fetch` を置き換えない。** SDK の既定（`polyfill: true`）は、このプロセスの fetch を
+         * 「402 を受けたら自動で払う fetch」に差し替える。同じプロセスにある他の HTTP クライアント（Router の client や
+         * 試験）が 402 を受けるたびに支払いを試みることになる（T14 の統合試験で発見）。
+         */
+        polyfill: false,
+        maxPaymentRetries: 0,
       });
 
       // 402 応答を復元して公式経路に載せる（Router は JSON で返すので wire を組み直す）。

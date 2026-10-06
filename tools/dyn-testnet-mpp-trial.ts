@@ -119,6 +119,9 @@ async function main(): Promise<void> {
   const client = createClient({ account: facade as never, chain: { ...tempoModerato, feeToken: PATHUSD } as never, transport: http(tempoModerato.rpcUrls.default.http[0], { retryCount: 0 }) });
   const mppx = Mppx.create({
     methods: [tempo.charge({ account: facade, mode: "push", getClient: () => client, autoSwap: false, allowedChainIds: [CHAIN_ID], expectedRecipients: [challenge.request.recipient as Hex] } as never)],
+    // `globalThis.fetch` を置き換えない（既定の polyfill は、このプロセスの fetch を自動で払うものに差し替える）。
+    polyfill: false,
+    maxPaymentRetries: 0,
   });
   const wire = await mppx.createCredential(new Response(null, { status: 402, headers: { "www-authenticate": header } }));
   const hash = (Credential.deserialize(wire).payload as { hash?: unknown; type?: unknown });

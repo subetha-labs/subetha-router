@@ -12,7 +12,7 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 import { Agent, fetch as undiciFetch } from "undici";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { parseAddress } from "../../src/net/destination-policy.js";
 import {
@@ -129,6 +129,9 @@ async function listenHttp(
 let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
+});
+afterAll(() => {
+  TLS.cleanup();
 });
 
 async function listenHttps(address: string, material: { cert: Buffer; key: Buffer }): Promise<Listener> {

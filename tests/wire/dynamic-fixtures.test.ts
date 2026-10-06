@@ -8,7 +8,7 @@ import { Mppx, tempo } from "mppx/client";
 import { createClient, http, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { tempoModerato } from "viem/tempo/chains";
-import { afterEach, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 
 import { createMppOutbound } from "../../src/adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "../../src/adapters/outbound/x402.js";
@@ -30,10 +30,22 @@ let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
 });
+afterAll(() => {
+  TLS.cleanup();
+});
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 /** 本番と同じ宛先の判定（loopback を許さない）＋ fixture への差し替え。 */

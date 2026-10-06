@@ -15,7 +15,7 @@ import { createClient, custom, decodeFunctionData, encodeFunctionData, http, kec
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { Abis, Transaction as TempoTransaction } from "viem/tempo";
 import { tempoModerato } from "viem/tempo/chains";
-import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 type Tx = Record<string, unknown>;
 interface FacadeLike {
@@ -86,6 +86,9 @@ let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
 });
+afterAll(() => {
+  TLS.cleanup();
+});
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -93,7 +96,16 @@ afterEach(async () => {
   sdk.wrapClient = undefined;
   sdk.accounts.length = 0;
   sdk.clients.length = 0;
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 async function settled(): Promise<void> {
