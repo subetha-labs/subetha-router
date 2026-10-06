@@ -172,10 +172,17 @@ and a dynamic budget counted separately from the static routes. All of this is c
 integration tests that run the product wiring with real keys and real SDKs against local fixtures
 (`tests/wire/dynamic-integration.test.ts`), on macOS and Linux.
 
+Real-network check (testnet, 2026-10-06, a local Router built from the production config with the
+feature enabled): one dynamic purchase in each direction against the operator's providers **settled on
+both chains** (x402→MPP: inbound `0x40c42b34…c4f` on Base Sepolia, outbound `0x4b117218…1a2` on Tempo
+with a 29 base-unit fee; MPP→x402: inbound `0xff82c44f…d8b`, outbound `0x64f7acde…a88`), and the quote
+step succeeded for 11 of 21 third-party Base Sepolia providers with unpaid reads.
+
 What is **not** done: it is **off in production** (`dynamic.enabled: false`, one line in
-`tools/remote-mcp-config.ts`), no real-network dynamic purchase has been made yet, the fee and limit
-values are a proposal, and the MPP-outbound fee bound is observed rather than established from the
-Tempo fee specification. The design and the task record live in `docs/dynamic-upstream-*.md`.
+`tools/remote-mcp-config.ts`), the fee and limit values are a proposal, the MPP-outbound fee bound is
+observed rather than established from the Tempo fee specification, and in the production config the
+operator's own providers are denied as dynamic targets (they are static upstreams). The design and the
+task record live in `docs/dynamic-upstream-*.md`.
 
 ## Not verified yet
 
@@ -200,8 +207,8 @@ outbound -- and each has been verified independently on chain (see the txs above
   **not confirmed** (it cannot be said that there is a guard).
 - **Same-rail coverage** (x402 -> x402 / MPP -> MPP) is **not verified**. Both *cross*-rail directions are
   settled on a real chain -- see the table above.
-- **Dynamic upstream URLs on a real network** (testnet gate G-2, third-party compatibility G-3, enabling in
-  production G-4) are **not done**; see the section above.
+- **Dynamic upstream URLs in production** (fee values G-1, enabling G-4) are **not done**; the testnet gates
+  G-2 and G-3 are recorded in `docs/dynamic-upstream-tasks.md`.
 
 ## Where the detail went
 
