@@ -37,6 +37,40 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい** |
 | `SUBETHA_APPROVAL_TTL_SECONDS` | | 承認期限（秒）。既定 `600`。**`SUBETHA_OFFER_SECONDS` と揃える**こと |
 | `SUBETHA_JOURNAL_PATH` | | journal の置き場。既定 `runtime/journal.ndjson`。**ボリュームの中を指すこと** |
+| `SUBETHA_DYNAMIC_MAX_PURCHASES` | | 動的上流 URL の通算の件数上限。既定 `1000`（§2b） |
+| `SUBETHA_DYNAMIC_MAX_TOTAL` | | 動的上流 URL の通算の額の上限（受信・送信の各バケット、base units）。既定 `100000000` |
+| `SUBETHA_DENY_HOSTS` | | 動的上流 URL の宛先にできないホスト名（カンマ区切り）。公開ホスト名・facilitator・上流・RPC は設定に関係なく拒否する |
+| `ROUTER_MPP_INBOUND_RPC_URL` | | MPP 受信の照合に使う Tempo の RPC。未設定なら chain の公開 RPC |
+
+### 2b. 動的上流 URL（呼び出し側が上流を指定する機能）— **本番では無効**
+
+呼び出し側が**自分で上流の URL を選んで**、x402 か MPP で払い、もう一方のレールで上流に届く機能
+（設計 `dynamic-upstream-design.md`、要件 `dynamic-upstream-requirements.md`）。実装と試験は済んでいるが、
+**本番の入口（`tools/remote-mcp.ts`）が作る設定は常に `dynamic.enabled: false`** で、env からは変えられない。
+無効でも `subetha_router_list_routes` の `dynamic` にプロファイルの一覧と `enabled: false` が出る（quote は 404 `dynamic_disabled`）。
+
+**有効にする条件**（T16 の G-4。owner の判断）:
+
+1. SSRF 防御 B（egress 制御、§8b）が**このホストで受け入れ済み**で、その記録があること。動的経路の transport は loopback を許さず、
+   名前解決に期限を付け、宛先アドレスの枠を取ってから接続するが、**ホスト側の egress 制御はそれとは別の層**である
+2. Router の port（`8787` と Router 本体の HTTP）を **Caddy 以外に公開しない**（`-p 127.0.0.1:8787:8787`）。
+   送信元の識別は Caddy が付ける `X-Forwarded-For` の最後の値で、Router の HTTP に直接届くローカルのプロセスは任意の送信元を名乗れる。
+   **Router の HTTP に届くローカルのプロセスは信頼する**、という前提で運用する
+3. 動的の通算の上限（`SUBETHA_DYNAMIC_MAX_PURCHASES`・`SUBETHA_DYNAMIC_MAX_TOTAL`）が**最大損失**として許容できる値であること。
+   動的購入の予算は静的 route とは別に数え、journal の `created` 行（予約つき）から再起動で復元する。
+   上限に達したら `purchase_count_limit`／`bucket_limit` で止まり、**止まること自体が安全機構**
+4. 控え（未払いの quote の記録）のディレクトリ `dynamic-quotes/` は journal と同じディレクトリに作られる。**ボリュームの中**にあること（`-v`）。
+   7 日より古いファイルは Router が消す。最悪のディスク使用量は設計 §7.3（約 860 MiB）
+5. MPP 送信のプロファイルは、Tempo の手数料の仕様で上限（`maxFee`）が確立するまで有効にしない（設計 §3.3 の T0-b。**x402 送信のプロファイルだけ先に有効にできる**）
+6. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`。G-1）を owner が決めていること。今の値は案（`flat 1000`、`maxUpstreamAmount 10000`、`maxFee 5000`）
+
+**有効化の手順**: `tools/remote-mcp-config.ts` の `routerConfigOf` にある `enabled: false` を `true` にして、§6 の手順でイメージを作り直して入れ替える。
+変える場所はこの 1 箇所だけ。**戻すのも同じ 1 箇所**（無効にした Router は、動的購入を含む journal をそのまま再生し、予算を保ち、動的 quote と控えの購入を拒否する。
+静的 route はそのまま動く）。
+
+**有効にした後に見るもの**: stderr の `outbound transport destination_blocked`（動的 URL が内部や拒否ホストに向いた）、`rate_limited` の頻度、
+journal の `dynamic.reservation` を持つ `created` 行の数（通算の件数）、`unknown` の終端（MPP 受信では credential を作った時点で資金が動く。
+`awaiting_payment` は「未払い」を意味しない）。
 
 ### journal を残す（`-v` は必須）
 

@@ -79,6 +79,22 @@ npm run test -- tests/wire/mcp-server.test.ts      # MCP wrapper (tool exposure,
 - Appends are serialized with a single mutex. The writer is not allowed to continue after close, or after a
   write/fsync failure.
 
+## Dynamic purchase lifecycle (differences from the static one)
+
+1. `quote`: URL rules → requestId collision rules → gates (source/global rate, outstanding quotes, destination host) → unpaid read of the upstream through the
+   dynamic transport (no loopback, DNS deadline, header cap 32 KiB, 402 body never read) → the first offer passing the profile's field-by-field check → pricing
+   (par, exact decimal conversion, `fee = max(min, flat + ceil(amount × bps / 10000))`, 30-digit cap, per-purchase bucket limits) → inbound offer for `total` →
+   **ledger** row (`<journal dir>/dynamic-quotes/<date>.ndjson`, ≤ 8 KiB, 24 h lifetime, 7-day retention) with `sha256(ownerKey)`. Nothing in the journal.
+2. `purchase` (requires the `ownerKey`): ownership → approval → profile fingerprint (includes `enabled`) → deadline → preflight (x402: the signed authorization's
+   nonce, recipient, amount and expiry must match the quote; MPP: the embedded challenge id) → purchase gate → one `attempt` row in the ledger (first time only)
+   → optional balance pre-check → host gate held to the end → reread and whole-offer match → inbound verify → deadline recheck → **promotion**: dynamic budget
+   check and one journal `created` row carrying the reservation, in one mutex → `source_pending` → inbound settle → outbound (target = the saved URL) → terminal.
+   Any failure before promotion writes nothing to the journal; a promoted `created` retried later repeats every check and skips only the reservation.
+   After promotion, any settle failure is recorded as `unknown` (never as "unpaid").
+3. Outbound (dynamic path): the saved offer must match a current offer **in full**; the x402 typed data and the Tempo transaction are **rebuilt by the Router**
+   from the profile and the approved values before signing (the SDK only proposes); one signature, one send per payment; the receipt is checked before a body
+   capped at 256 KiB; only an `application/json` object is delivered, anything else is `paid_data_unavailable` (`unsupported_response` / `response_too_large`).
+
 ## Current purchase lifecycle (synthetic rail only)
 
 `quote -> approval -> strict preflight -> re-check of the upstream offer -> verify -> deadline re-check ->
@@ -121,6 +137,19 @@ journal. The core does not branch on rail name, and this path also runs **over a
 | R3 | `GET /v1/routes/{routeId}/resource` | Executes the purchase. On success returns **the upstream JSON as-is** in the body |
 | R4 | `GET /v1/purchases/{paymentId}` | A fixed public projection that only the owning principal reads |
 
+**Dynamic upstream URLs** (feature present, **disabled in production**; design `dynamic-upstream-design.md`):
+
+| # | Addition | Role |
+|---|---|---|
+| R1 | `dynamic: { enabled, profiles[] }` | The profiles a caller can pay with (rails, assets, decimals, `maxUpstreamAmount`, `fee`, disclosures). No `payTo`, no token domain |
+| R2 | body `upstream: { url }` with `routeId` = profile id | Reads the caller's URL (https, no userinfo/port/IP literal/fragment, host not denied), selects the first offer that passes the profile's checks, prices it (`pricing`), issues the inbound offer for `total` and returns the quote with `upstream`, `pricing`, `disclosures` and an **`ownerKey`** (only in this response). The quote is kept in a ledger, not the journal |
+| R3 | header `x-router-owner-key` | Required for a dynamic quote; a missing or wrong key is a 404 `unknown_quote` (same as nonexistent). Path `/v1/routes/{profileId}/resource`, only while enabled |
+| R4 | header `x-router-owner-key`; fields `upstream`, `dynamic.{profileId,pricing,promoted,fundsMoveOnCredential,awaitingPaymentDoesNotMeanUnpaid}` | Same ownership rule |
+| R2/R3 | header `x-router-source` | The source identity for rate limiting. The MCP entry derives it (`X-Forwarded-For` last value, else the socket address) and overwrites anything the caller sent |
+
+Dynamic error codes: `dynamic_disabled`/`unknown_route` 404, `invalid_upstream_url` 400, `request_id_conflict` 409, `rate_limited`/`dynamic_capacity` 429,
+`dynamic_unavailable` 503, `quote_failed` 502 (`reason`: `no_matching_offer`, `offer_unavailable`, `amount_unrepresentable`, `per_purchase_limit`, `bucket_not_allowed`, `quote_too_large`).
+
 - Authentication is 2 things: `X-Router-Principal` and `Authorization: Bearer <token>`. R3 additionally
   requires `X-Router-Quote-Id` / `X-Router-Request-Id` / `X-Router-Approval` and the inbound rail's payment
   credential (`X-Payment`, base64 JSON). If even one is missing or mismatched, the purchase is not started.
@@ -161,6 +190,13 @@ in a non-secret JSON configuration file.
 | `ROUTER_JOURNAL_PATH` | `runtime/journal.ndjson` | NDJSON journal (`journal.lock` is in the same directory) |
 | `ROUTER_HTTP_HOST` / `ROUTER_HTTP_PORT` | `127.0.0.1` / `8500` | Listener. `0` for ephemeral |
 | `ROUTER_CANONICAL_BASE_URL` | `http://127.0.0.1:8500` | Base for the canonical URL (not derived from `Host`) |
+| `ROUTER_MPP_INBOUND_RPC_URL` | (chain default) | Tempo RPC used by the MPP inbound adapter to check receipts. Its host is also denied as a dynamic upstream |
+
+The `router.dynamic` section of the config (optional; **absent means the feature does not exist**): `enabled`, `profiles` (per profile: `sourceRail`, `source`,
+`rail`, `destination` incl. `tokenDomain` for x402 or `feeAsset`/`maxFee` for MPP, `par: true`, `maxUpstreamAmount`, `fee {flat,bps,min}`), `budget` (counted
+separately from the static budget), `limits` (rates, concurrency, outstanding quotes, per host/address, ledger retention), `denyHosts`. The wiring adds the
+facilitators, the static upstreams, the canonical base, the MPP RPCs and `RouterCapabilities.dependencyUrls` to the deny list, and refuses to start when the MPP
+capability's RPC host is not denied.
 
 - **By default (`ROUTER_ADAPTER_MODE=real`) it wires up the real adapters (official SDK wiring), but if no
   payment capability has been injected it aborts startup with `signer_not_authorized`. It does not fall back to
@@ -366,7 +402,8 @@ The deployment (EC2 + Docker + TLS) procedure is in [`docs/DEPLOY.md`](docs/DEPL
 | `subetha_router_list_routes` | R1 | Upstream Provider URLs are not returned |
 | `subetha_router_quote` | R2 | **Does not start a payment.** The returned `subject` is what gets approved; carry the `quote` around as-is |
 | `subetha_router_purchase` | R3 | Pass the `quote` and a `credential` signed with your own key |
-| `subetha_router_status` | R4 | Equivalent to save -> reopen. The txRefs of both legs remain |
+| `subetha_router_status` | R4 | Equivalent to save -> reopen. The txRefs of both legs remain. Optional `ownerKey` for dynamic purchases |
+| `subetha_router_quote_url` | R2 with `upstream` | **Dynamic upstream URL** (disabled in production). `{ profileId, url, requestId }`. The returned `quote` carries the `ownerKey`; pass the whole document to `purchase`, and its `ownerKey` to `status`. Results of dynamic purchases come back as `result: { untrusted: true, source: "upstream", contentType, body }` with `proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" }` |
 
 `tools/list` and `quote` are **free**, and `purchase` is **paid** (matching the convention for MCP with payment).
 The payment is **tied to the call, not to the session**, so the remote works **statelessly**.

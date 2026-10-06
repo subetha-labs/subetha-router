@@ -154,6 +154,28 @@ Payments are **testnet only**. The market data reads mainnet reference values, b
 tradable quotes**. Providers A/B are **hosted by us**, and this is not a claim that Hyperliquid or
 Uniswap support these payment methods.
 
+## Dynamic upstream URLs (implemented, disabled on the hosted Router)
+
+A caller can name **its own upstream URL** (a third-party x402 or MPP provider) and pay for it over the
+other rail: pay in Base Sepolia USDC (x402) for an MPP upstream, or in Tempo pathUSD (MPP) for an x402
+upstream. The Router selects the first offer that passes the profile's checks, prices it (upstream amount +
+a flat fee), issues the inbound offer, and only after the inbound payment is verified does it pay the
+upstream — rebuilding the signed EIP-3009 authorization or the Tempo transaction itself from the approved
+values, so the SDK and the upstream can only propose, never widen, what the operator's key signs.
+
+What is in place: anonymous use behind rate limits (per source, global, per destination host and address),
+a quote ledger that keeps unpaid quotes out of the journal, an `ownerKey` that makes a dynamic quote
+readable and executable only by whoever took it, the SSRF defences applied to every dynamic connection
+(no loopback, DNS deadline, header and body caps, the Router's own dependencies denied as destinations),
+and a dynamic budget counted separately from the static routes. All of this is covered by unit, wire and
+integration tests that run the product wiring with real keys and real SDKs against local fixtures
+(`tests/wire/dynamic-integration.test.ts`), on macOS and Linux.
+
+What is **not** done: it is **off in production** (`dynamic.enabled: false`, one line in
+`tools/remote-mcp-config.ts`), no real-network dynamic purchase has been made yet, the fee and limit
+values are a proposal, and the MPP-outbound fee bound is observed rather than established from the
+Tempo fee specification. The design and the task record live in `docs/dynamic-upstream-*.md`.
+
 ## Not verified yet
 
 **Real settlement is reached for all four legs in use** -- x402 inbound, MPP inbound, x402 outbound and MPP
@@ -177,6 +199,8 @@ outbound -- and each has been verified independently on chain (see the txs above
   **not confirmed** (it cannot be said that there is a guard).
 - **Same-rail coverage** (x402 -> x402 / MPP -> MPP) is **not verified**. Both *cross*-rail directions are
   settled on a real chain -- see the table above.
+- **Dynamic upstream URLs on a real network** (testnet gate G-2, third-party compatibility G-3, enabling in
+  production G-4) are **not done**; see the section above.
 
 ## Where the detail went
 

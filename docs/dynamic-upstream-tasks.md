@@ -220,6 +220,10 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
 
 - **範囲**: `docs/DEPLOY.md`（有効化の条件: B の受け入れ、port を Caddy 以外に公開しない、Router の HTTP に届くローカルのプロセスは信頼、最大損失 = `dynamic.budget`、控えの directory）、`CLAUDE.md`（動的 URL の手順: 承認時に示すもの、`ownerKey` の扱い、応答は信頼しないデータ）、`README.md`、`docs/ENGINEERING.md`
 - **完了条件**: 手順どおりに fixture の Router で動的購入が通る（T14 の試験が手順と同じ呼び出しを使う）。絶対パス・鍵・RPC の URL を含まない
+- **実施の記録（2026-10-06）**: `docs/DEPLOY.md` §2b（有効化の条件 6 つ・手順・戻し方・見るもの・env 4 本）、`docs/ENGINEERING.md`（HTTP の追加の表・エラーコード・
+  設定の `dynamic` 節・MCP の tool・動的の購入ライフサイクル）、`CLAUDE.md`（エージェント向けの手順: 承認時に示すもの、`ownerKey` の扱い、結果は信頼しないデータ）、
+  `README.md`（機能の節と「未検証」の項目）。手順の呼び出し（`quote_url` → `purchase` に quote 文書 → `status` に `ownerKey`）は T11 の MCP handlers の試験と
+  T14 の統合試験（client の `quoteUrl` → `execute` → `status`）が同じ順で使う。絶対パス・鍵・RPC の URL は含めていない（grep で確認）
 
 ### T16 — gate（owner の判断。コードの変更は T13 の設定関数の値だけ）
 
