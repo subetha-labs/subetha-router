@@ -66,10 +66,14 @@ docker run -d --name subetha-router --restart unless-stopped \
    上限に達したら `purchase_count_limit`／`bucket_limit` で止まり、**止まること自体が安全機構**
 5. 控え（未払いの quote の記録）のディレクトリ `dynamic-quotes/` は journal と同じディレクトリに作られる。**ボリュームの中**にあること（`-v`）。
    7 日より古いファイルは Router が消す。最悪のディスク使用量は設計 §7.3（約 860 MiB）
-6. MPP 送信のプロファイルは、Tempo の手数料の仕様で上限（`maxFee`）が確立するまで有効にしない（設計 §3.3 の T0-b。**x402 送信のプロファイルだけ先に有効にできる**）
-7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000、MPP 送信は定額 5,000（= `maxFee`。
-   `fee.min >= maxFee` を Router が起動時に確かめる。これで運営がチェーン手数料を負担しないのは、6 の前提——チェーンが請求する額が署名時の上限以下——が
-   成り立つ場合）、`maxUpstreamAmount 10000`、`maxFee 5000`
+6. MPP 送信のプロファイルは、Tempo の手数料の仕様で「チェーンが請求する額が署名時の上限以下」が確立するまで有効にしない（設計 §3.3 の T0-b。
+   **x402 送信のプロファイルだけ先に有効にできる**）。あわせて、quote 時と purchase 時の bound を本番の RPC で並べた記録（`feeMargin` 2 倍の見直し材料。
+   `docs/dynamic-gas-fee-design.md` §2・§4）と、RPC ノードが `eth_fillTransaction` に対応していること（起動時の `verify` が読取で確かめる。非対応ノードでは
+   quote・purchase の RPC が宛先アドレスの枠に収まらない。同 §4）
+7. 手数料・上限の値（`fee`・`maxUpstreamAmount`・`maxFee`・`feeMargin`。G-1）。**2026-10-06 に決定**: x402 送信は定額 1,000。MPP 送信は quote 時のガス代の見積りから
+   quote ごとに決める（`docs/dynamic-gas-fee-design.md`: cap = ceil(bound × `feeMargin` 20,000 / 10,000)、手数料 = max(定額 1,000, cap)、cap が天井 `maxFee` 50,000 を
+   超える quote は出さない。呼び出し側が先に払う手数料 ≥ 署名時の上限、を quote ごとに保つ。運営がチェーン手数料を負担しないのは、6 の前提が成り立つ場合）、
+   `maxUpstreamAmount 10000`
 
 **有効化の記録（2026-10-06）**: 条件 1〜7 を満たして x402 送信のプロファイルだけ有効にした。受け入れの記録は `tools/remote-mcp-config.ts` の
 `routerConfigOf` のコメントに日付と場所を並べて書いてある（B: 設計 `ssrf-egress-design.md` §25・レビュー #10、本番ホストへの設置と受け入れ 2026-10-05、§8b.0・§8b.6。

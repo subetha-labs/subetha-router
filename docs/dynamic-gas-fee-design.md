@@ -37,10 +37,13 @@ estimate = adapter.estimateFee(profileId, offer, target)      // { gas, maxFeePe
 | nonce | expiring nonce（`nonce: 0`、`nonceKey: 2^256−1`）、`validBefore` = 現在＋25 秒（SDK と同じ） |
 | `type` | `"tempo"` |
 
-- 「ガス量は memo の値に依らない」は、**この形の transaction について実測で支持されている**事実であって、一般則ではない: 本番の 13 件は `gasUsed` が
-  46,683 で一定（本設計 §3.3 T0-b）。実装時に読取だけの probe（`tools/dyn-mpp-fee-probe.ts` の拡張。testnet の RPC に `eth_estimateGas` /
-  `eth_fillTransaction` を出すだけで、署名も送金もしない）で、memo がゼロ／非ゼロ／SDK が作る帰属 memo の 3 通りで `gas` が同じことを確かめ、本書 §6 に記録する。
-  違えば、見積りは最大の値を採る形に改める
+- **ガス量は memo の中身に依る**（実測。第 1 版の「依らない」は誤り）: `tools/dyn-mpp-estimate-probe.ts`（読取だけ。testnet の RPC に
+  `eth_fillTransaction` / `eth_estimateGas` を出すだけで、署名も送金もしない）で 2026-10-06 に測った prepared gas は、memo がゼロ 32 バイトで **48,558**、
+  非ゼロ 32 バイト（ダミー）で **48,945**、SDK の帰属 memo と同じ形（非ゼロ）で **48,945**（自分宛て 10,000。残高の無い宛先では 53,796 / 54,182 / 54,182。
+  T0-a の 54,278 と整合）。差は calldata の単価（ゼロのバイト 4 gas、非ゼロ 16 gas）で、**全バイト非ゼロのダミーは 32 バイトの memo の中で最大**。
+  SDK の帰属 memo は tag・version・指紋・nonce を詰めた 32 バイトで、ゼロのバイトがあれば安くなるだけ。宛先の残高の有無（約 5,200 gas）は、見積りが**実際の
+  `offer.payTo`・`offer.amount`** で行われるので織り込まれる。本番の 13 件の `gasUsed` が 46,683 で一定だったのは、同じ形の送金が同じ宛先に繰り返されたため
+  （本設計 §3.3 T0-b）。この実測は**この形の transaction についての証拠**であって一般則ではなく、署名の境界は見積りに依らず権威（下記）
 - 見積りで使う `gas` は **ノードが提案する値（prepared gas。T0-a の実測 54,278）** であって receipt の `gasUsed`（46,683）ではない。署名の境界が照合するのも
   prepared gas なので、bound の定義は署名前の検査と同じ量で揃う
 - **署名の境界は見積りに依らず権威**: 見積りと署名時の値がどう違っても、署名時の bound が cap を超えれば署名しない（§3.4）
@@ -217,7 +220,7 @@ core で `dynamicCapInvalid` を見る場所: 控えから組んだ直後（`dyn
 | `src/core/store.ts`・`src/core/intent.ts` | `pricing.maxFee`・`pricing.estimate` の復元と `dynamicCapInvalid`（§3.2） |
 | `src/http/projection.ts`・`src/client`・`src/mcp` | `pricing.maxFee`・`pricing.estimate` の表示、`disclosures` の `routerMayRejectAfterSettle`・`routerMayRejectAfterFundsMoved`、client の `quoteUrl` の期限 30 秒・`DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS` の注釈 |
 | `tools/remote-mcp-config.ts`・`src/main.ts`・`docs/DEPLOY.md` | MPP 送信のプロファイル: `feeMargin 20000`、ceiling 50,000、`fee` を 1,000 に（登録は引き続き無効）。`verify` で RPC の `eth_fillTransaction` 対応を読取で確かめる。§2b の条件に足す |
-| `tools/dyn-mpp-fee-probe.ts` | memo 3 通りの読取だけの見積り（§1.1） |
+| `tools/dyn-mpp-estimate-probe.ts` | memo 3 通りの読取だけの見積り（§1.1。新規） |
 | 試験 | unit（config・priceOf・権威の欄・store の復元・core の順序と再開前の検査・RPC 0 の経路）、wire（adapter の見積り: 4 通りの RPC の列・値・失敗・残り予算の期限・送金系メソッドの拒否・署名器が無い。`pay`: `maxFee` 無し／ceiling 超えの拒否、署名と送信が同じ cap）、統合（fixture の単価を変えて cap・手数料が動く、ceiling 超えで断る、purchase の再見積りで `fee_too_high`・`fee_estimate_unavailable`、署名前の検査が cap を使う、昇格済みの再開と再開前の検査、journal の再読込で `dynamicCapInvalid` の記録の状態照会が通り purchase が `quote_unreadable`、x402 送信の quote が配備をまたいで有効、R 1 の fixture で quote 飽和後の purchase、送金の RPC の接続前の拒否が `not_sent`・接続後の失敗が `unknown`） |
 
 ## 6. 独立レビューの記録

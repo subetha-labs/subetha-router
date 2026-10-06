@@ -269,6 +269,31 @@ T1・T3・T4・T12 は前提が無く、T0 と並行できる。
   一覧に `enabled: true`・プロファイル 1 つ／Provider A への動的 quote が成立（上流 10,000＋手数料 1,000）／未登録のプロファイルは `unknown_route`、自分のホストは `invalid_upstream_url`／
   **本番で動的購入 1 件が delivered**（testnet。受信 pathUSD 11,000: tx `0x5cf20960…8096`、送信 USDC 10,000: tx `0x0a5492b9…5f3a`、3.5 秒）。`ownerKey` 無しの status は読めない
 
+### T17 — MPP 送信の手数料を quote 時のガス代で決める（`docs/dynamic-gas-fee-design.md`。owner の依頼 2026-10-06）
+
+**内容**: quote の時点でその送金のガス代（bound = `ceil(gas × maxFeePerGas / 10^12)`）を署名も送金もせずに見積もり、cap = `ceil(bound × feeMargin / 10000)`、
+手数料 = `max(規則の手数料, cap)`。cap が天井 `destination.maxFee` を超える quote は出さない。cap と見積りの証跡を記録に固定し、予約・残高・1 件の上限・署名の境界は cap を使う。
+purchase では受信 verify の前に再見積りし、bound が cap を超えていれば `fee_too_high`（`awaiting_payment`）。復元・昇格済みの再開・adapter の境界が cap を独立に確かめる。
+送金の RPC が接続の前に断られた場合は署名後でも `not_sent`。設定の検査 `fee.min >= maxFee` は外し、`feeMargin`（10,000〜1,000,000 bps、既定 20,000）と
+`pricingPolicy` を MPP 送信の権威の欄に足す（x402 送信の直列化は不変）。起動時の `verify` は RPC の `eth_fillTransaction` 対応を読取で確かめる。
+
+**変更**: `src/config.ts`・`src/ports/outbound.ts`・`src/net/guarded-rpc.ts`（`timeout` を関数でも）・`src/adapters/outbound/mpp-dynamic.ts`（`estimateFee`・cap・接続前の拒否）・
+`mpp.ts`・`src/main.ts`・`src/core/{dynamic,store,intent,orchestrator}.ts`・`src/http/projection.ts`・`src/mcp/tools.ts`・`src/client/{index,types}.ts`（`quoteTimeoutMs` 30 秒）・
+`tools/remote-mcp-config.ts`（MPP 送信: `feeMargin 20000`・天井 50,000・定額 1,000。登録は引き続き無効）・`tools/dyn-mpp-estimate-probe.ts`（読取だけの memo の probe）。
+
+**試験**: unit（config 53・core 54・wiring 15）、wire（adapter 191: 見積りの 4 経路と値・残り予算の期限・送金系メソッドの拒否と署名口の無い facade・`maxFee` 無し／天井超え・
+cap が bound 未満なら署名しない・接続前の拒否は `not_sent`、接続後は `unknown`）、統合（51: 単価で cap と手数料が動く、天井超えで断る、purchase の再見積りで `fee_too_high`、
+署名前の検査が cap を使う、quote 飽和後の purchase、起動の probe）、HTTP／MCP（25: `quoteTimeoutMs`、nextStep の cap・時刻・期限、開示、一覧の `feePolicy`）。
+全体 1,095 件（macOS では T-A5/A6/A8 の 3 件が既知の環境差で失敗）。**sabotage**: 22 の変異（cap を無視・予約が天井・天井の検査なし・再見積りなし・再開の検査なし
+（復元と両方）・`capCoversFee` の各条件・`offerFor`・`SAFE_REASONS`・見積りの guard が送金系を通す・adapter が天井を使う・天井超えを丸める・接続前の拒否を `unknown`／
+すべて `not_sent`・予算切れの印・`viaFillTransaction`・期限が残りでない・署名口のある facade・`feeMargin` の下限・権威の欄・`pricingPolicy` の無条件・起動の検査・
+transport の `timeout` 関数・開示・client の期限）がすべて試験で落ちた（2 つは最初すり抜け、試験を締めて再確認）。
+
+**実測（読取だけ、Tempo testnet、2026-10-06）**: prepared gas は memo の非ゼロのバイト数と宛先の残高の有無で変わる（48,558〜54,182。設計 §1.1）。
+「memo に依らない」は誤りだったので設計を直した。全バイト非ゼロのダミーは 32 バイトの memo の中で最大。
+
+**レビュー**: 設計 3 回（`docs/dynamic-gas-fee-design.md` §6）、実装は本記録の §4 に追記。
+
 ## 3. AC との対応
 
 | AC | タスク | AC | タスク |

@@ -159,7 +159,9 @@ Uniswap support these payment methods.
 A caller can name **its own upstream URL** (a third-party x402 or MPP provider) and pay for it over the
 other rail: pay in Base Sepolia USDC (x402) for an MPP upstream, or in Tempo pathUSD (MPP) for an x402
 upstream. The Router selects the first offer that passes the profile's checks, prices it (upstream amount +
-a flat fee), issues the inbound offer, and only after the inbound payment is verified does it pay the
+the Router's fee; for an MPP upstream the fee is set per quote from a gas-cost estimate of that very transfer,
+read from the chain without signing, so the caller always prepays at least the chain-fee cap the Router will
+sign under -- `docs/dynamic-gas-fee-design.md`), issues the inbound offer, and only after the inbound payment is verified does it pay the
 upstream — rebuilding the signed EIP-3009 authorization or the Tempo transaction itself from the approved
 values, so the SDK and the upstream can only propose, never widen, what the operator's key signs.
 
@@ -181,7 +183,8 @@ step succeeded for 11 of 21 third-party Base Sepolia providers with unpaid reads
 On the hosted Router (since 2026-10-06) the profile `dyn-mpp-to-x402` is enabled: pay in Tempo pathUSD
 for any x402 upstream on Base Sepolia. The reverse profile (pay in USDC for an MPP upstream) is **not**
 registered: the MPP-outbound fee bound is observed rather than established from the Tempo fee
-specification (the caller's fee covers it under that assumption, which the Router checks at startup).
+specification (the caller's per-quote fee covers the signing cap under that assumption; the gas-indexed
+fee is implemented and tested, the production registration remains an owner gate).
 The design and the task record live in `docs/dynamic-upstream-*.md`.
 
 ## Not verified yet

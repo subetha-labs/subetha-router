@@ -196,7 +196,7 @@ in a non-secret JSON configuration file.
 | `ROUTER_MPP_INBOUND_RPC_URL` | (chain default) | Tempo RPC used by the MPP inbound adapter to check receipts. Its host is also denied as a dynamic upstream |
 
 The `router.dynamic` section of the config (optional; **absent means the feature does not exist**): `enabled`, `profiles` (a map keyed by profile id; each
-profile carries `profileId` equal to its key, `sourceRail`, `source`, `rail`, `destination` incl. `tokenDomain` for x402 or `feeAsset`/`maxFee` for MPP, `par: true`,
+profile carries `profileId` equal to its key, `sourceRail`, `source`, `rail`, `destination` incl. `tokenDomain` for x402 or `feeAsset`/`maxFee`/`feeMargin` for MPP (the MPP fee is set per quote from a gas-cost estimate; `maxFee` is the ceiling of the per-quote cap, see `docs/dynamic-gas-fee-design.md`), `par: true`,
 `maxUpstreamAmount`, `fee {flat,bps,min}`; the public R1 listing is an array derived from it), `budget` (counted
 separately from the static budget), `limits` (rates, concurrency, outstanding quotes, per host/address, ledger retention), `denyHosts`. The wiring adds the
 facilitators, the canonical base, the MPP RPCs and `RouterCapabilities.dependencyUrls` to the deny list (not the static upstreams: the operator's own providers
