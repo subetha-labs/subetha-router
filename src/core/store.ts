@@ -189,11 +189,22 @@ function capFieldsOf(pricing: Record<string, unknown>): { maxFee: string; estima
  * - `total = converted + fee`、`converted = upstreamAmount`（MPP 送信は受信と送信の桁が同じ・par なので換算は恒等）、
  *   **実際の受信 offer**の額（呼び出し側が先に払う額。`source.amount` の写しではなく `source.offer.amount`）= `total`、`upstreamAmount` = 選んだ上流 offer の額
  *   （記録の `fee`・`maxFee`・`converted`・`source.amount` を書き換えて、払っていない手数料で大きな cap を通せないように）
- * - 予約があれば、手数料の資産の区分の合計が `upstreamAmount + maxFee` 以上。`requireReservation` なら予約が無いのも不可（昇格済み）
+ * - 予約があれば、手数料の資産の区分（宛先の network・feeAsset。再開では設定のプロファイルのもの）の合計が `upstreamAmount + maxFee` 以上。
+ *   `requireReservation` なら予約が無いのも不可（昇格済み）
  */
 export function capCoversFee(
   dynamic: IntentDynamic,
-  bound: { /** 実際の受信 offer の額（`source.offer.amount`）。 */ readonly sourceAmount: string; readonly upstreamOfferAmount: string; readonly requireReservation?: boolean },
+  bound: {
+    /** 実際の受信 offer の額（`source.offer.amount`）。 */
+    readonly sourceAmount: string;
+    readonly upstreamOfferAmount: string;
+    readonly requireReservation?: boolean;
+    /**
+     * 予約の区分を引く宛先（network・feeAsset）。再開では**設定のプロファイル**（指紋で quote 時のものと一致を確かめ済み）を渡す。
+     * 省略時は記録のプロファイルの写し（復元。写しは書き換えられ得るので、実行は再開の検査が守る）。
+     */
+    readonly destination?: { readonly network: string; readonly feeAsset: string | undefined };
+  },
 ): boolean {
   const cap = capFieldsOf(dynamic.pricing as unknown as Record<string, unknown>);
   if (cap === undefined) return false;
@@ -207,9 +218,9 @@ export function capCoversFee(
   if (dynamic.reservation === undefined) {
     return bound.requireReservation !== true;
   }
-  const destination = dynamic.profile["destination"];
-  const network = isPlainRecord(destination) ? destination["network"] : undefined;
-  const feeAsset = isPlainRecord(destination) ? destination["feeAsset"] : undefined;
+  const copied = dynamic.profile["destination"];
+  const network = bound.destination !== undefined ? bound.destination.network : isPlainRecord(copied) ? copied["network"] : undefined;
+  const feeAsset = bound.destination !== undefined ? bound.destination.feeAsset : isPlainRecord(copied) ? copied["feeAsset"] : undefined;
   if (typeof network !== "string" || typeof feeAsset !== "string") return false;
   let reserved = 0n;
   for (const leg of dynamic.reservation.legs) {

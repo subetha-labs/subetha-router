@@ -862,6 +862,12 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
     expect(capCoversFee({ ...base, reservation: { legs } }, { ...bound, requireReservation: true })).toBe(true);
     expect(capCoversFee({ ...base, reservation: { legs: [legs[0]!, legs[1]!, { ...legs[2]!, amount: "2999" }] } }, bound)).toBe(false);
     expect(capCoversFee({ ...base, reservation: { legs: [legs[0]!, legs[1]!, { ...legs[2]!, asset: DST_ASSET }] } }, bound)).toBe(false);
+    // 区分を引く宛先は、渡された設定のプロファイルのもの（記録の写しが別の資産を名乗っていても）。
+    const relabeled = { ...base, profile: { ...base.profile, destination: { ...(base.profile["destination"] as object), feeAsset: DST_ASSET, network: DST_NETWORK } } };
+    const moved = { legs: [legs[0]!, { network: DST_NETWORK, asset: DST_ASSET, amount: "5000" }, { network: DST_NETWORK, asset: DST_ASSET, amount: "3000" }] };
+    expect(capCoversFee({ ...relabeled, reservation: moved }, bound)).toBe(true); // 写しで引けば通ってしまう
+    expect(capCoversFee({ ...relabeled, reservation: moved }, { ...bound, destination: { network: SRC_NETWORK, feeAsset: SRC_ASSET } })).toBe(false);
+    expect(capCoversFee({ ...base, reservation: { legs } }, { ...bound, destination: { network: SRC_NETWORK, feeAsset: SRC_ASSET } })).toBe(true);
   });
 
   test("手数料 = max(規則, cap)。pricing に maxFee と見積りの証跡が入り、予約の手数料の区分は cap。受信 offer の額は total", async () => {
@@ -1009,6 +1015,19 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
     await writeFile(journalPath, tamper((row) => {
       (row.patch as unknown as { source: Record<string, unknown> }).source["amount"] = "9000";
       row.patch.dynamic.pricing["fee"] = "4000"; row.patch.dynamic.pricing["maxFee"] = "4000"; row.patch.dynamic.pricing["total"] = "9000"; row.patch.dynamic.reservation.legs[2]!.amount = "4000";
+    }));
+    core = await boot(baseConfig({ profile: MPP }));
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
+    expect(inbound.settleCalls).toBe(1);
+    await core.close();
+    opened.length = 0;
+
+    // (i) 記録のプロファイルの写しの宛先を書き換え、予約の区分をその資産に移す（offer・pricing・cap はそのまま）: 再開は設定の宛先で引くので不可
+    await writeFile(journalPath, tamper((row) => {
+      const profile = (row.patch.dynamic as unknown as { profile: { destination: Record<string, unknown> } }).profile;
+      profile.destination["network"] = DST_NETWORK; profile.destination["feeAsset"] = DST_ASSET;
+      row.patch.dynamic.reservation.legs[1] = { ...row.patch.dynamic.reservation.legs[1]!, network: DST_NETWORK, asset: DST_ASSET } as never;
+      row.patch.dynamic.reservation.legs[2] = { ...row.patch.dynamic.reservation.legs[2]!, network: DST_NETWORK, asset: DST_ASSET } as never;
     }));
     core = await boot(baseConfig({ profile: MPP }));
     expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "rejected", code: "quote_unreadable" });
