@@ -49,6 +49,24 @@ export interface MppDynamicOptions {
   readonly now?: () => number;
 }
 
+/**
+ * Router が決める手数料の単価（`docs/dynamic-gas-fee-design.md` §8）。ノードの提案（他人の tip に連動する priority fee）は写さない。
+ * priority は 1 wei 固定、`maxFeePerGas` は最新ブロックの baseFee から `ceil(2.4 × baseFee) + 1`（ノードの fill の 2 倍と viem の 1.2 倍と同じ余裕、priority 抜き）。
+ */
+export const ROUTER_PRIORITY_FEE_PER_GAS = 1n;
+export function feePerGasOf(baseFee: bigint): bigint {
+  return (baseFee * 24n + 9n) / 10n + 1n;
+}
+
+/** `eth_getBlockByNumber("latest")` の応答から baseFee を読む。無い・形が違う・0 以下は失敗。 */
+function baseFeeOf(block: unknown): bigint {
+  const raw = isRecord(block) ? block["baseFeePerGas"] : undefined;
+  if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(raw)) throw new Error("block has no baseFeePerGas");
+  const baseFee = BigInt(raw);
+  if (baseFee <= 0n) throw new Error("baseFeePerGas is not positive");
+  return baseFee;
+}
+
 /** 見積りに使う memo のダミー（32 バイト、非ゼロ）。quote 時には challenge が無いので SDK の帰属 memo は作れない。 */
 const ESTIMATE_MEMO: Hex = `0x${"01".repeat(32)}`;
 /** SDK が `validBefore` に使う長さ（秒）。見積りの transaction も同じ形にする。 */
@@ -297,8 +315,28 @@ function checkFeeAndValidity(
   fields: { gas: unknown; maxFeePerGas: unknown; maxPriorityFeePerGas: unknown; nonce: unknown; nonceKey: unknown; validBefore: unknown },
   approved: ApprovedTransfer,
   nowMs: number,
+  /**
+   * 署名の境界では、SDK が提案した単価を写さず Router が決める（設計 §8.2）: priority 1、`maxFeePerGas = min(feePerGasOf(baseFee), capPerGas)`。
+   * `maxFeePerGas < baseFee` なら取り込まれないので署名しない。送信の境界（raw の再検査）では省略し、署名した値を照合する。
+   */
+  policy?: { readonly baseFee: bigint },
 ): Omit<CheckedTransfer, "data"> {
-  const { gas, maxFeePerGas, maxPriorityFeePerGas, nonce, nonceKey, validBefore } = fields;
+  const { gas, nonce, nonceKey, validBefore } = fields;
+  let maxFeePerGas: unknown = fields.maxFeePerGas;
+  let maxPriorityFeePerGas: unknown = fields.maxPriorityFeePerGas;
+  if (policy !== undefined) {
+    if (typeof gas !== "bigint" || gas <= 0n) {
+      throw new TempoSigningRefusedError("destination_signing_fee_out_of_range");
+    }
+    const capPerGas = (approved.maxFee * 10n ** 12n) / gas;
+    const own = feePerGasOf(policy.baseFee);
+    const chosen: bigint = own < capPerGas ? own : capPerGas;
+    if (chosen < policy.baseFee) {
+      throw new TempoSigningRefusedError("destination_signing_fee_over_limit");
+    }
+    maxFeePerGas = chosen;
+    maxPriorityFeePerGas = ROUTER_PRIORITY_FEE_PER_GAS;
+  }
   if (
     typeof gas !== "bigint" ||
     typeof maxFeePerGas !== "bigint" ||
@@ -345,6 +383,8 @@ export function createGuardedTempoAccount(args: {
   readonly offer: DestinationOffer;
   /** quote が決めた署名時の上限（cap）。プロファイルの天井ではない。 */
   readonly maxFee: bigint;
+  /** 署名の直前に読んだ最新ブロックの baseFee（設計 §8.2。単価は Router が決める）。 */
+  readonly baseFee: bigint;
   readonly now: () => number;
 }): GuardedTempoAccount {
   const inner = args.account as Account & { signTransaction?: (transaction: unknown, options?: unknown) => Promise<Hex> };
@@ -413,9 +453,10 @@ export function createGuardedTempoAccount(args: {
         },
         approved,
         args.now(),
+        { baseFee: args.baseFee },
       );
       signatures += 1;
-      // 確かめた欄だけで組み直す。SDK が call に付ける `abi`・`functionName`・`args`・`address` は写さない。
+      // 確かめた欄だけで組み直す。SDK が call に付ける `abi`・`functionName`・`args`・`address` は写さない。単価は Router の値（上）。
       const raw = await inner.signTransaction!(
         {
           type: "tempo",
@@ -501,6 +542,10 @@ export function checkRawTempoTransfer(raw: unknown, approved: ApprovedTransfer, 
   const feeToken = envelope["feeToken"];
   if (typeof feeToken !== "string" || !sameAddress(feeToken, approved.feeAsset)) {
     throw new TempoSigningRefusedError("destination_signing_fee_token_mismatch");
+  }
+  // 単価は Router が決めたもの（priority 1）であること。
+  if (envelope["maxPriorityFeePerGas"] !== ROUTER_PRIORITY_FEE_PER_GAS) {
+    throw new TempoSigningRefusedError("destination_send_args_mismatch");
   }
   checkFeeAndValidity(
     {
@@ -723,7 +768,9 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
       const remaining = (): number => Math.min(estimateRpcTimeoutMs, deadline - Date.now());
 
       let readOnly: Client;
-      let viaFillTransaction = true;
+      let readOnlyRequest: ((args: unknown) => Promise<unknown>) | undefined;
+      // fill が成功したときだけ真（block の読取など、他の読取では変えない。設計 §8.2）。
+      let viaFillTransaction = false;
       try {
         // 能力が client を返すのを待つのも予算の中。
         const client = await withDeadline(Promise.resolve(capability.getClient({ chainId })), Math.max(1, remaining()));
@@ -745,14 +792,10 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
          * 読取だけの guard: 署名・送金系のメソッドは**例外なく**拒否する（支払いの guard が検査済みの raw に限って許す例外はここには無い）。
          * method は原始値として 1 度だけ読み、params は JSON の写しだけを送る。期限後は出さない。
          */
-        const readOnlyRequest = async (args: unknown): Promise<unknown> => {
+        readOnlyRequest = async (args: unknown): Promise<unknown> => {
           const method: unknown = isRecord(args) ? args["method"] : undefined;
           if (typeof method !== "string" || isSendOrSignMethod(method)) {
             throw new TempoSigningRefusedError("destination_estimate_method_refused");
-          }
-          if (method !== "eth_fillTransaction") {
-            // fill の後に別の読取が要るのは、fill が無かった（非対応）とき。
-            viaFillTransaction = false;
           }
           const budget = remaining();
           if (budget <= 0) {
@@ -765,7 +808,9 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
           } catch {
             throw new TempoSigningRefusedError("destination_rpc_request_refused");
           }
-          return withDeadline(guardedSend(params === undefined ? { method } : { method, params }, { retryCount: 0 }), budget + 1_000);
+          const result = await withDeadline(guardedSend(params === undefined ? { method } : { method, params }, { retryCount: 0 }), budget + 1_000);
+          if (method === "eth_fillTransaction") viaFillTransaction = true;
+          return result;
         };
         readOnly = createViemClient({
           chain: { ...chain, feeToken } as never,
@@ -778,9 +823,13 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
       // 署名しない facade（`address`・`type` だけ。`signTransaction` を持たない）。
       const facade = { address: capability.account.address as Hex, type: "local" as const };
       const data = encodeFunctionData({ abi: Abis.tip20, functionName: "transferWithMemo", args: [offer.payTo as Hex, BigInt(offer.amount), ESTIMATE_MEMO] });
-      let prepared: { gas?: unknown; maxFeePerGas?: unknown };
+      let prepared: { gas?: unknown; maxFeePerGas?: unknown; maxPriorityFeePerGas?: unknown };
+      let maxFeePerGas: bigint;
       try {
-        // SDK の push 経路（`sendTransactionSync`）が渡すのと同じ欄。chainId は client の chain から。
+        // 単価は Router が決める（設計 §8.2）: 最新ブロックの baseFee から。ノードの提案（priority）は使わない。
+        const baseFee = baseFeeOf(await readOnlyRequest!({ method: "eth_getBlockByNumber", params: ["latest", false] }));
+        maxFeePerGas = feePerGasOf(baseFee);
+        // SDK の push 経路（`sendTransactionSync`）が渡すのと同じ欄＋Router の単価（viem は渡された手数料を優先し、fill・fallback で上書きしない）。
         prepared = (await withDeadline(
           prepareTransactionRequest(readOnly as never, {
             account: facade as never,
@@ -788,16 +837,21 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
             feeToken,
             nonceKey: "expiring",
             validBefore: Math.floor(now() / 1000) + SDK_VALIDITY_SECONDS,
+            maxFeePerGas,
+            maxPriorityFeePerGas: ROUTER_PRIORITY_FEE_PER_GAS,
           } as never),
           // 全体の期限は予算そのもの（余裕を足さない）。transport の abort とは別に、準備の経路が止まっても予算で打ち切る。
           Math.max(1, deadline - Date.now()),
-        )) as { gas?: unknown; maxFeePerGas?: unknown };
+        )) as { gas?: unknown; maxFeePerGas?: unknown; maxPriorityFeePerGas?: unknown };
       } catch {
         throw new FeeEstimateError("fee_estimate_unavailable");
       }
       const gas = prepared.gas;
-      const maxFeePerGas = prepared.maxFeePerGas;
-      if (typeof gas !== "bigint" || typeof maxFeePerGas !== "bigint" || gas <= 0n || maxFeePerGas <= 0n) {
+      if (typeof gas !== "bigint" || gas <= 0n) {
+        throw new FeeEstimateError("fee_estimate_unavailable");
+      }
+      // 返ってきた手数料の欄が Router の値のままであること（fill は truthy の値だけを置き換える）。
+      if (prepared.maxFeePerGas !== maxFeePerGas || prepared.maxPriorityFeePerGas !== ROUTER_PRIORITY_FEE_PER_GAS) {
         throw new FeeEstimateError("fee_estimate_unavailable");
       }
       const bound = feeBoundOf(gas, maxFeePerGas);
@@ -860,7 +914,14 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
         return { outcome: "not_sent", reason: "destination_capability_unsupported" };
       }
 
-      const guard = createGuardedTempoAccount({ account: capability.account, profile, offer: approved, maxFee: cap, now });
+      // 署名の直前の baseFee（単価は Router が決める。設計 §8.2）。RPC の予算の中で 1 回。
+      let baseFee: bigint;
+      try {
+        baseFee = baseFeeOf(await rpcRequest({ method: "eth_getBlockByNumber", params: ["latest", false] }, { retryCount: 0 }));
+      } catch {
+        return { outcome: "not_sent", reason: "destination_rejected" };
+      }
+      const guard = createGuardedTempoAccount({ account: capability.account, profile, offer: approved, maxFee: cap, baseFee, now });
       let sends = 0;
       /** 送金の RPC が接続の前に断られた（raw は出ていない）。署名後でも `not_sent` と言える唯一の場合。 */
       let sendRefusedBeforeDispatch = false;

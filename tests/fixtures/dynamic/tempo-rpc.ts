@@ -40,8 +40,11 @@ export interface TempoRpc {
   readonly port: number;
   /** TLS なしの URL（同じ状態を見る）。上流の fixture が検証に使う。TLS を指定しなければ `url` と同じ。 */
   readonly plainUrl: string;
-  /** 見積りの応答（手数料の上限の試験用）。`eth_fillTransaction` は `gas` と `maxFeePerGas = baseFeePerGas + 1`（priority 1）を返す。 */
-  readonly quote: { gas: bigint; baseFeePerGas: bigint };
+  /**
+   * 見積りの応答（手数料の上限の試験用）。`eth_fillTransaction` は `gas`・`maxFeePerGas = 2 × baseFeePerGas + priority`・`maxPriorityFeePerGas = priority` を返し
+   * （実ノードの形）、`eth_maxPriorityFeePerGas` は `priority` を返す（ノードの提案。既定 1。試験で跳ねさせる）。
+   */
+  readonly quote: { gas: bigint; baseFeePerGas: bigint; priority: bigint };
   /** `eth_fillTransaction` を持つか（既定 true）。 */
   fillTransaction: boolean;
   /** `eth_maxPriorityFeePerGas` を持つか（既定 true）。 */
@@ -107,7 +110,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
   };
   const filled: Record<string, unknown>[] = [];
   const httpState: { requests: number; status: number | undefined; delayMs: number } = { requests: 0, status: undefined, delayMs: 0 };
-  const quote = { gas: 0xd412n, baseFeePerGas: 0x23c34600n };
+  const quote = { gas: 0xd412n, baseFeePerGas: 0x23c34600n, priority: 1n };
 
   /** raw の署名から送り主を復元する。secp256k1 以外・署名なしは例外。 */
   const signerOf = (raw: Hex): string => {
@@ -168,7 +171,7 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
         return `0x${quote.gas.toString(16)}`;
       case "eth_maxPriorityFeePerGas":
         if (!state.priorityFee) throw Object.assign(new Error("method not found"), { code: -32601 });
-        return "0x1";
+        return `0x${quote.priority.toString(16)}`;
       case "eth_fillTransaction": {
         if (!state.fillTransaction) throw Object.assign(new Error("method not found"), { code: -32601 });
         const request = (params[0] ?? {}) as Record<string, unknown>;
@@ -178,8 +181,8 @@ export async function startTempoRpc(options: { chainId?: number; tls?: TlsMateri
           ...request,
           type: "0x76",
           gas: `0x${quote.gas.toString(16)}`,
-          maxFeePerGas: `0x${(quote.baseFeePerGas + 1n).toString(16)}`,
-          maxPriorityFeePerGas: "0x1",
+          maxFeePerGas: `0x${(2n * quote.baseFeePerGas + quote.priority).toString(16)}`,
+          maxPriorityFeePerGas: `0x${quote.priority.toString(16)}`,
           input: "0x",
           hash: `0x${"22".repeat(32)}`,
           blockHash: null,

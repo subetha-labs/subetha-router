@@ -136,7 +136,8 @@ export const DEFAULT_DYNAMIC_LIMITS: DynamicLimits = Object.freeze({
   maxOutstandingQuotes: 200,
   perHostPerMinute: 10,
   perHostConcurrent: 2,
-  perAddressPerMinute: 60,
+  // 100: MPP 送信の見積り・再見積り・支払いの RPC（2 + 2 + 3）が quote 10／分・purchase 10／分の飽和で 80 になるため（`docs/dynamic-gas-fee-design.md` §8.2）。
+  perAddressPerMinute: 100,
   perAddressConcurrent: 4,
   ledgerRetentionDays: 7,
 });
@@ -193,7 +194,8 @@ export function dynamicAuthoritativeTermsOf(dynamic: DynamicConfig, profile: Dyn
       // MPP 送信だけ: 手数料の決め方（quote 時のガス代に連動）も支払いの条件。x402 送信の直列化は変えない（発行済みの quote を無効にしない）。
       ...(profile.rail === "mpp" ? { feeMargin: profile.destination.feeMargin } : {}),
     },
-    ...(profile.rail === "mpp" ? { pricingPolicy: "gas-indexed-v1" } : {}),
+    // v2（2026-10-06）: priority 1 固定・`maxFeePerGas = ceil(2.4 × baseFee) + 1`・capPerGas への clamp（`docs/dynamic-gas-fee-design.md` §8）。
+    ...(profile.rail === "mpp" ? { pricingPolicy: "gas-indexed-v2" } : {}),
     par: profile.par,
     maxUpstreamAmount: profile.maxUpstreamAmount,
     fee: { ...profile.fee },

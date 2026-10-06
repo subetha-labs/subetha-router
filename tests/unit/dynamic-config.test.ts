@@ -232,7 +232,9 @@ test("mpp 送信: feeMargin の既定は 20,000（2 倍）、fee.min は maxFee 
   expect(profile.fee.min).toBe("0");
   const terms = dynamicAuthoritativeTermsOf(config.dynamic!, profile) as { destination: { feeMargin?: number }; pricingPolicy?: string };
   expect(terms.destination.feeMargin).toBe(20_000);
-  expect(terms.pricingPolicy).toBe("gas-indexed-v1");
+  // v2（2026-10-06）: priority 1 固定・2.4 倍の係数・capPerGas への clamp（`docs/dynamic-gas-fee-design.md` §8）。v1 の quote は指紋が変わって `quote_changed`。
+  expect(terms.pricingPolicy).toBe("gas-indexed-v2");
+  expect(DEFAULT_DYNAMIC_LIMITS.perAddressPerMinute).toBe(100);
   expect(parseRouterConfig(withProfilePatch((p) => { (p["destination"] as Record<string, unknown>)["feeMargin"] = 1_000_000; })).dynamic!.profiles["dyn-x402-to-mpp"]!.destination.feeMargin).toBe(1_000_000);
 });
 

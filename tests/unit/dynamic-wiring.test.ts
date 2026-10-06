@@ -229,7 +229,7 @@ describe("composeRails（動的の配線）", () => {
       const declared = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp("http", "http://rpc.test"), dynamicTransportHooksForTest: hooks(dialed, { "rpc.test": rpc.port }), ...DEPENDENCIES });
       await expect(declared.rails.dynamic!.verify()).resolves.toBeUndefined();
       // 起動の probe は読取だけ（`eth_fillTransaction` 1 回。送金も署名も無い）。拒否ホストの検査で落ちた 1 回目は probe に至らない。
-      expect(rpc.methods).toEqual(["eth_fillTransaction"]);
+      expect(rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction"]);
       expect(rpc.sentRaw).toEqual([]);
       // 非対応ノードでは起動しない（設計 `dynamic-gas-fee-design.md` §4）。
       rpc.fillTransaction = false;
