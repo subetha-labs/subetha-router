@@ -55,7 +55,7 @@ vi.mock("mppx/client", async (importOriginal) => {
 });
 
 import { createMppOutbound } from "../../src/adapters/outbound/mpp.js";
-import { assertDynamicMppCapability, checkDynamicMppChallenge, checkRawTempoTransfer, createGuardedTempoAccount, TempoSigningRefusedError } from "../../src/adapters/outbound/mpp-dynamic.js";
+import { approvedTransferOf, assertDynamicMppCapability, checkDynamicMppChallenge, checkRawTempoTransfer, createGuardedTempoAccount, TempoSigningRefusedError } from "../../src/adapters/outbound/mpp-dynamic.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -244,7 +244,7 @@ function facadeHarness() {
       return real.signTransaction(tx as never, options as never);
     },
   };
-  const guard = createGuardedTempoAccount({ account: account as never, profile: PROFILE, offer: OFFER, now: () => NOW });
+  const guard = createGuardedTempoAccount({ account: account as never, profile: PROFILE, offer: OFFER, maxFee: 5000n, now: () => NOW });
   return { real, inner, guard, tx: (patch: Tx = {}) => sdkTx(real.address, patch) };
 }
 
@@ -354,7 +354,7 @@ describe("署名の境界（設計 §3.3 (ii)、AC-16）", () => {
   });
 
   test("local account でなければ作れない", () => {
-    expect(() => createGuardedTempoAccount({ account: { address: OTHER, type: "json-rpc" } as never, profile: PROFILE, offer: OFFER, now: () => NOW })).toThrow("local account");
+    expect(() => createGuardedTempoAccount({ account: { address: OTHER, type: "json-rpc" } as never, profile: PROFILE, offer: OFFER, maxFee: 5000n, now: () => NOW })).toThrow("local account");
   });
 });
 
@@ -366,7 +366,7 @@ describe("送信の境界（設計 §3.3 (iii)）", () => {
     const tx = { type: "tempo", chainId: MPP_FIXTURE_CHAIN_ID, calls: [{ to: MPP_FIXTURE_CURRENCY, data: transferData(), value: 0n }], gas: 54_290n, maxFeePerGas: 1_440_000_001n, maxPriorityFeePerGas: 1n, nonce: 0, nonceKey: maxUint256, validBefore: NOW_S + 25, feeToken: MPP_FIXTURE_CURRENCY, ...patch };
     return { raw: await account.signTransaction(tx as never, { serializer: TempoTransaction.serialize as never }), sender: account.address };
   };
-  const check = (raw: unknown, sender: string) => checkRawTempoTransfer(raw, PROFILE, OFFER, sender, NOW);
+  const check = (raw: unknown, sender: string) => checkRawTempoTransfer(raw, approvedTransferOf(PROFILE, OFFER, sender, 5000n), NOW);
 
   test("承認済みの送金の raw は通る", async () => {
     const { raw, sender } = await signRaw();
@@ -411,13 +411,29 @@ interface Harness {
   readonly address: Hex;
   /** 元の account（実鍵）が受け取った transaction。 */
   readonly innerSigned: Tx[];
-  readonly gate: { admitted: number; released: number };
+  readonly gate: { admitted: number; released: number; refuseAt: number | undefined };
   quote(): Promise<DestinationOffer>;
-  pay(offer: DestinationOffer, url?: string): ReturnType<OutboundRail["pay"]>;
+  pay(offer: DestinationOffer, url?: string, maxFee?: string | null): ReturnType<OutboundRail["pay"]>;
+  estimate(offer: DestinationOffer): ReturnType<NonNullable<OutboundRail["estimateFee"]>>;
   sends(): number;
 }
 
-async function harness(options: { paidTimeoutMs?: number; rpcTimeoutMs?: number; stallDnsFor?: string; rpcBudgetMs?: number; rpcRetryCount?: number; offerFeePayer?: boolean; profile?: DynamicProfile; capability?: Partial<MppTempoCapability> } = {}): Promise<Harness> {
+async function harness(
+  options: {
+    paidTimeoutMs?: number;
+    rpcTimeoutMs?: number;
+    stallDnsFor?: string;
+    rpcBudgetMs?: number;
+    rpcRetryCount?: number;
+    offerFeePayer?: boolean;
+    profile?: DynamicProfile;
+    capability?: Partial<MppTempoCapability>;
+    estimateRpcTimeoutMs?: number;
+    estimateRpcBudgetMs?: number;
+    /** 門: この番号（1 始まり）以降の admit を断る。 */
+    refuseAdmitAt?: number;
+  } = {},
+): Promise<Harness> {
   const rpc = await startTempoRpc({ tls: TLS });
   closers.push(rpc.close);
   const upstream = await startMppUpstream(TLS, rpc.plainUrl, "provider.test", { offerFeePayer: options.offerFeePayer === true });
@@ -431,7 +447,7 @@ async function harness(options: { paidTimeoutMs?: number; rpcTimeoutMs?: number;
       return real.signTransaction(tx as never, opts as never);
     },
   };
-  const gate = { admitted: 0, released: 0 };
+  const gate = { admitted: 0, released: 0, refuseAt: options.refuseAdmitAt };
   const transport = createGuardedTransport({
     allowLoopback: false,
     report: () => {},
@@ -446,6 +462,8 @@ async function harness(options: { paidTimeoutMs?: number; rpcTimeoutMs?: number;
     dns: { timeoutMs: 2_000, maxInFlight: 16 },
     admit: () => {
       gate.admitted += 1;
+      // この番号以降の admit を断る（1 回だけ断っても viem は見積りの別経路に落ちるので、以降すべて）。
+      if (gate.refuseAt !== undefined && gate.admitted >= gate.refuseAt) return undefined;
       return { release: () => { gate.released += 1; } };
     },
   });
@@ -460,6 +478,8 @@ async function harness(options: { paidTimeoutMs?: number; rpcTimeoutMs?: number;
       ...(options.paidTimeoutMs === undefined ? {} : { paidTimeoutMs: options.paidTimeoutMs }),
       ...(options.rpcBudgetMs === undefined ? {} : { rpcBudgetMs: options.rpcBudgetMs }),
       ...(options.rpcTimeoutMs === undefined ? {} : { rpcTimeoutMs: options.rpcTimeoutMs }),
+      ...(options.estimateRpcTimeoutMs === undefined ? {} : { estimateRpcTimeoutMs: options.estimateRpcTimeoutMs }),
+      ...(options.estimateRpcBudgetMs === undefined ? {} : { estimateRpcBudgetMs: options.estimateRpcBudgetMs }),
     },
   });
   return {
@@ -470,10 +490,17 @@ async function harness(options: { paidTimeoutMs?: number; rpcTimeoutMs?: number;
     innerSigned,
     gate,
     quote: async () => (await rail.readChallenge(PROFILE_ID, { url: URL_A }))[0]!,
-    pay: (offer, url = URL_A) => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, target: { url } }),
+    // `maxFee`: 既定は 5,000（天井と同じ）。`null` で欄ごと無し。
+    pay: (offer, url = URL_A, maxFee: string | null = "5000") => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, target: { url }, ...(maxFee === null ? {} : { maxFee }) }),
+    estimate: (offer) => rail.estimateFee!(PROFILE_ID, offer, { url: URL_A }),
     sends: () => rpc.methods.filter((method) => method.startsWith("eth_send")).length,
   };
 }
+
+/** `ceil(gas × maxFeePerGas / 10^12)`。 */
+const boundOf = (gas: bigint, maxFeePerGas: bigint): bigint => (gas * maxFeePerGas + 10n ** 12n - 1n) / 10n ** 12n;
+/** viem の見積りの係数（1.2 倍）。 */
+const times12 = (value: bigint): bigint => (value * 12n) / 10n;
 
 /** SDK が受け取る account を包み、`signTransaction` に渡る transaction を書き換える。 */
 function tamperWith(change: (tx: Tx) => Tx): void {
@@ -569,8 +596,14 @@ describe("未払いの読取", () => {
 });
 
 describe("支払い", () => {
-  test("push で 1 回だけ送金し、上流の実 SDK の検証を通る。RPC は送金 1 回・全体 5 回以下", async () => {
+  test.each([
+    // `eth_fillTransaction` 対応ノード（本番の RPC。T0-a）: 読取 1 回＋送金 1 回。
+    ["eth_fillTransaction 対応", true, ["eth_fillTransaction", "eth_sendRawTransactionSync"]],
+    // 非対応ノード: fill の失敗を含めて読取 4 回＋送金 1 回（設計 §3.3 T0-a）。
+    ["eth_fillTransaction 非対応", false, ["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas", "eth_sendRawTransactionSync"]],
+  ])("push で 1 回だけ送金し、上流の実 SDK の検証を通る。RPC は送金 1 回・全体 5 回以下（%s）", async (_label, fill, expectedCalls) => {
     const h = await harness();
+    h.rpc.fillTransaction = fill;
     const offer = await h.quote();
     const result = await h.pay(offer);
     expect(result).toMatchObject({ outcome: "paid", body: { ok: true }, contentType: "application/json" });
@@ -578,7 +611,7 @@ describe("支払い", () => {
     expect(h.sends()).toBe(1);
     // Router が出す RPC は送金まで（その後ろは、上流の fixture が検証のために読む receipt）。
     const routerCalls = h.rpc.methods.slice(0, h.rpc.methods.indexOf("eth_sendRawTransactionSync") + 1);
-    expect(routerCalls).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas", "eth_sendRawTransactionSync"]);
+    expect(routerCalls).toEqual(expectedCalls);
     expect(h.rpc.methods.slice(routerCalls.length).every((method) => method === "eth_getTransactionReceipt")).toBe(true);
     // 送った raw: 承認済みの送金 1 つ、fee token は明示、送り主は元の account。
     const raw = h.rpc.sentRaw[0]!;
@@ -829,6 +862,8 @@ describe("支払い", () => {
 
   test("RPC に使える時間の合計を過ぎたら、次の RPC を出さない（署名もしない）", async () => {
     const h = await harness({ rpcBudgetMs: 250 });
+    // 非対応ノードの経路（読取が 4 回）で、2 回目以降が予算を超える。
+    h.rpc.fillTransaction = false;
     const offer = await h.quote();
     h.rpc.http.delayMs = 200;
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
@@ -979,6 +1014,209 @@ describe("能力の条件（設計 §3.3 の「能力」）", () => {
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_capability_unsupported" });
     expect(h.innerSigned).toHaveLength(0);
     expect(h.rpc.methods).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ 見積り（docs/dynamic-gas-fee-design.md §1） */
+
+describe("見積り（quote 時のガス代。署名も送金もしない）", () => {
+  test("eth_fillTransaction 対応ノード: RPC は 1 回、bound = ceil(gas × maxFeePerGas / 10^12)（viem の 1.2 倍込み）、署名器は呼ばれない", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    h.rpc.methods.length = 0;
+    const estimate = await h.estimate(offer);
+    expect(h.rpc.methods).toEqual(["eth_fillTransaction"]);
+    const maxFeePerGas = times12(h.rpc.quote.baseFeePerGas + 1n);
+    expect(estimate).toEqual({ gas: h.rpc.quote.gas.toString(), maxFeePerGas: maxFeePerGas.toString(), bound: boundOf(h.rpc.quote.gas, maxFeePerGas).toString(), viaFillTransaction: true });
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.rpc.sentRaw).toHaveLength(0);
+    // 見積もった transaction は署名するものと同じ形: transferWithMemo(payTo, amount, 32 バイトの memo)、feeToken、expiring nonce。
+    const filled = h.rpc.filled[0]!;
+    expect(filled).toMatchObject({ type: "0x76", feeToken: MPP_FIXTURE_CURRENCY, nonceKey: `0x${"f".repeat(64)}`, nonce: "0x0", from: h.address });
+    const calls = filled["calls"] as { to: string; data?: string; input?: string }[];
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.to.toLowerCase()).toBe(MPP_FIXTURE_CURRENCY.toLowerCase());
+    const decoded = decodeFunctionData({ abi: Abis.tip20, data: (calls[0]!.data ?? calls[0]!.input) as Hex });
+    expect(decoded.functionName).toBe("transferWithMemo");
+    expect((decoded.args as readonly unknown[])[0]).toBe(MPP_FIXTURE_RECIPIENT);
+    expect((decoded.args as readonly unknown[])[1]).toBe(1000n);
+    expect(((decoded.args as readonly unknown[])[2] as string).length).toBe(66);
+  });
+
+  test("非対応ノード: fill の失敗を含めて読取 4 回。次の見積りでも同じ（client ごとに憶えるので quote をまたいで引き継がない）。eth_maxPriorityFeePerGas も無ければ eth_gasPrice に落ちて 5 回", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    h.rpc.fillTransaction = false;
+    h.rpc.methods.length = 0;
+    const first = await h.estimate(offer);
+    expect(h.rpc.methods).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas"]);
+    const maxFeePerGas = times12(h.rpc.quote.baseFeePerGas) + 1n;
+    expect(first).toEqual({ gas: h.rpc.quote.gas.toString(), maxFeePerGas: maxFeePerGas.toString(), bound: boundOf(h.rpc.quote.gas, maxFeePerGas).toString(), viaFillTransaction: false });
+    h.rpc.methods.length = 0;
+    await h.estimate(offer);
+    expect(h.rpc.methods).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas"]);
+    h.rpc.priorityFee = false;
+    h.rpc.methods.length = 0;
+    const third = await h.estimate(offer);
+    expect(h.rpc.methods).toEqual(["eth_fillTransaction", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_gasPrice", "eth_estimateGas"]);
+    expect(third.viaFillTransaction).toBe(false);
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.sends()).toBe(0);
+  });
+
+  test("単価が変わると bound が変わる（ノードの応答から決まる）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    const low = await h.estimate(offer);
+    h.rpc.quote.baseFeePerGas *= 10n;
+    const high = await h.estimate(offer);
+    expect(BigInt(high.bound)).toBeGreaterThan(BigInt(low.bound) * 9n);
+  });
+
+  test("RPC が応答しない: 1 回の期限 = min(1 回の上限, 残りの予算)。合計の予算を超えて待たず、期限後は次の RPC を出さない", async () => {
+    const h = await harness({ estimateRpcTimeoutMs: 1_000, estimateRpcBudgetMs: 1_200 });
+    const offer = await h.quote();
+    h.rpc.fillTransaction = false;
+    h.rpc.http.delayMs = 800;
+    const started = Date.now();
+    await expect(h.estimate(offer)).rejects.toMatchObject({ name: "FeeEstimateError", reason: "fee_estimate_unavailable" });
+    // fill（800 ms）→ 2 回目の期限は残り 400 ms（1 回の上限 1,000 ms ではなく）→ 合計 1,200 ms で終わる。1 回の上限で待つと 1,600 ms。
+    expect(Date.now() - started).toBeLessThan(1_400);
+    // 3 回目は出ない。
+    expect(h.rpc.http.requests).toBeLessThanOrEqual(2);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
+  test("RPC が HTTP の失敗を返す・門が断る: 見積りは失敗（再試行なし）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    h.rpc.http.status = 503;
+    await expect(h.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    // fill が HTTP で失敗すると viem は見積りの RPC に落ちる（そこも失敗）。再試行は無い。
+    expect(h.rpc.http.requests).toBeLessThanOrEqual(2);
+    const refused = await harness();
+    const offer2 = await refused.quote();
+    refused.gate.refuseAt = refused.gate.admitted + 1;
+    await expect(refused.estimate(offer2)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    expect(refused.rpc.http.requests).toBe(0);
+  });
+
+  test("能力の client が返らない・素の http でない: 見積りは失敗（予算の中で打ち切る）", async () => {
+    const stalled = await harness({ estimateRpcBudgetMs: 300, capability: { getClient: () => new Promise(() => {}) } });
+    const offer = await stalled.quote();
+    const started = Date.now();
+    await expect(stalled.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_capability_unsupported" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const customClient = createClient({ chain: tempoModerato, transport: custom({ request: async () => null }) });
+    const unsupported = await harness({ capability: { getClient: () => customClient } });
+    await expect(unsupported.estimate(await unsupported.quote())).rejects.toMatchObject({ reason: "fee_estimate_capability_unsupported" });
+  });
+
+  test("見積りの経路は送金・署名系の RPC を例外なく拒否する（chain の prepare フックが送ろうとしても RPC に出ない）", async () => {
+    const h0 = await harness();
+    const offer = await h0.quote();
+    // chain の prepareTransactionRequest フック（[fn, options] の組）を、送金の RPC を出すものに包む（敵対的な chain 設定の模倣）。
+    const [original, hookOptions] = (tempoModerato as unknown as { prepareTransactionRequest: [(r: unknown, c: unknown) => Promise<unknown>, unknown] }).prepareTransactionRequest;
+    const malicious = {
+      ...tempoModerato,
+      prepareTransactionRequest: [
+        async (request: unknown, context: { client: { request: (args: unknown) => Promise<unknown> } }) => {
+          // 見積りに渡る account は署名口を持たない facade。持っていれば、ここで署名できてしまう。
+          const account = (request as { account?: { signTransaction?: unknown } }).account;
+          if (typeof account?.signTransaction === "function") {
+            await (account.signTransaction as (tx: unknown) => Promise<unknown>)({ ...(request as object), type: "tempo" }).catch(() => undefined);
+          }
+          await context.client.request({ method: "eth_sendRawTransaction", params: ["0x76deadbeef"] });
+          return original(request, context);
+        },
+        hookOptions,
+      ],
+    };
+    const client = createClient({ chain: malicious as never, transport: http(h0.rpc.url, { retryCount: 0 }) });
+    const h = await harness({ capability: { getClient: () => client } });
+    h.rpc.methods.length = 0;
+    await expect(h.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    expect(h.rpc.methods.filter((method) => method.startsWith("eth_send"))).toEqual([]);
+    expect(h.rpc.sentRaw).toHaveLength(0);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
+  test("chain の prepare フックが止まっても、見積り全体は予算で終わる（余裕を足さない）", async () => {
+    const h0 = await harness();
+    const offer = await h0.quote();
+    const [, hookOptions] = (tempoModerato as unknown as { prepareTransactionRequest: [unknown, unknown] }).prepareTransactionRequest;
+    const stalled = { ...tempoModerato, prepareTransactionRequest: [() => new Promise(() => {}), hookOptions] };
+    const client = createClient({ chain: stalled as never, transport: http(h0.rpc.url, { retryCount: 0 }) });
+    const h = await harness({ estimateRpcBudgetMs: 500, capability: { getClient: () => client } });
+    const started = Date.now();
+    await expect(h.estimate(offer)).rejects.toMatchObject({ reason: "fee_estimate_unavailable" });
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+
+  test("offer の形が違えば RPC に出ない", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    await expect(h.estimate({ ...offer, amount: "-1" })).rejects.toMatchObject({ reason: "fee_estimate_offer_invalid" });
+    await expect(h.estimate({ ...offer, payTo: "nope" })).rejects.toMatchObject({ reason: "fee_estimate_offer_invalid" });
+    await expect(h.estimate({ ...offer, asset: MPP_FIXTURE_RECIPIENT })).rejects.toMatchObject({ reason: "fee_estimate_offer_invalid" });
+    expect(h.rpc.http.requests).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------ 署名時の上限 = quote の cap（§3.4） */
+
+describe("pay: 署名時の上限は request.maxFee（quote の cap）", () => {
+  test("maxFee が無い・形が違う・天井を超える: 読み直しの後、署名も RPC もせずに not_sent / destination_fee_cap_invalid", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    for (const maxFee of [null, "", "-1", "5001", "1e3"]) {
+      h.rpc.methods.length = 0;
+      expect(await h.pay(offer, URL_A, maxFee)).toEqual({ outcome: "not_sent", reason: "destination_fee_cap_invalid" });
+      expect(h.rpc.methods).toEqual([]);
+    }
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.upstream.seen.credentials).toBe(0);
+  });
+
+  test("cap が bound 未満なら署名しない。cap がちょうど bound なら通る（プロファイルの天井ではなく cap で決まる）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    const estimate = await h.estimate(offer);
+    expect(await h.pay(offer, URL_A, (BigInt(estimate.bound) - 1n).toString())).toEqual({ outcome: "not_sent", reason: "destination_not_signed" });
+    expect(h.innerSigned).toHaveLength(0);
+    expect((await h.pay(offer, URL_A, estimate.bound)).outcome).toBe("paid");
+    expect(h.innerSigned).toHaveLength(1);
+  });
+
+  test("送金の RPC が接続の前に門で断られたら、署名はしたが not_sent（raw は出ていない。再署名・再送なし）", async () => {
+    // fill 対応: 読み直し（+1）→ fill（+2）→ 送金（+3）。送金の admit を断る。
+    const h = await harness();
+    const offer = await h.quote();
+    h.gate.refuseAt = h.gate.admitted + 3;
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_send_refused_before_dispatch" });
+    expect(h.innerSigned).toHaveLength(1);
+    expect(h.rpc.sentRaw).toHaveLength(0);
+    expect(h.sends()).toBe(0);
+    expect(h.upstream.seen.credentials).toBe(0);
+  });
+
+  test("送金の RPC の予算が署名後に尽きていても、出していなければ not_sent", async () => {
+    const h = await harness({ rpcBudgetMs: 250 });
+    const offer = await h.quote();
+    // fill の応答を遅らせ、署名の後の送金の RPC の時点で予算切れにする（fill 1 回なので予算の検査は送金の前）。
+    h.rpc.http.delayMs = 300;
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_send_refused_before_dispatch" });
+    expect(h.innerSigned).toHaveLength(1);
+    expect(h.rpc.sentRaw).toHaveLength(0);
+  });
+
+  test("送金の RPC が接続した後に失敗したら unknown のまま（接続前の拒否とは区別する）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    h.rpc.failSend = true;
+    expect(await h.pay(offer)).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    expect(h.rpc.sentRaw).toHaveLength(1);
   });
 });
 

@@ -185,8 +185,10 @@ function errorCodeOf(body: unknown, fallback: string): string {
   return fallback;
 }
 
-/** 動的購入の期限の既定。Router 側の最悪の所要時間（約 96 秒）に余裕を足したもの。 */
+/** 動的購入の期限の既定。Router 側の最悪の所要時間（約 102 秒）に余裕を足したもの。 */
 export const DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS = 120_000;
+/** 動的 quote（`quoteUrl`）の期限の既定。Router 側の最悪（上流の読取 5 秒＋見積り 6 秒＋1 回 3 秒 = 14 秒）に余裕を足したもの。 */
+export const DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS = 30_000;
 
 export function createRouterClient(options: RouterClientOptions): RouterClient {
   const base = new URL(options.baseUrl);
@@ -197,6 +199,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   const doFetch = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const executeTimeoutMs = options.executeTimeoutMs ?? DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS;
+  // 動的 quote の期限: 明示の quoteTimeoutMs → 明示の timeoutMs → 既定 30 秒（明示した timeoutMs は従来どおり効く）。
+  const quoteTimeoutMs = options.quoteTimeoutMs ?? options.timeoutMs ?? DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS;
 
   /** principal 資格情報は**この origin への要求だけ**に付ける。 */
   function headers(extra: Readonly<Record<string, string>> = {}): Record<string, string> {
@@ -298,6 +302,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ routeId: profileId, requestId, upstream: { url } }),
+          // 動的 quote だけ長い（上流の読取＋見積り）。静的 quote は従来どおり `timeoutMs`。
+          timeoutMs: quoteTimeoutMs,
         });
       } catch {
         return { ok: false, error: "transport_failed", status: 0 };

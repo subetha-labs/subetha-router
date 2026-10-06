@@ -426,9 +426,12 @@ test("RPC の fixture: 知らない hash には null を返す。登録した re
   expect(receipt.logs).toHaveLength(2);
   expect(receipt.logs.every((log) => log.transactionHash === known)).toBe(true);
   expect(rpc.methods).toEqual(["eth_getTransactionReceipt", "eth_getTransactionReceipt"]);
-  // 持っていない method は「無い」と答える（黙って成功しない）。
-  const response = await fetch(rpc.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_fillTransaction", params: [] }) });
-  expect(((await response.json()) as { error: { code: number } }).error.code).toBe(-32601);
+  // 持っていない method は「無い」と答える（黙って成功しない）。`eth_fillTransaction` は既定で持ち、切れば無い。
+  const ask = async (method: string) => fetch(rpc.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: [{}] }) });
+  expect(((await (await ask("eth_signTransaction")).json()) as { error: { code: number } }).error.code).toBe(-32601);
+  expect(((await (await ask("eth_fillTransaction")).json()) as { result: { tx: unknown } }).result.tx).toMatchObject({ type: "0x76" });
+  rpc.fillTransaction = false;
+  expect(((await (await ask("eth_fillTransaction")).json()) as { error: { code: number } }).error.code).toBe(-32601);
 });
 
 test("MPP の上流: scope を付ける設定では、要求された URL（クエリを含む）が scope になる", async () => {

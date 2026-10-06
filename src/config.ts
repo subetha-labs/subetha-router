@@ -85,8 +85,16 @@ export interface DynamicProfile {
     readonly tokenDomain?: { readonly name: string; readonly version: string };
     /** mpp 送信: 手数料に使ってよい資産。 */
     readonly feeAsset?: string;
-    /** mpp 送信: 1 件の手数料の上限（`feeAsset` の base units）。 */
+    /**
+     * mpp 送信: quote が決められる手数料の上限（cap）の**天井**（`feeAsset` の base units）。署名時の上限は quote ごとの cap
+     * （`docs/dynamic-gas-fee-design.md` §2）。
+     */
     readonly maxFee?: string;
+    /**
+     * mpp 送信: quote 時の見積り（bound = ceil(gas × maxFeePerGas / 10^12)）に掛ける係数（bps）。cap = ceil(bound × feeMargin / 10000)。
+     * 10,000（1 倍）〜1,000,000（100 倍）。既定 20,000。
+     */
+    readonly feeMargin?: number;
   };
   /** 受信資産と送信資産を 1:1 とみなす宣言。`true` 以外は起動しない。 */
   readonly par: true;
@@ -112,6 +120,11 @@ export interface DynamicLimits {
   /** quote 控えの保持日数。 */
   readonly ledgerRetentionDays: number;
 }
+
+/** mpp 送信の `feeMargin` の範囲（bps）と既定（`docs/dynamic-gas-fee-design.md` §2）。 */
+export const DYNAMIC_FEE_MARGIN_MIN_BPS = 10_000;
+export const DYNAMIC_FEE_MARGIN_MAX_BPS = 1_000_000;
+export const DYNAMIC_FEE_MARGIN_DEFAULT_BPS = 20_000;
 
 export const DEFAULT_DYNAMIC_LIMITS: DynamicLimits = Object.freeze({
   quotesPerMinuteGlobal: 10,
@@ -177,7 +190,10 @@ export function dynamicAuthoritativeTermsOf(dynamic: DynamicConfig, profile: Dyn
       tokenDomain: profile.destination.tokenDomain,
       feeAsset: profile.destination.feeAsset,
       maxFee: profile.destination.maxFee,
+      // MPP 送信だけ: 手数料の決め方（quote 時のガス代に連動）も支払いの条件。x402 送信の直列化は変えない（発行済みの quote を無効にしない）。
+      ...(profile.rail === "mpp" ? { feeMargin: profile.destination.feeMargin } : {}),
     },
+    ...(profile.rail === "mpp" ? { pricingPolicy: "gas-indexed-v1" } : {}),
     par: profile.par,
     maxUpstreamAmount: profile.maxUpstreamAmount,
     fee: { ...profile.fee },
@@ -519,6 +535,7 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
   let tokenDomain: { name: string; version: string } | undefined;
   let feeAsset: string | undefined;
   let maxFee: string | undefined;
+  let feeMargin: number | undefined;
   if (rail === "x402") {
     const domain = requireRecord(destination, "tokenDomain", `${at}.destination`);
     tokenDomain = {
@@ -528,6 +545,15 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
   } else {
     feeAsset = requireString(destination, "feeAsset", `${at}.destination`);
     maxFee = requireAmount(destination, "maxFee", `${at}.destination`, false);
+    const margin = destination["feeMargin"];
+    if (margin === undefined) {
+      feeMargin = DYNAMIC_FEE_MARGIN_DEFAULT_BPS;
+    } else if (typeof margin !== "number" || !Number.isSafeInteger(margin) || margin < DYNAMIC_FEE_MARGIN_MIN_BPS || margin > DYNAMIC_FEE_MARGIN_MAX_BPS) {
+      // 1 倍未満は、署名で必ず止まる quote を出すだけ。
+      throw new ConfigError(`${at}.destination.feeMargin must be an integer in ${DYNAMIC_FEE_MARGIN_MIN_BPS}..${DYNAMIC_FEE_MARGIN_MAX_BPS} (bps)`);
+    } else {
+      feeMargin = margin;
+    }
   }
   const fee = requireRecord(value, "fee", at);
   const bps = requireNumber(fee, "bps", `${at}.fee`);
@@ -538,16 +564,14 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
   const sourceDecimals = requireDecimals(source, `${at}.source`);
   const destinationDecimals = requireDecimals(destination, `${at}.destination`);
   /**
-   * **運営がチェーン手数料を負担しない条件**（G-1、owner の決定 2026-10-06。設計 §6.6）: MPP 送信では Router が Tempo の手数料を払う。
-   * 署名前に `ceil(gas × maxFeePerGas / 10^12) <= maxFee` を確かめて超えたら払わないので、署名した transaction の手数料の上限は `maxFee`。
-   * 一方、呼び出し側は quote の手数料（`max(min, flat + ceil(額 × bps / 10000))` ≥ `min`）を**受信資産の base units で**先に払う。
+   * **運営がチェーン手数料を負担しない条件**（G-1、owner の決定 2026-10-06）: MPP 送信では Router が Tempo の手数料を払う。
+   * 呼び出し側が先に払う手数料 ≥ 署名時の上限（cap）は、設定ではなく **quote ごとの計算**で保つ（`docs/dynamic-gas-fee-design.md` §2・§3:
+   * cap = quote 時のガス代の見積り × feeMargin、手数料 = max(規則の手数料, cap)。記録・復元・再開・adapter がそれぞれ確かめる）。
    *
-   * 2 つの額を同じ単位で比べるため、この不変条件を掛けるプロファイルは次に限る:
+   * 2 つの額を同じ単位で比べるため、MPP 送信のプロファイルは次に限る:
    * - `feeAsset` が送信資産そのもの（別の資産の価値は `par` では定まらない）
    * - 受信資産と送信資産の桁が同じ（`par: true` は 1:1 の宣言で、桁が違うと base units の比較にならない）
-   * そのうえで `fee.min >= maxFee`。これは「チェーンが実際に請求する額が署名時の上限以下である」という Tempo 側の前提
-   * （設計 §3.3 の T0-b。観測と一致しているが仕様として未確立）の下で、1 件ごとに運営の純減を無くす**条件つきの保証**。
-   * 設定の値に頼らず、Router が起動時に確かめる。
+   * 「チェーンが実際に請求する額が署名時の上限以下である」という Tempo 側の前提（設計 §3.3 の T0-b。観測と一致しているが仕様として未確立）は変わらない。
    */
   if (maxFee !== undefined && feeAsset !== undefined) {
     const destinationAsset = requireString(destination, "asset", `${at}.destination`);
@@ -556,9 +580,6 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     }
     if (sourceDecimals !== destinationDecimals) {
       throw new ConfigError(`${at}: source.decimals must equal destination.decimals for an mpp outbound profile (the fee bound is compared in base units)`);
-    }
-    if (BigInt(feeMin) < BigInt(maxFee)) {
-      throw new ConfigError(`${at}.fee.min must be at least destination.maxFee for an mpp outbound profile (the operator must not subsidize the chain fee)`);
     }
   }
   return {
@@ -579,6 +600,7 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
       ...(tokenDomain === undefined ? {} : { tokenDomain }),
       ...(feeAsset === undefined ? {} : { feeAsset }),
       ...(maxFee === undefined ? {} : { maxFee }),
+      ...(feeMargin === undefined ? {} : { feeMargin }),
     },
     par: true,
     maxUpstreamAmount: requireAmount(value, "maxUpstreamAmount", at, true),

@@ -48,16 +48,18 @@ const OUTBOUND_X402 = {
 export const PUBLIC_HOSTNAME = "router.subethalabs.com";
 
 /**
- * 動的上流 URL の手数料・上限（G-1。owner が 2026-10-06 に決定）。設計 §3.3 の T0-b。
+ * 動的上流 URL の手数料・上限（G-1。owner が 2026-10-06 に決定。手数料の決め方は `docs/dynamic-gas-fee-design.md`）。
  * - x402 送信（Router にチェーン手数料がかからない）: 定額 1,000（0.001）
- * - MPP 送信（Router が Tempo の手数料を払う。実測 29〜478、署名前の上限 `maxFee` 5,000）: 定額 5,000 = `maxFee`。
- *   `fee.min >= maxFee`（`src/config.ts` が起動時に確かめる）により、**チェーンが請求する額が署名時の上限以下である限り**運営はチェーン手数料を
- *   負担しない（条件つき。設計 §6.6）。その前提が Tempo の仕様で確立するまで、このプロファイルは本番で有効にしない（`docs/DEPLOY.md` §2b の条件 6）。
- * 次のスライス: quote の時点でその送金のガス代（ガス量×単価）を見積もって `maxFee` と手数料を決める（平時は安く、高騰時は断る。設計 §11）。
+ * - MPP 送信（Router が Tempo の手数料を払う）: quote の時点でその送金のガス代（gas × maxFeePerGas）を見積もり、
+ *   cap = ceil(bound × feeMargin / 10000)（`feeMargin` 20,000 = 2 倍。仮の値——quote 時と purchase 時の bound を本番で並べてから見直す）、
+ *   手数料 = max(定額 1,000, cap)。cap が天井 `maxFee` 50,000（0.05。署名前の上限の実測 79〜706 の約 70 倍）を超える quote は出さない。
+ *   呼び出し側が先に払う手数料 ≥ 署名時の上限、を quote ごとに保つ（設計 §2・§3）。
+ *   「チェーンが請求する額が署名時の上限以下」という Tempo 側の前提が確立するまで、このプロファイルは本番で有効にしない（`docs/DEPLOY.md` §2b の条件 6）。
  */
-const DYNAMIC_MAX_FEE = "5000";
+const DYNAMIC_MAX_FEE_CEILING = "50000";
+const DYNAMIC_FEE_MARGIN_BPS = 20_000;
 const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
-const DYNAMIC_FEE_MPP_OUT = { flat: DYNAMIC_MAX_FEE, bps: 0, min: DYNAMIC_MAX_FEE } as const;
+const DYNAMIC_FEE_MPP_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 
 /** MPP 送信のプロファイルを登録するか。Tempo の手数料の仕様で上限が確立するまで `false`（`docs/DEPLOY.md` §2b の条件 6）。 */
@@ -77,7 +79,15 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
             sourceRail: "x402",
             source: { network: INBOUND.network, asset: INBOUND.asset, decimals: 6, payTo: receiver },
             rail: "mpp",
-            destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, decimals: 6, feeAsset: OUTBOUND.asset, maxFee: DYNAMIC_MAX_FEE },
+            destination: {
+              scheme: "tempo/charge",
+              network: OUTBOUND.network,
+              asset: OUTBOUND.asset,
+              decimals: 6,
+              feeAsset: OUTBOUND.asset,
+              maxFee: DYNAMIC_MAX_FEE_CEILING,
+              feeMargin: DYNAMIC_FEE_MARGIN_BPS,
+            },
             par: true,
             maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
             fee: DYNAMIC_FEE_MPP_OUT,

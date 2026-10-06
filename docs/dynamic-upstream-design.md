@@ -584,10 +584,13 @@ total     = converted + fee                                                // Bi
 
 `upstreamAmount > maxUpstreamAmount`、`total` が受信側の 1 件上限を超える、は quote 不成立。**手数料の値は owner が決める**（M-1 の後に案を出す）。
 
-**手数料の被覆の条件（G-1 で owner が決定、2026-10-06）: MPP 送信のプロファイルでは `fee.min >= destination.maxFee`、かつ `feeAsset` は送信資産そのもの、
-かつ受信と送信の桁が同じ。** `parseDynamic` が起動時に確かめる（違えば `config_invalid`）。意味: 呼び出し側が先に払う手数料（受信資産の base units、
-必ず `fee.min` 以上）が、Router が署名する transaction の手数料の上限 `maxFee`（送信資産の base units）以上になる。`par: true` は受信資産と送信資産が 1:1 という宣言で、
-第三の資産の価値は定めないので `feeAsset` は送信資産に限り、桁が違う base units は比べられないので桁も揃える。
+**手数料の被覆の条件（G-1 で owner が決定、2026-10-06。`docs/dynamic-gas-fee-design.md` で quote ごとの形に改めた）: MPP 送信のプロファイルでは、
+呼び出し側が先に払う手数料（受信資産の base units）≥ Router が署名する transaction の手数料の上限（cap。送信資産の base units）を **quote ごと**に保つ。**
+cap は quote 時にその送金のガス代を見積もって決め（`ceil(gas × maxFeePerGas / 10^12) × feeMargin`）、手数料は `max(規則の手数料, cap)`。記録（`pricing.maxFee`）・
+復元・昇格済みの再開・adapter の境界がそれぞれ確かめる。設定の検査として残るのは `feeAsset` は送信資産そのもの、かつ受信と送信の桁が同じ（`parseDynamic` が起動時に
+確かめる。違えば `config_invalid`）: `par: true` は受信資産と送信資産が 1:1 という宣言で、第三の資産の価値は定めないので `feeAsset` は送信資産に限り、
+桁が違う base units は比べられないので桁も揃える。第 1 版の設定の検査 `fee.min >= destination.maxFee`（定額）はこの quote ごとの計算に置き換えた
+（`destination.maxFee` は cap の天井になった）。
 
 これは**条件つきの保証**である。成り立つ前提は「チェーンが実際に請求する額が、署名時の `ceil(gas × maxFeePerGas / 10^12)` 以下である」こと（§3.3 の T0-b。
 15 件の観測と一致しているが、Fee AMM・換算の差額・丸め・返金を含む Tempo の手数料の仕様としては未確立）。この前提が仕様で確立するまで、MPP 送信のプロファイルは
@@ -743,9 +746,10 @@ M-2 は SDK → 包んだ account → 固定の serializer → guarded RPC を**
 | 静的 route の無効な purchase 試行は従来どおり journal に行を残す | 静的の記録順を変えない。入口の資源上限（§7.1）だけが掛かる |
 | 昇格前に Router が落ちると、進行中だった試行は journal に残らない（控えの `attempt` だけ） | §6.3 |
 
-**次のスライス（G-1 で owner が決めた方向、2026-10-06。MPP 送信のプロファイルを本番で有効にする前提）**: MPP 送信の手数料を定額ではなく、
+**次のスライス（G-1 で owner が決めた方向、2026-10-06。MPP 送信のプロファイルを本番で有効にする前提。設計は `docs/dynamic-gas-fee-design.md`、実装は
+`dynamic-upstream-tasks.md` T17）**: MPP 送信の手数料を定額ではなく、
 quote の時点で**その送金にかかるガス代**を読んで決める。ガス代は `ceil(gas × maxFeePerGas / 10^12)`（base units）で、`gas` は送金の内容（宛先・額の
-`transferWithMemo`。実測ではほぼ一定）、`maxFeePerGas` はその時のチェーンの混み具合（実測で約 17 倍の幅）。quote の時点で宛先と額は分かっているので、
+`transferWithMemo`。宛先の残高の有無と memo の非ゼロのバイト数で変わる。`dynamic-gas-fee-design.md` §1.1）、`maxFeePerGas` はその時のチェーンの混み具合（実測で約 17 倍の幅）。quote の時点で宛先と額は分かっているので、
 その送金そのもので `eth_estimateGas`（または `eth_fillTransaction`）を RPC に読み、ガス量と単価の両方から見積りを出す。
 - `maxFee` = 見積り × 余裕（例 2 倍）。固定の天井（例 50,000）を超える見積りのときは quote を出さない（高い手数料を提示するより断る）
 - `fee` ≥ `maxFee`（§6.6 の条件は quote ごとに保つ。設定の `fee.min >= maxFee` の検査は「quote が決めた `maxFee`」に対して行う形に変える）

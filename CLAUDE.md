@@ -96,7 +96,10 @@ The steps differ from the static ones in these ways:
 2. **Show the human the whole `subject`** (as for a static quote: what you pay, with `decimals`, network
    and asset; what the upstream receives; the method `GET`; the deadline), and **highlight the dynamic
    parts**: the upstream URL, the recipient (`subject.destinationPayTo`) and the price breakdown
-   (`subject.pricing`: upstream amount + Router fee = total). Say plainly what `subject.disclosures` says:
+   (`subject.pricing`: upstream amount + Router fee = total; when `pricing.maxFee` is present the fee was
+   set from a gas-cost estimate taken at quote time — show the cap and `pricing.estimate.atMs`, and say that the
+   Router refuses with `fee_too_high` if the chain fee rises above the cap before it signs, even after the
+   inbound payment settled). Say plainly what `subject.disclosures` says:
    the operator has not verified the destination; **nothing is refunded**, neither when the upstream takes
    the payment and returns no usable data nor when the Router itself refuses after your funds moved;
    only an `application/json` object up to 256 KiB is delivered (anything else ends as "paid, no data").

@@ -57,7 +57,7 @@ function x402ToMpp(): Record<string, unknown> {
     },
     par: true,
     maxUpstreamAmount: "100000",
-    // mpp 送信は `fee.min >= maxFee`（手数料の被覆の条件。設計 §6.6）。
+    // mpp 送信の手数料は quote ごとの cap（ガス代の見積り × feeMargin）で被覆する（`docs/dynamic-gas-fee-design.md` §2）。`fee.min >= maxFee` は要らない。
     fee: { flat: "50000", bps: 100, min: "50000" },
   };
 }
@@ -157,7 +157,11 @@ test.each<[string, unknown]>([
   ["decimals が負", withProfilePatch((p) => { p["source"] = { ...(p["source"] as object), decimals: -1 }; })],
   ["decimals が大きすぎる", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), decimals: 37 }; })],
   ["x402 送信で tokenDomain が無い", withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": (() => { const p = mppToX402(); const { tokenDomain: _t, ...rest } = p["destination"] as Record<string, unknown>; return { ...p, destination: rest }; })() } }))],
-  ["mpp 送信で fee.min が maxFee より小さい（運営がチェーン手数料を負担する設定）", withProfilePatch((profile) => { (profile["fee"] as Record<string, unknown>)["min"] = "49999"; })],
+  ["mpp 送信で feeMargin が 1 倍未満（署名で必ず止まる quote を出す）", withProfilePatch((profile) => { (profile["destination"] as Record<string, unknown>)["feeMargin"] = 9_999; })],
+  ["mpp 送信で feeMargin が 100 倍超", withProfilePatch((profile) => { (profile["destination"] as Record<string, unknown>)["feeMargin"] = 1_000_001; })],
+  ["mpp 送信で feeMargin が小数", withProfilePatch((profile) => { (profile["destination"] as Record<string, unknown>)["feeMargin"] = 20_000.5; })],
+  ["mpp 送信で feeMargin が文字列", withProfilePatch((profile) => { (profile["destination"] as Record<string, unknown>)["feeMargin"] = "20000"; })],
+  ["mpp 送信で feeMargin が null", withProfilePatch((profile) => { (profile["destination"] as Record<string, unknown>)["feeMargin"] = null; })],
   ["mpp 送信で feeAsset が送信資産と違う（手数料の上限を同じ価値で比べられない）", withProfilePatch((profile) => { (profile["destination"] as Record<string, unknown>)["feeAsset"] = USDC; })],
   ["mpp 送信で受信と送信の桁が違う（base units で比べられない）", withProfilePatch((profile) => { (profile["source"] as Record<string, unknown>)["decimals"] = 18; })],
   ["budget が無い", withDynamic((() => { const { budget: _b, ...rest } = dynamicOf(); return rest; })())],
@@ -203,6 +207,8 @@ test("指紋はプロファイルのどの欄を変えても、enabled を変え
     ["fee.flat", withProfilePatch((p) => { p["fee"] = { flat: "50001", bps: 100, min: "50000" }; })],
     ["fee.bps", withProfilePatch((p) => { p["fee"] = { flat: "50000", bps: 101, min: "50000" }; })],
     ["fee.min", withProfilePatch((p) => { p["fee"] = { flat: "50000", bps: 100, min: "50001" }; })],
+    // 手数料の決め方（cap の係数）も支払いの条件（FR-16。`docs/dynamic-gas-fee-design.md` §2）。
+    ["destination.feeMargin", withProfilePatch((p) => { p["destination"] = { ...(p["destination"] as object), feeMargin: 30_000 }; })],
   ];
   for (const [name, raw] of variants) {
     const config = parseRouterConfig(raw);
@@ -217,6 +223,36 @@ test("指紋はプロファイルのどの欄を変えても、enabled を変え
     withDynamic(dynamicOf({ profiles: { "dyn-mpp-to-x402": { ...mppToX402(), destination: { ...(mppToX402()["destination"] as object), tokenDomain: { name: "USDC", version: "3" } } } } })),
   );
   expect(fingerprintOf(dynamicAuthoritativeTermsOf(domainChanged.dynamic!, domainChanged.dynamic!.profiles["dyn-mpp-to-x402"]!))).not.toBe(x402Base);
+});
+
+test("mpp 送信: feeMargin の既定は 20,000（2 倍）、fee.min は maxFee より小さくてよい（被覆は quote ごとの cap）。権威の欄に feeMargin と pricingPolicy", () => {
+  const config = parseRouterConfig(withProfilePatch((p) => { (p["fee"] as Record<string, unknown>)["min"] = "0"; (p["fee"] as Record<string, unknown>)["flat"] = "1000"; }));
+  const profile = config.dynamic!.profiles["dyn-x402-to-mpp"]!;
+  expect(profile.destination.feeMargin).toBe(20_000);
+  expect(profile.fee.min).toBe("0");
+  const terms = dynamicAuthoritativeTermsOf(config.dynamic!, profile) as { destination: { feeMargin?: number }; pricingPolicy?: string };
+  expect(terms.destination.feeMargin).toBe(20_000);
+  expect(terms.pricingPolicy).toBe("gas-indexed-v1");
+  expect(parseRouterConfig(withProfilePatch((p) => { (p["destination"] as Record<string, unknown>)["feeMargin"] = 1_000_000; })).dynamic!.profiles["dyn-x402-to-mpp"]!.destination.feeMargin).toBe(1_000_000);
+});
+
+test("x402 送信の権威の欄は変えない（配備の前の quote を quote_changed にしない）。feeMargin・pricingPolicy は持たない", () => {
+  const config = parseRouterConfig(withDynamic(dynamicOf()));
+  const profile = config.dynamic!.profiles["dyn-mpp-to-x402"]!;
+  // 変更前の直列化（T10 から固定）。
+  expect(dynamicAuthoritativeTermsOf(config.dynamic!, profile)).toEqual({
+    dynamic: true,
+    enabled: true,
+    profileId: "dyn-mpp-to-x402",
+    sourceRail: "mpp",
+    source: { network: "eip155:42431", asset: PATHUSD, decimals: 6, payTo: PAY_TO },
+    rail: "x402",
+    destination: { scheme: "exact", network: "eip155:84532", asset: USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" }, feeAsset: undefined, maxFee: undefined },
+    par: true,
+    maxUpstreamAmount: "100000",
+    fee: { flat: "0", bps: 0, min: "0" },
+  });
+  expect(Object.keys(dynamicAuthoritativeTermsOf(config.dynamic!, profile) as object)).not.toContain("pricingPolicy");
 });
 
 test("プロファイルの ID・送信レール・tokenDomain の名前も指紋を変える。キーの順序と省略／undefined は変えない", () => {

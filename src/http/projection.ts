@@ -25,7 +25,8 @@ export function dynamicListingOf(config: RouterConfig): Record<string, unknown> 
       destination: { rail: profile.rail, scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, decimals: profile.destination.decimals },
       maxUpstreamAmount: profile.maxUpstreamAmount,
       fee: { ...profile.fee },
-      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp"),
+      ...(profile.rail === "mpp" ? { feePolicy: { kind: "gas-indexed", feeMargin: profile.destination.feeMargin, maxFeeCeiling: profile.destination.maxFee } } : {}),
+      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp", profile.rail === "mpp"),
     })),
   };
 }
@@ -101,15 +102,28 @@ export function quoteBody(
   };
 }
 
-/** 動的 quote の応答で開示する前提（設計 §8）。固定値。 */
-export function dynamicDisclosuresOf(fundsMoveOnCredential: boolean): Record<string, unknown> {
+/**
+ * 動的 quote の応答で開示する前提（設計 §8）。固定値。`gasIndexedFee`（MPP 送信）では、quote の手数料は quote 時のガス代の見積りから決まり、
+ * settle の後・署名の前に単価が上がっていれば Router は止める（返金しない。`docs/dynamic-gas-fee-design.md` §1.4・§4）。
+ */
+export function dynamicDisclosuresOf(fundsMoveOnCredential: boolean, gasIndexedFee = false): Record<string, unknown> {
   return {
     destinationVerifiedByOperator: false,
     refundOnFailure: false,
     fundsMoveOnCredential,
     ...(fundsMoveOnCredential
-      ? { routerMayRejectAfterFundsMoved: ["expired", "upstream_changed", "dynamic_disabled", "budget_exhausted", "operator_funds_unavailable"] }
+      ? {
+          routerMayRejectAfterFundsMoved: [
+            "expired",
+            "upstream_changed",
+            "dynamic_disabled",
+            "budget_exhausted",
+            "operator_funds_unavailable",
+            ...(gasIndexedFee ? ["fee_too_high", "fee_estimate_unavailable"] : []),
+          ],
+        }
       : {}),
+    ...(gasIndexedFee ? { feeEstimateIsNotADeliveryGuarantee: true, routerMayRejectAfterSettle: ["fee_too_high"] } : {}),
     awaitingPaymentDoesNotMeanUnpaid: fundsMoveOnCredential,
     unsupportedResponseIsPaidWithoutData: true,
     supportedResponse: "application/json object, <= 256 KiB",
@@ -149,7 +163,7 @@ export function dynamicQuoteBody(quote: QuoteDocument, profile: DynamicProfile, 
       quoteFingerprint: quote.destination.quoteFingerprint,
     },
     pricing: { ...pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
-    disclosures: dynamicDisclosuresOf(fundsMoveOnCredential),
+    disclosures: dynamicDisclosuresOf(fundsMoveOnCredential, profile.rail === "mpp"),
     approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
     ownerKey: quote.ownerKey,
   };

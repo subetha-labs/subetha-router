@@ -77,6 +77,7 @@ export function dynamicFieldsOf(
   readonly upstream?: IntentUpstream;
   readonly dynamic?: IntentDynamic;
   readonly dynamicInvalid?: boolean;
+  readonly dynamicCapInvalid?: boolean;
 } {
   const rawUpstream = patch["upstream"];
   const rawDynamic = patch["dynamic"];
@@ -133,21 +134,99 @@ export function dynamicFieldsOf(
     // 予約の無い動的購入は journal に存在し得ない（昇格は予約と同じ 1 行）。
     return { dynamicInvalid: true };
   }
-  return {
-    upstream: { url: rawUpstream["url"], method: "GET" },
-    dynamic: {
-      profileId,
-      profile,
-      pricing: {
-        upstreamAmount: pricing["upstreamAmount"] as string,
-        converted: pricing["converted"] as string,
-        fee: pricing["fee"] as string,
-        total: pricing["total"] as string,
-      },
-      ownerKeyHash,
-      ...(reservation === undefined ? {} : { reservation }),
+  const cap = capFieldsOf(pricing);
+  const dynamic: IntentDynamic = {
+    profileId,
+    profile,
+    pricing: {
+      upstreamAmount: pricing["upstreamAmount"] as string,
+      converted: pricing["converted"] as string,
+      fee: pricing["fee"] as string,
+      total: pricing["total"] as string,
+      ...(cap === undefined ? {} : cap),
     },
+    ownerKeyHash,
+    ...(reservation === undefined ? {} : { reservation }),
   };
+  /**
+   * MPP 送信の記録は cap を持つこと（`docs/dynamic-gas-fee-design.md` §3.2）。無い・形が違う・手数料 < cap なら `dynamicCapInvalid`:
+   * `dynamic` は保つ（持ち主の証明・予約・結果はそのまま）が、purchase は実行しない。
+   */
+  if (profile["rail"] === "mpp") {
+    const source = isPlainRecord(patch["source"]) ? patch["source"] : {};
+    const sourceOffer = isPlainRecord(source["offer"]) ? source["offer"] : {};
+    const destination = isPlainRecord(patch["destination"]) ? patch["destination"] : {};
+    const selected = isPlainRecord(destination["selectedOffer"]) ? destination["selectedOffer"] : {};
+    const bound = {
+      // settle に渡るのは `source.offer` そのもの。写しの `source.amount` ではなく offer の額に結び付ける。
+      sourceAmount: String(sourceOffer["amount"]),
+      upstreamOfferAmount: String(selected["amount"]),
+      requireReservation: options.requireReservation === true,
+    };
+    if (!capCoversFee(dynamic, bound)) {
+      return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic, dynamicCapInvalid: true };
+    }
+  }
+  return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic };
+}
+
+/** `pricing.maxFee`・`pricing.estimate` を形どおりに読む。片方でも形が違えば `undefined`（両方無いのも `undefined`）。 */
+function capFieldsOf(pricing: Record<string, unknown>): { maxFee: string; estimate: NonNullable<IntentDynamic["pricing"]["estimate"]> } | undefined {
+  const maxFee = pricing["maxFee"];
+  const estimate = pricing["estimate"];
+  if (typeof maxFee !== "string" || !AMOUNT.test(maxFee) || !isPlainRecord(estimate)) return undefined;
+  const { gas, maxFeePerGas, bound, atMs } = estimate;
+  if (typeof gas !== "string" || !AMOUNT.test(gas) || typeof maxFeePerGas !== "string" || !AMOUNT.test(maxFeePerGas) || typeof bound !== "string" || !AMOUNT.test(bound)) {
+    return undefined;
+  }
+  if (typeof atMs !== "number" || !Number.isSafeInteger(atMs) || atMs < 0) return undefined;
+  return { maxFee, estimate: { gas, maxFeePerGas, bound, atMs } };
+}
+
+/**
+ * MPP 送信の記録の cap が、**実際に払われる額**に結び付いているか（`docs/dynamic-gas-fee-design.md` §3.2・§3.3）。復元と昇格済みの再開が同じ検査を使う:
+ * - `pricing.maxFee`・`pricing.estimate` が形どおり（`capFieldsOf`）で、`fee >= maxFee`
+ * - `total = converted + fee`、`converted = upstreamAmount`（MPP 送信は受信と送信の桁が同じ・par なので換算は恒等）、
+ *   **実際の受信 offer**の額（呼び出し側が先に払う額。`source.amount` の写しではなく `source.offer.amount`）= `total`、`upstreamAmount` = 選んだ上流 offer の額
+ *   （記録の `fee`・`maxFee`・`converted`・`source.amount` を書き換えて、払っていない手数料で大きな cap を通せないように）
+ * - 予約があれば、手数料の資産の区分（宛先の network・feeAsset。再開では設定のプロファイルのもの）の合計が `upstreamAmount + maxFee` 以上。
+ *   `requireReservation` なら予約が無いのも不可（昇格済み）
+ */
+export function capCoversFee(
+  dynamic: IntentDynamic,
+  bound: {
+    /** 実際の受信 offer の額（`source.offer.amount`）。 */
+    readonly sourceAmount: string;
+    readonly upstreamOfferAmount: string;
+    readonly requireReservation?: boolean;
+    /**
+     * 予約の区分を引く宛先（network・feeAsset）。再開では**設定のプロファイル**（指紋で quote 時のものと一致を確かめ済み）を渡す。
+     * 省略時は記録のプロファイルの写し（復元。写しは書き換えられ得るので、実行は再開の検査が守る）。
+     */
+    readonly destination?: { readonly network: string; readonly feeAsset: string | undefined };
+  },
+): boolean {
+  const cap = capFieldsOf(dynamic.pricing as unknown as Record<string, unknown>);
+  if (cap === undefined) return false;
+  const { fee, upstreamAmount, converted, total } = dynamic.pricing;
+  if (![fee, upstreamAmount, converted, total, bound.sourceAmount, bound.upstreamOfferAmount].every((value) => typeof value === "string" && AMOUNT.test(value))) return false;
+  const maxFee = BigInt(cap.maxFee);
+  if (BigInt(fee) < maxFee) return false;
+  if (BigInt(converted) + BigInt(fee) !== BigInt(total)) return false;
+  if (BigInt(converted) !== BigInt(upstreamAmount)) return false;
+  if (BigInt(bound.sourceAmount) !== BigInt(total) || BigInt(bound.upstreamOfferAmount) !== BigInt(upstreamAmount)) return false;
+  if (dynamic.reservation === undefined) {
+    return bound.requireReservation !== true;
+  }
+  const copied = dynamic.profile["destination"];
+  const network = bound.destination !== undefined ? bound.destination.network : isPlainRecord(copied) ? copied["network"] : undefined;
+  const feeAsset = bound.destination !== undefined ? bound.destination.feeAsset : isPlainRecord(copied) ? copied["feeAsset"] : undefined;
+  if (typeof network !== "string" || typeof feeAsset !== "string") return false;
+  let reserved = 0n;
+  for (const leg of dynamic.reservation.legs) {
+    if (leg.network === network && leg.asset.toLowerCase() === feeAsset.toLowerCase()) reserved += BigInt(leg.amount);
+  }
+  return reserved >= BigInt(upstreamAmount) + maxFee;
 }
 
 /** `created` 行（控えの記録も同じ形）から intent を組む。動的の欄は予約が無くても読む側（控え）があるので、呼び出し側が `requireReservation` を決める。 */
