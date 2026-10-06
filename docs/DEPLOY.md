@@ -34,7 +34,7 @@ docker run -d --name subetha-router --restart unless-stopped \
 | `SUBETHA_INBOUND_MAX_TOTAL` / `SUBETHA_OUTBOUND_MAX_TOTAL` | | 既定 `1000000000` base units |
 | `SUBETHA_MPP_INBOUND_SECRET` | | **MPP 受信**を公開する場合のみ。challenge の HMAC 束縛鍵（**32 バイト以上**）。署名鍵ではない |
 | `SUBETHA_OUTBOUND_X402_KEY` | | x402 送信に別ウォレットを使う場合のみ。既定は `SUBETHA_OUTBOUND_PRIVATE_KEY` を流用 |
-| `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい**。MPP 送信と MPP 受信の照合の両方に使う |
+| `SUBETHA_TEMPO_RPC_URL` | | **推奨。** Tempo の認証付き RPC。未設定だと公開エンドポイントを使い、共有 egress IP からは**レート制限を受けやすい**。MPP 送信と MPP 受信の照合の両方に使う。**注意: 2026-10-06 より前のイメージは、この値を Router の子プロセスに渡していなかった**（設定しても送信は公開 RPC を使っていた。起動ログの `tempo rpc: public` で分かる）。直したイメージでは `tempo rpc: configured` と出る |
 | `SUBETHA_APPROVAL_TTL_SECONDS` | | 承認期限（秒）。既定 `600`。**`SUBETHA_OFFER_SECONDS` と揃える**こと |
 | `SUBETHA_JOURNAL_PATH` | | journal の置き場。既定 `runtime/journal.ndjson`。**ボリュームの中を指すこと** |
 | `SUBETHA_DYNAMIC_MAX_PURCHASES` | | 動的上流 URL の通算の件数上限。既定 `1000`（§2b） |

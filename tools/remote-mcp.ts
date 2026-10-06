@@ -100,8 +100,14 @@ async function start(): Promise<void> {
       // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
       // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
       ROUTER_X402_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
-      // MPP 受信の照合も同じ Tempo の RPC を使う（設定があるとき）。無ければ Router は chain の公開 RPC を使う。
-      ...(process.env["SUBETHA_TEMPO_RPC_URL"] === undefined || process.env["SUBETHA_TEMPO_RPC_URL"] === "" ? {} : { ROUTER_MPP_INBOUND_RPC_URL: process.env["SUBETHA_TEMPO_RPC_URL"] }),
+      /**
+       * Tempo の RPC（設定があるとき）。子プロセスの env は allowlist 方式（`startListening`）なので、**ここで明示的に渡さないと届かない**。
+       * 送信（`tools/remote-router-process.ts` が `SUBETHA_TEMPO_RPC_URL` を読む）と受信の照合（`ROUTER_MPP_INBOUND_RPC_URL`）の両方に同じ値を渡す。
+       * 以前は渡していなかったので、設定していても送信は公開 RPC を使っていた（T15 のレビューで発見）。
+       */
+      ...(process.env["SUBETHA_TEMPO_RPC_URL"] === undefined || process.env["SUBETHA_TEMPO_RPC_URL"] === ""
+        ? {}
+        : { SUBETHA_TEMPO_RPC_URL: process.env["SUBETHA_TEMPO_RPC_URL"], ROUTER_MPP_INBOUND_RPC_URL: process.env["SUBETHA_TEMPO_RPC_URL"] }),
       ...(mppInboundEnabled
         ? {
             ROUTER_MPP_INBOUND_SECRET: mppInboundSecret,
