@@ -57,7 +57,7 @@ function x402ToMpp(): Record<string, unknown> {
     },
     par: true,
     maxUpstreamAmount: "100000",
-    // mpp 送信は `fee.min >= maxFee`（運営がチェーン手数料を負担しない不変条件）。
+    // mpp 送信は `fee.min >= maxFee`（手数料の被覆の条件。設計 §6.6）。
     fee: { flat: "50000", bps: 100, min: "50000" },
   };
 }
