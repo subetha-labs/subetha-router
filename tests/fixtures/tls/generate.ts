@@ -26,7 +26,8 @@ export function generateTestTls(): TlsMaterial {
   openssl(dir, ["req", "-x509", ...ec, "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=subetha-router test CA (not for production)"]);
   for (const name of ["provider.test", "other.test"]) {
     openssl(dir, ["req", ...ec, "-keyout", `${name}.key`, "-out", `${name}.csr`, "-subj", `/CN=${name}`]);
-    writeFileSync(path.join(dir, `${name}.ext`), `subjectAltName=DNS:${name}\nbasicConstraints=CA:FALSE\n`);
+    // 統合試験（T14）は 1 つの Router から複数の fixture（上流 2 つ・facilitator・RPC）へ出るので、両方の証明書に補助の名前も入れる。
+    writeFileSync(path.join(dir, `${name}.ext`), `subjectAltName=DNS:${name},DNS:mpp.${name},DNS:facilitator.${name},DNS:rpc.${name}\nbasicConstraints=CA:FALSE\n`);
     openssl(dir, ["x509", "-req", "-in", `${name}.csr`, "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", `${name}.pem`, "-days", "2", "-extfile", `${name}.ext`]);
   }
   openssl(dir, ["req", "-x509", ...ec, "-keyout", "untrusted.key", "-out", "untrusted.pem", "-days", "2", "-subj", "/CN=provider.test", "-addext", "subjectAltName=DNS:provider.test"]);
