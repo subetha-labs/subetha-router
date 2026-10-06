@@ -141,8 +141,9 @@ total      = converted + fee
 ### 3.2 復元（`store.ts`）
 
 MPP 送信のプロファイルの記録（`dynamic.profile.rail === "mpp"`）は、`pricing.maxFee`・`pricing.estimate` が上の形で揃い、`fee >= maxFee` であり、
-**払う額に結び付いている**こと: `total = converted + fee`、受信 offer の額（呼び出し側が先に払う額）= `total`、`upstreamAmount` = 選んだ上流 offer の額
-（記録の `fee`・`maxFee` だけを書き換えて、払っていない手数料で大きな cap を通せないように。実装レビュー #4 の指摘 1）。予約があれば手数料の資産の区分の合計が
+**払う額に結び付いている**こと: `total = converted + fee`、`converted = upstreamAmount`（MPP 送信は桁が同じ・par なので換算は恒等）、
+**実際の受信 offer**（settle に渡る `source.offer`）の額 = `total`（写しの `source.amount` ではなく）、`upstreamAmount` = 選んだ上流 offer の額
+（記録の `fee`・`maxFee`・`converted`・`source.amount` を書き換えて、払っていない手数料で大きな cap を通せないように。実装レビュー #4・#5 の指摘 1）。予約があれば手数料の資産の区分の合計が
 `upstreamAmount + maxFee` 以上、journal の記録（昇格済み）なら予約が必須。この検査は 1 つの関数（`capCoversFee`）で、復元と再開（§3.3）が共有する。
 そうでなければ **`dynamic` はそのまま復元したうえで、intent に `dynamicCapInvalid: true` を立てる**（既存の `dynamicInvalid` とは別。`dynamicInvalid` は
 `dynamic` 全体を捨てるので `ownerKeyHash` が失われ、状態の照会が「存在しない」になる）。
@@ -165,7 +166,8 @@ core で `dynamicCapInvalid` を見る場所: 控えから組んだ直後（`dyn
 昇格済み（`created` ＋予約あり）の purchase は予約を取り直さない（本設計 §6.2 の 5）。そこで core は、再開の前に**記録から**次を確かめ、
 違えば `rejected` / `quote_unreadable`（復元で `dynamicCapInvalid` になるものと同じ条件を、復元に頼らず core でも見る）:
 
-- `pricing.maxFee`・`pricing.estimate` が §3.1 の形で存在し、`fee >= maxFee`、`total = converted + fee`、受信 offer の額 = `total`、上流 offer の額 = `upstreamAmount`
+- `pricing.maxFee`・`pricing.estimate` が §3.1 の形で存在し、`fee >= maxFee`、`total = converted + fee`、`converted = upstreamAmount`、実際の受信 offer（`source.offer`）の額 = `total`、
+  上流 offer の額 = `upstreamAmount`
 - 予約（昇格済みなら必須）に `{ network: destination.network, asset: destination.feeAsset }` の区分があり、その合計が `upstreamAmount + maxFee` 以上
   （`feeAsset` = 送信資産なので、元本の区分と手数料の区分は同じ鍵に落ちる。`reservationOf` の形）
 
@@ -239,3 +241,4 @@ core で `dynamicCapInvalid` を見る場所: 控えから組んだ直後（`dyn
 | 2 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 2 版 `a92e8e3`） | **REJECT** | (1) `dynamicInvalid` は `ownerKeyHash` ごと捨てるので状態の照会が通らない → `dynamic` を保ったまま `dynamicCapInvalid` を立てる形に。終端・昇格済み・控えの各記録の扱いと、再開前の検査の内容（cap の形・予約の区分）を明記（§3.2・§3.3）。(2) 容量の計算が送信の RPC だけで、上流の GET・facilitator・受信の RPC・名前解決の全アドレスを数えていなかった。「署名前に止まる」も誤り（送金の RPC の門の拒否は署名後で `unknown`）→ 全消費者を数え、非対応ノードを運用条件から外し、**送金の RPC の接続前の拒否を `not_sent` に分類**（§3.4・§4）。(3) `pricingPolicy` を無条件に足すと発行済みの x402 送信の quote が `quote_changed` になる → MPP 送信だけに限定し x402 の直列化を不変に（§2）。(4) purchase 時の見積り失敗の結果、証跡の表現、再開の「資金は動いていない」、レール別の助言、x402 受信への開示を明記（§1.4・§3.3・§4）。(5) `timeout` 関数は `fetchFn` の中で読む、client の取得も予算内、purchase の最悪 102 秒、見積りの証跡 `pricing.estimate` を定義（§1.2・§3.1・§5）。`feeMargin` の位置を `destination.feeMargin` に統一 |
 | 3 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 3 版 `e575a84`） | **APPROVE WITH CHANGES** | (1) `dynamic` を保つと `offerFor` が受信 offer を再発行し、断ると分かっている記録に向けて払える → offer の取得でも `dynamicCapInvalid` を見る（§3.2 に core の検査点を列挙）。(2) 新しい理由コードが `SAFE_REASONS` に無いと `destination_rejected` に潰れる → 許可リストと core の試験（§3.4・§5）。ほか: 接続前の拒否の判定は `cause` を辿って Router の例外型で（viem が包む）、最初の送金の要求にだけ結び付ける（§3.4）。§3.3 に `pricing.estimate` の検査を明記。実装の前提になる設計上の障害は無し |
 | 4 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。**実装** `df8c80a`） | **REJECT** | (1) 高: 復元の検査が記録の `fee` を信じ、払う額（受信 offer）と結び付いていない → `capCoversFee` に `total = converted + fee`・受信 offer の額 = `total`・上流 offer の額 = `upstreamAmount` を足した（§3.2）。(2) 再開の検査が形を見ず予約を任意にしていた → 復元と同じ関数で形を検査し、昇格済みは予約必須（§3.3）。(3) client の `quoteTimeoutMs` が明示の `timeoutMs` を無視 → 優先順位を直した（§1.2）。(4) 見積り全体の期限に 1 秒の余裕があった → 予算そのものに（§1.2）。ほか: `parameters` は既定（SDK と同じ）と明記、試験の経路は 3 通り＋「quote をまたいで憶えない」に訂正（§1.3） |
+| 5 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。実装 `ca29f8f`） | **REJECT** | 指摘 1 が部分的: `converted` が上流額に結び付いておらず（下げて `fee` を上げられる）、復元が写しの `source.amount` を見ていた（settle に渡る `source.offer` ではなく）→ `converted = upstreamAmount` と `source.offer.amount = total` に結び付けた（§3.2・§3.3）。他の 3 点は解消 |

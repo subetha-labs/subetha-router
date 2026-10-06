@@ -284,7 +284,7 @@ purchase では受信 verify の前に再見積りし、bound が cap を超え�
 **試験**: unit（config 53・core 55・wiring 15）、wire（adapter 192: 見積りの 3 経路（対応・非対応・`eth_gasPrice`）と値・quote をまたいで憶えない・残り予算の期限・送金系メソッドの拒否と署名口の無い facade・`maxFee` 無し／天井超え・
 cap が bound 未満なら署名しない・接続前の拒否は `not_sent`、接続後は `unknown`）、統合（51: 単価で cap と手数料が動く、天井超えで断る、purchase の再見積りで `fee_too_high`、
 署名前の検査が cap を使う、quote 飽和後の purchase、起動の probe）、HTTP／MCP（25: `quoteTimeoutMs`、nextStep の cap・時刻・期限、開示、一覧の `feePolicy`）。
-Linux（Colima の `node:22-bookworm`）で全体 1,098 件通過、macOS では T-A5/A6/A8 の 3 件が既知の環境差で失敗。**sabotage**: 27 の変異（cap を無視・予約が天井・天井の検査なし・再見積りなし・再開の検査なし
+Linux（Colima の `node:22-bookworm`）で全体 1,098 件通過、macOS では T-A5/A6/A8 の 3 件が既知の環境差で失敗。**sabotage**: 29 の変異（cap を無視・予約が天井・天井の検査なし・再見積りなし・再開の検査なし
 （復元と両方）・`capCoversFee` の各条件・`offerFor`・`SAFE_REASONS`・見積りの guard が送金系を通す・adapter が天井を使う・天井超えを丸める・接続前の拒否を `unknown`／
 すべて `not_sent`・予算切れの印・`viaFillTransaction`・期限が残りでない・署名口のある facade・`feeMargin` の下限・権威の欄・`pricingPolicy` の無条件・起動の検査・
 transport の `timeout` 関数・開示・client の期限、実装レビュー後に足した 5 つ: 受信 offer の額との結び付き・`total` の整合・昇格済みの予約必須・見積りの期限の余裕・client の優先順位）
@@ -293,7 +293,8 @@ transport の `timeout` 関数・開示・client の期限、実装レビュー�
 **実測（読取だけ、Tempo testnet、2026-10-06）**: prepared gas は memo の非ゼロのバイト数と宛先の残高の有無で変わる（48,558〜54,182。設計 §1.1）。
 「memo に依らない」は誤りだったので設計を直した。全バイト非ゼロのダミーは 32 バイトの memo の中で最大。
 
-**レビュー**: 設計 3 回・実装 1 回目は REJECT（高 1: 復元の検査が払う額と結び付いていない。`docs/dynamic-gas-fee-design.md` §6 の 4 行目）→ 修正。2 回目は §6 に追記。
+**レビュー**: 設計 3 回・実装 1 回目は REJECT（高 1: 復元の検査が払う額と結び付いていない。`docs/dynamic-gas-fee-design.md` §6 の 4 行目）→ 修正。2 回目も REJECT
+（`converted` と写しの `source.amount` の 2 つの抜け道。§6 の 5 行目）→ 修正（sabotage 2 つ追加: `converted` の束縛・写しへの束縛は復元と再開の両方を外す変異で落ちる）。3 回目は §6 に追記。
 
 ## 3. AC との対応
 
