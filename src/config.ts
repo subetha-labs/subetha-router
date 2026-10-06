@@ -535,15 +535,31 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     throw new ConfigError(`${at}.fee.bps must be an integer in 0..10000`);
   }
   const feeMin = requireAmount(fee, "min", `${at}.fee`, false);
+  const sourceDecimals = requireDecimals(source, `${at}.source`);
+  const destinationDecimals = requireDecimals(destination, `${at}.destination`);
   /**
-   * **運営がチェーン手数料を負担しない不変条件**（G-1、owner の決定 2026-10-06）: MPP 送信では Router が Tempo の手数料を払う。
-   * 署名前に `ceil(gas × maxFeePerGas / 10^12) <= maxFee` を確かめて超えたら払わないので、実際に払う手数料は必ず `maxFee` 以下。
-   * 一方、呼び出し側は quote の手数料（`max(min, flat + ceil(額 × bps / 10000))` ≥ `min`）を先に払う。
-   * よって `fee.min >= maxFee` なら、件数や単価に関わらず、運営がガス代で純減することは 1 件ごとに起きない。
-   * 設定の値に頼らず、Router がこの不等式を起動時に確かめる。
+   * **運営がチェーン手数料を負担しない条件**（G-1、owner の決定 2026-10-06。設計 §6.6）: MPP 送信では Router が Tempo の手数料を払う。
+   * 署名前に `ceil(gas × maxFeePerGas / 10^12) <= maxFee` を確かめて超えたら払わないので、署名した transaction の手数料の上限は `maxFee`。
+   * 一方、呼び出し側は quote の手数料（`max(min, flat + ceil(額 × bps / 10000))` ≥ `min`）を**受信資産の base units で**先に払う。
+   *
+   * 2 つの額を同じ単位で比べるため、この不変条件を掛けるプロファイルは次に限る:
+   * - `feeAsset` が送信資産そのもの（別の資産の価値は `par` では定まらない）
+   * - 受信資産と送信資産の桁が同じ（`par: true` は 1:1 の宣言で、桁が違うと base units の比較にならない）
+   * そのうえで `fee.min >= maxFee`。これは「チェーンが実際に請求する額が署名時の上限以下である」という Tempo 側の前提
+   * （設計 §3.3 の T0-b。観測と一致しているが仕様として未確立）の下で、1 件ごとに運営の純減を無くす**条件つきの保証**。
+   * 設定の値に頼らず、Router が起動時に確かめる。
    */
-  if (maxFee !== undefined && BigInt(feeMin) < BigInt(maxFee)) {
-    throw new ConfigError(`${at}.fee.min must be at least destination.maxFee for an mpp outbound profile (the operator must not subsidize the chain fee)`);
+  if (maxFee !== undefined && feeAsset !== undefined) {
+    const destinationAsset = requireString(destination, "asset", `${at}.destination`);
+    if (feeAsset.toLowerCase() !== destinationAsset.toLowerCase()) {
+      throw new ConfigError(`${at}.destination.feeAsset must be the destination asset for an mpp outbound profile (the fee bound is compared at par)`);
+    }
+    if (sourceDecimals !== destinationDecimals) {
+      throw new ConfigError(`${at}: source.decimals must equal destination.decimals for an mpp outbound profile (the fee bound is compared in base units)`);
+    }
+    if (BigInt(feeMin) < BigInt(maxFee)) {
+      throw new ConfigError(`${at}.fee.min must be at least destination.maxFee for an mpp outbound profile (the operator must not subsidize the chain fee)`);
+    }
   }
   return {
     profileId,
@@ -551,7 +567,7 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     source: {
       network: requireString(source, "network", `${at}.source`),
       asset: requireString(source, "asset", `${at}.source`),
-      decimals: requireDecimals(source, `${at}.source`),
+      decimals: sourceDecimals,
       payTo,
     },
     rail,
@@ -559,7 +575,7 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
       scheme: requireString(destination, "scheme", `${at}.destination`),
       network: requireString(destination, "network", `${at}.destination`),
       asset: requireString(destination, "asset", `${at}.destination`),
-      decimals: requireDecimals(destination, `${at}.destination`),
+      decimals: destinationDecimals,
       ...(tokenDomain === undefined ? {} : { tokenDomain }),
       ...(feeAsset === undefined ? {} : { feeAsset }),
       ...(maxFee === undefined ? {} : { maxFee }),
