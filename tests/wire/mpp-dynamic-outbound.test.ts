@@ -15,7 +15,7 @@ import { createClient, custom, decodeFunctionData, encodeFunctionData, http, kec
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { Abis, Transaction as TempoTransaction } from "viem/tempo";
 import { tempoModerato } from "viem/tempo/chains";
-import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 type Tx = Record<string, unknown>;
 interface FacadeLike {
@@ -85,6 +85,9 @@ const MEMO = `0x${"ab".repeat(32)}` as Hex;
 let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
+});
+afterAll(() => {
+  TLS.cleanup();
 });
 
 const closers: Array<() => Promise<void>> = [];

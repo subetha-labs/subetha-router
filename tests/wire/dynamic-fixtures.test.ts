@@ -8,7 +8,7 @@ import { Mppx, tempo } from "mppx/client";
 import { createClient, http, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { tempoModerato } from "viem/tempo/chains";
-import { afterEach, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 
 import { createMppOutbound } from "../../src/adapters/outbound/mpp.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "../../src/adapters/outbound/x402.js";
@@ -29,6 +29,9 @@ const CTX = { operation: "test", routeId: "dyn-test" };
 let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
+});
+afterAll(() => {
+  TLS.cleanup();
 });
 
 const closers: Array<() => Promise<void>> = [];

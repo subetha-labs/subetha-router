@@ -8,7 +8,7 @@ import https from "node:https";
 import type { LookupAddress } from "node:dns";
 import type { AddressInfo } from "node:net";
 
-import { afterEach, beforeAll, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS } from "../../src/config.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
@@ -29,6 +29,9 @@ const CTX = { operation: "challenge", routeId: "dyn-test" };
 let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
+});
+afterAll(() => {
+  TLS.cleanup();
 });
 
 interface Upstream {

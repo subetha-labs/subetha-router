@@ -80,6 +80,11 @@ export interface RouterCapabilities {
    */
   readonly dynamicTransportHooksForTest?: DynamicTransportHooks;
   /**
+   * **試験専用。** 静的 route の transport（上流・facilitator・RPC）に足す差し替え（同じ制限: 名前解決・接続先・CA・
+   * インタフェース一覧だけ。`allowLoopback` と `report` は配線が決める）。統合試験が静的と動的を同じ fixture の網に閉じ込めるため。
+   */
+  readonly transportHooksForTest?: DynamicTransportHooks;
+  /**
    * 能力が接続する依存先（送信 MPP の RPC など）の URL。動的上流 URL の**拒否ホスト**に入れる（設計 §7.4）。
    * 起動時の確認で、MPP 能力の client の RPC ホストがここに含まれていなければ起動を止める。
    */
@@ -226,8 +231,9 @@ export function reportTransportToStderr(write: (message: string) => void): (even
  * 実能力は常に false、fixture の能力（`non-signing-fixture`、synthetic、`fixtureFacilitators`）だけ true。
  * env / 設定からは変えられない。
  */
-export function transportFor(allowLoopback: boolean, report: (event: TransportEvent) => void): GuardedTransport {
-  return createGuardedTransport({ allowLoopback, report });
+export function transportFor(allowLoopback: boolean, report: (event: TransportEvent) => void, hooks: DynamicTransportHooks = {}): GuardedTransport {
+  // 差し替え（試験）の上に方針の欄を重ねる。
+  return createGuardedTransport({ ...hooks, allowLoopback, report });
 }
 
 export function composeRails(
@@ -254,6 +260,7 @@ export function composeRails(
   if (real === undefined) {
     throw new SignerNotAuthorizedError();
   }
+  const staticHooks = capabilities.transportHooksForTest ?? {};
 
   /**
    * 動的上流 URL（設計 §3.1・§7.3）。transport は route 用とは別のインスタンスで、**loopback を許さず**、名前解決に期限、
@@ -329,7 +336,7 @@ export function composeRails(
       rails[rail] = createX402Outbound({
         upstreams: upstreamsFor(rail),
         capability,
-        transport: transportFor(capability.kind === "non-signing-fixture", report),
+        transport: transportFor(capability.kind === "non-signing-fixture", report, staticHooks),
         ...dynamicOptionsFor("x402"),
       });
       continue;
@@ -342,7 +349,7 @@ export function composeRails(
       rails[rail] = createMppOutbound({
         upstreams: upstreamsFor(rail),
         capability,
-        transport: transportFor(capability.kind === "non-signing-fixture", report),
+        transport: transportFor(capability.kind === "non-signing-fixture", report, staticHooks),
         ...dynamicOptionsFor("mpp"),
       });
       continue;
@@ -356,7 +363,7 @@ export function composeRails(
   const inboundRails: Record<string, InboundRail> = {
     subetha: createSubethaInbound({
       facilitatorUrl: real.subethaFacilitatorUrl,
-      transport: transportFor(inboundLoopback, report),
+      transport: transportFor(inboundLoopback, report, staticHooks),
     }),
   };
   const usesX402Inbound =
@@ -378,7 +385,7 @@ export function composeRails(
       inboundRails[`x402:${route.routeId}`] = createX402Inbound({
         facilitatorUrl: real.x402InboundFacilitatorUrl,
         payTo,
-        transport: transportFor(inboundLoopback, report),
+        transport: transportFor(inboundLoopback, report, staticHooks),
         // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
         // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
         ...(real.x402InboundOfferSeconds === undefined
@@ -429,7 +436,7 @@ export function composeRails(
         chainId,
         ...(real.mppInboundRpcUrl === undefined ? {} : { rpcUrl: real.mppInboundRpcUrl }),
         // SDK の JSON-RPC も guarded transport を通る（設計 A §3.5 経路 11）。fixture 例外は他の受信と同じ能力で決まる。
-        transport: transportFor(inboundLoopback, report),
+        transport: transportFor(inboundLoopback, report, staticHooks),
         // 承認期限は `min(approvalTtlMs, offerExpiry)` で切られる。既定は x402 受信と揃える。
         maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
       });

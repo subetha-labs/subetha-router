@@ -10,7 +10,7 @@
  */
 import { getAddress } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 type TypedData = { domain: Record<string, unknown>; types: Record<string, unknown>; primaryType: string; message: Record<string, unknown> };
 
@@ -67,6 +67,9 @@ const MIB = 1024 * 1024;
 let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
+});
+afterAll(() => {
+  TLS.cleanup();
 });
 
 const closers: Array<() => Promise<void>> = [];

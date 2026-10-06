@@ -8,8 +8,9 @@
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { getAddress, verifyTypedData } from "viem";
 import { generatePrivateKey } from "viem/accounts";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 import { createRouterClient } from "../../src/client/index.js";
 import type { QuoteView, RouterClient } from "../../src/client/types.js";
@@ -38,11 +39,15 @@ const MPP_PROFILE = "dyn-x402-to-mpp";
 const STATIC_ROUTE = "r-static";
 const X402_URL = "https://provider.test/v1/price?symbol=ETH";
 const MPP_URL = "https://mpp.provider.test/v1/price";
-const HOSTS = { x402: "provider.test", mpp: "mpp.provider.test", facilitator: "facilitator.other.test", rpc: "rpc.other.test" } as const;
+const HOSTS = { x402: "provider.test", mpp: "mpp.provider.test", facilitator: "facilitator.other.test", rpc: "rpc.other.test", static: "static.provider.test" } as const;
+const STATIC_URL = `https://${HOSTS.static}/v1/x`;
 
 let TLS: TlsMaterial;
 beforeAll(() => {
   TLS = generateTestTls();
+});
+afterAll(() => {
+  TLS.cleanup();
 });
 
 interface Fixtures {
@@ -66,13 +71,24 @@ interface Router {
   readonly config: RuntimeConfig;
   readonly events: TransportEvent[];
   readonly payerAddress: { x402: `0x${string}`; mpp: `0x${string}` };
+  /** 運用者の鍵が署名した回数（x402: EIP-3009、mpp: Tempo transaction）。 */
+  signatures(): { x402: number; mpp: number };
   client(source?: string): RouterClient;
   close(): Promise<void>;
 }
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  while (closers.length > 0) await closers.pop()!();
+  // 1 つが失敗しても残りを片付ける。
+  const failures: unknown[] = [];
+  while (closers.length > 0) {
+    try {
+      await closers.pop()!();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) throw failures[0];
 });
 
 async function startFixtures(): Promise<Fixtures> {
@@ -84,7 +100,8 @@ async function startFixtures(): Promise<Fixtures> {
   closers.push(mpp.close);
   const facilitator = await startVerifyingFacilitator({ tls: TLS });
   closers.push(facilitator.close);
-  const ports = new Map<string, number>([[HOSTS.x402, x402.port], [HOSTS.mpp, mpp.port], [HOSTS.facilitator, facilitator.port], [HOSTS.rpc, rpc.port]]);
+  // 静的 route の上流も同じ TLS の x402 fixture（別の名前で）。
+  const ports = new Map<string, number>([[HOSTS.x402, x402.port], [HOSTS.mpp, mpp.port], [HOSTS.facilitator, facilitator.port], [HOSTS.rpc, rpc.port], [HOSTS.static, x402.port]]);
   return { x402, mpp, facilitator, rpc, resolve: new Map(), ports, dialed: [] };
 }
 
@@ -166,7 +183,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
         denyHosts: [],
       },
     },
-    x402: { upstreams: { [STATIC_ROUTE]: "https://static.provider.test/v1/x" } },
+    x402: { upstreams: { [STATIC_ROUTE]: STATIC_URL } },
   };
   const configPath = path.join(dir, "router.config.json");
   writeFileSync(configPath, JSON.stringify(document));
@@ -188,11 +205,23 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
   const keys = options.keys ?? { x402: generatePrivateKey(), mpp: generatePrivateKey() };
   const evm = createRealEvmCapability(keys.x402);
   const mppCapability = createRealMppCapability(keys.mpp, { rpcUrl: `https://${HOSTS.rpc}` });
+  // MPP の署名の回数は、能力の account を包んで数える（実装は変えない。署名は実鍵）。
+  const mppBase = mppCapability.capability();
+  let mppSignatures = 0;
+  const countingAccount = {
+    ...mppBase.account,
+    signTransaction: async (transaction: unknown, options?: unknown) => {
+      mppSignatures += 1;
+      return (mppBase.account as unknown as { signTransaction(t: unknown, o?: unknown): Promise<`0x${string}`> }).signTransaction(transaction, options);
+    },
+  };
   const capabilities: RouterCapabilities = {
     evmSigning: evm.capability(FIXTURE_NETWORK),
-    mppTempo: mppCapability.capability(),
+    mppTempo: { ...mppBase, account: countingAccount as never },
     dependencyUrls: [`https://${HOSTS.rpc}/`],
     dynamicTransportHooksForTest: hooksOf(fixtures),
+    // 静的 route の transport も同じ fixture の網に閉じ込める（表に無い宛先には接続しない）。
+    transportHooksForTest: hooksOf(fixtures),
   };
   const events: TransportEvent[] = [];
   const rails = composeRails(config, capabilities, (event) => events.push(event));
@@ -214,6 +243,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
     config,
     events,
     payerAddress: { x402: evm.address, mpp: mppCapability.address },
+    signatures: () => ({ x402: evm.signCount(), mpp: mppSignatures }),
     client: (source = "judge") => createRouterClient({ baseUrl, principalId: "judge", token: "public", allowUnissuedQuotes: true, source }),
     close: async () => {
       await server.close();
@@ -288,9 +318,21 @@ describe("AC-2: 両方向の quote → purchase → delivered", () => {
     const result = await purchase(router, quote, credential, "r1");
     expect(result).toMatchObject({ outcome: "delivered", snapshot: { price: 1 } });
     expect(outboundCalls(fixtures)).toEqual({ x402Payments: 1, mppSends: 1, mppCredentials: 0 });
-    const payment = fixtures.x402.seen.payments[0] as { accepted: unknown; payload: { authorization: { from: string } } };
+    const payment = fixtures.x402.seen.payments[0] as { accepted: unknown; payload: { signature: `0x${string}`; authorization: Record<string, string> } };
     expect(payment.accepted).toEqual(standardAccept());
-    expect(payment.payload.authorization.from.toLowerCase()).toBe(router.payerAddress.x402.toLowerCase());
+    // 署名は運用者の鍵のもの（住所の申告ではなく、EIP-3009 の typed data に対する署名を検証する）。
+    const a = payment.payload.authorization;
+    expect(
+      await verifyTypedData({
+        address: router.payerAddress.x402,
+        domain: { name: "USDC", version: "2", chainId: 84532, verifyingContract: getAddress(USDC) },
+        types: { TransferWithAuthorization: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }] },
+        primaryType: "TransferWithAuthorization",
+        message: { from: getAddress(a["from"]!), to: getAddress(a["to"]!), value: BigInt(a["value"]!), validAfter: BigInt(a["validAfter"]!), validBefore: BigInt(a["validBefore"]!), nonce: a["nonce"] as `0x${string}` },
+        signature: payment.payload.signature,
+      }),
+    ).toBe(true);
+    expect(router.signatures()).toEqual({ x402: 1, mpp: 0 });
     // 受信の照合（MPP の RPC）は動的用 transport を通った（RPC のホストに接続した）。
     expect(fixtures.dialed).toContain(HOSTS.rpc);
     expect(new Set(fixtures.dialed)).toEqual(new Set([HOSTS.x402, HOSTS.rpc]));
@@ -299,8 +341,16 @@ describe("AC-2: 両方向の quote → purchase → delivered", () => {
 
 /* ------------------------------------------------------------------ AC-5 */
 
+/** credential（base64 の封筒）を別の quote の封筒に入れ替える（署名・送金はそのまま）。 */
+function rebind(credential: string, into: QuoteView, patch: (payload: Record<string, unknown>) => Record<string, unknown> = (p) => p): string {
+  const decoded = JSON.parse(Buffer.from(credential, "base64").toString("utf8")) as { payload: Record<string, unknown> };
+  const offer = into.source.offer as { extra: Record<string, unknown> };
+  const envelope = { x402Version: 2, accepted: into.source.offer, payload: patch({ ...decoded.payload, challengeNonce: offer.extra["challengeNonce"] }) };
+  return Buffer.from(JSON.stringify(envelope), "utf8").toString("base64");
+}
+
 describe("AC-5: 1 回の受信支払いで送信の呼び出しは高々 1 回", () => {
-  test("同じ credential の再提出・別 quote（同額・異額・静的）への持ち込み・再起動後: 送信は 1 回のまま", async () => {
+  test("x402 受信: A の署名を B の封筒に入れ替えても（同額・異額・静的 route・nonce も書き換え）送信は 1 回のまま。再起動後も", async () => {
     const fixtures = await startFixtures();
     const dir = mkdtempSync(path.join(runtimeRoot, "t14-ac5-"));
     closers.push(async () => rmSync(dir, { recursive: true, force: true }));
@@ -310,33 +360,84 @@ describe("AC-5: 1 回の受信支払いで送信の呼び出しは高々 1 回",
     const a = await quoteOf(router, MPP_PROFILE, MPP_URL, "a");
     const credential = await credentialFor(fixtures, a);
     expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
-    expect(outboundCalls(fixtures).mppSends).toBe(1);
-    // 同じ quote に同じ credential をもう一度 → 既存の結果（送信は増えない）。
-    expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
-    // 同額の別 quote・異額の別 quote（上流の額を変える）に A の credential → preflight で止まる（facilitator にも出ない）。
-    const sameAmount = await quoteOf(router, MPP_PROFILE, MPP_URL, "b");
-    expect(await purchase(router, sameAmount, credential, "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
-    fixtures.mpp.state.amount = "2000";
-    const otherAmount = await quoteOf(router, MPP_PROFILE, MPP_URL, "c");
-    expect(await purchase(router, otherAmount, credential, "c")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
-    // 静的 route の offer に署名した credential を動的 quote に持ち込む（静的の上流は到達しないので offer は受信 adapter から直接作る）。
-    const staticOffer = await router.core.quote({ principalId: "judge", requestId: "s", routeId: STATIC_ROUTE }).catch(() => undefined);
-    void staticOffer;
-    const foreign = await createX402Payer(generatePrivateKey()).credentialFor({ ...(sameAmount.source.offer as object), extra: { ...((sameAmount.source.offer as { extra: Record<string, unknown> }).extra), challengeNonce: `0x${"ab".repeat(32)}` } } as never, 84532);
-    expect(await purchase(router, sameAmount, foreign, "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    expect(outboundCalls(fixtures)).toMatchObject({ mppSends: 1, mppCredentials: 1 });
     expect(fixtures.facilitator.calls).toMatchObject({ verify: 1, settle: 1 });
-    expect(outboundCalls(fixtures).mppSends).toBe(1);
-    // 再起動（journal の再オープン）後も、A の再提出は送信を増やさない。
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 1 });
+
+    // (1) 同じ quote に同じ credential → 既存の結果。
+    expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
+    // (2) 同額の B・(3) 異額の C の封筒に A の署名（authorization は A のまま）→ 署名の nonce が B の nonce と違う（束縛つき preflight）。
+    const b = await quoteOf(router, MPP_PROFILE, MPP_URL, "b");
+    expect(await purchase(router, b, rebind(credential, b), "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    fixtures.mpp.state.amount = "2000";
+    const c = await quoteOf(router, MPP_PROFILE, MPP_URL, "c");
+    expect(await purchase(router, c, rebind(credential, c), "c")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    fixtures.mpp.state.amount = "1000";
+    // (4) nonce の欄も B のものに書き換える → preflight は通るが、署名が合わないので facilitator が拒否する（verify_failed）。
+    const forged = rebind(credential, b, (payload) => ({ ...payload, authorization: { ...(payload["authorization"] as Record<string, unknown>), nonce: (b.source.offer as { extra: { challengeNonce: string } }).extra.challengeNonce } }));
+    expect(await purchase(router, b, forged, "b")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
+    expect(fixtures.facilitator.calls).toMatchObject({ verify: 2, settle: 1 });
+    expect(fixtures.facilitator.calls.reasons).toContain("invalid_signature");
+    // (5) 静的 route: A の署名を静的 quote の封筒に（静的の受信は nonce を束縛しない設定だが、facilitator の署名検証で落ちる）。
+    const s = await router.client().quote({ routeId: STATIC_ROUTE, requestId: "s" });
+    expect(s.ok).toBe(true);
+    const sq = (s as { quote: QuoteView }).quote;
+    expect(await purchase(router, sq, rebind(credential, sq), "s")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
+    // (6) 静的 quote の署名を動的 quote の封筒に → 束縛つき preflight が止める。
+    const staticCredential = await credentialFor(fixtures, sq);
+    expect(await purchase(router, b, rebind(staticCredential, b), "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    // 正の対照: 静的 quote は自分の credential で成立する（静的の送信も 1 回）。静的は verify の失敗で quote が終端になるので、新しい quote で。
+    const s2 = (await router.client().quote({ routeId: STATIC_ROUTE, requestId: "s2" })) as { quote: QuoteView };
+    expect((await purchase(router, s2.quote, await credentialFor(fixtures, s2.quote), "s2")).outcome).toBe("delivered");
+    expect(fixtures.x402.seen.payments).toHaveLength(1);
+    expect(outboundCalls(fixtures)).toMatchObject({ mppSends: 1, mppCredentials: 1 });
+    expect(fixtures.facilitator.calls.settle).toBe(2);
+
+    // 再起動（journal の再オープン）後も同じ。
     await router.close();
     closers.splice(closers.indexOf(router.close), 1);
     router = await startRouter(fixtures, { dir, keys });
     fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
     expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
-    expect(outboundCalls(fixtures).mppSends).toBe(1);
-    expect(fixtures.facilitator.calls.settle).toBe(1);
+    expect(await purchase(router, b, rebind(credential, b), "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    expect(await purchase(router, b, forged, "b")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
+    expect(outboundCalls(fixtures)).toMatchObject({ mppSends: 1, mppCredentials: 1 });
+    expect(fixtures.x402.seen.payments).toHaveLength(1);
+    expect(fixtures.facilitator.calls.settle).toBe(2);
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
   });
 
-  test("並行: 同じ quote への 2 つの purchase（A/A）は送信 1 回、別の quote 2 つ（A/B）は各 1 回", async () => {
+  test("MPP 受信: A の送金（wire credential）を B の封筒に入れ替えても送信は 1 回のまま。再起動後も", async () => {
+    const fixtures = await startFixtures();
+    const dir = mkdtempSync(path.join(runtimeRoot, "t14-ac5m-"));
+    closers.push(async () => rmSync(dir, { recursive: true, force: true }));
+    const keys = { x402: generatePrivateKey(), mpp: generatePrivateKey() };
+    let router = await startRouter(fixtures, { dir, keys });
+    fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
+    const a = await quoteOf(router, X402_PROFILE, X402_URL, "a");
+    const credential = await credentialFor(fixtures, a);
+    expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
+    expect(fixtures.x402.seen.payments).toHaveLength(1);
+    expect(router.signatures().x402).toBe(1);
+    const rpcBefore = fixtures.rpc.http.requests;
+    // 同額の B に A の wire credential（中の challenge は A のもの）→ 埋め込まれた challenge id の照合で止まる。
+    const b = await quoteOf(router, X402_PROFILE, X402_URL, "b");
+    expect(await purchase(router, b, rebind(credential, b), "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    // 同じ quote への再提出 → 既存の結果。
+    expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
+    expect(fixtures.x402.seen.payments).toHaveLength(1);
+    expect(fixtures.rpc.http.requests).toBe(rpcBefore);
+    await router.close();
+    closers.splice(closers.indexOf(router.close), 1);
+    router = await startRouter(fixtures, { dir, keys });
+    fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
+    expect(await purchase(router, b, rebind(credential, b), "b")).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    expect((await purchase(router, a, credential, "a")).outcome).toBe("delivered");
+    expect(fixtures.x402.seen.payments).toHaveLength(1);
+    expect(router.signatures().x402).toBe(0);
+  });
+
+  test("並行: 同じ quote への 2 つの purchase（A/A）は送信 1 回、別の quote 2 つ（A/B）は各 1 回。A の署名を B に持ち込む並行も送信は増えない", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
@@ -344,21 +445,26 @@ describe("AC-5: 1 回の受信支払いで送信の呼び出しは高々 1 回",
     const b = await quoteOf(router, MPP_PROFILE, MPP_URL, "b");
     const ca = await credentialFor(fixtures, a);
     const cb = await credentialFor(fixtures, b);
-    const [a1, a2] = await Promise.all([purchase(router, a, ca, "a"), purchase(router, a, ca, "a")]);
+    const [a1, a2, ab] = await Promise.all([purchase(router, a, ca, "a"), purchase(router, a, ca, "a"), purchase(router, b, rebind(ca, b), "b")]);
     expect([a1.outcome, a2.outcome]).toEqual(["delivered", "delivered"]);
-    expect(outboundCalls(fixtures).mppSends).toBe(1);
+    expect(ab).toMatchObject({ outcome: "payment_required", error: "nonce_mismatch" });
+    expect(outboundCalls(fixtures)).toMatchObject({ mppSends: 1, mppCredentials: 1 });
     expect(fixtures.facilitator.calls.settle).toBe(1);
-    const [b1, c1] = await Promise.all([purchase(router, b, cb, "b"), purchase(router, b, cb, "b")]);
-    expect([b1.outcome, c1.outcome]).toEqual(["delivered", "delivered"]);
-    expect(outboundCalls(fixtures).mppSends).toBe(2);
+    const [b1, b2] = await Promise.all([purchase(router, b, cb, "b"), purchase(router, b, cb, "b")]);
+    expect([b1.outcome, b2.outcome]).toEqual(["delivered", "delivered"]);
+    expect(outboundCalls(fixtures)).toMatchObject({ mppSends: 2, mppCredentials: 2 });
+    expect(router.signatures().mpp).toBe(2);
     // x402 側（MPP で払う）でも同じ。
     const x = await quoteOf(router, X402_PROFILE, X402_URL, "x");
     const y = await quoteOf(router, X402_PROFILE, X402_URL, "y");
     const cx = await credentialFor(fixtures, x);
     const cy = await credentialFor(fixtures, y);
-    const results = await Promise.all([purchase(router, x, cx, "x"), purchase(router, x, cx, "x"), purchase(router, y, cy, "y")]);
-    expect(results.map((r) => r.outcome)).toEqual(["delivered", "delivered", "delivered"]);
-    expect(outboundCalls(fixtures).x402Payments).toBe(2);
+    const results = await Promise.all([purchase(router, x, cx, "x"), purchase(router, x, cx, "x"), purchase(router, y, cy, "y"), purchase(router, y, rebind(cx, y), "y")]);
+    expect(results.slice(0, 3).map((r) => r.outcome)).toEqual(["delivered", "delivered", "delivered"]);
+    // 持ち込みは、先に本物が通っていれば既存の結果（delivered）、先なら拒否。どちらでも送信は y の 1 回だけ。
+    expect(["delivered", "payment_required"]).toContain(results[3]!.outcome);
+    expect(fixtures.x402.seen.payments).toHaveLength(2);
+    expect(router.signatures().x402).toBe(2);
   });
 });
 
@@ -366,20 +472,27 @@ describe("AC-5: 1 回の受信支払いで送信の呼び出しは高々 1 回",
 
 describe("AC-6: 上流が offer を変えたら受信 settle・送信の署名・broadcast が 0", () => {
   test.each([
-    ["額", (u: X402Upstream) => { u.state.accepts = [standardAccept({ amount: "1001" })]; }],
-    ["受取先", (u: X402Upstream) => { u.state.accepts = [standardAccept({ payTo: "0x0000000000000000000000000000000000000a12" })]; }],
-    ["maxTimeoutSeconds", (u: X402Upstream) => { u.state.accepts = [standardAccept({ maxTimeoutSeconds: 61 })]; }],
-    ["extra.name", (u: X402Upstream) => { u.state.accepts = [standardAccept({ extra: { name: "USD Coin", version: "2" } })]; }],
-    ["説明の欄", (u: X402Upstream) => { u.state.accepts = [standardAccept({ description: "new" })]; }],
-  ])("x402 の上流が %s を変えた", async (_name, change) => {
+    ["scheme", standardAccept({ scheme: "upto" })],
+    ["network", standardAccept({ network: "eip155:8453" })],
+    ["asset", standardAccept({ asset: "0x0000000000000000000000000000000000000abc" })],
+    ["額", standardAccept({ amount: "1001" })],
+    ["受取先", standardAccept({ payTo: "0x0000000000000000000000000000000000000a12" })],
+    ["maxTimeoutSeconds", standardAccept({ maxTimeoutSeconds: 61 })],
+    ["extra.name", standardAccept({ extra: { name: "USD Coin", version: "2" } })],
+    ["extra.version", standardAccept({ extra: { name: "USDC", version: "1" } })],
+    ["説明の欄", standardAccept({ description: "new" })],
+  ])("x402 の上流が %s を変えた: 受信 settle 0・署名 0・送信 0・journal 0 行", async (_name, changed) => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, X402_PROFILE, X402_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
-    change(fixtures.x402);
+    const rpcAfterCallerPayment = fixtures.rpc.http.requests;
+    fixtures.x402.state.accepts = [changed];
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "rejected", error: "offer_changed", status: 409 });
-    expect(outboundCalls(fixtures).x402Payments).toBe(0);
-    // 呼び出し側の送金（1 件）以外に RPC への送金は無く、journal も増えていない（昇格前）。
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
+    expect(fixtures.x402.seen.payments).toHaveLength(0);
+    // 受信の照合（RPC）にも進んでいない（読み直しで止まる）。呼び出し側の送金の 1 件以外に RPC への送金は無い。
+    expect(fixtures.rpc.http.requests).toBe(rpcAfterCallerPayment);
     expect(fixtures.rpc.sentRaw).toHaveLength(1);
     expect(journalEvents(router)).toEqual([]);
   });
@@ -388,7 +501,10 @@ describe("AC-6: 上流が offer を変えたら受信 settle・送信の署名�
     ["額", (u: MppUpstream) => { u.state.amount = "1001"; }],
     ["受取先", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), recipient: "0x0000000000000000000000000000000000000b23" } }); }],
     ["realm", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, realm: "another" }); }],
-  ])("MPP の上流が %s を変えた", async (_name, change) => {
+    ["request.description（条件の全文）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), description: "new" } }); }],
+    ["methodDetails（feePayer の申し出が増えた）", (u: MppUpstream) => { u.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Record<string, unknown>), methodDetails: { chainId: MPP_FIXTURE_CHAIN_ID, feePayer: true } } }); }],
+    ["meta（scope が付いた）", (u: MppUpstream) => { u.state.scope = "match"; }],
+  ])("MPP の上流が %s を変えた: 受信 verify・settle 0・署名 0・送金 0・journal 0 行", async (_name, change) => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, MPP_PROFILE, MPP_URL, "r1");
@@ -396,18 +512,26 @@ describe("AC-6: 上流が offer を変えたら受信 settle・送信の署名�
     change(fixtures.mpp);
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "rejected", error: "offer_changed", status: 409 });
     expect(fixtures.facilitator.calls).toMatchObject({ verify: 0, settle: 0 });
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
     expect(outboundCalls(fixtures)).toEqual({ x402Payments: 0, mppSends: 0, mppCredentials: 0 });
     expect(journalEvents(router)).toEqual([]);
   });
 
-  test("MPP の challenge の id・expires だけが変わっても成立する", async () => {
+  test("MPP の challenge の id・expires だけが変わっても成立する（発行ごとに実際に変わっていることを記録して確かめる）", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
+    const issued: { id: string; expires: string }[] = [];
+    fixtures.mpp.state.mutateChallenge = (c) => {
+      issued.push({ id: String(c["id"]), expires: String(c["expires"]) });
+      return c;
+    };
     const quote = await quoteOf(router, MPP_PROFILE, MPP_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
-    // fixture は読むたびに新しい id・expires を発行する（HMAC は実物）。
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect((await purchase(router, quote, credential, "r1")).outcome).toBe("delivered");
-    expect(fixtures.mpp.seen.challenges).toBeGreaterThanOrEqual(3);
+    expect(issued.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(issued.map((c) => c.id)).size).toBe(issued.length);
+    expect(new Set(issued.map((c) => c.expires)).size).toBeGreaterThan(1);
   });
 });
 
@@ -461,7 +585,7 @@ describe("AC-15: 購入 1 件が journal に足すバイト数", () => {
 /* ------------------------------------------------------------------ AC-17 */
 
 describe("AC-17: 別名は同じアドレスの枠を共有し、超過分は外部接続 0", () => {
-  test("同じアドレスに解決する 2 つの名前は 1 つの枠（アドレスの同時実行 1）", async () => {
+  test("同じアドレスに解決する 2 つの名前は 1 つの枠（アドレスの頻度 1/分）", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures, { limits: { perAddressPerMinute: 1 } });
     fixtures.ports.set("alias.provider.test", fixtures.x402.port);
@@ -493,6 +617,48 @@ describe("AC-17: 別名は同じアドレスの枠を共有し、超過分は外
   });
 });
 
+describe("AC-17: purchase の上限でも超過分は外部接続 0", () => {
+  test.each([
+    ["送信元", { purchasesPerMinutePerSource: 1 }, "judge"],
+    ["全体", { purchasesPerMinuteGlobal: 1 }, "other"],
+  ])("%s の purchase の上限", async (_name, limits, secondSource) => {
+    const fixtures = await startFixtures();
+    const router = await startRouter(fixtures, { limits });
+    fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
+    const a = await quoteOf(router, X402_PROFILE, X402_URL, "a", "judge");
+    const b = await quoteOf(router, X402_PROFILE, X402_URL, "b", secondSource);
+    const ca = await credentialFor(fixtures, a);
+    const cb = await credentialFor(fixtures, b);
+    expect((await purchase(router, a, ca, "a", "judge")).outcome).toBe("delivered");
+    const dialed = fixtures.dialed.length;
+    const payments = fixtures.x402.seen.payments.length;
+    const rpc = fixtures.rpc.http.requests;
+    expect(await purchase(router, b, cb, "b", secondSource)).toMatchObject({ outcome: "rejected", error: "rate_limited", status: 429 });
+    expect(fixtures.dialed.length).toBe(dialed);
+    expect(fixtures.x402.seen.payments.length).toBe(payments);
+    expect(fixtures.rpc.http.requests).toBe(rpc);
+    expect(journalEvents(router).filter((event) => event === "created")).toHaveLength(1);
+  });
+
+  test("宛先ホストの同時実行の上限: 同じホストへの 2 件目の purchase は、1 件目が終わるまで接続しない", async () => {
+    const fixtures = await startFixtures();
+    const router = await startRouter(fixtures, { limits: { perHostConcurrent: 1 } });
+    // 1 件目の有料要求を上流で止める（応答を遅らせる）。
+    fixtures.x402.state.pay = () => ({ ...paidOk(router.payerAddress.x402, { price: 1 }), delayMs: 800 });
+    const a = await quoteOf(router, X402_PROFILE, X402_URL, "a", "s1");
+    const b = await quoteOf(router, X402_PROFILE, X402_URL, "b", "s2");
+    const ca = await credentialFor(fixtures, a);
+    const cb = await credentialFor(fixtures, b);
+    const first = purchase(router, a, ca, "a", "s1");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const dialed = fixtures.dialed.length;
+    expect(await purchase(router, b, cb, "b", "s2")).toMatchObject({ outcome: "rejected", error: "rate_limited", status: 429 });
+    expect(fixtures.dialed.length).toBe(dialed);
+    expect((await first).outcome).toBe("delivered");
+    expect(fixtures.x402.seen.payments).toHaveLength(1);
+  });
+});
+
 /* ------------------------------------------------------------------ AC-20・AC-22 */
 
 test("AC-20・AC-22: 再起動をまたぐ持ち主の分離。動的購入を含む journal を動的無効の Router が再生し、予算が保たれ、動的 quote は実行されない", async () => {
@@ -508,8 +674,16 @@ test("AC-20・AC-22: 再起動をまたぐ持ち主の分離。動的購入を�
   await router.close();
   closers.splice(closers.indexOf(router.close), 1);
 
-  // 再起動（有効）: 持ち主の証明が無ければ見えず、あれば見える。控えの quote も残っている。
+  // 再起動（有効）: 持ち主の証明が無ければ見えず・買えず、別の持ち主の証明でも同じ。あれば見える。控えの quote も残っている。
   router = await startRouter(fixtures, { dir, keys, maxPurchases: 2 });
+  fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
+  const stolen = { ...pending, ownerKey: a.ownerKey } as QuoteView;
+  const { ownerKey: _dropped, ...noKey } = pending;
+  const pendingCredential = await credentialFor(fixtures, pending);
+  expect(await purchase(router, noKey as QuoteView, pendingCredential, "p")).toMatchObject({ outcome: "rejected", error: "unknown_quote", status: 404 });
+  expect(await purchase(router, stolen, pendingCredential, "p")).toMatchObject({ outcome: "rejected", error: "unknown_quote", status: 404 });
+  expect(await router.client().status(pending.paymentId, a.ownerKey)).toMatchObject({ found: false, status: 404 });
+  expect(outboundCalls(fixtures).x402Payments).toBe(1);
   expect(await router.client().status(a.paymentId)).toMatchObject({ found: false, status: 404 });
   expect(await router.client().status(a.paymentId, a.ownerKey)).toMatchObject({ found: true, projection: { status: "delivered" } });
   expect(await router.client().status(pending.paymentId, pending.ownerKey)).toMatchObject({ found: true, projection: { status: "awaiting_payment" } });
@@ -519,15 +693,16 @@ test("AC-20・AC-22: 再起動をまたぐ持ち主の分離。動的購入を�
   // 再起動（無効）: journal は再生され、予算は保たれ（1 件使用済み）、動的 quote も控えの quote の購入も実行されない。静的は動く。
   router = await startRouter(fixtures, { dir, keys, maxPurchases: 2, enabled: false });
   expect(await router.client().quoteUrl({ profileId: X402_PROFILE, url: X402_URL, requestId: "z" })).toMatchObject({ ok: false, error: "dynamic_disabled", status: 404 });
-  const credential = await credentialFor(fixtures, pending);
-  expect(await purchase(router, pending, credential, "p")).toMatchObject({ outcome: "rejected", status: 404 });
+  expect(await purchase(router, pending, pendingCredential, "p")).toMatchObject({ outcome: "rejected", status: 404 });
   expect(await router.client().status(a.paymentId, a.ownerKey)).toMatchObject({ found: true, projection: { status: "delivered" } });
   expect(outboundCalls(fixtures).x402Payments).toBe(1);
-  // 静的 route の quote は受け付けられる（上流は fixture に無いので transport の失敗で終わるが、動的無効の拒否（404 dynamic_disabled）とは別の経路）。
+  // 静的 route は動的が無効でも成立する（quote → purchase → delivered）。
+  fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
   const staticQuote = await router.client().quote({ routeId: STATIC_ROUTE, requestId: "s" });
-  expect(staticQuote.ok).toBe(false);
-  expect((staticQuote as { error: string }).error).not.toBe("dynamic_disabled");
-  expect(router.events.map((event) => event.code).some((code) => code === "dns_failed" || code === "connect_failed" || code === "destination_blocked")).toBe(true);
+  expect(staticQuote.ok).toBe(true);
+  const sq = (staticQuote as { quote: QuoteView }).quote;
+  expect((await purchase(router, sq, await credentialFor(fixtures, sq), "s")).outcome).toBe("delivered");
+  expect(fixtures.x402.seen.payments).toHaveLength(2);
   await router.close();
   closers.splice(closers.indexOf(router.close), 1);
 
@@ -543,64 +718,104 @@ test("AC-20・AC-22: 再起動をまたぐ持ち主の分離。動的購入を�
 /* ------------------------------------------------------------------ AC-12 */
 
 describe("AC-12: 各接続点に loopback・内部に解決する公開名を当てると拒否される（名前解決の fixture で内部アドレスを返す）", () => {
+  const blocked = (router: Router, operation: string): number => router.events.filter((event) => event.code === "destination_blocked" && event.operation === operation).length;
+
   test.each([
     ["loopback", "127.0.0.1"],
     ["private 10/8", "10.1.2.3"],
     ["link-local", "169.254.169.254"],
     ["IPv6 loopback", "::1"],
-  ])("quote の読取: 上流が %s に解決する", async (_name, address) => {
+    ["private 172.16/12", "172.16.0.9"],
+  ])("quote の読取: 上流が %s に解決する → 接続 0", async (_name, address) => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     fixtures.resolve.set(HOSTS.x402, [address]);
     expect(await router.client().quoteUrl({ profileId: X402_PROFILE, url: X402_URL, requestId: "r1" })).toMatchObject({ ok: false, error: "quote_failed" });
     expect(fixtures.dialed).toEqual([]);
-    expect(router.events.map((event) => event.code)).toContain("destination_blocked");
+    expect(blocked(router, "challenge")).toBe(1);
   });
 
-  test("再読取・有料要求: quote の後に上流が内部に解決するようになったら、署名も送金も無い", async () => {
+  test("再読取: quote の後に上流が内部に解決するようになったら、接続 0・署名 0・journal 0 行", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, X402_PROFILE, X402_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
+    const dialed = fixtures.dialed.length;
     fixtures.resolve.set(HOSTS.x402, ["127.0.0.1"]);
     // Router は 503 offer_unavailable（何も書かない）。client は 5xx を確定させず unknown で保持する（再送しない）。
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "unknown", reason: "offer_unavailable" });
-    expect(outboundCalls(fixtures).x402Payments).toBe(0);
+    expect(fixtures.dialed.length).toBe(dialed);
+    expect(blocked(router, "challenge")).toBe(1);
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
     expect(journalEvents(router)).toEqual([]);
-    expect(router.events.map((event) => event.code)).toContain("destination_blocked");
   });
 
-  test("MPP 送信の RPC が内部に解決する: 署名しない（not_sent）", async () => {
+  test("有料要求: 読み直しまで通った後、有料要求の時点で上流が内部に解決するようになったら、接続 0 で unknown（署名は 1 回、送信 0）", async () => {
+    const fixtures = await startFixtures();
+    const router = await startRouter(fixtures);
+    fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
+    // 4 回目の challenge（送信 adapter 自身の読み直し）の後、つまり有料要求の名前解決の前に、上流を内部アドレスに向ける。
+    let challenges = 0;
+    fixtures.x402.state.resourceUrl = (url) => {
+      challenges += 1;
+      if (challenges === 4) fixtures.resolve.set(HOSTS.x402, ["127.0.0.1"]);
+      return url;
+    };
+    const quote = await quoteOf(router, X402_PROFILE, X402_URL, "r1");
+    const credential = await credentialFor(fixtures, quote);
+    const result = await purchase(router, quote, credential, "r1");
+    expect(result).toMatchObject({ outcome: "unknown", reason: "destination_pay_unknown" });
+    expect(challenges).toBe(4);
+    expect(fixtures.x402.seen.payments).toHaveLength(0);
+    expect(blocked(router, "pay")).toBe(1);
+    expect(fixtures.dialed.filter((host) => host === HOSTS.x402)).toHaveLength(4);
+    expect(router.signatures().x402).toBe(1);
+    expect(journalEvents(router)).toEqual(["created", "source_pending", "source_settled", "destination_pending", "unknown"]);
+  });
+
+  test("MPP 送信の RPC が内部に解決する: 接続 0・署名 0・終端は dest_failed（受信は成立済み）", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, MPP_PROFILE, MPP_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
     fixtures.resolve.set(HOSTS.rpc, ["10.0.0.5"]);
-    const result = await purchase(router, quote, credential, "r1");
-    expect(result).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_rejected" });
+    const rpcDials = fixtures.dialed.filter((host) => host === HOSTS.rpc).length;
+    expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_rejected" });
+    expect(fixtures.dialed.filter((host) => host === HOSTS.rpc)).toHaveLength(rpcDials);
+    expect(blocked(router, "rpc")).toBeGreaterThanOrEqual(1);
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
     expect(fixtures.rpc.sentRaw).toHaveLength(0);
     expect(fixtures.mpp.seen.credentials).toBe(0);
+    expect(journalEvents(router)).toEqual(["created", "source_pending", "source_settled", "destination_pending", "dest_failed"]);
   });
 
-  test("受信の facilitator（x402）が内部に解決する: verify に届かず、何も書かない", async () => {
+  test("受信の facilitator（x402）が内部に解決する: 接続 0・verify に届かず・何も書かない", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, MPP_PROFILE, MPP_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
     fixtures.resolve.set(HOSTS.facilitator, ["127.0.0.1"]);
+    const dialed = fixtures.dialed.length;
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "unknown", reason: "source_verify_unavailable" });
+    // 読み直し（上流）には出るが、facilitator には接続しない。
+    expect(fixtures.dialed.slice(dialed)).toEqual([HOSTS.mpp]);
+    expect(blocked(router, "facilitator_verify")).toBe(1);
     expect(fixtures.facilitator.calls.verify).toBe(0);
     expect(journalEvents(router)).toEqual([]);
   });
 
-  test("受信の RPC（MPP）が内部に解決する: verify が成立せず、何も書かない", async () => {
+  test("受信の RPC（MPP）が内部に解決する: 接続 0・verify が成立せず・何も書かない", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);
     const quote = await quoteOf(router, X402_PROFILE, X402_URL, "r1");
     const credential = await credentialFor(fixtures, quote);
     fixtures.resolve.set(HOSTS.rpc, ["172.16.0.9"]);
+    const dialed = fixtures.dialed.length;
     expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "payment_required", error: "verify_failed" });
-    expect(outboundCalls(fixtures).x402Payments).toBe(0);
+    expect(fixtures.dialed.slice(dialed)).toEqual([HOSTS.x402]);
+    expect(blocked(router, "rpc")).toBeGreaterThanOrEqual(1);
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
+    expect(fixtures.x402.seen.payments).toHaveLength(0);
     expect(journalEvents(router)).toEqual([]);
   });
 });
