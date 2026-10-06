@@ -171,8 +171,9 @@ core で `dynamicCapInvalid` を見る場所: 控えから組んだ直後（`dyn
 - 予約（昇格済みなら必須）に `{ network: destination.network, asset: destination.feeAsset }` の区分があり、その合計が `upstreamAmount + maxFee` 以上
   （`feeAsset` = 送信資産なので、元本の区分と手数料の区分は同じ鍵に落ちる。`reservationOf` の形）
 
-復元と同じ関数（`capCoversFee`）を使う。復元が同じ検査をしているので core の検査は多重の防御で、単独では試験で観測できない（復元と両方を外す変異で落ちる）。
-関数そのものは入力ごとに直接試験する。
+復元と同じ関数（`capCoversFee`）を使うが、**予約の区分を引く宛先（network・feeAsset）は設定のプロファイルから渡す**（指紋で quote 時の設定と一致を確かめた後。
+記録のプロファイルの写しは書き換えられ得るので、写しの宛先に合わせて区分を移した記録は再開で落ちる。実装レビュー #6 の指摘）。復元は写しで引く（状態の照会と
+offer の抑止のため）ので、実行の守りは再開の検査。数値の検査は復元と同じなので単独では観測できない（両方を外す変異で落ちる）。関数そのものは入力ごとに直接試験する。
 
 これは x402 受信なら settle 前（資金は動いていない）、MPP 受信なら credential を作った時点で動いている（本設計 §6.3）。どちらでも Router の送信は起きない。
 
@@ -242,3 +243,4 @@ core で `dynamicCapInvalid` を見る場所: 控えから組んだ直後（`dyn
 | 3 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。第 3 版 `e575a84`） | **APPROVE WITH CHANGES** | (1) `dynamic` を保つと `offerFor` が受信 offer を再発行し、断ると分かっている記録に向けて払える → offer の取得でも `dynamicCapInvalid` を見る（§3.2 に core の検査点を列挙）。(2) 新しい理由コードが `SAFE_REASONS` に無いと `destination_rejected` に潰れる → 許可リストと core の試験（§3.4・§5）。ほか: 接続前の拒否の判定は `cause` を辿って Router の例外型で（viem が包む）、最初の送金の要求にだけ結び付ける（§3.4）。§3.3 に `pricing.estimate` の検査を明記。実装の前提になる設計上の障害は無し |
 | 4 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。**実装** `df8c80a`） | **REJECT** | (1) 高: 復元の検査が記録の `fee` を信じ、払う額（受信 offer）と結び付いていない → `capCoversFee` に `total = converted + fee`・受信 offer の額 = `total`・上流 offer の額 = `upstreamAmount` を足した（§3.2）。(2) 再開の検査が形を見ず予約を任意にしていた → 復元と同じ関数で形を検査し、昇格済みは予約必須（§3.3）。(3) client の `quoteTimeoutMs` が明示の `timeoutMs` を無視 → 優先順位を直した（§1.2）。(4) 見積り全体の期限に 1 秒の余裕があった → 予算そのものに（§1.2）。ほか: `parameters` は既定（SDK と同じ）と明記、試験の経路は 3 通り＋「quote をまたいで憶えない」に訂正（§1.3） |
 | 5 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ。実装 `ca29f8f`） | **REJECT** | 指摘 1 が部分的: `converted` が上流額に結び付いておらず（下げて `fee` を上げられる）、復元が写しの `source.amount` を見ていた（settle に渡る `source.offer` ではなく）→ `converted = upstreamAmount` と `source.offer.amount = total` に結び付けた（§3.2・§3.3）。他の 3 点は解消 |
+| 6 | 2026-10-06 | Codex `gpt-6-astra`（読取のみ・範囲限定。実装 `b7580ae`） | **REJECT** | 数値の不変条件は閉じた（cap ≤ 受信 offer − 上流 offer）。残り 1 点: 予約の区分を記録のプロファイルの写しで引いていた（写しの宛先を書き換えて区分を移せる）→ 再開は設定のプロファイルの宛先で引く（§3.3） |
