@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 
 import { createSubethaInbound } from "./adapters/inbound/subetha.js";
 import { createMppInbound } from "./adapters/inbound/mpp.js";
-import { createX402Inbound } from "./adapters/inbound/x402.js";
+import { createX402Inbound, type X402FacilitatorKind } from "./adapters/inbound/x402.js";
+import { createX402SvmInbound, type SvmInboundPolicy } from "./adapters/inbound/x402-svm.js";
+import { resolveSvmInboundPolicy } from "./adapters/inbound/x402-svm-startup.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
@@ -25,7 +27,11 @@ import { denyHostsOf } from "./net/upstream-url.js";
 import {
   ConfigError,
   KNOWN_NETWORKS,
+  LEGACY_X402_INBOUND_NETWORK,
+  knownAssetOf,
+  knownNetworkOf,
   loadRuntimeConfig,
+  networkFamilyOf,
   routeBindingOf,
   type DynamicProfile,
   type KnownNetwork,
@@ -37,7 +43,7 @@ import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import { DynamicGate } from "./core/dynamic-gate.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
-import type { InboundOffer, InboundRail } from "./ports/inbound.js";
+import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import type {
   EvmSigningCapability,
   MppTempoCapability,
@@ -96,6 +102,26 @@ export interface RouterCapabilities {
    * 表の外の network・資産で起動するために渡す。本番の入口は渡さない（既定は `KNOWN_NETWORKS`）。
    */
   readonly knownNetworksForTest?: readonly KnownNetwork[];
+  /**
+   * Circle の facilitator（kind `circle`）を使う network ごとの売り手証明の能力（multirail 設計 §3）。起動側が
+   * `tools/real-seller-proof-capability.ts` で作る。route／プロファイルの `source.payTo` と一致しなければ起動しない。
+   */
+  readonly sellerProofs?: Readonly<Record<string, SellerProofCapability>>;
+}
+
+/** Solana の公開 devnet RPC（`ROUTER_SOLANA_RPC_URL` が無いときの既定）。 */
+export const DEFAULT_SOLANA_RPC_URL = "https://api.devnet.solana.com";
+
+/** SVM 受信の起動時の検査で固定する値の置き場。`startup()` が埋めるまで adapter は offer を出さない（fail closed）。 */
+class SvmPolicyHolder {
+  #policy: SvmInboundPolicy | undefined;
+  get(): SvmInboundPolicy {
+    if (this.#policy === undefined) throw new ConfigError("svm inbound: startup checks have not run");
+    return this.#policy;
+  }
+  set(policy: SvmInboundPolicy): void {
+    this.#policy = policy;
+  }
 }
 
 /**
@@ -255,7 +281,8 @@ export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
-): { inbound: InboundRail; outbound: OutboundRail; dynamic?: DynamicWiring } {
+  note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
+): { inbound: InboundRail; outbound: OutboundRail; dynamic?: DynamicWiring; startup?: () => Promise<void> } {
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
@@ -314,12 +341,21 @@ export function composeRails(
    * **静的 route の上流は入れない**（owner の決定 2026-10-06）: 上流は運営の内側ではなく、静的 route で誰でも買える公開サービスで、
    * 動的に向けても内側への経路は開かない。増えるのは接続の頻度だけで、宛先ホストの枠（§7.3）で抑える。
    */
+  const networks = capabilities.knownNetworksForTest ?? KNOWN_NETWORKS;
+  const x402InboundNetworks = new Set<string>([
+    ...Object.values(config.router.routes).filter((route) => route.sourceRail === "x402").map((route) => route.source.network),
+    ...Object.values(profiles).filter((profile) => profile.sourceRail === "x402").map((profile) => profile.source.network),
+  ]);
+  const usesSvmInbound = [...x402InboundNetworks].some((network) => networkFamilyOf(network) === "svm");
+  const solanaRpcUrl = usesSvmInbound ? (real.solanaRpcUrl ?? DEFAULT_SOLANA_RPC_URL) : undefined;
   const denyHosts =
     dynamicConfig === undefined
       ? []
       : denyHostsOf(dynamicConfig.denyHosts, [
           real.subethaFacilitatorUrl,
           real.x402InboundFacilitatorUrl,
+          ...Object.values(real.x402InboundFacilitators ?? {}).map((facilitator) => facilitator.url),
+          solanaRpcUrl,
           config.http.canonicalBaseUrl,
           ...mppInboundChains.map((chainId) => mppInboundRpcUrlFor(chainId)),
           ...(capabilities.dependencyUrls ?? []),
@@ -384,43 +420,122 @@ export function composeRails(
       transport: transportFor(inboundLoopback, report, staticHooks),
     }),
   };
-  const usesX402Inbound =
-    Object.values(config.router.routes).some((route) => route.sourceRail === "x402") ||
-    Object.values(profiles).some((profile) => profile.sourceRail === "x402");
+  const usesX402Inbound = x402InboundNetworks.size > 0;
+  /** 起動時の非同期の検査（SVM の `/supported`・ATA）。`startRouter` が core を作る前に待つ。 */
+  const startupChecks: Array<() => Promise<void>> = [];
   if (usesX402Inbound) {
-    if (real.x402InboundFacilitatorUrl === undefined) {
-      throw new ConfigError(
-        "ROUTER_X402_INBOUND_FACILITATOR_URL is required when a route uses sourceRail \"x402\"",
-      );
-    }
+    /**
+     * network ごとの facilitator（multirail 設計 §2）: `eip155:84532` は env、それ以外は設定ファイルの `x402.inboundFacilitators`。
+     * kind は表（`x402Facilitator`）と設定で一致している（`loadRuntimeConfig` が照合する）。
+     */
+    const facilitatorFor = (network: string, at: string): { url: string; kind: X402FacilitatorKind } => {
+      if (network === LEGACY_X402_INBOUND_NETWORK) {
+        if (real.x402InboundFacilitatorUrl === undefined) {
+          throw new ConfigError("ROUTER_X402_INBOUND_FACILITATOR_URL is required when a route uses sourceRail \"x402\"");
+        }
+        return { url: real.x402InboundFacilitatorUrl, kind: "x402" };
+      }
+      const configured = real.x402InboundFacilitators?.[network];
+      if (configured === undefined) {
+        throw new ConfigError(`${at}: x402.inboundFacilitators has no facilitator for the route's network`);
+      }
+      return configured;
+    };
+    /** 表の資産（domain・mint・桁・token program）。表に無い組は設定の照合で既に落ちている。 */
+    const knownAssetFor = (network: string, asset: string, at: string) => {
+      const entry = knownNetworkOf(networks, network);
+      const known = entry === undefined ? undefined : knownAssetOf(entry, asset);
+      if (entry === undefined || known === undefined) {
+        throw new ConfigError(`${at}: the inbound network or asset is not in the table of known networks`);
+      }
+      return { entry, known };
+    };
+    /** kind `circle` の売り手証明の能力: network ごとに注入され、`payTo` と一致していること（設計 §3）。 */
+    const sellerProofFor = (network: string, payTo: string, at: string): SellerProofCapability => {
+      const capability = capabilities.sellerProofs?.[network];
+      if (capability === undefined) {
+        throw new ConfigError(`${at}: a seller proof capability is required for the Circle facilitator (RouterCapabilities.sellerProofs)`);
+      }
+      if (capability.network !== network || capability.address.toLowerCase() !== payTo.toLowerCase()) {
+        throw new ConfigError(`${at}: the seller proof capability is bound to a different network or address than source.payTo`);
+      }
+      return capability;
+    };
+    /**
+     * SVM 受信: adapter は policy の置き場を持ち、起動時の検査が埋める。同じ (network, payTo, mint, facilitator) を使う route と
+     * プロファイルは置き場を共有する（`/supported` と RPC の読取は起動時に **1 回ずつ**。設計 §5.1）。
+     */
+    const svmHolders = new Map<string, SvmPolicyHolder>();
+    const svmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitatorUrl: string, offerSeconds: number | undefined): InboundRail => {
+      const { known } = knownAssetFor(network, asset, at);
+      if (known.tokenProgram === undefined) {
+        throw new ConfigError(`${at}: the table has no token program for the inbound mint`);
+      }
+      const key = `${network}|${payTo}|${known.id}|${facilitatorUrl}`;
+      let holder = svmHolders.get(key);
+      if (holder === undefined) {
+        const created = new SvmPolicyHolder();
+        holder = created;
+        svmHolders.set(key, created);
+        // 起動時の検査の transport: 同じ方針（fixture の差し替えの上に、loopback の方針と DNS の期限）。
+        const startupTransport = createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+        startupChecks.push(async () => {
+          created.set(await resolveSvmInboundPolicy({ network, facilitatorUrl, rpcUrl: solanaRpcUrl!, payTo, mint: known.id, decimals: known.decimals, tokenProgram: known.tokenProgram!, transport: startupTransport, routeId: at }));
+        });
+      }
+      const resolved = holder;
+      return createX402SvmInbound({ facilitatorUrl, transport, policy: () => resolved.get(), ...(offerSeconds === undefined ? {} : { offerSeconds }) });
+    };
+    const evmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitator: { url: string; kind: X402FacilitatorKind }, offerSeconds: number | undefined, bindAuthorizationNonce: boolean): InboundRail => {
+      const { known } = knownAssetFor(network, asset, at);
+      if (facilitator.kind === "circle") {
+        return createX402Inbound({
+          kind: "circle",
+          sellerProof: sellerProofFor(network, payTo, at),
+          facilitatorUrl: facilitator.url,
+          payTo,
+          transport,
+          ...(known.domain === undefined ? {} : { assetDomain: known.domain }),
+          ...(offerSeconds === undefined ? {} : { offerSeconds }),
+          ...(bindAuthorizationNonce ? { bindAuthorizationNonce: true } : {}),
+          onDiagnostic: (code) => note(`router: facilitator diagnostic ${code} (${at})`),
+        });
+      }
+      // kind `x402`（Base Sepolia、既存）: 今までどおり（`maxTimeoutSeconds` が有効期間を兼ねる）。
+      return createX402Inbound({
+        facilitatorUrl: facilitator.url,
+        payTo,
+        transport,
+        ...(bindAuthorizationNonce ? { bindAuthorizationNonce: true } : {}),
+        ...(offerSeconds === undefined ? {} : { maxTimeoutSeconds: offerSeconds }),
+      });
+    };
     // 受取先は route ごとに違い得るので、route 単位で adapter を作る。
     for (const route of Object.values(config.router.routes)) {
       if (route.sourceRail !== "x402") continue;
+      const at = `routes.${route.routeId}`;
       const payTo = route.source.payTo;
       if (payTo === undefined) {
-        throw new ConfigError(`routes.${route.routeId}.source.payTo is required for x402 inbound`);
+        throw new ConfigError(`${at}.source.payTo is required for x402 inbound`);
       }
-      inboundRails[`x402:${route.routeId}`] = createX402Inbound({
-        facilitatorUrl: real.x402InboundFacilitatorUrl,
-        payTo,
-        transport: transportFor(inboundLoopback, report, staticHooks),
-        // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
-        // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
-        ...(real.x402InboundOfferSeconds === undefined
-          ? {}
-          : { maxTimeoutSeconds: real.x402InboundOfferSeconds }),
-      });
+      const facilitator = facilitatorFor(route.source.network, at);
+      const transport = transportFor(inboundLoopback, report, staticHooks);
+      // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
+      // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
+      inboundRails[`x402:${route.routeId}`] =
+        networkFamilyOf(route.source.network) === "svm"
+          ? svmRail(route.source.network, route.source.asset, payTo, at, transport, facilitator.url, real.x402InboundOfferSeconds)
+          : evmRail(route.source.network, route.source.asset, payTo, at, transport, facilitator, real.x402InboundOfferSeconds, false);
     }
     // 動的プロファイルの受信（x402）: 署名を quote に束縛し、transport は動的用（loopback 不可）。
     for (const profile of Object.values(profiles)) {
       if (profile.sourceRail !== "x402" || dynamicTransport === undefined) continue;
-      inboundRails[`x402:${profile.profileId}`] = createX402Inbound({
-        facilitatorUrl: real.x402InboundFacilitatorUrl,
-        payTo: profile.source.payTo,
-        transport: dynamicTransport,
-        bindAuthorizationNonce: true,
-        ...(real.x402InboundOfferSeconds === undefined ? {} : { maxTimeoutSeconds: real.x402InboundOfferSeconds }),
-      });
+      const at = `dynamic.profiles.${profile.profileId}`;
+      const facilitator = facilitatorFor(profile.source.network, at);
+      inboundRails[`x402:${profile.profileId}`] =
+        networkFamilyOf(profile.source.network) === "svm"
+          ? svmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, dynamicTransport, facilitator.url, real.x402InboundOfferSeconds)
+          : evmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, dynamicTransport, facilitator, real.x402InboundOfferSeconds, true);
     }
   }
 
@@ -524,6 +639,7 @@ export function composeRails(
         };
 
   return {
+    ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
     inbound: inboundByRoute(config.router.routes, inboundRails, profiles),
     outbound: railByRoute(config.router.routes, rails, profiles),
     ...(dynamic === undefined ? {} : { dynamic }),
@@ -619,6 +735,8 @@ export function warnIfInternalUpstream(
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
   const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"), { networks: capabilities.knownNetworksForTest ?? KNOWN_NETWORKS });
   const rails = composeRails(config, capabilities);
+  // 起動時の検査（SVM 受信の `/supported`・ATA。multirail 設計 §5.1）。失敗すれば起動しない。
+  await rails.startup?.();
   // 動的プロファイルの MPP 能力の起動時の確認（client が素の http transport で、プロファイルの chain のものか）。
   await rails.dynamic?.verify();
 

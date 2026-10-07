@@ -302,8 +302,8 @@ export const SVM_RESPONSE_MAX_BYTES = 64 * 1024;
 export interface X402SvmInboundOptions {
   readonly facilitatorUrl: string;
   readonly transport: GuardedTransport;
-  /** 起動時の検査で固定した値（`resolveSvmInboundPolicy`）。 */
-  readonly policy: SvmInboundPolicy;
+  /** 起動時の検査で固定した値（`resolveSvmInboundPolicy`）。合成側は起動時の検査が埋める置き場を関数で渡す（埋まる前は throw）。 */
+  readonly policy: SvmInboundPolicy | (() => SvmInboundPolicy);
   /** wire の `maxTimeoutSeconds`。既定 40。 */
   readonly maxTimeoutSeconds?: number;
   /** offer の有効期間（秒）。既定 120。 */
@@ -337,7 +337,7 @@ export function svmDeadlinesOf(options: Pick<X402SvmInboundOptions, "maxTimeoutS
 export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
   const transport = options.transport;
-  const policy = options.policy;
+  const policyOf = typeof options.policy === "function" ? options.policy : ((): SvmInboundPolicy => options.policy as SvmInboundPolicy);
   const deadlines = svmDeadlinesOf(options);
   const maxTimeoutSeconds = deadlines.wireSeconds;
   const offerSeconds = options.offerSeconds ?? SVM_DEFAULT_OFFER_SECONDS;
@@ -383,6 +383,7 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
 
   return {
     async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
+      const policy = policyOf();
       if (request.asset !== policy.mint) {
         // 起動時に固定した mint 以外の route では offer を出さない（fail closed）。
         throw new Error("svm inbound: the route asset is not the fixed mint");
@@ -409,7 +410,7 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
     },
 
     preflight(offer: InboundOffer, credential: PaymentCredential, nowMs: number): PreflightResult {
-      return preflightSvm(offer, credential, nowMs, policy);
+      return preflightSvm(offer, credential, nowMs, policyOf());
     },
 
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
