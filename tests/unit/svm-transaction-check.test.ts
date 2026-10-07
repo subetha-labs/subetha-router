@@ -4,7 +4,8 @@
  * `credential_mismatch`／`nonce_mismatch` のどちらか。封筒の検査（既存の preflight と同じ）は `preflightSvm` で見る。
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { address, getTransactionDecoder } from "@solana/kit";
+import { address, getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
+import { ed25519 } from "@noble/curves/ed25519";
 import { findAssociatedTokenPda, getTransferCheckedInstruction, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { getSetComputeUnitLimitInstruction } from "@solana-program/compute-budget";
 import { generateKeyPairSigner, type Instruction } from "@solana/kit";
@@ -69,6 +70,9 @@ describe("checkSvmTransaction: 否定（AC-3）", () => {
     ["1,233 バイト（末尾に足す）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(SVM_TRANSACTION_MAX_BYTES + 1); out.set(b); return out; } }), MISMATCH],
     ["読み残し（末尾に 1 バイト）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => new Uint8Array([...b, 0]) }), MISMATCH],
     ["署名の数が 1（先頭の count を書き換え）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(b); out[0] = 1; return out; } }), MISMATCH],
+    ["署名の数が 3（枠を 1 つ足す）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(b.length + 64); out[0] = 3; out.set(b.subarray(1, 129), 1); out.set(b.subarray(129), 193); return out; } }), MISMATCH],
+    ["別の鍵による同じ message への署名", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(b); const secret = new Uint8Array(32).map((_, i) => (i * 13 + 5) & 0xff); out.set(ed25519.sign(b.subarray(129), secret), 65); return out; } }), MISMATCH],
+    ["memo を書き換えた tx（元の署名のまま）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(b); const needle = Buffer.from(MEMO, "utf8"); const at = Buffer.from(out).indexOf(needle); if (at < 0) throw new Error("memo not found"); out.set(Buffer.from(`0x${"cd".repeat(32)}`, "utf8"), at); return out; } }), NONCE],
     ["fee payer の枠に署名がある", async () => payer.build(policy, AMOUNT, MEMO, { signFeePayerSlot: true }), MISMATCH],
     ["authority の署名が壊れている（1 bit）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(b); out[70] = (out[70] ?? 0) ^ 1; return out; } }), MISMATCH],
     ["authority の署名が別物（乱数）", async () => payer.build(policy, AMOUNT, MEMO, { mutateBytes: (b) => { const out = new Uint8Array(b); out.set(new Uint8Array(64).map((_, i) => (i * 7 + 3) & 0xff), 65); return out; } }), MISMATCH],
@@ -105,11 +109,20 @@ describe("checkSvmTransaction: 否定（AC-3）", () => {
     });
   }
 
-  test("authority = fee payer、authority = payTo は拒む（署名者が固定値と同じ）", async () => {
-    // fee payer の鍵で署名した形: 署名者を fee payer の位置に置くことは builder では作れないので、policy 側を payer の鍵に合わせて見る。
-    const tx = await payer.build(policy, AMOUNT, MEMO);
-    expect(checkSvmTransaction(tx, { ...policy, feePayer: payer.address }, AMOUNT, MEMO)).toEqual(MISMATCH);
-    expect(checkSvmTransaction(tx, { ...policy, payTo: payer.address }, AMOUNT, MEMO)).toEqual(MISMATCH);
+  test("authority = payTo は拒む（署名者が受取 owner。宛先は owner の ATA、source は別の口座で他の検査は通る形）", async () => {
+    const collided: SvmInboundPolicy = { ...policy, payTo: payer.address, destinationAta: payer.sourceAta };
+    const other = await generateKeyPairSigner();
+    const tx = await payer.build(collided, AMOUNT, MEMO, { source: String(other.address) });
+    expect(checkSvmTransaction(tx, collided, AMOUNT, MEMO)).toEqual(MISMATCH);
+    // 対照: payTo が別なら同じ transaction は通る。
+    expect(checkSvmTransaction(tx, { ...collided, payTo: ownerAddress }, AMOUNT, MEMO).ok).toBe(true);
+  });
+
+  test("authority = fee payer は作れない（同じ鍵が 1 つの署名者に畳まれ、署名の数が 1 になる）", async () => {
+    const collided: SvmInboundPolicy = { ...policy, feePayer: payer.address };
+    const tx = await payer.build(collided, AMOUNT, MEMO, { feePayer: payer.address });
+    expect(Buffer.from(tx, "base64")[0]).toBe(1);
+    expect(checkSvmTransaction(tx, collided, AMOUNT, MEMO)).toEqual(MISMATCH);
   });
 
   test("policy の fee payer・ATA・mint・桁の違いは落ちる（起動時の固定値に束縛される）", async () => {
@@ -162,14 +175,31 @@ describe("preflightSvm: 封筒の検査（既存の preflight と同じ）", () 
 describe("互換の試験（U-3）: @x402/svm の client が組んだ transaction を Router の検査が受ける", () => {
   let rpc: SolanaRpcFixture;
   beforeAll(async () => {
-    rpc = await startSolanaRpc({ mint: MINT, decimals: 6 });
+    rpc = await startSolanaRpc({ mint: MINT, decimals: 6, blockhash: TEST_BLOCKHASH });
   });
   afterAll(() => rpc.close());
 
   test("createPaymentPayload（loopback の RPC: mint の account と blockhash）→ checkSvmTransaction ok", async () => {
     const client = new ExactSvmScheme(payer.signer as never, { rpcUrl: rpc.url });
     const requirements = { scheme: "exact", network: SOL, asset: MINT, amount: AMOUNT, payTo: ownerAddress, maxTimeoutSeconds: 40, extra: { feePayer: FEE_PAYER, memo: MEMO } };
-    const built = await client.createPaymentPayload(2, requirements as never);
+    // fixture 以外の origin へ出ようとしたら失敗させる（SDK が公開 RPC に落ちない）。
+    const realFetch = globalThis.fetch;
+    const outside: string[] = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.startsWith(rpc.url)) {
+        outside.push(url);
+        throw new Error("blocked: not the fixture RPC");
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    let built;
+    try {
+      built = await client.createPaymentPayload(2, requirements as never);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(outside).toEqual([]);
     const transaction = (built.payload as { transaction: string }).transaction;
     const result = checkSvmTransaction(transaction, policy, AMOUNT, MEMO);
     expect(result).toMatchObject({ ok: true, authority: payer.address, source: payer.sourceAta });
@@ -177,8 +207,8 @@ describe("互換の試験（U-3）: @x402/svm の client が組んだ transactio
     expect(rpc.calls.map((c) => c.method).sort()).toEqual(["getAccountInfo", "getLatestBlockhash"]);
     // 復号して blockhash が fixture のもの（既定の公開 RPC に落ちていない）。
     const decoded = getTransactionDecoder().decode(new Uint8Array(Buffer.from(transaction, "base64")));
-    expect(decoded.messageBytes.length).toBeGreaterThan(0);
-    expect(TEST_BLOCKHASH.length).toBeGreaterThan(0);
+    const compiled = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes);
+    expect(String(compiled.lifetimeToken)).toBe(TEST_BLOCKHASH);
   });
 });
 
