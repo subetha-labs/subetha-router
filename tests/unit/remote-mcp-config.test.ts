@@ -67,7 +67,7 @@ function listedIds(router: RouterConfig): { routes: string[]; profiles: string[]
 }
 
 function bucketsOf(router: RouterConfig): { static: string[]; dynamic: string[] } {
-  const key = (b: { network: string; asset: string; maxPerPurchase: string }) => `${b.network}|${b.asset}|${b.maxPerPurchase}`;
+  const key = (b: { network: string; asset: string; maxPerPurchase: string; maxTotal: string }) => `${b.network}|${b.asset}|${b.maxPerPurchase}|${b.maxTotal}`;
   return { static: router.budget.buckets.map(key).sort(), dynamic: (router.dynamic?.budget.buckets ?? []).map(key).sort() };
 }
 
@@ -136,12 +136,23 @@ describe("有効にしたときだけ出る（設計 §8・D-6・D-7）", () => 
     }
     // 予算の区分: 静的 1 件 10,000、動的 1 件 20,000（D-7）。
     const buckets = bucketsOf(router);
-    expect(buckets.static).toContain(`${INBOUND_ARC.network}|${INBOUND_ARC.asset}|10000`);
-    expect(buckets.static).toContain(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|10000`);
-    expect(buckets.dynamic).toContain(`${INBOUND_ARC.network}|${INBOUND_ARC.asset}|20000`);
-    expect(buckets.dynamic).toContain(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|20000`);
+    expect(buckets.static).toContain("eip155:5042002|0x3600000000000000000000000000000000000000|10000|1000000000");
+    expect(buckets.static).toContain("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1|4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU|10000|1000000000");
+    expect(buckets.dynamic).toContain("eip155:5042002|0x3600000000000000000000000000000000000000|20000|100000000");
+    expect(buckets.dynamic).toContain("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1|4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU|20000|100000000");
     expect(buckets.static).toHaveLength(4);
     expect(buckets.dynamic).toHaveLength(4);
+    // 通算の上限は既存の env の上書きをそのまま使う（新しい env は増やさない）。
+    const overridden = routerOf(routerConfigOf({ SUBETHA_INBOUND_MAX_TOTAL: "777", SUBETHA_DYNAMIC_MAX_TOTAL: "555" }, RECEIVER, true, BOTH));
+    expect(bucketsOf(overridden).static.filter((b) => b.endsWith("|10000|777"))).toHaveLength(3);
+    expect(bucketsOf(overridden).dynamic.filter((b) => b.endsWith("|20000|555"))).toHaveLength(4);
+    // 文字どおりの id・path・宛先（定数を書き換えても気づけるように、生成側の定数は使わない）。
+    expect(ROUTE_ARC).toBe("md-mpp-eth-snapshot-arc");
+    expect(ROUTE_SOL).toBe("md-x402-eth-snapshot-sol");
+    expect(router.routes[ROUTE_ARC]).toMatchObject({ canonicalPath: "/v1/routes/md-mpp-eth-snapshot-arc/resource", destination: { asset: "0x20c0000000000000000000000000000000000000", payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1" } });
+    expect(router.routes[ROUTE_SOL]).toMatchObject({ canonicalPath: "/v1/routes/md-x402-eth-snapshot-sol/resource", destination: { asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1" } });
+    expect(loaded.real?.upstreams[ROUTE_ARC]).toBe("https://provider-mpp.subethalabs.com/v1/eth/snapshot");
+    expect(loaded.real?.upstreams[ROUTE_SOL]).toBe("https://provider-x402.subethalabs.com/v1/eth/snapshot");
     // facilitator は network ごと（Arc は Circle の kind、Solana は x402.org）。Base Sepolia は env のまま。
     expect(loaded.real?.x402InboundFacilitators).toEqual({ [INBOUND_ARC.network]: { kind: "circle", url: "https://api.circle.com/v1/facilitator/x402" }, [INBOUND_SOL.network]: { kind: "x402", url: "https://www.x402.org/facilitator" } });
     expect(loaded.real?.x402InboundFacilitatorUrl).toBe("https://www.x402.org/facilitator");
