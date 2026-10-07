@@ -3,15 +3,16 @@
  *
  * 公開の入口（`tools/remote-mcp.ts`）と**同じ設定生成・同じ Router の process・同じ入口の関数**（`startHost`）を、
  * 多レールの有効化を `true` にして起動する。違いはそれだけ:
- * - 有効化: `--rails arc,solana`（既定は両方）。公開の入口の定数 `RAILS_ACTIVATION` には触らない（凍結されている。G-4 の後は公開も両方 true）
+ * - 有効化: `--rails arc-in,arc-out,solana-in,solana-out` の部分集合（既定は受信の両方 `arc-in,solana-in`）。公開の入口の定数 `RAILS_ACTIVATION` には触らない
+ *   （凍結されている。G-4 の後は公開も受信は両方 true、送信は両方 false）
  * - bind: `127.0.0.1`（公開しない。必要なら ssh のトンネルで）、port は `SUBETHA_ACCEPTANCE_PORT`（既定 0 = 使い捨て）
  * - journal: `SUBETHA_ACCEPTANCE_JOURNAL_PATH`（既定 `runtime/acceptance/journal.ndjson`）。公開の journal と同じパスは拒む
  * 本番の env（送信の鍵・MPP 受信の秘密・Arc の受取鍵・Solana の受取 owner・RPC）はそのまま読む。鍵・URL の値は出さない。
  *
- * 起動したら stdout に 1 行 `{"event":"listening","port":<MCP>,"routerPort":<Router>,"mode":"acceptance","rails":"arc,solana"}` を書く。
+ * 起動したら stdout に 1 行 `{"event":"listening","port":<MCP>,"routerPort":<Router>,"mode":"acceptance","rails":"arc-in,solana-in"}` を書く（`rails` は有効化の token）。
  *
  * usage: SUBETHA_OUTBOUND_PRIVATE_KEY=0x... SUBETHA_ROUTER_RECEIVER=0x... SUBETHA_ARC_RECEIVER_KEY=0x... SUBETHA_SOLANA_RECEIVER=... \
- *        tsx tools/rails-acceptance-run.ts [--rails arc,solana]
+ *        tsx tools/rails-acceptance-run.ts [--rails arc-in,arc-out,solana-in]
  */
 import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";

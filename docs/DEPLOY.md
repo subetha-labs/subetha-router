@@ -99,7 +99,7 @@ owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登�
 journal の `dynamic.reservation` を持つ `created` 行の数（通算の件数）、`unknown` の終端（MPP 受信では credential を作った時点で資金が動く。
 `awaiting_payment` は「未払い」を意味しない）。
 
-### 2c. 多レールの受信（Arc testnet USDC・Solana devnet USDC で払う）— **本番で有効（2026-10-07 11:03Z から。`RAILS_ACTIVATION = { arc: true, solana: true }`。下の G-4 の記録）**
+### 2c. 多レールの受信（Arc testnet USDC・Solana devnet USDC で払う）— **本番で有効（2026-10-07 11:03Z から。当時の `RAILS_ACTIVATION = { arc: true, solana: true }`、今の形では `arc.inbound`・`solana.inbound` が `true`。下の G-4 の記録）**
 
 呼び出し側が **Arc testnet の USDC**（x402、facilitator は Circle）か **Solana devnet の USDC**（x402 の SVM `exact`、facilitator は x402.org）で払い、
 既存の Provider A（x402）・B（MPP）に届く機能（要件 `multirail-requirements.md`、設計 `multirail-design.md`、タスク `multirail-tasks.md`）。
@@ -218,7 +218,8 @@ U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の�
 静的（`md-x402-eth-snapshot-sol`、signature `bZUbak…`、finalized、4.4 秒）で各 1 件、どちらも **delivered**。受取 ATA は 0.021 → 0.042 USDC。これで **AC-2 の動的も満たした**
 （AC-1 は 1 回目で満たしている）。追跡が働いたかは hosted では観測できない（上記の制限）。公開の停止は約 1 分。
 
-**有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える
+**有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` の `arc.inbound`・`solana.inbound` を `true` にして（片方だけでもよい。G-4 の当時は `{ arc: true, solana: true }` の形だった。
+送信の `outbound` は別の gate G-4′ で、下の「送信」を見る）、§6 の手順でイメージを作り直して入れ替える
 （入れ替えは `deploy/swap-image.sh <image:tag>`: 入口を閉じ → 旧を `-prev-<ts>` に改名 → 新を同じ network・port・volume・env で起動 → `/healthz` と Router の `listening` 行 →
 journal の先頭バイト列が不変 → `subetha-egress check` → 入口を開ける → 公開の `/healthz` を 30 秒まで再試行。**イメージと旧コンテナの ID を確かめるまでは何も変えず、
 その後の失敗（INT/TERM も）は旧コンテナを ID で元の名前に戻して起動し（復旧の待ち 60 秒）、入口を開け直す**。docker・systemctl の呼び出しはどれも上限付き（`timeout -k`）。

@@ -24,6 +24,7 @@ import {
   ROUTE_MPP_IN,
   ROUTE_SOL,
   OUTBOUND_ARC,
+  RAIL_UPSTREAMS,
   railActive,
   routerConfigOf,
   UPSTREAM,
@@ -276,13 +277,63 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
     expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, false, OUT_ONLY)).dynamic!.profiles).sort()).toEqual(["dyn-x402-to-arc", "dyn-x402-to-mpp"]);
   });
 
-  test("静的 route md-arc-eth-snapshot は Provider の URL（定数）と受取先（env）がそろったときだけ。URL が空の今は出ない。URL があって受取先が無い・形が悪いなら起動しない", () => {
+  test("静的 route md-arc-eth-snapshot は Provider の URL（定数）と受取先（env）がそろったときだけ。URL が空の今は出ない", () => {
     expect(UPSTREAM_ARC).toBe("");
+    expect(RAIL_UPSTREAMS).toEqual({ arc: "" });
     const document = routerConfigOf({}, RECEIVER, true, OUT_ONLY);
     expect(routerOf(document).routes[ROUTE_ARC_OUT]).toBeUndefined();
     expect(Object.keys((document["x402"] as { upstreams: Record<string, string> }).upstreams)).not.toContain(ROUTE_ARC_OUT);
     // 受取先が無くても URL が空なら読まれない（起動する）。
     expect(() => routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, providers: {} })).not.toThrow();
+    // 受取先があっても URL が空なら出ない。
+    expect(routerOf(routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, upstreams: { arc: "" } })).routes[ROUTE_ARC_OUT]).toBeUndefined();
+  });
+
+  test("Provider の URL が入ると静的 route md-arc-eth-snapshot が出る: Base USDC 10,000 を Router の受取先に払い、Arc USDC で Provider の受取先に届く。上流はその URL。本番の読み込みを通る", () => {
+    const ARC_UPSTREAM = "https://provider-arc.test/v1/eth/snapshot";
+    const withUrl: RailsOptions = { ...OUT_ONLY, upstreams: { arc: ARC_UPSTREAM } };
+    const document = routerConfigOf({}, RECEIVER, true, withUrl);
+    const config = loadAsProduction(document);
+    const route = config.router.routes[ROUTE_ARC_OUT];
+    expect(route).toMatchObject({
+      routeId: ROUTE_ARC_OUT,
+      canonicalPath: `/v1/routes/${ROUTE_ARC_OUT}/resource`,
+      rail: "x402",
+      sourceRail: "x402",
+      source: { amount: "10000", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, network: "eip155:84532", payTo: RECEIVER },
+      destination: { scheme: "exact", network: OUTBOUND_ARC.network, asset: OUTBOUND_ARC.asset, payTo: ARC_PROVIDER },
+    });
+    expect(config.real?.upstreams[ROUTE_ARC_OUT]).toBe(ARC_UPSTREAM);
+    // 既存の route・上流はそのまま。受信は無効なので Arc の受信の route は無い。
+    expect(Object.keys(config.router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC_OUT].sort());
+    expect(config.real?.upstreams[ROUTE]).toBe(UPSTREAM);
+    expect(config.router.routes[ROUTE_ARC]).toBeUndefined();
+    // 一覧に出る。
+    expect(listedIds(config.router).routes).toContain(ROUTE_ARC_OUT);
+    // 区分は静的 1 つ（送信の分。10,000）で、動的と合わせて Arc USDC は各 1 つ。
+    const buckets = bucketsOf(config.router);
+    expect(buckets.static.filter((b) => b.startsWith(OUTBOUND_ARC.network))).toHaveLength(1);
+    // 送信が無効なら URL があっても出ない（受取先も読まない）。
+    const off: RailsOptions = { activation: RAILS_NONE, receivers: {}, providers: {}, upstreams: { arc: ARC_UPSTREAM } };
+    expect(routerOf(routerConfigOf({}, RECEIVER, true, off)).routes[ROUTE_ARC_OUT]).toBeUndefined();
+  });
+
+  test("URL があるのに受取先が無い・形が悪いなら起動しない（固定文。値は出ない）", () => {
+    const ARC_UPSTREAM = "https://provider-arc.test/v1/eth/snapshot";
+    const message = /arc outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed/;
+    for (const providers of [{}, { arc: "" }, { arc: "not-an-address" }, { arc: ARC_PROVIDER.slice(0, 41) }, { arc: SOL_OWNER }]) {
+      const rails: RailsOptions = { ...OUT_ONLY, providers, upstreams: { arc: ARC_UPSTREAM } };
+      let caught: unknown;
+      try {
+        routerConfigOf({}, RECEIVER, true, rails);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, JSON.stringify(providers)).toBeInstanceOf(Error);
+      expect((caught as Error).message).toMatch(message);
+      expect((caught as Error).message).not.toContain("not-an-address");
+      expect((caught as Error).message).not.toContain(ARC_UPSTREAM);
+    }
   });
 
   test("受信と送信が両方有効: 受信の route・プロファイルと送信のプロファイルが共存し、Arc USDC の区分は 1 つ（合算）", () => {

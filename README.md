@@ -123,8 +123,8 @@ The hosted version has 4 routes. The original two:
 | `md-x402-eth-snapshot` | MPP (Tempo pathUSD) | x402 (`subetha-provider-x402`) |
 
 **Two more inbound rails are enabled on the hosted Router since 2026-10-07** (G-4;
-`RAILS_ACTIVATION = { arc: true, solana: true }` in `tools/remote-mcp-config.ts`; the switch is a code constant, not an env, and
-`{ arc: false, solana: false }` removes them from the listing again):
+`RAILS_ACTIVATION` in `tools/remote-mcp-config.ts` with `arc.inbound` and `solana.inbound` set to `true`; the switch is a code constant,
+not an env, and setting them back to `false` removes them from the listing again):
 
 | routeId | Inbound | Outbound |
 |---|---|---|

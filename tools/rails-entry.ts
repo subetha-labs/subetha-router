@@ -12,7 +12,7 @@
 import { DEFAULT_SOLANA_RPC_URL, type RouterCapabilities } from "../src/main.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
 import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
-import { INBOUND_ARC, OUTBOUND_ARC, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions } from "./remote-mcp-config.js";
+import { INBOUND_ARC, OUTBOUND_ARC, RAIL_UPSTREAMS, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
 /** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out"` の部分集合。空 = すべて無効）。 */
@@ -76,19 +76,22 @@ export function railsReceiversOf(activation: RailsActivation, env: Readonly<Reco
   return receivers;
 }
 
-/** Provider の受取先（送信が有効なレールの分だけ読む。無ければ欄ごと無し: 静的 route を出すかは設定生成が URL と合わせて決める）。 */
-export function railsProvidersOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): RailProviders {
+/**
+ * Provider の受取先。読むのは**送信が有効で、かつ Provider の URL が空でない**レールの分だけ（静的 route を出すときだけ要る。D-10）。
+ * URL が空（Provider が立っていない。今の Arc）なら env に触れない。無ければ欄ごと無し: 有無の判定は設定生成（`providerOf`）が行う。
+ */
+export function railsProvidersOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, upstreams: RailUpstreams = RAIL_UPSTREAMS): RailProviders {
   const providers: { arc?: string } = {};
-  if (activation.arc.outbound) {
+  if (activation.arc.outbound && upstreams.arc !== "") {
     const payTo = env[ARC_PROVIDER_ENV];
     if (payTo !== undefined && payTo !== "") providers.arc = payTo;
   }
   return providers;
 }
 
-/** 設定生成に渡す値（有効化・受取先・Provider の受取先を 1 つに）。 */
-export function railsOptionsOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): RailsOptions {
-  return { activation, receivers: railsReceiversOf(activation, env), providers: railsProvidersOf(activation, env) };
+/** 設定生成に渡す値（有効化・受取先・Provider の受取先・Provider の URL を 1 つに。URL は本番では定数）。 */
+export function railsOptionsOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, upstreams: RailUpstreams = RAIL_UPSTREAMS): RailsOptions {
+  return { activation, receivers: railsReceiversOf(activation, env), providers: railsProvidersOf(activation, env, upstreams), upstreams };
 }
 
 export function solanaRpcUrlOf(env: Readonly<Record<string, string | undefined>>): string {

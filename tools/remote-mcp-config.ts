@@ -110,10 +110,17 @@ export interface RailProviders {
   readonly arc?: string;
   readonly solana?: string;
 }
+/** Provider の URL（レールごと。本番は定数 `UPSTREAM_ARC`。試験が静的 route の生成を確かめるために差し替えられる）。 */
+export interface RailUpstreams {
+  readonly arc: string;
+}
+export const RAIL_UPSTREAMS: RailUpstreams = Object.freeze({ arc: UPSTREAM_ARC });
 export interface RailsOptions {
   readonly activation: RailsActivation;
   readonly receivers: RailReceivers;
   readonly providers?: RailProviders;
+  /** 無ければ `RAIL_UPSTREAMS`（定数）。 */
+  readonly upstreams?: RailUpstreams;
 }
 const RAIL_OFF: RailActivation = Object.freeze({ inbound: false, outbound: false });
 /**
@@ -277,7 +284,8 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
 export function routerConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean, rails: RailsOptions = RAILS_DISABLED): Record<string, unknown> {
   const arcReceiver = receiverOf(rails, "arc");
   const solReceiver = receiverOf(rails, "solana");
-  const arcProvider = providerOf(rails, "arc", UPSTREAM_ARC);
+  const upstreamArc = (rails.upstreams ?? RAIL_UPSTREAMS).arc;
+  const arcProvider = providerOf(rails, "arc", upstreamArc);
   const arcOutbound = rails.activation.arc.outbound;
   /**
    * 新しい `(network, asset)` の区分（D-7: 既存と同じ桁。静的は 1 件 10,000、動的は 1 件 20,000）。
@@ -441,7 +449,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ...(mppInboundEnabled ? { [ROUTE_MPP_IN]: UPSTREAM_X402 } : {}),
         ...(arcReceiver === undefined ? {} : { [ROUTE_ARC]: UPSTREAM }),
         ...(solReceiver === undefined ? {} : { [ROUTE_SOL]: UPSTREAM_X402 }),
-        ...(arcProvider === undefined ? {} : { [ROUTE_ARC_OUT]: UPSTREAM_ARC }),
+        ...(arcProvider === undefined ? {} : { [ROUTE_ARC_OUT]: upstreamArc }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
       ...(arcReceiver === undefined && solReceiver === undefined

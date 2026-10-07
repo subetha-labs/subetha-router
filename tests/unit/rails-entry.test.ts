@@ -20,7 +20,7 @@ import { activationFromEnv, activationToEnv, ProcessEntryError, RAILS_ACTIVATION
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { createRealMppCapability } from "../../tools/real-mpp-capability.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
-import { INBOUND_ARC, INBOUND_SOL, RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { INBOUND_ARC, INBOUND_SOL, RAIL_UPSTREAMS, RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
 import { HostPlanError, hostPlanOf, listenMcp, publicJournalPathOf, type HostOptions,
   hasX402Outbound,
 } from "../../tools/remote-mcp.js";
@@ -470,14 +470,41 @@ describe("送信の有効化（Arc）: token・Provider の受取先・能力・
     for (const old of ["arc", "solana", "arc,solana"]) expect(() => activationFromEnv(old), old).toThrow(/must be a comma-separated subset/);
   });
 
-  test("送信だけ有効: 受取鍵・受取 owner は読まれない（壊れた値があっても通る）。Provider の受取先は送信が有効なときだけ読む", () => {
+  test("送信だけ有効: 受取鍵・受取 owner は読まれない（壊れた値があっても通る）。Provider の受取先は送信が有効で URL が空でないときだけ読む（今の定数は空 → 読まない）", () => {
+    const ARC_UPSTREAMS = { arc: "https://provider-arc.test/v1/eth/snapshot" };
     const env = envWith({ [ARC_RECEIVER_KEY_ENV]: "0xbroken", [SOLANA_RECEIVER_ENV]: "", [ARC_PROVIDER_ENV]: ARC_PROVIDER });
     expect(railsReceiversOf(OUT_ONLY, env)).toEqual({});
-    expect(railsProvidersOf(OUT_ONLY, env)).toEqual({ arc: ARC_PROVIDER });
-    expect(railsProvidersOf(NONE, env)).toEqual({});
-    expect(railsOptionsOf(OUT_ONLY, env)).toEqual({ activation: OUT_ONLY, receivers: {}, providers: { arc: ARC_PROVIDER } });
-    // 受信だけ有効なら Provider の受取先は読まない。
-    expect(railsProvidersOf({ arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, env)).toEqual({});
+    // 本番の定数（URL が空）: 送信が有効でも読まない。
+    expect(RAIL_UPSTREAMS.arc).toBe("");
+    expect(railsProvidersOf(OUT_ONLY, env)).toEqual({});
+    expect(railsOptionsOf(OUT_ONLY, env)).toEqual({ activation: OUT_ONLY, receivers: {}, providers: {}, upstreams: RAIL_UPSTREAMS });
+    // URL が入れば読む。無ければ欄ごと無し（有無の判定は設定生成）。
+    expect(railsProvidersOf(OUT_ONLY, env, ARC_UPSTREAMS)).toEqual({ arc: ARC_PROVIDER });
+    expect(railsProvidersOf(OUT_ONLY, envWith({ [ARC_PROVIDER_ENV]: "" }), ARC_UPSTREAMS)).toEqual({});
+    expect(railsOptionsOf(OUT_ONLY, env, ARC_UPSTREAMS)).toEqual({ activation: OUT_ONLY, receivers: {}, providers: { arc: ARC_PROVIDER }, upstreams: ARC_UPSTREAMS });
+    // 受信だけ有効・すべて無効なら URL があっても読まない。
+    expect(railsProvidersOf({ arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, env, ARC_UPSTREAMS)).toEqual({});
+    expect(railsProvidersOf(NONE, env, ARC_UPSTREAMS)).toEqual({});
+  });
+
+  test("Provider の受取先の env は、送信が有効で URL が空でないときにしか**触れない**（getter で観測）", () => {
+    const ARC_UPSTREAMS = { arc: "https://provider-arc.test/v1/eth/snapshot" };
+    const reads: string[] = [];
+    const observed = (): Record<string, string | undefined> => {
+      const target: Record<string, string | undefined> = {};
+      Object.defineProperty(target, ARC_PROVIDER_ENV, { enumerable: true, get: () => { reads.push(ARC_PROVIDER_ENV); return ARC_PROVIDER; } });
+      return target;
+    };
+    // 送信有効・URL 空（本番の今）: 読まない。
+    railsProvidersOf(OUT_ONLY, observed());
+    railsOptionsOf(OUT_ONLY, observed());
+    // 送信無効・URL あり: 読まない。
+    railsProvidersOf(NONE, observed(), ARC_UPSTREAMS);
+    railsProvidersOf({ arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: true } }, observed(), ARC_UPSTREAMS);
+    expect(reads).toEqual([]);
+    // 送信有効・URL あり: 読む（1 回）。
+    expect(railsProvidersOf(OUT_ONLY, observed(), ARC_UPSTREAMS)).toEqual({ arc: ARC_PROVIDER });
+    expect(reads).toEqual([ARC_PROVIDER_ENV]);
   });
 
   test("能力: arc-out で evmSigningByNetwork[Arc] が同じ鍵（同じ address）から出る。鍵が無ければ outbound_keys で止まる。売り手証明は受信だけ", () => {
