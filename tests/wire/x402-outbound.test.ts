@@ -9,7 +9,40 @@
  */
 
 import { getAddress } from "viem";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+type TypedData = { domain: Record<string, unknown>; types: Record<string, unknown>; primaryType: string; message: Record<string, unknown> };
+const sdk = vi.hoisted(() => ({
+  /** SDK が署名器（adapter の guarded signer）を呼ぶ直前（arm の後）に走る hook。 */
+  beforeSign: undefined as undefined | (() => void),
+  /** adapter が支払いヘッダを符号化している間に走る hook（送出の直前の検査の**前**）。 */
+  duringEncode: undefined as undefined | (() => void),
+}));
+vi.mock("@x402/fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/fetch")>();
+  class HookedHttpClient extends actual.x402HTTPClient {
+    override encodePaymentSignatureHeader(payload: Parameters<InstanceType<typeof actual.x402HTTPClient>["encodePaymentSignatureHeader"]>[0]): Record<string, string> {
+      sdk.duringEncode?.();
+      return super.encodePaymentSignatureHeader(payload);
+    }
+  }
+  return { ...actual, x402HTTPClient: HookedHttpClient };
+});
+vi.mock("@x402/evm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/evm")>();
+  class HookedScheme extends actual.ExactEvmScheme {
+    constructor(signer: { address: `0x${string}`; signTypedData(message: TypedData): Promise<`0x${string}`> }) {
+      super({
+        address: signer.address,
+        async signTypedData(message: TypedData): Promise<`0x${string}`> {
+          sdk.beforeSign?.();
+          return signer.signTypedData(message);
+        },
+      });
+    }
+  }
+  return { ...actual, ExactEvmScheme: HookedScheme };
+});
 
 import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -25,6 +58,8 @@ const PAY_TO = "0x0000000000000000000000000000000000000a11";
 const running: Listening[] = [];
 
 afterEach(async () => {
+  sdk.beforeSign = undefined;
+  sdk.duringEncode = undefined;
   while (running.length > 0) {
     await running.pop()?.stop();
   }
@@ -36,10 +71,12 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
   return fixture;
 }
 
-function railOf(fixture: Listening, spy: SignerSpy, network = NETWORK) {
+function railOf(fixture: Listening, spy: SignerSpy, network = NETWORK, options: { now?: () => number; operatorAddresses?: readonly string[]; capability?: ReturnType<SignerSpy["capability"]> } = {}) {
   return createX402Outbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
-    capability: spy.capability(network),
+    capability: options.capability ?? spy.capability(network),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
   });
 }
 
@@ -304,5 +341,95 @@ describe("x402 outbound over the installed official SDK", () => {
         capability: createSignerSpy().capability(NETWORK),
       }),
     ).toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("静的 x402: 承認の期限と運用者の集合", () => {
+  const FAR = 10_000_000;
+
+  it("期限が実署名の委譲の直前に切れていれば not_sent（署名 0・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    const rail = railOf(fixture, spy, NETWORK, { now: () => Date.now() + FAR });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("署名の後・送出の前に切れれば not_sent（署名 1・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let signedAt: number | undefined;
+    const inner = spy.capability(NETWORK);
+    const capability = { ...inner, signer: { ...inner.signer, signTypedData: async (message: Parameters<typeof inner.signer.signTypedData>[0]) => { const signature = await inner.signer.signTypedData(message); signedAt = Date.now(); return signature; } } };
+    const rail = railOf(fixture, spy, NETWORK, { capability, now: () => (signedAt === undefined ? Date.now() : Date.now() + FAR) });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d2", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(1);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("運用者の集合にある受取先の offer は候補に出ず、保存した offer でも pay の再検査で not_sent（署名 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    const plain = railOf(fixture, spy);
+    const offer = (await plain.readChallenge(ROUTE_ID))[0]!;
+    const guarded = railOf(fixture, spy, NETWORK, { operatorAddresses: [PAY_TO.toUpperCase().replace("0X", "0x")] });
+    expect(await guarded.readChallenge(ROUTE_ID)).toEqual([]);
+    const result = await guarded.pay({ routeId: ROUTE_ID, offer, paymentId: "o1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(spy.calls).toHaveLength(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+    // 自分の署名者宛ても候補にしない（集合に無くても常に含む）。
+    const self = railOf(fixture, spy, NETWORK, { operatorAddresses: [] });
+    expect(await self.pay({ routeId: ROUTE_ID, offer: { ...offer, payTo: spy.address }, paymentId: "o2", attempt: 1, deadlineMs: Date.now() + 600_000 })).toMatchObject({ outcome: "not_sent" });
+  });
+});
+
+describe("静的 x402: 期限の検査は arm の後、署名器の委譲の直前にある", () => {
+  it("arm の後・署名器の直前に時計を進めても署名しない（検査を arm の前や pay の入口に動かした実装では署名してしまう）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let expired = false;
+    // SDK が（arm の後に）署名器を呼ぶ直前で期限を過ぎさせる。guarded signer の検査はその後にある。
+    sdk.beforeSign = () => { expired = true; };
+    const rail = railOf(fixture, spy, NETWORK, { now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d3", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("署名の後、支払いヘッダを符号化している間に切れても送らない（検査は符号化の後・送出の直前。署名 1・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let expired = false;
+    sdk.duringEncode = () => { expired = true; };
+    const rail = railOf(fixture, spy, NETWORK, { now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d5", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(1);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("署名の後、要求を組んだ後・送出の直前に切れても送らない（署名 1・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let calls = 0;
+    // now の 1 回目 = 署名器の直前の検査（期限の前）、2 回目 = 送出の直前の検査（期限の後）。
+    const rail = railOf(fixture, spy, NETWORK, { now: () => { calls += 1; return calls >= 2 ? Date.now() + 10_000_000 : Date.now(); } });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d4", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(1);
+    expect(calls).toBe(2);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
   });
 });

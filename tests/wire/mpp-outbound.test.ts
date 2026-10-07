@@ -14,6 +14,10 @@ import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer } from "../../src/ports/outbound.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
 import { createPayerSpy, SPY_PAYER_ADDRESS, TEMPO_TESTNET_CHAIN_ID } from "../fixtures/mpp-payer-spy.js";
+import { createClient, http } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { tempoModerato } from "viem/tempo/chains";
+import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 
 const ROUTE_ID = "md-b-eth-snapshot";
 const CURRENCY = "0x20c0000000000000000000000000000000000000";
@@ -33,10 +37,12 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
   return fixture;
 }
 
-function railOf(fixture: Listening, spy: ReturnType<typeof createPayerSpy>) {
+function railOf(fixture: Listening, spy: ReturnType<typeof createPayerSpy>, options: { now?: () => number; operatorAddresses?: readonly string[] } = {}) {
   return createMppOutbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
     capability: spy.capability(),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
   });
 }
 
@@ -342,5 +348,82 @@ describe("mpp outbound over the installed official mppx client", () => {
     expect(
       await abortRail.pay({ routeId: ROUTE_ID, offer: abortOffer, paymentId: "b13", attempt: 1, deadlineMs: Date.now() + 600_000 }),
     ).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+  });
+});
+
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("静的 MPP: 承認の期限と運用者の集合", () => {
+  it("期限が送金 RPC の委譲の直前に切れていれば not_sent（送金 0・支払い要求 0。json-rpc の account は署名口が無く、送金 RPC が署名）", async () => {
+    const fixture = await startUpstream();
+    const spy = createPayerSpy();
+    const rail = railOf(fixture, spy, { now: () => Date.now() + 10_000_000 });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.sendAttempts()).toBe(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("運用者の集合にある受取先の challenge は候補に出ず、保存した offer でも pay の再検査で not_sent（送金 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createPayerSpy();
+    const offer = (await railOf(fixture, spy).readChallenge(ROUTE_ID))[0]!;
+    const guarded = railOf(fixture, spy, { operatorAddresses: [RECIPIENT] });
+    expect(await guarded.readChallenge(ROUTE_ID)).toEqual([]);
+    const result = await guarded.pay({ routeId: ROUTE_ID, offer, paymentId: "o1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(spy.sendAttempts()).toBe(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+});
+
+describe("静的 MPP: local の account（署名口あり）での (B) と、送金の後の期限切れ", () => {
+  /** 実鍵（乱数）の local account と Tempo の RPC fixture。署名は wrapper で数える。 */
+  async function localRail(fixture: Listening, now: () => number, hooks: { afterSign?: () => void; afterSend?: () => void } = {}) {
+    const rpc = await startTempoRpc({ chainId: TEMPO_TESTNET_CHAIN_ID });
+    const real = privateKeyToAccount(generatePrivateKey());
+    let signatures = 0;
+    const account = { ...real, signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await real.signTransaction(tx as never, opts as never); signatures += 1; hooks.afterSign?.(); return raw; } };
+    const base = createClient({ chain: { ...tempoModerato, id: TEMPO_TESTNET_CHAIN_ID }, transport: http(rpc.plainUrl, { retryCount: 0 }) });
+    const client = { ...base, request: async (args: { method?: string }, options?: unknown) => { const result = await base.request(args as never, options as never); if (typeof args?.method === "string" && args.method.startsWith("eth_sendRawTransaction")) hooks.afterSend?.(); return result; } };
+    const rail = createMppOutbound({
+      transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
+      upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
+      capability: { chainId: TEMPO_TESTNET_CHAIN_ID, account: account as never, getClient: () => client as never, mode: "push", kind: "real-key" },
+      now,
+    });
+    return { rail, signatures: () => signatures, sends: () => rpc.methods.filter((method) => method.startsWith("eth_send")).length, close: rpc.close };
+  }
+
+  it("(B) 署名の後・送金 RPC の委譲の前に切れれば not_sent（署名 1・送金 0）", async () => {
+    const fixture = await startUpstream();
+    let expired = false;
+    const local = await localRail(fixture, () => (expired ? Date.now() + 10_000_000 : Date.now()), { afterSign: () => { expired = true; } });
+    try {
+      const offer = (await local.rail.readChallenge(ROUTE_ID))[0]!;
+      const result = await local.rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b-local", attempt: 1, deadlineMs: Date.now() + 600_000 });
+      expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+      expect(local.signatures()).toBe(1);
+      expect(local.sends()).toBe(0);
+      expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+    } finally {
+      await local.close();
+    }
+  });
+
+  it("送金 RPC を委譲した後に切れても not_sent にしない（送金 1）", async () => {
+    const fixture = await startUpstream();
+    let expired = false;
+    const local = await localRail(fixture, () => (expired ? Date.now() + 10_000_000 : Date.now()), { afterSend: () => { expired = true; } });
+    try {
+      const offer = (await local.rail.readChallenge(ROUTE_ID))[0]!;
+      const result = await local.rail.pay({ routeId: ROUTE_ID, offer, paymentId: "post-local", attempt: 1, deadlineMs: Date.now() + 600_000 });
+      expect(result.outcome).not.toBe("not_sent");
+      expect(local.signatures()).toBe(1);
+      expect(local.sends()).toBe(1);
+    } finally {
+      await local.close();
+    }
   });
 });

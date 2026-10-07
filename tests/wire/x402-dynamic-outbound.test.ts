@@ -19,7 +19,20 @@ const sdk = vi.hoisted(() => ({
   tamper: undefined as undefined | ((message: TypedData) => TypedData),
   /** 1 件の支払いの中で、SDK が余分に署名を求める回数。 */
   extraSignatures: 0,
+  /** adapter が支払いヘッダを符号化している間に走る hook（送出の直前の検査の**前**）。 */
+  duringEncode: undefined as undefined | (() => void),
 }));
+
+vi.mock("@x402/fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/fetch")>();
+  class HookedHttpClient extends actual.x402HTTPClient {
+    override encodePaymentSignatureHeader(payload: Parameters<InstanceType<typeof actual.x402HTTPClient>["encodePaymentSignatureHeader"]>[0]): Record<string, string> {
+      sdk.duringEncode?.();
+      return super.encodePaymentSignatureHeader(payload);
+    }
+  }
+  return { ...actual, x402HTTPClient: HookedHttpClient };
+});
 
 vi.mock("@x402/evm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@x402/evm")>();
@@ -76,6 +89,7 @@ const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   sdk.tamper = undefined;
   sdk.extraSignatures = 0;
+  sdk.duringEncode = undefined;
   // 1 つが失敗しても残りを片付ける。
   const failures: unknown[] = [];
   while (closers.length > 0) {
@@ -100,7 +114,7 @@ interface Harness {
   pay(offer: DestinationOffer, url?: string): ReturnType<OutboundRail["pay"]>;
 }
 
-async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: number; denyHosts?: readonly string[]; profile?: DynamicProfile } = {}): Promise<Harness> {
+async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: number; denyHosts?: readonly string[]; profile?: DynamicProfile; now?: () => number; operatorAddresses?: readonly string[]; afterSign?: () => void } = {}): Promise<Harness> {
   const upstream = await startX402Upstream(TLS);
   closers.push(upstream.close);
   const account = privateKeyToAccount(generatePrivateKey());
@@ -135,7 +149,9 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
         address: account.address,
         signTypedData: async (message: TypedData) => {
           signed.push(message);
-          return account.signTypedData(message as never);
+          const signature = await account.signTypedData(message as never);
+          options.afterSign?.();
+          return signature;
         },
       },
     },
@@ -145,6 +161,8 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
       ...(options.denyHosts === undefined ? {} : { denyHosts: options.denyHosts }),
       ...(options.unpaidTimeoutMs === undefined ? {} : { unpaidTimeoutMs: options.unpaidTimeoutMs }),
       ...(options.paidTimeoutMs === undefined ? {} : { paidTimeoutMs: options.paidTimeoutMs }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
     },
   });
   upstream.state.pay = () => paidOk(account.address, { price: 1 });
@@ -494,7 +512,7 @@ describe("支払い", () => {
     const account = privateKeyToAccount(generatePrivateKey());
     const guard = createRebuildingSigner({
       signer: { address: account.address, signTypedData: async (message: TypedData) => { calls.push(message); return "0x00"; } },
-      profile: PROFILE,
+      destination: PROFILE.destination,
       offer: standardAccept() as unknown as DestinationOffer,
       now: () => NOW,
     });
@@ -704,4 +722,66 @@ test("動的経路は loopback を許す transport を受け取らない（起�
       dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: unbounded },
     }),
   ).toThrow("DNS deadline");
+});
+
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("動的 x402: 承認の期限と運用者の集合", () => {
+  const FAR = 10_000_000;
+
+  test("期限が実署名の委譲の直前に切れていれば not_sent（署名 0・支払い要求 0）。arm の後に SDK が待っても署名しない", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    // SDK が署名器を呼ぶ直前（arm の後）で時計を進める。
+    sdk.tamper = (message) => { offset = FAR; return message; };
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("署名の後、支払いヘッダを符号化している間に切れても送らない（検査は符号化の後・送出の直前。署名 1・支払い要求 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    sdk.duringEncode = () => { offset = FAR; };
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(1);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("署名の後・送出の前に切れれば not_sent（署名 1・支払い要求 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset, afterSign: () => { offset = FAR; } });
+    const offer = await h.quote();
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(1);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("運用者の集合にある受取先の offer は候補に出ず、保存した offer でも pay の再検査で not_sent", async () => {
+    const plain = await harness();
+    const offer = await plain.quote();
+    const h = await harness({ operatorAddresses: [FIXTURE_PAY_TO] });
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+});
+
+describe("動的 x402: 検査の間に期限を越えても署名しない（委譲の直前の再確認）", () => {
+  test("署名口の入口は通り、検査の後の再確認で止まる（署名 0・支払い要求 0）", async () => {
+    // 入口の検査（1 回目の now）は期限の前、検査の中の now から 2 秒進める（validBefore の窓 ≤ 660 秒の内側）。期限は +1 秒。
+    let calls = 0;
+    let counting = false;
+    const base = Date.now();
+    const h = await harness({ now: () => { if (!counting) return Date.now(); calls += 1; return calls === 1 ? base : base + 2_000; } });
+    const offer = await h.quote();
+    sdk.tamper = (message) => { counting = true; return message; };
+    expect(await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-mid", attempt: 1, deadlineMs: base + 1_000, target: { url: URL_A } })).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
 });
