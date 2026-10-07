@@ -8,6 +8,7 @@
  */
 
 import { reportStartupFailure, startRouter } from "../../src/main.js";
+import { TEST_NETWORKS } from "./known-networks.js";
 import { createSignerSpy } from "./x402-signer-spy.js";
 
 function arg(name: string, fallback: string): string {
@@ -17,4 +18,4 @@ function arg(name: string, fallback: string): string {
 
 const network = arg("network", "eip155:84532");
 
-startRouter({ evmSigning: createSignerSpy().capability(network), fixtureFacilitators: true }).catch(reportStartupFailure);
+startRouter({ evmSigning: createSignerSpy().capability(network), fixtureFacilitators: true, knownNetworksForTest: TEST_NETWORKS }).catch(reportStartupFailure);

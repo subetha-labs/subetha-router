@@ -24,9 +24,11 @@ import { createGuardedTransport, formatTransportEvent, type GuardedTransport, ty
 import { denyHostsOf } from "./net/upstream-url.js";
 import {
   ConfigError,
+  KNOWN_NETWORKS,
   loadRuntimeConfig,
   routeBindingOf,
   type DynamicProfile,
+  type KnownNetwork,
   type RouteConfig,
   type RuntimeConfig,
 } from "./config.js";
@@ -89,6 +91,11 @@ export interface RouterCapabilities {
    * 起動時の確認で、MPP 能力の client の RPC ホストがここに含まれていなければ起動を止める。
    */
   readonly dependencyUrls?: readonly string[];
+  /**
+   * **試験専用。** network の表（multirail 設計 §1）を差し替える。real モードの fixture 起動（`tests/fixtures/router-*-process.ts`）が
+   * 表の外の network・資産で起動するために渡す。本番の入口は渡さない（既定は `KNOWN_NETWORKS`）。
+   */
+  readonly knownNetworksForTest?: readonly KnownNetwork[];
 }
 
 /**
@@ -610,7 +617,7 @@ export function warnIfInternalUpstream(
 }
 
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
-  const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"));
+  const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"), { networks: capabilities.knownNetworksForTest ?? KNOWN_NETWORKS });
   const rails = composeRails(config, capabilities);
   // 動的プロファイルの MPP 能力の起動時の確認（client が素の http transport で、プロファイルの chain のものか）。
   await rails.dynamic?.verify();

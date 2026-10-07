@@ -50,7 +50,8 @@ const assetTransferMethod = arg("atm", "eip3009");
 const settleNetworkOverride = arg("settle-network", "");
 
 const NETWORK = "eip155:84532";
-const ASSET = "0x000000000000000000000000000000000000de57";
+/** offer の資産。既定は合成のアドレス。表の資産で起動する試験は `--asset` で渡す。 */
+const ASSET = arg("asset", "0x000000000000000000000000000000000000de57");
 const PAY_TO = "0x0000000000000000000000000000000000000a11";
 const SNAPSHOT_PATH = "/v1/eth/snapshot";
 
