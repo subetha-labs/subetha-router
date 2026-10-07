@@ -115,24 +115,26 @@ submits and pays the gas. **Look at the Transfer log for the address that actual
 (for the outbound leg above, `0x5d78cbd6…` -> Provider A). Looking only at `tx.from` makes it look
 like someone else's payment.
 
-The hosted version has 2 routes:
+The hosted version has 4 routes. The original two:
 
 | routeId | Inbound | Outbound |
 |---|---|---|
 | `md-mpp-eth-snapshot` | x402 (Base Sepolia USDC) | MPP (`subetha-provider-mpp`) |
 | `md-x402-eth-snapshot` | MPP (Tempo pathUSD) | x402 (`subetha-provider-x402`) |
 
-**Two more inbound rails exist in the code but are switched off on the hosted Router**
-(`RAILS_ACTIVATION = { arc: false, solana: false }` in `tools/remote-mcp-config.ts`; the switch is a code constant, not an env):
+**Two more inbound rails are enabled on the hosted Router since 2026-10-07** (G-4;
+`RAILS_ACTIVATION = { arc: true, solana: true }` in `tools/remote-mcp-config.ts`; the switch is a code constant, not an env, and
+`{ arc: false, solana: false }` removes them from the listing again):
 
-| routeId (when enabled) | Inbound | Outbound |
+| routeId | Inbound | Outbound |
 |---|---|---|
 | `md-mpp-eth-snapshot-arc` | x402 (Arc testnet USDC, facilitator: Circle) | MPP (`subetha-provider-mpp`) |
 | `md-x402-eth-snapshot-sol` | x402 (Solana devnet USDC, facilitator: x402.org, SVM `exact`) | x402 (`subetha-provider-x402`) |
 
-What is verified for them so far: fixture tests of the whole path (in-process, no chain), and **one live `/verify` each**
-against Circle and x402.org with disposable keys (`isValid: true`, no settlement). **No live purchase has been made on either rail yet**;
-that is the acceptance gate (G-3) before they are switched on. `npm run sign` already handles both offers (EIP-3009 on Arc; a
+What is verified for them: fixture tests of the whole path (in-process, no chain), **one live `/verify` each** against Circle and
+x402.org with disposable keys, and the **G-3 acceptance purchases of 2026-10-07** with disposable payers in the production environment
+(Arc static and dynamic → Tempo: delivered; Solana static and dynamic → Base: delivered with finalized signatures; records in
+`docs/DEPLOY.md` §2c). `npm run sign` handles both offers (EIP-3009 on Arc; a
 partially-signed Solana transaction that the facilitator's fee payer submits), and refuses any offer whose network or asset is not in the
 Router's table. `npm run wallet:new:solana` creates a Solana key; `npm run wallet:balance` shows Base Sepolia USDC only.
 
@@ -155,8 +157,10 @@ Because of that, **the meaning of `npm run sign` changes with the rail**:
 **Not verified yet**:
 
 - **Real settlement of the SubEtha inbound leg** (still the synthetic facilitator). -> **AC-4 is not met**
-- Same-rail (x402 -> x402 / MPP -> MPP) is **not verified**
-- **Arc and Solana inbound: no live purchase yet** (only `/verify` was exercised live; the rails are off on the hosted Router)
+- Same-rail: x402 -> x402 is covered by the Solana -> Base acceptance purchases (G-3, 2026-10-07); **MPP -> MPP is not verified**
+- **Arc and Solana inbound: only the four acceptance cases** (static and dynamic on each rail, testnets, 2026-10-07; six attempts in
+  total, five delivered and one `unknown` whose payment settled on chain without delivery, which led to the SVM follow-up in
+  `docs/DEPLOY.md` §2c); no sustained operation yet, and the hosted entry does not forward the child Router's stderr (§2c says what to look at instead)
 - **Replay prevention for MPP inbound across restarts, on a real chain**. The SDK's replay state is in-process
   and is lost on restart. The Router now refuses an MPP credential whose embedded challenge is not the one
   issued for that quote, and a quote runs at most once (journal). Fixture tests cover the adapter's refusal

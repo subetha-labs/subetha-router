@@ -231,7 +231,7 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
 | G-1 | 鍵と口座: Arc の証明専用の受取鍵を作る（ホストの env。Base Sepolia の鍵とは別）。Solana の受取 owner の鍵は**ホストに置かない**（運用者の手元）。ATA を作る（rent 1,488,440 lamports は運用者）。使い捨ての payer に Arc testnet USDC・devnet USDC を faucet で入れる | owner の確認。mainnet の資産は使わない |
 | G-2 | 配備（無効のまま）: env（鍵・RPC）を置き、公開の process を再起動。無効なので新しい route・facilitator・起動時の検査は**動かない**——確かめるのは「起動して既存の経路が従来どおり」と、**SSRF 防御 B（egress）の配備の受け入れ**（新しいホスト Circle・x402.org・Solana RPC への egress が許され、それ以外は拒まれる）。rollback の container を 1 つ保つ | owner の確認（配備） |
 | G-3 | 受け入れの購入: **T8-b の受け入れ用の起動**（`tools/rails-acceptance-run.ts`。本番の鍵・本番と同じ facilitator・別の journal・公開しない port）で。**最初に**その起動で `/supported`・ATA の起動時の検査が通ることを確かめ（これが本番 env での検査の証拠）、次にAC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、静的・動的）。各 1 件、使い捨て口座。証拠: Arc は settle の tx が Arc の RPC で `success` かつ受取先の残高の増分、Solana は signature が devnet で confirmed かつ ATA の残高の増分、結果の `proof.onChainFinality` が `not_checked`。U-1（settle の `success` までの時間、`settlement_pending` の有無）・U-4 を記録 | owner の確認（支払いごとに quote を見せる）。`settlement_pending` が出たら設計 §10 U-1 を改訂（`/status` の polling の設計）してから G-4 |
-| G-4 | 有効化: `ARC_PROFILES_ENABLED`／`SOLANA_PROFILES_ENABLED` = `true` の PR と配備。CLAUDE.md の route の表を更新 | owner の確認 |
+| G-4 | 有効化: `ARC_PROFILES_ENABLED`／`SOLANA_PROFILES_ENABLED` = `true` の PR と配備。CLAUDE.md の route の表を更新 | owner の確認。**実施 2026-10-07 11:03Z**（定数は T8-a で `RAILS_ACTIVATION` に統合。PR #68 `ce7de77`、イメージ `b-ce7de77`、入れ替えは `deploy/swap-image.sh`。記録は `docs/DEPLOY.md` §2c） |
 | U-5 | Base Sepolia の `success: false` の写像を揃えるか | owner の決定（急がない） |
 
 ## 3. AC との対応
