@@ -8,48 +8,20 @@
  * - RPC は 3 つの method だけ・回数の上限・すべて guarded transport
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
-import { address, getBase58Encoder, getTransactionDecoder } from "@solana/kit";
-import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
+import { getBase58Encoder, getTransactionDecoder } from "@solana/kit";
+import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 
-import { checkSvmTransaction } from "../../src/adapters/inbound/x402-svm.js";
-import { createX402SvmOutbound, type X402SvmOutbound, type X402SvmOutboundOptions } from "../../src/adapters/outbound/x402-svm.js";
-import type { DynamicProfile } from "../../src/config.js";
-import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
-import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
-import type { DestinationOffer, MessageReservation, PayRequest, PayResult } from "../../src/ports/outbound.js";
-import { dialTo, publicLookup } from "../fixtures/dynamic/dial.js";
-import { startSolanaRpc, type SolanaRpcFixture } from "../fixtures/solana-rpc.js";
+import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
+import type { DestinationOffer, PayResult } from "../../src/ports/outbound.js";
+import { startSolanaRpc } from "../fixtures/solana-rpc.js";
+import { ataOf, FAC_HOST, harness as harnessIn, MINT, OPERATOR_SOL_OWNER, paidTransactionOk, PROFILE_ID, PROVIDER_HOST, ROUTE, RPC_HOST, rpcMethods, requestOf, SOL, UPSTREAM, URL_A, type Harness } from "../fixtures/svm-outbound-harness.js";
 import { decodePaymentSignatureHeader } from "@x402/core/http";
 import { x402Client, x402HTTPClient } from "@x402/fetch";
 import { ExactSvmScheme } from "@x402/svm";
 
-import { startSvmFacilitator, type SvmFacilitator } from "../fixtures/svm-facilitator.js";
 import { createSvmTestPayer } from "../fixtures/svm-payer.js";
-import { createSvmSignerFixture, type SvmSignerFixture } from "../fixtures/svm-signer-fixture.js";
-import { startSvmUpstream, SVM_FIXTURE_MINT, SVM_FIXTURE_NETWORK, type SvmUpstream } from "../fixtures/svm-upstream.js";
+import { createSvmSignerFixture } from "../fixtures/svm-signer-fixture.js";
 import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
-
-const SOL = SVM_FIXTURE_NETWORK;
-const MINT = SVM_FIXTURE_MINT;
-const FAC_HOST = "facilitator.provider.test";
-const RPC_HOST = "rpc.provider.test";
-const PROVIDER_HOST = "provider.test";
-const ROUTE = "md-sol-eth-snapshot";
-const PROFILE_ID = "dyn-x402-to-sol";
-const UPSTREAM = `https://${PROVIDER_HOST}/v1/eth/snapshot`;
-const URL_A = `https://${PROVIDER_HOST}/v1/price?symbol=ETH`;
-const OPERATOR_BASE = "0x00000000000000000000000000000000000000b0";
-const OPERATOR_SOL_OWNER = "DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1";
-const PROFILE: DynamicProfile = {
-  profileId: PROFILE_ID,
-  sourceRail: "x402",
-  source: { network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, payTo: OPERATOR_BASE },
-  rail: "x402",
-  destination: { scheme: "exact", network: SOL, asset: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM_ADDRESS },
-  par: true,
-  maxUpstreamAmount: "100000",
-  fee: { flat: "0", bps: 0, min: "0" },
-};
 
 let TLS: TlsMaterial;
 beforeAll(() => {
@@ -62,104 +34,7 @@ afterEach(async () => {
   while (closers.length > 0) await closers.pop()!();
 });
 
-interface Harness {
-  readonly rail: X402SvmOutbound;
-  readonly signer: SvmSignerFixture;
-  readonly router: string;
-  readonly routerAta: string;
-  readonly provider: string;
-  readonly providerAta: string;
-  readonly fac: SvmFacilitator;
-  readonly rpc: SolanaRpcFixture;
-  readonly upstream: SvmUpstream;
-  readonly dialed: string[];
-  readonly clock: { now: number };
-  readonly hooks: NonNullable<X402SvmOutboundOptions["hooksForTest"]>;
-  readonly reservations: Set<string>;
-  readonly operators: Set<string>;
-  readonly rpcTransport: GuardedTransport;
-}
-
-async function ataOf(owner: string): Promise<string> {
-  return String((await findAssociatedTokenPda({ mint: address(MINT), owner: address(owner), tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
-}
-
-async function harness(options: { startup?: boolean; staticRoute?: boolean; providerAtaExists?: boolean; routerBalance?: string; rpcTransport?: (real: GuardedTransport) => GuardedTransport; rpcUrl?: (rpc: SolanaRpcFixture) => string } = {}): Promise<Harness> {
-  const signer = createSvmSignerFixture(SOL);
-  const router = signer.address;
-  const routerAta = await ataOf(router);
-  const provider = createSvmSignerFixture(SOL).address;
-  const providerAta = await ataOf(provider);
-  const fac = await startSvmFacilitator(TLS, SOL, undefined, FAC_HOST);
-  closers.push(fac.close);
-  const rpc = await startSolanaRpc({
-    mint: MINT,
-    decimals: 6,
-    tls: TLS,
-    atas: [{ address: routerAta, owner: router, amount: options.routerBalance ?? "1000000" }, ...(options.providerAtaExists === false ? [] : [{ address: providerAta, owner: provider }])],
-  });
-  closers.push(rpc.close);
-  const upstream = await startSvmUpstream(TLS, { port: fac.port, host: FAC_HOST, feePayer: fac.feePayer }, { payTo: provider }, PROVIDER_HOST);
-  closers.push(upstream.close);
-  const dialed: string[] = [];
-  const dial = dialTo({ [PROVIDER_HOST]: upstream.port, [RPC_HOST]: rpc.port, [FAC_HOST]: fac.port });
-  const base = {
-    allowLoopback: false,
-    report: () => {},
-    interfaces: () => [],
-    tls: { ca: [TLS.ca] },
-    lookup: publicLookup(),
-    dialForTest: (target: Parameters<typeof dial>[0]) => { dialed.push(target.hostname); return dial(target); },
-  };
-  const transport = createGuardedTransport(base);
-  const dynamicTransport = createGuardedTransport({ ...base, maxHeaderSize: DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes, dns: { timeoutMs: 2_000, maxInFlight: 16 } });
-  const realRpcTransport = createGuardedTransport({ ...base, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
-  const rpcTransport = options.rpcTransport === undefined ? realRpcTransport : options.rpcTransport(realRpcTransport);
-  const clock = { now: Date.now() };
-  const hooks: NonNullable<X402SvmOutboundOptions["hooksForTest"]> = {};
-  const operators = new Set<string>([OPERATOR_BASE, OPERATOR_SOL_OWNER, router]);
-  const staticRoute = options.staticRoute ?? true;
-  const rail = createX402SvmOutbound({
-    network: SOL,
-    upstreams: staticRoute ? { [ROUTE]: UPSTREAM } : {},
-    destinations: staticRoute ? { [ROUTE]: { payTo: provider, asset: MINT, scheme: "exact" } } : {},
-    capability: signer.capability,
-    transport,
-    rpc: { url: options.rpcUrl === undefined ? `https://${RPC_HOST}` : options.rpcUrl(rpc), transport: rpcTransport },
-    operatorAddresses: operators,
-    mint: MINT,
-    decimals: 6,
-    tokenProgram: TOKEN_PROGRAM_ADDRESS,
-    dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: dynamicTransport, denyHosts: [] },
-    now: () => clock.now,
-    hooksForTest: hooks,
-  });
-  if (options.startup !== false) await rail.startup();
-  return { rail, signer, router, routerAta, provider, providerAta, fac, rpc, upstream, dialed, clock, hooks, reservations: new Set(), operators, rpcTransport };
-}
-
-let paymentSeq = 0;
-function requestOf(h: Harness, offer: DestinationOffer, overrides: Partial<PayRequest> & { noReserve?: boolean } = {}): PayRequest {
-  paymentSeq += 1;
-  const { noReserve, ...rest } = overrides;
-  const reserveMessage = async (hash: string): Promise<MessageReservation> => {
-    if (h.reservations.has(hash)) return "collision";
-    h.reservations.add(hash);
-    return "reserved";
-  };
-  return { routeId: ROUTE, offer, paymentId: `11111111-2222-4333-8444-${String(paymentSeq).padStart(12, "0")}`, attempt: 1, deadlineMs: h.clock.now + 600_000, ...(noReserve ? {} : { reserveMessage }), ...rest };
-}
-
-/** `seen.paid` の transaction を受信の検査（第 2 層と同じ関数）に掛ける。 */
-function paidTransactionOk(h: Harness, index: number, amount: string, memo: string): boolean {
-  const paid = h.upstream.seen.paid[index];
-  if (paid?.transactionBase64 === undefined) return false;
-  return checkSvmTransaction(paid.transactionBase64, { feePayer: h.fac.feePayer, payTo: h.provider, destinationAta: h.providerAta, mint: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM_ADDRESS }, amount, memo).ok;
-}
-
-function rpcMethods(h: Harness): string[] {
-  return h.rpc.calls.map((c) => c.method);
-}
+const harness: (options?: Parameters<typeof harnessIn>[1]) => Promise<Harness> = (options) => harnessIn({ TLS, closers }, options);
 
 describe("startup", () => {
   test("startup の前は pay・readChallenge・balanceOf が throw。startup で Router の ATA が運用者の集合に入り、静的の宛先 ATA を RPC で検査する", async () => {
