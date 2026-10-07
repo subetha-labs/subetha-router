@@ -143,17 +143,13 @@ describe("静的 route（組み直しの署名器）", () => {
     expect(h.upstream.seen.payments).toHaveLength(1);
   });
 
-  test("SDK の typed data の domain の name/version と types を書き換えても、署名器に届くのは表の domain と固定の型（SDK の object は署名器に届かない。従来の passthrough なら書き換えが届く）", async () => {
+  test("SDK の typed data の domain の name/version と types を書き換えれば署名しない（組み直しの署名器は表の domain・固定の型と 1 欄ずつ照合する。従来の passthrough は chainId・contract・to・from・value しか見ないので署名してしまう）", async () => {
     const h = await harness();
     const offer = (await h.rail.readChallenge(ROUTE))[0]!;
-    // passthrough の guarded signer は chainId・contract・to・from・value しか見ない。name/version と types の書き換えは、組み直しでしか消えない。
     sdk.tamper = (message) => ({ ...message, domain: { ...message.domain, name: "EVIL", version: "9" }, types: { ...message.types, TransferWithAuthorization: [...(message.types["TransferWithAuthorization"] as unknown[]), { name: "extra", type: "uint256" }] } });
-    const result = await pay(h, ROUTE, offer);
-    expect(result).toMatchObject({ outcome: "paid" });
-    expect(h.signed).toHaveLength(1);
-    const typed = h.signed[0]!;
-    expect(typed.domain).toEqual({ name: "USDC", version: "2", chainId: 5042002, verifyingContract: getAddress(ARC_USDC) });
-    expect((typed.types["TransferWithAuthorization"] as { name: string }[]).map((field) => field.name)).toEqual(["from", "to", "value", "validAfter", "validBefore", "nonce"]);
+    expect(await pay(h, ROUTE, offer)).toMatchObject({ outcome: "not_sent" });
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
   });
 
   test("SDK の typed data の宛先・額を書き換えれば署名しない（組み直しの照合）", async () => {
