@@ -164,7 +164,7 @@ extra: { feePayer: <起動時に固定>, memo: challengeNonce, challengeNonce, e
   `chunk-C3NL2A6D.mjs:74`、`exact/facilitator/index.mjs:745`）。Router は起動時に同じ導出で **宛先 ATA** を求め、adapter に固定する
 - 起動時の ATA の検査（FR-14）: guarded transport（動的と同じ方針: loopback 不可、DNS 期限 3 秒、応答 64 KiB 以下、HTTP 期限 10 秒）で `SUBETHA_SOLANA_RPC_URL`
   （既定 `https://api.devnet.solana.com`、ホストは拒否ホストと `dependencyUrls`）に `getAccountInfo(ata, { encoding: "jsonParsed" })` を 1 回。`owner === program（表の token program）`、
-  `data.parsed.info.owner === payTo`、`data.parsed.info.mint === 表の mint` を要求。読めない・違う → 起動しない（fail closed）。quote・purchase の中では RPC に出ない（FR-18）
+  `data.parsed.info.owner === payTo`、`data.parsed.info.mint === 表の mint` を要求。読めない・違う → 起動しない（fail closed）。quote・verify の中では RPC に出ない。purchase では settle の要求の**後**に限り、§5.8 の追跡で `getSignatureStatuses` に出る（FR-18、D-9）
 - `extra.memo = challengeNonce`（facilitator も照合する。`index.mjs:790-810`）
 - `feePayer` は起動時に facilitator の `/supported` から読む: `kinds[]` のうち **`x402Version === 2` かつ `network === この network` かつ `scheme === "exact"`** の `extra.feePayer`。
   該当が 0 件、または該当の `feePayer` が **1 つに定まらない**（複数の違う値）→ 起動しない。**1 つに固定**し、quote ごとに読まない。変われば再起動（FR-15）
@@ -209,6 +209,27 @@ preflight は「同じ transaction の 2 度目」を**それ自体では拒ま�
 既存の adapter と同じ `post("/verify" | "/settle", { x402Version: 2, paymentPayload: { x402Version, scheme, network, accepted, payload: { transaction } }, paymentRequirements })`。
 `payload` の `challengeNonce` は送らない。facilitator の verify は simulate を含む（`index.mjs:812`）ので、payer の口座に残高が無ければ verify で落ちる（資金は動かない）。
 settle の結果は §6 の表。HTTP の期限は verify 10 秒、settle **50 秒**（wire 40 ＋ 10。SDK の settle は `confirmTransaction` に wire の値を渡さない `index.mjs:284` ので、wire の値は上限の主張ではない）。
+settle の応答の後に §5.8 の追跡が入るとき、settle 全体は最長 50 ＋ 30 ＋ 10（最後の RPC の期限）= **90 秒**で、client の purchase の期限 180 秒の内側。
+
+### 5.8 settle の応答の後の期限つきの追跡（D-9。G-3 の結果で足した）
+
+**事実**（SDK `@x402/svm` 2.28.0 `exact/facilitator/index.mjs:262-340`、`chunk-RXPBSPMZ.mjs:370-390`）: facilitator の settle は sign → send → confirm で、send の**後**の失敗は
+`success: false` に **`transaction: <署名>`** を付けて返す（confirm の timeout → `errorReason: "settlement_pending"`（facilitator 側は pending store に残す）、チェーン上の失敗 → `invalid_exact_svm_transaction_failed`、
+受取の事後検証の失敗 → `post_settlement_transfer_not_confirmed`）。send の**前**の失敗だけ `transaction: ""`。G-3 の 4 件目はこの形で、Router が `unknown` を書いた約 1.5 秒前の blockTime で finalized していた。
+
+**追跡**（adapter `createX402SvmInbound` の `settle` の中。core は変えない。静的・動的で同じ）:
+
+1. settle の HTTP 応答を読む。形どおりの成功（§6 の最終行）なら従来どおり `settled`
+2. そうでなく、**本文が JSON object で `transaction` が署名の形（base58 で 64 バイト）で `network` が offer と一致**するときだけ追跡に入る（HTTP status は問わない。署名が無い・形が違う・network が違う・JSON でない → 従来どおり `unknown`）
+3. 設定の RPC（`ROUTER_SOLANA_RPC_URL`、既定 devnet）に `getSignatureStatuses([signature], { searchTransactionHistory: true })` を POST する。transport は起動時の検査と同じ guarded transport
+   （loopback 不可・DNS 期限 3 秒・HTTP 期限 10 秒・redirect 無し・応答 64 KiB 以下）。間隔 **2 秒**、全体の期限 **30 秒**（`followUp: { totalMs, intervalMs }`。試験は短くする。既定は合成が渡す）
+4. 判定（`result.value[0]`）: object で `err === null` かつ `confirmationStatus` が `confirmed` または `finalized` → **`settled`（txRef = 署名）**、運用者向けの固定の診断 `svm_settle_followed_up`（U-1 の統計用）。
+   object で `err !== null` → チェーン上で失敗した署名は二度と成功しないので**打ち切って `unknown`**。`null`・`processed`・形が違う・RPC の失敗（timeout・5xx・JSON でない・64 KiB 超）→ 次の間隔まで待って再度。期限で `unknown`
+5. 使う RPC method は `getSignatureStatuses` だけ（`getTransaction` は読まない）。要求の回数は ≤ ⌈totalMs / intervalMs⌉ ＋ 1 で、試験は回数を数える
+
+**変わらないこと**: core の journal の遷移（settle の 1 回の呼び出しが長くなるだけ。追跡の途中の crash は `interrupted_at_restart` の `unknown`。自動の再 settle は無い）、予約の扱い、`unknown` の終端の意味、
+`proof.onChainFinality: "not_checked"`。**限界（FR-21）**: 署名は facilitator の申告で、チェーンの確定はその署名の transaction が確定したことを示すだけ（memo・額・宛先は読み直さない。
+形どおりの成功の経路と同じ信頼の範囲）。facilitator が pending を後で自分で解決しても Router は知らない（Router の判定は追跡の期限内だけ）。
 
 ### 5.6 呼び出し側の道具（`tools/svm-payer.ts`、`npm run sign` から）
 
@@ -244,7 +265,8 @@ settle の結果は §6 の表。HTTP の期限は verify 10 秒、settle **50 �
 | settle の要求を**出す前** | 売り手証明が作れない、offer の期限切れ | `rejected`（`source_rejected`） | 静的: journal は `source_failed`（**終端**。同じ quote の再購入は同じ結果を返すだけで verify・settle をやり直さない `src/core/orchestrator.ts:496-498`）、公開状態は `awaiting_payment`。回復は**新しい quote**。動的: 昇格前は再試行可（§5.4）、昇格後は `unknown` |
 | 要求を**出した後** | timeout、接続の失敗、応答が JSON でない、HTTP 5xx | `unknown`（`source_settle_unknown`） | `unknown`、予約を保つ、自動再 settle しない |
 | 〃 | HTTP 4xx（400・401・**403 registration_required**・409） | `unknown`（`source_settle_unknown`）。運用者向け診断に `facilitator_trial_exhausted`（403 の `errorReason` がそれのとき）を出す。**自動で再試行しない、facilitator を替えない**。運用者の作業（登録または API key の決定） | 同上 |
-| 〃 | `success: false`（`settlement_pending` を含む） | `unknown`（`source_settle_unknown`） | 同上 |
+| 〃 | `success: false`（`settlement_pending` を含む）、**署名を含まない** | `unknown`（`source_settle_unknown`） | 同上 |
+| 〃（SVM だけ） | `success: false` または形の違う成功で、**`transaction` が署名の形、`network` 一致** | §5.8 の追跡: 期限内に `confirmed`／`finalized`（`err` 無し）→ `settled`（txRef = 署名）。それ以外 → `unknown` | `settled` なら `source_settled` → 配送。`unknown` は同上 |
 | 〃 | `success: true` だが `network` が offer と違う、`transaction` の形が違う | `unknown` | 同上 |
 | 〃 | `success: true`、`network` 一致、`transaction` が **EVM: `0x` ＋ 64 hex、SVM: base58 で decode して 64 バイト** | `settled`（txRef） | `source_settled` → 配送 |
 
@@ -293,7 +315,7 @@ Memo の命令は `@solana-program/memo` を入れずに生で組む（program `
 
 | # | 事項 | 扱い |
 |---|---|---|
-| U-1 | Circle の `/settle` が 30 秒の窓の中で `success: true` を返す割合。`settlement_pending` が多ければ `/status` の bounded な polling（能力に purpose `status`・method `GET` を足す）を足す | **G-3（2026-10-07）の計測**: Circle は 2 件とも 1 回の `/settle` で `success`（purchase 全体 7.6 秒・6.9 秒、`settlement_pending` 無し）。**SVM（x402.org）は 2 件中 1 件が `unknown`**: facilitator の応答（約 4.4 秒）が形どおりの成功でなく、transaction は後から見ると finalized（blockTime は journal の `unknown` の約 1.5 秒前。確定が観測された時刻との前後関係は不明。`docs/DEPLOY.md` §2c の記録）。SVM には `/status` が無いので、改訂の候補は「settle の応答が失敗でも署名を含むなら、設定の RPC の `getSignatureStatuses` を期限つきで追う」。**G-4 の前に owner が決める** |
+| U-1 | Circle の `/settle` が 30 秒の窓の中で `success: true` を返す割合。`settlement_pending` が多ければ `/status` の bounded な polling（能力に purpose `status`・method `GET` を足す）を足す | **G-3（2026-10-07）の計測**: Circle は 2 件とも 1 回の `/settle` で `success`（purchase 全体 7.6 秒・6.9 秒、`settlement_pending` 無し）。**SVM（x402.org）は 2 件中 1 件が `unknown`**: facilitator の応答（約 4.4 秒）が形どおりの成功でなく、transaction は後から見ると finalized（blockTime は journal の `unknown` の約 1.5 秒前。確定が観測された時刻との前後関係は不明。`docs/DEPLOY.md` §2c の記録）。SVM には `/status` が無いので、**owner の決定（2026-10-07、D-9）で §5.8 の追跡を足す**（T11）。G-4 はその実装・配備・Solana の動的の再試行（AC-2）の後 |
 | U-2 | x402.org の SVM `/verify` が §5.3 の形を受理すること（simulate を含む） | **確認済み（T6、2026-10-07）**: 使い捨ての鍵と devnet の USDC（faucet）で、起動時の検査（`/supported`・ATA）→ adapter の offer → `svm-payer` の署名 → x402.org の `/verify` が **`isValid: true`**（settle はしていない）。最初の試行は `invalid_exact_svm_transaction_simulation_failed`（命令 3 = Memo で `ProgramFailedToComplete`）: SDK の既定の compute 上限 20,000 CU では **66 文字の memo（nonce）で尽きる**。devnet の simulate の実測は **25,332 CU**（上限 200,000 で成功）。道具の既定を **60,000 CU** に上げた（Router の上限 200,000 の内側。§5.6）。**配備先の facilitator の `maxComputeUnits` は不明**（SDK の既定は上限なし）。**再測定の手順**: memo・命令を変えたら、devnet の RPC `simulateTransaction`（読取）で `unitsConsumed` を読み、既定をその 2 倍以上かつ 200,000 以下に置き、`rails-verify-probe.ts svm verify` で `/verify` が `isValid: true` であることを確かめる（settle は要らない）。Circle も同日に `/verify` **`isValid: true`**（使い捨ての証明専用の受取鍵、Arc testnet の USDC を持つ使い捨て payer。封筒の `version: 1` と `assetTransferMethod` が受理された。settle はしていない） |
 | U-3 | `@solana/kit` の compile の並びが SDK の client と同じこと、decoder の API 名 | **固定済み（T4-a）**: 本物の `@x402/svm` の client が組んだ transaction を Router の検査が受ける互換の試験 |
 | U-4 | Circle の wire `maxTimeoutSeconds`（30）と settle の実際の所要 | **G-3 の 2 件で確認**: settle を含む purchase 全体で 7.6 秒・6.9 秒。この 2 件の範囲では 30 で足りる。30 のまま |
