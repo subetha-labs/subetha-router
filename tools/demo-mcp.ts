@@ -20,6 +20,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { evmChainIdOf } from "../src/config.js";
 import { main } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 import { createX402Payer } from "./x402-payer.js";
@@ -161,9 +162,13 @@ async function start(): Promise<void> {
   await main({
     payer: {
       address: payer.address,
-      credentialFor: (offer, chainId) => payer.credentialFor(offer as never, chainId),
+      // offer の network から chainId を引く（EVM 以外の offer にはこの payer は署名しない）。
+      credentialFor: (offer, network) => {
+        const chainId = evmChainIdOf(network);
+        if (chainId === undefined) throw new Error("not an EVM network");
+        return payer.credentialFor(offer as never, chainId);
+      },
     },
-    inboundChainId: INBOUND.chainId,
   });
 }
 

@@ -50,17 +50,18 @@ export interface InboundPayer {
    * その tx hash を含む credential を `purchase` に渡す
    * （＝ `subject.fundsMoveOnCredential` が true の経路は人間の承認が先に必要）。
    */
-  credentialFor(offer: unknown, chainId: number): Promise<string>;
+  credentialFor(offer: unknown, network: string): Promise<string>;
 }
 
 export interface ToolDeps {
   readonly client: RouterClient;
   readonly mode: AdapterMode;
   readonly evidence: Evidence;
-  /** `real` モードで受信レグを払う能力（省略時は実決済しない）。 */
+  /**
+   * `real` モードで受信レグを払う能力（省略時は実決済しない）。offer の `network`（CAIP-2）を渡すので、
+   * 能力は network ごとに署名の形（EVM の chainId・domain、SVM の transaction）を決める（multirail 設計 §7、FR-4）。
+   */
   readonly payer?: InboundPayer;
-  /** 受信レグのチェーン ID（EIP-712 署名に必要）。`payer` と対で渡す。 */
-  readonly inboundChainId?: number;
 }
 
 /** tool 名は prefix 固定（審査員の環境では他の MCP サーバと同居する）。 */
@@ -341,10 +342,12 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
         credential = input.credential;
       } else if (deps.mode === "synthetic") {
         credential = syntheticCredential(offer);
-      } else if (deps.payer !== undefined && deps.inboundChainId !== undefined) {
-        // 実レール: 注入された能力だけを使う。この層は鍵を持たない。
+      } else if (deps.payer !== undefined) {
+        // 実レール: 注入された能力だけを使う。この層は鍵を持たない。network は offer のもの（固定の chainId を持たない）。
+        const network = isRecord(offer) && typeof offer["network"] === "string" ? offer["network"] : undefined;
         try {
-          credential = await deps.payer.credentialFor(offer, deps.inboundChainId);
+          if (network === undefined) throw new Error("offer without network");
+          credential = await deps.payer.credentialFor(offer, network);
         } catch {
           // 署名できない offer には推測で署名しない（固定の安全な失敗）。
           return withEvidence(deps, {
