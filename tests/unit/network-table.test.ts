@@ -18,6 +18,7 @@ import {
   isWellFormedPayTo,
   loadRuntimeConfig,
   parseRouterConfig,
+  validateRouterConfigAgainstTable,
   type KnownNetwork,
 } from "../../src/config.js";
 import { TEST_NETWORKS } from "../fixtures/known-networks.js";
@@ -175,6 +176,32 @@ describe("送信の表（Arc・Solana 宛。U1）", () => {
   test("動的: EVM 宛に tokenProgram があれば拒否、`mint` の欄は受けない（mint は asset）", () => {
     expectInvalid(config([route()], [arcProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]), /profiles\.pa\.destination\.tokenProgram is only for an svm destination/);
     expectInvalid(config([route()], [solProfile({ mint: SOL_USDC })]), /profiles\.ps\.destination\.mint is not a field/);
+  });
+  test("表の照合そのもの（parse を通さずに）: svm の宛先に tokenDomain、evm の宛先に tokenProgram があれば表の段で拒む", () => {
+    const parsed = parseRouterConfig(config([route()], [arcProfile(), solProfile()]));
+    const withDomainOnSvm = {
+      ...parsed,
+      dynamic: { ...parsed.dynamic!, profiles: { ...parsed.dynamic!.profiles, ps: { ...parsed.dynamic!.profiles["ps"]!, destination: { ...parsed.dynamic!.profiles["ps"]!.destination, tokenDomain: { name: "USDC", version: "2" } } } } },
+    };
+    expect(() => validateRouterConfigAgainstTable(withDomainOnSvm, KNOWN_NETWORKS)).toThrow(/profiles\.ps\.destination\.tokenDomain is not allowed on an svm network/);
+    const withProgramOnEvm = {
+      ...parsed,
+      dynamic: { ...parsed.dynamic!, profiles: { ...parsed.dynamic!.profiles, pa: { ...parsed.dynamic!.profiles["pa"]!, destination: { ...parsed.dynamic!.profiles["pa"]!.destination, tokenProgram: SOL_TOKEN_PROGRAM } } } },
+    };
+    expect(() => validateRouterConfigAgainstTable(withProgramOnEvm, KNOWN_NETWORKS)).toThrow(/profiles\.pa\.destination\.tokenProgram is only allowed on an svm network/);
+    const withWrongProgram = {
+      ...parsed,
+      dynamic: { ...parsed.dynamic!, profiles: { ...parsed.dynamic!.profiles, ps: { ...parsed.dynamic!.profiles["ps"]!, destination: { ...parsed.dynamic!.profiles["ps"]!.destination, tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" } } } },
+    };
+    expect(() => validateRouterConfigAgainstTable(withWrongProgram, KNOWN_NETWORKS)).toThrow(/profiles\.ps\.destination\.tokenProgram does not match the known asset/);
+    expect(() => validateRouterConfigAgainstTable(parsed, KNOWN_NETWORKS)).not.toThrow();
+  });
+  test("parse の契約（networks 無し）: Solana 宛の x402 プロファイルは表無しでも parse でき、tokenDomain・mint・EVM の tokenProgram は parse の段で落ちる", () => {
+    const parsed = parseRouterConfig(config([route()], [solProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]));
+    expect(parsed.dynamic?.profiles["ps"]?.destination.tokenProgram).toBe(SOL_TOKEN_PROGRAM);
+    expect(() => parseRouterConfig(config([route()], [solProfile({ tokenDomain: { name: "USDC", version: "2" } })]))).toThrow(/tokenDomain is not allowed for an svm destination/);
+    expect(() => parseRouterConfig(config([route()], [solProfile({ mint: SOL_USDC })]))).toThrow(/destination\.mint is not a field/);
+    expect(() => parseRouterConfig(config([route()], [arcProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]))).toThrow(/tokenProgram is only for an svm destination/);
   });
   test("動的: Solana 宛の桁が表と違う・資産が表に無い", () => {
     expectInvalid(config([route()], [solProfile({ decimals: 9 })]), /profiles\.ps\.destination\.decimals does not match/);
