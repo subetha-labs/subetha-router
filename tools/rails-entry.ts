@@ -12,34 +12,47 @@
 import { DEFAULT_SOLANA_RPC_URL, type RouterCapabilities } from "../src/main.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
 import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
-import { INBOUND_ARC, type RailReceivers, type RailsActivation, type RailsOptions } from "./remote-mcp-config.js";
+import { INBOUND_ARC, OUTBOUND_ARC, RAIL_UPSTREAMS, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
-/** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc,solana"`・`"arc"`・`"solana"`・`""`）。 */
+/** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out"` の部分集合。空 = すべて無効）。 */
 export const RAILS_ACTIVATION_ENV = "SUBETHA_RAILS_ACTIVATION";
+/** Arc の Provider の受取先（送信が有効で静的 route を出すときだけ。D-10）。 */
+export const ARC_PROVIDER_ENV = "SUBETHA_ARC_PROVIDER_PAYTO";
 /** Solana の受取 owner の address（鍵はホストに置かない。ATA は運用者が作る）。 */
 export const SOLANA_RECEIVER_ENV = "SUBETHA_SOLANA_RECEIVER";
 /** Solana の JSON-RPC（起動時の ATA の検査だけ）。無ければ公開 devnet の既定。URL は鍵を含み得るのでログに出さない。 */
 export const SOLANA_RPC_ENV = "SUBETHA_SOLANA_RPC_URL";
 
 const RAIL_NAMES = ["arc", "solana"] as const;
+/** 内部 env の token（方向別。送信の設計 §6.1）。旧い `arc`・`solana` は受け付けない。 */
+const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out"] as const;
 
 export function activationToEnv(activation: RailsActivation): string {
-  return RAIL_NAMES.filter((rail) => activation[rail] === true).join(",");
+  const tokens: string[] = [];
+  for (const rail of RAIL_NAMES) {
+    if (activation[rail].inbound) tokens.push(`${rail}-in`);
+    if (activation[rail].outbound) tokens.push(`${rail}-out`);
+  }
+  return tokens.join(",");
 }
 
-/** 内部の env から有効化を復元する。空・未設定はどちらも無効。知らない語・重複は起動しない（値は出さない）。 */
+/** 内部の env から有効化を復元する。空・未設定はすべて無効。知らない語（旧い `arc`・`solana` を含む）・重複は起動しない（値は出さない）。 */
 export function activationFromEnv(value: string | undefined): RailsActivation {
-  if (value === undefined || value === "") return { arc: false, solana: false };
   const seen = new Set<string>();
-  for (const token of value.split(",")) {
-    const rail = token.trim();
-    if (!(RAIL_NAMES as readonly string[]).includes(rail) || seen.has(rail)) {
-      throw new Error(`${RAILS_ACTIVATION_ENV} must be a comma-separated subset of "arc,solana" without repeats`);
+  if (value !== undefined && value !== "") {
+    for (const token of value.split(",")) {
+      const name = token.trim();
+      if (!(ACTIVATION_TOKENS as readonly string[]).includes(name) || seen.has(name)) {
+        throw new Error(`${RAILS_ACTIVATION_ENV} must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out" without repeats`);
+      }
+      seen.add(name);
     }
-    seen.add(rail);
   }
-  return { arc: seen.has("arc"), solana: seen.has("solana") };
+  return {
+    arc: { inbound: seen.has("arc-in"), outbound: seen.has("arc-out") },
+    solana: { inbound: seen.has("solana-in"), outbound: seen.has("solana-out") },
+  };
 }
 
 /**
@@ -48,11 +61,12 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
  */
 export function railsReceiversOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): RailReceivers {
   const receivers: { arc?: string; solana?: string } = {};
-  if (activation.arc) {
+  // 受取先は**受信**の分だけ（送信だけ有効なレールの受取鍵・受取 owner は読まない）。
+  if (activation.arc.inbound) {
     // 鍵の形の検査と address の導出は能力の作成と同じ関数（違う鍵を見ない）。
     receivers.arc = createRealSellerProofCapability(INBOUND_ARC.network, env).address;
   }
-  if (activation.solana) {
+  if (activation.solana.inbound) {
     const owner = env[SOLANA_RECEIVER_ENV];
     if (owner === undefined || owner === "") {
       throw new Error(`${SOLANA_RECEIVER_ENV} is required when the solana rail is activated`);
@@ -62,9 +76,22 @@ export function railsReceiversOf(activation: RailsActivation, env: Readonly<Reco
   return receivers;
 }
 
-/** 設定生成に渡す値（有効化と受取先を 1 つに）。 */
-export function railsOptionsOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): RailsOptions {
-  return { activation, receivers: railsReceiversOf(activation, env) };
+/**
+ * Provider の受取先。読むのは**送信が有効で、かつ Provider の URL が空でない**レールの分だけ（静的 route を出すときだけ要る。D-10）。
+ * URL が空（Provider が立っていない。今の Arc）なら env に触れない。無ければ欄ごと無し: 有無の判定は設定生成（`providerOf`）が行う。
+ */
+export function railsProvidersOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, upstreams: RailUpstreams = RAIL_UPSTREAMS): RailProviders {
+  const providers: { arc?: string } = {};
+  if (activation.arc.outbound && upstreams.arc !== "") {
+    const payTo = env[ARC_PROVIDER_ENV];
+    if (payTo !== undefined && payTo !== "") providers.arc = payTo;
+  }
+  return providers;
+}
+
+/** 設定生成に渡す値（有効化・受取先・Provider の受取先・Provider の URL を 1 つに。URL は本番では定数）。 */
+export function railsOptionsOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, upstreams: RailUpstreams = RAIL_UPSTREAMS): RailsOptions {
+  return { activation, receivers: railsReceiversOf(activation, env), providers: railsProvidersOf(activation, env, upstreams), upstreams };
 }
 
 export function solanaRpcUrlOf(env: Readonly<Record<string, string | undefined>>): string {
@@ -79,8 +106,9 @@ export function solanaRpcUrlOf(env: Readonly<Record<string, string | undefined>>
  */
 export function railsCapabilitiesOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, now: () => number = Date.now): Pick<RouterCapabilities, "sellerProofs" | "dependencyUrls"> {
   return {
-    ...(activation.arc ? { sellerProofs: { [INBOUND_ARC.network]: createRealSellerProofCapability(INBOUND_ARC.network, env, now) } } : {}),
-    ...(activation.solana ? { dependencyUrls: [solanaRpcUrlOf(env)] } : {}),
+    // 売り手証明は Arc の**受信**だけ。Solana の RPC は受信か送信のどちらかで要る（送信の設計 §6.2）。
+    ...(activation.arc.inbound ? { sellerProofs: { [INBOUND_ARC.network]: createRealSellerProofCapability(INBOUND_ARC.network, env, now) } } : {}),
+    ...(activation.solana.inbound || activation.solana.outbound ? { dependencyUrls: [solanaRpcUrlOf(env)] } : {}),
   };
 }
 
@@ -106,17 +134,25 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
   if ((evmKey === undefined || evmKey === "") && (mppKey === undefined || mppKey === "")) {
     throw new ProcessEntryError("outbound_keys");
   }
+  let activation: RailsActivation;
   let rails: Pick<RouterCapabilities, "sellerProofs" | "dependencyUrls">;
   try {
-    rails = railsCapabilitiesOf(activationFromEnv(env[RAILS_ACTIVATION_ENV]), env, now);
+    activation = activationFromEnv(env[RAILS_ACTIVATION_ENV]);
+    rails = railsCapabilitiesOf(activation, env, now);
   } catch {
     throw new ProcessEntryError("rails");
   }
+  // Arc の送信（送信の設計 §6.2、D-11）: Base と同じ鍵を Arc の network の札で束ねる。鍵が無ければ Arc の送信は組めない（fail closed）。
+  if (activation.arc.outbound && (evmKey === undefined || evmKey === "")) {
+    throw new ProcessEntryError("outbound_keys");
+  }
+  const evm = evmKey === undefined || evmKey === "" ? undefined : createRealEvmCapability(evmKey);
   return {
     // 動的上流 URL の拒否ホスト（設計 §7.4）: 送信 MPP の RPC と、Solana の起動時の検査の RPC。URL は値ごと渡すが、使うのはホスト名だけ（ログには出ない）。
     dependencyUrls: [mppRpcUrl === undefined || mppRpcUrl === "" ? TEMPO_MODERATO_RPC : mppRpcUrl, ...(rails.dependencyUrls ?? [])],
     ...(rails.sellerProofs === undefined ? {} : { sellerProofs: rails.sellerProofs }),
-    ...(evmKey === undefined || evmKey === "" ? {} : { evmSigning: createRealEvmCapability(evmKey).capability("eip155:84532") }),
+    ...(evm === undefined ? {} : { evmSigning: evm.capability("eip155:84532") }),
+    ...(evm !== undefined && activation.arc.outbound ? { evmSigningByNetwork: { [OUTBOUND_ARC.network]: evm.capability(OUTBOUND_ARC.network) } } : {}),
     ...(mppKey === undefined || mppKey === "" ? {} : { mppTempo: createRealMppCapability(mppKey, { ...(mppRpcUrl === undefined || mppRpcUrl === "" ? {} : { rpcUrl: mppRpcUrl }) }).capability() }),
   };
 }
@@ -127,12 +163,12 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
  */
 export function railsChildEnvOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const out: Record<string, string> = { [RAILS_ACTIVATION_ENV]: activationToEnv(activation) };
-  // 無効なレールの env は**読まない**（渡さないだけでなく、参照もしない）。
-  if (activation.arc) {
+  // 無効なレール・方向の env は**読まない**（渡さないだけでなく、参照もしない）。
+  if (activation.arc.inbound) {
     const key = env[ARC_RECEIVER_KEY_ENV];
     if (key !== undefined && key !== "") out[ARC_RECEIVER_KEY_ENV] = key;
   }
-  if (activation.solana) {
+  if (activation.solana.inbound || activation.solana.outbound) {
     const rpc = env[SOLANA_RPC_ENV];
     if (rpc !== undefined && rpc !== "") {
       out[SOLANA_RPC_ENV] = rpc;

@@ -123,13 +123,17 @@ The hosted version has 4 routes. The original two:
 | `md-x402-eth-snapshot` | MPP (Tempo pathUSD) | x402 (`subetha-provider-x402`) |
 
 **Two more inbound rails are enabled on the hosted Router since 2026-10-07** (G-4;
-`RAILS_ACTIVATION = { arc: true, solana: true }` in `tools/remote-mcp-config.ts`; the switch is a code constant, not an env, and
-`{ arc: false, solana: false }` removes them from the listing again):
+`RAILS_ACTIVATION` in `tools/remote-mcp-config.ts` with `arc.inbound` and `solana.inbound` set to `true`; the switch is a code constant,
+not an env, and setting them back to `false` removes them from the listing again):
 
 | routeId | Inbound | Outbound |
 |---|---|---|
 | `md-mpp-eth-snapshot-arc` | x402 (Arc testnet USDC, facilitator: Circle) | MPP (`subetha-provider-mpp`) |
 | `md-x402-eth-snapshot-sol` | x402 (Solana devnet USDC, facilitator: x402.org, SVM `exact`) | x402 (`subetha-provider-x402`) |
+
+**Outbound rails** (paying providers that accept only Arc or Solana) are being added behind the same one-constant switch, now per direction
+(`RAILS_ACTIVATION = { arc: { inbound, outbound }, solana: { inbound, outbound } }`; outbound is `false` on the hosted Router until its own gate). The Arc outbound routes
+(`md-arc-eth-snapshot`, `dyn-x402-to-arc`, `dyn-mpp-to-arc`) appear in the listing only after enablement.
 
 What is verified for them: fixture tests of the whole path (in-process, no chain), **one live `/verify` each** against Circle and
 x402.org with disposable keys, and the **G-3 acceptance purchases of 2026-10-07** with disposable payers in the production environment

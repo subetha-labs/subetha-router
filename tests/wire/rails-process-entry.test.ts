@@ -60,8 +60,8 @@ describe("Router の process: 有効化の値は内部の env から、能力は
     const dir = workDir("t8b-process-arc-");
     const key = generatePrivateKey();
     const configPath = path.join(dir, "router.config.json");
-    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: true, solana: false }, receivers: { arc: privateKeyToAccount(key).address } })));
-    const result = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "arc", [ARC_RECEIVER_KEY_ENV]: key }));
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: privateKeyToAccount(key).address } })));
+    const result = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "arc-in", [ARC_RECEIVER_KEY_ENV]: key }));
     expect(result.code).not.toBe(0);
     expect(result.stderr).not.toMatch(/rails capabilities could not be created|seller proof capability/);
     expect(result.stderr).toMatch(PROBE_FAILED);
@@ -81,9 +81,9 @@ describe("Router の process: 有効化の値は内部の env から、能力は
   }, 30_000);
 
   test.each([
-    ["鍵が無い", (key: string, address: string) => ({ activation: "arc", key: undefined, payTo: address, pattern: /rails capabilities could not be created/, secret: key })],
-    ["鍵の形が違う", (key: string, address: string) => ({ activation: "arc", key: "0xabc", payTo: address, pattern: /rails capabilities could not be created/, secret: key })],
-    ["鍵と payTo が違う", (key: string) => ({ activation: "arc", key, payTo: privateKeyToAccount(generatePrivateKey()).address, pattern: /seller proof capability is bound to a different network or address/, secret: key })],
+    ["鍵が無い", (key: string, address: string) => ({ activation: "arc-in", key: undefined, payTo: address, pattern: /rails capabilities could not be created/, secret: key })],
+    ["鍵の形が違う", (key: string, address: string) => ({ activation: "arc-in", key: "0xabc", payTo: address, pattern: /rails capabilities could not be created/, secret: key })],
+    ["鍵と payTo が違う", (key: string) => ({ activation: "arc-in", key, payTo: privateKeyToAccount(generatePrivateKey()).address, pattern: /seller proof capability is bound to a different network or address/, secret: key })],
     ["有効化の値が壊れている", (key: string, address: string) => ({ activation: "arc,base", key, payTo: address, pattern: /rails capabilities could not be created/, secret: key })],
   ])("%s → 多レールの段で止まる（listen しない、固定文、鍵は出ない、probe に進まない）", async (_name, arrange) => {
     const dir = workDir("t8b-process-refuse-");
@@ -91,7 +91,7 @@ describe("Router の process: 有効化の値は内部の env から、能力は
     const address = privateKeyToAccount(key).address;
     const { activation, key: envKey, payTo, pattern, secret } = arrange(key, address);
     const configPath = path.join(dir, "router.config.json");
-    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: true, solana: false }, receivers: { arc: payTo } })));
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: payTo } })));
     const result = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: activation, ...(envKey === undefined ? {} : { [ARC_RECEIVER_KEY_ENV]: envKey }) }));
     expect(result.code).not.toBe(0);
     expect(result.stdout).not.toContain("listening");
@@ -107,7 +107,7 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     const key = generatePrivateKey();
     const journalPath = path.join(dir, "acceptance", "journal.ndjson");
     const before = new Set(readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-")));
-    const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "arc"], {
+    const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "arc-in"], {
       SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
       SUBETHA_ROUTER_RECEIVER: RECEIVER,
       SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-t8b-acceptance",
@@ -135,6 +135,7 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     // 別の journal: 受け入れ用のディレクトリが作られ、公開の journal には触れていない。
     expect(readdirSync(path.join(dir, "acceptance"))).toBeDefined();
     // 受け入れ用の起動は公開の定数を書き換えない（ソースの上の値は G-4 の両方 true のまま）。
-    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{ arc: true, solana: true \}\)/);
+    // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信は両方 false（G-4′ まで）。
+    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{ arc: Object\.freeze\(\{ inbound: true, outbound: false \}\), solana: Object\.freeze\(\{ inbound: true, outbound: false \}\) \}\)/);
   }, 40_000);
 });

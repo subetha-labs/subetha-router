@@ -29,6 +29,9 @@ The Router exposes **four routes**. **Pick the one you can pay with what you hol
 | `md-mpp-eth-snapshot-arc` | **Arc testnet USDC** (x402) | a provider that only accepts MPP |
 | `md-x402-eth-snapshot-sol` | **Solana devnet USDC** (x402) | a provider that only accepts x402 |
 
+Outbound rails to providers that accept only **Arc** or **Solana** are being added (`md-arc-eth-snapshot`, `md-sol-eth-snapshot-mpp`, profiles
+`dyn-x402-to-arc` / `dyn-mpp-to-arc` / `dyn-x402-to-sol` / `dyn-mpp-to-sol`). **They appear in the listing only after the operator enables them**; until then they do not exist for you.
+
 Steps:
 
 1. Call `subetha_router_list_routes` and **choose the route you can actually pay for**
