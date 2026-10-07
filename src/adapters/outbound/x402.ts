@@ -81,59 +81,6 @@ export function createSyntheticX402Outbound(options: SyntheticX402Options): Outb
     return url;
   }
 
-  /**
-   * 組み直しの静的経路（送信の設計 §3.2。Base 以外の EVM、Arc）: 動的と同じ形——表の domain・承認値だけで typed data を組み直し、
-   * 単一候補の `x402Client`、arm、`createPaymentPayload` の後の検査、送出の直前の期限、共有の領収の表。SDK の typed data は署名器に届かない。
-   */
-  async function payRebuilt(request: PayRequest, url: string, approved: DestinationOffer, approvedJson: string, challenge: Challenge, selected: PaymentRequirements): Promise<PayResult> {
-    const tokenDomain = tokenDomains.get(approved.asset.toLowerCase());
-    if (tokenDomain === undefined) {
-      return { outcome: "not_sent", reason: "destination_offer_not_allowed" };
-    }
-    const guard = createRebuildingSigner({ signer: capability.signer, destination: { network: approved.network, asset: approved.asset, tokenDomain }, offer: approved, now, deadlineMs: request.deadlineMs });
-    const client = new x402Client((_version, requirements) => {
-      if (requirements.length !== 1 || !sameOfferFields(approved, requirements[0]!)) {
-        throw new NotSentError("destination_selected_offer_mismatch");
-      }
-      return requirements[0]!;
-    });
-    client.setSpendControls({
-      maxAmountPerPayment: false,
-      allowedAssets: [{ network: asNetwork(approved.network), asset: approved.asset, maxAmountPerPayment: approved.amount }],
-    });
-    client.register(asNetwork(capability.network), new ExactEvmScheme(guard.signer));
-    client.onBeforePaymentCreation(async (context) => {
-      if (!sameOfferFields(approved, context.selectedRequirements) || context.paymentRequired.x402Version !== 2) {
-        throw new NotSentError("destination_selected_offer_mismatch");
-      }
-      guard.arm();
-    });
-    const httpClient = new x402HTTPClient(client);
-    let payload;
-    try {
-      payload = await httpClient.createPaymentPayload({ ...challenge.parsed, accepts: [selected] });
-    } catch (error) {
-      return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
-    }
-    const accepted = (payload as { accepted?: unknown }).accepted;
-    if (guard.signatures() !== 1 || accepted === undefined || !sameOfferFields(approved, accepted as PaymentRequirements) || stableJson(accepted) !== stableJson(selected)) {
-      return { outcome: "not_sent", reason: "destination_payload_mismatch" };
-    }
-    // 送出の直前にもう一度、承認の期限（FR-36）。
-    if (!(now() < request.deadlineMs)) {
-      return { outcome: "not_sent", reason: "destination_deadline" };
-    }
-    const payCtx = { routeId: request.routeId, operation: "pay" };
-    let response: Response;
-    try {
-      response = await transport.fetch(url, { method: "GET", headers: httpClient.encodePaymentSignatureHeader(payload), redirect: "error", signal: AbortSignal.timeout(timeoutMs) }, payCtx);
-    } catch {
-      return { outcome: "unknown", reason: "destination_pay_unknown" };
-    }
-    void approvedJson;
-    return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
-  }
-
   return {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
     async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
@@ -384,6 +331,59 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       }
     });
     return offers;
+  }
+
+  /**
+   * 組み直しの静的経路（送信の設計 §3.2。Base 以外の EVM、Arc）: 動的と同じ形——表の domain・承認値だけで typed data を組み直し、
+   * 単一候補の `x402Client`、arm、`createPaymentPayload` の後の検査、送出の直前の期限、共有の領収の表。SDK の typed data は署名器に届かない。
+   */
+  async function payRebuilt(request: PayRequest, url: string, approved: DestinationOffer, approvedJson: string, challenge: Challenge, selected: PaymentRequirements): Promise<PayResult> {
+    const tokenDomain = tokenDomains.get(approved.asset.toLowerCase());
+    if (tokenDomain === undefined) {
+      return { outcome: "not_sent", reason: "destination_offer_not_allowed" };
+    }
+    const guard = createRebuildingSigner({ signer: capability.signer, destination: { network: approved.network, asset: approved.asset, tokenDomain }, offer: approved, now, deadlineMs: request.deadlineMs });
+    const client = new x402Client((_version, requirements) => {
+      if (requirements.length !== 1 || !sameOfferFields(approved, requirements[0]!)) {
+        throw new NotSentError("destination_selected_offer_mismatch");
+      }
+      return requirements[0]!;
+    });
+    client.setSpendControls({
+      maxAmountPerPayment: false,
+      allowedAssets: [{ network: asNetwork(approved.network), asset: approved.asset, maxAmountPerPayment: approved.amount }],
+    });
+    client.register(asNetwork(capability.network), new ExactEvmScheme(guard.signer));
+    client.onBeforePaymentCreation(async (context) => {
+      if (!sameOfferFields(approved, context.selectedRequirements) || context.paymentRequired.x402Version !== 2) {
+        throw new NotSentError("destination_selected_offer_mismatch");
+      }
+      guard.arm();
+    });
+    const httpClient = new x402HTTPClient(client);
+    let payload;
+    try {
+      payload = await httpClient.createPaymentPayload({ ...challenge.parsed, accepts: [selected] });
+    } catch (error) {
+      return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
+    }
+    const accepted = (payload as { accepted?: unknown }).accepted;
+    if (guard.signatures() !== 1 || accepted === undefined || !sameOfferFields(approved, accepted as PaymentRequirements) || stableJson(accepted) !== stableJson(selected)) {
+      return { outcome: "not_sent", reason: "destination_payload_mismatch" };
+    }
+    // 送出の直前にもう一度、承認の期限（FR-36）。
+    if (!(now() < request.deadlineMs)) {
+      return { outcome: "not_sent", reason: "destination_deadline" };
+    }
+    const payCtx = { routeId: request.routeId, operation: "pay" };
+    let response: Response;
+    try {
+      response = await transport.fetch(url, { method: "GET", headers: httpClient.encodePaymentSignatureHeader(payload), redirect: "error", signal: AbortSignal.timeout(timeoutMs) }, payCtx);
+    } catch {
+      return { outcome: "unknown", reason: "destination_pay_unknown" };
+    }
+    void approvedJson;
+    return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
   }
 
   return {
