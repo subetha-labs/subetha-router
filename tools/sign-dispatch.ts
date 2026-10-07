@@ -1,0 +1,86 @@
+/**
+ * `npm run sign` の**振り分けと署名前の拒否**（multirail 設計 §7、SR-7。タスク T5）。**製品コードではない**（鍵を扱う側の補助）が、
+ * 鍵には触れない純粋な判定なので試験できる。
+ *
+ * - scheme `tempo/charge` → MPP（既存。署名で資金が動く）
+ * - scheme `exact` ＋ `eip155:` → x402 の EVM（chainId・domain は**表**から）
+ * - scheme `exact` ＋ `solana:` → x402 の SVM（mint・token program・桁は**表**から）
+ * - それ以外 → 拒否
+ *
+ * 表に無い network・資産・domain、失効した offer、形の違う offer、上限を超える額は**署名の前に**拒む。
+ */
+
+import { assetKeyOf, evmChainIdOf, isWellFormedPayTo, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, networkFamilyOf, type KnownNetwork } from "../src/config.js";
+
+/** 1 回の受信レグで払ってよい上限（base units）。D-7（2026-10-06）: 動的 quote の「上流額＋手数料」を賄う。 */
+export const SIGN_MAX_AMOUNT = 20_000n;
+
+export type SignDispatch =
+  | { readonly kind: "mpp"; readonly chainId: number; readonly asset: string; readonly payTo: string; readonly amount: string }
+  | { readonly kind: "x402-evm"; readonly chainId: number; readonly domain: { readonly name: string; readonly version: string }; readonly asset: string; readonly payTo: string; readonly amount: string }
+  | { readonly kind: "x402-svm"; readonly mint: string; readonly decimals: number; readonly tokenProgram: string; readonly payTo: string; readonly feePayer: string; readonly memo: string; readonly amount: string }
+  | { readonly kind: "refuse"; readonly reason: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
+const NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+
+/** offer を読んで、どの payer で署名するか（または拒む理由）を決める。 */
+export function classifyOffer(offer: unknown, nowMs: number, networks: readonly KnownNetwork[] = KNOWN_NETWORKS, maxAmount: bigint = SIGN_MAX_AMOUNT): SignDispatch {
+  if (!isRecord(offer)) return { kind: "refuse", reason: "the quote has no readable source.offer" };
+  const scheme = offer["scheme"];
+  const network = typeof offer["network"] === "string" ? offer["network"] : "";
+  const asset = typeof offer["asset"] === "string" ? offer["asset"] : "";
+  const amount = typeof offer["amount"] === "string" ? offer["amount"] : "";
+  const payTo = typeof offer["payTo"] === "string" ? offer["payTo"] : "";
+  const extra = isRecord(offer["extra"]) ? offer["extra"] : undefined;
+  if (!AMOUNT_PATTERN.test(amount)) return { kind: "refuse", reason: "the offer amount is not a base-unit integer" };
+  if (BigInt(amount) > maxAmount) return { kind: "refuse", reason: `the offer amount exceeds the cap (${amount} > ${maxAmount})` };
+  const expiresAt = extra?.["expiresAt"];
+  if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return { kind: "refuse", reason: "the offer has no expiresAt" };
+  if (expiresAt * 1000 <= nowMs) return { kind: "refuse", reason: "the offer has expired; take a new quote and ask for approval again" };
+  // 共通の欄: nonce（Router の封筒の `challengeNonce`）。無ければ、どのレールでも Router の preflight が落とす（MPP なら送金した後に）。
+  if (typeof extra?.["challengeNonce"] !== "string" || !NONCE_PATTERN.test(extra["challengeNonce"])) return { kind: "refuse", reason: "the offer has no well-formed challengeNonce" };
+  const entry = knownNetworkOf(networks, network);
+  if (entry === undefined) return { kind: "refuse", reason: "the offer network is not in the table of known networks" };
+  const known = knownAssetOf(entry, asset);
+  if (known === undefined) return { kind: "refuse", reason: "the offer asset is not a known asset on that network" };
+  if (!isWellFormedPayTo(network, payTo)) return { kind: "refuse", reason: "the offer payTo is not a well-formed address for that network" };
+
+  if (scheme === "tempo/charge") {
+    const chainId = evmChainIdOf(network);
+    if (chainId === undefined || !entry.inbound.includes("mpp")) return { kind: "refuse", reason: "MPP offers are only accepted on the table's MPP networks" };
+    // MPP の payer は serialized challenge（`extra.challenge`）で払う。無い offer は**送金の前に**拒む。
+    if (typeof extra?.["challenge"] !== "string" || extra["challenge"] === "") return { kind: "refuse", reason: "the MPP offer does not carry the mppx challenge" };
+    return { kind: "mpp", chainId, asset, payTo, amount };
+  }
+  if (scheme !== "exact") return { kind: "refuse", reason: "the offer scheme is neither exact nor tempo/charge" };
+  if (!entry.inbound.includes("x402")) return { kind: "refuse", reason: "x402 offers are not accepted on that network" };
+  if (extra?.["fundsMoveOnCredential"] === true) return { kind: "refuse", reason: "an exact offer must not move funds on signing" };
+
+  if (networkFamilyOf(network) === "evm") {
+    const chainId = evmChainIdOf(network);
+    if (chainId === undefined) return { kind: "refuse", reason: "the offer network has no chain id" };
+    if (known.domain === undefined) return { kind: "refuse", reason: "the table has no EIP-712 domain for that asset" };
+    if (extra?.["name"] !== known.domain.name || extra?.["version"] !== known.domain.version) {
+      return { kind: "refuse", reason: "the offer's EIP-712 domain does not match the table (refusing to sign an unexpected domain)" };
+    }
+    if (assetKeyOf(network, asset) !== assetKeyOf(network, known.id)) return { kind: "refuse", reason: "asset mismatch" };
+    return { kind: "x402-evm", chainId, domain: known.domain, asset, payTo, amount };
+  }
+  // SVM
+  if (known.tokenProgram === undefined) return { kind: "refuse", reason: "the table has no token program for that mint" };
+  const feePayer = extra?.["feePayer"];
+  const memo = extra?.["memo"];
+  const challengeNonce = extra?.["challengeNonce"];
+  if (typeof feePayer !== "string" || !isWellFormedPayTo(network, feePayer)) return { kind: "refuse", reason: "the offer has no well-formed feePayer" };
+  if (typeof memo !== "string" || memo === "" || memo !== challengeNonce) return { kind: "refuse", reason: "the offer memo must be the challengeNonce" };
+  // offer の extra が桁・token program・mint を名乗っていて表と違えば拒む（表が権威。設計 §5.6）。
+  if (extra?.["decimals"] !== undefined && extra["decimals"] !== known.decimals) return { kind: "refuse", reason: "the offer's decimals conflict with the table" };
+  if (extra?.["tokenProgram"] !== undefined && extra["tokenProgram"] !== known.tokenProgram) return { kind: "refuse", reason: "the offer's token program conflicts with the table" };
+  if (extra?.["mint"] !== undefined && extra["mint"] !== known.id) return { kind: "refuse", reason: "the offer's mint conflicts with the table" };
+  return { kind: "x402-svm", mint: known.id, decimals: known.decimals, tokenProgram: known.tokenProgram, payTo, feePayer, memo, amount };
+}

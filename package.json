@@ -15,7 +15,8 @@
     "demo:mcp": "tsx tools/demo-mcp.ts",
     "wallet:new": "tsx tools/wallet-new.ts",
     "wallet:balance": "tsx tools/wallet-balance.ts",
-    "sign": "tsx tools/sign-payment.ts"
+    "sign": "tsx tools/sign-payment.ts",
+    "wallet:new:solana": "tsx tools/wallet-new-solana.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
