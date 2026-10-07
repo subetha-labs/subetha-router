@@ -289,7 +289,8 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   /** 運用者の集合（小文字化）。自分の署名者は常に含む。 */
   const operatorAddresses = new Set([capability.signer.address, ...(options.operatorAddresses ?? [])].map((address) => address.toLowerCase()));
   const isOperator = (address: string): boolean => operatorAddresses.has(address.toLowerCase());
-  const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, options.dynamic);
+  // 運用者の集合は静的と動的で同じ 1 つ（動的の option に無ければ adapter のものを渡す。FR-38）。
+  const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, { ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }), ...options.dynamic });
 
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
   const upstreams = new Map<string, string>();
