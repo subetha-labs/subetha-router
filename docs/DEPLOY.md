@@ -218,7 +218,10 @@ U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の�
 静的（`md-x402-eth-snapshot-sol`、signature `bZUbak…`、finalized、4.4 秒）で各 1 件、どちらも **delivered**。受取 ATA は 0.021 → 0.042 USDC。これで **AC-2 の動的も満たした**
 （AC-1 は 1 回目で満たしている）。追跡が働いたかは hosted では観測できない（上記の制限）。公開の停止は約 1 分。
 
-**有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える。
+**有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える
+（入れ替えは `deploy/swap-image.sh <image:tag>`: 入口を閉じ → 旧を `-prev-<ts>` に改名 → 新を同じ network・port・volume・env で起動 → `/healthz` と Router の `listening` 行 →
+journal の先頭バイト列が不変 → `subetha-egress check` → 入口を開ける。**途中で失敗したら旧コンテナを元の名前に戻して起動し、入口を開け直す**。有効化の後は子の Router が
+listen の前に Solana の起動時の検査（最大 10 秒 × 2）を行うので、入口の起動待ちは 60 秒にしてある）。
 **戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
 
 **有効にした後に見るもの**（hosted の入口は Router の process の stderr を転送しないので、**ログの不在は成功の証拠にならない**。見るのは次の口）:

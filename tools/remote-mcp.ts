@@ -194,7 +194,8 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
 
   let router: Listening;
   try {
-    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath });
+    // 起動待ちは 60 秒: 子の Router は listen の前に Solana の起動時の検査（`/supported`・ATA、各 10 秒まで）と Tempo の probe と journal の replay を行う。
+    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, { listenTimeoutMs: 60_000 });
   } catch (error) {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
     void error;
@@ -251,7 +252,7 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
   return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, stop };
 }
 
-/** 公開の入口: 多レールは定数で無効、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
+/** 公開の入口: 多レールは定数 `RAILS_ACTIVATION`（G-4 で両方 true）、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
 async function start(): Promise<void> {
   await startHost({
     activation: RAILS_ACTIVATION,

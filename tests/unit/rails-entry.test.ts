@@ -17,7 +17,7 @@ import { activationFromEnv, activationToEnv, ProcessEntryError, RAILS_ACTIVATION
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { createRealMppCapability } from "../../tools/real-mpp-capability.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
-import { INBOUND_ARC, INBOUND_SOL, RAILS_ACTIVATION, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { INBOUND_ARC, INBOUND_SOL, RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
 import { HostPlanError, hostPlanOf, listenMcp, publicJournalPathOf, type HostOptions } from "../../tools/remote-mcp.js";
 import { FIXTURE_PUBLIC_ADDRESS, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
 
@@ -312,16 +312,33 @@ describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入
     expect(acceptanceRest).toEqual(publicRest);
   });
 
-  test("公開の入口（定数 RAILS_ACTIVATION = 両方 true、G-4）: 設定に Arc・Solana の route とプロファイルが出て、子の env に有効化 \"arc,solana\" と Arc の鍵が渡る。受取の env が無ければ計画は作れない", () => {
+  test("公開の入口（定数 RAILS_ACTIVATION = 両方 true、G-4）: 設定に Arc・Solana の route とプロファイルが出て、子の env に有効化 \"arc,solana\" と Arc の鍵が渡る。受取の env はどちらが欠けても計画は作れない。親の env の有効化の指定は無視される", () => {
+    expect(RAILS_NONE).toEqual(NONE);
     const key = generatePrivateKey();
     const options: HostOptions = { activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) };
-    const plan = hostPlanOf(options, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key, [SOLANA_RECEIVER_ENV]: SOL_OWNER });
+    const fullEnv = { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key, [SOLANA_RECEIVER_ENV]: SOL_OWNER };
+    const plan = hostPlanOf(options, fullEnv);
     const config = loadAsProduction(plan.config);
     expect(Object.keys(config.router.routes).sort()).toEqual(["md-mpp-eth-snapshot", "md-mpp-eth-snapshot-arc", "md-x402-eth-snapshot", "md-x402-eth-snapshot-sol"]);
+    expect(Object.keys(config.router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-x402", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-x402", "dyn-x402-to-mpp"]);
     expect(config.router.routes[ROUTE_ARC]?.source.payTo).toBe(privateKeyToAccount(key).address);
     expect(config.router.routes[ROUTE_SOL]?.source.payTo).toBe(SOL_OWNER);
+    expect(config.router.dynamic!.profiles["dyn-arc-to-x402"]?.source.payTo).toBe(privateKeyToAccount(key).address);
+    expect(config.router.dynamic!.profiles["dyn-sol-to-mpp"]?.source.payTo).toBe(SOL_OWNER);
     expect(plan.childEnv).toMatchObject({ [RAILS_ACTIVATION_ENV]: "arc,solana", [ARC_RECEIVER_KEY_ENV]: key });
-    expect(() => hostPlanOf(options, baseEnv)).toThrow(HostPlanError);
+    // 受取の env はどちらが欠けても止まる（片方ずつ）。
+    const { [SOLANA_RECEIVER_ENV]: _s, ...noSolana } = fullEnv;
+    const { [ARC_RECEIVER_KEY_ENV]: _a, ...noArc } = fullEnv;
+    for (const env of [noSolana, noArc, baseEnv]) {
+      let caught: unknown;
+      try { hostPlanOf(options, env); } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(HostPlanError);
+      expect((caught as HostPlanError).code).toBe("rails");
+    }
+    // 親の env に有効化の指定があっても、定数が決める（無効化も変更もできない）。
+    const conflicting = hostPlanOf(options, { ...fullEnv, [RAILS_ACTIVATION_ENV]: "", ARC_PROFILES_ENABLED: "false" });
+    expect(conflicting.childEnv[RAILS_ACTIVATION_ENV]).toBe("arc,solana");
+    expect(conflicting.config).toEqual(plan.config);
   });
 
   test("env が足りない・受取先が導けない・設定が作れない → code つきで止まる（値は出ない）", () => {
@@ -400,7 +417,7 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）の選択�
     expect(options).toMatchObject({ activation: BOTH, bind: "127.0.0.1", port: 0 });
     expect(options.journalPath).toBe(path.resolve("runtime", "acceptance", "journal.ndjson"));
     expect(options.journalPath).not.toBe(path.resolve(publicJournalPathOf({})));
-    // 公開の定数は G-4 で両方 true（受け入れ用の起動はそれを読まず、--rails で決める）。
+    // 公開の定数は G-4 で両方 true（受け入れ用の起動はそれを読まず、--rails で決める。既定の無効は RAILS_NONE）。
     expect(RAILS_ACTIVATION).toEqual({ arc: true, solana: true });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
   });
