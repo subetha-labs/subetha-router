@@ -306,8 +306,18 @@ describe("composeRails（動的の配線）", () => {
     const balanceOf = dynamicCoreOptionsOf(two.rails.dynamic!, full, two.config).balanceOf;
     expect(await balanceOf!("dyn-mpp-to-x402", USDC)).toBe(2n);
     expect(await balanceOf!("dyn-x402-to-mpp", PATHUSD)).toBe(1n);
-    // 静的 route（rail 未指定 = x402）も同じ配線で引ける。
+    // 静的 route も同じ配線で引ける。
     expect(await balanceOf!("r-mpp", PATHUSD)).toBe(1n);
+  });
+
+  test("静的だけの構成（dynamic 無し）でも残高の hook は合成の返り値に出る（送信の設計 §2.6。core には動的と独立に渡す）", async () => {
+    const mppWithBalance = { ...realMpp(), balanceOf: async () => 7n };
+    const { rails } = compose(envFor({ dynamic: false }), { evmSigning: REAL_EVM, mppTempo: mppWithBalance });
+    expect(rails.dynamic).toBeUndefined();
+    expect(rails.balanceOf).toBeDefined();
+    expect(await rails.balanceOf!("r-mpp", PATHUSD)).toBe(7n);
+    // 知らない経路は検査なし（core は経路の存在を別に検査する）。
+    expect(await rails.balanceOf!("no-such-route", USDC)).toBeUndefined();
   });
 });
 

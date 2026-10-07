@@ -283,7 +283,7 @@ export function composeRails(
   capabilities: RouterCapabilities,
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
-): { inbound: InboundRail; outbound: OutboundRail; dynamic?: DynamicWiring; startup?: () => Promise<void> } {
+): { inbound: InboundRail; outbound: OutboundRail; balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>; dynamic?: DynamicWiring; startup?: () => Promise<void> } {
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
@@ -658,6 +658,8 @@ export function composeRails(
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
     inbound: inboundByRoute(config.router.routes, inboundRails, profiles),
     outbound: railByRoute(config.router.routes, rails, profiles),
+    // 残高の hook は動的の設定の有無と独立に渡す（静的だけの構成でも静的 route の残高を見る。送信の設計 §2.6）。
+    balanceOf: balanceOfFor,
     ...(dynamic === undefined ? {} : { dynamic }),
   };
 }
@@ -768,6 +770,7 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     outbound: rails.outbound,
     // 拒否の理由を運用者に伝える（固定文のみ。値は渡さない）。
     note: (message) => process.stderr.write(`${message}\n`),
+    balanceOf: rails.balanceOf,
     ...(rails.dynamic === undefined ? {} : { dynamic: dynamicCoreOptionsOf(rails.dynamic, capabilities, config) }),
   });
 

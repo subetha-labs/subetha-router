@@ -209,15 +209,18 @@ describe("message の hash の予約（FR-37）", () => {
 
   test("journal に書けなければ unavailable（Set にも行にも残らない）", async () => {
     const core = await boot();
-    let result: string | undefined;
+    const results: string[] = [];
     outbound.payImpl = async (request) => {
       await core.close();
-      result = await request.reserveMessage!(H1);
+      results.push(await request.reserveMessage!(H1));
+      // 書けなかった hash は Set にも入っていない: intent はまだ destination_pending なので、もう一度予約しても
+      // 「衝突」ではなく、また書けずに unavailable になる。
+      results.push(await request.reserveMessage!(H1));
       return { outcome: "paid", body: BODY, contentType: "application/json", txRef: "dst-tx-1" };
     };
     const quote = await quoteOk(core, "r1");
     await expect(core.purchase(purchaseArgs(quote, "r1"))).rejects.toThrow();
-    expect(result).toBe("unavailable");
+    expect(results).toEqual(["unavailable", "unavailable"]);
     expect(await reservedRows()).toEqual([]);
   });
 
