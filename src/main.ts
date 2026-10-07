@@ -39,6 +39,7 @@ import {
   type RouterConfig,
   type RuntimeConfig,
 } from "./config.js";
+import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
 import { DynamicGate } from "./core/dynamic-gate.js";
@@ -171,6 +172,31 @@ export function outboundPairKeyOf(rail: string, network: string): string {
 const BASE_SEPOLIA_NETWORK = "eip155:84532";
 const SVM_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
+/** base58 で 32 バイトに復号できる公開鍵か（文字数では足りない: 33 個の `1` は 33 バイトのゼロ）。 */
+function isSvmPublicKey(value: string): boolean {
+  if (!SVM_ADDRESS_PATTERN.test(value)) return false;
+  try {
+    return getBase58Encoder().encode(value).length === 32;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SVM の使い方（送信の設計 §2.2）: 受信（`sourceRail: "x402"` の Solana）と送信（Solana 宛の route／プロファイル）のどちらかがあれば
+ * Solana RPC は依存先・拒否ホストに入る。純粋関数（試験で確かめる）。
+ */
+export function svmUsageOf(
+  routes: Readonly<Record<string, { readonly sourceRail?: string; readonly source: { readonly network: string }; readonly destination: { readonly network: string } }>>,
+  profiles: Readonly<Record<string, { readonly sourceRail: string; readonly source: { readonly network: string }; readonly destination: { readonly network: string } }>>,
+): { readonly inbound: boolean; readonly outbound: boolean } {
+  const all = [...Object.values(routes), ...Object.values(profiles)];
+  return {
+    inbound: all.some((entry) => entry.sourceRail === "x402" && networkFamilyOf(entry.source.network) === "svm"),
+    outbound: all.some((entry) => networkFamilyOf(entry.destination.network) === "svm"),
+  };
+}
+
 /** Solana RPC の transport（受信の起動時の検査・追跡と、送信で共有。送信の設計 §2.2）: fixture の差し替えの上に、loopback の方針と DNS の期限。 */
 function svmRpcTransportOf(hooks: DynamicTransportHooks, allowLoopback: boolean, report: (event: TransportEvent) => void): GuardedTransport {
   return createGuardedTransport({ ...hooks, allowLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
@@ -196,7 +222,7 @@ export function outboundCapabilitiesOf(capabilities: Pick<RouterCapabilities, "e
   }
   const svmByNetwork = new Map<string, SvmSigningCapability>();
   for (const [key, capability] of Object.entries(capabilities.svmSigning ?? {})) {
-    if (key !== capability.network || networkFamilyOf(key) !== "svm" || svmByNetwork.has(key) || !SVM_ADDRESS_PATTERN.test(capability.address)) throw new SignerNotAuthorizedError();
+    if (key !== capability.network || networkFamilyOf(key) !== "svm" || svmByNetwork.has(key) || !isSvmPublicKey(capability.address)) throw new SignerNotAuthorizedError();
     svmByNetwork.set(key, capability);
   }
   return { evmByNetwork, svmByNetwork };
@@ -417,10 +443,7 @@ export function composeRails(
   ]);
   const usesSvmInbound = [...x402InboundNetworks].some((network) => networkFamilyOf(network) === "svm");
   // SVM の送信（送信の設計 §2.2）: 受信が無くても、Solana 宛の route／プロファイルがあれば RPC は依存先・拒否ホストに入る。
-  const usesSvmOutbound = [
-    ...Object.values(config.router.routes).map((route) => route.destination.network),
-    ...Object.values(profiles).map((profile) => profile.destination.network),
-  ].some((network) => networkFamilyOf(network) === "svm");
+  const usesSvmOutbound = svmUsageOf(config.router.routes, profiles).outbound;
   const solanaRpcUrl = usesSvmInbound || usesSvmOutbound ? (real.solanaRpcUrl ?? DEFAULT_SOLANA_RPC_URL) : undefined;
   const denyHosts =
     dynamicConfig === undefined

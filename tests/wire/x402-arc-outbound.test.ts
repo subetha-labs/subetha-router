@@ -15,7 +15,25 @@ import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vite
 const sdk = vi.hoisted(() => ({
   /** SDK が署名器に渡す typed data を書き換える（組み直しの署名器なら、書き換えは署名器に届かない）。 */
   tamper: undefined as undefined | ((message: TypedDataLike) => TypedDataLike),
+  /** adapter が支払いヘッダを符号化している間に走る hook（送出の直前の検査の前）。 */
+  duringEncode: undefined as undefined | (() => void),
+  /** SDK が返す payload の x402Version を書き換える。 */
+  payloadVersion: undefined as undefined | number,
 }));
+vi.mock("@x402/fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/fetch")>();
+  class HookedHttpClient extends actual.x402HTTPClient {
+    override async createPaymentPayload(...args: Parameters<InstanceType<typeof actual.x402HTTPClient>["createPaymentPayload"]>): ReturnType<InstanceType<typeof actual.x402HTTPClient>["createPaymentPayload"]> {
+      const payload = await super.createPaymentPayload(...args);
+      return sdk.payloadVersion === undefined ? payload : { ...payload, x402Version: sdk.payloadVersion };
+    }
+    override encodePaymentSignatureHeader(payload: Parameters<InstanceType<typeof actual.x402HTTPClient>["encodePaymentSignatureHeader"]>[0]): Record<string, string> {
+      sdk.duringEncode?.();
+      return super.encodePaymentSignatureHeader(payload);
+    }
+  }
+  return { ...actual, x402HTTPClient: HookedHttpClient };
+});
 type TypedDataLike = { domain: Record<string, unknown>; types: Record<string, unknown>; primaryType: string; message: Record<string, unknown> };
 vi.mock("@x402/evm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@x402/evm")>();
@@ -70,6 +88,8 @@ afterAll(() => {
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   sdk.tamper = undefined;
+  sdk.duringEncode = undefined;
+  sdk.payloadVersion = undefined;
   while (closers.length > 0) await closers.pop()!();
 });
 
@@ -79,23 +99,27 @@ interface Harness {
   readonly address: `0x${string}`;
   readonly signed: TypedData[];
   readonly events: TransportEvent[];
+  /** transport が接続しようとしたホスト名（dial の記録。成功した接続も含む）。 */
+  readonly dialed: string[];
 }
 
 /** `network` の能力で静的 route（Arc 宛）と動的プロファイルを持つ rail。`rebuild` は静的の組み直し。 */
-async function harness(options: { network?: string; rebuild?: boolean; operatorAddresses?: readonly string[] } = {}): Promise<Harness> {
+async function harness(options: { network?: string; rebuild?: boolean; operatorAddresses?: readonly string[]; now?: () => number } = {}): Promise<Harness> {
   const upstream = await startX402Upstream(TLS);
   closers.push(upstream.close);
   upstream.state.accepts = [arcAccept()];
   const account = privateKeyToAccount(generatePrivateKey());
   const signed: TypedData[] = [];
   const events: TransportEvent[] = [];
+  const dialed: string[] = [];
+  const dial = dialTo({ "provider.test": upstream.port });
   const transportOptions = {
     allowLoopback: false,
     report: (event: TransportEvent) => events.push(event),
     interfaces: () => [],
     tls: { ca: [TLS.ca] },
     lookup: publicLookup(),
-    dialForTest: dialTo({ "provider.test": upstream.port }),
+    dialForTest: (target: Parameters<typeof dial>[0]) => { dialed.push(target.hostname); return dial(target); },
   };
   const transport = createGuardedTransport(transportOptions);
   const dynamicTransport = createGuardedTransport({ ...transportOptions, maxHeaderSize: DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes, dns: { timeoutMs: 2_000, maxInFlight: 16 } });
@@ -115,13 +139,14 @@ async function harness(options: { network?: string; rebuild?: boolean; operatorA
     upstreams: { [ROUTE]: UPSTREAM },
     transport,
     capability,
+    ...(options.now === undefined ? {} : { now: options.now }),
     rebuildSignatures: rebuild,
     ...(rebuild ? { tokenDomains: DOMAINS } : {}),
     ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
     dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: dynamicTransport, denyHosts: [] },
   });
   upstream.state.pay = () => paidOk(account.address, { price: 1 }, ARC);
-  return { upstream, rail, address: account.address, signed, events };
+  return { upstream, rail, address: account.address, signed, events, dialed };
 }
 
 const pay = (h: Harness, routeId: string, offer: DestinationOffer, url?: string) =>
@@ -161,11 +186,29 @@ describe("静的 route（組み直しの署名器）", () => {
     expect(h.upstream.seen.payments).toHaveLength(0);
   });
 
-  test("FR-33: Arc の送信で接続する先は Provider のホストだけ（chain の RPC には出ない）", async () => {
+  test("FR-33: Arc の送信で接続する先は Provider のホストだけ（chain の RPC には出ない。dial の記録で見る）", async () => {
     const h = await harness();
-    await pay(h, ROUTE, (await h.rail.readChallenge(ROUTE))[0]!);
-    const hosts = new Set(h.events.map((event) => (event as { host?: string }).host ?? (event as { url?: string }).url ?? "").filter((value) => value !== ""));
-    for (const host of hosts) expect(host).toContain("provider.test");
+    expect(await pay(h, ROUTE, (await h.rail.readChallenge(ROUTE))[0]!)).toMatchObject({ outcome: "paid" });
+    expect(h.dialed.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(h.dialed)).toEqual(new Set(["provider.test"]));
+  });
+
+  test("支払いヘッダを符号化している間に期限が切れれば送らない（署名 1・支払い要求 0）", async () => {
+    let expired = false;
+    const h = await harness({ now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = (await h.rail.readChallenge(ROUTE))[0]!;
+    sdk.duringEncode = () => { expired = true; };
+    expect(await pay(h, ROUTE, offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(1);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("SDK が返した payload の x402Version が 2 でなければ送らない", async () => {
+    const h = await harness();
+    const offer = (await h.rail.readChallenge(ROUTE))[0]!;
+    sdk.payloadVersion = 1;
+    expect(await pay(h, ROUTE, offer)).toEqual({ outcome: "not_sent", reason: "destination_payload_mismatch" });
+    expect(h.upstream.seen.payments).toHaveLength(0);
   });
 
   test("領収は共有の表: network が Base の領収は Arc の送信では unknown", async () => {

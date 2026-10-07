@@ -369,17 +369,19 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
     }
     const accepted = (payload as { accepted?: unknown }).accepted;
-    if (guard.signatures() !== 1 || accepted === undefined || !sameOfferFields(approved, accepted as PaymentRequirements) || stableJson(accepted) !== stableJson(selected)) {
+    // SDK が返した payload そのものを検査する（入力の検査では返り値を保証しない）: 署名 1 回・accepted の一致・v2。
+    if (guard.signatures() !== 1 || accepted === undefined || !sameOfferFields(approved, accepted as PaymentRequirements) || stableJson(accepted) !== stableJson(selected) || payload.x402Version !== 2) {
       return { outcome: "not_sent", reason: "destination_payload_mismatch" };
     }
-    // 送出の直前にもう一度、承認の期限（FR-36）。
+    const payCtx = { routeId: request.routeId, operation: "pay" };
+    // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。
+    const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
     if (!(now() < request.deadlineMs)) {
       return { outcome: "not_sent", reason: "destination_deadline" };
     }
-    const payCtx = { routeId: request.routeId, operation: "pay" };
     let response: Response;
     try {
-      response = await transport.fetch(url, { method: "GET", headers: httpClient.encodePaymentSignatureHeader(payload), redirect: "error", signal: AbortSignal.timeout(timeoutMs) }, payCtx);
+      response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(timeoutMs) }, payCtx);
     } catch {
       return { outcome: "unknown", reason: "destination_pay_unknown" };
     }
