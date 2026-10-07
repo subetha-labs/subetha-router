@@ -117,11 +117,16 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
   } catch {
     throw new HostPlanError("config");
   }
+  /**
+   * x402 送信の鍵が要るか: **生成した設定に x402 の送信（route かプロファイル）があるとき**（送信の設計 §6.2）。
+   * 以前は MPP 受信のときだけ渡していて、Arc／Solana 受信 → Base 送信の動的プロファイルに漏れていた（U5 で修正）。
+   */
+  const needsX402Key = hasX402Outbound(config);
   const childEnv: Record<string, string> = {
       // MPP 送信（Provider B）。既存経路。
       SUBETHA_OUTBOUND_MPP_KEY: outboundKey,
-      // x402 送信（Provider A）。MPP 受信経路を出すときだけ要る。
-      ...(mppInboundEnabled ? { SUBETHA_OUTBOUND_X402_KEY: x402OutboundKey } : {}),
+      // x402 送信（Provider A・Arc）。生成した設定が x402 の送信を持つときだけ渡す。
+      ...(needsX402Key ? { SUBETHA_OUTBOUND_X402_KEY: x402OutboundKey } : {}),
       ROUTER_JOURNAL_PATH: journalPath,
       ROUTER_HTTP_PORT: "0",
       ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
@@ -150,6 +155,14 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ...railsChildEnvOf(options.activation, env),
   };
   return { config, childEnv, journalPath };
+}
+
+/** 生成した設定に x402 の送信（静的 route の `rail`、動的プロファイルの `rail`）があるか。純粋関数（試験で確かめる）。 */
+export function hasX402Outbound(config: Record<string, unknown>): boolean {
+  const router = (config["router"] ?? {}) as { routes?: Record<string, { rail?: string }>; dynamic?: { profiles?: Record<string, { rail?: string }> } };
+  const routes = Object.values(router.routes ?? {});
+  const profiles = Object.values(router.dynamic?.profiles ?? {});
+  return [...routes, ...profiles].some((entry) => (entry.rail ?? "x402") === "x402");
 }
 
 /** MCP の入口を bind する。実際のアドレスと port を返す（試験で bind を確かめる）。 */

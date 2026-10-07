@@ -18,7 +18,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { activationFromEnv, activationToEnv } from "./rails-entry.js";
-import type { RailsActivation } from "./remote-mcp-config.js";
+import { railActive, type RailsActivation } from "./remote-mcp-config.js";
 import { publicJournalPathOf, startHost, type HostOptions, type RunningHost } from "./remote-mcp.js";
 
 export const ACCEPTANCE_PORT_ENV = "SUBETHA_ACCEPTANCE_PORT";
@@ -89,9 +89,10 @@ export function announcementOf(host: Pick<RunningHost, "mcpPort" | "mcpAddress" 
 
 /** 受け入れ用の起動の選択肢。純粋関数（試験で確かめる）。 */
 export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefined>>, argv: readonly string[] = []): HostOptions {
-  const activation: RailsActivation = activationFromEnv(argOf(argv, "rails") ?? "arc,solana");
-  if (!activation.arc && !activation.solana) {
-    throw new Error("--rails must activate at least one of arc, solana");
+  // 既定は受信の両方（公開の定数と同じ形）。送信の受け入れは `--rails arc-in,arc-out,solana-in` のように方向を足す（送信の設計 §6.1）。
+  const activation: RailsActivation = activationFromEnv(argOf(argv, "rails") ?? "arc-in,solana-in");
+  if (!railActive(activation)) {
+    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out");
   }
   const journalPath = path.resolve(env[ACCEPTANCE_JOURNAL_ENV] ?? path.join(path.resolve("runtime"), "acceptance", "journal.ndjson"));
   if (sameJournal(journalPath, publicJournalPathOf(env))) {

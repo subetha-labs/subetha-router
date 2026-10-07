@@ -131,6 +131,10 @@ The hosted version has 4 routes. The original two:
 | `md-mpp-eth-snapshot-arc` | x402 (Arc testnet USDC, facilitator: Circle) | MPP (`subetha-provider-mpp`) |
 | `md-x402-eth-snapshot-sol` | x402 (Solana devnet USDC, facilitator: x402.org, SVM `exact`) | x402 (`subetha-provider-x402`) |
 
+**Outbound rails** (paying providers that accept only Arc or Solana) are being added behind the same one-constant switch, now per direction
+(`RAILS_ACTIVATION = { arc: { inbound, outbound }, solana: { inbound, outbound } }`; outbound is `false` on the hosted Router until its own gate). The Arc outbound routes
+(`md-arc-eth-snapshot`, `dyn-x402-to-arc`, `dyn-mpp-to-arc`) appear in the listing only after enablement.
+
 What is verified for them: fixture tests of the whole path (in-process, no chain), **one live `/verify` each** against Circle and
 x402.org with disposable keys, and the **G-3 acceptance purchases of 2026-10-07** with disposable payers in the production environment
 (Arc static and dynamic → Tempo: delivered; Solana static and dynamic → Base: delivered with finalized signatures; records in

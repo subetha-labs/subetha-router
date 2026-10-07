@@ -151,8 +151,8 @@ docker run --rm --name subetha-router-acceptance \
   -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -e SUBETHA_SOLANA_RPC_URL=... \
   -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_BIND=0.0.0.0 \
   -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/journal.ndjson \
-  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
-# stdout の 1 行（起動できたとき）: {"event":"listening","port":8788,"address":"0.0.0.0","routerPort":<Router>,"mode":"acceptance","rails":"arc,solana"}
+  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc-in,solana-in
+# stdout の 1 行（起動できたとき）: {"event":"listening","port":8788,"address":"0.0.0.0","routerPort":<Router>,"mode":"acceptance","rails":"arc-in,solana-in"}
 # 手元からは ssh -L 8788:127.0.0.1:8788 <Router の host> で MCP（http://127.0.0.1:8788/mcp）に届く。Router 本体の HTTP はコンテナの外に出さない。
 # 終わったら、この端末で Ctrl-C（入口が SIGINT で子の Router を止めて終わる。--rm でコンテナは消える）→ docker start subetha-router
 ```
@@ -165,7 +165,7 @@ docker run --rm --name subetha-router-acceptance \
 # 前景（-it）で動かす: Ctrl-C が SIGINT として入口に届き、入口が子の Router を止めて終わる（-d で切り離すと止める手段が無い。pkill は使わない）。
 docker exec -it -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -e SUBETHA_SOLANA_RPC_URL=... \
   -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/journal.ndjson \
-  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
+  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc-in,solana-in
 # 送信の鍵・MPP 受信の秘密・Tempo の RPC はコンテナの env から読まれる（docker run で渡したもの）。
 # 終わった後に残っていないことの確認: cmdline か environ に印を含む process の PID を出す（自分自身は除く。印は pgrep の [ ] の形で、検査の process 自身には一致しない）。
 # 何も出なければ、受け入れの入口（印 rails-acceptance-ru[n]）とその子の Router（environ の ROUTER_JOURNAL_PATH。印 acceptance/journal.ndjso[n]）は残っていない。
@@ -189,7 +189,7 @@ docker exec -it \
   -e ROUTER_SUBETHA_FACILITATOR_URL=https://www.x402.org/facilitator -e ROUTER_X402_INBOUND_FACILITATOR_URL=https://www.x402.org/facilitator \
   -e ROUTER_X402_INBOUND_OFFER_SECONDS=<SUBETHA_OFFER_SECONDS の値、無ければ 600> -e ROUTER_MPP_INBOUND_SECRET=<SUBETHA_MPP_INBOUND_SECRET の値> -e ROUTER_MPP_INBOUND_OFFER_SECONDS=<同じ> \
   -e SUBETHA_TEMPO_RPC_URL=<値> -e ROUTER_MPP_INBOUND_RPC_URL=<同じ値> \
-  -e SUBETHA_RAILS_ACTIVATION=arc,solana -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RPC_URL=<値> -e ROUTER_SOLANA_RPC_URL=<同じ値> \
+  -e SUBETHA_RAILS_ACTIVATION=arc-in,solana-in -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RPC_URL=<値> -e ROUTER_SOLANA_RPC_URL=<同じ値> \
   subetha-router node --import tsx tools/remote-router-process.ts
 # stderr に理由の固定文（例: `svm inbound: ...`）か、`{"event":"listening",...}` が出る。終わったら Ctrl-C（SIGINT で Router が止まる）。
 # 残っていないことの確認は、この Router だけが持つ印（environ の ROUTER_JOURNAL_PATH の acceptance/dia[g]）で、動かしたコンテナの中で（公開・受け入れの Router は印を持たない）:
@@ -227,7 +227,17 @@ journal の先頭バイト列が不変 → `subetha-egress check` → 入口を�
 復旧の各段（名前の照合・削除・改名・起動・`/healthz`・caddy・`docker ps`）も同じで、確認できなければ exit 2。旧コンテナが元の名前で `/healthz` に答え、入口が active と確認できたときだけ exit 1。
 検証はどれも致命。待ちは経過時間で切り、ループの中の各要求にも残りの予算を渡す（予算を超えるのは `timeout` の kill の猶予 5 秒と、要約のための `docker logs` の別枠 10 秒 + 5 秒まで。段ごとの予算で、script 全体の期限ではない）。コンテナのログの中身と変更操作の docker の stderr は出さない（listening 行と bind 行の有無、`could not start the Router` の行数だけ）。それ以外の docker・systemctl の stderr はそのまま出る。有効化の後は子の Router が listen の前に Solana の起動時の検査（最大 10 秒 × 2）と Tempo の probe（MPP 送信のプロファイルごとに
 最大 6 秒、3 本）を行うので、入口の起動待ちは 120 秒（replay の分の余裕を含む運用上の値で、端から端の保証ではない）、入れ替えの待ちは 180 秒の経過時間にしてある）。
-**戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
+**戻すのも同じ 1 箇所**（`inbound: false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
+
+**送信（Arc・Solana の Provider に払う。送信の設計 §6、タスク U5・U9）**: 有効化の定数は方向別になった——`RAILS_ACTIVATION = { arc: { inbound, outbound }, solana: { inbound, outbound } }`
+（受信は G-4 で両方 `true`、**送信は両方 `false`**。G-4′ でレールごとに `true` にする）。内部の env `SUBETHA_RAILS_ACTIVATION` と受け入れ用の起動の `--rails` の token も方向別
+（`arc-in`・`arc-out`・`solana-in`・`solana-out`。旧い `arc`・`solana` は受け付けない）。受け入れ用の起動の既定は `arc-in,solana-in`。
+Arc の送信: 鍵は Base と同じ `SUBETHA_OUTBOUND_X402_KEY`（既定は `SUBETHA_OUTBOUND_PRIVATE_KEY`。**その address に Arc testnet USDC が要る**。D-11）。
+生成した設定に x402 の送信（route かプロファイル）があるときは常に子に渡す（以前は MPP 受信のときだけで、Arc／Solana 受信 → Base 送信の動的プロファイルに漏れていた）。
+`arc.outbound: true` で動的プロファイル `dyn-x402-to-arc`（Base USDC で払う）と `dyn-mpp-to-arc`（Tempo pathUSD で払う。MPP 受信があるとき）が出る。静的 route `md-arc-eth-snapshot` は
+Provider の URL（`tools/remote-mcp-config.ts` の `UPSTREAM_ARC`。Provider が立つまで空）と受取先（env `SUBETHA_ARC_PROVIDER_PAYTO`、`0x` の address）がそろったときだけ出る
+（URL があるのに受取先が無い・形が違えば起動しない）。Arc USDC の予算の区分は受信か送信のどちらかが有効なら出て、両方向で**同じ区分に合算**する（D-14）。
+段は受信と同じ（G-1′ 鍵と資金 → G-2′ 無効のまま配備 → G-3′ 受け入れの購入 → G-4′ 有効化。`docs/multirail-outbound-tasks.md` UG-A）。
 
 **実施の記録（G-4、2026-10-07 11:03Z。owner の決定「進めて良いです」）**: PR #68（`ce7de77`）で `RAILS_ACTIVATION = { arc: true, solana: true }`。
 イメージ `b-ce7de77` は手元で作った（§6。製品のファイルは PR の最初の試験済みの commit から変えていないことを `git diff` で確かめ、読み込み済みのイメージに tag を付け直した）。
