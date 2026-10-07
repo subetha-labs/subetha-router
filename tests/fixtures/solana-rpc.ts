@@ -32,6 +32,13 @@ export interface SolanaRpcState {
    * `error`（**正しい結果の本文**を HTTP 500 で）、`rpc-error`（HTTP 200 の JSON-RPC error）。
    */
   reply: "ok" | "huge" | "malformed" | "redirect" | "error" | "rpc-error";
+  /**
+   * `getSignatureStatuses` の応答の列（設計 §5.8 の試験用）。呼ばれるたびに 1 つ消費し、最後の値を繰り返す。
+   * `null` は「知らない署名」、`processed`／`confirmed`／`finalized` はその確定度、`err` はチェーン上の失敗。未設定・空の列なら `null`。
+   */
+  signatureStatuses: Array<"null" | "processed" | "confirmed" | "finalized" | "err" | "err-confirmed" | "empty" | "no-err-key"> | undefined;
+  /** 応答を返す前に待つ合図（試験が順序を固定するための barrier）。`undefined` なら待たない。 */
+  gate: (() => Promise<void>) | undefined;
   redirectTo: string | undefined;
 }
 
@@ -48,7 +55,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
   const tokenProgram = accounts.tokenProgram ?? TOKEN_PROGRAM_ADDRESS;
   const blockhash = accounts.blockhash ?? "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD";
   const calls: { method: string; params: unknown }[] = [];
-  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined };
+  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined };
   let connections = 0;
   const mintData = Buffer.from(
     getMintEncoder().encode({ mintAuthority: null, supply: 1_000_000_000_000n, decimals: accounts.decimals, isInitialized: true, freezeAuthority: null }),
@@ -59,6 +66,14 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
     request.on("data", (c: Buffer) => chunks.push(c));
     request.on("end", () => {
       const reply = (result: unknown, id: unknown, error?: { code: number; message: string }): void => {
+        const gate = state.gate;
+        if (gate !== undefined) {
+          void gate().then(() => replyNow(result, id, error));
+          return;
+        }
+        replyNow(result, id, error);
+      };
+      const replyNow = (result: unknown, id: unknown, error?: { code: number; message: string }): void => {
         const send = (): void => {
           if (state.reply === "redirect") {
             response.writeHead(302, { location: state.redirectTo ?? "https://other.test/" });
@@ -109,6 +124,19 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
       const params = body["params"];
       calls.push({ method, params });
       const id = body["id"];
+      if (method === "getSignatureStatuses") {
+        const queue = state.signatureStatuses === undefined || state.signatureStatuses.length === 0 ? ["null"] : state.signatureStatuses;
+        const kind = queue.length > 1 ? queue.shift()! : queue[0]!;
+        const entry =
+          kind === "null" ? null
+          : kind === "empty" ? {}
+          : kind === "no-err-key" ? { slot: 1, confirmations: 1, confirmationStatus: "confirmed" }
+          : kind === "err" ? { slot: 1, confirmations: 0, err: { InstructionError: [2, "Custom"] }, confirmationStatus: "processed" }
+          : kind === "err-confirmed" ? { slot: 1, confirmations: 1, err: { InstructionError: [2, "Custom"] }, confirmationStatus: "confirmed" }
+          : { slot: 1, confirmations: kind === "finalized" ? null : 1, err: null, confirmationStatus: kind };
+        reply({ context: { slot: 1 }, value: [entry] }, id);
+        return;
+      }
       if (method === "getLatestBlockhash") {
         reply({ context: { slot: 1 }, value: { blockhash, lastValidBlockHeight: 1000 } }, id);
         return;

@@ -465,26 +465,34 @@ export function composeRails(
      * SVM 受信: adapter は policy の置き場を持ち、起動時の検査が埋める。同じ (network, payTo, mint, facilitator) を使う route と
      * プロファイルは置き場を共有する（`/supported` と RPC の読取は起動時に **1 回ずつ**。設計 §5.1）。
      */
-    const svmHolders = new Map<string, SvmPolicyHolder>();
+    const svmHolders = new Map<string, { holder: SvmPolicyHolder; transport: GuardedTransport }>();
     const svmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitatorUrl: string, offerSeconds: number | undefined): InboundRail => {
       const { known } = knownAssetFor(network, asset, at);
       if (known.tokenProgram === undefined) {
         throw new ConfigError(`${at}: the table has no token program for the inbound mint`);
       }
       const key = `${network}|${payTo}|${known.id}|${facilitatorUrl}`;
-      let holder = svmHolders.get(key);
-      if (holder === undefined) {
+      let shared = svmHolders.get(key);
+      if (shared === undefined) {
         const created = new SvmPolicyHolder();
-        holder = created;
-        svmHolders.set(key, created);
-        // 起動時の検査の transport: 同じ方針（fixture の差し替えの上に、loopback の方針と DNS の期限）。
-        const startupTransport = createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+        // 起動時の検査と settle の後の追跡（設計 §5.8）の transport: 同じ方針（fixture の差し替えの上に、loopback の方針と DNS の期限）。
+        const rpcTransport = createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+        shared = { holder: created, transport: rpcTransport };
+        svmHolders.set(key, shared);
         startupChecks.push(async () => {
-          created.set(await resolveSvmInboundPolicy({ network, facilitatorUrl, rpcUrl: solanaRpcUrl!, payTo, mint: known.id, decimals: known.decimals, tokenProgram: known.tokenProgram!, transport: startupTransport, routeId: at }));
+          created.set(await resolveSvmInboundPolicy({ network, facilitatorUrl, rpcUrl: solanaRpcUrl!, payTo, mint: known.id, decimals: known.decimals, tokenProgram: known.tokenProgram!, transport: rpcTransport, routeId: at }));
         });
       }
-      const resolved = holder;
-      return createX402SvmInbound({ facilitatorUrl, transport, policy: () => resolved.get(), ...(offerSeconds === undefined ? {} : { offerSeconds }) });
+      const resolved = shared.holder;
+      return createX402SvmInbound({
+        facilitatorUrl,
+        transport,
+        policy: () => resolved.get(),
+        // settle の応答の後の期限つきの追跡（設計 §5.8、D-9）: 設定の RPC と起動時の検査と同じ transport。
+        rpc: { url: solanaRpcUrl!, transport: shared.transport },
+        onDiagnostic: (code) => note(`router: facilitator diagnostic ${code} (${at})`),
+        ...(offerSeconds === undefined ? {} : { offerSeconds }),
+      });
     };
     const evmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitator: { url: string; kind: X402FacilitatorKind }, offerSeconds: number | undefined, bindAuthorizationNonce: boolean): InboundRail => {
       const { known } = knownAssetFor(network, asset, at);

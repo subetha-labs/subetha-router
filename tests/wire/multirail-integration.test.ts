@@ -835,3 +835,88 @@ describe("AC-6: 動的 quote の ownerKey の保護と結果の再読取は新�
     expect(outboundCalls(fixtures).x402Payments).toBe(1);
   });
 });
+
+/* ------------------------------------------------------------------ T11: settle の応答の後の期限つきの追跡（設計 §5.8、D-9） */
+
+describe("T11: Solana の settle が settlement_pending（署名つき）でも、追跡で確定すれば delivered", () => {
+  test.each([
+    ["静的", "static", ROUTES.solX402],
+    ["動的", "dynamic", PROFILES.solX402],
+  ] as const)("%s: confirm の timeout → RPC の列 [null, confirmed] → delivered。journal は source_settled を経る。追跡は設定の RPC（起動時と同じ transport）へ、診断 1 回。再起動後の再提出は既存の結果", async (_name, kind, id) => {
+    const fixtures = await startFixtures();
+    const dir = mkdtempSync(path.join(runtimeRoot, "t11-followup-"));
+    closers.push(async () => rmSync(dir, { recursive: true, force: true }));
+    const keys = { x402: generatePrivateKey(), mpp: generatePrivateKey() };
+    let router = await startRouter(fixtures, { dir, keys });
+    fixtures.svm.state.confirm = "timeout";
+    fixtures.solRpc.state.signatureStatuses = ["null", "confirmed"];
+    const quote = kind === "static" ? await staticQuote(router, id, "f") : await dynamicQuote(router, id, "f");
+    const credential = await credentialFor(fixtures, quote);
+    const dialedBefore = fixtures.dialed.length;
+    const result = await purchase(router, quote, credential, "f");
+    expect(result.outcome).toBe("delivered");
+    // facilitator は settlement_pending と署名を返した。Router は追跡で settled にした（settle は 1 回、再 settle 無し）。
+    expect((fixtures.svm.seen.lastSettle as { success: boolean; errorReason: string }).success).toBe(false);
+    expect((fixtures.svm.seen.lastSettle as { errorReason: string }).errorReason).toBe("settlement_pending");
+    expect(inboundCalls(fixtures).svm).toEqual({ verify: 1, settle: 1, supported: 1 });
+    const polls = fixtures.solRpc.calls.filter((c) => c.method === "getSignatureStatuses");
+    expect(polls).toHaveLength(2);
+    expect(fixtures.solRpc.calls.map((c) => c.method)).toEqual(["getAccountInfo", "getSignatureStatuses", "getSignatureStatuses"]);
+    expect(fixtures.dialed.slice(dialedBefore)).toContain(HOSTS.solRpc);
+    expect(router.notes.filter((n) => n.includes("svm_settle_followed_up"))).toEqual([`router: facilitator diagnostic svm_settle_followed_up (${kind === "static" ? `routes.${id}` : `dynamic.profiles.${id}`})`]);
+    const signature = String((fixtures.svm.seen.lastSettle as { transaction: string }).transaction);
+    const status = await router.client().status(quote.paymentId, quote.ownerKey);
+    expect(status).toMatchObject({ found: true, projection: { status: "delivered", source: { txRef: signature } } });
+    const events = journalEventsOf(router, quote.paymentId);
+    expect(events).toContain("source_settled");
+    expect(events.at(-1)).toBe("delivered");
+    expect(outboundCalls(fixtures).x402Payments).toBe(1);
+    // 再起動後: 既存の結果。settle も追跡も増えない。
+    router = await restart(fixtures, router, { dir, keys });
+    expect((await purchase(router, quote, credential, "f")).outcome).toBe("delivered");
+    expect(inboundCalls(fixtures).svm.settle).toBe(1);
+    expect(fixtures.solRpc.calls.filter((c) => c.method === "getSignatureStatuses")).toHaveLength(2);
+    expect(outboundCalls(fixtures).x402Payments).toBe(1);
+  });
+
+  test("追跡の途中の再起動（Solana 静的）: 再起動後は interrupted_at_restart の unknown。settle は 1 回のまま、送信 0、予約は保たれる。旧い処理は観測して終わらせる", async () => {
+    const fixtures = await startFixtures();
+    const dir = mkdtempSync(path.join(runtimeRoot, "t11-crash-"));
+    closers.push(async () => rmSync(dir, { recursive: true, force: true }));
+    const keys = { x402: generatePrivateKey(), mpp: generatePrivateKey() };
+    let router = await startRouter(fixtures, { dir, keys, maxTotal: { sol: "10000" } });
+    fixtures.svm.state.confirm = "timeout";
+    // 追跡の最初の RPC が答える前に process が落ちたことにする（core を直接呼び、HTTP の接続を残さない）。
+    // 順序を固定する: RPC の応答は barrier で止め、要求を観測 → Router を閉じる → 応答（`err`）を放す → 旧い処理が 1 回で打ち切り、閉じた journal への書き込みで終わるのを待つ。
+    fixtures.solRpc.state.signatureStatuses = ["err"];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fixtures.solRpc.state.gate = () => gate;
+    const quote = await staticQuote(router, ROUTES.solX402, "c");
+    const credential = await svmCredential(quote);
+    const hung = router.core.purchase({ principalId: "judge", requestId: "c", quoteId: quote.quoteId, routeId: quote.routeId, approval: quote.quoteId, credential: decode(credential) as never });
+    await until(() => fixtures.solRpc.calls.some((c) => c.method === "getSignatureStatuses"), "the follow-up request");
+    await router.close();
+    closers.splice(closers.indexOf(router.close), 1);
+    release();
+    // 旧い処理は終わった: 閉じた journal には書けないので失敗する（settled・delivered にはならない）。追跡の要求は 1 回だけ。
+    const old = await hung.then((r) => ({ kind: "resolved" as const, status: r.status }), () => ({ kind: "rejected" as const, status: undefined }));
+    expect(old).not.toMatchObject({ status: "delivered" });
+    expect(old.kind === "rejected" || old.status === "unknown").toBe(true);
+    const pollsBeforeRestart = fixtures.solRpc.calls.filter((c) => c.method === "getSignatureStatuses").length;
+    expect(pollsBeforeRestart).toBe(1);
+    fixtures.solRpc.state.gate = undefined;
+    fixtures.solRpc.state.signatureStatuses = ["confirmed"];
+    router = await startRouter(fixtures, { dir, keys, maxTotal: { sol: "10000" } });
+    expect(await router.client().status(quote.paymentId)).toMatchObject({ found: true, projection: { status: "unknown", terminalReason: "interrupted_at_restart" } });
+    expect(await purchase(router, quote, credential, "c")).toMatchObject({ outcome: "unknown", reason: "interrupted_at_restart" });
+    expect(inboundCalls(fixtures).svm).toEqual({ verify: 1, settle: 1, supported: 2 });
+    expect(outboundCalls(fixtures).x402Payments).toBe(0);
+    // 再起動後に追跡の要求は増えない（再 settle も追跡の再開も無い）。
+    expect(fixtures.solRpc.calls.filter((c) => c.method === "getSignatureStatuses")).toHaveLength(pollsBeforeRestart);
+    // 予約は保たれている（同じ区分の次の購入は予約で止まる）。
+    const next = await staticQuote(router, ROUTES.solMpp, "n");
+    expect(await purchase(router, next, await svmCredential(next), "n")).toMatchObject({ outcome: "rejected", error: "bucket_limit", status: 429 });
+    expect(inboundCalls(fixtures).svm.settle).toBe(1);
+  });
+});
