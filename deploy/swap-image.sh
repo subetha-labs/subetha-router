@@ -5,9 +5,11 @@
 # 方針:
 # - コンテナや入口を変える前に、イメージと旧コンテナの ID を確かめる（それまでの失敗は一時ファイル以外に何も変えない）
 # - その後の失敗（ERR・INT・TERM）は復旧する: 名前を占めている新コンテナを消し、旧コンテナを ID で元の名前に戻して起動し、入口を開け直す
-# - docker・systemctl の呼び出しには上限（timeout -k）を付ける。上限に当たった操作は daemon 側で続いている可能性があるので、復旧は
-#   「不在」と「確認できない」を区別し、上限に当たった stop は完了を待ってから起動し、確認できない操作が残れば **状態不明**（exit 2）として報告する（復旧したとは言わない）
-# - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、最後の要求も残りの予算に収める。ログは固定の形に正準化した断片しか出さない
+# - docker・systemctl の呼び出しには上限（timeout -k）を付ける。上限に当たった（または結果を受け取る前に割り込まれた）変更操作
+#   （stop・rename・run）は daemon 側で続いているかもしれず、docker はその順序を保証しない。復旧は最善を尽くすが、そういう操作が
+#   1 つでもあれば **状態不明**（exit 2）として報告し、復旧したとは言わない。復旧の各段も同じ: 確認できなければ状態不明
+# - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、ループの中の各要求にも残りの予算を渡す。ログの中身は一切出さない
+#   （固定の文と行数だけ）
 set -euo pipefail
 
 IMG="${1:?usage: swap-image.sh <image:tag>}"
@@ -19,7 +21,7 @@ JP="$VOL/journal.ndjson"
 HEALTH=http://127.0.0.1:8787/healthz
 PUBLIC_HEALTH=https://router.subethalabs.com/healthz
 LISTEN_WAIT_S=180   # 子の Router の起動（Solana の検査 ≤ 20 秒・Tempo の probe ≤ 18 秒・replay）を待つ経過時間の上限。入口の起動待ち 120 秒より長い
-PUBLIC_WAIT_S=30    # 入口（caddy）を開けた後、公開の /healthz が答えるまでの経過時間の上限（最後の要求もこの中に収める）
+PUBLIC_WAIT_S=30    # 入口（caddy）を開けた後、公開の /healthz が答えるまでの経過時間の上限
 RESTORE_WAIT_S=60   # 復旧で旧コンテナの /healthz を待つ経過時間の上限
 STOP_SETTLE_S=30    # 上限に当たった docker stop の完了（daemon の grace 10 秒 + kill）を復旧で待つ上限
 TS=$(date -u +%Y%m%dT%H%M%SZ)
@@ -30,38 +32,43 @@ JBEFORE=$(mktemp)
 
 OLD_ID=
 INGRESS_CLOSED=0
-STOP_PENDING=0   # docker stop が上限に当たった（daemon 側で続いているかもしれない）
+PENDING=          # 結果を確認できていない変更操作（stop / rename / run）。空でなければ復旧は状態不明で終わる
 NEW_ID=
 DONE=0
-UNRESOLVED=0     # 復旧の中で確認できなかった操作があれば 1（最後に「状態不明」と報告する）
+UNRESOLVED=0      # 復旧の中で確認できなかった操作があれば 1
 
-d() { timeout -k 5 30 docker "$@"; }
+# 各呼び出しに上限。dt は上限の秒数を先頭の引数で受ける（ループの中では残りの予算を渡す）。
+dt() { local t=$1; shift; timeout -k 5 "$t" docker "$@"; }
+d() { dt 30 "$@"; }
 sc() { timeout -k 5 30 systemctl "$@"; }
 cleanup_tmp() { rm -f "$LOGTMP" "$ERRTMP" "$JBEFORE"; }
-remaining() { # <budget> <t0> <cap> → 残りの秒数（1 以上、cap 以下）
-  local r=$(( $1 - (SECONDS - $2) ))
+left() { echo $(( $1 - (SECONDS - $2) )); }   # <budget> <t0> → 残りの秒数（負もあり得る）
+capped() { # <budget> <t0> <cap> → 残りの秒数を 1..cap に収める
+  local r; r=$(left "$1" "$2")
   [ "$r" -gt "$3" ] && r=$3
   [ "$r" -lt 1 ] && r=1
   echo "$r"
 }
+is_timeout() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
 
 # inspect の結果を 3 値で返す: 0 = 値を stdout に出した、2 = 不在（No such object）、3 = 確認できない（timeout・その他）。
-inspect_or() { # <format> <id-or-name>
+inspect_or() { # <format> <id-or-name> [timeout-s]
   local out rc
-  out=$(timeout -k 5 30 docker inspect -f "$1" "$2" 2>"$ERRTMP") && rc=0 || rc=$?
+  out=$(timeout -k 5 "${3:-30}" docker inspect -f "$1" "$2" 2>"$ERRTMP") && rc=0 || rc=$?
   if [ "$rc" = 0 ]; then printf '%s' "$out"; return 0; fi
+  is_timeout "$rc" && return 3
   if grep -qi "no such object\|no such container" "$ERRTMP"; then return 2; fi
   return 3
 }
 health_ok() { # 入口の /healthz。応答は変数に取ってから見る（部分応答・転送の失敗は curl の終了状態で落ちる）。引数は上限の秒数。
   local r
-  r=$(curl -sf --max-time "${1:-3}" "$HEALTH" 2>/dev/null) || return 1
+  r=$(curl -sf --max-time "$1" "$HEALTH" 2>/dev/null) || return 1
   [[ "$r" == *'"router":"up"'* ]]
 }
-fixed_log_lines() { # 固定の形に正準化した断片だけ（形と桁に上限。それ以外は出さない）。
-  d logs "$1" > "$LOGTMP" 2>&1 || { echo "(could not read the container logs)"; return 0; }
-  grep -oE '"event":"listening","port":[0-9]{1,5}' "$LOGTMP" | grep -oE '[0-9]{1,5}$' | awk '$1 <= 65535 { print "child listening port=" $1 }' || true
-  grep -oE '^subetha-router remote MCP on ([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}/mcp$' "$LOGTMP" | awk '{ print "ingress bind=" $5 }' || true
+log_summary() { # ログの中身は出さない。固定の文と行数だけ。
+  dt "${2:-30}" logs "$1" > "$LOGTMP" 2>&1 || { echo "(could not read the container logs)"; return 0; }
+  if grep -q '"event":"listening"' "$LOGTMP"; then echo "child listening line: present"; else echo "child listening line: absent"; fi
+  if grep -q '^subetha-router remote MCP on ' "$LOGTMP"; then echo "ingress bind line: present"; else echo "ingress bind line: absent"; fi
   printf 'could-not-start lines: %s\n' "$(grep -cx 'could not start the Router' "$LOGTMP" || true)"
 }
 
@@ -74,6 +81,10 @@ restore() {
   if [ -z "$OLD_ID" ]; then
     echo "no previous container id recorded: the containers and the ingress were not changed" >&2
     cleanup_tmp; exit 1
+  fi
+  if [ -n "$PENDING" ]; then
+    echo "a docker '$PENDING' was submitted and its result was not confirmed (timeout or interrupt): it may still complete later, so the outcome below is best effort and the final state is unknown" >&2
+    UNRESOLVED=1
   fi
   # 1. 名前 $NAME を占めているのが旧コンテナでなければ消す（作りかけ・落ちた新コンテナ）。
   local holder hrc
@@ -94,19 +105,21 @@ restore() {
     [ "$orc" = 3 ] && { echo "could not read the previous container's name (docker did not answer)" >&2; UNRESOLVED=1; }
     oldname=${oldname#/}
     if [ "$oldname" != "$NAME" ]; then d rename "$OLD_ID" "$NAME" || { echo "could not rename $OLD_ID back to $NAME" >&2; UNRESOLVED=1; }; fi
-    if [ "$STOP_PENDING" = 1 ]; then
-      # 上限に当たった stop は daemon 側で続いているかもしれない。完了（Running=false）を見てから起動する。見えなければ、起動しても後から止められうる → 状態不明。
+    if [ "$PENDING" = stop ]; then
+      # 上限に当たった stop は daemon 側で続いているかもしれない。Running=false を見てから起動する（最善。完了の保証ではないので状態不明のまま）。
       local t0=$SECONDS settled=0 st
-      while [ $((SECONDS - t0)) -lt $STOP_SETTLE_S ]; do
-        st=$(inspect_or '{{.State.Running}}' "$OLD_ID") && [ "$st" = false ] && { settled=1; break; }
+      while [ "$(left $STOP_SETTLE_S "$t0")" -gt 0 ]; do
+        st=$(inspect_or '{{.State.Running}}' "$OLD_ID" "$(capped $STOP_SETTLE_S "$t0" 30)") && [ "$st" = false ] && { settled=1; break; }
+        [ "$(left $STOP_SETTLE_S "$t0")" -gt 1 ] || break
         sleep 1
       done
-      [ "$settled" = 1 ] || { echo "the timed-out docker stop of $OLD_ID did not settle within $STOP_SETTLE_S s" >&2; UNRESOLVED=1; }
+      [ "$settled" = 1 ] || echo "the timed-out docker stop of $OLD_ID did not settle within $STOP_SETTLE_S s" >&2
     fi
     d start "$OLD_ID" >/dev/null 2>&1 || { echo "could not start the previous container $OLD_ID" >&2; UNRESOLVED=1; }
     local t0=$SECONDS hok=0
-    while [ $((SECONDS - t0)) -lt $RESTORE_WAIT_S ]; do
-      if health_ok "$(remaining $RESTORE_WAIT_S "$t0" 3)"; then hok=1; break; fi
+    while [ "$(left $RESTORE_WAIT_S "$t0")" -gt 0 ]; do
+      if health_ok "$(capped $RESTORE_WAIT_S "$t0" 3)"; then hok=1; break; fi
+      [ "$(left $RESTORE_WAIT_S "$t0")" -gt 1 ] || break
       sleep 1
     done
     local now nrc
@@ -122,10 +135,10 @@ restore() {
     sc start caddy || { echo "could not start caddy (or it did not return in time)" >&2; UNRESOLVED=1; }
     timeout -k 5 10 systemctl is-active --quiet caddy || { echo "caddy is not active (or could not be queried)" >&2; UNRESOLVED=1; }
   fi
-  d ps -a --format '{{.Names}} {{.Image}} {{.Status}}' >&2 || echo "could not list containers (docker did not answer)" >&2
+  d ps -a --format '{{.Names}} {{.Image}} {{.Status}}' >&2 || { echo "could not list containers (docker did not answer)" >&2; UNRESOLVED=1; }
   cleanup_tmp
   if [ "$UNRESOLVED" = 1 ]; then
-    echo "STATE UNKNOWN: at least one recovery step could not be confirmed. Check 'docker ps -a', 'systemctl is-active caddy' and /healthz by hand; a timed-out docker operation may still complete." >&2
+    echo "STATE UNKNOWN: at least one operation could not be confirmed. Check 'docker ps -a', 'systemctl is-active caddy' and /healthz by hand; a timed-out docker operation may still complete." >&2
     exit 2
   fi
   echo "restored: $NAME = $OLD_ID, ingress reopened" >&2
@@ -152,30 +165,37 @@ case $rc in
   124|137) echo "could not query caddy (systemctl did not answer)" >&2; false ;;
 esac
 
-rc=0; d stop "$OLD_ID" >/dev/null || rc=$?
-case $rc in
-  0) ;;
-  124|137) STOP_PENDING=1; echo "docker stop did not return in time" >&2; false ;;
-  *) echo "docker stop failed (rc=$rc)" >&2; false ;;
-esac
-d rename "$OLD_ID" "$PREV"
+# 変更操作は、結果を受け取るまで PENDING に記す（daemon が答えた = 完了か失敗が確定。上限や割り込みは未確定のまま）。
+PENDING=stop; rc=0; d stop "$OLD_ID" >/dev/null || rc=$?
+is_timeout "$rc" || PENDING=
+[ "$rc" = 0 ] || { echo "docker stop failed (rc=$rc)" >&2; false; }
 
-NEW_ID=$(d run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG")
+PENDING=rename; rc=0; d rename "$OLD_ID" "$PREV" || rc=$?
+is_timeout "$rc" || PENDING=
+[ "$rc" = 0 ] || { echo "docker rename failed (rc=$rc)" >&2; false; }
+
+PENDING=run; rc=0
+NEW_ID=$(d run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG") || rc=$?
+is_timeout "$rc" || PENDING=
+[ "$rc" = 0 ] || { echo "docker run failed (rc=$rc)" >&2; false; }
 [ -n "$NEW_ID" ]
 echo "new container: $NEW_ID"
 
-# 子の Router の listening の行（入口の /healthz は入口の生存。Router の起動はこの行で見る）を経過時間の上限まで待つ。
+# 子の Router の listening の行（入口の /healthz は入口の生存。Router の起動はこの行で見る）を経過時間の上限まで待つ。各要求に残りの予算を渡す。
 t0=$SECONDS
 LISTENED=0
-while [ $((SECONDS - t0)) -lt $LISTEN_WAIT_S ]; do
-  st=$(inspect_or '{{.State.Running}}' "$NEW_ID") && src=0 || src=$?
-  if [ "$src" != 0 ] || [ "$st" != true ]; then echo "new container is not running (or could not be inspected):" >&2; fixed_log_lines "$NEW_ID" >&2; false; fi
-  if health_ok 3; then
-    if d logs "$NEW_ID" > "$LOGTMP" 2>&1 && grep -q '"event":"listening"' "$LOGTMP"; then LISTENED=1; break; fi
+while [ "$(left $LISTEN_WAIT_S "$t0")" -gt 0 ]; do
+  st=$(inspect_or '{{.State.Running}}' "$NEW_ID" "$(capped $LISTEN_WAIT_S "$t0" 30)") && src=0 || src=$?
+  if [ "$src" != 0 ] || [ "$st" != true ]; then echo "new container is not running (or could not be inspected):" >&2; log_summary "$NEW_ID" >&2; false; fi
+  [ "$(left $LISTEN_WAIT_S "$t0")" -gt 0 ] || break
+  if health_ok "$(capped $LISTEN_WAIT_S "$t0" 3)"; then
+    [ "$(left $LISTEN_WAIT_S "$t0")" -gt 0 ] || break
+    if dt "$(capped $LISTEN_WAIT_S "$t0" 30)" logs "$NEW_ID" > "$LOGTMP" 2>&1 && grep -q '"event":"listening"' "$LOGTMP"; then LISTENED=1; break; fi
   fi
+  [ "$(left $LISTEN_WAIT_S "$t0")" -gt 1 ] || break
   sleep 1
 done
-if [ "$LISTENED" != 1 ]; then echo "the Router child did not report listening within $LISTEN_WAIT_S s:" >&2; fixed_log_lines "$NEW_ID" >&2; false; fi
+if [ "$LISTENED" != 1 ]; then echo "the Router child did not report listening within $LISTEN_WAIT_S s:" >&2; log_summary "$NEW_ID" >&2; false; fi
 
 # 検証（どれも致命）。
 cmp -n "$BYTES" "$JBEFORE" "$JP"
@@ -192,8 +212,9 @@ case $rc in
 esac
 t0=$SECONDS
 PUBLIC_OK=0
-while [ $((SECONDS - t0)) -lt $PUBLIC_WAIT_S ]; do
-  if R=$(curl -sf --max-time "$(remaining $PUBLIC_WAIT_S "$t0" 5)" "$PUBLIC_HEALTH" 2>/dev/null) && [[ "$R" == *'"router":"up"'* ]]; then PUBLIC_OK=1; break; fi
+while [ "$(left $PUBLIC_WAIT_S "$t0")" -gt 0 ]; do
+  if R=$(curl -sf --max-time "$(capped $PUBLIC_WAIT_S "$t0" 5)" "$PUBLIC_HEALTH" 2>/dev/null) && [[ "$R" == *'"router":"up"'* ]]; then PUBLIC_OK=1; break; fi
+  [ "$(left $PUBLIC_WAIT_S "$t0")" -gt 1 ] || break
   sleep 1
 done
 if [ "$PUBLIC_OK" != 1 ]; then echo "public /healthz did not answer within $PUBLIC_WAIT_S s" >&2; false; fi
@@ -204,5 +225,5 @@ DONE=1
 trap - ERR INT TERM
 cleanup_tmp
 d ps -a --format '{{.Names}} {{.Image}} {{.Status}}' || echo "could not list containers (docker did not answer)" >&2
-fixed_log_lines "$NEW_ID"
+log_summary "$NEW_ID"
 echo "swap ok: $NAME = $IMG, rollback = $PREV ($OLD_ID)"
