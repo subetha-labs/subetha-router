@@ -469,9 +469,13 @@ describe("AC-3: 偽の Solana の credential は preflight で止まり、facili
     ["別の額（+1）", () => ({ amount: 10_001n }), "credential_mismatch"],
     ["別の mint", () => ({ mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" }), "credential_mismatch"],
     ["別の桁（9）", () => ({ decimals: 9 }), "credential_mismatch"],
-    ["fee payer を Router に向ける（宛先 = fee payer）", (_q, p) => ({ destination: p.feePayer }), "credential_mismatch"],
+    // fee payer を Router（受取 owner）に向けた tx: 宛先は正しく、fee payer の欄だけが facilitator の口座ではない。
+    ["fee payer を Router に向ける（fee payer = 受取 owner）", () => ({ feePayer: owner }), "credential_mismatch"],
+    ["宛先 = fee payer（facilitator の口座）", (_q, p) => ({ destination: p.feePayer }), "credential_mismatch"],
     ["transfer が 2 つ", () => ({ instructions: (ixs) => [...ixs, ixs[2]!] }), "credential_mismatch"],
-    ["不明な program の命令", () => ({ instructions: (ixs) => [...ixs, { programAddress: address("L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95"), accounts: [], data: new Uint8Array([1]) }] }), "credential_mismatch"],
+    // 命令の数は 4 のまま、memo の program だけを別のものにする（数の検査ではなく program の検査に当たる）。
+    ["不明な program の命令（4 つのまま、memo の program を差し替え）", () => ({ instructions: (ixs) => [ixs[0]!, ixs[1]!, ixs[2]!, { ...ixs[3]!, programAddress: address("L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95") }] }), "credential_mismatch"],
+    ["不明な program の命令（5 つ目として追加）", () => ({ instructions: (ixs) => [...ixs, { programAddress: address("L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95"), accounts: [], data: new Uint8Array([1]) }] }), "credential_mismatch"],
     [
       "memo を書き換えた tx（元の署名のまま）",
       (q) => ({
@@ -485,7 +489,8 @@ describe("AC-3: 偽の Solana の credential は preflight で止まり、facili
       }),
       "nonce_mismatch",
     ],
-    ["address lookup table の参照", () => ({ lookupTable: true }), "credential_mismatch"],
+    // lookup table つきの message に authority が正しく署名した tx: 構造だけで落ちる（署名の失敗ではない）。
+    ["address lookup table の参照（署名は有効）", () => ({ lookupTable: true }), "credential_mismatch"],
   ];
   test.each(rows)("%s → rejected（%s）。facilitator・RPC への要求 0、接続 0", async (_name, mutate, reason) => {
     const fixtures = await startFixtures();
