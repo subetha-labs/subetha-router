@@ -13,7 +13,7 @@
  * usage: SUBETHA_OUTBOUND_PRIVATE_KEY=0x... SUBETHA_ROUTER_RECEIVER=0x... SUBETHA_ARC_RECEIVER_KEY=0x... SUBETHA_SOLANA_RECEIVER=... \
  *        tsx tools/rails-acceptance-run.ts [--rails arc,solana]
  */
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -29,17 +29,36 @@ function argOf(argv: readonly string[], name: string): string | undefined {
   return index === -1 ? undefined : argv[index + 1];
 }
 
-/** 一番深い既存の祖先の実パス＋残り（symlink を辿った正準の形）。 */
-function canonicalPathOf(target: string): string {
+function existsAsEntry(target: string): boolean {
+  try {
+    lstatSync(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 一番深い既存の祖先の実パス＋残り（symlink を辿った正準の形）。先の無い symlink（dangling）も、その先を辿って同じ扱いにする。
+ * 起動時の判定であって、起動の後に作られる別名までは見ない（運用者の道具の範囲）。
+ */
+function canonicalPathOf(target: string, depth = 0): string {
   let current = path.resolve(target);
   const rest: string[] = [];
-  while (!existsSync(current)) {
+  while (!existsAsEntry(current)) {
     rest.unshift(path.basename(current));
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
   }
-  return path.join(realpathSync(current), ...rest);
+  try {
+    return path.join(realpathSync(current), ...rest);
+  } catch {
+    // 先の無い symlink: 先を読んで、その位置で同じ判定を続ける（循環は深さで止める）。
+    if (depth >= 32) return path.join(current, ...rest);
+    const link = readlinkSync(current);
+    return canonicalPathOf(path.join(path.resolve(path.dirname(current), link), ...rest), depth + 1);
+  }
 }
 
 /**

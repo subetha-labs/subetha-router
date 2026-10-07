@@ -365,6 +365,13 @@ describe("受け入れ用の journal は公開の journal と別のファイル�
     expect(sameJournal(path.join(dir, "hard.ndjson"), publicJournal)).toBe(true);
     // まだ無いファイルでも、symlink のディレクトリの下なら同じ。
     expect(sameJournal(path.join(dir, "alias-dir", "new.ndjson"), path.join(publicDir, "new.ndjson"))).toBe(true);
+    // 先の無い symlink（公開の journal がまだ無い）も、その先で判定する。
+    symlinkSync(path.join(publicDir, "later.ndjson"), path.join(dir, "dangling.ndjson"));
+    expect(sameJournal(path.join(dir, "dangling.ndjson"), path.join(publicDir, "later.ndjson"))).toBe(true);
+    symlinkSync(path.join(dir, "missing-dir"), path.join(dir, "dangling-dir"));
+    expect(sameJournal(path.join(dir, "dangling-dir", "journal.ndjson"), path.join(dir, "missing-dir", "journal.ndjson"))).toBe(true);
+    expect(sameJournal(path.join(dir, "dangling-dir", "journal.ndjson"), publicJournal)).toBe(false);
+    expect(() => acceptanceOptionsOf({ SUBETHA_JOURNAL_PATH: path.join(publicDir, "later.ndjson"), SUBETHA_ACCEPTANCE_JOURNAL_PATH: path.join(dir, "dangling.ndjson") })).toThrow(/must not be the public journal/);
     expect(sameJournal(path.join(dir, "other.ndjson"), publicJournal)).toBe(false);
     expect(sameJournal(path.join(dir, "acceptance", "journal.ndjson"), publicJournal)).toBe(false);
     for (const alias of ["alias-dir/journal.ndjson", "alias-file.ndjson", "hard.ndjson"]) {
