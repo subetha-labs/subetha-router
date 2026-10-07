@@ -194,6 +194,8 @@ in a non-secret JSON configuration file.
 | `ROUTER_HTTP_HOST` / `ROUTER_HTTP_PORT` | `127.0.0.1` / `8500` | Listener. `0` for ephemeral |
 | `ROUTER_CANONICAL_BASE_URL` | `http://127.0.0.1:8500` | Base for the canonical URL (not derived from `Host`) |
 | `ROUTER_MPP_INBOUND_RPC_URL` | (chain default) | Tempo RPC used by the MPP inbound adapter to check receipts. Its host is also denied as a dynamic upstream |
+| `ROUTER_SOLANA_RPC_URL` | `https://api.devnet.solana.com` | Solana JSON-RPC used **only at startup** to check the receiving ATA (owner, mint). Never used during quote or purchase. Its host is denied as a dynamic upstream. No query string allowed (a key goes in the path) |
+| `x402.inboundFacilitators` (config file) | (none) | Per-network x402 inbound facilitator `{ kind: "x402" \| "circle", url }` for networks other than `eip155:84532`, which stays on `ROUTER_X402_INBOUND_FACILITATOR_URL`. The `kind` must equal the code table's (`KNOWN_NETWORKS`); a mismatch is `config_invalid` |
 
 The `router.dynamic` section of the config (optional; **absent means the feature does not exist**): `enabled`, `profiles` (a map keyed by profile id; each
 profile carries `profileId` equal to its key, `sourceRail`, `source`, `rail`, `destination` incl. `tokenDomain` for x402 or `feeAsset`/`maxFee`/`feeMargin` for MPP (the MPP fee is set per quote from a gas-cost estimate; `maxFee` is the ceiling of the per-quote cap, see `docs/dynamic-gas-fee-design.md`), `par: true`,
@@ -221,6 +223,30 @@ may be dynamic targets), and refuses to start when the MPP capability's RPC host
 - `synthetic.crashBarrierPath` is a **synthetic-only test seam** for T-11 (it stops before any response byte is
   emitted and writes out that it was reached). Because it can only be written in the `synthetic` section, it is
   not even parsed in the default `real` configuration. It is not an operational feature.
+
+## Multirail inbound: Arc (Circle) and Solana (x402.org SVM)
+
+Two more x402 inbound adapters exist (`docs/multirail-design.md`); the core does not branch on them.
+
+- **Network table** (`KNOWN_NETWORKS` in `src/config.ts`, code only): per network the family, allowed inbound/outbound rails, the facilitator
+  kind, and the assets (id, decimals, EIP-712 domain). At startup the routes' and profiles' source/destination terms (network direction, rail,
+  asset) and the `inboundFacilitators` kinds are validated against it (budget buckets are parsed for shape only, not looked up in the table).
+  On the caller side `npm run sign` classifies the quote's `source.offer` against the same table and refuses offers outside it.
+- **Arc (`eip155:5042002`, kind `circle`)**: `createX402Inbound` with `kind: "circle"`. Every `/verify` and `/settle` carries a **seller proof**
+  (EIP-712 `SellerRequest` over the request body's hash, 60 s lifetime, fresh nonce) produced by a `SellerProofCapability` injected at startup
+  (`RouterCapabilities.sellerProofs[network]`). The capability holds the proof-only receiving key's signing closure; `src/` never sees the key and
+  cannot obtain any other signature from it. Composition refuses to start when the capability's address differs from the route's or profile's
+  `source.payTo`. Settle outcomes after the request was sent are all `unknown` unless the response is well-formed (`success`, matching network,
+  `0x` + 64-hex transaction).
+- **Solana (`solana:EtWT…`, kind `x402`, SVM `exact`)**: `createX402SvmInbound`. At startup it reads the facilitator's `/supported` once (one fee payer
+  for the network) and the receiving owner's ATA once over the Solana RPC; failure means no start. The caller's credential is a base64 transaction that
+  the adapter **rebuilds byte-for-byte** from the fixed policy (fee payer, destination ATA, mint, decimals, amount, memo = quote nonce, 4 instructions,
+  version 0, no lookup tables) and compares, then verifies the authority's ed25519 signature; anything else is refused before any request
+  (`credential_mismatch` / `nonce_mismatch`). Settlement requires a base58 64-byte signature and the issued network.
+- **Production entry**: `tools/remote-mcp-config.ts` emits the Arc/Solana routes, profiles, buckets and `inboundFacilitators` only when the single
+  activation value `{ arc, solana }` says so (public constant `RAILS_ACTIVATION`, both `false`); `tools/rails-entry.ts` derives the receivers and
+  capabilities from the same value; `tools/rails-acceptance-run.ts` runs the same host with the value `true`, on loopback and a separate journal, for
+  the acceptance gate.
 
 ## Typed client for the existing chat (T4)
 

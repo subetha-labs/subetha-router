@@ -99,6 +99,109 @@ owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登�
 journal の `dynamic.reservation` を持つ `created` 行の数（通算の件数）、`unknown` の終端（MPP 受信では credential を作った時点で資金が動く。
 `awaiting_payment` は「未払い」を意味しない）。
 
+### 2c. 多レールの受信（Arc testnet USDC・Solana devnet USDC で払う）— **本番では無効**（`RAILS_ACTIVATION = { arc: false, solana: false }`）
+
+呼び出し側が **Arc testnet の USDC**（x402、facilitator は Circle）か **Solana devnet の USDC**（x402 の SVM `exact`、facilitator は x402.org）で払い、
+既存の Provider A（x402）・B（MPP）に届く機能（要件 `multirail-requirements.md`、設計 `multirail-design.md`、タスク `multirail-tasks.md`）。
+有効にすると本番の入口（`tools/remote-mcp-config.ts`）が登録するのは、静的 route **`md-mpp-eth-snapshot-arc`**（Arc USDC 10,000 → Provider B/MPP）と
+**`md-x402-eth-snapshot-sol`**（Solana USDC 10,000 → Provider A/x402）、動的プロファイル **`dyn-arc-to-mpp`・`dyn-arc-to-x402`・`dyn-sol-to-x402`・`dyn-sol-to-mpp`**、
+`(network, asset)` ごとの予算の区分（静的 1 件 10,000、動的 1 件 20,000。通算は既存の env の上限）、`x402.inboundFacilitators`（`eip155:5042002` → Circle、
+`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` → x402.org。Base Sepolia は env のまま）。**有効・無効は 1 つの値 `activation { arc, solana }`** で、設定生成と
+Router の process の能力の注入の**両方**がそれを見る（`tools/rails-entry.ts`）。公開の入口はコードの定数 `RAILS_ACTIVATION` を渡し、**env からは変えられない**。
+
+**鍵と口座（G-1。owner が行う。mainnet の資産は使わない）**:
+
+1. **Arc の受取鍵は証明専用の新しい鍵**（Base Sepolia の受取鍵・送信の鍵とは別）。`npm run wallet:new` で作り、**秘密鍵をホストの env `SUBETHA_ARC_RECEIVER_KEY`** に置く。
+   Router の `src/` に渡るのは Circle の売り手証明（EIP-712 `SellerRequest`）に署名する閉包だけで、この鍵で資金を動かす署名（EIP-3009）は得られない（設計 §3）。
+   受取先（`payTo`）はこの鍵の address で、入口が鍵から導く（設定ファイルには address だけが入る）。受け取った USDC を動かすのは運用者の手元の操作
+2. **Solana の受取 owner の鍵はホストに置かない**（運用者の手元。`npm run wallet:new:solana` で作れる）。ホストの env `SUBETHA_SOLANA_RECEIVER` には **owner の address だけ**を置く。
+   **ATA（owner の USDC の口座）は運用者が先に作る**（rent 1,488,440 lamports ≈ 0.0015 SOL。devnet の SOL は faucet）。Router は起動時に ATA の存在・owner・mint を
+   RPC で 1 回確かめ、無ければ起動しない（設計 §5.1、FR-14）
+3. `SUBETHA_SOLANA_RPC_URL`（任意。無ければ公開 devnet `https://api.devnet.solana.com`）。起動時の検査だけに使い、quote・purchase では使わない。ホスト名は動的上流の拒否ホストに入る。
+   URL は鍵を含み得るのでログに出さない（query つきの URL は設定が拒む。鍵は path に）
+4. 使い捨ての payer（受け入れの支払い側）に Arc testnet の USDC と devnet の USDC（faucet）を入れる（T6・G-3 で使う。Router の鍵ではない）
+
+**配備（G-2。無効のまま）**: env（上の 1〜3）を置いて公開の process を再起動する。無効なので新しい route・facilitator・起動時の検査は**動かない**——確かめるのは
+「起動して既存の経路が従来どおり」と、egress 制御（§8b）が **Circle（`api.circle.com`）・x402.org・Solana の RPC** への egress を許し、それ以外を拒むこと。rollback の container を 1 つ保つ。
+
+**受け入れ（G-3。owner の確認の上で、支払いごとに quote を見せる）**: 公開の process の定数は触らず、**受け入れ用の起動**で行う。
+egress 制御の network `subetha-router-net` には **Router を 1 つだけ**置く決まり（§8b.1。runner は 2 つ目のメンバーを FAIL にし、同じ bridge の中の通信は
+フィルタを通らない）なので、受け入れの間は**公開の Router を止める**（`docker stop subetha-router`。終わったら `docker start subetha-router`。
+**2 つを同時に動かさない**）。止めている間、公開の要求は失敗し、発行済みの quote の期限は進み続け、stop の時点で終わっていなかった購入は再起動後に `unknown` として
+確定し得る（graceful shutdown の中で終わる要求はそのまま終わる）——**進行中の購入が無いときに**行う。この間の §8b.4 の検証はコンテナ名 `subetha-router-acceptance` を対象にする（verifier は唯一のメンバーの名前を見る）。そのうえで公開の Router と**同じイメージ・同じ network・同じボリューム**から受け入れのコンテナを起動し、MCP の入口は
+**ホストの loopback だけ**に公開する（Node や依存をホストに入れる必要はない。イメージに `tools/` と `node_modules` が入っている）:
+
+```sh
+docker stop subetha-router
+# 公開の Router と同じ env（送信の鍵・MPP 受信の秘密・Tempo の RPC）に、Arc の受取鍵・Solana の受取 owner・Solana の RPC を足す。
+# journal はボリュームの中の別のパス（公開の journal と同じファイル・別名は拒まれる）。コンテナの中では 0.0.0.0 に bind し、ホスト側は 127.0.0.1 だけに公開する。
+docker run --rm --name subetha-router-acceptance \
+  --network subetha-router-net -p 127.0.0.1:8788:8788 \
+  -v /var/lib/subetha-router:/app/runtime \
+  -e SUBETHA_OUTBOUND_PRIVATE_KEY=... -e SUBETHA_ROUTER_RECEIVER=... -e SUBETHA_MPP_INBOUND_SECRET=... -e SUBETHA_TEMPO_RPC_URL=... \
+  -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -e SUBETHA_SOLANA_RPC_URL=... \
+  -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_BIND=0.0.0.0 \
+  -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/journal.ndjson \
+  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
+# stdout の 1 行（起動できたとき）: {"event":"listening","port":8788,"address":"0.0.0.0","routerPort":<Router>,"mode":"acceptance","rails":"arc,solana"}
+# 手元からは ssh -L 8788:127.0.0.1:8788 <Router の host> で MCP（http://127.0.0.1:8788/mcp）に届く。Router 本体の HTTP はコンテナの外に出さない。
+# 終わったら、この端末で Ctrl-C（入口が SIGINT で子の Router を止めて終わる。--rm でコンテナは消える）→ docker start subetha-router
+```
+
+公開の経路を止めたくないときの代わり: 受け入れの起動を**公開の Router のコンテナの中**で動かす（`docker exec`。network のメンバーは増えない。
+入口は既定の `127.0.0.1` に bind し、コンテナの外には出ない）。この場合は支払いの手順（`CLAUDE.md` の quote → 承認 → `npm run sign` → purchase）も
+同じコンテナの中で、使い捨ての payer の鍵を `docker exec -e SUBETHA_PAYER_PRIVATE_KEY=... -e SOLANA_PAYER_PRIVATE_KEY=...` で渡して行う:
+
+```sh
+# 前景（-it）で動かす: Ctrl-C が SIGINT として入口に届き、入口が子の Router を止めて終わる（-d で切り離すと止める手段が無い。pkill は使わない）。
+docker exec -it -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -e SUBETHA_SOLANA_RPC_URL=... \
+  -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/journal.ndjson \
+  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
+# 送信の鍵・MPP 受信の秘密・Tempo の RPC はコンテナの env から読まれる（docker run で渡したもの）。
+# 終わった後に残っていないことの確認: cmdline か environ に印を含む process の PID を出す（自分自身は除く。印は pgrep の [ ] の形で、検査の process 自身には一致しない）。
+# 何も出なければ、受け入れの入口（印 rails-acceptance-ru[n]）とその子の Router（environ の ROUTER_JOURNAL_PATH。印 acceptance/journal.ndjso[n]）は残っていない。
+docker exec subetha-router sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; { tr "\0" " " < "$p/cmdline"; tr "\0" " " < "$p/environ"; } 2>/dev/null | grep -q "rails-acceptance-ru[n]\|acceptance/journal.ndjso[n]" && echo "${p#/proc/}"; done'
+```
+
+起動に失敗したときホスト（この起動）の stderr に出るのは固定文（`could not start the Router`）だけで、Router の process の stderr（`svm inbound` の起動時の検査の
+失敗の理由、`tempo rpc:` の行）は**転送されない**（§2 の表の `SUBETHA_TEMPO_RPC_URL` の注と同じ制限）。理由を見るには、入口が子に渡すのと同じ env
+（`tools/remote-mcp.ts` の `hostPlanOf` と `tools/rails-entry.ts` の `railsChildEnvOf` の写し。**名前が変わる**: 送信の鍵は `SUBETHA_OUTBOUND_MPP_KEY`・
+`SUBETHA_OUTBOUND_X402_KEY`、MPP 受信の秘密は `ROUTER_MPP_INBOUND_SECRET`）と、入口が書いた設定（ボリュームの `remote-*/router.config.json`）で
+`tools/remote-router-process.ts` を直接起動する。network のメンバーを増やさないよう `docker exec` で、**動いているコンテナの中で**: 別コンテナの変種では
+`subetha-router-acceptance` が動いている間はそれを対象にし（下の例の名前を読み替える）、受け入れの起動そのものが失敗したとき（`--rm` でコンテナは消えている）は
+`docker start subetha-router` で公開の Router を戻してからその中で行う（保存された設定はボリュームの `remote-*/` に残っている）。`docker exec` の変種では
+`subetha-router` の中で。受け入れの起動が動いたままなら、その journal のロックを取り合わないよう journal は 3 つ目のパスに。前景（-it）で動かして Ctrl-C で止める:
+
+```sh
+docker exec -it \
+  -e SUBETHA_OUTBOUND_MPP_KEY=<SUBETHA_OUTBOUND_PRIVATE_KEY の値> -e SUBETHA_OUTBOUND_X402_KEY=<SUBETHA_OUTBOUND_X402_KEY か、無ければ同じ値> \
+  -e ROUTER_CONFIG_PATH=runtime/remote-<起動が作った名前>/router.config.json -e ROUTER_JOURNAL_PATH=runtime/acceptance/diag/journal.ndjson \
+  -e ROUTER_HTTP_PORT=0 -e ROUTER_CANONICAL_BASE_URL=http://127.0.0.1:8500 -e ROUTER_PRINCIPAL_TOKENS=judge:public -e ROUTER_ADAPTER_MODE=real \
+  -e ROUTER_SUBETHA_FACILITATOR_URL=https://www.x402.org/facilitator -e ROUTER_X402_INBOUND_FACILITATOR_URL=https://www.x402.org/facilitator \
+  -e ROUTER_X402_INBOUND_OFFER_SECONDS=<SUBETHA_OFFER_SECONDS の値、無ければ 600> -e ROUTER_MPP_INBOUND_SECRET=<SUBETHA_MPP_INBOUND_SECRET の値> -e ROUTER_MPP_INBOUND_OFFER_SECONDS=<同じ> \
+  -e SUBETHA_TEMPO_RPC_URL=<値> -e ROUTER_MPP_INBOUND_RPC_URL=<同じ値> \
+  -e SUBETHA_RAILS_ACTIVATION=arc,solana -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RPC_URL=<値> -e ROUTER_SOLANA_RPC_URL=<同じ値> \
+  subetha-router node --import tsx tools/remote-router-process.ts
+# stderr に理由の固定文（例: `svm inbound: ...`）か、`{"event":"listening",...}` が出る。終わったら Ctrl-C（SIGINT で Router が止まる）。
+# 残っていないことの確認は、この Router だけが持つ印（environ の ROUTER_JOURNAL_PATH の acceptance/dia[g]）で、動かしたコンテナの中で（公開・受け入れの Router は印を持たない）:
+docker exec <動かしたコンテナ> sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; tr "\0" " " < "$p/environ" 2>/dev/null | grep -q "acceptance/dia[g]" && echo "${p#/proc/}"; done'
+```
+
+**最初に**この起動で Solana の起動時の検査（`/supported`・ATA）が通ることを確かめる（本番 env での検査の証拠）。次に AC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、
+静的・動的）を各 1 件、使い捨ての payer で。証拠: Arc は settle の tx が Arc の RPC で `success` かつ受取先の残高の増分、Solana は signature が devnet で confirmed かつ ATA の残高の増分、
+結果の `proof.onChainFinality` は `not_checked`。U-1（settle の `success` までの時間、`settlement_pending` の有無）・U-4（Circle の wire 30 秒で足りるか）を記録する。
+`settlement_pending` が出たら設計 §10 U-1（`/status` の polling）を改訂してから G-4 へ。
+
+**有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える。
+**戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
+
+**有効にした後に見るもの**（hosted の入口は Router の process の stderr を転送しないので、**ログの不在は成功の証拠にならない**。見るのは次の口）:
+起動の成否は `docker logs` の `router: {"event":"listening",...}` の有無（Solana の起動時の検査が落ちれば Router は起動せず、入口は `could not start the Router` で終わる。
+理由は上記のとおり `tools/remote-router-process.ts` を直接起動して読む）。稼働中は journal（ボリュームの `journal.ndjson`）の終端: `unknown`（settle の要求の後の失敗。自動で再 settle しない。
+**facilitator が止まれば資金は動かない、とは言えない**）と、`subetha_router_status` の射影。Circle の trial が尽きた（HTTP 403 `registration_required`）ときの診断
+`facilitator diagnostic facilitator_trial_exhausted` と、動的 URL が Circle・x402.org・Solana RPC に向いたときの `destination_blocked` は Router の process の stderr にしか出ない——
+hosted では journal の `unknown` と呼び出し側への `url` の拒否として現れる。
+
 ### journal を残す（`-v` は必須）
 
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
