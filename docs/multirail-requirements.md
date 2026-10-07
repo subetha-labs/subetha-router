@@ -158,7 +158,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 
 - **FR-14**: Solana devnet の USDC（SPL。mint・decimals・token program は表で固定）を x402 `exact`（SVM）で受ける。受取先は offer の `payTo` = Router の受取 **owner の公開鍵**（設定値。鍵は要らない）で、資金は owner の ATA に入る。**起動時に ATA を読み、
   owner・mint・token program が表と一致することを確かめる**（存在だけでは足りない）。無ければ起動しない（作るのは運用者。rent の負担も運用者）
-- **FR-15**: requirements の `extra.feePayer` は facilitator の `/supported` から**起動時に読んで固定**する。変われば再起動（発行済みの quote は verify で落ちる。自動で追随しない）
+- **FR-15**: requirements の `extra.feePayer` は facilitator の `/supported` から**起動時に読んで固定**する。変われば再起動（発行済みの quote は preflight または verify で落ちる。自動で追随しない）
 - **FR-16**（preflight。facilitator に渡す前に Router が**自分で**確かめる。確かめられない形は有料ライフサイクルを始めない）:
   - 既存の preflight と同じ検査を**すべて継ぐ**: nonce 既知・未失効・route 束縛・発行 offer との完全一致（`src/ports/inbound.ts:51`、`src/adapters/inbound/x402.ts:186`）
   - transaction の復号は**大きさを限って**行い（上限を決める）、対応する version だけを受ける。address lookup table の参照（解決できない口座）は拒否
@@ -216,7 +216,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 - **AC-3**: 偽の credential は preflight で止まり、facilitator に届かない（外部接続 0）: 別の宛先・別の額・別の mint・別の桁・fee payer を Router に向けた tx・transfer が 2 つ・
   不明な program・memo を書き換えた tx（元の署名のまま）・同じ transaction の再提出（別の quote・別の route・並行・再起動後）・address lookup table の参照
 - **AC-4**: 決済の不確かさ: settle の応答の喪失・crash・**形の違う／network の違う／識別子の無い**成功応答（loopback の fixture）に対して、`unknown` が耐久的に残り、再起動後に
-  二重の支払いが起きない。形の正しい偽の成功は検出の対象外（FR-21・§7）。facilitator の fee payer が変わった後、発行済みの quote は verify で落ちて止まる
+  二重の支払いが起きない。形の正しい偽の成功は検出の対象外（FR-21・§7）。facilitator の fee payer が変わった後、発行済みの quote は preflight または verify で落ちて止まる
 - **AC-5**: 既存の全試験が通る（Linux）。新しい adapter は fixture（loopback の facilitator・RPC、`dialForTest`）で試験し、実チェーンに依らない
 - **AC-6**: 公開 MCP の一覧に新しい route／プロファイルが出て、`subject` に network・asset・decimals・受取先が正しく出る。`ownerKey` の保護・結果の保存と再読取は既存どおり。
   CLAUDE.md の手順（`npm run sign`）が Arc・Solana でも通り、表に無い offer を拒否する（英語で書く）
@@ -234,7 +234,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 | リスク | 扱い |
 |---|---|
 | Circle の facilitator は testnet が鍵なし trial。制限・変更があり得る | 要求の前の失敗は受信が止まるだけ。要求の後の失敗は `unknown`（FR-19）。本番の API key は別途（D-8） |
-| x402.org の facilitator が fee payer を変える | 起動時に固定（FR-15）。変われば再起動。発行済みの quote は verify で落ちる |
+| x402.org の facilitator が fee payer を変える | 起動時に固定（FR-15）。変われば再起動。発行済みの quote は preflight または verify で落ちる |
 | facilitator が送信するので、Router は「署名した」と「送られた」を直接は結べない | settle の応答の識別子と network の照合（FR-20）。最終性は主張しない |
 | 新しい依存の供給鎖 | SR-1 |
 | Arc のネイティブ USDC（18 桁）と ERC-20（6 桁）の取り違え | FR-7（設定で拒否、否定の試験） |

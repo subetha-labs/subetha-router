@@ -131,7 +131,7 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
   - verify・settle の payload に `challengeNonce` が無い。**本物の verify の論理**（fixture の facilitator）が Router の形を受ける。settle の期限 50 秒（49 秒で通り 51 秒で `unknown`）
   - 順序と衛生: verify が `isValid: false` なら settle 0 回／`invalidReason` を転送しない
   - §6 の表の各行（SVM 版: `transaction` が base58 64 バイトでない → `unknown`、64 バイト → `settled`）。settle は 1 回だけ
-  - fee payer が変わった後（fixture の `/supported` を変えて **adapter を作り直す**。process の再起動と journal の回復は T7-c）、発行済みの quote は verify で落ちる（AC-4）
+  - fee payer が変わった後（fixture の `/supported` を変えて **adapter を作り直す**。process の再起動と journal の回復は T7-c）、発行済みの quote は preflight または verify で落ちる（AC-4）
   - transport（SR-2、**Linux**）: verify・settle の要求が guarded transport を通る——redirect を追わない（3xx で `isValid: false`／`unknown`、Location へ 0 接続）、応答の上限、期限、`fixtureFacilitators` 無しで loopback の facilitator は 0 接続。既存の x402 adapter の transport の試験を共有の形にして SVM でも走らせる
   - quote・purchase の中で RPC・`/supported` に出ない（接続を数える）
 - **sabotage**: settle の形の検査を「非空」に戻す／`challengeNonce` を payload に残す／memo を offer から外す → 各試験が落ちる
@@ -177,8 +177,8 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
   - AC-3（各 1 本、結果と回数を書く）: 別の宛先・額・mint・桁・fee payer が Router 向き・transfer 2 つ・不明な program・memo の書き換え・lookup table → `rejected` と facilitator・RPC への要求 0。
     再提出: 別の quote（`nonce_mismatch`、要求 0）・別の route（`route_binding_mismatch`、要求 0）・**同じ quote の並行**（settle は合計 1 回。2 本目は既存の結果）・**再起動後**（settle 1 回のまま）。
     昇格前の同じ credential の再試行は通る（要求はあるが settle は 1 回）
-  - AC-4: settle の応答の喪失・crash・形の違う／network の違う／識別子の無い成功応答で `unknown` が耐久的に残り、再起動後に settle が再発しない（要求数）。**両レグの予約が保たれる**（予算の残が減ったまま）。fee payer が変わった後の **process の再起動**で、発行済みの quote が verify で落ちる
-  - FR-5・FR-6: 旧い journal（Base Sepolia・Tempo の記録）を読んで新しい記録と混在した identity を保つ／権威の欄（facilitator の kind・表の資産）を変えた再起動で発行済みの quote が `quote_changed`／
+  - AC-4: settle の応答の喪失・crash・形の違う／network の違う／識別子の無い成功応答で `unknown` が耐久的に残り、再起動後に settle が再発しない（要求数）。**両レグの予約が保たれる**（予算の残が減ったまま）。fee payer が変わった後の **process の再起動**で、発行済みの quote が preflight または verify で落ちる（fee payer を固定の方針と照合する preflight が先に止める）
+  - FR-5・FR-6: 旧い journal（Base Sepolia・Tempo の記録）を読んで新しい記録と混在した identity を保つ／権威の欄（route の source の資産など、既存の指紋の欄。facilitator の kind は表で network に固定され、設定では変えられない）を変えた再起動で発行済みの quote が `quote_changed`（facilitator への要求 0）／
     再起動後の予算の合計が復元される／`(network, asset)` の区分が別（Arc の消費が Base Sepolia の予算を減らさない）
   - AC-6: `ownerKey` 無しの status が読めない、結果の保存と再読取が既存どおり
   - 既存の Base Sepolia・Tempo の統合試験が変わらない

@@ -14,6 +14,7 @@ import {
   partiallySignTransactionMessageWithSigners,
   pipe,
   setTransactionMessageFeePayer,
+  signBytes,
   setTransactionMessageLifetimeUsingBlockhash,
   type Instruction,
   type KeyPairSigner,
@@ -39,7 +40,7 @@ export interface SvmPayerBuildOptions {
   /** 命令の列を差し替える（追加・並べ替え・data の改変）。 */
   readonly instructions?: (ixs: Instruction[]) => Instruction[];
   readonly version?: 0 | "legacy";
-  /** address lookup table を参照する message にする（署名は無効でよい: 構造で落ちる）。 */
+  /** address lookup table を参照する message にする（authority の署名はその message に対して有効。構造だけで落ちることを見る）。 */
   readonly lookupTable?: boolean;
   /** 署名後の bytes を改変する。 */
   readonly mutateBytes?: (bytes: Uint8Array) => Uint8Array;
@@ -91,11 +92,13 @@ export async function createSvmTestPayer(mint: string, tokenProgram: string = TO
       if (options.lookupTable === true) {
         const compiled = compileTransactionMessage(message);
         const withLookup = { ...compiled, addressTableLookups: [{ lookupTableAddress: address("AddressLookupTab1e1111111111111111111111111"), writableIndexes: [], readonlyIndexes: [] }] };
-        const messageBytes = getCompiledTransactionMessageEncoder().encode(withLookup as never);
+        const messageBytes = new Uint8Array(getCompiledTransactionMessageEncoder().encode(withLookup as never));
+        // 署名は本物（authority の鍵で、lookup つきの message に対して）。fee payer の枠は空。
+        const signature = await signBytes(signer.keyPair.privateKey, messageBytes);
         bytes = new Uint8Array(1 + 128 + messageBytes.length);
         bytes[0] = 2;
-        bytes.set(new Uint8Array(64).fill(1), 65);
-        bytes.set(new Uint8Array(messageBytes), 129);
+        bytes.set(signature, 65);
+        bytes.set(messageBytes, 129);
       } else {
         const signed = await partiallySignTransactionMessageWithSigners(message);
         bytes = new Uint8Array(getTransactionEncoder().encode(signed));
