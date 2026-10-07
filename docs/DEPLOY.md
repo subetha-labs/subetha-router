@@ -160,7 +160,7 @@ docker exec -it -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -
 # 送信の鍵・MPP 受信の秘密・Tempo の RPC はコンテナの env から読まれる（docker run で渡したもの）。
 # 終わった後に残っていないことの確認: cmdline か environ に印を含む process の PID を出す（自分自身は除く。印は pgrep の [ ] の形で、検査の process 自身には一致しない）。
 # 何も出なければ、受け入れの入口（印 rails-acceptance-ru[n]）とその子の Router（environ の ROUTER_JOURNAL_PATH。印 acceptance/journal.ndjso[n]）は残っていない。
-docker exec subetha-router sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; { tr "\0" " " < "$p/cmdline"; tr "\0" " " < "$p/environ"; } 2>/dev/null | grep -q "rails-acceptance-ru\[n\]\|acceptance/journal.ndjso\[n\]" && echo "${p#/proc/}"; done'
+docker exec subetha-router sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; { tr "\0" " " < "$p/cmdline"; tr "\0" " " < "$p/environ"; } 2>/dev/null | grep -q "rails-acceptance-ru[n]\|acceptance/journal.ndjso[n]" && echo "${p#/proc/}"; done'
 ```
 
 起動に失敗したときホスト（この起動）の stderr に出るのは固定文（`could not start the Router`）だけで、Router の process の stderr（`svm inbound` の起動時の検査の
@@ -184,7 +184,7 @@ docker exec -it \
   subetha-router node --import tsx tools/remote-router-process.ts
 # stderr に理由の固定文（例: `svm inbound: ...`）か、`{"event":"listening",...}` が出る。終わったら Ctrl-C（SIGINT で Router が止まる）。
 # 残っていないことの確認は、この Router だけが持つ印（environ の ROUTER_JOURNAL_PATH の acceptance/dia[g]）で、動かしたコンテナの中で（公開・受け入れの Router は印を持たない）:
-docker exec <動かしたコンテナ> sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; tr "\0" " " < "$p/environ" 2>/dev/null | grep -q "acceptance/dia\[g\]" && echo "${p#/proc/}"; done'
+docker exec <動かしたコンテナ> sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; tr "\0" " " < "$p/environ" 2>/dev/null | grep -q "acceptance/dia[g]" && echo "${p#/proc/}"; done'
 ```
 
 **最初に**この起動で Solana の起動時の検査（`/supported`・ATA）が通ることを確かめる（本番 env での検査の証拠）。次に AC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、
