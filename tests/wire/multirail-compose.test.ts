@@ -160,6 +160,9 @@ describe("合成: facilitator と adapter の選択（network ごと）", () => 
     expect(rails.startup).toBeDefined();
     // 起動時の検査の前は SVM の offer を出さない（fail closed）。
     await expect(rails.inbound.createOffer({ routeId: "sol", amount: "10000", asset: MINT, network: SOL, routeBinding: routeBindingOf(config.router.routes["sol"]!), nowMs: Date.now() })).rejects.toThrow(/startup checks have not run/);
+    // preflight も同じ（起動時の検査が埋まる前は policy が無い）。
+    const prematureOffer = { scheme: "exact", network: SOL, asset: MINT, amount: "10000", payTo: owner, maxTimeoutSeconds: 40, extra: { challengeNonce: "0x" + "ab".repeat(32), expiresAt: Math.floor(Date.now() / 1000) + 60, routeBinding: routeBindingOf(config.router.routes["sol"]!), feePayer: "x", memo: "0x" + "ab".repeat(32), fundsMoveOnCredential: false } };
+    expect(() => rails.inbound.preflight(prematureOffer, { x402Version: 2, accepted: prematureOffer, payload: { challengeNonce: prematureOffer.extra.challengeNonce } }, Date.now())).toThrow(/startup checks have not run/);
     await rails.startup!();
     expect(fx.svm.seen.supportedCalls).toBe(1);
     expect(fx.rpc.calls.map((c) => c.method)).toEqual(["getAccountInfo"]);
@@ -330,7 +333,7 @@ describe("合成: 起動時の検査の否定（T4-b の各行を合成で）と
       process.env[key] = value;
     }
     const written: string[] = [];
-    const originalWrite = process.stdout.write.bind(process.stdout);
+    const originalWrite = process.stdout.write;
     process.stdout.write = ((chunk: unknown) => { written.push(String(chunk)); return true; }) as typeof process.stdout.write;
     try {
       await expect(startRouter(capabilitiesOf(fx))).rejects.toThrow(/no exact kind/);
