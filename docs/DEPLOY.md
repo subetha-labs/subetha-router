@@ -127,8 +127,8 @@ Router の process の能力の注入の**両方**がそれを見る（`tools/ra
 **受け入れ（G-3。owner の確認の上で、支払いごとに quote を見せる）**: 公開の process の定数は触らず、**受け入れ用の起動**で行う。
 egress 制御の network `subetha-router-net` には **Router を 1 つだけ**置く決まり（§8b.1。runner は 2 つ目のメンバーを FAIL にし、同じ bridge の中の通信は
 フィルタを通らない）なので、受け入れの間は**公開の Router を止める**（`docker stop subetha-router`。終わったら `docker start subetha-router`。
-**2 つを同時に動かさない**）。止めている間、公開の要求は失敗し、発行済みの quote の期限は進み続け、stop の瞬間に進行中だった購入は再起動後に `unknown` として
-確定する——**進行中の購入が無いときに**行う。この間の §8b.4 の検証はコンテナ名 `subetha-router-acceptance` を対象にする（verifier は唯一のメンバーの名前を見る）。そのうえで公開の Router と**同じイメージ・同じ network・同じボリューム**から受け入れのコンテナを起動し、MCP の入口は
+**2 つを同時に動かさない**）。止めている間、公開の要求は失敗し、発行済みの quote の期限は進み続け、stop の時点で終わっていなかった購入は再起動後に `unknown` として
+確定し得る（graceful shutdown の中で終わる要求はそのまま終わる）——**進行中の購入が無いときに**行う。この間の §8b.4 の検証はコンテナ名 `subetha-router-acceptance` を対象にする（verifier は唯一のメンバーの名前を見る）。そのうえで公開の Router と**同じイメージ・同じ network・同じボリューム**から受け入れのコンテナを起動し、MCP の入口は
 **ホストの loopback だけ**に公開する（Node や依存をホストに入れる必要はない。イメージに `tools/` と `node_modules` が入っている）:
 
 ```sh
@@ -158,8 +158,9 @@ docker exec -it -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -
   -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/journal.ndjson \
   subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
 # 送信の鍵・MPP 受信の秘密・Tempo の RPC はコンテナの env から読まれる（docker run で渡したもの）。
-# 終わった後に残っていないことの確認（0 が出る）:
-docker exec subetha-router sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " " | grep -c rails-acceptance-run'
+# 終わった後に残っていないことの確認: cmdline か environ に印を含む process の PID を出す（自分自身は除く。印は pgrep の [ ] の形で、検査の process 自身には一致しない）。
+# 何も出なければ、受け入れの入口（印 rails-acceptance-ru[n]）とその子の Router（environ の ROUTER_JOURNAL_PATH。印 acceptance/journal.ndjso[n]）は残っていない。
+docker exec subetha-router sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; { tr "\0" " " < "$p/cmdline"; tr "\0" " " < "$p/environ"; } 2>/dev/null | grep -q "rails-acceptance-ru\[n\]\|acceptance/journal.ndjso\[n\]" && echo "${p#/proc/}"; done'
 ```
 
 起動に失敗したときホスト（この起動）の stderr に出るのは固定文（`could not start the Router`）だけで、Router の process の stderr（`svm inbound` の起動時の検査の
@@ -181,7 +182,9 @@ docker exec -it \
   -e SUBETHA_TEMPO_RPC_URL=<値> -e ROUTER_MPP_INBOUND_RPC_URL=<同じ値> \
   -e SUBETHA_RAILS_ACTIVATION=arc,solana -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RPC_URL=<値> -e ROUTER_SOLANA_RPC_URL=<同じ値> \
   subetha-router node --import tsx tools/remote-router-process.ts
-# stderr に理由の固定文（例: `svm inbound: ...`）か、`{"event":"listening",...}` が出る。終わったら Ctrl-C（SIGINT で Router が止まる。上と同じ確認で 0 を見る）。
+# stderr に理由の固定文（例: `svm inbound: ...`）か、`{"event":"listening",...}` が出る。終わったら Ctrl-C（SIGINT で Router が止まる）。
+# 残っていないことの確認は、この Router だけが持つ印（environ の ROUTER_JOURNAL_PATH の acceptance/dia[g]）で、動かしたコンテナの中で（公開・受け入れの Router は印を持たない）:
+docker exec <動かしたコンテナ> sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] && continue; tr "\0" " " < "$p/environ" 2>/dev/null | grep -q "acceptance/dia\[g\]" && echo "${p#/proc/}"; done'
 ```
 
 **最初に**この起動で Solana の起動時の検査（`/supported`・ATA）が通ることを確かめる（本番 env での検査の証拠）。次に AC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、
