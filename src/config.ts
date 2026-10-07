@@ -490,6 +490,11 @@ export interface RealRailsConfig {
    */
   readonly x402InboundFacilitators?: Readonly<Record<string, X402InboundFacilitator>>;
   /**
+   * Solana の JSON-RPC（`ROUTER_SOLANA_RPC_URL`、任意）。起動時の ATA の検査だけに使う（quote・purchase では使わない。multirail 設計 §5.1）。
+   * 無ければ devnet の公開 RPC。ホストは拒否ホストと `dependencyUrls` に入る。
+   */
+  readonly solanaRpcUrl?: string;
+  /**
    * x402 受信 offer の有効期間（秒）。`ROUTER_X402_INBOUND_OFFER_SECONDS`。
    * 承認期限は `min(approvalTtlMs, offerExpiry)` なので、**ここが実効的な上限**になる。
    * 人間が承認に関与する運用では、その所要時間を賄う値にする。
@@ -1033,6 +1038,8 @@ function parseReal(
     }
     mppInboundSecret = mppInboundSecretRaw;
   }
+  const solanaRpcRaw = env["ROUTER_SOLANA_RPC_URL"];
+  const solanaRpcUrl = solanaRpcRaw === undefined || solanaRpcRaw === "" ? undefined : assertAbsoluteHttpUrl(solanaRpcRaw, "ROUTER_SOLANA_RPC_URL");
   const mppInboundRpcRaw = env["ROUTER_MPP_INBOUND_RPC_URL"];
   const mppInboundRpcUrl = mppInboundRpcRaw === undefined || mppInboundRpcRaw === "" ? undefined : assertAbsoluteHttpUrl(mppInboundRpcRaw, "ROUTER_MPP_INBOUND_RPC_URL");
   const facilitatorUrl = env["ROUTER_SUBETHA_FACILITATOR_URL"];
@@ -1056,6 +1063,7 @@ function parseReal(
     ...(inboundOfferSeconds === undefined ? {} : { x402InboundOfferSeconds: inboundOfferSeconds }),
     ...(mppInboundOfferSeconds === undefined ? {} : { mppInboundOfferSeconds }),
     ...(mppInboundRpcUrl === undefined ? {} : { mppInboundRpcUrl }),
+    ...(solanaRpcUrl === undefined ? {} : { solanaRpcUrl }),
     ...(mppInboundSecret === undefined ? {} : { mppInboundSecret }),
     ...(inboundFacilitators === undefined ? {} : { x402InboundFacilitators: inboundFacilitators }),
     ...(inboundFacilitatorUrl === undefined
