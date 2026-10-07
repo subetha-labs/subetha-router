@@ -115,7 +115,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const counter = connectionCounter(fixture);
     const before = await counter.adapter();
     const rail = createMppOutbound({ transport: denyAt("pay_challenge", events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability() });
-    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-2", attempt: 1 });
+    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-2", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_challenge_unreadable" });
     expectSilent(result);
     expect(events).toEqual([{ code: "destination_blocked", operation: "pay_challenge", routeId: MPP.route, policy: expect.any(String) }]);
@@ -131,7 +131,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const counter = connectionCounter(fixture);
     const before = await counter.adapter();
     const rail = createMppOutbound({ transport: denyAt("pay", events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability() });
-    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-3", attempt: 1 });
+    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-3", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
     expectSilent(result);
     expect(events).toEqual([{ code: "destination_blocked", operation: "pay", routeId: MPP.route, policy: expect.any(String) }]);
@@ -156,7 +156,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const counter = connectionCounter(fixture);
     const before = await counter.adapter();
     const rail = createX402Outbound({ transport: denyAt("pay_challenge", events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network) });
-    const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-5", attempt: 1 });
+    const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-5", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("not_sent");
     expectSilent(result);
     expect(events.map((e) => [e.code, e.operation])).toEqual([["destination_blocked", "pay_challenge"]]);
@@ -172,7 +172,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const counter = connectionCounter(fixture);
     const before = await counter.adapter();
     const rail = createX402Outbound({ transport: denyAt("pay", events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network) });
-    const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-6", attempt: 1 });
+    const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-6", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
     expectSilent(result);
     expect(events.map((e) => [e.code, e.operation])).toEqual([["destination_blocked", "pay"]]);
@@ -193,7 +193,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const probe = createSyntheticX402Outbound({ transport: denyAt(undefined, []), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` } });
     const [offer] = await probe.readChallenge(X402.route);
     const rail = createSyntheticX402Outbound({ transport: denyAt("pay", events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` } });
-    await expect(rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-8", attempt: 1 })).rejects.toBeInstanceOf(TransportError);
+    await expect(rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-8", attempt: 1, deadlineMs: Date.now() + 600_000 })).rejects.toBeInstanceOf(TransportError);
     expect(events.map((e) => [e.code, e.operation])).toEqual([["destination_blocked", "pay"]]);
   });
 
@@ -327,7 +327,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const upstreamBefore = (await readUpstream()).connections;
     // 拒否: 最初の RPC で destination_blocked。有料要求は送られない（upstream の接続は challenge 再読の 1 本だけ増える）。
     // 公開結果は既存の写像のまま: 能力に触れた後の createCredential の失敗は保守的に unknown（adapter は送金 RPC の成否を推定しない）。
-    const blocked = await railWith("rpc").pay({ routeId: MPP.route, offer: offer!, paymentId: "p-12", attempt: 1 });
+    const blocked = await railWith("rpc").pay({ routeId: MPP.route, offer: offer!, paymentId: "p-12", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(blocked).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
     expectSilent(blocked);
     expect(events.map((e) => [e.code, e.operation, e.routeId])).toEqual([["destination_blocked", "rpc", MPP.route]]);
@@ -336,7 +336,7 @@ describe("reach of every outbound path (T-A13)", () => {
     expect(afterBlocked.payCalls).toBe(0);
     expect(afterBlocked.connections).toBe(upstreamBefore + 1);
     // 許可側: 同じ能力で RPC fixture に届き（接続 ≥ 1、method が記録される）、spy と同じ stub で支払いが完走する。
-    const paid = await railWith(undefined).pay({ routeId: MPP.route, offer: offer!, paymentId: "p-12b", attempt: 1 });
+    const paid = await railWith(undefined).pay({ routeId: MPP.route, offer: offer!, paymentId: "p-12b", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(paid.outcome).toBe("paid");
     expect(await rpcCounter.adapter()).toBeGreaterThanOrEqual(rpcBefore + 1);
     expect((await stats<{ methods: string[] }>(rpc)).methods.length).toBeGreaterThan(0);
@@ -351,7 +351,7 @@ describe("reach of every outbound path (T-A13)", () => {
     const capability = { ...spy.capability(), kind: "real-key" as const };
     const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${upstream.baseUrl}/v1/eth/snapshot` }, capability, timeoutMs: 5000 });
     const [offer] = await rail.readChallenge(MPP.route);
-    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-12c", attempt: 1 });
+    const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-12c", attempt: 1, deadlineMs: Date.now() + 600_000 });
     // 既存の写像（能力に触れた後の失敗は unknown）。RPC は 1 回も出ていない。
     expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
     expect(spy.sendAttempts()).toBe(0);
@@ -388,7 +388,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: createPayerSpy().capability(), timeoutMs: LONG });
       const [offer] = await rail.readChallenge(MPP.route); // challenge（body 停滞 → 捨てる）
       const t0 = Date.now();
-      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-${mode}`, attempt: 1 }); // pay_challenge（同じ）→ pay
+      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-${mode}`, attempt: 1, deadlineMs: Date.now() + 600_000 }); // pay_challenge（同じ）→ pay
       expect(result.outcome, mode).toBe("paid");
       expectSilent(result);
       expect(Date.now() - t0, mode).toBeLessThan(LONG / 2); // 停滞した challenge body を待っていない
@@ -422,7 +422,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const spy = createPayerSpy();
       const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(), timeoutMs: SHORT });
       const [offer] = await rail.readChallenge(MPP.route);
-      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-${mode}`, attempt: 1 });
+      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-${mode}`, attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result.outcome, mode).toBe("paid_no_data");
       expectSilent(result);
       expect(events, mode).toEqual([{ code, operation: "pay", routeId: MPP.route, policy: expect.any(String) }]);
@@ -436,7 +436,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const spy = createSignerSpy();
       const rail = createX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network), timeoutMs: SHORT });
       const [offer] = await rail.readChallenge(X402.route);
-      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-x-${mode}`, attempt: 1 });
+      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-x-${mode}`, attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
       expectSilent(result);
       expect(events, mode).toEqual([{ code, operation: "pay", routeId: X402.route, policy: expect.any(String) }]);
@@ -449,7 +449,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const events: TransportEvent[] = [];
       const rail = createSyntheticX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, timeoutMs: SHORT });
       const [offer] = await rail.readChallenge(X402.route);
-      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-s-${mode}`, attempt: 1 });
+      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-s-${mode}`, attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
       expectSilent(result);
       expect(events, mode).toEqual([{ code, operation: "pay", routeId: X402.route, policy: expect.any(String) }]);
@@ -501,7 +501,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${upstream.baseUrl}/v1/eth/snapshot` }, capability, timeoutMs: 5000 });
       const [offer] = await rail.readChallenge(MPP.route);
       const t0 = Date.now();
-      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-g-${mode}`, attempt: 1 });
+      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: `p-g-${mode}`, attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
       expect(Date.now() - t0, mode).toBeLessThan(SHORT * 5);
       expectSilent(result);
@@ -520,7 +520,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const events: TransportEvent[] = [];
       const rail = createMppOutbound({ transport: denyAt(undefined, events), upstreams: { [MPP.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: createPayerSpy().capability(), timeoutMs: LONG });
       const [offer] = await rail.readChallenge(MPP.route);
-      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-h1", attempt: 1 });
+      const result = await rail.pay({ routeId: MPP.route, offer: offer!, paymentId: "p-h1", attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result).toEqual({ outcome: "unknown", reason: "destination_receipt_unverified" });
       expectSilent(result);
       expect(await waitFor(async () => (await closedOther(fixture)) >= 1, 1500), "mpp receipt_unverified socket closes").toBe(true);
@@ -532,7 +532,7 @@ describe("diagnostics after headers (T-A17)", () => {
       const events: TransportEvent[] = [];
       const rail = createSyntheticX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, timeoutMs: LONG });
       const [offer] = await rail.readChallenge(X402.route);
-      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-h2", attempt: 1 });
+      const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: "p-h2", attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
       expectSilent(result);
       expect(await waitFor(async () => (await closedOther(fixture)) >= 1, 1500), "synthetic 500 socket closes").toBe(true);
@@ -567,8 +567,8 @@ describe("context attribution under concurrency (T-A18)", () => {
     const [offerA] = await rail.readChallenge("route-a");
     const [offerB] = await rail.readChallenge("route-b");
     const [a, b] = await Promise.all([
-      rail.pay({ routeId: "route-a", offer: offerA!, paymentId: "pa", attempt: 1 }),
-      rail.pay({ routeId: "route-b", offer: offerB!, paymentId: "pb", attempt: 1 }),
+      rail.pay({ routeId: "route-a", offer: offerA!, paymentId: "pa", attempt: 1, deadlineMs: Date.now() + 600_000 }),
+      rail.pay({ routeId: "route-b", offer: offerB!, paymentId: "pb", attempt: 1, deadlineMs: Date.now() + 600_000 }),
     ]);
     expect([a.outcome, b.outcome]).toEqual(["paid_no_data", "paid_no_data"]);
     expectSilent([a, b]);

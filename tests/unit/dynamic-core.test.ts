@@ -163,7 +163,7 @@ let outbound: SyntheticOutbound;
 let clock = 1_800_000_000_000;
 const opened: RouterCore[] = [];
 
-async function boot(config: RouterConfig = baseConfig(), extra: { balanceOf?: (profileId: string, asset: string) => Promise<bigint>; gate?: DynamicGate } = {}): Promise<RouterCore> {
+async function boot(config: RouterConfig = baseConfig(), extra: { balanceOf?: (profileId: string, asset: string) => Promise<bigint | undefined>; gate?: DynamicGate } = {}): Promise<RouterCore> {
   const core = await createRouterCore({
     journalPath,
     config,
@@ -509,6 +509,14 @@ describe("動的 purchase", () => {
     expect(await journalLines()).toEqual([]);
     balances.set(DST_ASSET, 5000n);
     expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+  });
+
+  test("残高の事前確認: balanceOf が undefined を返す経路は検査しない（送信の設計 §2.6）", async () => {
+    const asked: string[] = [];
+    const core = await boot(baseConfig(), { balanceOf: async (_profileId, asset) => { asked.push(asset); return undefined; } });
+    const quote = await quoteOk(core);
+    expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+    expect(asked).toEqual([DST_ASSET]);
   });
 
   test("残高の事前確認: 資産の鍵は network の族で決める（SVM の mint は大文字小文字を保ち、EVM は小文字化。FR-4）", async () => {

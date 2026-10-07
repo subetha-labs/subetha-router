@@ -92,8 +92,8 @@ export interface DynamicCoreOptions {
   readonly now: () => number;
   readonly nextPaymentId: () => string;
   readonly note?: ((message: string) => void) | undefined;
-  /** 支払い元の残高（base units）。省略時は検査しない。 */
-  readonly balanceOf?: ((profileId: string, asset: string) => Promise<bigint>) | undefined;
+  /** 支払い元の残高（base units）。省略時は検査しない。`undefined` を返した資産は「検査なし」（送信の設計 §2.6）。 */
+  readonly balanceOf?: ((profileId: string, asset: string) => Promise<bigint | undefined>) | undefined;
   /** 受信 settle が成立した後の送信レグ（静的と共通）。 */
   readonly deliver: (paymentId: string) => Promise<DynamicPurchaseOutcome>;
 }
@@ -638,12 +638,14 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       add(profile.destination.feeAsset, BigInt(cap));
     }
     for (const [asset, amount] of needed) {
-      let balance: bigint;
+      let balance: bigint | undefined;
       try {
         balance = await options.balanceOf!(profile.profileId, asset);
       } catch {
         return false;
       }
+      // `undefined` = この経路の rail／能力は残高を持たない（検査なし）。それ以外は bigint で足りることを要求する。
+      if (balance === undefined) continue;
       if (typeof balance !== "bigint" || balance < amount) return false;
     }
     return true;

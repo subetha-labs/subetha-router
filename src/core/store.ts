@@ -4,6 +4,7 @@
  */
 
 import type { InboundOffer } from "../ports/inbound.js";
+import type { MessageReservation } from "../ports/outbound.js";
 import type { DestinationOffer } from "../ports/outbound.js";
 import {
   isInterrupted,
@@ -355,11 +356,18 @@ export class IntentCollisionError extends Error {
   }
 }
 
+/** message の hash（sha256 の小文字 hex 64 文字）。 */
+const MESSAGE_HASH_PATTERN = /^[0-9a-f]{64}$/;
+/** 署名する message の hash を署名の前に予約する行（送信の設計 §2.5）。intent の状態は変えない。 */
+export const MESSAGE_RESERVED_EVENT = "destination_message_reserved";
+
 export class IntentStore {
   readonly #journal: Journal;
   readonly #intents = new Map<string, Intent>();
   readonly #quoteToPayment = new Map<string, string>();
   readonly #requestToQuote = new Map<string, string>();
+  /** 予約済みの message の hash（journal から復元。永続）。 */
+  readonly #messageHashes = new Set<string>();
   /** 追記の直列化（同一性検査 → append → 反映を不可分にする）。 */
   #queue: Promise<void> = Promise.resolve();
 
@@ -400,6 +408,15 @@ export class IntentStore {
   }
 
   #applyRecord(paymentId: string, event: string, patch: Patch, at: string): void {
+    if (event === MESSAGE_RESERVED_EVENT) {
+      // 形の壊れた予約の行は無視しない（復元できない予約は「同じ message に二度署名しない」規則を破る）。起動を止める。
+      const hash = patch["messageHash"];
+      if (typeof hash !== "string" || !MESSAGE_HASH_PATTERN.test(hash)) {
+        throw new Error("journal: malformed destination_message_reserved row");
+      }
+      this.#messageHashes.add(hash);
+      return;
+    }
     if (event === "created") {
       this.#assertFreshIdentity(paymentId, asString(patch["quoteId"]));
       const intent = intentFromCreated(paymentId, at, patch);
@@ -442,6 +459,39 @@ export class IntentStore {
       throw new Error("journal record mismatch after append");
     }
     this.#applyRecord(written.paymentId, written.event, written.patch, written.at);
+  }
+
+  /**
+   * 署名する message の hash を**署名の前に**排他的に予約する（送信の設計 §2.5、FR-37）。同じ `#queue` の中で
+   * 未使用の検査 → journal への追記（fsync）→ 索引の更新を不可分に行う。journal に書けなければ `unavailable`（Set にも入れない）。
+   * 同じ hash は、別の購入からでも同じ購入からでも `collision`。対象の intent が `destination_pending` でなければ `unavailable`。
+   */
+  reserveMessage(paymentId: string, messageHash: string): Promise<MessageReservation> {
+    const reserved = this.#queue.then(() => this.#reserveLocked(paymentId, messageHash));
+    this.#queue = reserved.then(
+      () => undefined,
+      () => undefined,
+    );
+    return reserved;
+  }
+
+  async #reserveLocked(paymentId: string, messageHash: string): Promise<MessageReservation> {
+    if (!MESSAGE_HASH_PATTERN.test(messageHash)) return "unavailable";
+    const intent = this.#intents.get(paymentId);
+    if (intent === undefined || intent.status !== "destination_pending") return "unavailable";
+    if (this.#messageHashes.has(messageHash)) return "collision";
+    try {
+      // queue の中から公開の `append()` を待たない（自己待機になる）。内部の追記を直接呼ぶ。
+      await this.#appendLocked(paymentId, MESSAGE_RESERVED_EVENT, { messageHash });
+    } catch {
+      return "unavailable";
+    }
+    return "reserved";
+  }
+
+  /** 予約済みの message の hash か（試験と診断のため。予約はこれを見ずに `reserveMessage` で行う）。 */
+  hasReservedMessage(messageHash: string): boolean {
+    return this.#messageHashes.has(messageHash);
   }
 
   byPaymentId(paymentId: string): Intent | undefined {
