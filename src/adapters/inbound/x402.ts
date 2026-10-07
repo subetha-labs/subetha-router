@@ -26,9 +26,21 @@ import type {
   InboundRail,
   PaymentCredential,
   PreflightResult,
+  SellerProofCapability,
+  SellerProofPurpose,
   SettleResult,
   InboundCallContext,
 } from "../../ports/inbound.js";
+import { bodyHashOf } from "./seller-proof.js";
+
+/** facilitator の種類（multirail 設計 §2・§4）。`x402` は既存の挙動そのまま、`circle` は Circle の Facilitator Service。 */
+export type X402FacilitatorKind = "x402" | "circle";
+/** Circle の settle の wire の `maxTimeoutSeconds`（facilitator が settle を待つ窓）の既定。設計 §4.1。 */
+export const CIRCLE_DEFAULT_WIRE_TIMEOUT_SECONDS = 30;
+/** kind `circle` の offer の有効期間の既定（秒）。承認の時間を賄う。 */
+export const CIRCLE_DEFAULT_OFFER_SECONDS = 120;
+/** EVM の tx hash。Circle の settle の `transaction` はこの形でなければ `settled` にしない（設計 §6）。 */
+const EVM_TX_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 /** x402 の EIP-3009 経路。ほかの scheme は扱わない（fail closed）。 */
 export const X402_INBOUND_SCHEME = "exact";
@@ -54,14 +66,34 @@ const ISSUED_EXTRA_KEYS = [
   "fundsMoveOnCredential",
 ] as const;
 
+/** kind `circle` の発行 extra（Circle の要求 `assetTransferMethod: "eip3009"` を足す。設計 §4.1）。 */
+const CIRCLE_ISSUED_EXTRA_KEYS = [...ISSUED_EXTRA_KEYS, "assetTransferMethod"] as const;
+
 export interface X402InboundOptions {
+  /** facilitator の種類。既定 `x402`（既存の挙動）。`circle` は `sellerProof` が必須。 */
+  readonly kind?: X402FacilitatorKind;
+  /** kind `circle` の売り手証明の能力（設計 §3）。 */
+  readonly sellerProof?: SellerProofCapability;
+  /**
+   * offer の有効期間（秒。`extra.expiresAt`、承認期限）。kind `x402` の既定は `maxTimeoutSeconds` と同じ（今までどおり）、
+   * kind `circle` の既定は 120。
+   */
+  readonly offerSeconds?: number;
+  /**
+   * 運用者向けの診断（固定の code だけ。値は渡さない）。kind `circle` で facilitator が `403 registration_required`
+   * （鍵なし trial の枠切れ）を返したときに `facilitator_trial_exhausted`。自動では何もしない。
+   */
+  readonly onDiagnostic?: (code: "facilitator_trial_exhausted") => void;
   /** 受信 facilitator の base URL（`ROUTER_X402_INBOUND_FACILITATOR_URL`）。 */
   readonly facilitatorUrl: string;
   /** facilitator へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
   readonly transport: GuardedTransport;
   /** Router 自身の受取先。構成の `source.payTo`。 */
   readonly payTo: string;
-  /** offer の有効期間（秒）。デモの操作時間を賄える値にする。 */
+  /**
+   * wire の `maxTimeoutSeconds`（requirements に載る、facilitator が settle を待つ窓）。kind `x402` では offer の有効期間も兼ねる（既存の挙動）。
+   * kind `circle` の既定は 30（Circle が待つ窓。settle の HTTP 期限はこれ＋10 秒）。
+   */
   readonly maxTimeoutSeconds?: number;
   /**
    * 受信資産の EIP-712 domain（`exact` の署名に必要）。
@@ -88,22 +120,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function createX402Inbound(options: X402InboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
   const transport = options.transport;
-  const maxTimeoutSeconds = options.maxTimeoutSeconds ?? 120;
+  const kind: X402FacilitatorKind = options.kind ?? "x402";
+  const sellerProof = options.sellerProof;
+  if (kind === "circle" && sellerProof === undefined) {
+    throw new Error("x402 inbound: kind \"circle\" requires a seller proof capability");
+  }
+  // 時間の 3 つ（設計 §4.1・§4.4）: offer の有効期間、wire の maxTimeoutSeconds、HTTP の期限。
+  // kind `x402` は 3 つとも今までどおり（有効期間 = wire、HTTP は verify・settle とも timeoutMs）。
+  const maxTimeoutSeconds = options.maxTimeoutSeconds ?? (kind === "circle" ? CIRCLE_DEFAULT_WIRE_TIMEOUT_SECONDS : 120);
+  const offerSeconds = options.offerSeconds ?? (kind === "circle" ? CIRCLE_DEFAULT_OFFER_SECONDS : maxTimeoutSeconds);
   const assetDomain = options.assetDomain ?? { name: "USDC", version: "2" };
   const timeoutMs = options.timeoutMs ?? 10_000;
+  const settleTimeoutMs = kind === "circle" ? (maxTimeoutSeconds + 10) * 1000 : timeoutMs;
+  const issuedExtraKeys: readonly string[] = kind === "circle" ? CIRCLE_ISSUED_EXTRA_KEYS : ISSUED_EXTRA_KEYS;
 
-  /** 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。 */
+  /**
+   * 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。
+   * body は**ここで 1 度だけ直列化**し、売り手証明はその bytes の hash に束縛する（設計 §4.2）。
+   */
   async function post(
     path: string,
     body: unknown,
     context: TransportContext,
+    deadlineMs: number,
+    proof: string | undefined,
   ): Promise<{ status: number; json: unknown }> {
+    const requestText = JSON.stringify(body);
     const response = await transport.fetch(`${base}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: { "content-type": "application/json", ...(proof === undefined ? {} : { "facilitator-seller-proof": proof }) },
+      body: requestText,
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(deadlineMs),
     }, context);
     let text: string;
     try {
@@ -120,6 +168,19 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
       json = undefined;
     }
     return { status: response.status, json };
+  }
+
+  /**
+   * kind `circle` の売り手証明。要求本体の bytes の hash を能力に渡す。能力が拒めば `undefined` を返し、呼び出し側は**要求を出さない**。
+   * kind `x402` では常に `undefined`（header 無し）。
+   */
+  async function proofFor(purpose: SellerProofPurpose, body: unknown): Promise<{ ok: true; proof: string | undefined } | { ok: false }> {
+    if (kind !== "circle" || sellerProof === undefined) return { ok: true, proof: undefined };
+    try {
+      return { ok: true, proof: await sellerProof.proofFor(purpose, bodyHashOf(JSON.stringify(body))) };
+    } catch {
+      return { ok: false };
+    }
   }
 
   /**
@@ -171,8 +232,10 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
           name: assetDomain.name,
           version: assetDomain.version,
           challengeNonce,
-          expiresAt: Math.floor(request.nowMs / 1000) + maxTimeoutSeconds,
+          expiresAt: Math.floor(request.nowMs / 1000) + offerSeconds,
           routeBinding: request.routeBinding,
+          // Circle は EIP-3009 の経路を requirements で名指しすることを要求する（設計 §4.1）。
+          ...(kind === "circle" ? { assetTransferMethod: "eip3009" } : {}),
           /**
            * **署名だけでは資金が動かない**（EIP-3009）。送金は後段で facilitator が
            * settle するときに起きるので、承認は purchase の前で間に合う。
@@ -215,11 +278,11 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
       // `extra` は Router 発行キーのみ。未知キーがあれば拒否する
       // （`exact` では extra が署名ドメインを決めるため、ここを緩めない）。
       for (const key of Object.keys(acceptedExtra)) {
-        if (!(ISSUED_EXTRA_KEYS as readonly string[]).includes(key)) {
+        if (!issuedExtraKeys.includes(key)) {
           return { ok: false, reason: "offer_mismatch" };
         }
       }
-      for (const key of ISSUED_EXTRA_KEYS) {
+      for (const key of issuedExtraKeys) {
         if (acceptedExtra[key] !== offer.extra[key]) {
           return { ok: false, reason: "offer_mismatch" };
         }
@@ -254,11 +317,17 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
     },
 
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
-      const { status, json } = await post("/verify", {
+      const body = {
         x402Version: 2,
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
-      }, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" });
+      };
+      const proof = await proofFor("verify", body);
+      if (!proof.ok) {
+        // 証明が作れない: 要求を出さない（接続 0）。
+        return { isValid: false };
+      }
+      const { status, json } = await post("/verify", body, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, timeoutMs, proof.proof);
       // 検証できないまま settle へ進まない（この時点では課金が起きていない）。
       // `invalidMessage` / `error` は読まない（facilitator の内部実装を転送しない）。
       if (status !== 200 || !isRecord(json)) {
@@ -269,11 +338,20 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは呼び出し側（core）が `unknown` として確定する。自動再 settle はしない。
-      const { status, json } = await post("/settle", {
+      const body = {
         x402Version: 2,
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
-      }, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" });
+      };
+      const proof = await proofFor("settle", body);
+      if (!proof.ok) {
+        // 要求を**出す前**の失敗だけが `rejected`（設計 §6）。
+        return { outcome: "rejected", reason: "source_rejected" };
+      }
+      const { status, json } = await post("/settle", body, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs, proof.proof);
+      if (kind === "circle") {
+        return settleOutcomeCircle(offer, status, json);
+      }
       if (status >= 500) {
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }
@@ -297,4 +375,24 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
       return { outcome: "settled", txRef };
     },
   };
+
+  /**
+   * kind `circle` の決済の結果の表（設計 §6、FR-19・FR-20）: 要求を出した後の失敗は**すべて `unknown`**
+   * （4xx・5xx・`success: false`・`settlement_pending`・network 違い・`transaction` の形違い）。
+   * `success: true`、network 一致、`transaction` が 0x＋64 hex のときだけ `settled`。
+   * `payer`・`amount`・`extensions`・`errorReason` の文字列は読まない（診断の code だけ）。
+   */
+  function settleOutcomeCircle(offer: InboundOffer, status: number, json: unknown): SettleResult {
+    if (status === 403 && isRecord(json) && json["errorReason"] === "registration_required") {
+      options.onDiagnostic?.("facilitator_trial_exhausted");
+    }
+    if (status !== 200 || !isRecord(json) || json["success"] !== true || json["network"] !== offer.network) {
+      return { outcome: "unknown", reason: "source_settle_unknown" };
+    }
+    const txRef = json["transaction"];
+    if (typeof txRef !== "string" || !EVM_TX_HASH_PATTERN.test(txRef)) {
+      return { outcome: "unknown", reason: "source_settle_unknown" };
+    }
+    return { outcome: "settled", txRef };
+  }
 }
