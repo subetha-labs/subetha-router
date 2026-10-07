@@ -19,7 +19,7 @@
 | D-6 | 静的 route と動的プロファイルの**両方**を足す |
 | D-7 | 予算は既存と同じ桁（動的 1 件 20,000、通算 100,000,000、件数 1,000）。`npm run sign` の受信の上限は **20,000** |
 | D-8 | testnet は trial で運用し、facilitator の応答の照合は形まで（FR-20・FR-21）。Circle の本番 API key は取らない（mainnet は対象外） |
-| D-9 | **SVM の settle の追跡**（2026-10-07、G-3 の結果）: facilitator の settle 応答が形どおりの成功でなく（`settlement_pending` 等）署名を含むとき、Router は設定の RPC で `getSignatureStatuses` を**期限つき**（30 秒）で追い、確定していれば `settled` として送信に進む。確定が取れなければ従来どおり `unknown`。owner の選択（追跡を足す。Arc だけ先に有効化しない） |
+| D-9 | **SVM の settle の追跡**（2026-10-07、G-3 の結果）: facilitator の settle 応答が形どおりの成功でなく（`settlement_pending` 等）署名を含むとき、Router は設定の RPC で `getSignatureStatuses` を**期限つき**（完了の期限 15 秒、間隔 2 秒）で追い、形の正しい status で **`err === null` かつ `confirmationStatus` が `confirmed` または `finalized`** なら `settled` として送信に進む（finality は主張しない）。それ以外は従来どおり `unknown`。FR-19〜21 の例外（設計 §5.8）。owner の選択（追跡を足す。Arc だけ先に有効化しない） |
 
 ## 1. 今の Router が持つもの（ソースで確認。第 2 版で誤りを直し、EVM 前提の箇所を足した）
 
@@ -176,12 +176,14 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 ### 4.5 決済の不確かさと facilitator の信頼（S-1・S-2 共通）
 
 - **FR-19**: settle の要求が**出た後**の失敗（timeout・応答の喪失・エラー）は `unknown` とし、予約を保ち、**自動で再 settle しない**（既存の設計 §6.5 と同じ）。「facilitator が止まれば
-  資金は動かない」とは**言わない**（要求が届いた後に止まり得る）
-- **FR-20**: settle の成功は、facilitator の応答が**形どおり**であることで判定する: 成功の印、`network` が発行 offer の network と**一致**、`transaction` が **その network の識別子の形**
+  資金は動かない」とは**言わない**（要求が届いた後に止まり得る）。**例外（D-9、SVM だけ）**: 失敗の応答が署名を含むときは、期限つきの追跡の結果（設計 §5.8）に従う。追跡は再 settle ではない（新しい要求を facilitator に出さない）
+- **FR-20**: settle の成功は、facilitator の応答が**形どおり**であることで判定する: 成功の印、`network` が発行 offer の network と**一致**、`transaction` が **その network の識別子の形**。
+  **または（D-9、SVM だけ）**、`network` が一致し `transaction` が署名の形の失敗の応答について、設定の RPC の `getSignatureStatuses` が期限内に `err === null`・`confirmed`／`finalized` を返したこと
   （EVM は 32 バイトの hash、SVM は base58 の signature）。形が違う・network が違う・識別子が無い応答は `unknown`（既存の MPP 受信の「証跡なしで settled にしない」と同じ）。
   発行 offer は transaction の識別子を持たないので、識別子の**値**を offer と照合することはできない。Solana の `confirmed` は最終性の主張ではなく、`proof.onChainFinality: "not_checked"` のまま
 - **FR-21**: facilitator の応答を**信じる範囲**を明示する: Router が自分で確かめるのは credential の形（FR-16）と応答の形（FR-20）。**形の正しい偽の成功**（facilitator が嘘を言う）は、
   チェーンを独立に読まない限り見分けられず、本書では**受容するリスク**（§7）。独立したチェーンの照合（受取先の残高・transaction の存在）は範囲外（将来の別紙）
+  **D-9 の注**: 追跡は「facilitator が申告した署名の transaction がチェーンで確定したか」を読むだけで、その transaction の memo・額・宛先を読み直して「この offer が払われた」と独立に証明するものではない（信頼の範囲は形どおりの成功の経路と同じ）
 
 ### 4.6 Arc の送信（S-3）・Solana の送信（S-4）
 

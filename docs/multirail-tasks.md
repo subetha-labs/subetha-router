@@ -213,8 +213,10 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
   `ROUTER_SOLANA_RPC_URL` を渡す）、`tests/fixtures/solana-rpc.ts`（`getSignatureStatuses` と応答の列: `confirmed`／`finalized`／`processed`／`null`／`err`／malformed／huge／HTTP 500／遅延）。core は変えない
 - **完了条件（wire、Linux）**:
   - facilitator の fixture を `confirm: "timeout"`（SDK の実物が `settlement_pending` と署名を返す）にして、RPC の列 `[null, null, confirmed]` → `settled`（txRef = 署名）、RPC の要求はちょうど 3、診断 `svm_settle_followed_up` が 1 回。
-    `finalized` も同じ。`processed` が続く → 期限で `unknown`、要求は ⌈totalMs / intervalMs⌉ ＋ 1 以下で**ちょうどの数**を書く
-  - `err` が非 null → 1 回で打ち切って `unknown`／署名の無い失敗（`transaction: ""`、send 前）→ RPC 0 で `unknown`／`network` が違う成功・失敗 → RPC 0／形どおりの成功 → RPC 0（従来どおり）
+    `finalized` も同じ。`processed` が続く → 期限（完了の期限。全体の時間も測る）で `unknown`、要求は ⌈totalMs / intervalMs⌉ ＋ 1 以下で**ちょうどの数**を書く
+  - `err` が非 null（**`confirmationStatus: "confirmed"` と組にして**、確定度の検査が変異を隠さないように）→ 1 回で打ち切って `unknown`／形の違う status（`{}`、`err` の欄が無い）は再度 → 列 `[{}, confirmed]` で `settled`／
+    署名の無い失敗（`transaction: ""`）・**空でない形違いの署名（base58 でない、base58 だが 64 バイトでない）** → RPC 0 で `unknown`／`network` が違う・無い → RPC 0／形どおりの成功 → RPC 0（従来どおり）／
+    **署名を含む HTTP 4xx・5xx** → 追跡に入る／RPC の要求の params が `[[signature], { searchTransactionHistory: true }]` で method が `getSignatureStatuses`（本文を照合）
   - RPC の失敗（HTTP 500・JSON でない・64 KiB 超・timeout・名前解決の停止）は期限の内側で `unknown`（各 1 本。全体の時間の上限を書く）。`getTransaction` 等の他の method を呼ばない（fixture が `method not found` を返し、回数 0）
   - 統合（T7-c の harness）: Solana の静的と動的の購入で `confirm: "timeout"` → `delivered`、journal は `source_settled` を経る。再起動後の再提出は既存の結果（settle・RPC の追加 0）。追跡の途中の再起動 → `interrupted_at_restart`
   - 合成: 追跡の RPC は起動時の検査と同じ transport（loopback 不可・DNS の期限）で、ホストは拒否ホストに入ったまま。`ROUTER_SOLANA_RPC_URL` を変えれば追跡の宛先も変わる
