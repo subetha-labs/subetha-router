@@ -21,8 +21,6 @@ LOGTMP=$(mktemp)
 # 進行の記録（復旧はこれに従う）。
 OLD_ID=
 INGRESS_CLOSED=0
-OLD_STOPPED=0
-OLD_RENAMED=0
 NEW_ID=
 DONE=0
 
@@ -71,9 +69,7 @@ INGRESS_CLOSED=1
 if systemctl is-active --quiet caddy; then echo "caddy still active" >&2; false; fi
 
 docker stop "$OLD_ID" >/dev/null
-OLD_STOPPED=1
 docker rename "$OLD_ID" "$PREV"
-OLD_RENAMED=1
 
 NEW_ID=$(docker run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG")
 echo "new container: $NEW_ID"
