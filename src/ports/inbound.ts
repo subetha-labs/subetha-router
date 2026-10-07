@@ -55,3 +55,19 @@ export interface InboundRail {
   verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }>;
   settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult>;
 }
+
+/** Circle の facilitator への売り手証明（multirail 設計 §3）。目的は verify・settle だけ。 */
+export type SellerProofPurpose = "verify" | "settle";
+
+/**
+ * 売り手証明の能力。**`SellerRequest` 型にだけ署名する**（EIP-3009 の authorization や任意の typed data には署名できない）。
+ * 時刻・nonce・method は能力の中で決める。`src/` は鍵を持たず、起動側（`tools/`）が作って注入する。
+ */
+export interface SellerProofCapability {
+  /** 束縛された network（CAIP-2）。 */
+  readonly network: string;
+  /** 受取先（この鍵のアドレス）。route／プロファイルの `source.payTo` と一致しなければ起動しない（合成側）。 */
+  readonly address: string;
+  /** `Facilitator-Seller-Proof` header の値（base64url の封筒）。拒む・署名できないときは throw。 */
+  proofFor(purpose: SellerProofPurpose, bodyHash: string): Promise<string>;
+}
