@@ -149,7 +149,8 @@ header    = await capability.proofFor(purpose, bodyHash)                        
 |---|---|---|
 | Router の core | settle の**前**に承認期限と offer の期限を再検査する（`src/core/orchestrator.ts:621-635`、`src/core/dynamic.ts:564-567`）。settle の完了には期限を掛けない | 変えない（settle の待ちが承認期限の中に収まる必要はない） |
 | Router の ingress | `requestTimeout`・`headersTimeout` 10 秒（`src/http/app.ts:467`）。これは**要求の受信**の期限で、応答には掛からない（動的購入は今も 100 秒の応答を返す） | 変えない |
-| client（`src/client`・MCP tool） | 静的購入は `timeoutMs`（10 秒）、動的購入だけ `executeTimeoutMs`（120 秒。`src/client/index.ts:189,423`） | **購入はすべて `executeTimeoutMs`** にし、既定を **180 秒**に（静的の Arc・Solana は settle に 40〜50 秒掛かり得る。10 秒で切ると Router が続けているのに `transport_uncertain` になる）。動的の最悪は 102 ＋ 40 = **142 秒 < 180**。SVM は settle が 50 秒なので 152 秒、§5.8 の追跡（完了の期限 15 秒）を足して **167 秒 < 180**（余裕 13 秒）。静的は 50 ＋ 15 = 65 秒 |
+| client（`src/client`・MCP tool） | 静的購入は `timeoutMs`（10 秒）、動的購入だけ `executeTimeoutMs`（120 秒。`src/client/index.ts:189,423`） | **購入はすべて `executeTimeoutMs`** にし、既定を **180 秒**に（静的の Arc・Solana は settle に 40〜50 秒掛かり得る。10 秒で切ると Router が続けているのに `transport_uncertain` になる）。動的の最悪は 102 ＋ 40 = **142 秒 < 180**。SVM は settle が 50 秒なので 152 秒、§5.8 の追跡（完了の期限 15 秒）を足して **167 秒 < 180**（余裕 13 秒。102 秒の見積りは旧い settle の枠を含むので、50 秒を丸ごと足すのは保守的な側）。静的の settle ＋ 追跡は 50 ＋ 15 = 65 秒（購入全体ではない: 上流の読取・verify・journal・送信が加わる）。13 秒の余裕は運用上の許容で、端から端の保証ではない（受信・永続化・応答の送出が余裕を使う） |
+| MCP の ingress | 1 要求が接続を使える上限 `maxRequestMs` 180 秒（受信から応答の完了まで。`src/mcp/ingress.ts:170` で socket を切る） | 変えない。client の `executeTimeoutMs` だけを上げても ingress の上限は残る |
 
 ## 5. S-2: Solana の受信（新規 `src/adapters/inbound/x402-svm.ts`）
 
