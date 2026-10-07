@@ -17,14 +17,27 @@ export interface SolanaRpcAccounts {
   readonly mint: string;
   readonly decimals: number;
   readonly tokenProgram?: string;
-  /** ATA（jsonParsed で返す）。無ければ `null`。 */
-  readonly ata?: { readonly address: string; readonly owner: string; readonly mint?: string; readonly program?: string };
+  /** ATA（jsonParsed で返す）。無ければ `null`。`atas` と併用できる（`state.atas` の初期値は `[ata, ...atas]`）。 */
+  readonly ata?: SolanaRpcAta;
+  /** 複数の ATA（送信: Router の ATA と宛先の ATA。残高は `amount`、既定 0）。 */
+  readonly atas?: readonly SolanaRpcAta[];
   readonly blockhash?: string;
   /** TLS で待つ（guarded transport の本番方針の試験）。 */
   readonly tls?: TlsMaterial;
 }
 
+export interface SolanaRpcAta {
+  readonly address: string;
+  readonly owner: string;
+  readonly mint?: string;
+  readonly program?: string;
+  /** base units（既定 "0"）。`getAccountInfo` の `tokenAmount` と `getTokenAccountBalance` の両方に出る。 */
+  readonly amount?: string;
+}
+
 export interface SolanaRpcState {
+  /** 今ある ATA（試験が途中で消す・足す・残高を変える）。`getAccountInfo`・`getTokenAccountBalance` が見る。 */
+  atas: SolanaRpcAta[];
   /** 応答を遅らせる（ms）。 */
   delayMs: number;
   /**
@@ -51,11 +64,21 @@ export interface SolanaRpcFixture {
   close(): Promise<void>;
 }
 
+/** base units の 10 進文字列 → `uiAmountString`（文字列の算術。`Number` を通さないので精度を失わない）。 */
+export function uiAmountStringOf(amount: string, decimals: number): string {
+  if (!/^(0|[1-9][0-9]*)$/.test(amount)) throw new Error("fixture: amount must be a decimal string");
+  if (decimals === 0) return amount;
+  const padded = amount.padStart(decimals + 1, "0");
+  const whole = padded.slice(0, padded.length - decimals);
+  const fraction = padded.slice(padded.length - decimals).replace(/0+$/, "");
+  return fraction === "" ? whole : `${whole}.${fraction}`;
+}
+
 export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<SolanaRpcFixture> {
   const tokenProgram = accounts.tokenProgram ?? TOKEN_PROGRAM_ADDRESS;
   const blockhash = accounts.blockhash ?? "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD";
   const calls: { method: string; params: unknown }[] = [];
-  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined };
+  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])] };
   let connections = 0;
   const mintData = Buffer.from(
     getMintEncoder().encode({ mintAuthority: null, supply: 1_000_000_000_000n, decimals: accounts.decimals, isInitialized: true, freezeAuthority: null }),
@@ -141,6 +164,17 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
         reply({ context: { slot: 1 }, value: { blockhash, lastValidBlockHeight: 1000 } }, id);
         return;
       }
+      if (method === "getTokenAccountBalance") {
+        const [pubkey] = (params as [string] | undefined) ?? [];
+        const ata = state.atas.find((entry) => entry.address === pubkey);
+        if (ata === undefined) {
+          reply(undefined, id, { code: -32602, message: "Invalid param: could not find account" });
+          return;
+        }
+        const amount = ata.amount ?? "0";
+        reply({ context: { slot: 1 }, value: { amount, decimals: accounts.decimals, uiAmount: Number(uiAmountStringOf(amount, accounts.decimals)), uiAmountString: uiAmountStringOf(amount, accounts.decimals) } }, id);
+        return;
+      }
       if (method === "getAccountInfo") {
         const [pubkey, config] = (params as [string, { encoding?: string } | undefined]) ?? [];
         const encoding = config?.encoding ?? "base64";
@@ -151,12 +185,14 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
           reply({ context: { slot: 1 }, value: { data, executable: false, lamports: 1_461_600, owner: tokenProgram, rentEpoch: 0, space: 82 } }, id);
           return;
         }
-        if (accounts.ata !== undefined && pubkey === accounts.ata.address) {
-          const program = accounts.ata.program ?? tokenProgram;
-          const mint = accounts.ata.mint ?? accounts.mint;
+        const ata = state.atas.find((entry) => entry.address === pubkey);
+        if (ata !== undefined) {
+          const program = ata.program ?? tokenProgram;
+          const mint = ata.mint ?? accounts.mint;
+          const amount = ata.amount ?? "0";
           const data = encoding === "jsonParsed"
-            ? { program: "spl-token", parsed: { type: "account", info: { mint, owner: accounts.ata.owner, state: "initialized", isNative: false, tokenAmount: { amount: "0", decimals: accounts.decimals, uiAmount: 0, uiAmountString: "0" } } }, space: 165 }
-            : [Buffer.from(getTokenEncoder().encode({ mint: address(mint), owner: address(accounts.ata.owner), amount: 0n, delegate: null, state: 1, isNative: null, delegatedAmount: 0n, closeAuthority: null })).toString("base64"), "base64"];
+            ? { program: "spl-token", parsed: { type: "account", info: { mint, owner: ata.owner, state: "initialized", isNative: false, tokenAmount: { amount, decimals: accounts.decimals, uiAmount: Number(uiAmountStringOf(amount, accounts.decimals)), uiAmountString: uiAmountStringOf(amount, accounts.decimals) } } }, space: 165 }
+            : [Buffer.from(getTokenEncoder().encode({ mint: address(mint), owner: address(ata.owner), amount: BigInt(amount), delegate: null, state: 1, isNative: null, delegatedAmount: 0n, closeAuthority: null })).toString("base64"), "base64"];
           reply({ context: { slot: 1 }, value: { data, executable: false, lamports: 2_039_280, owner: program, rentEpoch: 0, space: 165 } }, id);
           return;
         }
