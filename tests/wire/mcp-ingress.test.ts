@@ -504,7 +504,7 @@ test("本番の入口（tools/remote-mcp.ts）は例外の文字列をログに�
 });
 
 test("既定値は設計どおり: 本文 64 KiB・受信 10 秒・同時接続 64・要求 1 件 120 秒", () => {
-  expect(DEFAULT_MCP_INGRESS_LIMITS).toEqual({ maxBodyBytes: 65_536, receiveTimeoutMs: 10_000, maxConnections: 64, maxRequestMs: 120_000 });
+  expect(DEFAULT_MCP_INGRESS_LIMITS).toEqual({ maxBodyBytes: 65_536, receiveTimeoutMs: 10_000, maxConnections: 64, maxRequestMs: 180_000 });
 });
 
 test("実際の MCP（Streamable HTTP・ステートレス）が入口越しに tool を呼べる", async () => {

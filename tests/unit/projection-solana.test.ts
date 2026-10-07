@@ -34,7 +34,7 @@ const config = parseRouterConfig(
 describe("Solana の受信 route の公開射影", () => {
   test("一覧に network・mint・桁がそのまま出る", () => {
     const body = routeListBody(config, BASE) as { routes: { source: Record<string, unknown> }[] };
-    expect(body.routes[0]?.source).toEqual({ amount: "10000", asset: MINT, decimals: 6, network: SOL });
+    expect(body.routes[0]?.source).toEqual({ amount: "10000", asset: MINT, decimals: 6, network: SOL, payTo: OWNER });
   });
 
   test("quote の subject に base58 の受取先と 6 桁が出る（0x に書き換えない）", () => {

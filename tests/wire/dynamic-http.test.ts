@@ -237,14 +237,15 @@ describe("HTTP: R2 の動的 quote", () => {
       profiles: [{
         profileId: PROFILE_ID,
         resource: { url: `${CANONICAL}/v1/routes/${PROFILE_ID}/resource`, method: "GET" },
-        source: { rail: "mpp", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6 },
+        source: { rail: "mpp", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, payTo: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/) },
         destination: { rail: "x402", scheme: "exact", network: DST_NETWORK, asset: DST_ASSET, decimals: 6 },
         maxUpstreamAmount: "100000",
         fee: { flat: "1000", bps: 0, min: "1000" },
         disclosures: expect.objectContaining({ fundsMoveOnCredential: true, refundOnFailure: false }),
       }],
     });
-    expect(r.text).not.toContain("payTo");
+    // 一覧に出る受取先は**受信側（Router の受取 owner／アドレス）だけ**。送信側の受取先は quote ごとに決まるので一覧には無い（multirail T7-a）。
+    expect(r.text).not.toContain(DST_PAY_TO);
     expect(r.text).not.toContain("tokenDomain");
     await server.close();
     await core.close();

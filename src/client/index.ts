@@ -204,6 +204,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   const doFetch = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const executeTimeoutMs = options.executeTimeoutMs ?? DEFAULT_EXECUTE_TIMEOUT_MS;
+  const signalFor = options.signalForTest ?? ((ms: number): AbortSignal => AbortSignal.timeout(ms));
   // 動的 quote の期限: 明示の quoteTimeoutMs → 明示の timeoutMs → 既定 30 秒（明示した timeoutMs は従来どおり効く）。
   const quoteTimeoutMs = options.quoteTimeoutMs ?? options.timeoutMs ?? DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS;
 
@@ -233,7 +234,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       ...(init.body === undefined ? {} : { body: init.body }),
       // リダイレクトは追わない（資格情報を別の宛先へ運ばない）。
       redirect: "error",
-      signal: AbortSignal.timeout(init.timeoutMs ?? timeoutMs),
+      signal: signalFor(init.timeoutMs ?? timeoutMs),
     });
     let body: unknown;
     try {

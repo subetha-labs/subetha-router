@@ -21,7 +21,8 @@ export function dynamicListingOf(config: RouterConfig): Record<string, unknown> 
     enabled: dynamic.enabled,
     profiles: Object.values(dynamic.profiles).map((profile) => ({
       profileId: profile.profileId,
-      source: { rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals },
+      // 受取先（Router の受取 owner／アドレス）も一覧に出す（AC-6。呼び出し側が quote の前に相手を確かめられる）。
+      source: { rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals, payTo: profile.source.payTo },
       destination: { rail: profile.rail, scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, decimals: profile.destination.decimals },
       maxUpstreamAmount: profile.maxUpstreamAmount,
       fee: { ...profile.fee },
@@ -54,6 +55,8 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): u
         asset: route.source.asset,
         decimals: route.source.decimals,
         network: route.source.network,
+        // x402／mpp 受信の受取先（subetha 受信は facilitator が決めるので無い）。
+        ...(route.source.payTo === undefined ? {} : { payTo: route.source.payTo }),
       },
       destination: {
         rail: route.rail ?? route.destination.scheme,
