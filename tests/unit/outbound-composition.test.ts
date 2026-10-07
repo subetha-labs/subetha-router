@@ -201,7 +201,7 @@ describe("outboundCapabilitiesOf（起動時の検査）", () => {
     ["SVM の key が solana: でない", { svmSigning: { [BASE]: svm(BASE, SOL_OWNER) } }],
     ["SVM の address の形違い（0x）", { svmSigning: { [SOL]: svm(SOL, "0x0000000000000000000000000000000000000501") } }],
     ["SVM の address が 32 バイトに復号できない（33 個の 1 = 33 バイトのゼロ）", { svmSigning: { [SOL]: svm(SOL, "1".repeat(33)) } }],
-    ["SVM の address が 31 バイトに復号される", { svmSigning: { [SOL]: svm(SOL, "1".repeat(31) + "2".repeat(1)) } }],
+    ["SVM の address が 32 文字でも 32 バイトに復号されない（2 が 32 個 ≈ 24 バイト）", { svmSigning: { [SOL]: svm(SOL, "2".repeat(32)) } }],
   ])("起動しない: %s", (_name, capabilities) => {
     expect(() => outboundCapabilitiesOf(capabilities as RouterCapabilities)).toThrow(/signer_not_authorized/);
   });
