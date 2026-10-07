@@ -22,6 +22,12 @@ import { RAILS_ACTIVATION, type RailsActivation } from "./remote-mcp-config.js";
 import { publicJournalPathOf, startHost, type HostOptions, type RunningHost } from "./remote-mcp.js";
 
 export const ACCEPTANCE_PORT_ENV = "SUBETHA_ACCEPTANCE_PORT";
+/**
+ * bind するアドレス。既定 `127.0.0.1`。コンテナの中で動かし、ホストの loopback だけに port を公開する（`-p 127.0.0.1:8788:8788`）ときは
+ * コンテナの中では `0.0.0.0` でなければ届かないので、その 2 つだけを許す（公開しないことはホスト側の port の公開で保つ）。
+ */
+export const ACCEPTANCE_BIND_ENV = "SUBETHA_ACCEPTANCE_BIND";
+const ACCEPTANCE_BINDS = ["127.0.0.1", "0.0.0.0"] as const;
 export const ACCEPTANCE_JOURNAL_ENV = "SUBETHA_ACCEPTANCE_JOURNAL_PATH";
 
 function argOf(argv: readonly string[], name: string): string | undefined {
@@ -96,11 +102,16 @@ export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefi
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw new Error(`${ACCEPTANCE_PORT_ENV} must be an integer in 0..65535`);
   }
+  const bindRaw = env[ACCEPTANCE_BIND_ENV];
+  const bind = bindRaw === undefined || bindRaw === "" ? "127.0.0.1" : bindRaw;
+  if (!(ACCEPTANCE_BINDS as readonly string[]).includes(bind)) {
+    throw new Error(`${ACCEPTANCE_BIND_ENV} must be 127.0.0.1 (default) or 0.0.0.0 (only inside a container whose port is published to the host's loopback)`);
+  }
   // 公開の入口の定数はこの起動でも無効のまま（凍結。ここでは読むだけ）。
   if (RAILS_ACTIVATION.arc || RAILS_ACTIVATION.solana) {
     throw new Error("the public RAILS_ACTIVATION must stay disabled");
   }
-  return { activation, bind: "127.0.0.1", port, journalPath };
+  return { activation, bind, port, journalPath };
 }
 
 async function main(): Promise<void> {

@@ -401,6 +401,12 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）の選択�
     expect(() => acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_PORT: "70000" })).toThrow(/SUBETHA_ACCEPTANCE_PORT must be an integer/);
     expect(() => acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_PORT: "abc" })).toThrow(/SUBETHA_ACCEPTANCE_PORT must be an integer/);
     expect(() => acceptanceOptionsOf({}, ["--rails", ""])).toThrow(/at least one of arc, solana/);
+    // bind は 127.0.0.1（既定）か 0.0.0.0（コンテナの中で、ホストの loopback に port を公開するとき）だけ。
+    expect(acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_BIND: "0.0.0.0" }).bind).toBe("0.0.0.0");
+    expect(acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_BIND: "" }).bind).toBe("127.0.0.1");
+    for (const bad of ["::", "10.0.0.5", "localhost", "router.subethalabs.com", "0.0.0.0 "]) {
+      expect(() => acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_BIND: bad }), bad).toThrow(/SUBETHA_ACCEPTANCE_BIND must be 127.0.0.1/);
+    }
     expect(() => acceptanceOptionsOf({}, ["--rails", "base"])).toThrow(/SUBETHA_RAILS_ACTIVATION must be a comma-separated subset/);
   });
 });

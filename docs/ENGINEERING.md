@@ -229,8 +229,9 @@ may be dynamic targets), and refuses to start when the MPP capability's RPC host
 Two more x402 inbound adapters exist (`docs/multirail-design.md`); the core does not branch on them.
 
 - **Network table** (`KNOWN_NETWORKS` in `src/config.ts`, code only): per network the family, allowed inbound/outbound rails, the facilitator
-  kind, and the assets (id, decimals, EIP-712 domain). Every route, profile, offer and budget bucket is validated against it at startup and
-  by `npm run sign` on the caller side.
+  kind, and the assets (id, decimals, EIP-712 domain). At startup the routes' and profiles' source/destination terms (network direction, rail,
+  asset) and the `inboundFacilitators` kinds are validated against it (budget buckets are parsed for shape only, not looked up in the table).
+  On the caller side `npm run sign` classifies the quote's `source.offer` against the same table and refuses offers outside it.
 - **Arc (`eip155:5042002`, kind `circle`)**: `createX402Inbound` with `kind: "circle"`. Every `/verify` and `/settle` carries a **seller proof**
   (EIP-712 `SellerRequest` over the request body's hash, 60 s lifetime, fresh nonce) produced by a `SellerProofCapability` injected at startup
   (`RouterCapabilities.sellerProofs[network]`). The capability holds the proof-only receiving key's signing closure; `src/` never sees the key and

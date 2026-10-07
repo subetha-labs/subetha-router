@@ -124,14 +124,29 @@ Router の process の能力の注入の**両方**がそれを見る（`tools/ra
 **配備（G-2。無効のまま）**: env（上の 1〜3）を置いて公開の process を再起動する。無効なので新しい route・facilitator・起動時の検査は**動かない**——確かめるのは
 「起動して既存の経路が従来どおり」と、egress 制御（§8b）が **Circle（`api.circle.com`）・x402.org・Solana の RPC** への egress を許し、それ以外を拒むこと。rollback の container を 1 つ保つ。
 
-**受け入れ（G-3。owner の確認の上で、支払いごとに quote を見せる）**: 公開の process の定数は触らず、**受け入れ用の起動**で行う:
+**受け入れ（G-3。owner の確認の上で、支払いごとに quote を見せる）**: 公開の process の定数は触らず、**受け入れ用の起動**で行う。
+公開の Router と**同じイメージ・同じ network（egress 制御の中）・同じボリューム**から**別のコンテナ**を起動し、MCP の入口は**ホストの loopback だけ**に公開する
+（Node や依存をホストに入れる必要はない。イメージに `tools/` と `node_modules` が入っている）:
 
 ```sh
-# 本番の env をそのまま読む（送信の鍵・MPP 受信の秘密・Arc の受取鍵・Solana の受取 owner・RPC）。別の journal、127.0.0.1 の使い捨て port。
-SUBETHA_ACCEPTANCE_JOURNAL_PATH=/var/lib/subetha-router/acceptance/journal.ndjson \
-  node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
-# stdout の 1 行: {"event":"listening","port":<MCP>,"routerPort":<Router>,"mode":"acceptance","rails":"arc,solana"}
+# 公開の Router と同じ env（送信の鍵・MPP 受信の秘密・Tempo の RPC）に、Arc の受取鍵・Solana の受取 owner・Solana の RPC を足す。
+# journal はボリュームの中の別のパス（公開の journal と同じファイル・別名は拒まれる）。コンテナの中では 0.0.0.0 に bind し、ホスト側は 127.0.0.1 だけに公開する。
+docker run --rm --name subetha-router-acceptance \
+  --network subetha-router-net -p 127.0.0.1:8788:8788 \
+  -v /var/lib/subetha-router:/app/runtime \
+  -e SUBETHA_OUTBOUND_PRIVATE_KEY=... -e SUBETHA_ROUTER_RECEIVER=... -e SUBETHA_MPP_INBOUND_SECRET=... -e SUBETHA_TEMPO_RPC_URL=... \
+  -e SUBETHA_ARC_RECEIVER_KEY=... -e SUBETHA_SOLANA_RECEIVER=... -e SUBETHA_SOLANA_RPC_URL=... \
+  -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_BIND=0.0.0.0 \
+  -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/journal.ndjson \
+  subetha-router node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
+# stdout の 1 行（起動できたとき）: {"event":"listening","port":8788,"address":"0.0.0.0","routerPort":<Router>,"mode":"acceptance","rails":"arc,solana"}
+# 手元からは ssh -L 8788:127.0.0.1:8788 で MCP（http://127.0.0.1:8788/mcp）に届く。Router 本体の HTTP はコンテナの外に出さない。
 ```
+
+起動に失敗したときホスト（この起動）の stderr に出るのは固定文（`could not start the Router`）だけで、Router の process の stderr（`svm inbound` の起動時の検査の
+失敗の理由、`tempo rpc:` の行）は**転送されない**（§2 の表の `SUBETHA_TEMPO_RPC_URL` の注と同じ制限）。理由を見るには、同じ env と生成された設定
+（`runtime/remote-*/router.config.json`）で `tools/remote-router-process.ts` を直接起動する（`-e ROUTER_CONFIG_PATH=... -e ROUTER_JOURNAL_PATH=runtime/acceptance/journal.ndjson`
+に加えて `-e SUBETHA_RAILS_ACTIVATION=arc,solana`。入口が子に渡す env は `tools/remote-mcp.ts` の `hostPlanOf` のとおり）。
 
 **最初に**この起動で Solana の起動時の検査（`/supported`・ATA）が通ることを確かめる（本番 env での検査の証拠）。次に AC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、
 静的・動的）を各 1 件、使い捨ての payer で。証拠: Arc は settle の tx が Arc の RPC で `success` かつ受取先の残高の増分、Solana は signature が devnet で confirmed かつ ATA の残高の増分、
@@ -141,9 +156,12 @@ SUBETHA_ACCEPTANCE_JOURNAL_PATH=/var/lib/subetha-router/acceptance/journal.ndjso
 **有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える。
 **戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
 
-**有効にした後に見るもの**: 起動ログに `svm inbound` の起動時の検査の失敗が無いこと（あれば起動しない）、stderr の `facilitator diagnostic facilitator_trial_exhausted`
-（Circle の trial が尽きた。要求の後なので結果は `unknown`）、`unknown` の終端（settle の要求の後の失敗。自動で再 settle しない。**facilitator が止まれば資金は動かない、とは言えない**）、
-`destination_blocked`（動的 URL が Circle・x402.org・Solana RPC に向いた）。
+**有効にした後に見るもの**（hosted の入口は Router の process の stderr を転送しないので、**ログの不在は成功の証拠にならない**。見るのは次の口）:
+起動の成否は `docker logs` の `router: {"event":"listening",...}` の有無（Solana の起動時の検査が落ちれば Router は起動せず、入口は `could not start the Router` で終わる。
+理由は上記のとおり `tools/remote-router-process.ts` を直接起動して読む）。稼働中は journal（ボリュームの `journal.ndjson`）の終端: `unknown`（settle の要求の後の失敗。自動で再 settle しない。
+**facilitator が止まれば資金は動かない、とは言えない**）と、`subetha_router_status` の射影。Circle の trial が尽きた（HTTP 403 `registration_required`）ときの診断
+`facilitator diagnostic facilitator_trial_exhausted` と、動的 URL が Circle・x402.org・Solana RPC に向いたときの `destination_blocked` は Router の process の stderr にしか出ない——
+hosted では journal の `unknown` と呼び出し側への `url` の拒否として現れる。
 
 ### journal を残す（`-v` は必須）
 
