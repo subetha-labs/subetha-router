@@ -4,6 +4,9 @@
  *
  *   npx tsx tools/rails-verify-probe.ts svm prepare   … devnet の SOL を payer に airdrop し、受取 owner の ATA を作る（rent は payer）
  *   npx tsx tools/rails-verify-probe.ts svm verify    … 起動時の検査（/supported・ATA）→ adapter の offer → svm-payer で署名 → x402.org の /verify
+ *   npx tsx tools/rails-verify-probe.ts arc verify    … Circle の facilitator: adapter（kind circle、証明専用の受取鍵の能力）の offer → x402-payer で EIP-3009 に署名 → /verify
+ *
+ * env（`.claude_workflow/local/t6-arc.env`）: T6_ARC_RECEIVER_KEY（証明専用。0x hex）。payer は `.claude_workflow/local/t7-disposable-key.env` の T7_PAYER_PRIVATE_KEY。
  *
  * env（`.claude_workflow/local/t6-solana.env`。ignored）: T6_SOLANA_PAYER_KEY, T6_SOLANA_RECEIVER_KEY（base58 の 32 バイトの seed）、
  * 任意 T6_SOLANA_RPC_URL（既定 devnet の公開 RPC）、T6_SVM_FACILITATOR_URL（既定 https://www.x402.org/facilitator）。
@@ -55,9 +58,49 @@ function env(name: string, fallback?: string): string {
 
 const rail = process.argv[2];
 const command = process.argv[3];
-if (rail !== "svm" || (command !== "prepare" && command !== "verify")) {
-  process.stderr.write("usage: rails-verify-probe.ts svm prepare|verify\n");
+if (!((rail === "svm" && (command === "prepare" || command === "verify")) || (rail === "arc" && command === "verify"))) {
+  process.stderr.write("usage: rails-verify-probe.ts svm prepare|verify | arc verify\n");
   process.exit(2);
+}
+
+if (rail === "arc") {
+  // ---- Arc testnet（Circle の Facilitator Service）。/verify だけ。
+  const ARC = "eip155:5042002";
+  const arcEntry = KNOWN_NETWORKS.find((n) => n.network === ARC)!;
+  const arcAsset = arcEntry.assets[0]!;
+  const readEnv = (file: string, name: string): string => {
+    const line = readFileSync(file, "utf8").split("\n").find((l) => l.startsWith(`${name}=`));
+    if (line === undefined) { process.stderr.write(`${name} is required in ${file}\n`); process.exit(2); }
+    return line.slice(name.length + 1).trim();
+  };
+  const receiverKey = readEnv(".claude_workflow/local/t6-arc.env", "T6_ARC_RECEIVER_KEY");
+  const payerKey = readEnv(".claude_workflow/local/t7-disposable-key.env", "T7_PAYER_PRIVATE_KEY");
+  const { createRealSellerProofCapability } = await import("./real-seller-proof-capability.js");
+  const { createX402Inbound } = await import("../src/adapters/inbound/x402.js");
+  const { createX402Payer } = await import("./x402-payer.js");
+  const sellerProof = createRealSellerProofCapability(ARC, { SUBETHA_ARC_RECEIVER_KEY: receiverKey });
+  const facilitatorUrl = process.env["T6_CIRCLE_FACILITATOR_URL"] ?? "https://api.circle.com/v1/facilitator/x402";
+  const arcRecord: Record<string, unknown> = { at: new Date().toISOString(), rail, command, network: ARC, asset: arcAsset.id, receiver: sellerProof.address, facilitatorUrl };
+  const transport = createGuardedTransport({ allowLoopback: false, report: (event) => { (arcRecord["transportEvents"] as unknown[] | undefined)?.push(event) ?? (arcRecord["transportEvents"] = [event]); }, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+  const diagnostics: string[] = [];
+  const arcRail = createX402Inbound({ kind: "circle", sellerProof, facilitatorUrl, payTo: sellerProof.address, transport, assetDomain: arcAsset.domain!, onDiagnostic: (code) => diagnostics.push(code) });
+  const offer = await arcRail.createOffer({ routeId: "t6-probe", amount: "10000", asset: arcAsset.id, network: ARC, routeBinding: "t6-probe|GET|%2Ft6", nowMs: Date.now() });
+  const payer = createX402Payer(payerKey);
+  arcRecord["payer"] = payer.address;
+  const credential = JSON.parse(Buffer.from(await payer.credentialFor(offer as never, 5042002), "base64").toString("utf8")) as { x402Version: number; accepted: never; payload: Record<string, unknown> & { challengeNonce: string } };
+  const preflight = arcRail.preflight(offer, credential as never, Date.now());
+  arcRecord["preflight"] = preflight;
+  if (!preflight.ok) {
+    writeFileSync(".claude_workflow/local/t6-arc-verify.json", `${JSON.stringify(arcRecord, null, 2)}\n`);
+    process.stderr.write(`preflight refused: ${JSON.stringify(preflight)}\n`);
+    process.exit(1);
+  }
+  const verified = await arcRail.verify(offer, credential as never, { routeId: "t6-probe" });
+  arcRecord["verify"] = verified;
+  arcRecord["diagnostics"] = diagnostics;
+  writeFileSync(".claude_workflow/local/t6-arc-verify.json", `${JSON.stringify(arcRecord, null, 2)}\n`);
+  process.stdout.write(`verify: ${JSON.stringify(verified)} (receiver ${sellerProof.address}; no settle was sent)\n`);
+  process.exit(0);
 }
 const rpcUrl = env("T6_SOLANA_RPC_URL", "https://api.devnet.solana.com");
 const facilitatorUrl = env("T6_SVM_FACILITATOR_URL", "https://www.x402.org/facilitator");

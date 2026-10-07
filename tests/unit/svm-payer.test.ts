@@ -48,7 +48,7 @@ describe("svm payer", () => {
     expect(decoded.payload.challengeNonce).toBe(NONCE);
     expect(decoded.payload).not.toHaveProperty("txHash");
     const result = checkSvmTransaction(decoded.payload.transaction, policy, "10000", NONCE);
-    expect(result).toMatchObject({ ok: true, authority: payer.address, units: 20_000, microLamports: 1n });
+    expect(result).toMatchObject({ ok: true, authority: payer.address, units: 60_000, microLamports: 1n });
   });
 
   test("memo ≠ nonce・feePayer 無しは RPC の前に拒む（要求 0）", async () => {

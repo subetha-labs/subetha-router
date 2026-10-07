@@ -215,7 +215,7 @@ settle の結果は §6 の表。HTTP の期限は verify 10 秒、settle **50 �
 - 鍵: env `SOLANA_PAYER_PRIVATE_KEY`（base58 の 64 バイト、または hex の 32 バイトの seed）。`npm run wallet:new:solana` で作る（`tools/wallet-new-solana.ts`）
 - **SDK の client（`createPaymentPayload`）は使わない**（mint の metadata を RPC から読み、桁と program を RPC の値で決める。`chunk-WIPN332D.mjs:2-9`）。transaction は
   `@solana/kit`・`@solana-program/token`・`@solana-program/compute-budget` で**固定値だけで組む**: 表の mint・decimals・token program、offer の `payTo` → 宛先 ATA（同じ導出）、
-  `amount`、`extra.feePayer`、memo = `extra.memo`、`units = 20,000`、`microLamports = 1`（SDK の既定と同じ）。署名者の ATA は鍵から導く
+  `amount`、`extra.feePayer`、memo = `extra.memo`、`units = 60,000`（SDK の既定 20,000 では 66 文字の memo で尽きる。T6 の実測 25,332 CU）、`microLamports = 1`（SDK の既定と同じ）。署名者の ATA は鍵から導く
 - RPC は **`getLatestBlockhash` の 1 回だけ**（`SOLANA_RPC_URL`、既定 `https://api.devnet.solana.com`。tools は呼び出し側で、`wallet:balance` と同じく自分の fetch）。
   mint も残高も読まない。simulate しない
 - decimals・token program は**表から**（offer には無い）。offer の `extra` にそれらが入っていて表と違えば拒否
@@ -294,8 +294,8 @@ Memo の命令は `@solana-program/memo` を入れずに生で組む（program `
 | # | 事項 | 扱い |
 |---|---|---|
 | U-1 | Circle の `/settle` が 30 秒の窓の中で `success: true` を返す割合。`settlement_pending` が多ければ `/status` の bounded な polling（能力に purpose `status`・method `GET` を足す）を足す | AC-1 の試行で測る。第 2 版は `unknown` |
-| U-2 | x402.org の SVM `/verify` が §5.3 の形を受理すること（simulate を含む） | 使い捨ての ed25519 鍵と devnet の USDC（faucet.circle.com）で `/verify` を実行（settle はしない）。実装の最初のタスク |
-| U-3 | `@solana/kit` の compile の並びが SDK の client と同じこと、decoder の API 名 | §5.7 の互換の試験で固定 |
+| U-2 | x402.org の SVM `/verify` が §5.3 の形を受理すること（simulate を含む） | **確認済み（T6、2026-10-07）**: 使い捨ての鍵と devnet の USDC（faucet）で、起動時の検査（`/supported`・ATA）→ adapter の offer → `svm-payer` の署名 → x402.org の `/verify` が **`isValid: true`**（settle はしていない）。最初の試行は `invalid_exact_svm_transaction_simulation_failed`（命令 3 = Memo で `ProgramFailedToComplete`）: SDK の既定の compute 上限 20,000 CU では **66 文字の memo（nonce）で尽きる**。devnet の simulate の実測は **25,332 CU**（上限 200,000 で成功）。道具の既定を **60,000 CU** に上げた（Router の上限 200,000 の内側。§5.6）。Circle も同日に `/verify` **`isValid: true`**（使い捨ての証明専用の受取鍵、Arc testnet の USDC を持つ使い捨て payer。封筒の `version: 1` と `assetTransferMethod` が受理された。settle はしていない） |
+| U-3 | `@solana/kit` の compile の並びが SDK の client と同じこと、decoder の API 名 | **固定済み（T4-a）**: 本物の `@x402/svm` の client が組んだ transaction を Router の検査が受ける互換の試験 |
 | U-4 | Circle の wire `maxTimeoutSeconds`（30）と settle の実際の所要 | AC-1 で確認。30 で足りなければ値を上げる（settle の HTTP 期限も連動） |
 | U-5 | kind `x402`/EVM（Base Sepolia）の `success: false` → `rejected`（静的は終端の `source_failed`、公開状態 `awaiting_payment`）を §6 の表（`unknown`）に揃えるか | owner の決定。揃えると静的の既存の試験と公開状態が変わる |
 
