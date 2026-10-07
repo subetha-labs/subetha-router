@@ -99,7 +99,7 @@ describe("起動時の検査: 肯定", () => {
     expect(fac.seen.supportedCalls).toBe(1);
     expect(fac.seen.verifyCalls + fac.seen.settleCalls).toBe(0);
     expect(rpc.calls).toHaveLength(1);
-    expect(rpc.calls[0]).toMatchObject({ method: "getAccountInfo", params: [ata, { encoding: "jsonParsed" }] });
+    expect(rpc.calls[0]).toEqual({ method: "getAccountInfo", params: [ata, { encoding: "jsonParsed", commitment: "confirmed" }] });
     expect(fac.seen.connections).toBe(1);
     expect(rpc.connections()).toBe(1);
   });
@@ -124,17 +124,23 @@ describe("起動時の検査: /supported の否定（fail closed）", () => {
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /no exact kind/);
     expect(rpc.calls).toHaveLength(0);
   });
-  it("feePayer が 2 つ", async () => {
+  it("feePayer が 2 つ（同じ値の重複は 1 つ）", async () => {
     const { fac, rpc } = await fixtures();
     fac.state.kinds = [supportedKind(SOL, FEE_PAYER), supportedKind(SOL, "11111111111111111111111111111112")];
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /more than one feePayer/);
+    expect(rpc.calls).toHaveLength(0);
+    fac.state.kinds = [supportedKind(SOL, FEE_PAYER), supportedKind(SOL, FEE_PAYER)];
+    expect((await resolveSvmInboundPolicy(inputsOf(fac, rpc))).feePayer).toBe(FEE_PAYER);
   });
-  it("feePayer が 32 バイトでない・無い", async () => {
+  it("feePayer が 32 バイトでない・無い・extra 無し（正しい項目と並んでいても拒む）", async () => {
     const { fac, rpc } = await fixtures();
     fac.state.kinds = [supportedKind(SOL, "abc")];
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /well-formed feePayer/);
     fac.state.kinds = [{ x402Version: 2, scheme: "exact", network: SOL, extra: {} }];
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /well-formed feePayer/);
+    fac.state.kinds = [supportedKind(SOL, FEE_PAYER), { x402Version: 2, scheme: "exact", network: SOL }];
+    await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /well-formed feePayer/);
+    expect(rpc.calls).toHaveLength(0);
   });
   it("feePayer が payTo・ATA・mint・token program・Memo・ComputeBudget のどれかと等しい", async () => {
     const { fac, rpc } = await fixtures();
@@ -146,7 +152,7 @@ describe("起動時の検査: /supported の否定（fail closed）", () => {
     expect(() => assertFeePayerIsolated(FEE_PAYER, { payTo: owner, destinationAta: ata, mint: MINT, tokenProgram: TOKEN_PROGRAM_ADDRESS })).not.toThrow();
     expect(() => feePayerOfSupported({ kinds: "x" }, SOL)).toThrow(/no kinds/);
   });
-  it("JSON でない・500・64 KiB 超・redirect・期限切れ", async () => {
+  it("JSON でない・500（本文は正しい）・64 KiB 超（本文は正しい）・redirect・期限切れ", async () => {
     const { fac, rpc } = await fixtures();
     for (const mode of ["not-json", "error", "huge"] as const) {
       fac.state.supportedReply = mode;
@@ -180,14 +186,18 @@ describe("起動時の検査: ATA の否定（fail closed）", () => {
     const { fac, rpc } = await fixtures({ ata: { program: TOKEN_2022 } });
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /not owned by the configured token program/);
   });
-  it("RPC が読めない・JSON でない・64 KiB 超・redirect・期限切れ", async () => {
+  it("RPC が 500（本文は正しい）・JSON でない・64 KiB 超（本文は正しい）・JSON-RPC error・redirect（行き先へ 0 接続）・期限切れ", async () => {
     const { fac, rpc } = await fixtures();
-    for (const mode of ["error", "malformed", "huge"] as const) {
+    for (const mode of ["error", "malformed", "huge", "rpc-error"] as const) {
       rpc.state.reply = mode;
-      await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /could not be read|could not be parsed|does not exist/);
+      await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /did not return an account record/);
     }
+    const sink = await startSvmFacilitator(TLS, SOL, FEE_PAYER, "other.test");
+    closers.push(sink.close);
     rpc.state.reply = "redirect";
-    await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc)), /could not be read/);
+    rpc.state.redirectTo = "https://other.test/";
+    await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { transport: transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port, "other.test": sink.port }) })), /RPC could not be read/);
+    expect(sink.seen.connections).toBe(0);
     rpc.state.reply = "ok";
     rpc.state.delayMs = 1_500;
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { timeoutMs: 300 })), /could not be read/);
@@ -202,18 +212,27 @@ describe("起動時の検査: ATA の否定（fail closed）", () => {
 });
 
 describe("起動時の検査: transport の方針（SR-2。Linux で受け入れ）", () => {
+  it("literal の loopback URL には接続しない（0 接続）", async () => {
+    const { fac, rpc } = await fixtures();
+    await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { facilitatorUrl: `https://127.0.0.1:${fac.port}` })), /\/supported could not be read/);
+    expect(fac.seen.connections).toBe(0);
+    await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { rpcUrl: `https://127.0.0.1:${rpc.port}` })), /RPC could not be read/);
+    expect(rpc.connections()).toBe(0);
+  });
   it("loopback に解決する名前には接続しない（0 接続）", async () => {
     const { fac, rpc } = await fixtures();
     const transport = createGuardedTransport({ allowLoopback: false, report: () => {}, interfaces: () => [], tls: { ca: [TLS.ca] }, lookup: publicLookup({ [FAC_HOST]: ["127.0.0.1"] }), dialForTest: dialTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port }), dns: { timeoutMs: 3_000, maxInFlight: 4 } });
     await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { transport })), /\/supported could not be read/);
     expect(fac.seen.connections).toBe(0);
   });
-  it("禁止アドレス（private）に解決する RPC には接続しない", async () => {
+  it("禁止アドレス（private・link-local・metadata・IPv6 の loopback）に解決する RPC には接続しない", async () => {
     const { fac, rpc } = await fixtures();
-    const transport = createGuardedTransport({ allowLoopback: false, report: () => {}, interfaces: () => [], tls: { ca: [TLS.ca] }, lookup: publicLookup({ [RPC_HOST]: ["10.0.0.5"] }), dialForTest: dialTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port }), dns: { timeoutMs: 3_000, maxInFlight: 4 } });
-    await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { transport })), /RPC could not be read/);
+    for (const forbidden of ["10.0.0.5", "169.254.169.254", "fd00::1", "::1"]) {
+      const transport = createGuardedTransport({ allowLoopback: false, report: () => {}, interfaces: () => [], tls: { ca: [TLS.ca] }, lookup: publicLookup({ [RPC_HOST]: [forbidden] }), dialForTest: dialTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port }), dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+      await expectConfigError(resolveSvmInboundPolicy(inputsOf(fac, rpc, { transport })), /RPC could not be read/);
+    }
     expect(rpc.connections()).toBe(0);
-    expect(fac.seen.supportedCalls).toBe(1);
+    expect(fac.seen.supportedCalls).toBe(4);
   });
   it("名前解決が止まれば DNS の期限で失敗する（接続 0）", async () => {
     const { fac, rpc } = await fixtures();

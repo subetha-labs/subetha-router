@@ -10,7 +10,7 @@ import type { TlsMaterial } from "./tls/generate.js";
 export interface SvmFacilitatorState {
   /** `/supported` の `kinds`。試験が差し替える。 */
   kinds: Record<string, unknown>[];
-  /** 応答の形: `ok`、`not-json`、`huge`、`redirect`、`error`、`delay`。 */
+  /** 応答の形: `ok`、`not-json`、`huge`（正しい kinds に padding）、`redirect`、`error`（正しい kinds を 500 で）。 */
   supportedReply: "ok" | "not-json" | "huge" | "redirect" | "error";
   supportedDelayMs: number;
   redirectTo: string | undefined;
@@ -50,7 +50,7 @@ export async function startSvmFacilitator(tls: TlsMaterial, network: string, fee
             return;
           case "huge":
             response.writeHead(200, { "content-type": "application/json" });
-            response.write('{"kinds":[],"pad":"');
+            response.write(`{"kinds":${JSON.stringify(state.kinds)},"pad":"`);
             for (let i = 0; i < 70; i += 1) response.write("p".repeat(1024));
             response.end('"}');
             return;
@@ -58,12 +58,15 @@ export async function startSvmFacilitator(tls: TlsMaterial, network: string, fee
             response.writeHead(302, { location: state.redirectTo ?? "https://other.test/supported" });
             response.end();
             return;
-          case "error":
-            response.writeHead(500, { "content-type": "application/json" });
-            response.end('{"error":"SECRET_INTERNAL_DETAIL"}');
+          case "error": {
+            const text = JSON.stringify({ kinds: state.kinds, note: "SECRET_INTERNAL_DETAIL" });
+            response.writeHead(500, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+            response.end(text);
             return;
+          }
           default: {
-            const text = JSON.stringify({ kinds: state.kinds, extensions: [], signers: { [network]: state.kinds.map((k) => (k["extra"] as Record<string, unknown>)["feePayer"]) } });
+            const signers = state.kinds.map((k) => (typeof k["extra"] === "object" && k["extra"] !== null ? (k["extra"] as Record<string, unknown>)["feePayer"] : undefined)).filter((f) => f !== undefined);
+            const text = JSON.stringify({ kinds: state.kinds, extensions: [], signers: { [network]: signers } });
             response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
             response.end(text);
           }

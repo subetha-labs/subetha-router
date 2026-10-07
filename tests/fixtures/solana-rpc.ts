@@ -27,8 +27,11 @@ export interface SolanaRpcAccounts {
 export interface SolanaRpcState {
   /** 応答を遅らせる（ms）。 */
   delayMs: number;
-  /** `ok`、`huge`（64 KiB 超、Content-Length 無し）、`malformed`（JSON でない）、`redirect`（302）、`error`（500）。 */
-  reply: "ok" | "huge" | "malformed" | "redirect" | "error";
+  /**
+   * `ok`、`huge`（**正しい結果**に 64 KiB 超の padding、Content-Length 無し）、`malformed`（JSON でない）、`redirect`（302）、
+   * `error`（**正しい結果の本文**を HTTP 500 で）、`rpc-error`（HTTP 200 の JSON-RPC error）。
+   */
+  reply: "ok" | "huge" | "malformed" | "redirect" | "error" | "rpc-error";
   redirectTo: string | undefined;
 }
 
@@ -63,8 +66,16 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
             return;
           }
           if (state.reply === "error") {
-            response.writeHead(500, { "content-type": "application/json" });
-            response.end('{"error":"SECRET_INTERNAL_DETAIL"}');
+            // 本文は正しい結果（status だけが 500）: status の検査が無ければ通ってしまう形。
+            const text = JSON.stringify({ jsonrpc: "2.0", id, result, note: "SECRET_INTERNAL_DETAIL" });
+            response.writeHead(500, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+            response.end(text);
+            return;
+          }
+          if (state.reply === "rpc-error") {
+            const text = JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32005, message: "SECRET_INTERNAL_DETAIL" } });
+            response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+            response.end(text);
             return;
           }
           if (state.reply === "malformed") {
@@ -73,10 +84,11 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
             return;
           }
           if (state.reply === "huge") {
+            // 正しい結果に 64 KiB 超の padding（Content-Length 無し）: 上限が無ければ通ってしまう形。
             response.writeHead(200, { "content-type": "application/json" });
-            response.write('{"jsonrpc":"2.0","id":1,"result":{"pad":"');
+            response.write(`{"jsonrpc":"2.0","id":${JSON.stringify(id)},"result":${JSON.stringify(result)},"pad":"`);
             for (let i = 0; i < 70; i += 1) response.write("p".repeat(1024));
-            response.end('"}}');
+            response.end('"}');
             return;
           }
           const text = JSON.stringify({ jsonrpc: "2.0", id, ...(error === undefined ? { result } : { error }) });

@@ -109,9 +109,16 @@ export function assertFeePayerIsolated(feePayer: string, policy: { payTo: string
 /** `getAccountInfo(jsonParsed)` の応答が、表どおりの ATA であること。 */
 export function assertAtaAccount(reply: Record<string, unknown> | undefined, expected: { owner: string; mint: string; tokenProgram: string }): void {
   const result = reply?.["result"];
-  const value = isRecord(result) ? result["value"] : undefined;
-  if (!isRecord(value)) {
+  if (!isRecord(result) || !("value" in result)) {
+    // JSON-RPC の error、形の違う応答、読めなかった応答: 口座の有無は分からない。
+    throw new ConfigError("svm inbound: the Solana RPC did not return an account record for the receiving ATA");
+  }
+  const value = result["value"];
+  if (value === null) {
     throw new ConfigError("svm inbound: the receiving ATA does not exist (create it before starting; the operator pays the rent)");
+  }
+  if (!isRecord(value)) {
+    throw new ConfigError("svm inbound: the Solana RPC returned an unexpected account record");
   }
   if (value["owner"] !== expected.tokenProgram) {
     throw new ConfigError("svm inbound: the receiving ATA is not owned by the configured token program");
@@ -140,8 +147,14 @@ export async function resolveSvmInboundPolicy(inputs: SvmStartupInputs): Promise
   if (!isSvmAddress(inputs.payTo)) {
     throw new ConfigError("svm inbound: payTo must be a 32-byte base58 owner address");
   }
-  const [ata] = await findAssociatedTokenPda({ mint: address(inputs.mint), owner: address(inputs.payTo), tokenProgram: address(inputs.tokenProgram) });
-  const destinationAta = String(ata);
+  let destinationAta: string;
+  try {
+    const [ata] = await findAssociatedTokenPda({ mint: address(inputs.mint), owner: address(inputs.payTo), tokenProgram: address(inputs.tokenProgram) });
+    destinationAta = String(ata);
+  } catch {
+    // 依存の例外（値を含み得る）を外に出さない。
+    throw new ConfigError("svm inbound: the receiving ATA could not be derived from payTo, mint and token program");
+  }
 
   let supported: Record<string, unknown> | undefined;
   try {
