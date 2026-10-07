@@ -81,6 +81,20 @@ in `data.disclaimer`. Report it as a reference price, never as a tradable quote.
 No key yet? `npm run wallet:new`. Base Sepolia USDC balance: `npm run wallet:balance`.
 **That command does not show pathUSD** (needed only when paying over MPP).
 
+### Arc and Solana inbound (present in the code, off on the hosted Router)
+
+The listing may one day also show `md-mpp-eth-snapshot-arc` (pay with **Arc testnet USDC** over x402) and
+`md-x402-eth-snapshot-sol` (pay with **Solana devnet USDC** over x402), plus profiles `dyn-arc-to-*` / `dyn-sol-to-*`.
+Until they appear in `subetha_router_list_routes`, they do not exist for you. When they do:
+
+- The steps are the same as for x402 above, and `npm run sign` **detects the rail from the offer**: on Arc it signs an EIP-3009
+  authorization (no funds move at `sign`); on Solana it **partially signs** a transfer that the facilitator's fee payer submits
+  (no funds move at `sign`, and your key never pays SOL). Both are "x402" in the table above.
+- `sign` refuses an offer whose `network` or `asset` is not in the Router's table, or whose EIP-712 domain differs from the table.
+  **Do not work around a refusal**; report it.
+- A Solana key: `npm run wallet:new:solana`. `npm run wallet:balance` shows Base Sepolia USDC only (not Arc USDC, not devnet USDC).
+- The MPP disclosure above is unchanged: only MPP moves funds at `sign`.
+
 ### Dynamic upstream URLs (`subetha_router_quote_url`)
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the

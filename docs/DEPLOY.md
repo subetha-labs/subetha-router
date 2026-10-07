@@ -99,6 +99,52 @@ owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登�
 journal の `dynamic.reservation` を持つ `created` 行の数（通算の件数）、`unknown` の終端（MPP 受信では credential を作った時点で資金が動く。
 `awaiting_payment` は「未払い」を意味しない）。
 
+### 2c. 多レールの受信（Arc testnet USDC・Solana devnet USDC で払う）— **本番では無効**（`RAILS_ACTIVATION = { arc: false, solana: false }`）
+
+呼び出し側が **Arc testnet の USDC**（x402、facilitator は Circle）か **Solana devnet の USDC**（x402 の SVM `exact`、facilitator は x402.org）で払い、
+既存の Provider A（x402）・B（MPP）に届く機能（要件 `multirail-requirements.md`、設計 `multirail-design.md`、タスク `multirail-tasks.md`）。
+有効にすると本番の入口（`tools/remote-mcp-config.ts`）が登録するのは、静的 route **`md-mpp-eth-snapshot-arc`**（Arc USDC 10,000 → Provider B/MPP）と
+**`md-x402-eth-snapshot-sol`**（Solana USDC 10,000 → Provider A/x402）、動的プロファイル **`dyn-arc-to-mpp`・`dyn-arc-to-x402`・`dyn-sol-to-x402`・`dyn-sol-to-mpp`**、
+`(network, asset)` ごとの予算の区分（静的 1 件 10,000、動的 1 件 20,000。通算は既存の env の上限）、`x402.inboundFacilitators`（`eip155:5042002` → Circle、
+`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` → x402.org。Base Sepolia は env のまま）。**有効・無効は 1 つの値 `activation { arc, solana }`** で、設定生成と
+Router の process の能力の注入の**両方**がそれを見る（`tools/rails-entry.ts`）。公開の入口はコードの定数 `RAILS_ACTIVATION` を渡し、**env からは変えられない**。
+
+**鍵と口座（G-1。owner が行う。mainnet の資産は使わない）**:
+
+1. **Arc の受取鍵は証明専用の新しい鍵**（Base Sepolia の受取鍵・送信の鍵とは別）。`npm run wallet:new` で作り、**秘密鍵をホストの env `SUBETHA_ARC_RECEIVER_KEY`** に置く。
+   Router の `src/` に渡るのは Circle の売り手証明（EIP-712 `SellerRequest`）に署名する閉包だけで、この鍵で資金を動かす署名（EIP-3009）は得られない（設計 §3）。
+   受取先（`payTo`）はこの鍵の address で、入口が鍵から導く（設定ファイルには address だけが入る）。受け取った USDC を動かすのは運用者の手元の操作
+2. **Solana の受取 owner の鍵はホストに置かない**（運用者の手元。`npm run wallet:new:solana` で作れる）。ホストの env `SUBETHA_SOLANA_RECEIVER` には **owner の address だけ**を置く。
+   **ATA（owner の USDC の口座）は運用者が先に作る**（rent 1,488,440 lamports ≈ 0.0015 SOL。devnet の SOL は faucet）。Router は起動時に ATA の存在・owner・mint を
+   RPC で 1 回確かめ、無ければ起動しない（設計 §5.1、FR-14）
+3. `SUBETHA_SOLANA_RPC_URL`（任意。無ければ公開 devnet `https://api.devnet.solana.com`）。起動時の検査だけに使い、quote・purchase では使わない。ホスト名は動的上流の拒否ホストに入る。
+   URL は鍵を含み得るのでログに出さない（query つきの URL は設定が拒む。鍵は path に）
+4. 使い捨ての payer（受け入れの支払い側）に Arc testnet の USDC と devnet の USDC（faucet）を入れる（T6・G-3 で使う。Router の鍵ではない）
+
+**配備（G-2。無効のまま）**: env（上の 1〜3）を置いて公開の process を再起動する。無効なので新しい route・facilitator・起動時の検査は**動かない**——確かめるのは
+「起動して既存の経路が従来どおり」と、egress 制御（§8b）が **Circle（`api.circle.com`）・x402.org・Solana の RPC** への egress を許し、それ以外を拒むこと。rollback の container を 1 つ保つ。
+
+**受け入れ（G-3。owner の確認の上で、支払いごとに quote を見せる）**: 公開の process の定数は触らず、**受け入れ用の起動**で行う:
+
+```sh
+# 本番の env をそのまま読む（送信の鍵・MPP 受信の秘密・Arc の受取鍵・Solana の受取 owner・RPC）。別の journal、127.0.0.1 の使い捨て port。
+SUBETHA_ACCEPTANCE_JOURNAL_PATH=/var/lib/subetha-router/acceptance/journal.ndjson \
+  node --import tsx tools/rails-acceptance-run.ts --rails arc,solana
+# stdout の 1 行: {"event":"listening","port":<MCP>,"routerPort":<Router>,"mode":"acceptance","rails":"arc,solana"}
+```
+
+**最初に**この起動で Solana の起動時の検査（`/supported`・ATA）が通ることを確かめる（本番 env での検査の証拠）。次に AC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、
+静的・動的）を各 1 件、使い捨ての payer で。証拠: Arc は settle の tx が Arc の RPC で `success` かつ受取先の残高の増分、Solana は signature が devnet で confirmed かつ ATA の残高の増分、
+結果の `proof.onChainFinality` は `not_checked`。U-1（settle の `success` までの時間、`settlement_pending` の有無）・U-4（Circle の wire 30 秒で足りるか）を記録する。
+`settlement_pending` が出たら設計 §10 U-1（`/status` の polling）を改訂してから G-4 へ。
+
+**有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える。
+**戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
+
+**有効にした後に見るもの**: 起動ログに `svm inbound` の起動時の検査の失敗が無いこと（あれば起動しない）、stderr の `facilitator diagnostic facilitator_trial_exhausted`
+（Circle の trial が尽きた。要求の後なので結果は `unknown`）、`unknown` の終端（settle の要求の後の失敗。自動で再 settle しない。**facilitator が止まれば資金は動かない、とは言えない**）、
+`destination_blocked`（動的 URL が Circle・x402.org・Solana RPC に向いた）。
+
 ### journal を残す（`-v` は必須）
 
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
