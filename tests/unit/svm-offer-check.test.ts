@@ -93,7 +93,9 @@ describe("checkSvmOffer: 否定（§4.2 の各行）", () => {
     // 7. feePayer
     ["feePayer が無い", offer({}, {}), scope, "fee_payer"],
     ["feePayer が base58 でない", offer({}, { feePayer: "0xabc" }), scope, "fee_payer"],
-    ["feePayer が運用者（Base の受取先の文字列）", offer({}, { feePayer: BASE_RECEIVER }), scope, "fee_payer"],
+    ["feePayer が運用者（Base の受取先の文字列。公開鍵の形でも落ちる）", offer({}, { feePayer: BASE_RECEIVER }), scope, "fee_payer"],
+    // 運用者の集合**だけ**で落ちる例: 受信の受取 owner は正しい公開鍵で、予約済みの集合（Router の鍵・ATA・mint・program）には無い。
+    ["feePayer が運用者（受信の受取 owner。集合の検査だけで落ちる）", offer({}, { feePayer: "DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1" }), scope, "fee_payer"],
     ["feePayer が Router の公開鍵", offer({}, { feePayer: ROUTER }), scope, "fee_payer"],
     ["feePayer が Router の ATA", offer({}, { feePayer: ROUTER_ATA }), scope, "fee_payer"],
     ["feePayer が payTo", offer({}, { feePayer: PROVIDER }), scope, "fee_payer"],
@@ -119,6 +121,14 @@ describe("checkSvmOffer: 否定（§4.2 の各行）", () => {
       expect(checkSvmOffer(raw, s, operators)).toBe(reason);
     });
   }
+
+  test("運用者の集合が空なら、受信の受取 owner は feePayer・payTo として通る（落ちるのは集合の検査だけ、の裏）", () => {
+    const owner = "DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1";
+    expect(checkSvmOffer(offer({}, { feePayer: owner }), scope, new Set())).toBeUndefined();
+    expect(checkSvmOffer(offer({ payTo: owner }), scope, new Set())).toBeUndefined();
+    expect(checkSvmOffer(offer({}, { feePayer: owner }), scope, operators)).toBe("fee_payer");
+    expect(checkSvmOffer(offer({ payTo: owner }), scope, operators)).toBe("pay_to");
+  });
 
   test("静的（maxUpstreamAmount 無し）は額の上限を見ない", () => {
     expect(checkSvmOffer(offer({ amount: "999999999999" }), scope, operators)).toBeUndefined();
