@@ -3,7 +3,7 @@
  *
  * 公開の入口（`tools/remote-mcp.ts`）と**同じ設定生成・同じ Router の process・同じ入口の関数**（`startHost`）を、
  * 多レールの有効化を `true` にして起動する。違いはそれだけ:
- * - 有効化: `--rails arc,solana`（既定は両方）。公開の入口の定数 `RAILS_ACTIVATION` には触らない（凍結されている）
+ * - 有効化: `--rails arc,solana`（既定は両方）。公開の入口の定数 `RAILS_ACTIVATION` には触らない（凍結されている。G-4 の後は公開も両方 true）
  * - bind: `127.0.0.1`（公開しない。必要なら ssh のトンネルで）、port は `SUBETHA_ACCEPTANCE_PORT`（既定 0 = 使い捨て）
  * - journal: `SUBETHA_ACCEPTANCE_JOURNAL_PATH`（既定 `runtime/acceptance/journal.ndjson`）。公開の journal と同じパスは拒む
  * 本番の env（送信の鍵・MPP 受信の秘密・Arc の受取鍵・Solana の受取 owner・RPC）はそのまま読む。鍵・URL の値は出さない。
@@ -18,7 +18,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { activationFromEnv, activationToEnv } from "./rails-entry.js";
-import { RAILS_ACTIVATION, type RailsActivation } from "./remote-mcp-config.js";
+import type { RailsActivation } from "./remote-mcp-config.js";
 import { publicJournalPathOf, startHost, type HostOptions, type RunningHost } from "./remote-mcp.js";
 
 export const ACCEPTANCE_PORT_ENV = "SUBETHA_ACCEPTANCE_PORT";
@@ -106,10 +106,6 @@ export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefi
   const bind = bindRaw === undefined || bindRaw === "" ? "127.0.0.1" : bindRaw;
   if (!(ACCEPTANCE_BINDS as readonly string[]).includes(bind)) {
     throw new Error(`${ACCEPTANCE_BIND_ENV} must be 127.0.0.1 (default) or 0.0.0.0 (only inside a container whose port is published to the host's loopback)`);
-  }
-  // 公開の入口の定数はこの起動でも無効のまま（凍結。ここでは読むだけ）。
-  if (RAILS_ACTIVATION.arc || RAILS_ACTIVATION.solana) {
-    throw new Error("the public RAILS_ACTIVATION must stay disabled");
   }
   return { activation, bind, port, journalPath };
 }

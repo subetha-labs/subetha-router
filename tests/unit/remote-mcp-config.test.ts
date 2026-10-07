@@ -1,6 +1,7 @@
 /**
  * 本番の入口の設定生成（`tools/remote-mcp-config.ts`）の多レール（multirail 設計 §8、タスク T8-a）。
- * 登録は 1 つの値 `activation: { arc, solana }` で決まり、公開の process の既定（`RAILS_ACTIVATION`）は**どちらも無効**。
+ * 登録は 1 つの値 `activation: { arc, solana }` で決まる。設定生成の既定の引数（`RAILS_DISABLED`）は**どちらも無効**、公開の process の定数
+ * `RAILS_ACTIVATION` は G-4（2026-10-07）で両方 `true`。
  * env からは変えられない。有効にしたときだけ route・プロファイル・予算の区分・facilitator が出て、`KNOWN_NETWORKS` の検証を通る。
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -16,6 +17,7 @@ import {
   INBOUND_SOL,
   RAILS_ACTIVATION,
   RAILS_DISABLED,
+  RAILS_NONE,
   ROUTE,
   ROUTE_ARC,
   ROUTE_MPP_IN,
@@ -72,10 +74,12 @@ function bucketsOf(router: RouterConfig): { static: string[]; dynamic: string[] 
 }
 
 describe("公開の process の既定: Arc・Solana はどちらも無効", () => {
-  test("RAILS_ACTIVATION は { arc: false, solana: false } で凍結。既定の生成は RAILS_DISABLED と同じで、既存の 2 経路・2 プロファイルだけ", () => {
-    expect(RAILS_ACTIVATION).toEqual({ arc: false, solana: false });
+  test("既定の生成（RAILS_DISABLED = RAILS_NONE）は既存の 2 経路・2 プロファイルだけ。公開の定数 RAILS_ACTIVATION は G-4 で両方 true（凍結）", () => {
+    expect(RAILS_NONE).toEqual({ arc: false, solana: false });
+    expect(Object.isFrozen(RAILS_NONE)).toBe(true);
+    expect(RAILS_DISABLED.activation).toBe(RAILS_NONE);
+    expect(RAILS_ACTIVATION).toEqual({ arc: true, solana: true });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
-    expect(RAILS_DISABLED.activation).toBe(RAILS_ACTIVATION);
     const document = routerConfigOf({}, RECEIVER, true);
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true, RAILS_DISABLED));
     const router = routerOf(document);
@@ -109,7 +113,7 @@ describe("公開の process の既定: Arc・Solana はどちらも無効", () =
   });
 
   test("受取先だけ渡しても、有効にしていなければ何も出ない（受取先は読まれない）", () => {
-    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } });
+    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_NONE, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } });
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true));
     expect(JSON.stringify(document)).not.toContain(ARC_RECEIVER);
     expect(JSON.stringify(document)).not.toContain(SOL_OWNER);

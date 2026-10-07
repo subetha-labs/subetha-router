@@ -81,7 +81,8 @@ function capabilitiesOf(activation: RailsActivation, env: Record<string, string>
 
 describe("有効化の値（ホスト → process の内部 env）", () => {
   test("往復: 定数（どちらも無効）は空文字、arc・solana・両方はその語。知らない語・重複・空の語は起動しない", () => {
-    expect(activationToEnv(RAILS_ACTIVATION)).toBe("");
+    expect(activationToEnv(NONE)).toBe("");
+    expect(activationToEnv(RAILS_ACTIVATION)).toBe("arc,solana");
     expect(activationFromEnv("")).toEqual(NONE);
     expect(activationFromEnv(undefined)).toEqual(NONE);
     for (const activation of [{ arc: true, solana: false }, { arc: false, solana: true }, BOTH]) {
@@ -108,20 +109,20 @@ describe("能力と受取先は 1 つの有効化の値から（設定生成と�
       },
     });
     const rails = [ARC_RECEIVER_KEY_ENV, SOLANA_RECEIVER_ENV, SOLANA_RPC_ENV];
-    expect(railsCapabilitiesOf(RAILS_ACTIVATION, env)).toEqual({});
-    expect(railsReceiversOf(RAILS_ACTIVATION, env)).toEqual({});
-    expect(railsChildEnvOf(RAILS_ACTIVATION, env)).toEqual({ [RAILS_ACTIVATION_ENV]: "" });
+    expect(railsCapabilitiesOf(NONE, env)).toEqual({});
+    expect(railsReceiversOf(NONE, env)).toEqual({});
+    expect(railsChildEnvOf(NONE, env)).toEqual({ [RAILS_ACTIVATION_ENV]: "" });
     expect(touched.filter((name) => rails.includes(name))).toEqual([]);
     // 片方だけ有効なら、もう片方の欄は参照されない。
     touched.length = 0;
     railsChildEnvOf({ arc: true, solana: false }, env);
     railsReceiversOf({ arc: false, solana: true }, env);
     expect(touched.filter((name) => rails.includes(name)).sort()).toEqual([ARC_RECEIVER_KEY_ENV, SOLANA_RECEIVER_ENV]);
-    expect(railsCapabilitiesOf(RAILS_ACTIVATION, env)).toEqual({});
-    expect(railsReceiversOf(RAILS_ACTIVATION, env)).toEqual({});
-    expect(railsChildEnvOf(RAILS_ACTIVATION, env)).toEqual({ [RAILS_ACTIVATION_ENV]: "" });
+    expect(railsCapabilitiesOf(NONE, env)).toEqual({});
+    expect(railsReceiversOf(NONE, env)).toEqual({});
+    expect(railsChildEnvOf(NONE, env)).toEqual({ [RAILS_ACTIVATION_ENV]: "" });
     // 無効の設定生成にも何も出ない（T8-a）。
-    const document = routerConfigOf({}, RECEIVER, true, railsOptionsOf(RAILS_ACTIVATION, env));
+    const document = routerConfigOf({}, RECEIVER, true, railsOptionsOf(NONE, env));
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true));
   });
 
@@ -272,8 +273,8 @@ describe("Router の process が注入する能力の全部（routerProcessCapab
 describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入れ用の起動が同じ関数）", () => {
   const baseEnv = { SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(), SUBETHA_ROUTER_RECEIVER: RECEIVER, SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-plan" };
 
-  test("公開の入口（定数で無効）: 子の env は従来の欄＋有効化 \"\" だけ。壊れた鍵があっても読まれない。journal は固定の公開パス", () => {
-    const options: HostOptions = { activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) };
+  test("無効の有効化: 子の env は従来の欄＋有効化 \"\" だけ。壊れた鍵があっても読まれない。journal は固定の公開パス", () => {
+    const options: HostOptions = { activation: NONE, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) };
     const plan = hostPlanOf(options, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: "not-a-key", SUBETHA_SOLANA_RECEIVER: "" });
     expect(plan.journalPath).toBe(path.resolve("runtime", "journal.ndjson"));
     expect(plan.childEnv).toEqual({
@@ -304,11 +305,23 @@ describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入
     const config = loadAsProduction(plan.config);
     expect(config.router.routes[ROUTE_ARC]?.source.payTo).toBe(privateKeyToAccount(key).address);
     expect(config.router.routes[ROUTE_SOL]).toBeUndefined();
-    // 公開の入口の計画と同じ関数・同じ env で、違うのは有効化と journal だけ。
-    const publicPlan = hostPlanOf({ activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key });
+    // 無効の計画と同じ関数・同じ env で、違うのは有効化と journal だけ。
+    const publicPlan = hostPlanOf({ activation: NONE, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key });
     const { ROUTER_JOURNAL_PATH: _j1, [RAILS_ACTIVATION_ENV]: _a1, [ARC_RECEIVER_KEY_ENV]: _k1, ...acceptanceRest } = plan.childEnv;
     const { ROUTER_JOURNAL_PATH: _j2, [RAILS_ACTIVATION_ENV]: _a2, ...publicRest } = publicPlan.childEnv;
     expect(acceptanceRest).toEqual(publicRest);
+  });
+
+  test("公開の入口（定数 RAILS_ACTIVATION = 両方 true、G-4）: 設定に Arc・Solana の route とプロファイルが出て、子の env に有効化 \"arc,solana\" と Arc の鍵が渡る。受取の env が無ければ計画は作れない", () => {
+    const key = generatePrivateKey();
+    const options: HostOptions = { activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) };
+    const plan = hostPlanOf(options, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key, [SOLANA_RECEIVER_ENV]: SOL_OWNER });
+    const config = loadAsProduction(plan.config);
+    expect(Object.keys(config.router.routes).sort()).toEqual(["md-mpp-eth-snapshot", "md-mpp-eth-snapshot-arc", "md-x402-eth-snapshot", "md-x402-eth-snapshot-sol"]);
+    expect(config.router.routes[ROUTE_ARC]?.source.payTo).toBe(privateKeyToAccount(key).address);
+    expect(config.router.routes[ROUTE_SOL]?.source.payTo).toBe(SOL_OWNER);
+    expect(plan.childEnv).toMatchObject({ [RAILS_ACTIVATION_ENV]: "arc,solana", [ARC_RECEIVER_KEY_ENV]: key });
+    expect(() => hostPlanOf(options, baseEnv)).toThrow(HostPlanError);
   });
 
   test("env が足りない・受取先が導けない・設定が作れない → code つきで止まる（値は出ない）", () => {
@@ -387,7 +400,8 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）の選択�
     expect(options).toMatchObject({ activation: BOTH, bind: "127.0.0.1", port: 0 });
     expect(options.journalPath).toBe(path.resolve("runtime", "acceptance", "journal.ndjson"));
     expect(options.journalPath).not.toBe(path.resolve(publicJournalPathOf({})));
-    expect(RAILS_ACTIVATION).toEqual(NONE);
+    // 公開の定数は G-4 で両方 true（受け入れ用の起動はそれを読まず、--rails で決める）。
+    expect(RAILS_ACTIVATION).toEqual({ arc: true, solana: true });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
   });
 

@@ -52,7 +52,7 @@ function required(env: Readonly<Record<string, string | undefined>>, name: strin
 
 /** ホストの起動の選択肢。公開の入口と受け入れ用の起動（`tools/rails-acceptance-run.ts`）が同じ関数を使う。 */
 export interface HostOptions {
-  /** 多レールの有効化。公開の入口は定数 `RAILS_ACTIVATION`（どちらも false）。受け入れ用の起動だけが true を渡す。 */
+  /** 多レールの有効化。公開の入口は定数 `RAILS_ACTIVATION`（G-4 で両方 true）。受け入れ用の起動は `--rails` で渡す。 */
   readonly activation: RailsActivation;
   /** MCP の入口を bind するアドレス（公開は 0.0.0.0、受け入れは 127.0.0.1）。 */
   readonly bind: string;
