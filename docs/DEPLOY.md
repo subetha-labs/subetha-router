@@ -222,10 +222,10 @@ U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の�
 （入れ替えは `deploy/swap-image.sh <image:tag>`: 入口を閉じ → 旧を `-prev-<ts>` に改名 → 新を同じ network・port・volume・env で起動 → `/healthz` と Router の `listening` 行 →
 journal の先頭バイト列が不変 → `subetha-egress check` → 入口を開ける → 公開の `/healthz` を 30 秒まで再試行。**イメージと旧コンテナの ID を確かめるまでは何も変えず、
 その後の失敗（INT/TERM も）は旧コンテナを ID で元の名前に戻して起動し（復旧の待ち 60 秒）、入口を開け直す**。docker・systemctl の呼び出しはどれも上限付き（`timeout -k`）。
-変更操作（stop・rename・run）は daemon が答えた（成功か `Error response from daemon`）と確認できるまで「未確定」と記し、上限に当たった・結果の前に割り込まれた・接続が切れた操作は daemon 側で続いているかもしれない（docker はその順序を保証しない）ので、
+変更操作（stop・rename・run）は成功と確認できるまで「未確定」と記し（失敗の種類は見分けない）、未確定の操作は daemon 側で続いているかもしれない（docker はその順序を保証しない）ので、
 復旧は最善を尽くした上で **`STATE UNKNOWN`（exit 2）** と報告し、復旧したとは言わない（上限に当たった `docker stop` は、旧コンテナを起動する前に `Running=false` を最大 30 秒見る。これは最善であって完了の保証ではない）。
 復旧の各段（名前の照合・削除・改名・起動・`/healthz`・caddy・`docker ps`）も同じで、確認できなければ exit 2。旧コンテナが元の名前で `/healthz` に答え、入口が active と確認できたときだけ exit 1。
-検証はどれも致命。待ちは経過時間で切り、ループの中の各要求にも残りの予算を渡す（予算を超えるのは `timeout` の kill の猶予 5 秒と、失敗時の診断の `docker logs` の別枠 10 秒 + 5 秒まで）。ログの中身は出さない（listening 行と bind 行の有無、`could not start the Router` の行数だけ）。有効化の後は子の Router が listen の前に Solana の起動時の検査（最大 10 秒 × 2）と Tempo の probe（MPP 送信のプロファイルごとに
+検証はどれも致命。待ちは経過時間で切り、ループの中の各要求にも残りの予算を渡す（予算を超えるのは `timeout` の kill の猶予 5 秒と、要約のための `docker logs` の別枠 10 秒 + 5 秒まで。段ごとの予算で、script 全体の期限ではない）。コンテナのログの中身と変更操作の docker の stderr は出さない（listening 行と bind 行の有無、`could not start the Router` の行数だけ）。それ以外の docker・systemctl の stderr はそのまま出る。有効化の後は子の Router が listen の前に Solana の起動時の検査（最大 10 秒 × 2）と Tempo の probe（MPP 送信のプロファイルごとに
 最大 6 秒、3 本）を行うので、入口の起動待ちは 120 秒（replay の分の余裕を含む運用上の値で、端から端の保証ではない）、入れ替えの待ちは 180 秒の経過時間にしてある）。
 **戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
 

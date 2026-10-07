@@ -5,12 +5,13 @@
 # 方針:
 # - コンテナや入口を変える前に、イメージと旧コンテナの ID を確かめる（それまでの失敗は一時ファイル以外に何も変えない）
 # - その後の失敗（ERR・INT・TERM）は復旧する: 名前を占めている新コンテナを消し、旧コンテナを ID で元の名前に戻して起動し、入口を開け直す
-# - docker・systemctl の呼び出しには上限（timeout -k）を付ける。変更操作（stop・rename・run）は、daemon が答えた（成功か、
-#   "Error response from daemon"）と確認できるまで未確定。上限に当たった・結果の前に割り込まれた・接続が切れた操作は daemon 側で
+# - docker・systemctl の呼び出しには上限（timeout -k）を付ける。変更操作（stop・rename・run）は成功と確認できるまで未確定
+#   （失敗の種類は見分けない: daemon のエラー応答も、上限も、割り込みも、接続の切断も、すべて未確定）。未確定の操作は daemon 側で
 #   続いているかもしれず、docker はその順序を保証しない。復旧は最善を尽くすが、未確定の操作が 1 つでもあれば **状態不明**（exit 2）
 #   として報告し、復旧したとは言わない。復旧の各段も同じ: 確認できなければ状態不明
 # - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、ループの中の各要求にも残りの予算を渡す（失敗時の診断の docker logs だけ
-#   別枠 10 秒）。ログの中身は一切出さない（固定の文と行数だけ）
+#   別枠 10 秒）。コンテナのログの中身と、変更操作の docker の stderr は出さない（固定の文と行数だけ）。それ以外の docker・systemctl
+#   の stderr はそのまま出る
 set -Eeuo pipefail   # -E: ERR trap は関数の中でも効く（sc・dt の中の失敗も復旧に入る）
 
 IMG="${1:?usage: swap-image.sh <image:tag>}"
@@ -35,7 +36,7 @@ DIAG_LOGS_S=10    # 失敗時の診断で docker logs に許す上限（待ち�
 
 OLD_ID=
 INGRESS_CLOSED=0
-PENDING=          # daemon の答えを確認できていない変更操作（stop / rename / run）。空でなければ復旧は状態不明で終わる
+PENDING=          # 成功を確認できていない変更操作（stop / rename / run）。空でなければ復旧は状態不明で終わる
 NEW_ID=
 DONE=0
 UNRESOLVED=0      # 復旧の中で確認できなかった操作があれば 1
@@ -53,18 +54,14 @@ capped() { # <budget> <t0> <cap> → 残りの秒数を 1..cap に収める
   echo "$r"
 }
 is_timeout() { [[ "$1" == 124 || "$1" == 137 ]]; }
-# 変更操作（この shell で実行。$(...) の中では PENDING が親に残らないので使わない）。daemon が答えたときだけ未確定を解く。
+# 変更操作（この shell で実行。$(...) の中では PENDING が親に残らないので使わない）。成功したときだけ未確定を解く。
 # docker の stderr は出さない（env-file の行などが混じりうる）。
 mutate() { # <op> <docker args...>; stdout は透過
   local op=$1 rc=0; shift
   PENDING=$op
   timeout -k 5 30 docker "$@" 2>"$ERRTMP" || rc=$?
   if [ "$rc" = 0 ]; then PENDING=; return 0; fi
-  if ! is_timeout "$rc" && grep -q "Error response from daemon" "$ERRTMP"; then
-    PENDING=; echo "docker $op failed (rc=$rc, the daemon answered)" >&2
-  else
-    echo "docker $op failed (rc=$rc, unconfirmed: timeout or connection lost)" >&2
-  fi
+  echo "docker $op failed (rc=$rc): its outcome is unconfirmed" >&2
   return "$rc"
 }
 
@@ -100,7 +97,7 @@ restore() {
     cleanup_tmp; exit 1
   fi
   if [ -n "$PENDING" ]; then
-    echo "a docker '$PENDING' was submitted and its result was not confirmed (timeout or interrupt): it may still complete later, so the outcome below is best effort and the final state is unknown" >&2
+    echo "a docker '$PENDING' was submitted and did not confirm success: it may still complete later, so the recovery below is best effort and the final state is unknown" >&2
     UNRESOLVED=1
   fi
   # 1. 名前 $NAME を占めているのが旧コンテナでなければ消す（作りかけ・落ちた新コンテナ）。
@@ -182,7 +179,7 @@ case $rc in
   124|137) echo "could not query caddy (systemctl did not answer)" >&2; false ;;
 esac
 
-# 変更操作は mutate で（daemon が答えたと確認できるまで PENDING。失敗は ERR で restore へ）。
+# 変更操作は mutate で（成功と確認できるまで PENDING。失敗は ERR で restore へ）。
 mutate stop stop "$OLD_ID" >/dev/null
 mutate rename rename "$OLD_ID" "$PREV"
 mutate run run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG" > "$OUTTMP"
