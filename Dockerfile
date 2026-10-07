@@ -33,8 +33,12 @@ COPY tools ./tools
 COPY tests/fixtures ./tests/fixtures
 
 # 出荷するものだけを型検査する（`tests/wire` と `examples` は実行時に使わない）。
+# `lib` と `skipLibCheck` を `tsconfig.json` に揃える（`lib` は ES2023 だけ: DOM の型を混ぜない。`skipLibCheck`: 依存の `.d.ts` は検査しない。
+# `noUncheckedIndexedAccess`・`exactOptionalPropertyTypes`・`verbatimModuleSyntax` は以前からここでは渡していない）。
+# T8-b で入口が `tools/rails-entry.ts` 経由で `src/main.ts` を引き込むようになり（子プロセスの入口はファイル名で起動するので対象外）、
+# 既定の lib では DOM の `BodyInit` と衝突した。本番ホスト（1.8 GB）で出たヒープ不足は、依存の `.d.ts` の検査が一因と見ている（証明はしていない）。
 RUN npx --no-install tsc --noEmit \
-      --strict --module nodenext --moduleResolution nodenext --target es2023 --types node \
+      --strict --module nodenext --moduleResolution nodenext --target es2023 --lib es2023 --types node --skipLibCheck \
       tools/remote-mcp.ts
 
 FROM node:22-bookworm-slim AS runtime
