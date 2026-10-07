@@ -2,7 +2,7 @@
  * 本番の入口の多レール（`tools/rails-entry.ts`・`tools/remote-router-process.ts` の能力・`tools/rails-acceptance-run.ts` の選択肢。
  * multirail 設計 §3・§8、タスク T8-b）。**鍵は乱数**。接続はしない（配線の組み立てと offer の発行まで）。
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -11,13 +11,14 @@ import { afterEach, describe, expect, test } from "vitest";
 import { DynamicChallengeError } from "../../src/adapters/outbound/x402-dynamic.js";
 import { ConfigError, loadRuntimeConfig, routeBindingOf, type RuntimeConfig } from "../../src/config.js";
 import { composeRails, DEFAULT_SOLANA_RPC_URL, type DynamicTransportHooks, type RouterCapabilities } from "../../src/main.js";
-import { acceptanceOptionsOf } from "../../tools/rails-acceptance-run.js";
+import { createMcpIngress } from "../../src/mcp/ingress.js";
+import { acceptanceOptionsOf, announcementOf, sameJournal } from "../../tools/rails-acceptance-run.js";
 import { activationFromEnv, activationToEnv, ProcessEntryError, RAILS_ACTIVATION_ENV, railsCapabilitiesOf, railsChildEnvOf, railsOptionsOf, railsReceiversOf, routerProcessCapabilitiesOf, SOLANA_RECEIVER_ENV, SOLANA_RPC_ENV, solanaRpcUrlOf } from "../../tools/rails-entry.js";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { createRealMppCapability } from "../../tools/real-mpp-capability.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
 import { INBOUND_ARC, INBOUND_SOL, RAILS_ACTIVATION, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
-import { publicJournalPathOf } from "../../tools/remote-mcp.js";
+import { HostPlanError, hostPlanOf, listenMcp, publicJournalPathOf, type HostOptions } from "../../tools/remote-mcp.js";
 import { FIXTURE_PUBLIC_ADDRESS, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
 
 const RECEIVER = "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405";
@@ -94,8 +95,28 @@ describe("有効化の値（ホスト → process の内部 env）", () => {
 });
 
 describe("能力と受取先は 1 つの有効化の値から（設定生成と同じ値）", () => {
-  test("無効なら env を読まない: 壊れた鍵・受取 owner が無くても何も作らず、何も出ない", () => {
-    const env = { [ARC_RECEIVER_KEY_ENV]: "not-a-key", [SOLANA_RPC_ENV]: "https://rpc.example/v1/SECRETTOKEN" };
+  test("無効なら env を読まない: 壊れた鍵・受取 owner が無くても何も作らず、何も出ない。鍵・受取 owner・RPC の欄は参照もされない", () => {
+    const touched: string[] = [];
+    const env = new Proxy({ [ARC_RECEIVER_KEY_ENV]: "not-a-key", [SOLANA_RPC_ENV]: "https://rpc.example/v1/SECRETTOKEN", [SOLANA_RECEIVER_ENV]: SOL_OWNER } as Record<string, string>, {
+      get(target, property) {
+        if (typeof property === "string") touched.push(property);
+        return target[property as string];
+      },
+      has(target, property) {
+        if (typeof property === "string") touched.push(property);
+        return property in target;
+      },
+    });
+    const rails = [ARC_RECEIVER_KEY_ENV, SOLANA_RECEIVER_ENV, SOLANA_RPC_ENV];
+    expect(railsCapabilitiesOf(RAILS_ACTIVATION, env)).toEqual({});
+    expect(railsReceiversOf(RAILS_ACTIVATION, env)).toEqual({});
+    expect(railsChildEnvOf(RAILS_ACTIVATION, env)).toEqual({ [RAILS_ACTIVATION_ENV]: "" });
+    expect(touched.filter((name) => rails.includes(name))).toEqual([]);
+    // 片方だけ有効なら、もう片方の欄は参照されない。
+    touched.length = 0;
+    railsChildEnvOf({ arc: true, solana: false }, env);
+    railsReceiversOf({ arc: false, solana: true }, env);
+    expect(touched.filter((name) => rails.includes(name)).sort()).toEqual([ARC_RECEIVER_KEY_ENV, SOLANA_RECEIVER_ENV]);
     expect(railsCapabilitiesOf(RAILS_ACTIVATION, env)).toEqual({});
     expect(railsReceiversOf(RAILS_ACTIVATION, env)).toEqual({});
     expect(railsChildEnvOf(RAILS_ACTIVATION, env)).toEqual({ [RAILS_ACTIVATION_ENV]: "" });
@@ -245,6 +266,111 @@ describe("Router の process が注入する能力の全部（routerProcessCapab
       expect((caught as ProcessEntryError).code).toBe(code);
       expect((caught as Error).message).not.toContain(arcKey.slice(2));
     }
+  });
+});
+
+describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入れ用の起動が同じ関数）", () => {
+  const baseEnv = { SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(), SUBETHA_ROUTER_RECEIVER: RECEIVER, SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-plan" };
+
+  test("公開の入口（定数で無効）: 子の env は従来の欄＋有効化 \"\" だけ。壊れた鍵があっても読まれない。journal は固定の公開パス", () => {
+    const options: HostOptions = { activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) };
+    const plan = hostPlanOf(options, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: "not-a-key", SUBETHA_SOLANA_RECEIVER: "" });
+    expect(plan.journalPath).toBe(path.resolve("runtime", "journal.ndjson"));
+    expect(plan.childEnv).toEqual({
+      SUBETHA_OUTBOUND_MPP_KEY: baseEnv.SUBETHA_OUTBOUND_PRIVATE_KEY,
+      SUBETHA_OUTBOUND_X402_KEY: baseEnv.SUBETHA_OUTBOUND_PRIVATE_KEY,
+      ROUTER_JOURNAL_PATH: plan.journalPath,
+      ROUTER_HTTP_PORT: "0",
+      ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
+      ROUTER_PRINCIPAL_TOKENS: "judge:public",
+      ROUTER_ADAPTER_MODE: "real",
+      ROUTER_SUBETHA_FACILITATOR_URL: "https://www.x402.org/facilitator",
+      ROUTER_X402_INBOUND_FACILITATOR_URL: "https://www.x402.org/facilitator",
+      ROUTER_X402_INBOUND_OFFER_SECONDS: "600",
+      ROUTER_MPP_INBOUND_SECRET: baseEnv.SUBETHA_MPP_INBOUND_SECRET,
+      ROUTER_MPP_INBOUND_OFFER_SECONDS: "600",
+      [RAILS_ACTIVATION_ENV]: "",
+    });
+    expect(plan.config).toEqual(routerConfigOf(baseEnv, RECEIVER, true));
+  });
+
+  test("受け入れ用の起動（Arc だけ）: 同じ関数で、設定は Arc の route・プロファイル、子の env は有効化 \"arc\" と鍵、journal は受け入れのパス", () => {
+    const key = generatePrivateKey();
+    const options = acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_JOURNAL_PATH: "/tmp/acc/journal.ndjson" }, ["--rails", "arc"]);
+    const plan = hostPlanOf(options, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key });
+    expect(plan.journalPath).toBe(path.resolve("/tmp/acc/journal.ndjson"));
+    expect(plan.childEnv).toMatchObject({ ROUTER_JOURNAL_PATH: path.resolve("/tmp/acc/journal.ndjson"), [RAILS_ACTIVATION_ENV]: "arc", [ARC_RECEIVER_KEY_ENV]: key });
+    expect(plan.childEnv["ROUTER_CONFIG_PATH"]).toBeUndefined();
+    const config = loadAsProduction(plan.config);
+    expect(config.router.routes[ROUTE_ARC]?.source.payTo).toBe(privateKeyToAccount(key).address);
+    expect(config.router.routes[ROUTE_SOL]).toBeUndefined();
+    // 公開の入口の計画と同じ関数・同じ env で、違うのは有効化と journal だけ。
+    const publicPlan = hostPlanOf({ activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key });
+    const { ROUTER_JOURNAL_PATH: _j1, [RAILS_ACTIVATION_ENV]: _a1, [ARC_RECEIVER_KEY_ENV]: _k1, ...acceptanceRest } = plan.childEnv;
+    const { ROUTER_JOURNAL_PATH: _j2, [RAILS_ACTIVATION_ENV]: _a2, ...publicRest } = publicPlan.childEnv;
+    expect(acceptanceRest).toEqual(publicRest);
+  });
+
+  test("env が足りない・受取先が導けない・設定が作れない → code つきで止まる（値は出ない）", () => {
+    const options = acceptanceOptionsOf({}, ["--rails", "arc"]);
+    const codes = (env: Record<string, string>) => {
+      try {
+        hostPlanOf(options, env);
+      } catch (error) {
+        expect(error).toBeInstanceOf(HostPlanError);
+        return (error as HostPlanError).code;
+      }
+      return "none";
+    };
+    expect(codes({})).toBe("env");
+    expect(codes({ SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey() })).toBe("env");
+    expect(codes(baseEnv)).toBe("rails");
+    expect(codes({ ...baseEnv, [ARC_RECEIVER_KEY_ENV]: "0xabc" })).toBe("rails");
+    const solana = acceptanceOptionsOf({}, ["--rails", "solana"]);
+    expect(() => hostPlanOf(solana, { ...baseEnv, [SOLANA_RECEIVER_ENV]: RECEIVER })).toThrow(HostPlanError);
+    try {
+      hostPlanOf(solana, { ...baseEnv, [SOLANA_RECEIVER_ENV]: RECEIVER });
+    } catch (error) {
+      expect((error as HostPlanError).code).toBe("config");
+    }
+  });
+
+  test("MCP の入口は options.bind に実際に bind する（受け入れは 127.0.0.1、公開は 0.0.0.0）", async () => {
+    const http = createMcpIngress({ handle: async (_req, res) => { res.end(); } });
+    const bound = await listenMcp(http, "127.0.0.1", 0);
+    expect(bound.address).toBe("127.0.0.1");
+    expect(bound.port).toBeGreaterThan(0);
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+    const open = createMcpIngress({ handle: async (_req, res) => { res.end(); } });
+    const any = await listenMcp(open, "0.0.0.0", 0);
+    expect(any.address).toBe("0.0.0.0");
+    await new Promise<void>((resolve) => open.close(() => resolve()));
+    expect(JSON.parse(announcementOf({ mcpPort: bound.port, mcpAddress: bound.address, routerPort: 4242 }, { arc: true, solana: false }))).toEqual({ event: "listening", port: bound.port, address: "127.0.0.1", routerPort: 4242, mode: "acceptance", rails: "arc" });
+  });
+});
+
+describe("受け入れ用の journal は公開の journal と別のファイル（別名も見る）", () => {
+  test("symlink のディレクトリ・symlink のファイル・hard link は同じと判定し、受け入れの選択肢が拒む。別のファイルは通る", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "t8b-journal-"));
+    dirs.push(dir);
+    const publicDir = path.join(dir, "public");
+    mkdirSync(publicDir);
+    const publicJournal = path.join(publicDir, "journal.ndjson");
+    writeFileSync(publicJournal, "");
+    symlinkSync(publicDir, path.join(dir, "alias-dir"));
+    symlinkSync(publicJournal, path.join(dir, "alias-file.ndjson"));
+    linkSync(publicJournal, path.join(dir, "hard.ndjson"));
+    expect(sameJournal(path.join(dir, "alias-dir", "journal.ndjson"), publicJournal)).toBe(true);
+    expect(sameJournal(path.join(dir, "alias-file.ndjson"), publicJournal)).toBe(true);
+    expect(sameJournal(path.join(dir, "hard.ndjson"), publicJournal)).toBe(true);
+    // まだ無いファイルでも、symlink のディレクトリの下なら同じ。
+    expect(sameJournal(path.join(dir, "alias-dir", "new.ndjson"), path.join(publicDir, "new.ndjson"))).toBe(true);
+    expect(sameJournal(path.join(dir, "other.ndjson"), publicJournal)).toBe(false);
+    expect(sameJournal(path.join(dir, "acceptance", "journal.ndjson"), publicJournal)).toBe(false);
+    for (const alias of ["alias-dir/journal.ndjson", "alias-file.ndjson", "hard.ndjson"]) {
+      expect(() => acceptanceOptionsOf({ SUBETHA_JOURNAL_PATH: publicJournal, SUBETHA_ACCEPTANCE_JOURNAL_PATH: path.join(dir, alias) }), alias).toThrow(/must not be the public journal/);
+    }
+    expect(acceptanceOptionsOf({ SUBETHA_JOURNAL_PATH: publicJournal, SUBETHA_ACCEPTANCE_JOURNAL_PATH: path.join(dir, "acceptance", "journal.ndjson") }).journalPath).toBe(path.join(dir, "acceptance", "journal.ndjson"));
   });
 });
 

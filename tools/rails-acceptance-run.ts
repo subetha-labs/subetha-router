@@ -13,12 +13,13 @@
  * usage: SUBETHA_OUTBOUND_PRIVATE_KEY=0x... SUBETHA_ROUTER_RECEIVER=0x... SUBETHA_ARC_RECEIVER_KEY=0x... SUBETHA_SOLANA_RECEIVER=... \
  *        tsx tools/rails-acceptance-run.ts [--rails arc,solana]
  */
+import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { activationFromEnv, activationToEnv } from "./rails-entry.js";
 import { RAILS_ACTIVATION, type RailsActivation } from "./remote-mcp-config.js";
-import { publicJournalPathOf, startHost, type HostOptions } from "./remote-mcp.js";
+import { publicJournalPathOf, startHost, type HostOptions, type RunningHost } from "./remote-mcp.js";
 
 export const ACCEPTANCE_PORT_ENV = "SUBETHA_ACCEPTANCE_PORT";
 export const ACCEPTANCE_JOURNAL_ENV = "SUBETHA_ACCEPTANCE_JOURNAL_PATH";
@@ -28,6 +29,39 @@ function argOf(argv: readonly string[], name: string): string | undefined {
   return index === -1 ? undefined : argv[index + 1];
 }
 
+/** 一番深い既存の祖先の実パス＋残り（symlink を辿った正準の形）。 */
+function canonicalPathOf(target: string): string {
+  let current = path.resolve(target);
+  const rest: string[] = [];
+  while (!existsSync(current)) {
+    rest.unshift(path.basename(current));
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return path.join(realpathSync(current), ...rest);
+}
+
+/**
+ * 2 つの journal のパスが同じファイルを指すか（文字列の一致だけでなく、symlink を辿った正準の形と、既存なら dev/ino も見る。
+ * 別名で同じ journal に 2 つの process が別のロックで書くことを防ぐ）。
+ */
+export function sameJournal(a: string, b: string): boolean {
+  if (canonicalPathOf(a) === canonicalPathOf(b)) return true;
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
+}
+
+/** 起動したときに stdout に書く 1 行（純粋関数）。 */
+export function announcementOf(host: Pick<RunningHost, "mcpPort" | "mcpAddress" | "routerPort">, activation: RailsActivation): string {
+  return JSON.stringify({ event: "listening", port: host.mcpPort, address: host.mcpAddress, routerPort: host.routerPort, mode: "acceptance", rails: activationToEnv(activation) });
+}
+
 /** 受け入れ用の起動の選択肢。純粋関数（試験で確かめる）。 */
 export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefined>>, argv: readonly string[] = []): HostOptions {
   const activation: RailsActivation = activationFromEnv(argOf(argv, "rails") ?? "arc,solana");
@@ -35,7 +69,7 @@ export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefi
     throw new Error("--rails must activate at least one of arc, solana");
   }
   const journalPath = path.resolve(env[ACCEPTANCE_JOURNAL_ENV] ?? path.join(path.resolve("runtime"), "acceptance", "journal.ndjson"));
-  if (journalPath === path.resolve(publicJournalPathOf(env))) {
+  if (sameJournal(journalPath, publicJournalPathOf(env))) {
     throw new Error("the acceptance journal must not be the public journal");
   }
   const portRaw = env[ACCEPTANCE_PORT_ENV];
@@ -59,7 +93,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const host = await startHost(options);
-  process.stdout.write(`${JSON.stringify({ event: "listening", port: host.mcpPort, routerPort: host.routerPort, mode: "acceptance", rails: activationToEnv(options.activation) })}\n`);
+  process.stdout.write(`${announcementOf(host, options.activation)}\n`);
 }
 
 const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

@@ -63,11 +63,9 @@ describe("seller proof capability", () => {
     expect(proof.capability.signMessage).toBeUndefined();
     // @ts-expect-error 寿命の設定は無い（設計 §3: 60 秒固定）
     const withIgnoredOption = createTestSellerProof({ network: ARC, lifetimeSeconds: 61, now: () => 1_800_000_000_000 });
-    return withIgnoredOption.capability.proofFor("settle", HASH).then((header) => {
-      const issued = decodeSellerProofHeader(header)!;
-      // 61 を渡しても発行される証明の寿命は 60 秒。
-      expect(issued.expiresAt - issued.issuedAt).toBe(60);
-    });
+    const issued = decodeSellerProofHeader(await withIgnoredOption.capability.proofFor("settle", HASH))!;
+    // 61 を渡しても発行される証明の寿命は 60 秒。
+    expect(issued.expiresAt - issued.issuedAt).toBe(60);
     expect(Object.isFrozen(SELLER_REQUEST_TYPES)).toBe(true);
     expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest)).toBe(true);
     expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest[0])).toBe(true);

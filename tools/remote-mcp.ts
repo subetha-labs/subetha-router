@@ -16,7 +16,7 @@
  * usage: SUBETHA_OUTBOUND_PRIVATE_KEY=0x... PORT=8787 tsx tools/remote-mcp.ts
  */
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -33,11 +33,19 @@ function note(message: string): void {
   process.stderr.write(`${message}\n`);
 }
 
-function required(name: string): string {
-  const value = process.env[name];
+export class HostPlanError extends Error {
+  readonly code: "env" | "rails" | "config";
+  constructor(code: "env" | "rails" | "config") {
+    super(code === "env" ? "a required env is missing" : code === "rails" ? "rails receivers could not be derived" : "router config could not be generated");
+    this.name = "HostPlanError";
+    this.code = code;
+  }
+}
+
+function required(env: Readonly<Record<string, string | undefined>>, name: string): string {
+  const value = env[name];
   if (value === undefined || value === "") {
-    note(`${name} is required.`);
-    process.exit(2);
+    throw new HostPlanError("env");
   }
   return value;
 }
@@ -53,8 +61,17 @@ export interface HostOptions {
   readonly journalPath: string;
 }
 
+/** 起動の計画（純粋。process に触らない）: Router に渡す設定と、子プロセスの env（`ROUTER_CONFIG_PATH` は起動側が足す）。 */
+export interface HostPlan {
+  readonly config: Record<string, unknown>;
+  readonly childEnv: Readonly<Record<string, string>>;
+  readonly journalPath: string;
+}
+
 export interface RunningHost {
   readonly mcpPort: number;
+  /** 実際に bind したアドレス（`http.address()`）。 */
+  readonly mcpAddress: string;
   readonly routerPort: number;
   readonly journalPath: string;
   stop(): void;
@@ -65,20 +82,19 @@ export function publicJournalPathOf(env: Readonly<Record<string, string | undefi
   return env["SUBETHA_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "journal.ndjson");
 }
 
-export async function startHost(options: HostOptions): Promise<RunningHost> {
+/**
+ * 起動の計画を作る（純粋関数。試験で確かめる）。**1 つの値 `options.activation`** が、設定生成（`routerConfigOf`）と子プロセスの
+ * 能力の env（`railsChildEnvOf` → `SUBETHA_RAILS_ACTIVATION`）の両方を決める。無効なら受取鍵・受取 owner・RPC の env は読まない。
+ */
+export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, string | undefined>>): HostPlan {
   // 送信レグ（Provider への支払い）は運営の資金。受信レグの鍵はここには無い。
-  const outboundKey = required("SUBETHA_OUTBOUND_PRIVATE_KEY");
-  const receiver = required("SUBETHA_ROUTER_RECEIVER");
-  /**
-   * 多レール（Arc・Solana の受信。multirail 設計 §8）: 1 つの値 `activation` が設定生成と子プロセスの能力の両方を決める。
-   * 無効なら受取鍵・受取 owner・RPC の env は読まない。有効で env が無い・形が違うときは起動しない（固定文のみ）。
-   */
+  const outboundKey = required(env, "SUBETHA_OUTBOUND_PRIVATE_KEY");
+  const receiver = required(env, "SUBETHA_ROUTER_RECEIVER");
   let rails;
   try {
-    rails = railsOptionsOf(options.activation, process.env);
+    rails = railsOptionsOf(options.activation, env);
   } catch {
-    note("rails receivers could not be derived (check SUBETHA_ARC_RECEIVER_KEY / SUBETHA_SOLANA_RECEIVER)");
-    process.exit(2);
+    throw new HostPlanError("rails");
   }
   /**
    * MPP 受信を公開するかどうか。**両方そろって初めて有効**:
@@ -86,15 +102,76 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
    * - `SUBETHA_OUTBOUND_X402_KEY`: x402 送信（Provider A）に払う鍵。**USDC 残高が要る**
    * 片方だけだと起動が fail closed で止まるので、**両方ある時だけ route を足す**。
    */
-  const mppInboundSecret = process.env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
+  const mppInboundSecret = env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
   /**
    * x402 送信の鍵。**既定は送信レグの鍵を流用**する（同じ運営ウォレットが両レグを払う
    * 構成が普通で、env を 2 本に増やす理由がない）。別ウォレットにしたいときだけ上書きする。
    * どちらにせよ **Base Sepolia USDC の残高が要る**。
    */
-  const x402OutboundKey = process.env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey;
+  const x402OutboundKey = env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey;
   const mppInboundEnabled = mppInboundSecret !== "";
-  const port = options.port;
+  const journalPath = options.journalPath;
+  let config: Record<string, unknown>;
+  try {
+    config = routerConfigOf(env, receiver, mppInboundEnabled, rails);
+  } catch {
+    throw new HostPlanError("config");
+  }
+  const childEnv: Record<string, string> = {
+      // MPP 送信（Provider B）。既存経路。
+      SUBETHA_OUTBOUND_MPP_KEY: outboundKey,
+      // x402 送信（Provider A）。MPP 受信経路を出すときだけ要る。
+      ...(mppInboundEnabled ? { SUBETHA_OUTBOUND_X402_KEY: x402OutboundKey } : {}),
+      ROUTER_JOURNAL_PATH: journalPath,
+      ROUTER_HTTP_PORT: "0",
+      ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
+      ROUTER_PRINCIPAL_TOKENS: "judge:public",
+      ROUTER_ADAPTER_MODE: "real",
+      ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
+      ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
+      // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
+      // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
+      ROUTER_X402_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
+      /**
+       * Tempo の RPC（設定があるとき）。子プロセスの env は allowlist 方式（`startListening`）なので、**ここで明示的に渡さないと届かない**。
+       * 送信（`tools/remote-router-process.ts` が `SUBETHA_TEMPO_RPC_URL` を読む）と受信の照合（`ROUTER_MPP_INBOUND_RPC_URL`）の両方に同じ値を渡す。
+       * 以前は渡していなかったので、設定していても送信は公開 RPC を使っていた（T15 のレビューで発見）。
+       */
+      ...(env["SUBETHA_TEMPO_RPC_URL"] === undefined || env["SUBETHA_TEMPO_RPC_URL"] === ""
+        ? {}
+        : { SUBETHA_TEMPO_RPC_URL: env["SUBETHA_TEMPO_RPC_URL"], ROUTER_MPP_INBOUND_RPC_URL: env["SUBETHA_TEMPO_RPC_URL"] }),
+      ...(mppInboundEnabled
+        ? {
+            ROUTER_MPP_INBOUND_SECRET: mppInboundSecret,
+            ROUTER_MPP_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
+          }
+        : {}),
+      // 多レール: 有効化の値と、有効なレールの受取鍵・RPC だけ（`tools/rails-entry.ts`）。
+      ...railsChildEnvOf(options.activation, env),
+  };
+  return { config, childEnv, journalPath };
+}
+
+/** MCP の入口を bind する。実際のアドレスと port を返す（試験で bind を確かめる）。 */
+export function listenMcp(http: Server, bind: string, port: number): Promise<{ address: string; port: number }> {
+  return new Promise((resolve) => {
+    http.listen(port, bind, () => {
+      const address = http.address();
+      resolve(typeof address === "object" && address !== null ? { address: address.address, port: address.port } : { address: bind, port });
+    });
+  });
+}
+
+export async function startHost(options: HostOptions): Promise<RunningHost> {
+  let plan: HostPlan;
+  try {
+    plan = hostPlanOf(options, process.env);
+  } catch (error) {
+    // 固定文のみ（理由の code で選ぶ。値は出さない）。
+    const code = error instanceof HostPlanError ? error.code : undefined;
+    note(code === "env" ? "SUBETHA_OUTBOUND_PRIVATE_KEY and SUBETHA_ROUTER_RECEIVER are required." : code === "rails" ? "rails receivers could not be derived (check SUBETHA_ARC_RECEIVER_KEY / SUBETHA_SOLANA_RECEIVER)" : "router config could not be generated (check the rails receivers)");
+    process.exit(2);
+  }
 
   /**
    * 使い捨ての作業領域。**config と証拠ログだけ**を置く（起動ごとに新しくてよい）。
@@ -110,53 +187,14 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
    * コンテナで動かす場合は、このディレクトリを**ボリュームとして外に出す**こと
    * （`docs/DEPLOY.md`）。出さないとコンテナ作り直しで消える。
    */
-  const journalPath = options.journalPath;
+  const journalPath = plan.journalPath;
   await mkdir(path.dirname(journalPath), { recursive: true });
-  let config: Record<string, unknown>;
-  try {
-    config = routerConfigOf(process.env, receiver, mppInboundEnabled, rails);
-  } catch {
-    note("router config could not be generated (check the rails receivers)");
-    process.exit(2);
-  }
   const configPath = path.join(work, "router.config.json");
-  await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
+  await writeFile(configPath, JSON.stringify(plan.config, null, 2), "utf8");
 
   let router: Listening;
   try {
-    router = await startListening("tools/remote-router-process.ts", [], {
-      // MPP 送信（Provider B）。既存経路。
-      SUBETHA_OUTBOUND_MPP_KEY: outboundKey,
-      // x402 送信（Provider A）。MPP 受信経路を出すときだけ要る。
-      ...(mppInboundEnabled ? { SUBETHA_OUTBOUND_X402_KEY: x402OutboundKey } : {}),
-      ROUTER_CONFIG_PATH: configPath,
-      ROUTER_JOURNAL_PATH: journalPath,
-      ROUTER_HTTP_PORT: "0",
-      ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
-      ROUTER_PRINCIPAL_TOKENS: "judge:public",
-      ROUTER_ADAPTER_MODE: "real",
-      ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
-      ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
-      // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
-      // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
-      ROUTER_X402_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
-      /**
-       * Tempo の RPC（設定があるとき）。子プロセスの env は allowlist 方式（`startListening`）なので、**ここで明示的に渡さないと届かない**。
-       * 送信（`tools/remote-router-process.ts` が `SUBETHA_TEMPO_RPC_URL` を読む）と受信の照合（`ROUTER_MPP_INBOUND_RPC_URL`）の両方に同じ値を渡す。
-       * 以前は渡していなかったので、設定していても送信は公開 RPC を使っていた（T15 のレビューで発見）。
-       */
-      ...(process.env["SUBETHA_TEMPO_RPC_URL"] === undefined || process.env["SUBETHA_TEMPO_RPC_URL"] === ""
-        ? {}
-        : { SUBETHA_TEMPO_RPC_URL: process.env["SUBETHA_TEMPO_RPC_URL"], ROUTER_MPP_INBOUND_RPC_URL: process.env["SUBETHA_TEMPO_RPC_URL"] }),
-      ...(mppInboundEnabled
-        ? {
-            ROUTER_MPP_INBOUND_SECRET: mppInboundSecret,
-            ROUTER_MPP_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
-          }
-        : {}),
-      // 多レール: 有効化の値と、有効なレールの受取鍵・RPC だけ（`tools/rails-entry.ts`）。
-      ...railsChildEnvOf(options.activation, process.env),
-    });
+    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath });
   } catch (error) {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
     void error;
@@ -208,15 +246,9 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
-  const mcpPort = await new Promise<number>((resolve) => {
-    http.listen(port, options.bind, () => {
-      const address = http.address();
-      const bound = typeof address === "object" && address !== null ? address.port : port;
-      note(`subetha-router remote MCP on ${options.bind}:${bound}/mcp (inbound payer: the caller's own key)`);
-      resolve(bound);
-    });
-  });
-  return { mcpPort, routerPort: router.port, journalPath, stop };
+  const bound = await listenMcp(http, options.bind, options.port);
+  note(`subetha-router remote MCP on ${bound.address}:${bound.port}/mcp (inbound payer: the caller's own key)`);
+  return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, stop };
 }
 
 /** 公開の入口: 多レールは定数で無効、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */

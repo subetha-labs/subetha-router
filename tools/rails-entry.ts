@@ -126,11 +126,18 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
  * 有効化の値、Arc の受取鍵（Arc が有効なときだけ）、Solana の RPC（Solana が有効で設定があるときだけ。Router の設定の読み口 `ROUTER_SOLANA_RPC_URL` にも同じ値）。
  */
 export function railsChildEnvOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): Record<string, string> {
-  const key = env[ARC_RECEIVER_KEY_ENV];
-  const rpc = env[SOLANA_RPC_ENV];
-  return {
-    [RAILS_ACTIVATION_ENV]: activationToEnv(activation),
-    ...(activation.arc && key !== undefined && key !== "" ? { [ARC_RECEIVER_KEY_ENV]: key } : {}),
-    ...(activation.solana && rpc !== undefined && rpc !== "" ? { [SOLANA_RPC_ENV]: rpc, ROUTER_SOLANA_RPC_URL: rpc } : {}),
-  };
+  const out: Record<string, string> = { [RAILS_ACTIVATION_ENV]: activationToEnv(activation) };
+  // 無効なレールの env は**読まない**（渡さないだけでなく、参照もしない）。
+  if (activation.arc) {
+    const key = env[ARC_RECEIVER_KEY_ENV];
+    if (key !== undefined && key !== "") out[ARC_RECEIVER_KEY_ENV] = key;
+  }
+  if (activation.solana) {
+    const rpc = env[SOLANA_RPC_ENV];
+    if (rpc !== undefined && rpc !== "") {
+      out[SOLANA_RPC_ENV] = rpc;
+      out["ROUTER_SOLANA_RPC_URL"] = rpc;
+    }
+  }
+  return out;
 }
