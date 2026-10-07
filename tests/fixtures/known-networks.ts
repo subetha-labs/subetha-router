@@ -21,17 +21,19 @@ const SYNTHETIC_EVM_ASSETS = [
   "0x000000000000000000000000000000000000beef",
 ].map((id) => ({ id, decimals: 6, domain: { name: "USDC", version: "2" } }));
 
-/** 試験では、どの EVM network でも両レールの受信・送信を許す（照合の対象は形と一致で、本番の向きの制限は本番の表で固定する）。 */
-function permissiveEvm(network: string, assets: KnownNetwork["assets"]): KnownNetwork {
-  return { network, family: "evm", inbound: ["x402", "mpp"], outbound: ["x402", "mpp"], x402Facilitator: "x402", assets };
+/** 合成の EVM network（本番の表に無い）。向きとレールは両方許す（fixture の都合。本番の向きの制限は本番の表の項目で保つ）。 */
+function syntheticEvm(network: string): KnownNetwork {
+  return { network, family: "evm", inbound: ["x402", "mpp"], outbound: ["x402", "mpp"], x402Facilitator: "x402", assets: SYNTHETIC_EVM_ASSETS };
 }
 
+/**
+ * 本番の項目は **向き・レール・facilitator の種類をそのまま**保ち、合成の資産だけを足す（本番が拒む向きを fixture が受け入れないため）。
+ * 本番に無い network は合成の項目。
+ */
 export const TEST_NETWORKS: readonly KnownNetwork[] = [
-  ...KNOWN_NETWORKS.map((entry) =>
-    entry.family === "evm" ? permissiveEvm(entry.network, [...entry.assets, ...SYNTHETIC_EVM_ASSETS]) : entry,
-  ),
-  permissiveEvm("eip155:11155111", SYNTHETIC_EVM_ASSETS),
-  permissiveEvm("eip155:8453", SYNTHETIC_EVM_ASSETS),
-  permissiveEvm("eip155:1", SYNTHETIC_EVM_ASSETS),
-  permissiveEvm("eip155:4217", SYNTHETIC_EVM_ASSETS),
+  ...KNOWN_NETWORKS.map((entry) => (entry.family === "evm" ? { ...entry, assets: [...entry.assets, ...SYNTHETIC_EVM_ASSETS] } : entry)),
+  syntheticEvm("eip155:11155111"),
+  syntheticEvm("eip155:8453"),
+  syntheticEvm("eip155:1"),
+  syntheticEvm("eip155:4217"),
 ];

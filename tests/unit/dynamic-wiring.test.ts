@@ -19,6 +19,7 @@ import { TransportError, type TransportEvent } from "../../src/net/guarded-fetch
 import { DynamicTargetUnsupportedError, type EvmSigningCapability, type MppTempoCapability } from "../../src/ports/outbound.js";
 import { dynamicProfilesOf, routerConfigOf } from "../../tools/remote-mcp-config.js";
 import { publicLookup, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
+import { TEST_NETWORKS } from "../fixtures/known-networks.js";
 import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 import { createPayerSpy } from "../fixtures/mpp-payer-spy.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
@@ -144,7 +145,7 @@ function hooks(dialed: string[], routes: Readonly<Record<string, number>> = {}):
 
 function compose(env: Record<string, string>, capabilities: RouterCapabilities) {
   const events: TransportEvent[] = [];
-  const config = loadRuntimeConfig(env, (file) => readFileSync(file, "utf8"));
+  const config = loadRuntimeConfig(env, (file) => readFileSync(file, "utf8"), { networks: TEST_NETWORKS });
   return { rails: composeRails(config, capabilities, (event) => events.push(event)), events, config };
 }
 

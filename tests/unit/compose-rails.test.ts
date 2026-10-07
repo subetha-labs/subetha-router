@@ -12,6 +12,7 @@ import { loadRuntimeConfig, routeBindingOf } from "../../src/config.js";
 import { composeRails, type RouterCapabilities } from "../../src/main.js";
 import { TransportError, type TransportEvent } from "../../src/net/guarded-fetch.js";
 import type { EvmSigningCapability, MppTempoCapability } from "../../src/ports/outbound.js";
+import { TEST_NETWORKS } from "../fixtures/known-networks.js";
 import { createPayerSpy } from "../fixtures/mpp-payer-spy.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
 
@@ -98,7 +99,7 @@ async function outcomeOf(promise: Promise<unknown>): Promise<string> {
 
 function compose(mode: "real" | "synthetic", capabilities: RouterCapabilities, env: Record<string, string> = {}) {
   const events: TransportEvent[] = [];
-  const config = loadRuntimeConfig({ ...configFor(mode), ...env }, (file) => readFileSync(file, "utf8"));
+  const config = loadRuntimeConfig({ ...configFor(mode), ...env }, (file) => readFileSync(file, "utf8"), { networks: TEST_NETWORKS });
   const rails = composeRails(config, capabilities, (event) => events.push(event));
   return { rails, events, config };
 }

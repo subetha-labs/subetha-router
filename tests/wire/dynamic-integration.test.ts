@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { createRouterClient } from "../../src/client/index.js";
 import type { QuoteView, RouterClient } from "../../src/client/types.js";
 import { DEFAULT_DYNAMIC_LIMITS, loadRuntimeConfig, type RuntimeConfig } from "../../src/config.js";
+import { TEST_NETWORKS } from "../fixtures/known-networks.js";
 import { createRouterCore, type RouterCore } from "../../src/core/orchestrator.js";
 import { startHttpServer, type RunningServer } from "../../src/http/app.js";
 import { composeRails, dynamicCoreOptionsOf, type DynamicTransportHooks, type RouterCapabilities } from "../../src/main.js";
@@ -213,6 +214,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
       ROUTER_JOURNAL_PATH: journalPath,
     },
     (file) => readFileSync(file, "utf8"),
+    { networks: TEST_NETWORKS },
   );
   const keys = options.keys ?? { x402: generatePrivateKey(), mpp: generatePrivateKey() };
   const evm = createRealEvmCapability(keys.x402);

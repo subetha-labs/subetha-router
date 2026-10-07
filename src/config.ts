@@ -78,6 +78,13 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
   },
 ]);
 
+/** CAIP-2 の構文そのもの（facilitator の表の鍵に使う。route の network は従来どおり文字列）。 */
+const CAIP2_PATTERN = /^(eip155:[1-9][0-9]{0,19}|solana:[1-9A-HJ-NP-Za-km-z]{32})$/;
+
+export function isCaip2Network(network: string): boolean {
+  return CAIP2_PATTERN.test(network);
+}
+
 /** CAIP-2 の名前空間から族を引く。知らない名前空間は `undefined`（呼び出し側は EVM の規則に落とす: 既存の構成を壊さない）。 */
 export function networkFamilyOf(network: string): NetworkFamily | undefined {
   if (network.startsWith("eip155:")) return "evm";
@@ -120,7 +127,6 @@ interface TermsToValidate {
   readonly decimals?: number;
   readonly payTo?: string;
   readonly tokenDomain?: { readonly name: string; readonly version: string };
-  readonly feeAsset?: string;
 }
 
 /**
@@ -153,9 +159,6 @@ function validateTermsAgainstTable(at: string, terms: TermsToValidate, networks:
     if (terms.tokenDomain.name !== asset.domain.name || terms.tokenDomain.version !== asset.domain.version) {
       throw new ConfigError(`${at}.tokenDomain does not match the known asset`);
     }
-  }
-  if (terms.feeAsset !== undefined && knownAssetOf(entry, terms.feeAsset) === undefined) {
-    throw new ConfigError(`${at}.feeAsset is not a known asset on this network`);
   }
 }
 
@@ -869,7 +872,7 @@ export function parseRouterConfig(raw: unknown, options: RouterConfigOptions = {
 /**
  * 表との照合（multirail 設計 §1）。範囲は x402／mpp の受信（`sourceRail`）と x402／mpp の送信（`rail`）だけ。
  * `subetha` 受信（既定）と rail 未指定の route は今の検査のまま。静的 route の destination は network・向き・資産・受取先の形、
- * source と動的プロファイルはそれに桁（x402 送信は `tokenDomain`、mpp 送信は `feeAsset`）を足して見る。
+ * source と動的プロファイルはそれに桁（x402 送信は `tokenDomain`）を足して見る。
  */
 export function validateRouterConfigAgainstTable(router: RouterConfig, networks: readonly KnownNetwork[]): void {
   for (const route of Object.values(router.routes)) {
@@ -890,8 +893,8 @@ export function validateRouterConfigAgainstTable(router: RouterConfig, networks:
       network: profile.destination.network,
       asset: profile.destination.asset,
       decimals: profile.destination.decimals,
+      // mpp 送信の `feeAsset` は送信資産そのものに限る（`parseDynamicProfile`）ので、資産の照合で一緒に決まる。
       ...(profile.destination.tokenDomain === undefined ? {} : { tokenDomain: profile.destination.tokenDomain }),
-      ...(profile.destination.feeAsset === undefined ? {} : { feeAsset: profile.destination.feeAsset }),
     }, networks);
   }
 }
@@ -1082,11 +1085,12 @@ function parseInboundFacilitators(
     if (!isRecord(raw)) {
       throw new ConfigError(`${at} must be an object when present`);
     }
-    parsed = {};
-    for (const [network, value] of Object.entries(raw)) {
-      const here = `${at}["${network}"]`;
-      if (networkFamilyOf(network) === undefined) {
-        throw new ConfigError(`${here}: the key must be a CAIP-2 network (eip155:… or solana:…)`);
+    const table: Record<string, X402InboundFacilitator> = {};
+    // 鍵（network）はメッセージに**写さない**（設定の値を起動ログに出さない）。位置は何番目かで示す。
+    Object.entries(raw).forEach(([network, value], index) => {
+      const here = `${at}[#${index + 1}]`;
+      if (!isCaip2Network(network)) {
+        throw new ConfigError(`${here}: the key must be a CAIP-2 network (eip155:<id> or solana:<32-char genesis>)`);
       }
       if (!isRecord(value)) {
         throw new ConfigError(`${here} must be an object`);
@@ -1108,8 +1112,9 @@ function parseInboundFacilitators(
           throw new ConfigError(`${here}.kind does not match the known network's facilitator kind`);
         }
       }
-      parsed[network] = { kind, url };
-    }
+      table[network] = { kind, url };
+    });
+    parsed = table;
   }
   if (networks !== undefined) {
     const inboundNetworks = new Set<string>();
@@ -1120,10 +1125,13 @@ function parseInboundFacilitators(
       if (profile.sourceRail === "x402") inboundNetworks.add(profile.source.network);
     }
     for (const network of inboundNetworks) {
-      const hasLegacy = network === LEGACY_X402_INBOUND_NETWORK && legacyUrl !== undefined && legacyUrl !== "";
-      if (!hasLegacy && parsed?.[network] === undefined) {
-        throw new ConfigError(`${at}: a facilitator is required for every x402 inbound network (missing one)`);
+      if (parsed?.[network] !== undefined) continue;
+      if (network === LEGACY_X402_INBOUND_NETWORK) {
+        if (legacyUrl !== undefined && legacyUrl !== "") continue;
+        // 既存の起動失敗の文言を保つ（`src/main.ts` と同じ）。
+        throw new ConfigError('ROUTER_X402_INBOUND_FACILITATOR_URL is required when a route uses sourceRail "x402"');
       }
+      throw new ConfigError(`${at}: a facilitator is required for every x402 inbound network (missing one)`);
     }
   }
   return parsed;
@@ -1156,7 +1164,7 @@ function parsePort(raw: string | undefined, fallback: number): number {
  */
 /**
  * `loadRuntimeConfig` の選択肢。`networks` は **real モードのときだけ**使う（synthetic の harness は表の外の network・資産で起動する）。
- * 本番の入口（`startRouter` の既定）は `KNOWN_NETWORKS`、試験の起動側は `knownNetworksForTest`。渡さなければ照合しない。
+ * 渡さなければ real モードは `KNOWN_NETWORKS`（本番の表）。試験の起動側は `knownNetworksForTest`（`src/main.ts`）で差し替える。
  */
 export interface RuntimeConfigOptions {
   readonly networks?: readonly KnownNetwork[];
@@ -1185,7 +1193,8 @@ export function loadRuntimeConfig(
   if (mode !== "real" && mode !== "synthetic") {
     throw new ConfigError("ROUTER_ADAPTER_MODE must be 'real' or 'synthetic'");
   }
-  const networks = mode === "real" ? options.networks : undefined;
+  // real モードの既定は本番の表（設計 §1）。試験の起動側は `knownNetworksForTest`（`src/main.ts`）で差し替える。
+  const networks = mode === "real" ? (options.networks ?? KNOWN_NETWORKS) : undefined;
   // 表との照合は、実レールの env・設定（facilitator の URL 等）の不足を先に報告してから行う（既存の起動失敗の文言を変えない）。
   const router = parseRouterConfig(document["router"]);
   const canonicalBaseUrl = (env["ROUTER_CANONICAL_BASE_URL"] ?? "http://127.0.0.1:8500").replace(

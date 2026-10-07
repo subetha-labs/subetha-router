@@ -8,10 +8,12 @@
  */
 import { describe, expect, test } from "vitest";
 
+import { getBase58Decoder } from "@solana/kit";
 import {
   ConfigError,
   KNOWN_NETWORKS,
   assetKeyOf,
+  isCaip2Network,
   isWellFormedPayTo,
   loadRuntimeConfig,
   parseRouterConfig,
@@ -116,7 +118,12 @@ describe("否定（static route）", () => {
   test("表に無い資産", () => expectInvalid(config([route({}, { asset: "0x000000000000000000000000000000000000beef" })]), /source\.asset is not a known asset/));
   test("桁が違う（Arc のネイティブ USDC 18 桁は設定できない。FR-7）", () => expectInvalid(config([route({}, { network: "eip155:5042002", asset: ARC_USDC, decimals: 18 })]), /source\.decimals does not match/));
   test("EVM の payTo が 0x＋40 hex でない", () => expectInvalid(config([route({}, { payTo: "0x1234" })]), /source\.payTo must be a well-formed address/));
-  test("SVM の payTo が 32 バイトの base58 でない", () => expectInvalid(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDUxx" })]), /source\.payTo must be a well-formed address/));
+  test("SVM の payTo が 32 バイトの base58 でない（長さ超過と、字種は正しいが 31 バイトに復号されるもの）", () => {
+    expectInvalid(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDUxx" })]), /source\.payTo must be a well-formed address/);
+    const thirtyOne = getBase58Decoder().decode(new Uint8Array(31).fill(0xff));
+    expect(thirtyOne.length).toBeGreaterThanOrEqual(32);
+    expectInvalid(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: thirtyOne })]), /source\.payTo must be a well-formed address/);
+  });
   test("送信の payTo の形（EVM）", () => expectInvalid(config([route({}, {}, { payTo: "not-an-address" })]), /destination\.payTo is not a well-formed address/));
   test("Solana は受信だけ（表のとおり）。owner の公開鍵は通る", () => {
     const parsed = parseRouterConfig(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), { networks: KNOWN_NETWORKS });
@@ -134,10 +141,8 @@ describe("否定（dynamic profile）", () => {
     const networks: KnownNetwork[] = [...KNOWN_NETWORKS, { network: "eip155:99", family: "evm", inbound: [], outbound: ["x402"], assets: [{ id: "0x000000000000000000000000000000000000beef", decimals: 6 }] }];
     expectInvalid(config([route()], [profile({ rail: "x402" }, {}, { scheme: "exact", network: "eip155:99", asset: "0x000000000000000000000000000000000000beef", tokenDomain: { name: "USDC", version: "2" }, feeAsset: undefined, maxFee: undefined })]), /has no EIP-712 domain/, networks);
   });
-  test("mpp 送信の feeAsset が表に無い", () => {
-    const networks: KnownNetwork[] = [...KNOWN_NETWORKS.filter((n) => n.network !== "eip155:42431"), { network: "eip155:42431", family: "evm", inbound: ["mpp"], outbound: ["mpp"], assets: [{ id: PATHUSD, decimals: 6 }, { id: "0x000000000000000000000000000000000000beef", decimals: 6 }] }];
-    // feeAsset は送信資産そのもの、という既存の規則が先に落ちるので、表の検査は資産を変えて見る。
-    expectInvalid(config([route()], [profile({}, {}, { asset: "0x000000000000000000000000000000000000cafe", feeAsset: "0x000000000000000000000000000000000000cafe" })]), /destination\.asset is not a known asset/, networks);
+  test("mpp 送信の資産（= feeAsset。既存の規則で同じ）が表に無い", () => {
+    expectInvalid(config([route()], [profile({}, {}, { asset: "0x000000000000000000000000000000000000cafe", feeAsset: "0x000000000000000000000000000000000000cafe" })]), /destination\.asset is not a known asset/);
   });
   test("SVM の payTo の形（profile）", () => expectInvalid(config([route()], [profile({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405" })]), /profiles\.p\.source\.payTo must be a well-formed/));
 });
@@ -187,14 +192,33 @@ describe("x402.inboundFacilitators（real モードの読み込み）", () => {
     }
   });
   test("x402 受信の network に facilitator が無い", () => expectLoadInvalid(() => load({}, [route(), SOL_ROUTE]), /a facilitator is required for every x402 inbound network/));
+  test("Base Sepolia の x402 受信で env が無いときは既存の文言（ROUTER_X402_INBOUND_FACILITATOR_URL）", () =>
+    expectLoadInvalid(() => load({}, [route()], { ROUTER_X402_INBOUND_FACILITATOR_URL: undefined }), /ROUTER_X402_INBOUND_FACILITATOR_URL is required when a route uses sourceRail "x402"/));
+  test("鍵の構文は CAIP-2 そのもので、メッセージに鍵の値を写さない", () => {
+    for (const key of ["eip155:", "solana:bad key", "eip155:abc", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", "secret-looking-value\nline2"]) {
+      let caught: unknown;
+      try {
+        load({ inboundFacilitators: { [key]: { kind: "x402", url: "https://sol.test" } } }, [route(), SOL_ROUTE]);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ConfigError);
+      expect((caught as Error).message).toMatch(/must be a CAIP-2 network/);
+      // 名前空間だけの鍵（`eip155:`）は文言の例示と重なるので、それ以外で「値を写さない」を見る。
+      if (key !== "eip155:") expect((caught as Error).message).not.toContain(key);
+      expect(isCaip2Network(key)).toBe(false);
+    }
+    expect(isCaip2Network(SOL_DEVNET)).toBe(true);
+    expect(isCaip2Network("eip155:84532")).toBe(true);
+  });
   test("表に無い network の facilitator", () => expectLoadInvalid(() => load({ inboundFacilitators: { "eip155:1": { kind: "x402", url: "https://one.test" } } }, [route()]), /not a known network/));
   test("kind の列挙外・CAIP-2 でない鍵", () => {
     expectLoadInvalid(() => load({ inboundFacilitators: { [SOL_DEVNET]: { kind: "cdp", url: "https://sol.test" } } }, [route(), SOL_ROUTE]), /kind must be "x402" or "circle"/);
     expectLoadInvalid(() => load({ inboundFacilitators: { solana: { kind: "x402", url: "https://sol.test" } } }, [route(), SOL_ROUTE]), /must be a CAIP-2 network/);
   });
-  test("networks を渡さなければ、facilitator の必須と kind の照合はしない（既存の試験の経路）", () => {
-    const loaded = load({}, [route(), SOL_ROUTE], {}, null);
-    expect(loaded.real?.x402InboundFacilitators).toBeUndefined();
+  test("networks を渡さなければ real モードの既定は本番の表（facilitator の必須も効く）", () => {
+    expectLoadInvalid(() => load({}, [route(), SOL_ROUTE], {}, null), /a facilitator is required for every x402 inbound network/);
+    expectLoadInvalid(() => load({}, [route({}, { asset: "0x000000000000000000000000000000000000beef" })], {}, null), /source\.asset is not a known asset/);
   });
   test("synthetic モードでは表を使わない", () => {
     const document = { router: config([route({}, { network: "eip155:1", asset: "0x000000000000000000000000000000000000beef" })]), synthetic: { facilitatorUrl: "http://127.0.0.1:1", upstreams: { r: "http://127.0.0.1:1/x" } } };
@@ -211,12 +235,19 @@ describe("本番と試験の表", () => {
     expect(Object.keys(parsed.dynamic?.profiles ?? {}).length).toBe(2);
   });
 
-  test("試験の表は本番の表を含み、本番の network の資産を減らさない", () => {
+  test("試験の表は本番の項目の向き・レール・facilitator の種類をそのまま保ち、資産を減らさない", () => {
     for (const entry of KNOWN_NETWORKS) {
       const test = TEST_NETWORKS.find((n) => n.network === entry.network);
       expect(test).toBeDefined();
-      for (const asset of entry.assets) expect(test?.assets.some((a) => a.id === asset.id && a.decimals === asset.decimals)).toBe(true);
+      expect(test?.family).toBe(entry.family);
+      expect(test?.inbound).toEqual(entry.inbound);
+      expect(test?.outbound).toEqual(entry.outbound);
+      expect(test?.x402Facilitator).toBe(entry.x402Facilitator);
+      for (const asset of entry.assets) expect(test?.assets.some((a) => a.id === asset.id && a.decimals === asset.decimals && a.domain?.name === asset.domain?.name && a.tokenProgram === asset.tokenProgram)).toBe(true);
     }
+    // 本番が拒む向きは試験の表でも拒む（Arc への送信、Tempo での x402 受信）。
+    expectInvalid(config([route({ rail: "x402" }, {}, { scheme: "exact", network: "eip155:5042002", asset: ARC_USDC })]), /outbound rail "x402" is not allowed/, TEST_NETWORKS);
+    expectInvalid(config([route({}, { network: "eip155:42431", asset: PATHUSD })]), /inbound rail "x402" is not allowed/, TEST_NETWORKS);
   });
 
   test("assetKeyOf と受取先の形", () => {
