@@ -101,9 +101,11 @@ again with one constant: **if they are missing from `subetha_router_list_routes`
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`. On the hosted Router both profiles are enabled: `dyn-mpp-to-x402` (you pay **Tempo
+with `enabled`. On the hosted Router six profiles are enabled. The original two: `dyn-mpp-to-x402` (you pay **Tempo
 pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**) and `dyn-x402-to-mpp` (you pay
-**Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); a profile that is not listed,
+**Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); since 2026-10-07 also `dyn-arc-to-mpp` /
+`dyn-arc-to-x402` (you pay **Arc testnet USDC**) and `dyn-sol-to-x402` / `dyn-sol-to-mpp` (you pay **Solana devnet USDC**).
+A profile that is not listed,
 or `enabled: false`, means `subetha_router_quote_url` answers `unknown_route` / `dynamic_disabled`.
 The steps differ from the static ones in these ways:
 

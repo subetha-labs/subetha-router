@@ -115,7 +115,7 @@ submits and pays the gas. **Look at the Transfer log for the address that actual
 (for the outbound leg above, `0x5d78cbd6…` -> Provider A). Looking only at `tx.from` makes it look
 like someone else's payment.
 
-The hosted version has 2 routes:
+The hosted version has 4 routes. The original two:
 
 | routeId | Inbound | Outbound |
 |---|---|---|
@@ -157,9 +157,10 @@ Because of that, **the meaning of `npm run sign` changes with the rail**:
 **Not verified yet**:
 
 - **Real settlement of the SubEtha inbound leg** (still the synthetic facilitator). -> **AC-4 is not met**
-- Same-rail (x402 -> x402 / MPP -> MPP) is **not verified**
-- **Arc and Solana inbound: only the four acceptance purchases** (one per route and profile kind, testnets, 2026-10-07); no sustained
-  operation yet, and the hosted entry does not forward the child Router's stderr (`docs/DEPLOY.md` §2c says what to look at instead)
+- Same-rail: x402 -> x402 is covered by the Solana -> Base acceptance purchases (G-3, 2026-10-07); **MPP -> MPP is not verified**
+- **Arc and Solana inbound: only the four acceptance cases** (static and dynamic on each rail, testnets, 2026-10-07; six attempts in
+  total, five delivered and one `unknown` whose payment settled on chain without delivery, which led to the SVM follow-up in
+  `docs/DEPLOY.md` §2c); no sustained operation yet, and the hosted entry does not forward the child Router's stderr (§2c says what to look at instead)
 - **Replay prevention for MPP inbound across restarts, on a real chain**. The SDK's replay state is in-process
   and is lost on restart. The Router now refuses an MPP credential whose embedded challenge is not the one
   issued for that quote, and a quote runs at most once (journal). Fixture tests cover the adapter's refusal

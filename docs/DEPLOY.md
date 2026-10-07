@@ -99,7 +99,7 @@ owner の決定で MPP 送信のプロファイル（`dyn-x402-to-mpp`）も登�
 journal の `dynamic.reservation` を持つ `created` 行の数（通算の件数）、`unknown` の終端（MPP 受信では credential を作った時点で資金が動く。
 `awaiting_payment` は「未払い」を意味しない）。
 
-### 2c. 多レールの受信（Arc testnet USDC・Solana devnet USDC で払う）— **本番では無効**（`RAILS_ACTIVATION = { arc: false, solana: false }`）
+### 2c. 多レールの受信（Arc testnet USDC・Solana devnet USDC で払う）— **本番で有効（2026-10-07 11:03Z から。`RAILS_ACTIVATION = { arc: true, solana: true }`。下の G-4 の記録）**
 
 呼び出し側が **Arc testnet の USDC**（x402、facilitator は Circle）か **Solana devnet の USDC**（x402 の SVM `exact`、facilitator は x402.org）で払い、
 既存の Provider A（x402）・B（MPP）に届く機能（要件 `multirail-requirements.md`、設計 `multirail-design.md`、タスク `multirail-tasks.md`）。
