@@ -887,22 +887,25 @@ describe("T11: Solana の settle が settlement_pending（署名つき）でも�
     let router = await startRouter(fixtures, { dir, keys, maxTotal: { sol: "10000" } });
     fixtures.svm.state.confirm = "timeout";
     // 追跡の最初の RPC が答える前に process が落ちたことにする（core を直接呼び、HTTP の接続を残さない）。
-    // 旧い処理を放置しない: RPC は 1 秒後に `err` を返すので、旧い処理はその 1 回で打ち切り、閉じた journal への書き込みで失敗して終わる（それを待って観測する）。
+    // 順序を固定する: RPC の応答は barrier で止め、要求を観測 → Router を閉じる → 応答（`err`）を放す → 旧い処理が 1 回で打ち切り、閉じた journal への書き込みで終わるのを待つ。
     fixtures.solRpc.state.signatureStatuses = ["err"];
-    fixtures.solRpc.state.delayMs = 1_000;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fixtures.solRpc.state.gate = () => gate;
     const quote = await staticQuote(router, ROUTES.solX402, "c");
     const credential = await svmCredential(quote);
     const hung = router.core.purchase({ principalId: "judge", requestId: "c", quoteId: quote.quoteId, routeId: quote.routeId, approval: quote.quoteId, credential: decode(credential) as never });
     await until(() => fixtures.solRpc.calls.some((c) => c.method === "getSignatureStatuses"), "the follow-up request");
     await router.close();
     closers.splice(closers.indexOf(router.close), 1);
+    release();
+    // 旧い処理は終わった: 閉じた journal には書けないので失敗する（settled・delivered にはならない）。追跡の要求は 1 回だけ。
     const old = await hung.then((r) => ({ kind: "resolved" as const, status: r.status }), () => ({ kind: "rejected" as const, status: undefined }));
-    // 旧い処理は終わった（閉じた journal には書けないので失敗するか、何も書かずに unknown を返す）。追跡の要求は 1 回だけ。
-    expect(["rejected", "resolved"]).toContain(old.kind);
-    if (old.kind === "resolved") expect(old.status).toBe("unknown");
+    expect(old).not.toMatchObject({ status: "delivered" });
+    expect(old.kind === "rejected" || old.status === "unknown").toBe(true);
     const pollsBeforeRestart = fixtures.solRpc.calls.filter((c) => c.method === "getSignatureStatuses").length;
     expect(pollsBeforeRestart).toBe(1);
-    fixtures.solRpc.state.delayMs = 0;
+    fixtures.solRpc.state.gate = undefined;
     fixtures.solRpc.state.signatureStatuses = ["confirmed"];
     router = await startRouter(fixtures, { dir, keys, maxTotal: { sol: "10000" } });
     expect(await router.client().status(quote.paymentId)).toMatchObject({ found: true, projection: { status: "unknown", terminalReason: "interrupted_at_restart" } });
