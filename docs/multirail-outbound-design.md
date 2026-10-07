@@ -122,7 +122,7 @@ export interface PayRequest {
 - 期限の検査の場所（**実際の署名の委譲の直前**と送出の直前。「arm の前」では SDK が間で待てば期限後に署名できる）:
   - x402 動的: `createRebuildingSigner` に `deadlineMs` を渡し、`args.signer.signTypedData` を呼ぶ直前（`x402-dynamic.ts:275`）で `now < deadlineMs` でなければ `SigningRefusedError("destination_deadline")`
   - x402 静的 Base: guarded signer の委譲の直前（`x402.ts:438`）と **送出の直前（`:499`）** で同じ検査（**Base への変更はこの 2 点と候補の段階の運用者の照合だけ**）。静的 Arc は組み直しの署名器なので上と同じ
-  - SVM: §4.5 の 8・11
+  - SVM: §4.5 の 9・12
   - MPP（FR-36 は全 adapter に掛ける。`:409`・`:865` は `pay` の入口で、credential の生成 `:485`・`:1014` の中に非同期の処理と broadcast がある）: 動的 MPP は **実署名の委譲の直前（`mpp-dynamic.ts:460`）と送金 RPC の直前（`:978`）**、
     静的 MPP は `:287` の account を**期限を検査する署名 wrapper で包み**、送金 RPC（`:323`）の直前にも検査。**結果の写像**: 期限の拒否は専用の例外 `DeadlineRefusedError` で、wrapper は **実署名・最初の RPC の委譲の前**（署名・送信の counter を増やす前）に投げ、
     adapter の状態 `refusedBeforeDispatch = true` を立てる。**2 つの拒否の場所**: (A) 実署名の委譲の前（署名 0・送金 0）、(B) 署名の後・**送金 RPC**（`eth_sendRawTransaction` 相当。読取の RPC は署名の前にも走る `mpp-dynamic.ts:925` ので数えない）の委譲の前（署名 1・送金 0）。
@@ -435,3 +435,4 @@ fixture の facilitator は simulate／send／confirm を模擬するので、**
 | 2 | 2026-10-07 | `gpt-6-astra`（read-only。第 2 版 `1f94224`） | **REJECT**（5 項目: 署名前の検査を builder と独立に、noble の公開鍵の渡し方、MPP の期限は実署名・送金 RPC の直前で broadcast 後は `not_sent` にしない、crash の試験は子 process の停止で、AC-11 の完了確認）。第 3 版で反映 |
 | 3 | 2026-10-07 | `gpt-6-astra`（read-only。第 3 版 `a57dd0c`） | **REJECT**（4 項目: header は 2／1／4 と口座の並びの規則、parser は検証しないので program ID・discriminator・data 長・口座数・読み残しを明示、step 10 の sabotage の検出は理由の変化で、MPP の期限の拒否の `not_sent` への写像）。第 4 版で反映 |
 | 4 | 2026-10-07 | `gpt-6-astra`（read-only。第 4 版 `64be346`） | **REJECT**（2 項目: MPP の署名後・送金 RPC 前の期限の拒否も `not_sent` に統一、Base の静的の送出直前の期限）。第 5 版で反映。header・口座の並び・命令の形・step 10 の sabotage・予約は解消と確認 |
+| 5 | 2026-10-07 | `gpt-6-astra`（read-only。第 5 版 `154c3f1`） | **APPROVE WITH CHANGES**（§2.4 の SVM の手順番号の参照 1 件。反映済み）。MPP の A／B、Base の静的の 2 点、要件の網羅、衛生を確認 |
