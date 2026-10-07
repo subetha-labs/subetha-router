@@ -293,10 +293,10 @@ Memo の命令は `@solana-program/memo` を入れずに生で組む（program `
 
 | # | 事項 | 扱い |
 |---|---|---|
-| U-1 | Circle の `/settle` が 30 秒の窓の中で `success: true` を返す割合。`settlement_pending` が多ければ `/status` の bounded な polling（能力に purpose `status`・method `GET` を足す）を足す | AC-1 の試行で測る。第 2 版は `unknown` |
+| U-1 | Circle の `/settle` が 30 秒の窓の中で `success: true` を返す割合。`settlement_pending` が多ければ `/status` の bounded な polling（能力に purpose `status`・method `GET` を足す）を足す | **G-3（2026-10-07）の計測**: Circle は 2 件とも 1 回の `/settle` で `success`（purchase 全体 7.6 秒・6.9 秒、`settlement_pending` 無し）。**SVM（x402.org）は 2 件中 1 件が `unknown`**: facilitator の応答（約 4.4 秒）が形どおりの成功でなく、transaction は後から見ると finalized（blockTime は journal の `unknown` の約 1.5 秒前。確定が観測された時刻との前後関係は不明。`docs/DEPLOY.md` §2c の記録）。SVM には `/status` が無いので、改訂の候補は「settle の応答が失敗でも署名を含むなら、設定の RPC の `getSignatureStatuses` を期限つきで追う」。**G-4 の前に owner が決める** |
 | U-2 | x402.org の SVM `/verify` が §5.3 の形を受理すること（simulate を含む） | **確認済み（T6、2026-10-07）**: 使い捨ての鍵と devnet の USDC（faucet）で、起動時の検査（`/supported`・ATA）→ adapter の offer → `svm-payer` の署名 → x402.org の `/verify` が **`isValid: true`**（settle はしていない）。最初の試行は `invalid_exact_svm_transaction_simulation_failed`（命令 3 = Memo で `ProgramFailedToComplete`）: SDK の既定の compute 上限 20,000 CU では **66 文字の memo（nonce）で尽きる**。devnet の simulate の実測は **25,332 CU**（上限 200,000 で成功）。道具の既定を **60,000 CU** に上げた（Router の上限 200,000 の内側。§5.6）。**配備先の facilitator の `maxComputeUnits` は不明**（SDK の既定は上限なし）。**再測定の手順**: memo・命令を変えたら、devnet の RPC `simulateTransaction`（読取）で `unitsConsumed` を読み、既定をその 2 倍以上かつ 200,000 以下に置き、`rails-verify-probe.ts svm verify` で `/verify` が `isValid: true` であることを確かめる（settle は要らない）。Circle も同日に `/verify` **`isValid: true`**（使い捨ての証明専用の受取鍵、Arc testnet の USDC を持つ使い捨て payer。封筒の `version: 1` と `assetTransferMethod` が受理された。settle はしていない） |
 | U-3 | `@solana/kit` の compile の並びが SDK の client と同じこと、decoder の API 名 | **固定済み（T4-a）**: 本物の `@x402/svm` の client が組んだ transaction を Router の検査が受ける互換の試験 |
-| U-4 | Circle の wire `maxTimeoutSeconds`（30）と settle の実際の所要 | AC-1 で確認。30 で足りなければ値を上げる（settle の HTTP 期限も連動） |
+| U-4 | Circle の wire `maxTimeoutSeconds`（30）と settle の実際の所要 | **G-3 の 2 件で確認**: settle を含む purchase 全体で 7.6 秒・6.9 秒。この 2 件の範囲では 30 で足りる。30 のまま |
 | U-5 | kind `x402`/EVM（Base Sepolia）の `success: false` → `rejected`（静的は終端の `source_failed`、公開状態 `awaiting_payment`）を §6 の表（`unknown`）に揃えるか | owner の決定。揃えると静的の既存の試験と公開状態が変わる |
 
 ## 11. 変更するファイル（見込み）
