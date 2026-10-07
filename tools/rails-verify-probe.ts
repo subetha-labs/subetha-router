@@ -8,8 +8,9 @@
  *
  * env（`.claude_workflow/local/t6-arc.env`）: T6_ARC_RECEIVER_KEY（証明専用。0x hex）。payer は `.claude_workflow/local/t7-disposable-key.env` の T7_PAYER_PRIVATE_KEY。
  *
- * env（`.claude_workflow/local/t6-solana.env`。ignored）: T6_SOLANA_PAYER_KEY, T6_SOLANA_RECEIVER_KEY（base58 の 32 バイトの seed）、
- * 任意 T6_SOLANA_RPC_URL（既定 devnet の公開 RPC）、T6_SVM_FACILITATOR_URL（既定 https://www.x402.org/facilitator）。
+ * env（`.claude_workflow/local/t6-solana.env`。ignored）: T6_SOLANA_PAYER_KEY, T6_SOLANA_RECEIVER_KEY（base58 の 32 バイトの seed）。
+ * 宛先は**固定**（devnet の公開 RPC、x402.org、Circle の testnet の facilitator）。上書きの env は持たない（別の宛先に支払いの署名を送らない）。
+ * 終了コード: verify が `isValid: true` のときだけ 0。
  * 記録は `.claude_workflow/local/t6-svm-<cmd>.json`（鍵・本文は書かない）。
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -79,7 +80,7 @@ if (rail === "arc") {
   const { createX402Inbound } = await import("../src/adapters/inbound/x402.js");
   const { createX402Payer } = await import("./x402-payer.js");
   const sellerProof = createRealSellerProofCapability(ARC, { SUBETHA_ARC_RECEIVER_KEY: receiverKey });
-  const facilitatorUrl = process.env["T6_CIRCLE_FACILITATOR_URL"] ?? "https://api.circle.com/v1/facilitator/x402";
+  const facilitatorUrl = "https://api.circle.com/v1/facilitator/x402";
   const arcRecord: Record<string, unknown> = { at: new Date().toISOString(), rail, command, network: ARC, asset: arcAsset.id, receiver: sellerProof.address, facilitatorUrl };
   const transport = createGuardedTransport({ allowLoopback: false, report: (event) => { (arcRecord["transportEvents"] as unknown[] | undefined)?.push(event) ?? (arcRecord["transportEvents"] = [event]); }, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
   const diagnostics: string[] = [];
@@ -100,12 +101,21 @@ if (rail === "arc") {
   arcRecord["diagnostics"] = diagnostics;
   writeFileSync(".claude_workflow/local/t6-arc-verify.json", `${JSON.stringify(arcRecord, null, 2)}\n`);
   process.stdout.write(`verify: ${JSON.stringify(verified)} (receiver ${sellerProof.address}; no settle was sent)\n`);
-  process.exit(0);
+  process.exit(verified.isValid ? 0 : 1);
 }
-const rpcUrl = env("T6_SOLANA_RPC_URL", "https://api.devnet.solana.com");
-const facilitatorUrl = env("T6_SVM_FACILITATOR_URL", "https://www.x402.org/facilitator");
-const payer = await svmSignerFromKey(env("T6_SOLANA_PAYER_KEY"));
-const receiver = await svmSignerFromKey(env("T6_SOLANA_RECEIVER_KEY"));
+const rpcUrl = "https://api.devnet.solana.com";
+const facilitatorUrl = "https://www.x402.org/facilitator";
+const signerOrExit = async (name: string) => {
+  try {
+    return await svmSignerFromKey(env(name));
+  } catch {
+    // 鍵の値を文言に出さない。
+    process.stderr.write(`${name} is not a usable Solana key (base58 32/64 bytes or 32-byte hex seed)\n`);
+    process.exit(2);
+  }
+};
+const payer = await signerOrExit("T6_SOLANA_PAYER_KEY");
+const receiver = await signerOrExit("T6_SOLANA_RECEIVER_KEY");
 const [receiverAta] = await findAssociatedTokenPda({ mint: address(MINT), owner: receiver.address, tokenProgram: address(TOKEN_PROGRAM) });
 const record: Record<string, unknown> = { at: new Date().toISOString(), rail, command, network: SOL, mint: MINT, payer: String(payer.address), receiverOwner: String(receiver.address), receiverAta: String(receiverAta) };
 const write = (): void => writeFileSync(`.claude_workflow/local/t6-svm-${command}.json`, `${JSON.stringify(record, null, 2)}\n`);
@@ -141,7 +151,13 @@ if (command === "prepare") {
   record["feePayer"] = policy.feePayer;
   const rail2 = createX402SvmInbound({ facilitatorUrl, transport, policy });
   const offer = await rail2.createOffer({ routeId: "t6-probe", amount: "10000", asset: MINT, network: SOL, routeBinding: "t6-probe|GET|%2Ft6", nowMs: Date.now() });
-  const svmPayer = await createSvmPayer(env("T6_SOLANA_PAYER_KEY"), { rpcUrl });
+  let svmPayer;
+  try {
+    svmPayer = await createSvmPayer(env("T6_SOLANA_PAYER_KEY"), { rpcUrl });
+  } catch {
+    process.stderr.write("T6_SOLANA_PAYER_KEY is not a usable Solana key\n");
+    process.exit(2);
+  }
   const credentialText = await svmPayer.credentialFor(offer as never, { mint: MINT, decimals: entry.assets[0]!.decimals, tokenProgram: TOKEN_PROGRAM });
   const credential = JSON.parse(Buffer.from(credentialText, "base64").toString("utf8")) as { x402Version: number; accepted: never; payload: { challengeNonce: string; transaction: string } };
   const preflight = rail2.preflight(offer, credential as never, Date.now());
@@ -155,4 +171,5 @@ if (command === "prepare") {
   record["verify"] = verified;
   write();
   process.stdout.write(`verify: ${JSON.stringify(verified)} (feePayer ${policy.feePayer}; no settle was sent)\n`);
+  process.exit(verified.isValid ? 0 : 1);
 }

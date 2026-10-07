@@ -74,5 +74,11 @@ describe("svm payer", () => {
     sixtyFour.set(seed, 0);
     expect(String((await svmSignerFromKey(getBase58Decoder().decode(sixtyFour))).address)).toBe(String(fromBase58.address));
     await expect(svmSignerFromKey("abc")).rejects.toThrow(/Solana key/);
+    // 形の違う鍵（引用符つき等）の失敗の文言に、入力の値を写さない。
+    const quoted = `"${getBase58Decoder().decode(seed)}"`;
+    let message = "";
+    await svmSignerFromKey(quoted).catch((error: Error) => { message = error.message; });
+    expect(message).toMatch(/Solana key/);
+    expect(message).not.toContain(quoted.slice(1, 10));
   });
 });
