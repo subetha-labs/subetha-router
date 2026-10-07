@@ -83,6 +83,8 @@ export interface SvmMessageParams {
   readonly units: number;
   readonly microLamports: bigint;
   readonly blockhash: string;
+  /** lifetime の高さ（message の bytes には入らない。送信は RPC の値を渡し、受信・道具は省略 = 0n）。 */
+  readonly lastValidBlockHeight?: bigint;
   readonly tokenProgram?: string;
 }
 
@@ -93,7 +95,7 @@ export function buildSvmTransactionMessage(params: SvmMessageParams) {
   return pipe(
     createTransactionMessage({ version: 0 }),
     (m) => setTransactionMessageFeePayer(address(params.feePayer), m),
-    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: params.blockhash as never, lastValidBlockHeight: 0n }, m),
+    (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: params.blockhash as never, lastValidBlockHeight: params.lastValidBlockHeight ?? 0n }, m),
     (m) =>
       appendTransactionMessageInstructions(
         [

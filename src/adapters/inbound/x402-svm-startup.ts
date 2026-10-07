@@ -52,7 +52,8 @@ function isSvmAddress(value: unknown): value is string {
 }
 
 /** 1 回の要求（redirect 無し・期限・上限つき）。JSON object でなければ `undefined`。 */
-async function fetchJson(transport: GuardedTransport, url: string, init: { method: "GET" | "POST"; body?: string }, timeoutMs: number, operation: string, routeId: string): Promise<Record<string, unknown> | undefined> {
+/** JSON を 1 回取る（上限付き・期限付き。送信の SVM adapter も使う: 設計 §4.3）。 */
+export async function svmFetchJson(transport: GuardedTransport, url: string, init: { method: "GET" | "POST"; body?: string }, timeoutMs: number, operation: string, routeId: string): Promise<Record<string, unknown> | undefined> {
   const response = await transport.fetch(
     url,
     {
@@ -158,7 +159,7 @@ export async function resolveSvmInboundPolicy(inputs: SvmStartupInputs): Promise
 
   let supported: Record<string, unknown> | undefined;
   try {
-    supported = await fetchJson(inputs.transport, `${inputs.facilitatorUrl.replace(/\/$/, "")}/supported`, { method: "GET" }, timeoutMs, "facilitator_supported", routeId);
+    supported = await svmFetchJson(inputs.transport, `${inputs.facilitatorUrl.replace(/\/$/, "")}/supported`, { method: "GET" }, timeoutMs, "facilitator_supported", routeId);
   } catch {
     throw new ConfigError("svm inbound: the facilitator /supported could not be read at startup");
   }
@@ -178,7 +179,7 @@ export async function resolveSvmInboundPolicy(inputs: SvmStartupInputs): Promise
 
   let reply: Record<string, unknown> | undefined;
   try {
-    reply = await fetchJson(
+    reply = await svmFetchJson(
       inputs.transport,
       inputs.rpcUrl,
       { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [destinationAta, { encoding: "jsonParsed", commitment: "confirmed" }] }) },
