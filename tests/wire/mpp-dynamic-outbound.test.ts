@@ -557,7 +557,7 @@ async function harness(
     gate,
     quote: async () => (await rail.readChallenge(PROFILE_ID, { url: URL_A }))[0]!,
     // `maxFee`: 既定は 5,000（天井と同じ）。`null` で欄ごと無し。
-    pay: (offer, url = URL_A, maxFee: string | null = "5000") => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, target: { url }, ...(maxFee === null ? {} : { maxFee }) }),
+    pay: (offer, url = URL_A, maxFee: string | null = "5000") => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url }, ...(maxFee === null ? {} : { maxFee }) }),
     estimate: (offer) => rail.estimateFee!(PROFILE_ID, offer, { url: URL_A }),
     sends: () => rpc.methods.filter((method) => method.startsWith("eth_send")).length,
   };

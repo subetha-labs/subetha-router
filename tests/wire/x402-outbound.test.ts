@@ -76,7 +76,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p1", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result.outcome).toBe("paid");
     if (result.outcome !== "paid") {
@@ -119,7 +119,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p2", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p2", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_changed" });
     expect(spy.calls).toHaveLength(0);
@@ -133,7 +133,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
     const tampered: DestinationOffer = { ...offer, amount: "1" };
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer: tampered, paymentId: "p3", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer: tampered, paymentId: "p3", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_changed" });
     expect(spy.calls).toHaveLength(0);
@@ -146,7 +146,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy, "eip155:1");
     const offer = (await railOf(fixture, createSignerSpy()).readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p4", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p4", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_signer_network_mismatch" });
     expect(spy.calls).toHaveLength(0);
@@ -159,7 +159,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p5", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p5", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result).toEqual({ outcome: "rejected", reason: "destination_rejected" });
     // 署名は 1 回だけ。402 を受けて自動で再支払いしない。
@@ -172,7 +172,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p6", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p6", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -183,7 +183,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p7", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p7", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -194,7 +194,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p8", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p8", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -206,7 +206,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p13", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p13", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_payer_mismatch",
     });
@@ -220,7 +220,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p14", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p14", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("unknown");
     expect((await upstreamCalls(fixture)).payCalls).toBe(1);
   });
@@ -230,7 +230,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect((await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p15", attempt: 1 })).outcome).toBe(
+    expect((await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p15", attempt: 1, deadlineMs: Date.now() + 600_000 })).outcome).toBe(
       "paid",
     );
   });
@@ -240,7 +240,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p16", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p16", attempt: 1, deadlineMs: Date.now() + 600_000 });
     // 決済証跡は保持したまま「データ未取得」として終端する（再送しない）。
     expect(result.outcome).toBe("paid_no_data");
     if (result.outcome === "paid_no_data") {
@@ -255,7 +255,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p9", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p9", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_pay_unknown",
     });
@@ -267,7 +267,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p10", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p10", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_pay_unknown",
     });
@@ -278,7 +278,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, createSignerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p11", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p11", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("paid_no_data");
     if (result.outcome === "paid_no_data") {
       expect(result.reason).toBe("paid_data_unavailable");
@@ -292,7 +292,7 @@ describe("x402 outbound over the installed official SDK", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p12", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p12", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("not_sent");
     expect((await upstreamCalls(fixture)).payCalls).toBe(0);
   });

@@ -133,7 +133,8 @@ export type DynamicTransportHooks = Omit<GuardedTransportOptions, "allowLoopback
 /** 動的上流 URL の配線が core に渡すもの。 */
 export interface DynamicWiring {
   readonly gate: DynamicGate;
-  readonly balanceOf?: (profileId: string, asset: string) => Promise<bigint>;
+  /** 残高（送信の設計 §2.6）: rail の `balanceOf` → 能力の `balanceOf` → 無ければ `undefined`（検査なし）。 */
+  readonly balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>;
   /** 起動時の非同期の確認（MPP 能力の client）。 */
   readonly verify: () => Promise<void>;
 }
@@ -603,20 +604,25 @@ export function composeRails(
     }
   }
 
+  /**
+   * 残高の配線（送信の設計 §2.6、D-15）: その経路（routeId／profileId）の rail が `balanceOf` を持てばそれ、無ければ能力の任意の `balanceOf`
+   * （既存の互換）、どちらも無ければ `undefined`（core は検査しない）。組ごとの rail の選択は U4 で `railByRoute` に揃える。
+   */
+  const balanceOfFor = async (id: string, asset: string): Promise<bigint | undefined> => {
+    const railName = config.router.routes[id]?.rail ?? profiles[id]?.rail ?? (config.router.routes[id] === undefined ? undefined : "x402");
+    const rail = railName === undefined ? undefined : rails[railName];
+    if (rail?.balanceOf !== undefined) return rail.balanceOf(id, asset);
+    const capability = railName === "x402" ? capabilities.evmSigning : railName === "mpp" ? capabilities.mppTempo : undefined;
+    if (capability?.balanceOf !== undefined) return capability.balanceOf(asset);
+    return undefined;
+  };
+
   const dynamic: DynamicWiring | undefined =
     gate === undefined
       ? undefined
       : {
           gate,
-          balanceOf: async (profileId, asset) => {
-            const profile = profiles[profileId];
-            const capability = profile?.rail === "x402" ? capabilities.evmSigning : profile?.rail === "mpp" ? capabilities.mppTempo : undefined;
-            if (capability?.balanceOf === undefined) {
-              // `dynamicCoreOptionsOf` が全プロファイルに能力があるときだけ渡すので、ここには来ない。来たら不足として扱う。
-              throw new Error("balance unavailable");
-            }
-            return capability.balanceOf(asset);
-          },
+          balanceOf: async (id, asset) => balanceOfFor(id, asset),
           verify: async () => {
             const mppProfiles = Object.values(profiles).filter((profile) => profile.rail === "mpp");
             if (mppProfiles.length > 0 && capabilities.mppTempo !== undefined) {
@@ -821,15 +827,11 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
 }
 
 /**
- * core に渡す動的の配線。残高の検査（設計 §6.6）は core では「`balanceOf` があれば検査、無ければしない」の 1 本なので、
- * **全プロファイルの能力が `balanceOf` を持つときだけ**渡す（一部だけだと、持たない方の購入が常に残高不足になる）。
+ * core に渡す動的の配線。残高の検査は経路ごと（送信の設計 §2.6）: 配線の `balanceOf` が `undefined` を返す経路は検査しないので、
+ * **常に渡す**（以前は「全プロファイルの能力が持つときだけ」だった。持たない経路が常に不足になる問題は `undefined` で解けた）。
  */
-export function dynamicCoreOptionsOf(wiring: DynamicWiring, capabilities: RouterCapabilities, config: RuntimeConfig): { gate: DynamicGate; balanceOf?: (profileId: string, asset: string) => Promise<bigint> } {
-  const profiles = Object.values(config.router.dynamic?.profiles ?? {});
-  const allBalance =
-    profiles.length > 0 &&
-    profiles.every((profile) => (profile.rail === "x402" ? capabilities.evmSigning?.balanceOf !== undefined : capabilities.mppTempo?.balanceOf !== undefined));
-  return { gate: wiring.gate, ...(allBalance && wiring.balanceOf !== undefined ? { balanceOf: wiring.balanceOf } : {}) };
+export function dynamicCoreOptionsOf(wiring: DynamicWiring, _capabilities: RouterCapabilities, _config: RuntimeConfig): { gate: DynamicGate; balanceOf?: (id: string, asset: string) => Promise<bigint | undefined> } {
+  return { gate: wiring.gate, ...(wiring.balanceOf === undefined ? {} : { balanceOf: wiring.balanceOf }) };
 }
 
 /** 起動失敗は固定コードとメッセージだけを出す（秘密もスタックも載せない）。 */

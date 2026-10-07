@@ -83,7 +83,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b1", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b1", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result.outcome).toBe("paid");
     if (result.outcome !== "paid") {
@@ -122,7 +122,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b2", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b2", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result.outcome).toBe("not_sent");
     expect(spy.rpcCalls).toHaveLength(0);
@@ -136,7 +136,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
     const tampered: DestinationOffer = { ...offer, amount: "1" };
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer: tampered, paymentId: "b3", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer: tampered, paymentId: "b3", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_changed" });
     expect(spy.rpcCalls).toHaveLength(0);
@@ -152,7 +152,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     });
     const offer = (await railOf(fixture, createPayerSpy()).readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b4", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b4", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "not_sent",
       reason: "destination_signer_network_mismatch",
     });
@@ -166,7 +166,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const offer = (await railOf(fixture, createPayerSpy()).readChallenge(ROUTE_ID))[0]!;
 
     // push mode では credential 生成の途中で broadcast され得るため、払っていないと断定しない。
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b5", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b5", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_pay_unknown",
     });
@@ -180,7 +180,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b6", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b6", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("paid_no_data");
     if (result.outcome === "paid_no_data") {
       expect(result.reason).toBe("paid_data_unavailable");
@@ -194,7 +194,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b15", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b15", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -205,7 +205,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b16", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b16", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_pay_unknown",
     });
@@ -217,7 +217,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, spy);
     const offer = (await railOf(fixture, createPayerSpy()).readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b17", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b17", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     // 成否不明のまま保持し、追加送金も credential 送信もしない。
     expect(result).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
@@ -232,7 +232,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
     // 実 SDK の action がそのまま走り、送金は 1 回だけ guard を通る。
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b18", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b18", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("paid");
     expect(spy.sendAttempts()).toBe(1);
   });
@@ -243,7 +243,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, spy);
     const offer = (await railOf(fixture, createPayerSpy()).readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b19", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b19", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_pay_unknown",
     });
@@ -260,7 +260,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     });
     const offer = (await railOf(fixture, createPayerSpy()).readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b20", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b20", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "not_sent",
       reason: "destination_unsupported_mode",
     });
@@ -273,7 +273,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b7", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b7", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -284,7 +284,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b8", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b8", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -298,7 +298,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b9", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b9", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_receipt_unverified",
     });
@@ -309,7 +309,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b10", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b10", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result.outcome).toBe("paid_no_data");
   });
 
@@ -318,7 +318,7 @@ describe("mpp outbound over the installed official mppx client", () => {
     const rail = railOf(fixture, createPayerSpy());
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b11", attempt: 1 })).toEqual({
+    expect(await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "b11", attempt: 1, deadlineMs: Date.now() + 600_000 })).toEqual({
       outcome: "unknown",
       reason: "destination_pay_unknown",
     });
@@ -333,14 +333,14 @@ describe("mpp outbound over the installed official mppx client", () => {
     const errorRail = railOf(errorFixture, createPayerSpy());
     const errorOffer = (await errorRail.readChallenge(ROUTE_ID))[0]!;
     expect(
-      await errorRail.pay({ routeId: ROUTE_ID, offer: errorOffer, paymentId: "b12", attempt: 1 }),
+      await errorRail.pay({ routeId: ROUTE_ID, offer: errorOffer, paymentId: "b12", attempt: 1, deadlineMs: Date.now() + 600_000 }),
     ).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
 
     const abortFixture = await startUpstream(["--pay", "abort"]);
     const abortRail = railOf(abortFixture, createPayerSpy());
     const abortOffer = (await abortRail.readChallenge(ROUTE_ID))[0]!;
     expect(
-      await abortRail.pay({ routeId: ROUTE_ID, offer: abortOffer, paymentId: "b13", attempt: 1 }),
+      await abortRail.pay({ routeId: ROUTE_ID, offer: abortOffer, paymentId: "b13", attempt: 1, deadlineMs: Date.now() + 600_000 }),
     ).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
   });
 });

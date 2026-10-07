@@ -141,13 +141,18 @@ export interface RouterCoreOptions {
    */
   readonly note?: (message: string) => void;
   /**
+   * 支払い元の残高（base units。送信の設計 §2.6、D-15）。`routeId`（静的）または `profileId`（動的）と送信資産で引く。
+   * `undefined` を返せば「その経路に検査なし」。省略時は検査しない。throw・`bigint` でない・不足は「不足」。
+   */
+  readonly balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>;
+  /**
    * 動的上流 URL（`config.dynamic` があるときだけ使う）。控えの置き場所は省略時 `<journal のディレクトリ>/dynamic-quotes`。
-   * `balanceOf` は支払い元の残高（省略時は検査しない）。
+   * `balanceOf` は上の `balanceOf` と同じ契約（互換のために残す。両方あれば上が勝つ）。
    */
   readonly dynamic?: {
     readonly ledgerDir?: string;
     readonly gate?: DynamicGate;
-    readonly balanceOf?: (profileId: string, asset: string) => Promise<bigint>;
+    readonly balanceOf?: (profileId: string, asset: string) => Promise<bigint | undefined>;
   };
 }
 
@@ -345,7 +350,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         now,
         nextPaymentId,
         note: options.note,
-        balanceOf: options.dynamic?.balanceOf,
+        balanceOf: options.balanceOf ?? options.dynamic?.balanceOf,
         deliver,
       });
       // 期限切れの控えと古いファイルの定期的な削除（設計 §6.1）。
@@ -593,6 +598,23 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "offer_changed" };
     }
 
+    // 残高の事前確認（静的。送信の設計 §2.6、D-15）: 受信の verify の**前**なので資金は動いていない。
+    // rail が検査を持たなければ `undefined` で通す。throw・形違い・不足は止める（journal に `source_pending` を書かない）。
+    const balanceOf = options.balanceOf ?? options.dynamic?.balanceOf;
+    if (balanceOf !== undefined) {
+      let enough: boolean;
+      try {
+        const balance = await balanceOf(intent.routeId, intent.destination.asset);
+        enough = balance === undefined ? true : typeof balance === "bigint" && balance >= BigInt(intent.destination.quoted);
+      } catch {
+        enough = false;
+      }
+      if (!enough) {
+        await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "operator_funds_unavailable" });
+        return { paymentId: intent.paymentId, status: "awaiting_payment", code: "operator_funds_unavailable" };
+      }
+    }
+
     await store.append(intent.paymentId, "source_pending", {});
 
     let verified: { isValid: boolean };
@@ -758,6 +780,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         offer: intent.destination.selectedOffer,
         paymentId,
         attempt,
+        // 承認の期限（送信の設計 §2.4、FR-36）と、署名する message の hash の予約（§2.5、FR-37）。
+        deadlineMs: intent.approvalDeadlineMs,
+        reserveMessage: (messageHash) => store.reserveMessage(paymentId, messageHash),
         ...(intent.upstream === undefined ? {} : { target: { url: intent.upstream.url } }),
         // 動的 MPP 送信: quote が決めた署名時の上限（cap）。adapter は無ければ送らない。
         ...(intent.dynamic?.pricing.maxFee === undefined ? {} : { maxFee: intent.dynamic.pricing.maxFee }),

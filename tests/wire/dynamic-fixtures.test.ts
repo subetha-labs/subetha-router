@@ -457,6 +457,6 @@ test("動的経路を持たない adapter は、上流の URL（target）を受�
   ];
   for (const rail of rails) {
     await expect(rail.readChallenge("r", target)).rejects.toBeInstanceOf(DynamicTargetUnsupportedError);
-    await expect(rail.pay({ routeId: "r", offer, paymentId: "p", attempt: 1, target })).rejects.toBeInstanceOf(DynamicTargetUnsupportedError);
+    await expect(rail.pay({ routeId: "r", offer, paymentId: "p", attempt: 1, deadlineMs: Date.now() + 600_000, target })).rejects.toBeInstanceOf(DynamicTargetUnsupportedError);
   }
 });

@@ -156,7 +156,7 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
     events,
     gate,
     quote: async () => (await rail.readChallenge(PROFILE_ID, { url: URL_A }))[0]!,
-    pay: (offer, url = URL_A) => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, target: { url } }),
+    pay: (offer, url = URL_A) => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url } }),
   };
 }
 

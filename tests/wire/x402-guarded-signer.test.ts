@@ -56,7 +56,7 @@ describe("guarded signer は承認と外れた typed data で署名能力を呼�
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "g1", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "g1", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result.outcome).toBe("not_sent");
     // guarded signer 本体に到達して EIP-3009 以外を弾いた経路。
@@ -81,7 +81,7 @@ describe("guarded signer は承認と外れた typed data で署名能力を呼�
       routeId: ROUTE_ID,
       offer: tampered,
       paymentId: "g2",
-      attempt: 1,
+      attempt: 1, deadlineMs: Date.now() + 600_000,
     });
 
     expect(result.outcome).toBe("not_sent");
@@ -109,7 +109,7 @@ describe("guarded signer は承認と外れた typed data で署名能力を呼�
       routeId: ROUTE_ID,
       offer: tampered,
       paymentId: "g3",
-      attempt: 1,
+      attempt: 1, deadlineMs: Date.now() + 600_000,
     });
 
     expect(result.outcome).toBe("not_sent");
@@ -137,7 +137,7 @@ describe("guarded signer は承認と外れた typed data で署名能力を呼�
       routeId: ROUTE_ID,
       offer: tampered,
       paymentId: "g4",
-      attempt: 1,
+      attempt: 1, deadlineMs: Date.now() + 600_000,
     });
 
     expect(result.outcome).toBe("not_sent");
@@ -158,7 +158,7 @@ describe("guarded signer は承認と外れた typed data で署名能力を呼�
     const rail = railOf(fixture, spy);
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
 
-    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "g5", attempt: 1 });
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "g5", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
     expect(result.outcome).toBe("paid");
     // 1 要求につき署名は 1 回だけ（arming は 1 回で解除される）。

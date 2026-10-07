@@ -288,20 +288,26 @@ describe("composeRails（動的の配線）", () => {
     expect(rails.dynamic).toBeUndefined();
   });
 
-  test("残高の検査は、全プロファイルの能力が balanceOf を持つときだけ core に渡し、渡したものは能力の値を返す", async () => {
+  test("残高の検査は経路ごと（送信の設計 §2.6）: 能力が balanceOf を持つ経路はその値、持たない経路は undefined（検査なし）。常に core に渡す", async () => {
     const dialed: string[] = [];
     const mppWithBalance = { ...realMpp(), balanceOf: async () => 1n };
     const partial = { evmSigning: REAL_EVM, mppTempo: mppWithBalance, dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES };
     const one = compose(envFor(), partial);
-    // x402 の能力は balanceOf を持たないので渡さない。
-    expect(dynamicCoreOptionsOf(one.rails.dynamic!, partial, one.config).balanceOf).toBeUndefined();
+    const partialBalanceOf = dynamicCoreOptionsOf(one.rails.dynamic!, partial, one.config).balanceOf;
+    expect(partialBalanceOf).toBeDefined();
+    // x402 の能力は balanceOf を持たない → その経路は undefined（以前は「全部が持つときだけ渡す」だった）。
+    expect(await partialBalanceOf!("dyn-mpp-to-x402", USDC)).toBeUndefined();
+    expect(await partialBalanceOf!("dyn-x402-to-mpp", PATHUSD)).toBe(1n);
+    // 知らない経路も undefined（検査なし。core は経路の存在を別に検査する）。
+    expect(await partialBalanceOf!("no-such-route", USDC)).toBeUndefined();
     const evmWithBalance = { ...REAL_EVM, balanceOf: async () => 2n };
     const full = { ...partial, evmSigning: evmWithBalance };
     const two = compose(envFor(), full);
     const balanceOf = dynamicCoreOptionsOf(two.rails.dynamic!, full, two.config).balanceOf;
-    expect(balanceOf).toBeDefined();
     expect(await balanceOf!("dyn-mpp-to-x402", USDC)).toBe(2n);
     expect(await balanceOf!("dyn-x402-to-mpp", PATHUSD)).toBe(1n);
+    // 静的 route（rail 未指定 = x402）も同じ配線で引ける。
+    expect(await balanceOf!("r-mpp", PATHUSD)).toBe(1n);
   });
 });
 
