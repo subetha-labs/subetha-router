@@ -770,7 +770,7 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     outbound: rails.outbound,
     // 拒否の理由を運用者に伝える（固定文のみ。値は渡さない）。
     note: (message) => process.stderr.write(`${message}\n`),
-    balanceOf: rails.balanceOf,
+    ...(rails.balanceOf === undefined ? {} : { balanceOf: rails.balanceOf }),
     ...(rails.dynamic === undefined ? {} : { dynamic: dynamicCoreOptionsOf(rails.dynamic, capabilities, config) }),
   });
 
