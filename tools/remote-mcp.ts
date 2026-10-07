@@ -194,8 +194,9 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
 
   let router: Listening;
   try {
-    // 起動待ちは 60 秒: 子の Router は listen の前に Solana の起動時の検査（`/supported`・ATA、各 10 秒まで）と Tempo の probe と journal の replay を行う。
-    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, { listenTimeoutMs: 60_000 });
+    // 起動待ちは 120 秒: 子の Router は listen の前に Solana の起動時の検査（`/supported`・ATA、各 10 秒まで）、MPP 送信のプロファイルごとの Tempo の probe（各 6 秒まで、最大 3 本）、
+    // journal の replay を行う。上限に達すると子は殺され、入口は固定文で止まる。
+    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, { listenTimeoutMs: 120_000 });
   } catch (error) {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
     void error;

@@ -220,8 +220,9 @@ U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の�
 
 **有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える
 （入れ替えは `deploy/swap-image.sh <image:tag>`: 入口を閉じ → 旧を `-prev-<ts>` に改名 → 新を同じ network・port・volume・env で起動 → `/healthz` と Router の `listening` 行 →
-journal の先頭バイト列が不変 → `subetha-egress check` → 入口を開ける。**途中で失敗したら旧コンテナを元の名前に戻して起動し、入口を開け直す**。有効化の後は子の Router が
-listen の前に Solana の起動時の検査（最大 10 秒 × 2）を行うので、入口の起動待ちは 60 秒にしてある）。
+journal の先頭バイト列が不変 → `subetha-egress check` → 入口を開ける → 公開の `/healthz`。**検証はどれも致命で、途中で失敗したら旧コンテナを ID で元の名前に戻して起動し、
+入口を開け直す**（INT/TERM でも同じ）。ログは許可した行（listening の行と固定文）しか出さない。有効化の後は子の Router が listen の前に Solana の起動時の検査（最大 10 秒 × 2）と
+Tempo の probe（MPP 送信のプロファイルごとに最大 6 秒、3 本）を行うので、入口の起動待ちは 120 秒、入れ替えの待ちは 180 秒の実時間にしてある）。
 **戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
 
 **有効にした後に見るもの**（hosted の入口は Router の process の stderr を転送しないので、**ログの不在は成功の証拠にならない**。見るのは次の口）:
