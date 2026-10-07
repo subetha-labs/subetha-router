@@ -38,6 +38,8 @@ export interface SvmFacilitatorState {
   confirm: "ok" | "onchain-failure" | "timeout";
   /** settle の応答を書き換える（§6 の表の各行）。`undefined` なら本物の応答。 */
   settleOverride: ((body: Record<string, unknown>) => { status: number; body: unknown } | { raw: string }) | undefined;
+  /** verify の応答を書き換える（形の検査用）。`undefined` なら本物の応答。 */
+  verifyOverride: ((body: Record<string, unknown>) => { status: number; body: unknown } | { raw: string }) | undefined;
   settleDelayMs: number;
   /** verify・settle を 302 にする。 */
   redirectCalls: boolean;
@@ -90,6 +92,7 @@ export async function startSvmFacilitator(tls: TlsMaterial, network: string, fee
     send: "ok",
     confirm: "ok",
     settleOverride: undefined,
+    verifyOverride: undefined,
     settleDelayMs: 0,
     redirectCalls: false,
     dropSettle: false,
@@ -189,7 +192,12 @@ export async function startSvmFacilitator(tls: TlsMaterial, network: string, fee
           seen.verifyCalls += 1;
           const result = await facilitator.verify(body["paymentPayload"] as never, body["paymentRequirements"] as never);
           seen.lastVerify = result;
-          sendJson(200, result);
+          const override = state.verifyOverride?.(result as unknown as Record<string, unknown>);
+          if (override === undefined) sendJson(200, result);
+          else if ("raw" in override) {
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(override.raw);
+          } else sendJson(override.status, override.body);
           return;
         }
         seen.settleCalls += 1;

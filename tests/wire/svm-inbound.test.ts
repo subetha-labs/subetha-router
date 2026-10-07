@@ -7,12 +7,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { address, generateKeyPairSigner } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 
-import { createX402SvmInbound, isSvmSignature, SVM_DEFAULT_WIRE_TIMEOUT_SECONDS, SVM_RESPONSE_MAX_BYTES, type SvmInboundPolicy } from "../../src/adapters/inbound/x402-svm.js";
+import { getBase58Decoder } from "@solana/kit";
+
+import { createX402SvmInbound, isSvmSignature, svmDeadlinesOf, SVM_DEFAULT_WIRE_TIMEOUT_SECONDS, SVM_RESPONSE_MAX_BYTES, type SvmInboundPolicy } from "../../src/adapters/inbound/x402-svm.js";
 import { resolveSvmInboundPolicy } from "../../src/adapters/inbound/x402-svm-startup.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
 import { dialTo, publicLookup } from "../fixtures/dynamic/dial.js";
-import { startSolanaRpc } from "../fixtures/solana-rpc.js";
+import { startSolanaRpc, type SolanaRpcFixture } from "../fixtures/solana-rpc.js";
 import { startSvmFacilitator, type SvmFacilitator } from "../fixtures/svm-facilitator.js";
 import { createSvmTestPayer, type SvmTestPayer } from "../fixtures/svm-payer.js";
 import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
@@ -47,16 +49,15 @@ function transportTo(routes: Record<string, number>): GuardedTransport {
 }
 
 /** 起動時の検査（T4-b）で policy を固定してから adapter を組む（本番と同じ順）。 */
-async function boot(extra: Partial<Parameters<typeof createX402SvmInbound>[0]> = {}): Promise<{ fac: SvmFacilitator; rail: ReturnType<typeof createX402SvmInbound>; policy: SvmInboundPolicy; transport: GuardedTransport }> {
+async function boot(extra: Partial<Parameters<typeof createX402SvmInbound>[0]> = {}, moreRoutes: Record<string, number> = {}): Promise<{ fac: SvmFacilitator; rpc: SolanaRpcFixture; rail: ReturnType<typeof createX402SvmInbound>; policy: SvmInboundPolicy; transport: GuardedTransport }> {
   const fac = await startSvmFacilitator(TLS, SOL, undefined, FAC_HOST);
   closers.push(fac.close);
   const rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls: TLS, ata: { address: ata, owner } });
   closers.push(rpc.close);
-  const transport = transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port });
+  const transport = transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port, ...moreRoutes });
   const policy = await resolveSvmInboundPolicy({ network: SOL, facilitatorUrl: `https://${FAC_HOST}`, rpcUrl: `https://${RPC_HOST}`, payTo: owner, mint: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM_ADDRESS, transport });
   const rail = createX402SvmInbound({ facilitatorUrl: `https://${FAC_HOST}`, transport, policy, ...extra });
-  // 起動後の要求の回数を数えるために、起動時の分を差し引く基準を持つ。
-  return { fac, rail, policy, transport };
+  return { fac, rpc, rail, policy, transport };
 }
 
 async function issue(rail: ReturnType<typeof createX402SvmInbound>, amount = "10000"): Promise<InboundOffer> {
@@ -76,7 +77,8 @@ describe("SVM 受信: offer と preflight", () => {
     expect(offer.extra["feePayer"]).toBe(policy.feePayer);
     expect(offer.extra["memo"]).toBe(offer.extra.challengeNonce);
     expect(offer.extra.challengeNonce).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(offer.maxTimeoutSeconds).toBe(SVM_DEFAULT_WIRE_TIMEOUT_SECONDS);
+    expect(offer.maxTimeoutSeconds).toBe(40);
+    expect(SVM_DEFAULT_WIRE_TIMEOUT_SECONDS).toBe(40);
     expect(offer.extra.expiresAt).toBe(Math.floor(now / 1000) + 120);
     expect(offer.extra["fundsMoveOnCredential"]).toBe(false);
     await expect(rail.createOffer({ routeId: ROUTE_ID, amount: "1", asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", network: SOL, routeBinding: ROUTE_BINDING, nowMs: now })).rejects.toThrow(/fixed mint/);
@@ -96,12 +98,21 @@ describe("SVM 受信: offer と preflight", () => {
 });
 
 describe("SVM 受信: verify・settle（本物の facilitator の論理）", () => {
-  it("verify → settle が通り、txRef は 64 バイトの signature。payload に challengeNonce は無く、requirements は offer から。要求は各 1 回、quote・purchase 中に RPC・/supported へ出ない", async () => {
-    const { fac, rail, policy } = await boot();
+  it("verify → settle が通り、txRef は 64 バイトの signature。payload に challengeNonce は無く、requirements は offer から（accepted ではない）。要求は各 1 回、quote・purchase 中に RPC・/supported へ出ない", async () => {
+    const { fac, rpc, rail, policy } = await boot();
     const supportedBefore = fac.seen.supportedCalls;
+    const rpcBefore = rpc.calls.length;
+    const rpcConnectionsBefore = rpc.connections();
     const offer = await issue(rail);
-    const credential = await credentialFor(policy, offer);
+    // accepted を改変しても（preflight は別の段）、facilitator に送る requirements は Router 発行の offer のまま。
+    const credential = await credentialFor(policy, offer, { payTo: payer.address, amount: "1" });
     expect(await rail.verify(offer, credential)).toEqual({ isValid: true });
+    const verifyRequirements = fac.seen.lastRequirements as Record<string, unknown>;
+    expect(verifyRequirements["payTo"]).toBe(owner);
+    expect(verifyRequirements["amount"]).toBe(offer.amount);
+    expect(Object.keys((fac.seen.lastPayload as Record<string, unknown>)["payload"] as Record<string, unknown>)).toEqual(["transaction"]);
+    expect(rpc.calls.length).toBe(rpcBefore);
+    expect(rpc.connections()).toBe(rpcConnectionsBefore);
     const settled = await rail.settle(offer, credential);
     expect(settled.outcome).toBe("settled");
     expect(isSvmSignature((settled as { txRef: string }).txRef)).toBe(true);
@@ -116,7 +127,40 @@ describe("SVM 受信: verify・settle（本物の facilitator の論理）", () 
     expect(requirements["payTo"]).toBe(owner);
     expect((requirements["extra"] as Record<string, unknown>)["feePayer"]).toBe(policy.feePayer);
     expect((requirements["extra"] as Record<string, unknown>)["memo"]).toBe(offer.extra.challengeNonce);
-    expect(requirements["maxTimeoutSeconds"]).toBe(SVM_DEFAULT_WIRE_TIMEOUT_SECONDS);
+    expect(requirements["maxTimeoutSeconds"]).toBe(40);
+    expect(rpc.calls.length).toBe(rpcBefore);
+    expect(rpc.connections()).toBe(rpcConnectionsBefore);
+  });
+
+  it("応答の形は厳密に見る: isValid が真偽値の true 以外・success が true 以外・JSON の null／配列／数は通さない", async () => {
+    const { fac, rail, policy } = await boot();
+    const offer = await issue(rail);
+    const credential = await credentialFor(policy, offer);
+    for (const override of [{ raw: '{"isValid": 1}' }, { raw: '{"isValid": "true"}' }, { raw: "null" }, { raw: "[]" }, { raw: "1" }, { status: 500, body: { isValid: true } }] as const) {
+      fac.state.verifyOverride = () => override;
+      expect(await rail.verify(offer, credential)).toEqual({ isValid: false });
+    }
+    for (const override of [{ raw: "null" }, { raw: "[]" }, { raw: "1" }, { raw: '{"success": "true", "network": "' + SOL + '", "transaction": "' + "1".repeat(64) + '"}' }] as const) {
+      fac.state.settleOverride = () => override;
+      expect(await rail.settle(offer, credential)).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    }
+  });
+
+  it("期限の既定: verify 10,000 ms、settle 50,000 ms（wire 40 ＋ 10）。wire 5 なら 15,000 ms", () => {
+    expect(svmDeadlinesOf({})).toEqual({ wireSeconds: 40, verifyMs: 10_000, settleMs: 50_000 });
+    expect(svmDeadlinesOf({ maxTimeoutSeconds: 5 })).toEqual({ wireSeconds: 5, verifyMs: 10_000, settleMs: 15_000 });
+    expect(svmDeadlinesOf({ timeoutMs: 2_000 }).verifyMs).toBe(2_000);
+  });
+
+  it("isSvmSignature: 64 バイトに復号される base58 だけ（63・65 バイト、先頭ゼロの 64 バイト、hex）", () => {
+    const decode = getBase58Decoder();
+    expect(isSvmSignature(decode.decode(new Uint8Array(64).fill(7)))).toBe(true);
+    expect(isSvmSignature(decode.decode(new Uint8Array(64).map((_, i) => (i < 3 ? 0 : 9))))).toBe(true);
+    expect(isSvmSignature(decode.decode(new Uint8Array(63).fill(7)))).toBe(false);
+    expect(isSvmSignature(decode.decode(new Uint8Array(65).fill(7)))).toBe(false);
+    expect(isSvmSignature(`0x${"ab".repeat(32)}`)).toBe(false);
+    expect(isSvmSignature("")).toBe(false);
+    expect(isSvmSignature(42)).toBe(false);
   });
 
   it("verify が false（simulate の失敗）なら理由を転送しない", async () => {
@@ -204,13 +248,12 @@ describe("SVM 受信: 決済の結果の表（設計 §6）", () => {
     expect((await wide.rail.settle(offer2, await credentialFor(wide.policy, offer2))).outcome).toBe("settled");
   }, 60_000);
 
-  it("transport: redirect を追わない（行き先へ 0 接続）、loopback に解決する名前には届かない", async () => {
-    const { fac, rail, policy, transport } = await boot();
+  it("transport: redirect を追わない（行き先の listener へ 0 接続。行き先は transport に写してある）、loopback に解決する名前には届かない", async () => {
     const sink = await startSvmFacilitator(TLS, SOL, undefined, "other.test");
     closers.push(sink.close);
+    const { fac, rail, policy } = await boot({}, { "other.test": sink.port });
     fac.state.redirectCalls = true;
     fac.state.redirectTo = "https://other.test/settle";
-    void transport;
     const offer = await issue(rail);
     const credential = await credentialFor(policy, offer);
     await expect(rail.verify(offer, credential)).rejects.toThrow();

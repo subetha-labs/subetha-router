@@ -325,14 +325,21 @@ export function isSvmSignature(value: unknown): value is string {
  * SVM 受信レール。Router が payee として offer を発行し（`payTo` は owner）、credential を自分で検査してから facilitator で verify → settle する。
  * 決済の結果は設計 §6 の表: 要求を出した後の失敗はすべて `unknown`、`success: true`・network 一致・64 バイトの signature だけが `settled`。
  */
+/** HTTP の期限（設計 §4.4・§5.5）: verify は `timeoutMs`（既定 10 秒）、settle は wire の `maxTimeoutSeconds` ＋ 10 秒。 */
+export function svmDeadlinesOf(options: Pick<X402SvmInboundOptions, "maxTimeoutSeconds" | "timeoutMs">): { readonly wireSeconds: number; readonly verifyMs: number; readonly settleMs: number } {
+  const wireSeconds = options.maxTimeoutSeconds ?? SVM_DEFAULT_WIRE_TIMEOUT_SECONDS;
+  return { wireSeconds, verifyMs: options.timeoutMs ?? 10_000, settleMs: (wireSeconds + 10) * 1000 };
+}
+
 export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
   const transport = options.transport;
   const policy = options.policy;
-  const maxTimeoutSeconds = options.maxTimeoutSeconds ?? SVM_DEFAULT_WIRE_TIMEOUT_SECONDS;
+  const deadlines = svmDeadlinesOf(options);
+  const maxTimeoutSeconds = deadlines.wireSeconds;
   const offerSeconds = options.offerSeconds ?? SVM_DEFAULT_OFFER_SECONDS;
-  const verifyTimeoutMs = options.timeoutMs ?? 10_000;
-  const settleTimeoutMs = (maxTimeoutSeconds + 10) * 1000;
+  const verifyTimeoutMs = deadlines.verifyMs;
+  const settleTimeoutMs = deadlines.settleMs;
 
   async function post(path: string, requestText: string, context: TransportContext, deadlineMs: number): Promise<{ status: number; json: unknown }> {
     const response = await transport.fetch(
