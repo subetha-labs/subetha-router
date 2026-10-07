@@ -1,8 +1,12 @@
-# 設計: Arc と Solana の Provider に払う（S-3・S-4。第 2 版、2026-10-07）
+# 設計: Arc と Solana の Provider に払う（S-3・S-4。第 3 版、2026-10-07）
 
 > 要件は `multirail-outbound-requirements.md`（owner の決定 §0、FR-22〜FR-38、AC-8〜AC-14、V-6〜V-13）。本書は **S-3（Arc の Provider に払う）** と **S-4（Solana の Provider に払う）** の設計。
 > 受信の設計（`multirail-design.md`）と動的上流の設計（`dynamic-upstream-design.md` §3.3 の署名の境界）の原則を継ぐ: core はレールの port 越しにだけ外へ出る、署名・検査の境界は確かめた値だけで組む、
 > `src/` の外への接続はすべて SSRF 防御 A の transport、鍵は `tools/` だけが env から読む、testnet だけ。調べた基準は `main` の `f1897bd`（file:line は目安）。
+>
+> 第 2 版からの訂正（独立レビュー #2、§12）: 署名前の検査は builder と**独立に**（復号した命令・口座・役割・header・data を期待値と 1 欄ずつ照合し、組み直しの関数を使わない）、期待値は原始値の私有 object で builder には別の写しを渡す（§4.5）。
+> noble には公開鍵を 32 バイトに復号して渡す（§4.5 10）。MPP の期限は**実署名の委譲の直前と送金 RPC の直前**で、broadcast の後は `not_sent` にしない（§2.4）。crash の試験は子 process の停止で（§7.2）。sabotage の観測を明記し、「HTTP 0」は支払いヘッダ付きの要求 0 件に（§4.6）。
+> AC-11 の公開後の確認を完了条件に（§7.3）。有効化の受信だけを見る箇所を列挙（§6.1）。
 >
 > 第 1 版からの訂正（独立レビュー #1、§12）: **署名の前に unsigned の message を期待値だけで検査**し、署名器には写しを渡し、署名の後も同じ snapshot と照合する（§4.5）。`feePayer` も運用者の集合と照合し、
 > 静的 x402・MPP も候補の段階で運用者宛てを外す（§2.3）。**Base の静的の領収の処理は変えない**（§3.2・§5）。adapter に `startup()` と静的 route の期待値を持たせ、ATA の導出は起動時に（§4.1・§4.4）。
@@ -114,8 +118,10 @@ export interface PayRequest {
   - x402 動的: `createRebuildingSigner` に `deadlineMs` を渡し、`args.signer.signTypedData` を呼ぶ直前（`x402-dynamic.ts:275`）で `now < deadlineMs` でなければ `SigningRefusedError("destination_deadline")`
   - x402 静的 Base: guarded signer の委譲の直前（`x402.ts:438`）で同じ検査（**Base への変更はこれだけ**）。静的 Arc は組み直しの署名器なので上と同じ
   - SVM: §4.5 の 8・11
-  - MPP: credential を作る直前（`mpp.ts:409`、`mpp-dynamic.ts:865`）と送出の直前。FR-36 は全 adapter に掛ける
-  - いずれも送出の直前にもう一度。過ぎていれば `not_sent`（`destination_deadline`）
+  - MPP（FR-36 は全 adapter に掛ける。`:409`・`:865` は `pay` の入口で、credential の生成 `:485`・`:1014` の中に非同期の処理と broadcast がある）: 動的 MPP は **実署名の委譲の直前（`mpp-dynamic.ts:460`）と送金 RPC の直前（`:978`）**、
+    静的 MPP は `:287` の account を**期限を検査する署名 wrapper で包み**、送金 RPC（`:323`）の直前にも検査。**broadcast の後**（Provider への HTTP の前）に期限が切れても `not_sent` にはしない——
+    既存の「送金済みかもしれない」扱い（`mpp.ts:440`・`:491`、`mpp-dynamic.ts:930`）をそのまま保つ
+  - EVM・SVM は送出の直前にもう一度（署名だけでは資金が動かない）。過ぎていれば `not_sent`（`destination_deadline`）
 
 ### 2.5 message の hash の予約（FR-37。`src/core/store.ts` `IntentStore`）
 
@@ -226,12 +232,12 @@ export function createX402SvmOutbound(options: {
 | 2 | 上流を読み直し（§4.4 の 1–2）、**保存した offer と `stableJson` で完全一致**する accepts があること（`x402-dynamic.ts:506` と同じ規則） | `not_sent` `destination_offer_changed` |
 | 3 | 宛先 ATA の再確認（`getAccountInfo`）。quote の後の消失は防げない——送る直前にもう一度見るだけ | `not_sent` `destination_ata_missing` |
 | 4 | `getLatestBlockhash({ commitment: "confirmed" })`。`blockhash` は base58 32 バイト、`lastValidBlockHeight` は 0 より大きい整数（`number` でも 10 進文字列でも）。`fetchedAt = now()` | `not_sent` `destination_blockhash_unavailable` |
-| 5 | **期待値を固める**（adapter が自分で決める値だけ。offer からは `feePayer`・`payTo`・`amount`・`memo` だけ）: `expected = { feePayer, source: RouterのATA, authority: capability.address, destination: 宛先ATA, mint, amount: BigInt(offer.amount), decimals, memo, units: 60_000, microLamports: 1n, blockhash, lastValidBlockHeight, tokenProgram }`。`memo = offer.extra.memo ?? \`subetha:${paymentId}\``——**既定にも §4.2 の 8 の検査を実行時に掛ける**（`paymentId` は任意の文字列 `src/ports/outbound.ts:87`。既定は UUID なら 44 バイト） | `not_sent` `destination_memo_invalid` |
-| 6 | 組み立て: `buildSvmTransactionMessage(expected)`（**`lastValidBlockHeight` を引数に足す**。受信は `0n` のまま渡す `x402-svm.ts:96`）→ `compileTransaction(message)` → `messageBytes`。**snapshot** = `messageBytes.slice()`（以後の照合はすべて snapshot と） | — |
-| 7 | **署名前の検査**（`checkSvmOutboundMessage(snapshot, expected)`。純粋関数）: `getCompiledTransactionMessageDecoder` で復号し、version 0・lookup table 無し・`staticAccounts[0] === expected.feePayer`・`numSignerAccounts === 2`・`staticAccounts[1] === expected.authority`・`lifetimeToken === expected.blockhash`・命令 4 つの program と口座と data が **expected から組み直した message の bytes と一致**（提出値を一切使わない。受信の `checkSvmTransaction` が提出値から再構築するのと**違う**: ここは期待値だけ）。builder の変異（別の宛先・額・追加の命令）はここで落ち、**署名器は呼ばれない**（AC-9 (c)） | `not_sent` `destination_message_mismatch` |
+| 5 | **期待値を固める**（adapter が自分で決める値だけ。offer からは `feePayer`・`payTo`・`amount`・`memo` だけ）: `expected = Object.freeze({ feePayer, source: RouterのATA, authority: capability.address, destination: 宛先ATA, mint, amount: BigInt(offer.amount), decimals, memo, units: 60_000, microLamports: 1n, blockhash, lastValidBlockHeight, tokenProgram })`——**原始値（文字列・bigint・number）だけの私有 object**。builder には別の写し（`{ ...expected }`）を渡し、`expected` 自体は検査にだけ使う（builder が入力を書き換える変異は検査に届かない）。`memo = offer.extra.memo ?? \`subetha:${paymentId}\``——**既定にも §4.2 の 8 の検査を実行時に掛ける**（`paymentId` は任意の文字列 `src/ports/outbound.ts:87`。既定は UUID なら 44 バイト） | `not_sent` `destination_memo_invalid` |
+| 6 | 組み立て: `buildSvmTransactionMessage({ ...expected })`（**`lastValidBlockHeight` を引数に足す**。受信は `0n` のまま渡す `x402-svm.ts:96`）→ `compileTransaction(message)` → `messageBytes`。**snapshot** = `Uint8Array.from(messageBytes)`（以後の照合はすべて snapshot と） | — |
+| 7 | **署名前の検査**（`checkSvmOutboundMessage(snapshot, expected)`。純粋関数。**builder と独立**: `buildSvmTransactionMessage` を呼ばず、復号した結果を期待値と 1 欄ずつ照合する）: `getCompiledTransactionMessageDecoder` で復号し、version 0・lookup table 無し・header `{ numSignerAccounts: 2, numReadonlySignerAccounts: 0, numReadonlyNonSignerAccounts: 期待の数 }`・`staticAccounts` の並びと数が期待の集合（`[feePayer, authority, source, destination, mint, tokenProgram, ComputeBudget, Memo]` の kit の並び——試験で固定）と一致・`lifetimeToken === expected.blockhash`・命令が**ちょうど 4 つ**で順に (i) ComputeBudget `SetComputeUnitLimit` の data = `units`、(ii) `SetComputeUnitPrice` の data = `microLamports`、(iii) token program の `TransferChecked` で口座が `[source, mint, destination, authority]`（役割: source 書込・mint 読取・destination 書込・authority 署名）、data の `amount`・`decimals` が期待値、(iv) Memo program で口座 0・data が `memo` の UTF-8。`parseSetComputeUnitLimitInstruction`・`parseTransferCheckedInstruction` 等の **parser**（`@solana-program/*`）で読む。builder の変異（別の source・宛先・額・追加の命令・口座の入れ替え）はここで落ち、**署名器は呼ばれない**（AC-9 (c)） | `not_sent` `destination_message_mismatch` |
 | 8 | `messageHash = sha256(snapshot)`（`node:crypto`、小文字 hex）。`request.reserveMessage(messageHash)` → `"collision"` → `destination_message_collision`、`"unavailable"` → `destination_message_record_unavailable`。`hooksForTest.afterReserve?.()` | `not_sent` |
 | 9 | **もう一度** `now < deadlineMs` と `now - fetchedAt ≤ fetchToSignMs` | `not_sent` `destination_deadline`／`destination_blockhash_stale` |
-| 10 | `signature = capability.sign(snapshot.slice())`（**写しを渡す**）。64 バイトで、`ed25519.verify(signature, snapshot, capability.address)` が true（`@noble/curves`。受信の preflight と同じ）。`hooksForTest.afterSign?.()` | `not_sent` `destination_not_signed` |
+| 10 | `signature = Uint8Array.from(capability.sign(Uint8Array.from(snapshot)))`（**写しを渡し、返った署名も写して保持**。`Buffer.slice` の共有領域を避ける）。64 バイトで、`ed25519.verify(signature, snapshot, publicKeyBytes)` が true——`publicKeyBytes` は `capability.address` を base58 で復号した 32 バイト（noble は文字列を hex と解釈する。受信の `x402-svm.ts:221` と同じ渡し方）。`hooksForTest.afterSign?.()` | `not_sent` `destination_not_signed` |
 | 11 | wire の組み立て: `compileTransaction` が作った署名の map（signer の順。`feePayer → null`、`authority → signature`。**map の列挙順を保つ**——encoder は列挙順で並べる）を `getTransactionEncoder().encode`（null は全ゼロ 64 バイト）。`hooksForTest.wire?.(bytes)`（試験の改変）。**再検査**: (i) `getTransactionDecoder` で復号し、`messageBytes` が snapshot と byte 一致、署名 2 つ・[0] 全ゼロ・[1] が `signature`、読み残し無し、全体 ≤ 1,232 バイト。(ii) base64 にして受信の `checkSvmTransaction(base64, policy, amount, memo)`（`x402-svm.ts:152`。**base64 を受け取る**）を policy `{ feePayer, payTo, destinationAta, mint, decimals, tokenProgram }` で掛ける（第 2 層。`lastValidBlockHeight` は wire に無いので policy に足さない——message には blockhash しか入らない） | `not_sent` `destination_payload_mismatch` |
 | 12 | `now < deadlineMs`（送出の直前）。`hooksForTest.beforeSend?.()` | `not_sent` `destination_deadline` |
 | 13 | 送出: `PaymentPayload = { x402Version: 2, resource: challenge.resource, accepted: <完全一致した accepts の写し>, payload: { transaction: base64 } }` を `x402HTTPClient.encodePaymentSignatureHeader` で header に。GET、`redirect: "error"`、期限 `paidTimeoutMs`。**1 回だけ**。throw → `unknown` `destination_pay_unknown` | `unknown` |
@@ -244,8 +250,12 @@ export function createX402SvmOutbound(options: {
 
 - 署名器に渡るのは **Router が期待値だけから組み、期待値だけで検査した message の bytes の写し**。SDK の提案は読まない（`@x402/svm` の client を使わない。SR-1: dependencies は増えない）
 - 順序: 期待値 → 組み立て → **署名前の検査** → hash の予約 → 期限 → 署名 → 署名の検証 → wire の組み立て → **wire の再検査（snapshot との一致＋受信の検査）** → 期限 → 送出
-- sabotage（SR-3。AC-12）: 期待値の各欄（宛先 ATA・額・mint・fee payer・compute の上限・Memo・blockhash）を builder で 1 つずつ変える → 7 で落ち signer の回数 0；署名前の検査を外す → その変異が通ってしまう（試験が落ちる）；
-  予約を署名の後に動かす → 並行 2 件の試験が落ちる；`reserveMessage` 無しで署名する → 1 の試験が落ちる；wire の再検査を外す → `hooksForTest.wire` の改変が通ってしまう；署名の検証を外す → 不正な署名を返す fixture-key で通ってしまう
+- sabotage（SR-3。AC-12。観測は **signer の回数・渡された bytes**、**支払いヘッダ付きの要求の件数**（challenge の GET は数えない。upstream の `seen.paid`）、journal の行）:
+  builder の変異（source・宛先・額・mint・fee payer・compute・Memo・blockhash を 1 つずつ、命令の追加、口座の入れ替え、入力の書き換え）→ 7 で `not_sent`、signer 0、支払い要求 0；
+  署名前の検査を外す → その変異で signer が 1 回呼ばれる（試験が落ちる。第 2 層が止めるかどうかに関わらず、**署名の有無**で検出）；
+  予約を署名の後に動かす → 並行 2 件で signer 2 回（試験が落ちる）；`reserveMessage` 無しで署名する → 1 の試験で signer 1 回；
+  wire の再検査 (i) を外す → `hooksForTest.wire` の改変で支払い要求 1 件（試験が落ちる）；署名の検証（10）を外す → 壊れた署名の fixture-key で **11-(i) の署名の照合**で止まる——
+  なので検出は「10 を外し (i) も外す」二重の変異で支払い要求 1 件、または 10 を外したときに 11 の理由が `destination_payload_mismatch` になること（`destination_not_signed` ではない）で
 - 独立レビュー: Arc の署名の境界 1 回以上、SVM の署名の境界 **2 回以上**（SR-3）。置き場はタスクの表
 
 ## 5. 送信の結果の表（FR-32）
@@ -283,6 +293,8 @@ export const railActive = (a: RailsActivation): boolean => Object.values(a).some
   受け入れ用の起動の `--rails` の既定を `"arc-in,solana-in"` に、「少なくとも 1 つ」の判定を `railActive` に（`rails-acceptance-run.ts:92-94`。今は boolean 前提）、`announcementOf` の `rails` は新しい token、
   `docs/DEPLOY.md` の実行例（`:154`・`:168`・`:192`）と rollback の文、`tests/wire/rails-process-entry.test.ts`・`tests/unit/rails-entry.test.ts`・`remote-mcp-config.test.ts` の token
 - 1 つの値が決めるもの: 設定生成（route・プロファイル・予算の区分・`inboundFacilitators`）、子の env（鍵・RPC の転送）、能力の注入（`routerProcessCapabilitiesOf`）。env で上書きできない（今のまま）
+- object 化の後、**受信だけ**を見る箇所（`.inbound` を見る。truthiness で判定しない）: `railsReceiversOf` の両分岐（`tools/rails-entry.ts:51`・`:55`）、`sellerProofs`（`:82`）、Arc の受取鍵の転送（`:131`）、`receiverOf`（`tools/remote-mcp-config.ts:101`）、
+  受信の route・`inboundFacilitators`・受信のプロファイルの生成。**送信だけ**: 送信の route・プロファイル、送信の鍵、`evmSigningByNetwork`／`svmSigning`。**どちらか**: Solana RPC（依存先・拒否ホスト・子の env）、予算の区分
 - G-2′ は `outbound: false` のまま配備、G-4′ でレールごとに `true`
 
 ### 6.2 鍵と env（`tools/remote-mcp.ts:89-150`、`tools/rails-entry.ts:102-143`）
@@ -336,7 +348,7 @@ export const railActive = (a: RailsActivation): boolean => Object.values(a).some
   `seen` に受けた payload（transaction の bytes）と回数
 - **Solana RPC**（`tests/fixtures/solana-rpc.ts`）に `getTokenAccountBalance` と、宛先 ATA の有無（`state.atas` の複数化）を足す。`getLatestBlockhash` は既に `lastValidBlockHeight: 1000`
 - **署名器**（`tests/fixtures/svm-signer-fixture.ts`）: 試験用の seed で**本当に署名**し（`ed25519.verify` を通る成功の経路を作る）、`sign` の回数と渡された bytes を記録。`kind: "fixture-key"`。改変の試験用に「壊れた署名を返す」モード
-- **MPP**: 既存の fixture のまま（運用者宛ての受取先の試験だけ足す）
+- **MPP**: 既存の fixture のまま（運用者宛ての受取先と期限の試験を足す。§7.2）
 
 ### 7.2 試験の置き場
 
@@ -348,8 +360,9 @@ export const railActive = (a: RailsActivation): boolean => Object.values(a).some
 | unit | `tests/unit/outbound-composition.test.ts` | `(rail, network)` の合成: 欠落・重複・key と network の不一致・family 不一致で起動しない、`railByRoute` が組で引く、運用者の集合の構成（(a)(b)、ATA は startup）、Solana RPC の拒否ホスト（受信無し・送信あり）、残高の配線の順（rail → 能力 → なし） |
 | unit | `tests/unit/remote-mcp-config.test.ts`・`rails-entry.test.ts`・`rails-acceptance-run.test.ts` | 方向別の有効化の生成・復元（旧 token の拒否）、鍵を読まない、静的 route の生成の条件、x402 送信の鍵の転送の条件、区分の生成、受け入れ用の既定 |
 | wire | `tests/wire/x402-arc-outbound.test.ts` | 静的（組み直し）・動的、Base 用の能力で Arc の offer → `not_sent` と Arc 用で Base → `not_sent`（AC-8 の両方向）、`assetTransferMethod`（V-6 の結果で）、Base の静的の既存試験が変わらない |
-| wire | `tests/wire/x402-svm-outbound.test.ts` | §4.5 の各段の失敗（AC-10 の列挙）、改変（AC-9）: (a) 初見の offer の違反 → 候補外（signer 0・HTTP 0）、(b) 保存した offer からの変更 → `destination_offer_changed`（signer 0）、(c) builder の変異 → 署名前の検査で `not_sent`（signer 0）、(d1) 署名器が壊れた署名を返す → `not_sent`、(d2) `hooksForTest.wire` の改変 → 再検査で `not_sent`（HTTP 0）。固定 Memo の並行 2 件（2 件目 `collision`、signer 1 回）。停止点: `afterReserve`／`afterSign`／`beforeSend` で throw → journal に予約の行、signer の回数、upstream の `seen` が 0 → 再起動 → `unknown`、再署名 0・再送信 0。`dropAfterSettle` → `unknown`、再起動後も再送信 0。SDK の client の封筒との鍵の一致（V-8a） |
-| integration | `tests/wire/multirail-integration.test.ts` | O-1〜O-4 の静的・動的が `delivered`（能力は `evmSigningByNetwork[ARC]`・`svmSigning[SOL]` を注入）、残高の hook（静的・動的、不足と RPC 失敗）、既存の経路が変わらない |
+| wire | `tests/wire/x402-svm-outbound.test.ts` | §4.5 の各段の失敗（AC-10 の列挙）、改変（AC-9）: (a) 初見の offer の違反 → 候補外（signer 0・HTTP 0）、(b) 保存した offer からの変更 → `destination_offer_changed`（signer 0）、(c) builder の変異 → 署名前の検査で `not_sent`（signer 0）、(d1) 署名器が壊れた署名を返す → `not_sent`、(d2) `hooksForTest.wire` の改変 → 再検査で `not_sent`（HTTP 0）。固定 Memo の並行 2 件（2 件目 `collision`、signer 1 回）。**中断**（throw では core が捕まえてその場で `unknown` を書く `orchestrator.ts:765` ので証拠にならない）: Router を**子 process**で起動し、`afterReserve`／`afterSign`／`beforeSend` の hook で `process.kill(process.pid, "SIGKILL")`（core の catch と終端の追記を通さない）→ journal に予約の行があり intent が `destination_pending` のまま → 同じ journal で再起動 → `interrupted_at_restart` で `unknown`（`store.ts:384`）、signer 0・支払い要求 0 → 別の paymentId で同じ message → `collision`。`dropAfterSettle` → `unknown`、再起動後も再送信 0。SDK の client の封筒との鍵の一致（V-8a） |
+| wire | `tests/wire/mpp-outbound.test.ts`・`mpp-dynamic-outbound.test.ts`（既存に追加） | 運用者宛ての受取先 → 候補外；期限: credential の生成の中（署名の委譲の直前）で切れる → `not_sent`・署名 0・送金 0；broadcast の後に切れる → 既存の「送金済みかもしれない」結果のまま（`not_sent` にならない） |
+| integration | `tests/wire/multirail-integration.test.ts` | 公開する組（静的 O-1・O-4、動的 O-1〜O-4。D-12）の `delivered`（能力は `evmSigningByNetwork[ARC]`・`svmSigning[SOL]` を注入）、残高の hook（静的・動的、不足と RPC 失敗）、既存の経路が変わらない |
 | process | `tests/wire/rails-process-entry.test.ts` | 方向別の token、送信の鍵の注入、無効な方向で env を読まない、静的 Solana route の ATA の起動時の検査で止まる |
 
 fixture の facilitator は simulate／send／confirm を模擬するので、**実 ATA の増分・compute の消費・finality は offline では観測できない**（V-8b と AC-13／AC-14 で）。
@@ -361,6 +374,7 @@ fixture の facilitator は simulate／send／confirm を模擬するので、**
 - AC-13／AC-14: 公開する組（静的 2・動的 4）**すべて**で各 1 件。記録: 両レグの tx（受信の settle、Provider 側の facilitator の tx: Arc は RPC で `success` と転送の内容、Solana は devnet で finalized と Provider の ATA の増分）、
   送受取先・額、Provider の応答の本文、client が受けた結果、保存した結果の再読取（`subetha_router_status`）。公開の Router は止めて受け入れ用の起動で（SR-5）
 - SR-3 の独立レビュー: Arc の署名の境界 1 回以上（§3.2 の PR）、SVM の署名の境界 2 回以上（§4 の adapter の PR と、統合の PR）
+- AC-11（公開の後、G-4′ ごと）: 公開 MCP を HTTPS で直接呼び、一覧に新しい route／プロファイルが出ること、`subetha_router_quote`／`quote_url` の `subject` の送信先（network・asset・decimals）と `disclosures` が設定どおりであること（各組 1 回。支払わない）を記録。CLAUDE.md の表と一致
 
 ## 8. `npm run sign`・呼び出し側
 
@@ -404,3 +418,4 @@ fixture の facilitator は simulate／send／confirm を模擬するので、**
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
 | 1 | 2026-10-07 | `gpt-6-astra`（read-only。第 1 版 `8c1889f`） | **REJECT**（10 項目: 署名前の検査の欠落と `checkSvmTransaction` の性質、`feePayer` と候補の段階の運用者の照合、Base の静的の領収の互換、`startup` と非同期の配線、期限の検査の位置と MPP、残高の hook の失敗の契約、RPC helper の封筒と回数、Memo の実行時検査と予約の契約、有効化の移行と子の env の条件、試験の観測点）。第 2 版で反映 |
+| 2 | 2026-10-07 | `gpt-6-astra`（read-only。第 2 版 `1f94224`） | **REJECT**（5 項目: 署名前の検査を builder と独立に、noble の公開鍵の渡し方、MPP の期限は実署名・送金 RPC の直前で broadcast 後は `not_sent` にしない、crash の試験は子 process の停止で、AC-11 の完了確認）。第 3 版で反映 |
