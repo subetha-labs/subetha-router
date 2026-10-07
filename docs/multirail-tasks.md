@@ -178,7 +178,7 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
     再提出: 別の quote（`nonce_mismatch`、要求 0）・別の route（`route_binding_mismatch`、要求 0）・**同じ quote の並行**（settle は合計 1 回。2 本目は既存の結果）・**再起動後**（settle 1 回のまま）。
     昇格前の同じ credential の再試行は通る（要求はあるが settle は 1 回）
   - AC-4: settle の応答の喪失・crash・形の違う／network の違う／識別子の無い成功応答で `unknown` が耐久的に残り、再起動後に settle が再発しない（要求数）。**両レグの予約が保たれる**（予算の残が減ったまま）。fee payer が変わった後の **process の再起動**で、発行済みの quote が verify で落ちる
-  - FR-5・FR-6: 旧い journal（Base Sepolia・Tempo の記録）を読んで新しい記録と混在した identity を保つ／権威の欄（facilitator の kind・表の資産）を変えた再起動で発行済みの quote が `quote_changed`／
+  - FR-5・FR-6: 旧い journal（Base Sepolia・Tempo の記録）を読んで新しい記録と混在した identity を保つ／権威の欄（route の source の資産など、既存の指紋の欄。facilitator の kind は表で network に固定され、設定では変えられない）を変えた再起動で発行済みの quote が `quote_changed`（facilitator への要求 0）／
     再起動後の予算の合計が復元される／`(network, asset)` の区分が別（Arc の消費が Base Sepolia の予算を減らさない）
   - AC-6: `ownerKey` 無しの status が読めない、結果の保存と再読取が既存どおり
   - 既存の Base Sepolia・Tempo の統合試験が変わらない
