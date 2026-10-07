@@ -2,7 +2,7 @@
  * 本番の入口の多レール（Arc・Solana の受信）の**有効化と能力**（multirail 設計 §3・§8、タスク T8-b）。**製品コードではない**（鍵を扱う起動側）。
  *
  * 有効化は 1 つの値 `RailsActivation { arc, solana }` で決まり、**設定生成（`routerConfigOf`）と能力の注入の両方**がこの値を見る:
- * - ホストの入口（`tools/remote-mcp.ts`）は定数 `RAILS_ACTIVATION`（どちらも `false`）を渡し、受取先と子プロセスの env をここで作る
+ * - ホストの入口（`tools/remote-mcp.ts`）は定数 `RAILS_ACTIVATION`（G-4 の後は両方 `true`）を渡し、受取先と子プロセスの env をここで作る
  * - 受け入れ用の起動（`tools/rails-acceptance-run.ts`）は同じ関数に `true` を渡す
  * - Router の process（`tools/remote-router-process.ts`）はホストが渡した内部の env `SUBETHA_RAILS_ACTIVATION` から同じ値を復元し、能力を作る
  *

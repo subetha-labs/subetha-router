@@ -94,7 +94,10 @@ export async function startListening(
   script: string,
   args: readonly string[],
   env: Readonly<Record<string, string>> = {},
+  /** `listening` の行を待つ上限（既定 20 秒。本番の入口は起動時の外部検査を含むので長く渡す）。 */
+  options: { readonly listenTimeoutMs?: number } = {},
 ): Promise<Listening> {
+  const listenTimeoutMs = options.listenTimeoutMs ?? 20_000;
   const child = spawnApp(script, args, env);
   let stdout = "";
   let stderr = "";
@@ -111,7 +114,7 @@ export async function startListening(
   const listening = new Promise<number>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`timeout waiting for listen: ${script}\n${stdout}\n${stderr}`));
-    }, 20_000);
+    }, listenTimeoutMs);
     const check = (): void => {
       for (const line of stdout.split("\n")) {
         if (line === "") {

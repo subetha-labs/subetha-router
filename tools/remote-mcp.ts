@@ -52,7 +52,7 @@ function required(env: Readonly<Record<string, string | undefined>>, name: strin
 
 /** ホストの起動の選択肢。公開の入口と受け入れ用の起動（`tools/rails-acceptance-run.ts`）が同じ関数を使う。 */
 export interface HostOptions {
-  /** 多レールの有効化。公開の入口は定数 `RAILS_ACTIVATION`（どちらも false）。受け入れ用の起動だけが true を渡す。 */
+  /** 多レールの有効化。公開の入口は定数 `RAILS_ACTIVATION`（G-4 で両方 true）。受け入れ用の起動は `--rails` で渡す。 */
   readonly activation: RailsActivation;
   /** MCP の入口を bind するアドレス（公開は 0.0.0.0、受け入れは 127.0.0.1）。 */
   readonly bind: string;
@@ -194,7 +194,9 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
 
   let router: Listening;
   try {
-    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath });
+    // 起動待ちは 120 秒: 子の Router は listen の前に Solana の起動時の検査（`/supported`・ATA、各 10 秒まで）、MPP 送信のプロファイルごとの Tempo の probe（各 6 秒まで、最大 3 本）、
+    // journal の replay を行う。上限に達すると子は殺され、入口は固定文で止まる。
+    router = await startListening("tools/remote-router-process.ts", [], { ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, { listenTimeoutMs: 120_000 });
   } catch (error) {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
     void error;
@@ -251,7 +253,7 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
   return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, stop };
 }
 
-/** 公開の入口: 多レールは定数で無効、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
+/** 公開の入口: 多レールは定数 `RAILS_ACTIVATION`（G-4 で両方 true）、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
 async function start(): Promise<void> {
   await startHost({
     activation: RAILS_ACTIVATION,

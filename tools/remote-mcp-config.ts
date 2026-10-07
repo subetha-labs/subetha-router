@@ -85,11 +85,13 @@ export interface RailsOptions {
   readonly receivers: RailReceivers;
 }
 /**
- * 公開の process の既定: **どちらも無効**（T10 の G-4 で、受け入れ（G-3）の後に `true` へ。G-4 と同じ gate）。
- * env からは変えられない。受け入れ用の起動（`tools/rails-acceptance-run.ts`）だけが `true` を渡す。
+ * 公開の process の有効化。**2026-10-07 に両方 `true`**（T10 の G-4。owner の決定。受け入れ G-3: Arc → Tempo の静的・動的、Solana → Base の静的・動的が
+ * すべて delivered、`docs/DEPLOY.md` §2c の記録）。env からは変えられない。戻すのはここを `false` に（イメージを作り直して入れ替える）。
  */
-export const RAILS_ACTIVATION: RailsActivation = Object.freeze({ arc: false, solana: false });
-export const RAILS_DISABLED: RailsOptions = Object.freeze({ activation: RAILS_ACTIVATION, receivers: Object.freeze({}) });
+export const RAILS_ACTIVATION: RailsActivation = Object.freeze({ arc: true, solana: true });
+/** どちらも無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
+export const RAILS_NONE: RailsActivation = Object.freeze({ arc: false, solana: false });
+export const RAILS_DISABLED: RailsOptions = Object.freeze({ activation: RAILS_NONE, receivers: Object.freeze({}) });
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BASE58_32 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -161,7 +163,7 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
     fee: DYNAMIC_FEE_X402_OUT,
   });
   const profiles: Record<string, unknown> = {
-    // 多レール（設計 §8）: 有効なレールの分だけ。公開の process は `RAILS_ACTIVATION`（どちらも false）。
+    // 多レール（設計 §8）: 有効なレールの分だけ。公開の process は `RAILS_ACTIVATION`（G-4 で両方 true）。
     ...(arcReceiver === undefined ? {} : { "dyn-arc-to-mpp": toMpp("dyn-arc-to-mpp", INBOUND_ARC, arcReceiver), "dyn-arc-to-x402": toX402("dyn-arc-to-x402", INBOUND_ARC, arcReceiver) }),
     ...(solReceiver === undefined ? {} : { "dyn-sol-to-x402": toX402("dyn-sol-to-x402", INBOUND_SOL, solReceiver), "dyn-sol-to-mpp": toMpp("dyn-sol-to-mpp", INBOUND_SOL, solReceiver) }),
     ...(MPP_OUTBOUND_PROFILE_ENABLED
