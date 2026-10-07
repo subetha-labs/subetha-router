@@ -20,6 +20,7 @@ import {
   createNoopSigner,
   createTransactionMessage,
   getAddressEncoder,
+  getBase58Encoder,
   getCompiledTransactionMessageDecoder,
   getCompiledTransactionMessageEncoder,
   getTransactionDecoder,
@@ -276,4 +277,155 @@ export function preflightSvm(offer: InboundOffer, credential: PaymentCredential,
   }
   const checked = checkSvmTransaction(credential.payload["transaction"], policy, offer.amount, memo);
   return checked.ok ? { ok: true } : { ok: false, reason: checked.reason };
+}
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * adapter（multirail 設計 §5.1・§5.5・§6。タスク T4-c）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+import { randomBytes } from "node:crypto";
+
+import { readBoundedBody } from "../../net/bounded-body.js";
+import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
+import type { CreateOfferRequest, InboundCallContext, InboundRail, SettleResult } from "../../ports/inbound.js";
+
+/** wire の `maxTimeoutSeconds`（facilitator が settle を待つ窓）の既定。settle の HTTP 期限はこれ＋10 秒。 */
+export const SVM_DEFAULT_WIRE_TIMEOUT_SECONDS = 40;
+/** offer の有効期間（承認期限）の既定（秒）。 */
+export const SVM_DEFAULT_OFFER_SECONDS = 120;
+/** facilitator の応答の上限（バイト）。 */
+export const SVM_RESPONSE_MAX_BYTES = 64 * 1024;
+
+export interface X402SvmInboundOptions {
+  readonly facilitatorUrl: string;
+  readonly transport: GuardedTransport;
+  /** 起動時の検査で固定した値（`resolveSvmInboundPolicy`）。 */
+  readonly policy: SvmInboundPolicy;
+  /** wire の `maxTimeoutSeconds`。既定 40。 */
+  readonly maxTimeoutSeconds?: number;
+  /** offer の有効期間（秒）。既定 120。 */
+  readonly offerSeconds?: number;
+  /** verify の HTTP 期限（ms）。既定 10 秒。settle は `(maxTimeoutSeconds + 10) * 1000`。 */
+  readonly timeoutMs?: number;
+}
+
+const BASE58_SIGNATURE_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
+
+/** settle の `transaction` が SVM の signature の形（base58 で 64 バイト）か。 */
+export function isSvmSignature(value: unknown): value is string {
+  if (typeof value !== "string" || !BASE58_SIGNATURE_PATTERN.test(value)) return false;
+  try {
+    return getBase58Encoder().encode(value).length === 64;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SVM 受信レール。Router が payee として offer を発行し（`payTo` は owner）、credential を自分で検査してから facilitator で verify → settle する。
+ * 決済の結果は設計 §6 の表: 要求を出した後の失敗はすべて `unknown`、`success: true`・network 一致・64 バイトの signature だけが `settled`。
+ */
+export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRail {
+  const base = options.facilitatorUrl.replace(/\/$/, "");
+  const transport = options.transport;
+  const policy = options.policy;
+  const maxTimeoutSeconds = options.maxTimeoutSeconds ?? SVM_DEFAULT_WIRE_TIMEOUT_SECONDS;
+  const offerSeconds = options.offerSeconds ?? SVM_DEFAULT_OFFER_SECONDS;
+  const verifyTimeoutMs = options.timeoutMs ?? 10_000;
+  const settleTimeoutMs = (maxTimeoutSeconds + 10) * 1000;
+
+  async function post(path: string, requestText: string, context: TransportContext, deadlineMs: number): Promise<{ status: number; json: unknown }> {
+    const response = await transport.fetch(
+      `${base}${path}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: requestText, redirect: "error", signal: AbortSignal.timeout(deadlineMs) },
+      context,
+    );
+    let text = "";
+    try {
+      const read = await readBoundedBody(response, SVM_RESPONSE_MAX_BYTES);
+      text = read.ok ? new TextDecoder("utf-8", { fatal: false }).decode(read.bytes) : "";
+    } catch (error) {
+      transport.report(error, context);
+      throw error;
+    }
+    let json: unknown;
+    try {
+      json = text === "" ? undefined : JSON.parse(text);
+    } catch {
+      json = undefined;
+    }
+    return { status: response.status, json };
+  }
+
+  /** facilitator へ送る requirements。**Router 発行の offer からのみ組む。** */
+  function requirementsOf(offer: InboundOffer): unknown {
+    return { scheme: offer.scheme, network: offer.network, asset: offer.asset, amount: offer.amount, payTo: offer.payTo, maxTimeoutSeconds: offer.maxTimeoutSeconds, extra: offer.extra };
+  }
+
+  /** payload は `transaction` だけ（`challengeNonce` は送らない。設計 §5.5）。 */
+  function requestTextOf(offer: InboundOffer, credential: PaymentCredential): string {
+    return JSON.stringify({
+      x402Version: 2,
+      paymentPayload: { x402Version: credential.x402Version, scheme: offer.scheme, network: offer.network, accepted: credential.accepted, payload: { transaction: credential.payload["transaction"] } },
+      paymentRequirements: requirementsOf(offer),
+    });
+  }
+
+  return {
+    async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
+      if (request.asset !== policy.mint) {
+        // 起動時に固定した mint 以外の route では offer を出さない（fail closed）。
+        throw new Error("svm inbound: the route asset is not the fixed mint");
+      }
+      const challengeNonce = `0x${randomBytes(32).toString("hex")}`;
+      return {
+        scheme: "exact",
+        network: request.network,
+        asset: request.asset,
+        amount: request.amount,
+        payTo: policy.payTo,
+        maxTimeoutSeconds,
+        extra: {
+          feePayer: policy.feePayer,
+          // facilitator も照合する memo。この quote の nonce そのもの。
+          memo: challengeNonce,
+          challengeNonce,
+          expiresAt: Math.floor(request.nowMs / 1000) + offerSeconds,
+          routeBinding: request.routeBinding,
+          // 部分署名だけでは資金は動かない（送信は fee payer）。
+          fundsMoveOnCredential: false,
+        },
+      };
+    },
+
+    preflight(offer: InboundOffer, credential: PaymentCredential, nowMs: number): PreflightResult {
+      return preflightSvm(offer, credential, nowMs, policy);
+    },
+
+    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
+      const { status, json } = await post("/verify", requestTextOf(offer, credential), { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, verifyTimeoutMs);
+      if (status !== 200 || typeof json !== "object" || json === null || Array.isArray(json)) {
+        return { isValid: false };
+      }
+      // `invalidReason` 等は読まない（転送しない）。
+      return { isValid: (json as Record<string, unknown>)["isValid"] === true };
+    },
+
+    async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
+      // 例外・タイムアウトは core が `unknown` にする。自動再 settle はしない。
+      const { status, json } = await post("/settle", requestTextOf(offer, credential), { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs);
+      if (status !== 200 || typeof json !== "object" || json === null || Array.isArray(json)) {
+        return { outcome: "unknown", reason: "source_settle_unknown" };
+      }
+      const record = json as Record<string, unknown>;
+      if (record["success"] !== true || record["network"] !== offer.network) {
+        return { outcome: "unknown", reason: "source_settle_unknown" };
+      }
+      const txRef = record["transaction"];
+      if (!isSvmSignature(txRef)) {
+        return { outcome: "unknown", reason: "source_settle_unknown" };
+      }
+      return { outcome: "settled", txRef };
+    },
+  };
 }
