@@ -38,6 +38,8 @@ export interface SolanaRpcAta {
 export interface SolanaRpcState {
   /** 今ある ATA（試験が途中で消す・足す・残高を変える）。`getAccountInfo`・`getTokenAccountBalance` が見る。 */
   atas: SolanaRpcAta[];
+  /** この method だけ JSON-RPC の error を返す（他は `reply` のまま）。 */
+  failMethods: string[];
   /** 応答を遅らせる（ms）。 */
   delayMs: number;
   /**
@@ -78,7 +80,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
   const tokenProgram = accounts.tokenProgram ?? TOKEN_PROGRAM_ADDRESS;
   const blockhash = accounts.blockhash ?? "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD";
   const calls: { method: string; params: unknown }[] = [];
-  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])] };
+  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])], failMethods: [] };
   let connections = 0;
   const mintData = Buffer.from(
     getMintEncoder().encode({ mintAuthority: null, supply: 1_000_000_000_000n, decimals: accounts.decimals, isInitialized: true, freezeAuthority: null }),
@@ -147,6 +149,10 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
       const params = body["params"];
       calls.push({ method, params });
       const id = body["id"];
+      if (state.failMethods.includes(method)) {
+        reply(undefined, id, { code: -32000, message: "fixture: method failure" });
+        return;
+      }
       if (method === "getSignatureStatuses") {
         const queue = state.signatureStatuses === undefined || state.signatureStatuses.length === 0 ? ["null"] : state.signatureStatuses;
         const kind = queue.length > 1 ? queue.shift()! : queue[0]!;

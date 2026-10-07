@@ -18,7 +18,25 @@ const observed = vi.hoisted(() => ({
   mpp: [] as { upstreams: string[]; profiles: string[]; operatorAddresses: readonly string[] | undefined; dispatched: string[] }[],
   /** Arc の rail に残高を持たせる（rail → 能力 の優先の試験）。 */
   arcRailBalance: undefined as bigint | undefined,
+  svm: [] as { network: string; upstreams: string[]; destinations: Record<string, { payTo: string; asset: string; scheme: string }>; profiles: string[]; mint: string; decimals: number; tokenProgram: string; rpcUrl: string; operatorAddresses: Set<string>; startupCalls: number; dispatched: string[] }[],
 }));
+vi.mock("../../src/adapters/outbound/x402-svm.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/adapters/outbound/x402-svm.js")>();
+  return {
+    ...actual,
+    createX402SvmOutbound: (options: Parameters<typeof actual.createX402SvmOutbound>[0]) => {
+      const rail = actual.createX402SvmOutbound(options);
+      const record = { network: options.network, upstreams: Object.keys(options.upstreams), destinations: { ...options.destinations }, profiles: Object.keys(options.dynamic?.profiles ?? {}), mint: options.mint, decimals: options.decimals, tokenProgram: options.tokenProgram, rpcUrl: options.rpc.url, operatorAddresses: options.operatorAddresses, startupCalls: 0, dispatched: [] as string[] };
+      observed.svm.push(record);
+      return {
+        ...rail,
+        // startup は RPC に出る（fixture 無し）ので記録だけして呼ばない。合成が `startup` を束ねることはここで観測する。
+        startup: async () => { record.startupCalls += 1; },
+        readChallenge: (routeId: string, target?: { url: string }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); },
+      };
+    },
+  };
+});
 vi.mock("../../src/adapters/outbound/x402.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/adapters/outbound/x402.js")>();
   return {
@@ -65,6 +83,7 @@ const SOL_OWNER = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
 beforeEach(() => {
   observed.x402.length = 0;
   observed.mpp.length = 0;
+  observed.svm.length = 0;
   observed.arcRailBalance = undefined;
 });
 
@@ -97,7 +116,7 @@ const MPP: MppTempoCapability = {
 const svm = (network: string, address: string): SvmSigningCapability => ({ network, address, sign: () => new Uint8Array(64), kind: "fixture-key" });
 
 /** Base → Arc の静的 route、Base → Base の静的 route、Tempo → Arc の動的プロファイル。 */
-function envFor(options: { solRoute?: boolean } = {}): Record<string, string> {
+function envFor(options: { solRoute?: boolean; solProfile?: boolean } = {}): Record<string, string> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "outbound-composition-"));
   const routes: Record<string, unknown> = {
     "r-base": {
@@ -139,6 +158,16 @@ function envFor(options: { solRoute?: boolean } = {}): Record<string, string> {
     maxUpstreamAmount: "10000",
     fee: { flat: "1000", bps: 0, min: "1000" },
   };
+  const solProfile: DynamicProfile = {
+    profileId: "dyn-x402-to-sol",
+    sourceRail: "x402",
+    source: { network: BASE, asset: USDC, decimals: 6, payTo: RECEIVER },
+    rail: "x402",
+    destination: { scheme: "exact", network: SOL, asset: SOL_USDC, decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+    par: true,
+    maxUpstreamAmount: "10000",
+    fee: { flat: "1000", bps: 0, min: "1000" },
+  };
   const buckets = [
     { network: BASE, asset: USDC, maxTotal: "100000", maxPerPurchase: "5000" },
     { network: "eip155:42431", asset: PATHUSD, maxTotal: "100000", maxPerPurchase: "5000" },
@@ -150,7 +179,7 @@ function envFor(options: { solRoute?: boolean } = {}): Record<string, string> {
       approvalTtlMs: 60_000,
       routes,
       budget: { maxPurchases: 8, buckets },
-      dynamic: { enabled: true, profiles: { [profile.profileId]: profile }, budget: { maxPurchases: 8, buckets }, denyHosts: [] },
+      dynamic: { enabled: true, profiles: { [profile.profileId]: profile, ...(options.solProfile ? { [solProfile.profileId]: solProfile } : {}) }, budget: { maxPurchases: 8, buckets }, denyHosts: [] },
     },
     x402: {
       upstreams: Object.fromEntries(Object.keys(routes).map((routeId) => [routeId, `${LOOPBACK_CLOSED}v1/${routeId}`])),
@@ -258,8 +287,39 @@ describe("composeRails: 組ごとの adapter と選択", () => {
   it("Arc 宛の route があるのに Arc 用の能力が無ければ起動しない（Base 用では代替しない）", () => {
     expect(() => compose({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), mppTempo: MPP })).toThrow(/signer_not_authorized/);
   });
-  it("Solana 宛の route は、SVM の adapter が無い間は起動しない（fail closed。U8 で足す）", () => {
-    expect(() => compose({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000501") }, mppTempo: MPP, svmSigning: { [SOL]: svm(SOL, SOL_OWNER) } }, envFor({ solRoute: true }))).toThrow(/signer_not_authorized/);
+  it("Solana 宛の route・プロファイル: svmSigning[SOL] から SVM の adapter が 1 つ組まれ、表の mint・桁・token program、設定の RPC、静的の destination、自分のプロファイルだけを受ける。startup は rails.startup に束ねられる", async () => {
+    const all = { evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000501") }, mppTempo: MPP, svmSigning: { [SOL]: svm(SOL, SOL_OWNER) } };
+    const { rails } = compose(all, envFor({ solRoute: true, solProfile: true }));
+    expect(observed.svm).toHaveLength(1);
+    const record = observed.svm[0]!;
+    expect(record).toMatchObject({ network: SOL, upstreams: ["r-sol"], profiles: ["dyn-x402-to-sol"], mint: SOL_USDC, decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" });
+    expect(record.destinations).toEqual({ "r-sol": { payTo: SOL_OWNER, asset: SOL_USDC, scheme: "exact" } });
+    expect(record.rpcUrl).toMatch(/^https:\/\//);
+    // 運用者の集合は (a)(b) を含む可変の Set（(c) の ATA は adapter の startup が足す）。
+    expect(record.operatorAddresses).toBeInstanceOf(Set);
+    expect(record.operatorAddresses.has(RECEIVER)).toBe(true);
+    expect(record.operatorAddresses.has(SOL_OWNER)).toBe(true);
+    expect(record.operatorAddresses.has("0x0000000000000000000000000000000000000501")).toBe(true);
+    // startup は束ねられ、rails.startup が 1 回呼ぶ。
+    expect(rails.startup).toBeDefined();
+    await rails.startup!();
+    expect(record.startupCalls).toBe(1);
+    // 経路の振り分け: r-sol と dyn-x402-to-sol は SVM の adapter へ、r-arc は Arc の adapter へ。
+    await outcomeOf(rails.outbound.readChallenge("r-sol"));
+    await outcomeOf(rails.outbound.readChallenge("dyn-x402-to-sol", { url: "https://sol.provider.test/v1" }));
+    expect(record.dispatched).toEqual(["r-sol", "dyn-x402-to-sol"]);
+    expect(observed.x402.flatMap((r) => r.dispatched)).toEqual([]);
+  });
+  it("Solana 宛の route があるのに svmSigning が無ければ起動しない（EVM の能力では代替しない）。能力の network が別の solana: なら key の照合で止まる", () => {
+    expect(() => compose({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000501") }, mppTempo: MPP }, envFor({ solRoute: true }))).toThrow(/signer_not_authorized/);
+    expect(() => compose({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000501") }, mppTempo: MPP, svmSigning: { [SOL]: svm("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", SOL_OWNER) } }, envFor({ solRoute: true }))).toThrow(/signer_not_authorized/);
+    expect(observed.svm).toHaveLength(0);
+  });
+  it("残高の配線: SVM の rail の balanceOf が r-sol と dyn-x402-to-sol に繋がる（rail が優先）", async () => {
+    const { rails } = compose({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000501") }, mppTempo: MPP, svmSigning: { [SOL]: svm(SOL, SOL_OWNER) } }, envFor({ solRoute: true, solProfile: true }));
+    // startup 前の balanceOf は adapter が throw する（合成はそのまま伝える）。
+    await expect(rails.balanceOf!("r-sol", SOL_USDC)).rejects.toThrow(/startup\(\) has not completed/);
+    await expect(rails.balanceOf!("dyn-x402-to-sol", SOL_USDC)).rejects.toThrow(/startup\(\) has not completed/);
   });
   it("残高の選択は組ごと: Arc 用の能力だけが balanceOf を持てば r-arc は値、r-base は undefined", async () => {
     const { rails } = compose({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000501", "real-key", 9n) }, mppTempo: MPP });
