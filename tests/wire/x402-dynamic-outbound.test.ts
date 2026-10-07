@@ -494,7 +494,7 @@ describe("支払い", () => {
     const account = privateKeyToAccount(generatePrivateKey());
     const guard = createRebuildingSigner({
       signer: { address: account.address, signTypedData: async (message: TypedData) => { calls.push(message); return "0x00"; } },
-      profile: PROFILE,
+      destination: PROFILE.destination,
       offer: standardAccept() as unknown as DestinationOffer,
       now: () => NOW,
     });

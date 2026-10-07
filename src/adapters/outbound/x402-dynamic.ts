@@ -23,7 +23,83 @@ import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import { parseUpstreamUrl } from "../../net/upstream-url.js";
 import type { DestinationOffer, EvmSigningCapability, PayRequest, PayResult } from "../../ports/outbound.js";
 
+/** 領収の形（送信の設計 §5）。EVM は bytes32 の tx hash と `0x` のアドレス、SVM は base58 の 64 バイトの署名と base58 のアドレス。 */
+export interface ReceiptForm {
+  readonly transactionPattern: RegExp;
+  readonly payerForm: "evm" | "svm";
+  readonly signerAddress: string;
+}
+
+export type Receipt =
+  | { readonly kind: "none" }
+  | { readonly kind: "payer_mismatch" }
+  | { readonly kind: "settled"; readonly header: string; readonly transaction: string };
+
+/**
+ * receipt ヘッダを本文より先に判定する（SDK の `processResponse` は本文を先に読むので使わない）。送信の設計 §5 の 1 枚の表の入口。
+ * 動的 EVM・静的 Arc・SVM が共有する（Base の静的は従来の処理のまま）。
+ */
+export function receiptOf(response: Response, approved: DestinationOffer, form: ReceiptForm): Receipt {
+  const header = response.headers.get("PAYMENT-RESPONSE") ?? response.headers.get("X-PAYMENT-RESPONSE");
+  if (header === null || header === "") return { kind: "none" };
+  let decoded: unknown;
+  try {
+    decoded = decodePaymentResponseHeader(header);
+  } catch {
+    return { kind: "none" };
+  }
+  if (!isRecord(decoded) || decoded["success"] !== true || decoded["network"] !== approved.network) {
+    return { kind: "none" };
+  }
+  const transaction = decoded["transaction"];
+  // 取引の参照は form の形に限る（上流の任意の文字列を記録に入れない）。
+  if (typeof transaction !== "string" || !form.transactionPattern.test(transaction)) {
+    return { kind: "none" };
+  }
+  // receipt が購入者を名乗るなら、それはこの Router の署名者でなければならない（形ごとの比較）。
+  const payer = decoded["payer"];
+  if (payer !== undefined) {
+    const matches =
+      typeof payer === "string" &&
+      (form.payerForm === "evm" ? ADDRESS_PATTERN.test(payer) && sameAddress(payer, form.signerAddress) : SVM_ADDRESS_PATTERN.test(payer) && payer === form.signerAddress);
+    if (!matches) return { kind: "payer_mismatch" };
+  }
+  return { kind: "settled", header, transaction };
+}
+
+/** receipt が整合した 200 の本文。対応するのは `application/json` の JSON object だけ（設計 §3.4）。 */
+export async function deliveredBodyOf(
+  response: Response,
+  receipt: { readonly header: string; readonly transaction: string },
+  deps: { readonly maxBodyBytes: number; readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void; readonly ctx: { routeId: string; operation: string } },
+): Promise<PayResult> {
+  const noData = (reason: string): PayResult => ({ outcome: "paid_no_data", reason, receiptRef: receipt.header });
+  let delivered;
+  try {
+    delivered = await readJsonObjectBody(response, deps.maxBodyBytes);
+  } catch (error) {
+    // 支払いは receipt で確かめてある。取れなかったのはデータだけ。
+    deps.report(error, deps.ctx);
+    return noData("paid_data_unavailable");
+  }
+  if (delivered.kind === "too_large") {
+    return noData("response_too_large");
+  }
+  if (delivered.kind === "unsupported") {
+    return noData("unsupported_response");
+  }
+  return { outcome: "paid", body: delivered.body, contentType: "application/json", txRef: receipt.transaction, receiptRef: receipt.header };
+}
+
+/** EVM の領収の形（bytes32 の tx hash）。 */
+export const EVM_RECEIPT_FORM = (signerAddress: string): ReceiptForm => ({ transactionPattern: BYTES32_PATTERN, payerForm: "evm", signerAddress });
+
 export interface X402DynamicOptions {
+  /**
+   * 運用者の集合（送信の設計 §2.3、FR-38）: 受信の受取先・送信の署名者・それらの ATA。ここへ払う offer は候補にしない。
+   * EVM は小文字化して比較する。無ければ「この能力の署名者と、プロファイルの受信の受取先」だけ（従来）。
+   */
+  readonly operatorAddresses?: readonly string[];
   /** `profileId` → プロファイル。送信レールが x402 のものだけを使う。 */
   readonly profiles: Readonly<Record<string, DynamicProfile>>;
   /** 動的経路の transport。**loopback を許すものは受け取らない**（設計 §3.1）。 */
@@ -43,6 +119,7 @@ const MAX_TIMEOUT_SECONDS = 600;
 
 const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+const SVM_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const BYTES32_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
@@ -198,17 +275,20 @@ export interface RebuildingSigner {
  */
 export function createRebuildingSigner(args: {
   readonly signer: ClientEvmSigner;
-  readonly profile: DynamicProfile;
+  /** 宛先の権威（プロファイルの `destination`、または静的 route の `destination`＋表の domain。送信の設計 §3.2）。 */
+  readonly destination: { readonly network: string; readonly asset: string; readonly tokenDomain?: { readonly name: string; readonly version: string } };
   readonly offer: DestinationOffer;
   readonly now: () => number;
+  /** 承認の絶対期限（FR-36）。**実際の署名の委譲の直前**に見る。無ければ期限なし（試験用）。 */
+  readonly deadlineMs?: number;
 }): RebuildingSigner {
-  const { profile, offer } = args;
-  const tokenDomain = profile.destination.tokenDomain;
+  const { destination, offer } = args;
+  const tokenDomain = destination.tokenDomain;
   if (tokenDomain === undefined) {
-    throw new Error("dynamic x402 profile has no tokenDomain");
+    throw new Error("x402 destination has no tokenDomain");
   }
-  const chainId = evmChainIdOf(profile.destination.network);
-  const verifyingContract = getAddress(profile.destination.asset);
+  const chainId = evmChainIdOf(destination.network);
+  const verifyingContract = getAddress(destination.asset);
   const from = getAddress(args.signer.address);
   const to = getAddress(offer.payTo);
   const value = BigInt(offer.amount);
@@ -272,6 +352,10 @@ export function createRebuildingSigner(args: {
       ) {
         throw new SigningRefusedError("destination_signing_validity_out_of_range");
       }
+      // 承認の期限は**ここ**（実際の署名の委譲の直前）で見る。arm の前では SDK が間で待てば期限後に署名できる（送信の設計 §2.4）。
+      if (args.deadlineMs !== undefined && !(args.now() < args.deadlineMs)) {
+        throw new SigningRefusedError("destination_deadline");
+      }
       signatures += 1;
       return args.signer.signTypedData({
         domain: { name: tokenDomain.name, version: tokenDomain.version, chainId, verifyingContract },
@@ -317,11 +401,6 @@ interface DynamicChallenge {
   readonly resource: { url: string; description?: string; mimeType?: string };
 }
 
-type Receipt =
-  | { readonly kind: "none" }
-  | { readonly kind: "payer_mismatch" }
-  | { readonly kind: "settled"; readonly header: string; readonly transaction: string };
-
 export interface X402DynamicPath {
   readChallenge(profileId: string, url: string): Promise<readonly DestinationOffer[]>;
   pay(request: PayRequest & { readonly target: { readonly url: string } }): Promise<PayResult>;
@@ -359,10 +438,11 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
     return profile;
   }
 
-  /** 運用者自身のアドレス（署名者と、受信の受取先）。 */
+  /** 運用者自身のアドレス（署名者と、受信の受取先、注入された運用者の集合。送信の設計 §2.3）。 */
   function operatorAddressesOf(profile: DynamicProfile): string[] {
-    return [capability.signer.address, profile.source.payTo];
+    return [capability.signer.address, profile.source.payTo, ...(options.operatorAddresses ?? [])];
   }
+  const receiptForm = EVM_RECEIPT_FORM(capability.signer.address);
 
   /** 未払いの GET（支払いヘッダを付けない）。本文は読まずに捨てる。 */
   async function getChallenge(url: string, ctx: { routeId: string; operation: string }): Promise<DynamicChallenge> {
@@ -420,53 +500,6 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
     };
   }
 
-  /** receipt ヘッダを本文より先に判定する（SDK の `processResponse` は本文を先に読むので使わない）。 */
-  function receiptOf(response: Response, approved: DestinationOffer): Receipt {
-    const header = response.headers.get("PAYMENT-RESPONSE") ?? response.headers.get("X-PAYMENT-RESPONSE");
-    if (header === null || header === "") return { kind: "none" };
-    let decoded: unknown;
-    try {
-      decoded = decodePaymentResponseHeader(header);
-    } catch {
-      return { kind: "none" };
-    }
-    if (!isRecord(decoded) || decoded["success"] !== true || decoded["network"] !== approved.network) {
-      return { kind: "none" };
-    }
-    const transaction = decoded["transaction"];
-    // 送信先は EVM なので、取引の参照は 32 バイトのハッシュに限る（上流の任意の文字列を記録に入れない）。
-    if (typeof transaction !== "string" || !BYTES32_PATTERN.test(transaction)) {
-      return { kind: "none" };
-    }
-    // receipt が購入者を名乗るなら、それはこの Router の署名者でなければならない。
-    const payer = decoded["payer"];
-    if (payer !== undefined && (typeof payer !== "string" || !ADDRESS_PATTERN.test(payer) || !sameAddress(payer, capability.signer.address))) {
-      return { kind: "payer_mismatch" };
-    }
-    return { kind: "settled", header, transaction };
-  }
-
-  /** receipt が整合した 200 の本文。対応するのは `application/json` の JSON object だけ（設計 §3.4）。 */
-  async function deliveredBodyOf(response: Response, receipt: { header: string; transaction: string }, ctx: { routeId: string; operation: string }): Promise<PayResult> {
-    const noData = (reason: string): PayResult => ({ outcome: "paid_no_data", reason, receiptRef: receipt.header });
-    let delivered;
-    try {
-      delivered = await readJsonObjectBody(response, DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes);
-    } catch (error) {
-      // 支払いは receipt で確かめてある。取れなかったのはデータだけ。
-      transport.report(error, ctx);
-      return noData("paid_data_unavailable");
-    }
-    if (delivered.kind === "too_large") {
-      return noData("response_too_large");
-    }
-    if (delivered.kind === "unsupported") {
-      return noData("unsupported_response");
-    }
-    const body = delivered.body;
-    return { outcome: "paid", body, contentType: "application/json", txRef: receipt.transaction, receiptRef: receipt.header };
-  }
-
   return {
     /** 検査を通った offer だけを、**上流の順のまま**返す（先頭が §2.3 の「最初の 1 件」）。 */
     async readChallenge(profileId: string, url: string): Promise<readonly DestinationOffer[]> {
@@ -511,7 +544,7 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       // SDK には写しを渡す（SDK が書き換えても、照合に使う値は変わらない）。
       const selected = JSON.parse(JSON.stringify(current)) as PaymentRequired["accepts"][number];
 
-      const guard = createRebuildingSigner({ signer: capability.signer, profile, offer: approved, now });
+      const guard = createRebuildingSigner({ signer: capability.signer, destination: profile.destination, offer: approved, now, deadlineMs: request.deadlineMs });
       const client = new x402Client((_version, requirements) => {
         if (requirements.length !== 1 || stableJson(requirements[0]) !== approvedJson) {
           throw new SigningRefusedError("destination_selected_offer_mismatch");
@@ -544,6 +577,10 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };
       }
 
+      // 送出の直前にもう一度、承認の期限（FR-36）。署名だけでは資金は動かない。
+      if (!(now() < request.deadlineMs)) {
+        return { outcome: "not_sent", reason: "destination_deadline" };
+      }
       const payCtx = { routeId: request.routeId, operation: "pay" };
       let response: Response;
       try {
@@ -559,10 +596,10 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
 
-      const receipt = receiptOf(response, approved);
+      const receipt = receiptOf(response, approved, receiptForm);
       if (receipt.kind === "settled") {
         if (response.status === 200) {
-          return deliveredBodyOf(response, receipt, payCtx);
+          return deliveredBodyOf(response, receipt, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
         }
         // 整合した receipt があるのに 200 でない。支払いは成立していて、データは無い。
         discardBody(response);
