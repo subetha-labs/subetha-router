@@ -8,9 +8,10 @@
  *
  * **受信レールは offer の `scheme` で判定する**（呼び出し側が指定しない）:
  *
- * | scheme | レール | 性質 |
+ * | scheme ＋ network | レール | 性質 |
  * |---|---|---|
- * | `exact` | x402 / Base Sepolia | **署名するだけ**。送信と gas は facilitator 負担 |
+ * | `exact` ＋ `eip155:` | x402 / EVM（Base Sepolia・Arc testnet） | **署名するだけ**。送信と gas は facilitator 負担 |
+ * | `exact` ＋ `solana:` | x402 / Solana devnet | **部分署名するだけ**。送信と手数料は facilitator の fee payer |
  * | `tempo/charge` | MPP / Tempo | **この場でチェーンに送金する**。手数料も自分持ち |
  *
  * **MPP は署名ではなく送金**である点に注意。このコマンドを実行した時点で
@@ -19,31 +20,40 @@
  * **鍵はこのマシンから出ない。** Router に送るのは**署名済みの credential だけ**で、
  * 秘密鍵そのものは送信されない（Router 側も鍵を保持しない設計）。
  *
- * EIP-712 domain は **Router が発行した offer から読む**（勝手に決めない）。
+ * EIP-712 の chainId・domain は **network の表**から引き、offer の domain が表と違えば署名しない（SR-7）。
  */
 
 import { readFileSync } from "node:fs";
 
 import { createMppPayer } from "./mpp-payer.js";
+import { classifyOffer, SIGN_MAX_AMOUNT } from "./sign-dispatch.js";
+import { createSvmPayer } from "./svm-payer.js";
 import { createX402Payer } from "./x402-payer.js";
 
-const BASE_SEPOLIA = 84532;
-/** 1 回の受信レグで払ってよい上限（base units）。これを超える offer には署名・送金しない。 */
-const MAX_AMOUNT = 10_000n;
-
-function payerKey(): string {
-  const fromEnv = process.env["SUBETHA_PAYER_PRIVATE_KEY"];
+function envValue(name: string): string | undefined {
+  const fromEnv = process.env[name];
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
   try {
     const text = readFileSync(".env.local", "utf8");
-    const line = text.split("\n").find((l) => l.startsWith("SUBETHA_PAYER_PRIVATE_KEY="));
-    if (line !== undefined) return line.slice("SUBETHA_PAYER_PRIVATE_KEY=".length).trim();
+    const line = text.split("\n").find((l) => l.startsWith(`${name}=`));
+    if (line !== undefined) return line.slice(name.length + 1).trim();
   } catch {
     // .env.local が無いだけ。
   }
-  process.stderr.write(
-    "SUBETHA_PAYER_PRIVATE_KEY is not set. Run `npm run wallet:new` to create one.\n",
-  );
+  return undefined;
+}
+
+function payerKey(): string {
+  const key = envValue("SUBETHA_PAYER_PRIVATE_KEY");
+  if (key !== undefined) return key;
+  process.stderr.write("SUBETHA_PAYER_PRIVATE_KEY is not set. Run `npm run wallet:new` to create one.\n");
+  process.exit(2);
+}
+
+function solanaKey(): string {
+  const key = envValue("SOLANA_PAYER_PRIVATE_KEY");
+  if (key !== undefined) return key;
+  process.stderr.write("SOLANA_PAYER_PRIVATE_KEY is not set. Run `npm run wallet:new:solana` to create one.\n");
   process.exit(2);
 }
 
@@ -73,33 +83,27 @@ if (offer === undefined) {
   process.exit(2);
 }
 
-const offerRecord = offer as Record<string, unknown>;
-const scheme = offerRecord["scheme"];
-const network = String(offerRecord["network"] ?? "");
-const amount = String(offerRecord["amount"] ?? "0");
-const payTo = String(offerRecord["payTo"] ?? "");
-
-if (BigInt(amount) > MAX_AMOUNT) {
-  process.stderr.write(`Offer amount exceeds the cap: ${amount} > ${MAX_AMOUNT}\n`);
+/**
+ * 振り分けと署名前の拒否は `sign-dispatch.ts`（表に無い network・資産・domain・mint、失効、形の違い、上限 20,000）。
+ * **鍵を読むのは振り分けが決まった後**（拒む offer では鍵に触れない）。
+ */
+const dispatch = classifyOffer(offer, Date.now());
+if (dispatch.kind === "refuse") {
+  process.stderr.write(`Refusing to sign: ${dispatch.reason}\n`);
   process.exit(2);
 }
+const offerRecord = offer as Record<string, unknown>;
 
-if (scheme === "tempo/charge") {
+if (dispatch.kind === "mpp") {
   // ---- MPP 受信。**ここで実際に送金する。** ----
-  const chainId = Number(network.replace(/^eip155:/, ""));
-  if (!Number.isInteger(chainId) || chainId <= 0) {
-    process.stderr.write(`Cannot read the offer network: ${network}\n`);
-    process.exit(2);
-  }
-  const asset = String(offerRecord["asset"] ?? "");
   const payer = createMppPayer(payerKey(), {
-    chainId,
-    asset,
-    payTo,
-    maxAmount: MAX_AMOUNT,
+    chainId: dispatch.chainId,
+    asset: dispatch.asset,
+    payTo: dispatch.payTo,
+    maxAmount: SIGN_MAX_AMOUNT,
   });
   process.stderr.write(
-    `MPP: about to send ${amount} to ${payTo} on ${network}.\n` +
+    `MPP: about to send ${dispatch.amount} to ${dispatch.payTo} on eip155:${dispatch.chainId}.\n` +
       "     **This transfer cannot be undone.** Only run this after a human has approved.\n",
   );
   const { credential, txRef } = await payer.payAndCredential(offerRecord as never);
@@ -107,7 +111,6 @@ if (scheme === "tempo/charge") {
    * **両レールで出力の形を揃える。** x402 側は payer が Router の封筒
    * （`x402Version` / `accepted` / `payload.challengeNonce`）まで組んで base64 を返すが、
    * MPP 側が返すのは mppx の wire 文字列なので、ここで同じ封筒に入れる。
-   * 揃えておかないと、呼び出し側がレールごとに扱いを変える羽目になる。
    */
   const extra = offerRecord["extra"] as Record<string, unknown> | undefined;
   const envelope = Buffer.from(
@@ -120,10 +123,16 @@ if (scheme === "tempo/charge") {
   ).toString("base64");
   process.stderr.write(`paid by ${payer.address} / tx ${txRef} (your key is never sent)\n`);
   process.stdout.write(`${envelope}\n`);
-} else {
-  // ---- x402 受信。署名するだけで、資金はまだ動かない。 ----
+} else if (dispatch.kind === "x402-evm") {
+  // ---- x402 受信（EVM）。署名するだけで、資金はまだ動かない。chainId は表から。 ----
   const payer = createX402Payer(payerKey());
-  const credential = await payer.credentialFor(offer as never, BASE_SEPOLIA);
-  process.stderr.write(`signed by ${payer.address} (your key is never sent)\n`);
+  const credential = await payer.credentialFor(offerRecord as never, dispatch.chainId);
+  process.stderr.write(`signed by ${payer.address} for eip155:${dispatch.chainId} (your key is never sent)\n`);
+  process.stdout.write(`${credential}\n`);
+} else {
+  // ---- x402 受信（Solana）。部分署名するだけで、資金はまだ動かない（送信は facilitator の fee payer）。 ----
+  const payer = await createSvmPayer(solanaKey(), { ...(envValue("SOLANA_RPC_URL") === undefined ? {} : { rpcUrl: envValue("SOLANA_RPC_URL")! }) });
+  const credential = await payer.credentialFor(offerRecord as never, { mint: dispatch.mint, decimals: dispatch.decimals, tokenProgram: dispatch.tokenProgram });
+  process.stderr.write(`signed by ${payer.address} on Solana (your key is never sent; the facilitator broadcasts)\n`);
   process.stdout.write(`${credential}\n`);
 }

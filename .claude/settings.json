@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npm run sign:*)",
       "Bash(npm run wallet:balance)",
-      "Bash(npm run wallet:new)"
+      "Bash(npm run wallet:new)",
+      "Bash(npm run wallet:new:solana)"
     ]
   }
 }
