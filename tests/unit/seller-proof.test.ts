@@ -10,6 +10,7 @@ import {
   createSellerProofCapability,
   decodeSellerProofHeader,
   SELLER_PROOF_ENVELOPE_VERSION,
+  SELLER_PROOF_LIFETIME_SECONDS,
   SELLER_REQUEST_TYPES,
   sellerProofDomainOf,
 } from "../../src/adapters/inbound/seller-proof.js";
@@ -28,7 +29,8 @@ describe("seller proof capability", () => {
     expect(a.network).toBe(ARC);
     expect(a.payTo).toBe(proof.address);
     expect(a.issuedAt).toBe(1_800_000_000);
-    expect(a.expiresAt).toBe(1_800_000_060);
+    expect(a.expiresAt).toBe(1_800_000_000 + SELLER_PROOF_LIFETIME_SECONDS);
+    expect(SELLER_PROOF_LIFETIME_SECONDS).toBe(60);
     expect(a.nonce).not.toBe(b.nonce);
     const recovered = await recoverTypedDataAddress({
       domain: sellerProofDomainOf(5042002),
@@ -49,17 +51,32 @@ describe("seller proof capability", () => {
     expect(proof.signCalls()).toBe(0);
   });
 
-  test("能力は proofFor 以外の署名の口を持たない（型と実体）", () => {
+  test("能力は proofFor 以外の署名の口を持たない（型と実体）。寿命は設定で変えられない（61 秒の証明は作れない）", () => {
     const proof = createTestSellerProof({ network: ARC });
     expect(Object.keys(proof.capability).sort()).toEqual(["address", "network", "proofFor"]);
-    expect((proof.capability as unknown as Record<string, unknown>)["signTypedData"]).toBeUndefined();
-    expect((proof.capability as unknown as Record<string, unknown>)["signMessage"]).toBeUndefined();
+    expect(Object.isFrozen(proof.capability)).toBe(true);
+    // @ts-expect-error 署名の口は型にも無い
+    expect(proof.capability.signTypedData).toBeUndefined();
+    // @ts-expect-error 署名の口は型にも無い
+    expect(proof.capability.signMessage).toBeUndefined();
+    // @ts-expect-error 寿命の設定は無い（設計 §3: 60 秒固定）
+    expect(() => createTestSellerProof({ network: ARC, lifetimeSeconds: 61 })).not.toThrow();
+    expect(Object.isFrozen(SELLER_REQUEST_TYPES)).toBe(true);
+    expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest)).toBe(true);
+    expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest[0])).toBe(true);
   });
 
-  test("network は eip155 だけ、寿命は 1..300、アドレスの形を要求する", () => {
+  test("設定は作るときに写す: options を後から変えても署名の network・payTo は変わらない", async () => {
+    const options = { network: ARC, now: () => 1_800_000_000_000 };
+    const proof = createTestSellerProof(options);
+    (options as { network: string }).network = "eip155:84532";
+    const envelope = decodeSellerProofHeader(await proof.capability.proofFor("verify", HASH))!;
+    expect(envelope.network).toBe(ARC);
+    expect(proof.capability.network).toBe(ARC);
+  });
+
+  test("network は eip155 だけ、アドレスの形を要求する", () => {
     expect(() => createTestSellerProof({ network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" })).toThrow(/eip155/);
-    expect(() => createTestSellerProof({ network: ARC, lifetimeSeconds: 301 })).toThrow(/lifetime/);
-    expect(() => createTestSellerProof({ network: ARC, lifetimeSeconds: 0 })).toThrow(/lifetime/);
     expect(() => createSellerProofCapability({ network: ARC, address: "0x12", signSellerRequest: async () => "0x" })).toThrow(/address/);
   });
 

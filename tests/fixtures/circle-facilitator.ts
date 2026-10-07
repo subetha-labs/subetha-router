@@ -1,54 +1,69 @@
 /**
- * Circle の Facilitator Service を**loopback で模した**合成 facilitator（multirail 設計 §4.3）。
+ * Circle の Facilitator Service を**loopback（TLS、プロセス内）で模した**合成 facilitator（multirail 設計 §4.3）。
  * **テスト基盤であり製品の facilitator ではない。** 鍵・実決済は無い。
  *
- * 本物に合わせて検査するもの:
- * - `Facilitator-Seller-Proof` header（base64url の封筒）を読み、EIP-712 `SellerRequest` の署名を recover して `payTo` と一致、
- *   `bodyHash` が受けた **body の bytes そのもの**の keccak256 と一致、`purpose` が endpoint と一致、`method` が POST、
- *   `issuedAt` が現在＋30 秒以内、`expiresAt` が現在より後かつ `issuedAt`＋300 秒以内、nonce が `(network, payTo, purpose)` で未使用、
- *   `network`・`payTo` が `paymentRequirements` と一致。違えば 401
- * - `paymentRequirements.extra.assetTransferMethod === "eip3009"`。無ければ 400
- *
- * usage: circle-facilitator.ts [--verify ok|invalid] [--settle ok|reject|pending|registration-required|conflict|bad-tx|bad-network|unknown]
- *        [--settle-delay-ms N] [--redirect] [--port N]
+ * 製品コードの定数・decoder は**使わない**（producer と verifier が同じ思い込みを共有しないため）。仕様（Circle の
+ * "Seller Proof Specification"）をここで独立に書き下す:
+ * - domain `{ name: "Circle Facilitator Seller Request", version: "1", chainId }`、型 `SellerRequest`（issuedAt/expiresAt は uint64）
+ * - header は base64url（`A-Za-z0-9_-`、padding 無し）の JSON 封筒 `{ version: 1, signature, network, payTo, nonce, issuedAt, expiresAt }`
+ * - `bodyHash = keccak256(受けた body の bytes)`、purpose = endpoint、method = POST、issuedAt ≤ now+30、now < expiresAt ≤ issuedAt+300、
+ *   nonce は (network, payTo, purpose) で一意、network・payTo は paymentRequirements と一致、署名者 = payTo
+ * - `paymentRequirements.extra.assetTransferMethod === "eip3009"` を要求（違えば 400）
  */
 import { randomBytes } from "node:crypto";
-import http from "node:http";
+import https from "node:https";
 
-import { keccak256, recoverTypedDataAddress } from "viem";
+import { keccak256, recoverTypedDataAddress, type Hex } from "viem";
 
-import { decodeSellerProofHeader, SELLER_REQUEST_TYPES, sellerProofDomainOf } from "../../src/adapters/inbound/seller-proof.js";
+import type { TlsMaterial } from "./tls/generate.js";
 
-function arg(name: string, fallback: string): string {
-  const index = process.argv.indexOf(`--${name}`);
-  return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
+const DOMAIN_NAME = "Circle Facilitator Seller Request";
+const DOMAIN_VERSION = "1";
+const TYPES = {
+  SellerRequest: [
+    { name: "purpose", type: "string" },
+    { name: "method", type: "string" },
+    { name: "bodyHash", type: "bytes32" },
+    { name: "network", type: "string" },
+    { name: "payTo", type: "address" },
+    { name: "nonce", type: "bytes32" },
+    { name: "issuedAt", type: "uint64" },
+    { name: "expiresAt", type: "uint64" },
+  ],
+} as const;
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+const HEX32 = /^0x[0-9a-fA-F]{64}$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "unknown" | "malformed" | "drop" | "huge";
+
+export interface CircleFacilitatorState {
+  verify: "ok" | "invalid";
+  settle: CircleSettleMode;
+  settleDelayMs: number;
+  /** すべての証明を 401 にする（adapter 側の写像を見る）。 */
+  rejectProofs: boolean;
+  /** verify・settle を 302 で `redirectTo` に送る。 */
+  redirectTo: string | undefined;
 }
 
-const verifyMode = arg("verify", "ok");
-const settleMode = arg("settle", "ok");
-const settleDelayMs = Number(arg("settle-delay-ms", "0"));
-const redirect = process.argv.includes("--redirect");
-
-let connections = 0;
-let verifyCalls = 0;
-let settleCalls = 0;
-let elsewhereCalls = 0;
-const proofFailures: string[] = [];
-const usedNonces = new Set<string>();
-let lastRequirements: unknown;
-let lastPayload: unknown;
-let lastProof: unknown;
-
-function send(response: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  const text = JSON.stringify(body);
-  response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), ...headers });
-  response.end(text);
+export interface CircleSeen {
+  connections: number;
+  verifyCalls: number;
+  settleCalls: number;
+  proofFailures: string[];
+  lastRequirements: unknown;
+  lastPayload: unknown;
+  lastRawBody: string | undefined;
+  lastProof: Record<string, unknown> | undefined;
 }
 
-async function readRaw(request: http.IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks);
+export interface CircleFacilitator {
+  readonly port: number;
+  readonly host: string;
+  readonly state: CircleFacilitatorState;
+  readonly seen: CircleSeen;
+  close(): Promise<void>;
 }
 
 function chainIdOf(network: unknown): number | undefined {
@@ -56,138 +71,187 @@ function chainIdOf(network: unknown): number | undefined {
   return match === null ? undefined : Number(match[1]);
 }
 
+function decodeEnvelope(header: string): Record<string, unknown> | string {
+  if (!BASE64URL.test(header)) return "proof_not_base64url";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(header, "base64url").toString("utf8"));
+  } catch {
+    return "proof_not_json";
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return "proof_not_object";
+  return parsed as Record<string, unknown>;
+}
+
 /** 証明の検査。失敗の理由（固定文）を返す。`undefined` なら合格。 */
-async function checkProof(header: string | undefined, purpose: "verify" | "settle", raw: Buffer, requirements: Record<string, unknown> | undefined): Promise<string | undefined> {
-  if (header === undefined) return "proof_missing";
-  const envelope = decodeSellerProofHeader(header);
-  if (envelope === undefined) return "proof_malformed";
+async function checkProof(header: string | undefined, purpose: "verify" | "settle", raw: Buffer, requirements: Record<string, unknown> | undefined, usedNonces: Set<string>): Promise<{ failure?: string; envelope?: Record<string, unknown> }> {
+  if (header === undefined) return { failure: "proof_missing" };
+  const envelope = decodeEnvelope(header);
+  if (typeof envelope === "string") return { failure: envelope };
+  const { version, signature, network, payTo, nonce, issuedAt, expiresAt } = envelope;
+  if (version !== 1) return { failure: "proof_version", envelope };
+  if (typeof signature !== "string" || !/^0x[0-9a-fA-F]{130}$/.test(signature)) return { failure: "signature_malformed", envelope };
+  if (typeof network !== "string" || typeof payTo !== "string" || !ADDRESS.test(payTo) || typeof nonce !== "string" || !HEX32.test(nonce)) return { failure: "envelope_fields", envelope };
+  if (!Number.isInteger(issuedAt) || !Number.isInteger(expiresAt)) return { failure: "time_not_integer", envelope };
   const chainId = chainIdOf(requirements?.["network"]);
-  if (chainId === undefined) return "requirements_network";
-  if (envelope.network !== requirements?.["network"]) return "network_mismatch";
-  if (typeof requirements?.["payTo"] !== "string" || envelope.payTo.toLowerCase() !== (requirements["payTo"] as string).toLowerCase()) return "payto_mismatch";
+  if (chainId === undefined) return { failure: "requirements_network", envelope };
+  if (network !== requirements?.["network"]) return { failure: "network_mismatch", envelope };
+  if (typeof requirements?.["payTo"] !== "string" || payTo.toLowerCase() !== (requirements["payTo"] as string).toLowerCase()) return { failure: "payto_mismatch", envelope };
   const now = Math.floor(Date.now() / 1000);
-  if (!Number.isInteger(envelope.issuedAt) || !Number.isInteger(envelope.expiresAt)) return "time_not_integer";
-  if (envelope.issuedAt > now + 30) return "issued_in_future";
-  if (envelope.expiresAt <= now) return "expired";
-  if (envelope.expiresAt > envelope.issuedAt + 300) return "lifetime_too_long";
-  if (envelope.expiresAt <= envelope.issuedAt) return "lifetime_inverted";
-  const nonceKey = `${envelope.network}|${envelope.payTo.toLowerCase()}|${purpose}|${envelope.nonce.toLowerCase()}`;
-  if (usedNonces.has(nonceKey)) return "nonce_reused";
+  const issued = issuedAt as number;
+  const expires = expiresAt as number;
+  if (issued > now + 30) return { failure: "issued_in_future", envelope };
+  if (expires <= now) return { failure: "expired", envelope };
+  if (expires > issued + 300) return { failure: "lifetime_too_long", envelope };
+  if (expires <= issued) return { failure: "lifetime_inverted", envelope };
+  const nonceKey = `${network}|${payTo.toLowerCase()}|${purpose}|${nonce.toLowerCase()}`;
+  if (usedNonces.has(nonceKey)) return { failure: "nonce_reused", envelope };
   let recovered: string;
   try {
     recovered = await recoverTypedDataAddress({
-      domain: sellerProofDomainOf(chainId),
-      types: SELLER_REQUEST_TYPES,
+      domain: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId },
+      types: TYPES,
       primaryType: "SellerRequest",
-      message: {
-        purpose,
-        method: "POST",
-        bodyHash: keccak256(new Uint8Array(raw)),
-        network: envelope.network,
-        payTo: envelope.payTo,
-        nonce: envelope.nonce,
-        issuedAt: BigInt(envelope.issuedAt),
-        expiresAt: BigInt(envelope.expiresAt),
-      },
-      signature: envelope.signature,
+      message: { purpose, method: "POST", bodyHash: keccak256(new Uint8Array(raw)), network, payTo: payTo as Hex, nonce: nonce as Hex, issuedAt: BigInt(issued), expiresAt: BigInt(expires) },
+      signature: signature as Hex,
     });
   } catch {
-    return "signature_unrecoverable";
+    return { failure: "signature_unrecoverable", envelope };
   }
-  if (recovered.toLowerCase() !== envelope.payTo.toLowerCase()) return "signer_mismatch";
+  if (recovered.toLowerCase() !== payTo.toLowerCase()) return { failure: "signer_mismatch", envelope };
   usedNonces.add(nonceKey);
-  return undefined;
+  return { envelope };
 }
 
-const server = http.createServer((request, response) => {
-  const url = new URL(request.url ?? "/", "http://127.0.0.1");
-  if (request.method === "GET" && url.pathname === "/calls") {
-    send(response, 200, { connections, verifyCalls, settleCalls, elsewhereCalls, proofFailures, lastRequirements, lastPayload, lastProof });
-    return;
-  }
-  if (url.pathname === "/elsewhere") {
-    elsewhereCalls += 1;
-    send(response, 200, { ok: true });
-    return;
-  }
-  if (request.method !== "POST" || (url.pathname !== "/verify" && url.pathname !== "/settle")) {
-    send(response, 404, { error: "not_found" });
-    return;
-  }
-  const purpose = url.pathname === "/verify" ? "verify" : "settle";
-  void (async () => {
-    const raw = await readRaw(request);
-    let body: Record<string, unknown> = {};
-    try {
-      body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
-    } catch {
-      /* 形が違えば下で落ちる */
-    }
-    const requirements = body["paymentRequirements"] as Record<string, unknown> | undefined;
-    lastRequirements = requirements;
-    lastPayload = body["paymentPayload"];
-    const header = request.headers["facilitator-seller-proof"];
-    const headerValue = Array.isArray(header) ? header[0] : header;
-    lastProof = headerValue === undefined ? undefined : decodeSellerProofHeader(headerValue);
-    if (purpose === "verify") verifyCalls += 1;
-    else settleCalls += 1;
+export async function startCircleFacilitator(tls: TlsMaterial, host = "circle.test"): Promise<CircleFacilitator> {
+  const state: CircleFacilitatorState = { verify: "ok", settle: "ok", settleDelayMs: 0, rejectProofs: false, redirectTo: undefined };
+  const seen: CircleSeen = { connections: 0, verifyCalls: 0, settleCalls: 0, proofFailures: [], lastRequirements: undefined, lastPayload: undefined, lastRawBody: undefined, lastProof: undefined };
+  const usedNonces = new Set<string>();
+  const PAYER = "0x0000000000000000000000000000000000000501";
 
-    if (redirect) {
-      send(response, 302, { moved: true }, { location: `http://127.0.0.1:${(server.address() as { port: number }).port}/elsewhere` });
+  const server = https.createServer({ key: tls.provider.key, cert: tls.provider.cert }, (request, response) => {
+    const send = (status: number, body: unknown, headers: Record<string, string> = {}): void => {
+      const text = typeof body === "string" ? body : JSON.stringify(body);
+      response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), ...headers });
+      response.end(text);
+    };
+    const path = request.url ?? "/";
+    if (request.method !== "POST" || (path !== "/verify" && path !== "/settle")) {
+      send(404, { error: "not_found" });
       return;
     }
-    const failure = await checkProof(headerValue, purpose, raw, requirements);
-    if (failure !== undefined) {
-      proofFailures.push(failure);
-      send(response, 401, { error: "unauthorized", reason: failure });
-      return;
-    }
-    const extra = requirements?.["extra"] as Record<string, unknown> | undefined;
-    if (extra?.["assetTransferMethod"] !== "eip3009") {
-      send(response, 400, { error: "invalid_request", errorReason: "asset_transfer_method_required" });
-      return;
-    }
-
-    if (purpose === "verify") {
-      send(response, 200, verifyMode === "ok" ? { isValid: true, payer: "0x0000000000000000000000000000000000000501" } : { isValid: false, invalidReason: "invalid_exact_evm_signature", invalidMessage: "SECRET_INTERNAL_DETAIL" });
-      return;
-    }
-    if (settleDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, settleDelayMs));
-    const network = requirements?.["network"];
-    const tx = `0x${randomBytes(32).toString("hex")}`;
-    switch (settleMode) {
-      case "reject":
-        send(response, 200, { success: false, errorReason: "insufficient_funds", transaction: "", network, payer: "0x0000000000000000000000000000000000000501" });
-        return;
-      case "pending":
-        send(response, 200, { success: false, errorReason: "settlement_pending", transaction: "", network, payer: "0x0000000000000000000000000000000000000501", extensions: { "settlement-status": { status: "pending", paymentId: "pay_1", statusUrl: "/status/pay_1" } } });
-        return;
-      case "registration-required":
-        send(response, 403, { error: "forbidden", errorReason: "registration_required", message: "SECRET_INTERNAL_DETAIL" });
-        return;
-      case "conflict":
-        send(response, 409, { error: "conflict", errorReason: "payment_identifier_in_use" });
-        return;
-      case "bad-tx":
-        send(response, 200, { success: true, transaction: "not-a-hash", network, payer: "0x0000000000000000000000000000000000000501" });
-        return;
-      case "bad-network":
-        send(response, 200, { success: true, transaction: tx, network: "eip155:5042", payer: "0x0000000000000000000000000000000000000501" });
-        return;
-      case "unknown":
-        send(response, 500, { error: "internal", message: "SECRET_INTERNAL_DETAIL" });
-        return;
-      default:
-        send(response, 200, { success: true, transaction: tx, network, payer: "0x0000000000000000000000000000000000000501", amount: "10000", extensions: { "settlement-status": { status: "confirmed", paymentId: "pay_1", statusUrl: "/status/pay_1" } } });
-    }
-  })();
-});
-
-server.on("connection", () => {
-  connections += 1;
-});
-server.listen(Number(arg("port", "0")), "127.0.0.1", () => {
+    const purpose = path === "/verify" ? "verify" : "settle";
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      void (async () => {
+        const raw = Buffer.concat(chunks);
+        seen.lastRawBody = raw.toString("utf8");
+        let body: Record<string, unknown> = {};
+        try {
+          body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+        } catch {
+          /* 形が違えば下で落ちる */
+        }
+        const requirements = body["paymentRequirements"] as Record<string, unknown> | undefined;
+        seen.lastRequirements = requirements;
+        seen.lastPayload = body["paymentPayload"];
+        if (purpose === "verify") seen.verifyCalls += 1;
+        else seen.settleCalls += 1;
+        if (state.redirectTo !== undefined) {
+          send(302, { moved: true }, { location: state.redirectTo });
+          return;
+        }
+        const header = request.headers["facilitator-seller-proof"];
+        const checked = await checkProof(Array.isArray(header) ? header[0] : header, purpose, raw, requirements, usedNonces);
+        seen.lastProof = checked.envelope;
+        const failure = state.rejectProofs ? "rejected_by_fixture" : checked.failure;
+        if (failure !== undefined) {
+          seen.proofFailures.push(failure);
+          send(401, { error: "unauthorized", reason: failure });
+          return;
+        }
+        const extra = requirements?.["extra"] as Record<string, unknown> | undefined;
+        if (extra?.["assetTransferMethod"] !== "eip3009") {
+          send(400, { error: "invalid_request", errorReason: "asset_transfer_method_required" });
+          return;
+        }
+        if (purpose === "verify") {
+          send(200, state.verify === "ok" ? { isValid: true, payer: PAYER } : { isValid: false, invalidReason: "invalid_exact_evm_signature", invalidMessage: "SECRET_INTERNAL_DETAIL" });
+          return;
+        }
+        if (state.settleDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.settleDelayMs));
+        const network = requirements?.["network"];
+        const tx = `0x${randomBytes(32).toString("hex")}`;
+        switch (state.settle) {
+          case "minimal":
+            send(200, { success: true, transaction: tx, network });
+            return;
+          case "reject":
+            send(200, { success: false, errorReason: "insufficient_funds", transaction: "", network, payer: PAYER });
+            return;
+          case "pending":
+            send(200, { success: false, errorReason: "settlement_pending", transaction: "", network, payer: PAYER, extensions: { "settlement-status": { status: "pending", paymentId: "pay_1", statusUrl: "/status/pay_1" } } });
+            return;
+          case "registration-required":
+            send(403, { error: "forbidden", errorReason: "registration_required", message: "SECRET_INTERNAL_DETAIL" });
+            return;
+          case "conflict":
+            send(409, { error: "conflict", errorReason: "payment_identifier_in_use" });
+            return;
+          case "bad-tx":
+            send(200, { success: true, transaction: "not-a-hash", network, payer: PAYER });
+            return;
+          case "no-tx":
+            send(200, { success: true, network, payer: PAYER, amount: "10000" });
+            return;
+          case "bad-network":
+            send(200, { success: true, transaction: tx, network: "eip155:5042", payer: PAYER });
+            return;
+          case "unknown":
+            send(500, { error: "internal", message: "SECRET_INTERNAL_DETAIL" });
+            return;
+          case "malformed":
+            send(200, '{"success": true, "transaction": "0x');
+            return;
+          case "drop":
+            response.socket?.destroy();
+            return;
+          case "huge":
+            send(200, JSON.stringify({ success: true, transaction: tx, network, payer: PAYER, pad: "p".repeat(70 * 1024) }));
+            return;
+          default:
+            send(200, { success: true, transaction: tx, network, payer: PAYER, amount: 10000, extensions: { "settlement-status": { status: "confirmed", paymentId: "pay_1", statusUrl: "/status/pay_1" } } });
+        }
+      })();
+    });
+  });
+  server.on("connection", () => {
+    seen.connections += 1;
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : 0;
-  process.stdout.write(`${JSON.stringify({ event: "listening", port, role: "circle-facilitator" })}\n`);
-});
+  return {
+    port,
+    host,
+    state,
+    seen,
+    close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
+  };
+}
+
+/** redirect の行き先（別の listener）。接続数だけを数える。 */
+export async function startSink(tls: TlsMaterial): Promise<{ port: number; connections: () => number; close(): Promise<void> }> {
+  let connections = 0;
+  const server = https.createServer({ key: tls.provider.key, cert: tls.provider.cert }, (_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  server.on("connection", () => {
+    connections += 1;
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  return { port: typeof address === "object" && address !== null ? address.port : 0, connections: () => connections, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+}

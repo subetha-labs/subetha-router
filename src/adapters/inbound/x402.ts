@@ -31,7 +31,11 @@ import type {
   SettleResult,
   InboundCallContext,
 } from "../../ports/inbound.js";
+import { readBoundedBody } from "../../net/bounded-body.js";
 import { bodyHashOf } from "./seller-proof.js";
+
+/** kind `circle` の facilitator の応答の上限（バイト）。verify・settle の JSON は数百バイト。 */
+export const CIRCLE_RESPONSE_MAX_BYTES = 64 * 1024;
 
 /** facilitator の種類（multirail 設計 §2・§4）。`x402` は既存の挙動そのまま、`circle` は Circle の Facilitator Service。 */
 export type X402FacilitatorKind = "x402" | "circle";
@@ -136,16 +140,16 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
 
   /**
    * 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。
-   * body は**ここで 1 度だけ直列化**し、売り手証明はその bytes の hash に束縛する（設計 §4.2）。
+   * `requestText` は呼び出し側が**1 度だけ直列化した文字列**で、売り手証明はその bytes の hash に束縛されている（設計 §4.2）。
+   * kind `circle` は応答の本文を上限つきで読む（超えれば JSON 無しとして扱う）。kind `x402` は今までどおり。
    */
   async function post(
     path: string,
-    body: unknown,
+    requestText: string,
     context: TransportContext,
     deadlineMs: number,
     proof: string | undefined,
   ): Promise<{ status: number; json: unknown }> {
-    const requestText = JSON.stringify(body);
     const response = await transport.fetch(`${base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...(proof === undefined ? {} : { "facilitator-seller-proof": proof }) },
@@ -155,7 +159,12 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
     }, context);
     let text: string;
     try {
-      text = await response.text();
+      if (kind === "circle") {
+        const read = await readBoundedBody(response, CIRCLE_RESPONSE_MAX_BYTES);
+        text = read.ok ? new TextDecoder("utf-8", { fatal: false }).decode(read.bytes) : "";
+      } else {
+        text = await response.text();
+      }
     } catch (error) {
       // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
       transport.report(error, context);
@@ -174,10 +183,10 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
    * kind `circle` の売り手証明。要求本体の bytes の hash を能力に渡す。能力が拒めば `undefined` を返し、呼び出し側は**要求を出さない**。
    * kind `x402` では常に `undefined`（header 無し）。
    */
-  async function proofFor(purpose: SellerProofPurpose, body: unknown): Promise<{ ok: true; proof: string | undefined } | { ok: false }> {
+  async function proofFor(purpose: SellerProofPurpose, requestText: string): Promise<{ ok: true; proof: string | undefined } | { ok: false }> {
     if (kind !== "circle" || sellerProof === undefined) return { ok: true, proof: undefined };
     try {
-      return { ok: true, proof: await sellerProof.proofFor(purpose, bodyHashOf(JSON.stringify(body))) };
+      return { ok: true, proof: await sellerProof.proofFor(purpose, bodyHashOf(requestText)) };
     } catch {
       return { ok: false };
     }
@@ -317,17 +326,18 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
     },
 
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
-      const body = {
+      // **1 度だけ直列化**し、証明も送信もこの文字列に束縛する（設計 §4.2）。
+      const requestText = JSON.stringify({
         x402Version: 2,
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
-      };
-      const proof = await proofFor("verify", body);
+      });
+      const proof = await proofFor("verify", requestText);
       if (!proof.ok) {
         // 証明が作れない: 要求を出さない（接続 0）。
         return { isValid: false };
       }
-      const { status, json } = await post("/verify", body, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, timeoutMs, proof.proof);
+      const { status, json } = await post("/verify", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, timeoutMs, proof.proof);
       // 検証できないまま settle へ進まない（この時点では課金が起きていない）。
       // `invalidMessage` / `error` は読まない（facilitator の内部実装を転送しない）。
       if (status !== 200 || !isRecord(json)) {
@@ -338,17 +348,17 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは呼び出し側（core）が `unknown` として確定する。自動再 settle はしない。
-      const body = {
+      const requestText = JSON.stringify({
         x402Version: 2,
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
-      };
-      const proof = await proofFor("settle", body);
+      });
+      const proof = await proofFor("settle", requestText);
       if (!proof.ok) {
         // 要求を**出す前**の失敗だけが `rejected`（設計 §6）。
         return { outcome: "rejected", reason: "source_rejected" };
       }
-      const { status, json } = await post("/settle", body, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs, proof.proof);
+      const { status, json } = await post("/settle", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs, proof.proof);
       if (kind === "circle") {
         return settleOutcomeCircle(offer, status, json);
       }
