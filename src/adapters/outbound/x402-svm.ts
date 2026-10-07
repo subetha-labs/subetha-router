@@ -1,7 +1,8 @@
 /**
  * SVM の送信（Solana の Provider に払う）の**純粋な部分**（送信の設計 §4.2・§4.5 の 5〜7・10〜11、FR-24・FR-34・FR-35・FR-37。タスク U6-a）。
- * ネットワークにも鍵にも触れない。adapter（U7）は、ここで組んだ期待値だけから message を組み、署名の前に `checkSvmOutboundMessage` で
- * **builder と独立に**検査し、署名の後に `recheckWire` で wire を snapshot と照合する。
+ * 前半は純粋関数（ネットワークにも鍵にも触れない）。後半の adapter `createX402SvmOutbound`（タスク U7。設計 §4.1・§4.3〜§4.6）は、
+ * ここで組んだ期待値だけから message を組み、署名の前に `checkSvmOutboundMessage` で**builder と独立に**検査し、署名の後に
+ * `recheckSvmWire` で wire を snapshot と照合してから 1 回だけ送出する。
  */
 import { createHash } from "node:crypto";
 
@@ -20,8 +21,20 @@ import {
 } from "@solana/kit";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS } from "@solana-program/compute-budget";
 
+import { decodePaymentRequiredHeader } from "@x402/core/http";
+import { x402Client, x402HTTPClient } from "@x402/fetch";
+import { findAssociatedTokenPda } from "@solana-program/token";
+
+import type { DynamicProfile } from "../../config.js";
+import { stableJson } from "../../core/intent.js";
+import { DYNAMIC_RESPONSE_LIMITS } from "../../net/bounded-body.js";
+import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
+import { parseUpstreamUrl } from "../../net/upstream-url.js";
+import { DynamicTargetUnsupportedError, type DestinationOffer, type OutboundRail, type PayRequest, type PayResult, type SvmSigningCapability, type UpstreamTarget } from "../../ports/outbound.js";
 import { buildSvmTransactionMessage, checkSvmTransaction, MEMO_PROGRAM_ADDRESS, SVM_DEFAULT_COMPUTE_UNITS, SVM_DEFAULT_MICRO_LAMPORTS_PER_UNIT, SVM_TRANSACTION_MAX_BYTES, type SvmInboundPolicy } from "../inbound/x402-svm.js";
-import type { DestinationOffer } from "../../ports/outbound.js";
+import { assertAtaAccount, svmFetchJson } from "../inbound/x402-svm-startup.js";
+import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
+import { paidOutcomeOf, SVM_RECEIPT_FORM } from "./x402-dynamic.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -348,4 +361,407 @@ export function recheckSvmWire(wire: Uint8Array, snapshot: Uint8Array, signature
   const second = checkSvmTransaction(Buffer.from(wire).toString("base64"), policy, expected.amount.toString(), expected.memo);
   if (!second.ok) return fail(`second_layer_${second.reason}`);
   return { ok: true };
+}
+
+// ---- U7: adapter（送信の設計 §4.1・§4.3〜§4.6、FR-24・FR-32〜FR-37。`src/adapters/outbound/x402-svm.ts` の末尾に足す） ----
+
+/** 静的 route の destination（起動時の ATA の検査と候補の照合に使う固定値）。 */
+export interface SvmStaticDestination {
+  readonly payTo: string;
+  readonly asset: string;
+  readonly scheme: string;
+}
+
+export interface X402SvmOutboundOptions {
+  readonly network: string;
+  /** 静的 route の上流（`routeId` → canonical URL）。 */
+  readonly upstreams: Readonly<Record<string, string>>;
+  /** 静的 route の destination（`routeId` → payTo・asset・scheme）。`upstreams` と同じ鍵の集合。 */
+  readonly destinations: Readonly<Record<string, SvmStaticDestination>>;
+  readonly capability: SvmSigningCapability;
+  /** 上流への HTTP（静的。既存の静的と同じ transport）。 */
+  readonly transport: GuardedTransport;
+  /** Solana RPC（§2.2。受信の起動時の検査と同じ作りの guarded transport）。 */
+  readonly rpc: { readonly url: string; readonly transport: GuardedTransport };
+  /** 運用者の集合（§2.3）。`startup()` が ATA を足すので可変の Set。 */
+  readonly operatorAddresses: Set<string>;
+  readonly mint: string;
+  readonly decimals: number;
+  readonly tokenProgram: string;
+  /** 動的（`profileId` → プロファイル。送信が x402 かつ SVM のものだけを使う）。 */
+  readonly dynamic?: {
+    readonly profiles: Readonly<Record<string, DynamicProfile>>;
+    readonly transport: GuardedTransport;
+    readonly denyHosts: readonly string[];
+  };
+  readonly now?: () => number;
+  readonly unpaidTimeoutMs?: number;
+  readonly paidTimeoutMs?: number;
+  /** blockhash を取ってから署名するまでの上限（FR-34）。既定 5,000。 */
+  readonly fetchToSignMs?: number;
+  readonly rpcTimeoutMs?: number;
+  /** 試験だけ（§7 の停止点・改変）。 */
+  readonly hooksForTest?: {
+    afterReserve?(): void;
+    afterSign?(): void;
+    beforeSend?(): void;
+    wire?(bytes: Uint8Array): Uint8Array;
+  };
+}
+
+export type X402SvmOutbound = OutboundRail & {
+  startup(): Promise<void>;
+  balanceOf(routeId: string, asset: string): Promise<bigint>;
+};
+
+/** RPC の応答の上限（受信の起動時の検査と同じ 64 KiB・10 秒）。 */
+export const SVM_OUTBOUND_RPC_TIMEOUT_MS = 10_000;
+export const SVM_OUTBOUND_FETCH_TO_SIGN_MS = 5_000;
+
+class SvmChallengeError extends Error {
+  constructor(readonly reason: "url" | "status" | "no_header" | "undecodable" | "version" | "no_offers" | "too_many_offers" | "resource_mismatch" | "unreadable") {
+    super(`svm outbound challenge rejected: ${reason}`);
+    this.name = "SvmChallengeError";
+  }
+}
+
+interface SvmChallenge {
+  readonly accepts: readonly unknown[];
+  /** SDK の封筒に載せる `resource`（`url` と文字列の説明だけ）。 */
+  readonly resource: { url: string; description?: string; mimeType?: string };
+}
+
+export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmOutbound {
+  const now = options.now ?? Date.now;
+  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
+  const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
+  const fetchToSignMs = options.fetchToSignMs ?? SVM_OUTBOUND_FETCH_TO_SIGN_MS;
+  const rpcTimeoutMs = options.rpcTimeoutMs ?? SVM_OUTBOUND_RPC_TIMEOUT_MS;
+  const hooks = options.hooksForTest ?? {};
+  const capability = options.capability;
+  const operators = options.operatorAddresses;
+  if (capability.network !== options.network) throw new Error("svm outbound: the signing capability is for a different network");
+  if (!isSvmPublicKey(capability.address)) throw new Error("svm outbound: the signing capability address is not a 32-byte base58 key");
+  for (const [routeId, raw] of Object.entries(options.upstreams)) {
+    if (options.destinations[routeId] === undefined) throw new Error("svm outbound: every static route needs a destination");
+    // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。クエリ無しの GET 1 本。
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error(`x402.upstreams.${routeId} must be an absolute URL`);
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`x402.upstreams.${routeId} must use http(s)`);
+    if (url.search !== "") throw new Error(`x402.upstreams.${routeId} must not carry a query`);
+  }
+  const dynamic = options.dynamic;
+  if (dynamic !== undefined) {
+    if (dynamic.transport.allowLoopback) throw new Error("the dynamic svm path must not use a transport that allows loopback");
+    if (!dynamic.transport.boundsDns) throw new Error("the dynamic svm path requires a transport with a DNS deadline");
+  }
+  const profiles = new Map<string, DynamicProfile>();
+  for (const [profileId, profile] of Object.entries(dynamic?.profiles ?? {})) {
+    if (profile.rail !== "x402" || profile.destination.network !== options.network) continue;
+    if (profile.destination.scheme !== "exact" || profile.destination.asset !== options.mint || profile.destination.decimals !== options.decimals) {
+      throw new Error(`dynamic profile ${profileId} is not an svm exact profile for this adapter's mint`);
+    }
+    if (profile.destination.tokenProgram !== undefined && profile.destination.tokenProgram !== options.tokenProgram) {
+      throw new Error(`dynamic profile ${profileId} names a different token program`);
+    }
+    profiles.set(profileId, profile);
+  }
+  const receiptForm = SVM_RECEIPT_FORM(capability.address);
+
+  /** `startup()` が埋める。 */
+  let routerAta: string | undefined;
+  /** 静的 route の宛先 ATA（起動時に導いて検査した値）。 */
+  const staticAtas = new Map<string, string>();
+
+  function ready(): string {
+    if (routerAta === undefined) throw new Error("svm outbound: startup() has not completed");
+    return routerAta;
+  }
+
+  function scopeOf(routeId: string): SvmOutboundScope {
+    const ata = ready();
+    const profile = profiles.get(routeId);
+    return {
+      network: options.network,
+      mint: options.mint,
+      decimals: options.decimals,
+      tokenProgram: options.tokenProgram,
+      routerAddress: capability.address,
+      routerAta: ata,
+      ...(profile === undefined ? {} : { maxUpstreamAmount: profile.maxUpstreamAmount }),
+    };
+  }
+
+  async function ataOf(owner: string): Promise<string> {
+    const [ata] = await findAssociatedTokenPda({ mint: address(options.mint), owner: address(owner), tokenProgram: address(options.tokenProgram) });
+    return String(ata);
+  }
+
+  /** JSON-RPC の封筒を組んで `result` を返す（method は 3 つだけ。失敗は `undefined`）。 */
+  async function rpcResult(method: "getAccountInfo" | "getLatestBlockhash" | "getTokenAccountBalance", params: unknown[], operation: string, routeId: string): Promise<Record<string, unknown> | undefined> {
+    let reply: Record<string, unknown> | undefined;
+    try {
+      reply = await svmFetchJson(options.rpc.transport, options.rpc.url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }, rpcTimeoutMs, operation, routeId);
+    } catch {
+      return undefined;
+    }
+    return reply;
+  }
+
+  /** 宛先 ATA が表どおりに存在するか（`getAccountInfo` → `assertAtaAccount`）。 */
+  async function ataExists(ata: string, owner: string, operation: string, routeId: string): Promise<boolean> {
+    const reply = await rpcResult("getAccountInfo", [ata, { encoding: "jsonParsed", commitment: "confirmed" }], operation, routeId);
+    try {
+      assertAtaAccount(reply, { owner, mint: options.mint, tokenProgram: options.tokenProgram });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 静的の destination との照合（payTo・asset・scheme の完全一致）。 */
+  function matchesStatic(routeId: string, offer: DestinationOffer): boolean {
+    const destination = options.destinations[routeId];
+    return destination !== undefined && offer.payTo === destination.payTo && offer.asset === destination.asset && offer.scheme === destination.scheme;
+  }
+
+  /**
+   * 候補の検査（§4.2: 同期の形 → 静的の照合 → ATA の不等式。`checkExistence` なら動的は ATA の存在も）。通れば宛先 ATA。
+   * `pay` の 1 は存在を見ない（存在は 3 で、送る直前にもう一度）。
+   */
+  async function candidateAtaOf(routeId: string, raw: unknown, operation: string, checkExistence: boolean): Promise<string | undefined> {
+    if (checkSvmOffer(raw, scopeOf(routeId), operators) !== undefined) return undefined;
+    const offer = raw as DestinationOffer;
+    const isStatic = options.upstreams[routeId] !== undefined;
+    if (isStatic) {
+      if (!matchesStatic(routeId, offer)) return undefined;
+      const ata = staticAtas.get(routeId);
+      if (ata === undefined) return undefined;
+      return checkSvmOfferAtas(offer, scopeOf(routeId), ata) === undefined ? ata : undefined;
+    }
+    let ata: string;
+    try {
+      ata = await ataOf(offer.payTo);
+    } catch {
+      return undefined;
+    }
+    if (checkSvmOfferAtas(offer, scopeOf(routeId), ata) !== undefined) return undefined;
+    if (checkExistence && !(await ataExists(ata, offer.payTo, operation, routeId))) return undefined;
+    return ata;
+  }
+
+  /** 静的の 402（共有の読取。本文も SDK に読ませる）。 */
+  async function staticChallenge(routeId: string, ctx: { routeId: string; operation: string }): Promise<SvmChallenge> {
+    const url = options.upstreams[routeId];
+    if (url === undefined) throw new Error("no svm upstream for route");
+    let challenge: X402Challenge;
+    try {
+      challenge = await readX402Challenge(options.transport, url, ctx, unpaidTimeoutMs);
+    } catch {
+      throw new SvmChallengeError("unreadable");
+    }
+    const resource = challenge.parsed.resource as { url: string; description?: string; mimeType?: string };
+    return { accepts: challenge.rawAccepts, resource: { url: resource.url, ...(typeof resource.description === "string" ? { description: resource.description } : {}), ...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}) } };
+  }
+
+  /** 動的の 402（ヘッダが権威。本文は読まない。動的 EVM と同じ検査）。 */
+  async function dynamicChallenge(url: string, ctx: { routeId: string; operation: string }): Promise<SvmChallenge> {
+    if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+    if (!parseUpstreamUrl(url, { denyHosts: dynamic.denyHosts }).ok) throw new SvmChallengeError("url");
+    const response = await dynamic.transport.fetch(url, { method: "GET", redirect: "error", signal: AbortSignal.timeout(unpaidTimeoutMs) }, ctx);
+    const header = response.headers.get("PAYMENT-REQUIRED");
+    discardBody(response);
+    if (response.status !== 402) throw new SvmChallengeError("status");
+    if (header === null || header === "") throw new SvmChallengeError("no_header");
+    let raw: unknown;
+    try {
+      raw = decodePaymentRequiredHeader(header);
+    } catch {
+      throw new SvmChallengeError("undecodable");
+    }
+    if (!isRecord(raw)) throw new SvmChallengeError("undecodable");
+    if (raw["x402Version"] !== 2) throw new SvmChallengeError("version");
+    const accepts = raw["accepts"];
+    if (!Array.isArray(accepts) || accepts.length === 0) throw new SvmChallengeError("no_offers");
+    if (accepts.length > DYNAMIC_RESPONSE_LIMITS.maxOffers) throw new SvmChallengeError("too_many_offers");
+    const resource = raw["resource"];
+    if (!isRecord(resource) || resource["url"] !== url) throw new SvmChallengeError("resource_mismatch");
+    const description = resource["description"];
+    const mimeType = resource["mimeType"];
+    return { accepts, resource: { url, ...(typeof description === "string" ? { description } : {}), ...(typeof mimeType === "string" ? { mimeType } : {}) } };
+  }
+
+  async function challengeOf(routeId: string, target: UpstreamTarget | undefined, operation: string): Promise<SvmChallenge> {
+    const ctx = { routeId, operation };
+    if (target !== undefined) {
+      if (!profiles.has(routeId)) throw new Error("no dynamic svm profile for route");
+      return dynamicChallenge(target.url, ctx);
+    }
+    if (options.upstreams[routeId] === undefined) throw new Error("no svm upstream for route");
+    return staticChallenge(routeId, ctx);
+  }
+
+  function blockhashOf(reply: Record<string, unknown> | undefined): { blockhash: string; lastValidBlockHeight: bigint } | undefined {
+    const result = reply?.["result"];
+    const value = isRecord(result) ? result["value"] : undefined;
+    if (!isRecord(value)) return undefined;
+    const blockhash = value["blockhash"];
+    const height = value["lastValidBlockHeight"];
+    if (typeof blockhash !== "string" || !isSvmPublicKey(blockhash)) return undefined;
+    let lastValidBlockHeight: bigint;
+    if (typeof height === "number" && Number.isSafeInteger(height) && height > 0) lastValidBlockHeight = BigInt(height);
+    else if (typeof height === "string" && /^[1-9][0-9]*$/.test(height)) lastValidBlockHeight = BigInt(height);
+    else return undefined;
+    return { blockhash, lastValidBlockHeight };
+  }
+
+  return {
+    async startup(): Promise<void> {
+      const ata = await ataOf(capability.address);
+      for (const [routeId, destination] of Object.entries(options.destinations)) {
+        if (!isSvmPublicKey(destination.payTo) || destination.asset !== options.mint || destination.scheme !== "exact") {
+          throw new Error(`svm outbound: static route ${routeId} has a destination this adapter cannot pay`);
+        }
+        const destinationAta = await ataOf(destination.payTo);
+        if (destinationAta === ata) throw new Error(`svm outbound: static route ${routeId} pays the Router's own token account`);
+        if (!(await ataExists(destinationAta, destination.payTo, "solana_rpc_startup", routeId))) {
+          throw new Error(`svm outbound: the destination token account of static route ${routeId} does not exist or is not the table's ATA`);
+        }
+        staticAtas.set(routeId, destinationAta);
+      }
+      // 運用者の集合に Router の ATA と、集合にある SVM の公開鍵の ATA を足す（§2.3 (c)）。
+      operators.add(ata);
+      for (const operator of [...operators]) {
+        if (isSvmPublicKey(operator) && operator !== ata) {
+          try {
+            operators.add(await ataOf(operator));
+          } catch {
+            // ATA を導けない文字列（program 等）はそのまま。
+          }
+        }
+      }
+      routerAta = ata;
+    },
+
+    async balanceOf(routeId: string, asset: string): Promise<bigint> {
+      const ata = ready();
+      if (asset !== options.mint) throw new Error("svm outbound: balance requested for a different asset");
+      const reply = await rpcResult("getTokenAccountBalance", [ata, { commitment: "confirmed" }], "solana_rpc_balance", routeId);
+      const result = reply?.["result"];
+      const value = isRecord(result) ? result["value"] : undefined;
+      const amount = isRecord(value) ? value["amount"] : undefined;
+      if (typeof amount !== "string" || !AMOUNT_PATTERN.test(amount)) throw new Error("svm outbound: the RPC did not return a token balance");
+      return BigInt(amount);
+    },
+
+    async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
+      ready();
+      const challenge = await challengeOf(routeId, target, "challenge");
+      const offers: DestinationOffer[] = [];
+      for (const entry of challenge.accepts) {
+        if ((await candidateAtaOf(routeId, entry, "solana_rpc_ata", true)) !== undefined) offers.push(entry as DestinationOffer);
+      }
+      return offers;
+    },
+
+    async pay(request: PayRequest): Promise<PayResult> {
+      const routerAtaNow = ready();
+      const routeId = request.routeId;
+      const approved = request.offer;
+      const approvedJson = stableJson(approved);
+      const notSent = (reason: string): PayResult => ({ outcome: "not_sent", reason });
+
+      // 1. 能力の network、保存した offer の再検査、期限、予約の口。
+      if (capability.network !== approved.network || approved.network !== options.network) return notSent("destination_signer_network_mismatch");
+      const destinationAta = await candidateAtaOf(routeId, approved, "solana_rpc_ata", false).catch(() => undefined);
+      if (destinationAta === undefined) return notSent("destination_offer_not_allowed");
+      if (!(now() < request.deadlineMs)) return notSent("destination_deadline");
+      if (request.reserveMessage === undefined) return notSent("destination_reservation_unsupported");
+
+      // 2. 読み直して、保存した offer と完全一致する accepts があること。
+      let challenge: SvmChallenge;
+      try {
+        challenge = await challengeOf(routeId, request.target, "pay_challenge");
+      } catch {
+        return notSent("destination_challenge_unreadable");
+      }
+      const current = challenge.accepts.find((entry) => stableJson(entry) === approvedJson);
+      if (current === undefined) return notSent("destination_offer_changed");
+
+      // 3. 宛先 ATA の再確認（送る直前にもう一度）。
+      if (!(await ataExists(destinationAta, approved.payTo, "solana_rpc_ata", routeId))) return notSent("destination_ata_missing");
+
+      // 4. blockhash。
+      const lifetime = blockhashOf(await rpcResult("getLatestBlockhash", [{ commitment: "confirmed" }], "solana_rpc_blockhash", routeId));
+      if (lifetime === undefined) return notSent("destination_blockhash_unavailable");
+      const fetchedAt = now();
+
+      // 5. 期待値（原始値だけ）。
+      const expectedResult = expectedOf({ offer: approved, scope: scopeOf(routeId), destinationAta, paymentId: request.paymentId, blockhash: lifetime.blockhash, lastValidBlockHeight: lifetime.lastValidBlockHeight });
+      if (!expectedResult.ok) return notSent(expectedResult.reason);
+      const expected = expectedResult.expected;
+      if (expected.source !== routerAtaNow || expected.authority !== capability.address) return notSent("destination_message_mismatch");
+
+      // 6. 組み立て（snapshot）。7. 署名前の検査（builder と独立）。
+      let snapshot: Uint8Array;
+      try {
+        snapshot = compileSvmMessage(expected);
+      } catch {
+        return notSent("destination_message_mismatch");
+      }
+      const check = checkSvmOutboundMessage(snapshot, expected);
+      if (!check.ok) return notSent("destination_message_mismatch");
+
+      // 8. hash の予約（署名の前。同じ message には二度と署名しない）。
+      const reservation = await request.reserveMessage(messageHashOf(snapshot)).catch(() => "unavailable" as const);
+      if (reservation === "collision") return notSent("destination_message_collision");
+      if (reservation !== "reserved") return notSent("destination_message_record_unavailable");
+      hooks.afterReserve?.();
+
+      // 9. 期限と blockhash の鮮度（署名の直前）。
+      if (!(now() < request.deadlineMs)) return notSent("destination_deadline");
+      if (now() - fetchedAt > fetchToSignMs) return notSent("destination_blockhash_stale");
+
+      // 10. 署名（写しを渡し、写しを保つ）と検証。
+      let signature: Uint8Array;
+      try {
+        signature = Uint8Array.from(capability.sign(Uint8Array.from(snapshot)));
+      } catch {
+        return notSent("destination_not_signed");
+      }
+      if (!verifySvmSignature(signature, snapshot, capability.address)) return notSent("destination_not_signed");
+      hooks.afterSign?.();
+
+      // 11. wire の組み立てと再検査（snapshot との一致＋受信の検査）。
+      let wire = assembleSvmWire(snapshot, expected, signature);
+      if (hooks.wire !== undefined) wire = hooks.wire(wire);
+      const recheck = recheckSvmWire(wire, snapshot, signature, expected, approved.payTo);
+      if (!recheck.ok) return notSent("destination_payload_mismatch");
+
+      // 13 の封筒を先に組み（ヘッダの符号化）、12. **送出の委譲の直前**に承認の期限（FR-36）。署名だけでは資金は動かない。
+      const accepted = JSON.parse(JSON.stringify(current)) as Record<string, unknown>;
+      const payload = { x402Version: 2, resource: challenge.resource, accepted, payload: { transaction: Buffer.from(wire).toString("base64") } };
+      const paymentHeaders = new x402HTTPClient(new x402Client()).encodePaymentSignatureHeader(payload as never);
+      if (!(now() < request.deadlineMs)) return notSent("destination_deadline");
+      hooks.beforeSend?.();
+
+      // 13. 送出（1 回だけ）。
+      const payCtx = { routeId, operation: "pay" };
+      const transport = request.target === undefined ? options.transport : dynamic!.transport;
+      const url = request.target === undefined ? options.upstreams[routeId]! : request.target.url;
+      let response: Response;
+      try {
+        response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(paidTimeoutMs) }, payCtx);
+      } catch {
+        return { outcome: "unknown", reason: "destination_pay_unknown" };
+      }
+
+      // 14. 領収（共有の表、SVM の form）。
+      return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
+    },
+  };
 }
