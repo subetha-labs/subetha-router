@@ -990,8 +990,13 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
         if (typeof raw !== "string" || signed === undefined || raw !== signed) {
           throw new TempoSigningRefusedError("destination_send_not_the_signed_transaction");
         }
+        // 承認の期限（FR-36 の (B)）: raw の検査の前（期限と raw の有効期限が両方切れていても「期限」で止める）と、
+        // 送金 RPC の委譲の**直前**（検査の間に越えたとき）の両方。ここで断れば資金は動いていない。
+        if (!(now() < request.deadlineMs)) {
+          sendDeadlineRefused = true;
+          throw new TempoSigningRefusedError("destination_deadline");
+        }
         checkRawTempoTransfer(signed, guard.approved, now());
-        // 送金 RPC の委譲の**直前**（raw の検査の後）に、承認の期限（FR-36 の (B)）。ここで断れば資金は動いていない。
         if (!(now() < request.deadlineMs)) {
           sendDeadlineRefused = true;
           throw new TempoSigningRefusedError("destination_deadline");

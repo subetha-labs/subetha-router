@@ -9,7 +9,28 @@
  */
 
 import { getAddress } from "viem";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+type TypedData = { domain: Record<string, unknown>; types: Record<string, unknown>; primaryType: string; message: Record<string, unknown> };
+const sdk = vi.hoisted(() => ({
+  /** SDK が署名器（adapter の guarded signer）を呼ぶ直前（arm の後）に走る hook。 */
+  beforeSign: undefined as undefined | (() => void),
+}));
+vi.mock("@x402/evm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/evm")>();
+  class HookedScheme extends actual.ExactEvmScheme {
+    constructor(signer: { address: `0x${string}`; signTypedData(message: TypedData): Promise<`0x${string}`> }) {
+      super({
+        address: signer.address,
+        async signTypedData(message: TypedData): Promise<`0x${string}`> {
+          sdk.beforeSign?.();
+          return signer.signTypedData(message);
+        },
+      });
+    }
+  }
+  return { ...actual, ExactEvmScheme: HookedScheme };
+});
 
 import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -25,6 +46,7 @@ const PAY_TO = "0x0000000000000000000000000000000000000a11";
 const running: Listening[] = [];
 
 afterEach(async () => {
+  sdk.beforeSign = undefined;
   while (running.length > 0) {
     await running.pop()?.stop();
   }
@@ -356,21 +378,32 @@ describe("静的 x402: 承認の期限と運用者の集合", () => {
   });
 });
 
-describe("静的 x402: 期限の検査は arm の後（送金直前の読み直しの後）にある", () => {
-  it("読み直しの fetch の後に時計を進めても署名しない（検査を pay の入口に動かした実装では署名してしまう）", async () => {
+describe("静的 x402: 期限の検査は arm の後、署名器の委譲の直前にある", () => {
+  it("arm の後・署名器の直前に時計を進めても署名しない（検査を arm の前や pay の入口に動かした実装では署名してしまう）", async () => {
     const fixture = await startUpstream();
     const spy = createSignerSpy();
-    const inner = createGuardedTransport({ allowLoopback: true, report: () => {} });
-    let fetches = 0;
     let expired = false;
-    // 1 回目 = readChallenge、2 回目 = pay の読み直し。読み直しが返った**後**に期限を過ぎさせる。
-    const transport = { ...inner, fetch: async (...args: Parameters<typeof inner.fetch>) => { const response = await inner.fetch(...args); fetches += 1; if (fetches >= 2) expired = true; return response; } };
-    const rail = createX402Outbound({ transport: transport as never, upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(NETWORK), now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    // SDK が（arm の後に）署名器を呼ぶ直前で期限を過ぎさせる。guarded signer の検査はその後にある。
+    sdk.beforeSign = () => { expired = true; };
+    const rail = railOf(fixture, spy, NETWORK, { now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
     const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
     const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d3", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
     expect(spy.calls).toHaveLength(0);
-    expect(fetches).toBe(2);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("署名の後、要求を組んだ後・送出の直前に切れても送らない（署名 1・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let calls = 0;
+    // now の 1 回目 = 署名器の直前の検査（期限の前）、2 回目 = 送出の直前の検査（期限の後）。
+    const rail = railOf(fixture, spy, NETWORK, { now: () => { calls += 1; return calls >= 2 ? Date.now() + 10_000_000 : Date.now(); } });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d4", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(1);
+    expect(calls).toBe(2);
     expect((await upstreamCalls(fixture)).payCalls).toBe(0);
   });
 });

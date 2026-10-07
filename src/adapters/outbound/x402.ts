@@ -473,17 +473,18 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };
       }
 
-      // 送出の直前にもう一度、承認の期限（FR-36）。署名だけでは資金は動かない。
+      const payCtx = { routeId: request.routeId, operation: "pay" };
+      // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。署名だけでは資金は動かない。
+      const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
       if (!(now() < request.deadlineMs)) {
         return { outcome: "not_sent", reason: "destination_deadline" };
       }
-      const payCtx = { routeId: request.routeId, operation: "pay" };
       let response: Response;
       try {
         // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。
         response = await transport.fetch(url, {
           method: "GET",
-          headers: httpClient.encodePaymentSignatureHeader(payload),
+          headers: paymentHeaders,
           redirect: "error",
           signal: AbortSignal.timeout(timeoutMs),
         }, payCtx);

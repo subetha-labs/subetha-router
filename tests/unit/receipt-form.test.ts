@@ -53,6 +53,10 @@ describe("receiptOf（領収の整合。形ごと）", () => {
     ["SVM: 文字数は範囲内でも 64 バイトに復号できない（65 個の 1 = 65 バイトのゼロ）", SVM_FORM, SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: "1".repeat(65) }, "none"],
     ["SVM: 63 バイトに復号される署名", SVM_FORM, SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: "1".repeat(63) }, "none"],
     ["SVM: payer が 32 バイトに復号できない（33 個の 1）", SVM_FORM, { ...SVM_OFFER }, { success: true, network: SVM_OFFER.network, transaction: SVM_SIG, payer: "1".repeat(33) }, "payer_mismatch"],
+    ["SVM: 署名者の札が壊れていて payer がそれと一致しても、32 バイトに復号できなければ不一致（復号の検査が独立に効く）", SVM_RECEIPT_FORM("1".repeat(33)), SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: SVM_SIG, payer: "1".repeat(33) }, "payer_mismatch"],
+    ["SVM: success が偽", SVM_FORM, SVM_OFFER, { success: false, network: SVM_OFFER.network, transaction: SVM_SIG }, "none"],
+    ["SVM: 領収なし", SVM_FORM, SVM_OFFER, undefined, "none"],
+    ["SVM: base64 でない", SVM_FORM, SVM_OFFER, "!!not-base64!!", "none"],
   ];
   test.each(cases)("%s", (_name, form, offer, receipt, kind) => {
     const result = receiptOf(response(receipt), offer, form);
@@ -115,9 +119,19 @@ describe("paidOutcomeOf（HTTP の状態 × 領収 → 結果。EVM と SVM）",
       ["領収なし ∧ 302 → rejected", undefined, 302, "{}", { outcome: "rejected", reason: "destination_rejected" }],
       ["不整合（network 違い）∧ 200 → unknown（領収なしと同じ）", { ...settled, network: "eip155:1" }, 200, "{}", { outcome: "unknown", reason: "destination_receipt_unverified" }],
       ["不整合（transaction の形違い）∧ 500 → unknown", { ...settled, transaction: "nope" }, 500, "{}", { outcome: "unknown", reason: "destination_pay_unknown" }],
+      ["不整合（success が偽）∧ 200 → unknown", { ...settled, success: false }, 200, "{}", { outcome: "unknown", reason: "destination_receipt_unverified" }],
+      ["整合 ∧ 200 ∧ 本文が大きすぎる → paid_no_data（response_too_large）", settled, 200, JSON.stringify({ pad: "x".repeat(200) }), { outcome: "paid_no_data", reason: "response_too_large" }],
+      ["整合 ∧ 200 ∧ application/json でない → paid_no_data（unsupported_response）", settled, 200, "text", { outcome: "paid_no_data", reason: "unsupported_response" }],
     ])(`${label}: %s`, async (_name, receipt, status, body, expected) => {
-      const result = await paidOutcomeOf(response(receipt as Record<string, unknown> | undefined, { status, body }), offer, form, deps);
+      const result = await paidOutcomeOf(response(receipt as Record<string, unknown> | undefined, { status, body, ...(body === "text" ? { contentType: "text/plain" } : {}) }), offer, form, deps);
       expect(result).toMatchObject(expected);
+    });
+
+    test(`${label}: 整合 ∧ 200 ∧ 本文が読めない → paid_no_data（paid_data_unavailable）。transport に報告する`, async () => {
+      const reports: unknown[] = [];
+      const broken = new Response(new ReadableStream({ start(controller) { controller.error(new Error("socket reset")); } }), { status: 200, headers: { "content-type": "application/json", "PAYMENT-RESPONSE": header(settled) } });
+      expect(await paidOutcomeOf(broken, offer, form, { ...deps, report: (error: unknown) => reports.push(error) })).toEqual({ outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: header(settled) });
+      expect(reports).toHaveLength(1);
     });
   }
 });

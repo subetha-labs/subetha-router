@@ -1422,8 +1422,8 @@ describe("動的 MPP: 検査の間に期限を越えても署名・送金しな�
     let rawChecks = 0;
     const originalNow = Date.now;
     void originalNow;
-    // raw の検査（checkRawTempoTransfer）は now() を 1 回呼ぶ。その呼び出しの後に期限を過ぎさせる。
-    const h2 = await harness({ now: () => { if (!signedOnce) return Date.now(); rawChecks += 1; return rawChecks >= 2 ? Date.now() + 10_000_000 : Date.now(); } });
+    // 署名の後の now(): 1 回目 = 送金 guard の入口の期限（前）、2 回目 = raw の検査（前）、3 回目 = 委譲の直前の再確認（後）。
+    const h2 = await harness({ now: () => { if (!signedOnce) return Date.now(); rawChecks += 1; return rawChecks >= 3 ? Date.now() + 10_000_000 : Date.now(); } });
     void h; void expired;
     const offer2 = await h2.quote();
     const result = await h2.pay(offer2);
@@ -1444,5 +1444,21 @@ describe("動的 MPP: 検査の間に期限を越えても署名・送金しな�
     expect(result.outcome).not.toBe("not_sent");
     expect(h.sends()).toBe(1);
     expect(dispatched).toBe(true);
+  });
+});
+
+describe("動的 MPP: 承認の期限と raw の有効期限が両方切れていても「期限」で止める", () => {
+  test("署名の後に遠い未来へ（raw の検査も通らない）→ not_sent destination_deadline（署名 1・送金 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    sdk.wrapAccount = ((facade: FacadeLike) => ({
+      address: facade.address,
+      type: "local",
+      signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await facade.signTransaction(tx, opts); offset = 10_000_000; return raw; },
+    })) as never;
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.innerSigned).toHaveLength(1);
+    expect(h.sends()).toBe(0);
   });
 });
