@@ -144,9 +144,11 @@
   **Arc の能力を作らない**（鍵は読む）。Solana の RPC は **SVM の受信か送信のどちらかがある**とき依存先・拒否ホストに入る（`src/main.ts:349` を広げる）。有効化は受信と同じ gate（§6.3）
 - **FR-31**: 呼び出し側の手順（CLAUDE.md、`npm run sign`）は**変わらない**——受信のレールは増えない。変わるのは一覧に出る route／プロファイルと `subject` の送信先の表示だけ（AC-11）
 - **FR-32**（送信の結果の表）: 送信の結果は送信 adapter の規則で決まる（受信の設計 §6 は受信の表で、送信には使わない）。**既存の動的 x402 の規則をそのまま新しいレールに適用し、Base の規則は変えない**
-  （`x402-dynamic.ts:540-575`）: 送出前の失敗（署名の境界・payload の不一致・期限・候補外）→ `not_sent`（**未送出が確かなとき**。署名の後でも送出の前なら `not_sent`）、送出の通信例外（期限・redirect・上限超過を含む）→ `unknown`、
-  領収が整合（`success`・`network` の一致・`transaction` の形・`payer` があれば署名者と一致）かつ 200 → `paid`、整合かつ 200 以外 → `paid_no_data`、`payer` の不一致 → `unknown`、領収が無い・不整合のとき 4xx → `rejected`、
-  2xx／5xx → `unknown`。SVM は `transaction` の形が **base58 の 64 バイトの署名**である点だけ違う。`not_sent`・`rejected` は受信が成立した後なので公開の状態は `paid_data_unavailable`（返金は無い。既存の開示）。この表は設計で 1 枚にする
+  （`x402-dynamic.ts:424-449`・`:540-590`）: 送出前の失敗（署名の境界・payload の不一致・期限・候補外）→ `not_sent`（**未送出が確かなとき**。署名の後でも送出の前なら `not_sent`）、
+  送出の通信例外（期限・redirect・ヘッダの上限超過を含む）→ `unknown`。応答を得たら領収を順に見る: `success`・`network` の一致・`transaction` の形が通った上で `payer` があり署名者と違う → `unknown`
+  （それより前の不整合は「領収なし」と同じ）。領収が整合かつ 200 かつ **本文の取得と検査が通った**（読取、大きさ、`application/json` の object）→ `paid`。整合かつ 200 だが本文が得られない・大きすぎる・形が違う → `paid_no_data`。
+  整合かつ 200 以外 → `paid_no_data`。領収なし・不整合のとき 2xx または 500 以上 → `unknown`、**それ以外（4xx 等）** → `rejected`。SVM は `transaction` の形が **base58 の 64 バイトの署名**で、
+  `payer` があれば **SVM のアドレス（base58 32 バイト）として**検査し Router の公開鍵と比較する（EVM は `0x` のアドレスの比較。形ごとの比較）。`not_sent`・`rejected` は受信が成立した後なので公開の状態は `paid_data_unavailable`（返金は無い。既存の開示）。この表は設計で 1 枚にする
 - **FR-38**（運用者の集合）: 候補にしない宛先の集合は **「その能力の署名者と、そのプロファイルの `source.payTo`」だけではなく**、起動時に **Router が所有する**アドレスから作る:
   (a) `sourceRail` が `x402`／`mpp` の全 route／プロファイルの `source.payTo`（受信の受取先。`subetha` 受信は `payTo` を設定に持たないので何も足さない `src/config.ts:184-189`）、
   (b) **注入された**送信能力の公開アドレス（有効な方向の能力だけ。無効な方向の鍵は読まないので入らない——FR-30 と整合）、(c) (a)(b) の SVM のアドレスと表の mint・token program から導いた ATA。
@@ -170,7 +172,8 @@
   **署名器から戻った wire の transaction を復号して再検査してから送る**: message の bytes が組んだものと一致（`lastValidBlockHeight` は wire に無い局所の lifetime の情報なので、比較は message の bytes——blockhash を含む——で行う）、
   version 0、lookup table 無し、署名の数 = 2、[0]（fee payer）は全ゼロ、[1] は Router の署名で ed25519 の検証が通る、全体 ≤ 1,232 バイト（受信の preflight §5.3 の 1〜4 と同じ検査を送信にも）。
   `extra.recentBlockhash` を含む offer は候補にしない。**順序**: quote 時 = offer の検査（FR-35・FR-37 の形）＋宛先 ATA の存在（RPC 1 回）。purchase 時 = 承認の期限（FR-36）→ offer の読み直しと完全一致 →
-  宛先 ATA の再確認（RPC。quote の後の消失は防げないので「送る直前にもう一度見る」だけ）→ blockhash（FR-34）→ 組み立て → message の hash の予約（FR-37）→ 署名（取得〜署名の上限の内側）→ raw の再検査 → 期限の再確認 → 送出
+  宛先 ATA の再確認（RPC。quote の後の消失は防げないので「送る直前にもう一度見る」だけ）→ blockhash（FR-34）→ 組み立て → message の hash の予約（FR-37。追記と fsync を挟む）→
+  **承認の期限（FR-36）と取得〜署名の上限（FR-34）をもう一度確かめてから**署名器を呼ぶ → raw の再検査 → 期限の再確認 → 送出
 - **FR-25**（引き継ぎ）: Router の Solana 鍵は ed25519 で x402 の送信にだけ使う。鍵は `tools/` だけが env から読む（名前は設計）。`src/` は能力（署名器＋公開鍵＋network、あれば `balanceOf`）だけを受け取る。
   残高の事前確認は D-15
 - **FR-26**（引き継ぎ）: 動的プロファイルで `rail: "x402"` ＋ `destination.network: "solana:…"` を許す。`tokenDomain` の代わりに `mint`・`decimals`・token program（FR-28）
@@ -262,3 +265,4 @@ G-1′（鍵と資金: D-11、V-9）→ G-2′（無効のまま配備）→ G-3
 |---|---|---|---|
 | 1 | 2026-10-07 | `gpt-6-astra`（read-only。第 1 版 `448d9b3`） | **REJECT**（12 項目: §1 の断定、`payTo` = owner と ATA の事前作成、Memo の一意性、署名済み raw の再検査と隔離の列挙、blockhash の期限、残高の事前確認の矛盾、有効化の独立、予算の共有、SDK の事実と Provider の仮定の分離、AC の分割と失敗の表、owner の判断の不足、形式）。第 2 版で反映 |
 | 2 | 2026-10-07 | `gpt-6-astra`（read-only。第 2 版 `c9d2b34`） | **REJECT**（9 項目: hash の予約は署名前に原子的・永続的に、運用者の集合の構成元、SDK の事実の 3 点、purchase の順序と期限の断定、結果の表の既存規則との不一致、SR-2 と D-11・D-15 の範囲、AC-9 の観測可能性、FR-30 と単一の定数、§1 の限定 2 点）。第 3 版で反映 |
+| 3 | 2026-10-07 | `gpt-6-astra`（read-only。第 3 版 `8ff4db3`） | **APPROVE WITH CHANGES**（2 項目: FR-32 の表に本文の取得の条件・`rejected` の分岐・SVM の `payer` の比較を足す、FR-24 の手順に予約の後の期限の再確認を入れる）。反映済み。FR-37 は既存の `IntentStore` の直列化の中で原子的にできる（hash の未使用検査 → journal 追記・fsync → 索引）と確認 |
