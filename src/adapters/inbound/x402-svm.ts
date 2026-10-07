@@ -45,8 +45,11 @@ export const SVM_TRANSACTION_MAX_BASE64_CHARS = 1644;
 export const SVM_MAX_COMPUTE_UNITS = 200_000;
 /** facilitator の既定の上限と同じ（5 lamports/CU）。 */
 export const SVM_MAX_MICRO_LAMPORTS_PER_UNIT = 5_000_000n;
-/** `npm run sign`（道具）が組む既定の compute budget（SDK の client と同じ）。 */
-export const SVM_DEFAULT_COMPUTE_UNITS = 20_000;
+/**
+ * `npm run sign`（道具）が組む既定の compute budget。SDK の client の既定 20,000 では **Memo（66 文字の nonce）で尽きる**
+ * （devnet の simulate の実測 2026-10-07: 消費 25,332 CU。T6）。上限 200,000 の内側で 2.4 倍の余裕を取る。
+ */
+export const SVM_DEFAULT_COMPUTE_UNITS = 60_000;
 export const SVM_DEFAULT_MICRO_LAMPORTS_PER_UNIT = 1n;
 export const SVM_INSTRUCTION_COUNT = 4;
 

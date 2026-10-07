@@ -14,6 +14,7 @@ import { ExactSvmScheme } from "@x402/svm";
 import {
   checkSvmTransaction,
   MEMO_PROGRAM_ADDRESS,
+  SVM_DEFAULT_COMPUTE_UNITS,
   preflightSvm,
   SVM_MAX_COMPUTE_UNITS,
   SVM_MAX_MICRO_LAMPORTS_PER_UNIT,
@@ -50,7 +51,9 @@ describe("checkSvmTransaction: 正しい transaction", () => {
   test("通り、提出値（authority・source・compute）を返す。同期で、ネットワークに出ない", async () => {
     const tx = await payer.build(policy, AMOUNT, MEMO);
     const result = checkSvmTransaction(tx, policy, AMOUNT, MEMO);
-    expect(result).toMatchObject({ ok: true, authority: payer.address, source: payer.sourceAta, units: 20_000, microLamports: 1n });
+    expect(result).toMatchObject({ ok: true, authority: payer.address, source: payer.sourceAta, units: SVM_DEFAULT_COMPUTE_UNITS, microLamports: 1n });
+    // SDK の client の既定（20,000）では Memo で尽きる（T6 の実測 25,332 CU）。道具の既定はその上。
+    expect(SVM_DEFAULT_COMPUTE_UNITS).toBeGreaterThan(25_332);
     // 同期（Promise ではない）。
     expect(typeof (result as unknown as { then?: unknown }).then).toBe("undefined");
     expect(Buffer.from(tx, "base64").length).toBeLessThanOrEqual(SVM_TRANSACTION_MAX_BYTES);

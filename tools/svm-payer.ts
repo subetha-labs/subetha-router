@@ -35,15 +35,24 @@ export interface SvmPayer {
 
 /** 鍵の形: base58 の 64 バイト（secret ‖ public）か、hex の 32 バイトの seed。 */
 export async function svmSignerFromKey(key: string): Promise<KeyPairSigner> {
+  // 失敗の文言に鍵の値を含めない（依存の例外は入力を文言に写す）。
+  const refuse = (): never => {
+    throw new Error("the Solana key must be base58 (64 or 32 bytes) or a 32-byte hex seed");
+  };
   let seed: Uint8Array;
-  if (/^(0x)?[0-9a-fA-F]{64}$/.test(key)) {
-    seed = new Uint8Array(Buffer.from(key.replace(/^0x/, ""), "hex"));
-  } else {
-    const bytes = getBase58Encoder().encode(key);
-    if (bytes.length !== 64 && bytes.length !== 32) throw new Error("the Solana key must be base58 (64 or 32 bytes) or a 32-byte hex seed");
-    seed = new Uint8Array(bytes.subarray(0, 32));
+  try {
+    if (/^(0x)?[0-9a-fA-F]{64}$/.test(key)) {
+      seed = new Uint8Array(Buffer.from(key.replace(/^0x/, ""), "hex"));
+    } else {
+      if (!/^[1-9A-HJ-NP-Za-km-z]{32,90}$/.test(key)) return refuse();
+      const bytes = getBase58Encoder().encode(key);
+      if (bytes.length !== 64 && bytes.length !== 32) return refuse();
+      seed = new Uint8Array(bytes.subarray(0, 32));
+    }
+    return await createKeyPairSignerFromPrivateKeyBytes(seed);
+  } catch {
+    return refuse();
   }
-  return createKeyPairSignerFromPrivateKeyBytes(seed);
 }
 
 interface RpcOptions {

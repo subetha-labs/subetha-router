@@ -9,9 +9,10 @@
 - **担当**: 親（controller）が状態・commit を持ち、実装後に実ソースを読み戻してテストを実際に実行する。レビューは `gpt-6-astra`・read-only で差分を見る
 - **順序**: まず落ちるテストを書き、赤を確かめてから実装する。完了条件の試験は**守っているコードを外して落ちること**（sabotage）を確かめ、結果を PR に書く
 - **完了コマンド**: focused（当該テスト）→ `npm run types` → `npm test`。skip と失敗を区別して報告する。「Linux」と書いた完了条件は Linux（Colima の `node:22-bookworm`）で実行した結果を要する
-- **資金**: **Router の購入の settle（資金が動く決済）は T10 G-3 だけ**。T9 までのどのタスクも**本物の facilitator の `/settle`** を呼ばない（loopback の fixture の settle は試験であり、資金は動かない）。例外として許すのは、T6 の使い捨て口座への **faucet の testnet 資産**の受け取りと、
-  送信しない部分署名（SVM）・署名だけ（EIP-3009）。**mainnet の資産は一切使わない**（SR-6）
-- **外部への接続**（T9 まで）: T0-a の npm の取得、T6 の **faucet（faucet.circle.com）の受け取り**と **未払いの読取**だけ——x402.org の `/supported`・`/verify`、Circle の `/supported`・`/verify`、Solana devnet の `getLatestBlockhash`
+- **資金**: **Router の購入の settle（資金が動く決済）は T10 G-3 だけ**。T9 までのどのタスクも**本物の facilitator の `/settle`** を呼ばない（loopback の fixture の settle は試験であり、資金は動かない）。例外として許すのは、T6 の使い捨て口座への **faucet の testnet 資産**の受け取り、
+  T6 の準備（devnet の SOL の airdrop と、受取 owner の ATA の作成——使い捨て payer が rent と手数料を払う devnet の tx）、送信しない部分署名（SVM）・署名だけ（EIP-3009）。**mainnet の資産は一切使わない**（SR-6）
+- **外部への接続**（T9 まで）: T0-a の npm の取得、T6 の **faucet（faucet.circle.com・faucet.solana.com）の受け取り**と **未払いの読取**——x402.org の `/supported`・`/verify`、Circle の `/verify`、
+  Solana devnet の RPC（`getBalance`・`requestAirdrop`・`getLatestBlockhash`・`getAccountInfo`・`simulateTransaction`、ATA 作成の `sendTransaction` とその確認）
   （各 1〜数回。日時・回数を記録）。それ以外の試験はすべて loopback の fixture
 - **既定で無効**: T9 まで、Arc・Solana の route／プロファイルは**本番の入口の設定に出さない**（`ARC_PROFILES_ENABLED`／`SOLANA_PROFILES_ENABLED` = `false`）。T8-a がそれを試験で固定する
 - **既存を壊さない**（SR-4・FR-5）: 各タスクで既存テスト全通過（AC-5）。試験の数・内容を減らさない。既存の Base Sepolia・Tempo の経路で**意図して変えるのは次の 3 つだけ**で、各タスクに明記する:
@@ -148,7 +149,7 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
 
 | 内容 | 成果物 | 完了条件 |
 |---|---|---|
-| 使い捨ての ed25519 鍵（`wallet:new:solana`）と devnet の USDC（faucet.circle.com。devnet SOL は不要——fee payer は facilitator）。**offer は T4-c の adapter に作らせ**（`createOffer`。`feePayer` は本物の `/supported` から）、T5 の道具で署名し、x402.org の **`/verify` だけ**に出す。Circle は、Arc testnet の USDC を faucet で得られれば、T3 の adapter の offer と売り手証明（使い捨ての受取鍵）で `/verify` だけ（得られなければ T10 G-3 に送る）。道具は `tools/rails-verify-probe.ts`（`/settle` の経路を持たない） | 設計 §10 の U-2 の行に結果（日時・`isValid`・`invalidReason` の有無。鍵・URL・本文は書かない）、`.claude_workflow/local/` に記録 | **必須**: SVM の `isValid: true` が 1 回。**条件つき**: Circle は Arc testnet の USDC が faucet で得られれば `isValid: true` 1 回、得られなければその事実を記録して G-3 に送る。false なら理由を設計に照らし、**設計を改訂してから T7-b に進む**。外部の要求は `/supported` 1 回・`getLatestBlockhash` 1 回・`/verify` 数回。settle 0 回 |
+| 使い捨ての ed25519 鍵（`wallet:new:solana`）と devnet の USDC（faucet.circle.com）。受取 owner の ATA を作るための少量の devnet SOL（faucet.solana.com。購入そのものには SOL は要らない——fee payer は facilitator）。**offer は T4-c の adapter に作らせ**（`createOffer`。`feePayer` は本物の `/supported` から）、T5 の道具で署名し、x402.org の **`/verify` だけ**に出す。Circle は、Arc testnet の USDC を faucet で得られれば、T3 の adapter の offer と売り手証明（使い捨ての受取鍵）で `/verify` だけ（得られなければ T10 G-3 に送る）。道具は `tools/rails-verify-probe.ts`（`/settle` の経路を持たない） | 設計 §10 の U-2 の行に結果（日時・`isValid`・`invalidReason` の有無。鍵・URL・本文は書かない）、`.claude_workflow/local/` に記録 | **必須**: SVM の `isValid: true` が 1 回。**条件つき**: Circle は Arc testnet の USDC が faucet で得られれば `isValid: true` 1 回、得られなければその事実を記録して G-3 に送る。false なら理由を設計に照らし、**設計を改訂してから T7-b に進む**。外部の要求は `/supported` 1 回・`getLatestBlockhash` 1 回・`/verify` 数回。settle 0 回 |
 
 ### T7-a — client・MCP（設計 §4.4、AC-6）
 

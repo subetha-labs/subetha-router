@@ -48,7 +48,7 @@ describe("svm payer", () => {
     expect(decoded.payload.challengeNonce).toBe(NONCE);
     expect(decoded.payload).not.toHaveProperty("txHash");
     const result = checkSvmTransaction(decoded.payload.transaction, policy, "10000", NONCE);
-    expect(result).toMatchObject({ ok: true, authority: payer.address, units: 20_000, microLamports: 1n });
+    expect(result).toMatchObject({ ok: true, authority: payer.address, units: 60_000, microLamports: 1n });
   });
 
   test("memo ≠ nonce・feePayer 無しは RPC の前に拒む（要求 0）", async () => {
@@ -74,5 +74,11 @@ describe("svm payer", () => {
     sixtyFour.set(seed, 0);
     expect(String((await svmSignerFromKey(getBase58Decoder().decode(sixtyFour))).address)).toBe(String(fromBase58.address));
     await expect(svmSignerFromKey("abc")).rejects.toThrow(/Solana key/);
+    // 形の違う鍵（引用符つき等）の失敗の文言に、入力の値を写さない。
+    const quoted = `"${getBase58Decoder().decode(seed)}"`;
+    let message = "";
+    await svmSignerFromKey(quoted).catch((error: Error) => { message = error.message; });
+    expect(message).toMatch(/Solana key/);
+    expect(message).not.toContain(quoted.slice(1, 10));
   });
 });
