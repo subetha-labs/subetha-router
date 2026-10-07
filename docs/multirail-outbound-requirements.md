@@ -56,7 +56,7 @@
 | # | 確かめること | 方法 | 通らなければ |
 |---|---|---|---|
 | V-6 | Arc で x402 を受ける Provider の 402 の offer が、表（network・asset・domain）と `checkDynamicX402Offer` の検査に**そのまま通る**か（`extra` の鍵、`maxTimeoutSeconds`、`payTo`） | Provider が立ったら `curl` で 402 を取り、検査の unit 試験に写す | 検査の緩和は**しない**。Provider 側の offer を直す |
-| V-7 | Solana で x402 を受ける Provider の 402 の offer の形（`extra.feePayer`、`asset` = mint、`payTo` = owner の公開鍵か ATA か） | 同上 | 設計 §（SVM の offer 検査）で形を固定 |
+| V-7 | Solana で x402 を受ける Provider の 402 の offer の形（`extra.feePayer`、`asset` = mint、`payTo`、`extra.memo` の有無）。SDK（`@x402/svm` 2.28.0 の client・facilitator）は `payTo` を **owner の公開鍵**として宛先 ATA を導き、facilitator は settle 後にその ATA の残高の増分を読む——**宛先 ATA は Provider 側が先に作っておく**必要がある | 同上。Provider の受取 ATA の存在を `getAccountInfo` で見る | 設計 §（SVM の offer 検査）で形を固定。ATA が無い Provider には払わない（`not_sent`） |
 | V-8 | Router が組んだ部分署名の transaction を Provider 側の facilitator（x402.org）が `/verify` → `/settle` で受けるか（命令 4 つ・compute budget 60,000・Memo の有無） | 使い捨ての鍵で Provider の fixture に 1 回 | Memo の扱い・compute 予算を Provider 側の facilitator の規則に合わせる（Router の上限は動かさない） |
 | V-9 | 運用者の資金: Arc の送信鍵（D-11）に Arc testnet USDC、Solana の送信鍵の ATA に devnet USDC が入り、faucet で補充できるか | owner の作業 | 受け入れ（G-3′）に進めない |
 | V-10 | `ExactEvmScheme`／`@x402/fetch` が `eip155:5042002` を **静的** 送信で扱えるか（viem の chain 定義） | 試験で確かめる。**扱えなくても要件は変えない**: Arc の静的 route も**動的の組み直しの形**で署名する（FR-22） | 静的 x402 送信 adapter を Arc には使わない |
@@ -122,7 +122,8 @@
 ### 4.3 Solana の送信（S-4）
 
 - **FR-24**（引き継ぎ）: 払う transaction は **承認値だけで組み直す**: fee payer = offer の `extra.feePayer`、source = Router の ATA（鍵の公開鍵と mint から導く）、destination = offer の `payTo` から導いた ATA
-  （`payTo` が owner の公開鍵なら ATA を導く。ATA そのものなら表の規則で拒むか受けるかを V-7 で決める）、mint・decimals = 表、額 = 承認値、Memo = offer が求める値（無ければ命令 3 つ）、
+  （`payTo` が owner の公開鍵なら ATA を導く。ATA そのものなら表の規則で拒むか受けるかを V-7 で決める）、mint・decimals = 表、額 = 承認値、Memo = offer の `extra.memo`（facilitator はあるときだけ 1 つの Memo を照合する）か、無ければ Router 自身の固定の値（paymentId。SDK の client は
+  無いとき乱数の nonce を入れる）——**命令は常に 4 つ**（受信の builder と同じ形: compute limit・compute price・`transferChecked`・Memo）、
   compute budget = Router の既定（60,000・1 micro-lamport。上限 200,000・5,000,000）。署名は 1 回、部分署名、送信は facilitator。**SDK の提案は読まない**（`@x402/svm` の client を使わない。
   使う場合も提案を写さず、組み直したものと byte 単位で一致するときだけ署名する）
 - **FR-25**（引き継ぎ）: Router の Solana 鍵は ed25519 で x402 の送信にだけ使う。鍵は `tools/` だけが env から読む（`SUBETHA_OUTBOUND_SOLANA_KEY`。名前は設計）。`src/` は能力（署名器＋公開鍵＋network）だけを受け取る
