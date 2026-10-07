@@ -467,6 +467,11 @@ export function createGuardedTempoAccount(args: {
         args.now(),
         { baseFee: args.baseFee },
       );
+      // 検査の間に期限を越えたかもしれない。**実際の委譲の直前**にもう一度（送信の設計 §2.4）。
+      if (args.deadlineMs !== undefined && !(args.now() < args.deadlineMs)) {
+        deadlineRefused = true;
+        throw new TempoSigningRefusedError("destination_deadline");
+      }
       signatures += 1;
       // 確かめた欄だけで組み直す。SDK が call に付ける `abi`・`functionName`・`args`・`address` は写さない。単価は Router の値（上）。
       const raw = await inner.signTransaction!(
@@ -985,12 +990,12 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
         if (typeof raw !== "string" || signed === undefined || raw !== signed) {
           throw new TempoSigningRefusedError("destination_send_not_the_signed_transaction");
         }
-        // 送金 RPC の委譲の直前に、承認の期限（FR-36 の (B)）。ここで断れば資金は動いていない。
+        checkRawTempoTransfer(signed, guard.approved, now());
+        // 送金 RPC の委譲の**直前**（raw の検査の後）に、承認の期限（FR-36 の (B)）。ここで断れば資金は動いていない。
         if (!(now() < request.deadlineMs)) {
           sendDeadlineRefused = true;
           throw new TempoSigningRefusedError("destination_deadline");
         }
-        checkRawTempoTransfer(signed, guard.approved, now());
         sends += 1;
         // 送るのは、検査した raw だけを持つ新しい要求。
         try {

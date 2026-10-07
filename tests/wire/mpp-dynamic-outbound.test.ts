@@ -1364,15 +1364,17 @@ describe("動的 MPP: 承認の期限と運用者の集合", () => {
   });
 
   test("(B) 署名の後・送金 RPC の委譲の前に切れれば not_sent（署名 1・送金 0）", async () => {
+    // 署名の後に +2 秒（raw の検査の validBefore の窓の内側）。期限は +1 秒なので、raw の検査は通り、委譲の直前の再確認で止まる。
     let offset = 0;
+    const base = Date.now();
     const h = await harness({ now: () => Date.now() + offset });
     const offer = await h.quote();
     sdk.wrapAccount = ((facade: FacadeLike) => ({
       address: facade.address,
       type: "local",
-      signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await facade.signTransaction(tx, opts); offset = FAR; return raw; },
+      signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await facade.signTransaction(tx, opts); offset = 2_000; return raw; },
     })) as never;
-    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-b", attempt: 1, deadlineMs: base + 1_000, target: { url: URL_A }, maxFee: "5000" })).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
     expect(h.innerSigned).toHaveLength(1);
     expect(h.sends()).toBe(0);
   });
@@ -1386,5 +1388,61 @@ describe("動的 MPP: 承認の期限と運用者の集合", () => {
     expect(result.outcome).toBe("not_sent");
     expect(h.innerSigned).toHaveLength(0);
     expect(h.sends()).toBe(0);
+  });
+});
+
+describe("動的 MPP: 検査の間に期限を越えても署名・送金しない。送金の後の期限切れは not_sent にしない", () => {
+  /** 署名口の入口の後、検査の中の now から +2 秒（validBefore の窓の内側）。期限は +1 秒。 */
+  function midValidationClock() {
+    let calls = 0;
+    let counting = false;
+    const base = Date.now();
+    return { base, start: () => { counting = true; calls = 0; }, now: () => { if (!counting) return Date.now(); calls += 1; return calls === 1 ? base : base + 2_000; }, calls: () => calls };
+  }
+
+  test("(A′) 署名口の入口は通り、transaction の検査の後の再確認で止まる（署名 0・送金 0）", async () => {
+    const clock = midValidationClock();
+    const h = await harness({ now: clock.now });
+    const offer = await h.quote();
+    sdk.wrapAccount = ((facade: FacadeLike) => ({ address: facade.address, type: "local", signTransaction: async (tx: unknown, opts?: unknown) => { clock.start(); return facade.signTransaction(tx, opts); } })) as never;
+    const result = await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-mid-a", attempt: 1, deadlineMs: clock.base + 1_000, target: { url: URL_A }, maxFee: "5000" });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(clock.calls()).toBeGreaterThanOrEqual(2);
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.sends()).toBe(0);
+  });
+
+  test("(B′) raw の検査の後・送金 RPC の委譲の直前で止まる（署名 1・送金 0）", async () => {
+    let expired = false;
+    let signedOnce = false;
+    const h = await harness({ now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = await h.quote();
+    // 署名の後、送金の RPC の guard が raw を検査するときの now は期限の前、その直後の再確認で期限の後。
+    sdk.wrapAccount = ((facade: FacadeLike) => ({ address: facade.address, type: "local", signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await facade.signTransaction(tx, opts); signedOnce = true; return raw; } })) as never;
+    let rawChecks = 0;
+    const originalNow = Date.now;
+    void originalNow;
+    // raw の検査（checkRawTempoTransfer）は now() を 1 回呼ぶ。その呼び出しの後に期限を過ぎさせる。
+    const h2 = await harness({ now: () => { if (!signedOnce) return Date.now(); rawChecks += 1; return rawChecks >= 2 ? Date.now() + 10_000_000 : Date.now(); } });
+    void h; void expired;
+    const offer2 = await h2.quote();
+    const result = await h2.pay(offer2);
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h2.innerSigned).toHaveLength(1);
+    expect(h2.sends()).toBe(0);
+  });
+
+  test("送金 RPC を委譲した後に期限が切れても not_sent にしない（既存の結果のまま。送金 1）", async () => {
+    let dispatched = false;
+    const h = await harness({ now: () => (dispatched ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = await h.quote();
+    sdk.wrapClient = ((client: { request: (args: unknown, options?: unknown) => Promise<unknown> }) => ({
+      ...client,
+      request: async (args: { method?: string }, options?: unknown) => { const result = await client.request(args, options); if (typeof args?.method === "string" && args.method.startsWith("eth_sendRawTransaction")) dispatched = true; return result; },
+    })) as never;
+    const result = await h.pay(offer);
+    expect(result.outcome).not.toBe("not_sent");
+    expect(h.sends()).toBe(1);
+    expect(dispatched).toBe(true);
   });
 });

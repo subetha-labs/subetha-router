@@ -745,3 +745,19 @@ describe("動的 x402: 承認の期限と運用者の集合", () => {
     expect(h.upstream.seen.payments).toHaveLength(0);
   });
 });
+
+describe("動的 x402: 検査の間に期限を越えても署名しない（委譲の直前の再確認）", () => {
+  test("署名口の入口は通り、検査の後の再確認で止まる（署名 0・支払い要求 0）", async () => {
+    // 入口の検査（1 回目の now）は期限の前、検査の中の now から 2 秒進める（validBefore の窓 ≤ 660 秒の内側）。期限は +1 秒。
+    let calls = 0;
+    let counting = false;
+    const base = Date.now();
+    const h = await harness({ now: () => { if (!counting) return Date.now(); calls += 1; return calls === 1 ? base : base + 2_000; } });
+    const offer = await h.quote();
+    sdk.tamper = (message) => { counting = true; return message; };
+    expect(await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-mid", attempt: 1, deadlineMs: base + 1_000, target: { url: URL_A } })).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+});

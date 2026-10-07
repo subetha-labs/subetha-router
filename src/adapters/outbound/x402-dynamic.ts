@@ -14,6 +14,7 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from "@x402/
 import { ExactEvmScheme, type ClientEvmSigner } from "@x402/evm";
 import { x402Client, x402HTTPClient } from "@x402/fetch";
 import type { Network, PaymentRequired } from "@x402/fetch";
+import { getBase58Encoder } from "@solana/kit";
 import { getAddress } from "viem";
 
 import type { DynamicProfile } from "../../config.js";
@@ -26,8 +27,19 @@ import type { DestinationOffer, EvmSigningCapability, PayRequest, PayResult } fr
 /** 領収の形（送信の設計 §5）。EVM は bytes32 の tx hash と `0x` のアドレス、SVM は base58 の 64 バイトの署名と base58 のアドレス。 */
 export interface ReceiptForm {
   readonly transactionPattern: RegExp;
+  /** SVM: `transaction` を base58 で復号したときのバイト数（署名は 64）。EVM は無し（bytes32 は pattern で決まる）。 */
+  readonly transactionBytes?: number;
   readonly payerForm: "evm" | "svm";
   readonly signerAddress: string;
+}
+
+/** base58 を復号したバイト数（復号できなければ `undefined`）。 */
+function base58ByteLength(text: string): number | undefined {
+  try {
+    return getBase58Encoder().encode(text).length;
+  } catch {
+    return undefined;
+  }
 }
 
 export type Receipt =
@@ -52,16 +64,21 @@ export function receiptOf(response: Response, approved: DestinationOffer, form: 
     return { kind: "none" };
   }
   const transaction = decoded["transaction"];
-  // 取引の参照は form の形に限る（上流の任意の文字列を記録に入れない）。
+  // 取引の参照は form の形に限る（上流の任意の文字列を記録に入れない）。SVM は復号したバイト数まで見る（文字数では 64 バイトを保証しない）。
   if (typeof transaction !== "string" || !form.transactionPattern.test(transaction)) {
     return { kind: "none" };
   }
-  // receipt が購入者を名乗るなら、それはこの Router の署名者でなければならない（形ごとの比較）。
+  if (form.transactionBytes !== undefined && base58ByteLength(transaction) !== form.transactionBytes) {
+    return { kind: "none" };
+  }
+  // receipt が購入者を名乗るなら、それはこの Router の署名者でなければならない（形ごとの比較。SVM は 32 バイトに復号できる base58）。
   const payer = decoded["payer"];
   if (payer !== undefined) {
     const matches =
       typeof payer === "string" &&
-      (form.payerForm === "evm" ? ADDRESS_PATTERN.test(payer) && sameAddress(payer, form.signerAddress) : SVM_ADDRESS_PATTERN.test(payer) && payer === form.signerAddress);
+      (form.payerForm === "evm"
+        ? ADDRESS_PATTERN.test(payer) && sameAddress(payer, form.signerAddress)
+        : SVM_ADDRESS_PATTERN.test(payer) && base58ByteLength(payer) === 32 && payer === form.signerAddress);
     if (!matches) return { kind: "payer_mismatch" };
   }
   return { kind: "settled", header, transaction };
@@ -93,6 +110,44 @@ export async function deliveredBodyOf(
 
 /** EVM の領収の形（bytes32 の tx hash）。 */
 export const EVM_RECEIPT_FORM = (signerAddress: string): ReceiptForm => ({ transactionPattern: BYTES32_PATTERN, payerForm: "evm", signerAddress });
+/** SVM の領収の形（base58 で 64 バイトに復号できる署名。`payer` は base58 32 バイトの公開鍵）。 */
+export const SVM_RECEIPT_FORM = (signerAddress: string): ReceiptForm => ({ transactionPattern: /^[1-9A-HJ-NP-Za-km-z]{64,88}$/, transactionBytes: 64, payerForm: "svm", signerAddress });
+
+/**
+ * 送出した後の応答から結果を決める（送信の設計 §5 の 1 枚の表。動的 EVM・静的 Arc・SVM が共有する）。
+ * 整合した領収 ∧ 200 → 本文（`deliveredBodyOf`）、整合 ∧ 200 以外 → `paid_no_data`、`payer` だけ違う → `unknown`、
+ * 領収なし: 2xx → `unknown`、≥ 500 → `unknown`、それ以外 → `rejected`。本文は整合した 200 のときだけ読む。
+ */
+export async function paidOutcomeOf(
+  response: Response,
+  approved: DestinationOffer,
+  form: ReceiptForm,
+  deps: { readonly maxBodyBytes: number; readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void; readonly ctx: { routeId: string; operation: string } },
+): Promise<PayResult> {
+  const receipt = receiptOf(response, approved, form);
+  if (receipt.kind === "settled") {
+    if (response.status === 200) {
+      return deliveredBodyOf(response, receipt, deps);
+    }
+    // 整合した receipt があるのに 200 でない。支払いは成立していて、データは無い。
+    discardBody(response);
+    return { outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: receipt.header };
+  }
+  // receipt が無い・不整合。本文は読まない。
+  discardBody(response);
+  if (receipt.kind === "payer_mismatch") {
+    return { outcome: "unknown", reason: "destination_receipt_payer_mismatch" };
+  }
+  if (response.status >= 200 && response.status < 300) {
+    return { outcome: "unknown", reason: "destination_receipt_unverified" };
+  }
+  if (response.status >= 500) {
+    return { outcome: "unknown", reason: "destination_pay_unknown" };
+  }
+  // 402 を含む 4xx: 上流は「受け付けなかった」と答えた。再署名はしない。
+  // **未決済の証明ではない**（署名済みの authorization は `validBefore` まで有効で、上流は後から決済できる）。
+  return { outcome: "rejected", reason: "destination_rejected" };
+}
 
 export interface X402DynamicOptions {
   /**
@@ -366,6 +421,10 @@ export function createRebuildingSigner(args: {
       ) {
         throw new SigningRefusedError("destination_signing_validity_out_of_range");
       }
+      // 検査の間に期限を越えたかもしれない。**実際の委譲の直前**にもう一度（送信の設計 §2.4）。
+      if (args.deadlineMs !== undefined && !(args.now() < args.deadlineMs)) {
+        throw new SigningRefusedError("destination_deadline");
+      }
       signatures += 1;
       return args.signer.signTypedData({
         domain: { name: tokenDomain.name, version: tokenDomain.version, chainId, verifyingContract },
@@ -606,30 +665,7 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
 
-      const receipt = receiptOf(response, approved, receiptForm);
-      if (receipt.kind === "settled") {
-        if (response.status === 200) {
-          return deliveredBodyOf(response, receipt, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
-        }
-        // 整合した receipt があるのに 200 でない。支払いは成立していて、データは無い。
-        discardBody(response);
-        return { outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: receipt.header };
-      }
-      // receipt が無い・不整合。本文は読まない。
-      discardBody(response);
-      if (receipt.kind === "payer_mismatch") {
-        return { outcome: "unknown", reason: "destination_receipt_payer_mismatch" };
-      }
-      if (response.status >= 200 && response.status < 300) {
-        return { outcome: "unknown", reason: "destination_receipt_unverified" };
-      }
-      if (response.status >= 500) {
-        return { outcome: "unknown", reason: "destination_pay_unknown" };
-      }
-      // 402 を含む 4xx: 上流は「受け付けなかった」と答えた。再署名はしない。
-      // **未決済の証明ではない**（署名済みの authorization は `validBefore` まで有効で、上流は後から決済できる）。
-      // core はこの後も動的予算を保持する（設計 §6.5）。
-      return { outcome: "rejected", reason: "destination_rejected" };
+      return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
     },
   };
 }

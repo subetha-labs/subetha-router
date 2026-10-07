@@ -6,7 +6,7 @@
 import { encodePaymentResponseHeader } from "@x402/core/http";
 import { describe, expect, test } from "vitest";
 
-import { deliveredBodyOf, EVM_RECEIPT_FORM, receiptOf, type ReceiptForm } from "../../src/adapters/outbound/x402-dynamic.js";
+import { deliveredBodyOf, EVM_RECEIPT_FORM, paidOutcomeOf, receiptOf, SVM_RECEIPT_FORM, type ReceiptForm } from "../../src/adapters/outbound/x402-dynamic.js";
 import type { DestinationOffer } from "../../src/ports/outbound.js";
 
 const EVM_SIGNER = "0x00000000000000000000000000000000000000C0";
@@ -16,12 +16,12 @@ const EVM_TX = `0x${"7a".repeat(32)}`;
 const SVM_SIG = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
 const EVM_OFFER: DestinationOffer = { scheme: "exact", network: "eip155:5042002", asset: "0x3600000000000000000000000000000000000000", amount: "1000", payTo: "0x0000000000000000000000000000000000000a11" };
 const SVM_OFFER: DestinationOffer = { scheme: "exact", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", amount: "1000", payTo: SVM_OTHER };
-const SVM_FORM: ReceiptForm = { transactionPattern: /^[1-9A-HJ-NP-Za-km-z]{64,88}$/, payerForm: "svm", signerAddress: SVM_SIGNER };
+const SVM_FORM: ReceiptForm = SVM_RECEIPT_FORM(SVM_SIGNER);
 const EVM_FORM = EVM_RECEIPT_FORM(EVM_SIGNER);
 
 const header = (receipt: Record<string, unknown>): string => encodePaymentResponseHeader(receipt as never);
 const response = (receipt: Record<string, unknown> | string | undefined, init: { status?: number; body?: string; contentType?: string } = {}): Response =>
-  new Response(init.body ?? "{}", {
+  new Response(init.body === "" ? null : (init.body ?? "{}"), {
     status: init.status ?? 200,
     headers: {
       "content-type": init.contentType ?? "application/json",
@@ -50,6 +50,9 @@ describe("receiptOf（領収の整合。形ごと）", () => {
     ["SVM: payer の形違い（0x）", SVM_FORM, SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: SVM_SIG, payer: EVM_SIGNER }, "payer_mismatch"],
     ["SVM: payer は大文字小文字を区別する", SVM_FORM, SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: SVM_SIG, payer: SVM_SIGNER.toLowerCase() }, "payer_mismatch"],
     ["SVM: network 不一致（EVM の network）", SVM_FORM, SVM_OFFER, { success: true, network: EVM_OFFER.network, transaction: SVM_SIG }, "none"],
+    ["SVM: 文字数は範囲内でも 64 バイトに復号できない（65 個の 1 = 65 バイトのゼロ）", SVM_FORM, SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: "1".repeat(65) }, "none"],
+    ["SVM: 63 バイトに復号される署名", SVM_FORM, SVM_OFFER, { success: true, network: SVM_OFFER.network, transaction: "1".repeat(63) }, "none"],
+    ["SVM: payer が 32 バイトに復号できない（33 個の 1）", SVM_FORM, { ...SVM_OFFER }, { success: true, network: SVM_OFFER.network, transaction: SVM_SIG, payer: "1".repeat(33) }, "payer_mismatch"],
   ];
   test.each(cases)("%s", (_name, form, offer, receipt, kind) => {
     const result = receiptOf(response(receipt), offer, form);
@@ -84,4 +87,37 @@ describe("deliveredBodyOf（整合した領収つきの 200 の本文）", () =>
     expect(await deliveredBodyOf(broken, receipt, deps(reports))).toEqual({ outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: "h" });
     expect(reports).toHaveLength(1);
   });
+});
+
+/** 送信の設計 §5 の表を、送出の後の応答から結果まで**両方の form で**通す（HTTP の状態 × 領収の有無・整合）。 */
+describe("paidOutcomeOf（HTTP の状態 × 領収 → 結果。EVM と SVM）", () => {
+  const deps = { maxBodyBytes: 64, report: () => {}, ctx: { routeId: "r", operation: "pay" } };
+  const forms: [string, ReceiptForm, DestinationOffer, string, string][] = [
+    ["EVM", EVM_FORM, EVM_OFFER, EVM_TX, EVM_SIGNER],
+    ["SVM", SVM_FORM, SVM_OFFER, SVM_SIG, SVM_SIGNER],
+  ];
+  for (const [label, form, offer, tx, signer] of forms) {
+    const settled = { success: true, network: offer.network, transaction: tx, payer: signer };
+    test.each([
+      ["整合 ∧ 200 ∧ 本文 → paid", settled, 200, '{"price":1}', { outcome: "paid", body: { price: 1 }, txRef: tx }],
+      ["整合 ∧ 200 ∧ 本文が object でない → paid_no_data", settled, 200, "[1]", { outcome: "paid_no_data", reason: "unsupported_response" }],
+      ["整合 ∧ 402 → paid_no_data（4xx でも領収があれば支払い済み）", settled, 402, "{}", { outcome: "paid_no_data", reason: "paid_data_unavailable" }],
+      ["整合 ∧ 500 → paid_no_data", settled, 500, "{}", { outcome: "paid_no_data", reason: "paid_data_unavailable" }],
+      ["整合 ∧ 502 → paid_no_data", settled, 502, "{}", { outcome: "paid_no_data", reason: "paid_data_unavailable" }],
+      ["payer だけ違う ∧ 200 → unknown", { ...settled, payer: label === "EVM" ? "0x00000000000000000000000000000000000000C1" : SVM_OTHER }, 200, "{}", { outcome: "unknown", reason: "destination_receipt_payer_mismatch" }],
+      ["payer だけ違う ∧ 402 → unknown（rejected にしない）", { ...settled, payer: label === "EVM" ? "0x00000000000000000000000000000000000000C1" : SVM_OTHER }, 402, "{}", { outcome: "unknown", reason: "destination_receipt_payer_mismatch" }],
+      ["領収なし ∧ 200 → unknown", undefined, 200, "{}", { outcome: "unknown", reason: "destination_receipt_unverified" }],
+      ["領収なし ∧ 204 → unknown", undefined, 204, "", { outcome: "unknown", reason: "destination_receipt_unverified" }],
+      ["領収なし ∧ 500 → unknown", undefined, 500, "{}", { outcome: "unknown", reason: "destination_pay_unknown" }],
+      ["領収なし ∧ 503 → unknown", undefined, 503, "{}", { outcome: "unknown", reason: "destination_pay_unknown" }],
+      ["領収なし ∧ 402 → rejected", undefined, 402, "{}", { outcome: "rejected", reason: "destination_rejected" }],
+      ["領収なし ∧ 400 → rejected", undefined, 400, "{}", { outcome: "rejected", reason: "destination_rejected" }],
+      ["領収なし ∧ 302 → rejected", undefined, 302, "{}", { outcome: "rejected", reason: "destination_rejected" }],
+      ["不整合（network 違い）∧ 200 → unknown（領収なしと同じ）", { ...settled, network: "eip155:1" }, 200, "{}", { outcome: "unknown", reason: "destination_receipt_unverified" }],
+      ["不整合（transaction の形違い）∧ 500 → unknown", { ...settled, transaction: "nope" }, 500, "{}", { outcome: "unknown", reason: "destination_pay_unknown" }],
+    ])(`${label}: %s`, async (_name, receipt, status, body, expected) => {
+      const result = await paidOutcomeOf(response(receipt as Record<string, unknown> | undefined, { status, body }), offer, form, deps);
+      expect(result).toMatchObject(expected);
+    });
+  }
 });

@@ -355,3 +355,22 @@ describe("静的 x402: 承認の期限と運用者の集合", () => {
     expect(await self.pay({ routeId: ROUTE_ID, offer: { ...offer, payTo: spy.address }, paymentId: "o2", attempt: 1, deadlineMs: Date.now() + 600_000 })).toMatchObject({ outcome: "not_sent" });
   });
 });
+
+describe("静的 x402: 期限の検査は arm の後（送金直前の読み直しの後）にある", () => {
+  it("読み直しの fetch の後に時計を進めても署名しない（検査を pay の入口に動かした実装では署名してしまう）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    const inner = createGuardedTransport({ allowLoopback: true, report: () => {} });
+    let fetches = 0;
+    let expired = false;
+    // 1 回目 = readChallenge、2 回目 = pay の読み直し。読み直しが返った**後**に期限を過ぎさせる。
+    const transport = { ...inner, fetch: async (...args: Parameters<typeof inner.fetch>) => { const response = await inner.fetch(...args); fetches += 1; if (fetches >= 2) expired = true; return response; } };
+    const rail = createX402Outbound({ transport: transport as never, upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(NETWORK), now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d3", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(0);
+    expect(fetches).toBe(2);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+});
