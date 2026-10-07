@@ -35,7 +35,7 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
-export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "unknown" | "malformed" | "drop" | "huge";
+export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "unknown" | "malformed" | "drop" | "huge" | "huge-chunked" | "exact-64k";
 
 export interface CircleFacilitatorState {
   verify: "ok" | "invalid";
@@ -220,6 +220,22 @@ export async function startCircleFacilitator(tls: TlsMaterial, host = "circle.te
           case "huge":
             send(200, JSON.stringify({ success: true, transaction: tx, network, payer: PAYER, pad: "p".repeat(70 * 1024) }));
             return;
+          case "huge-chunked": {
+            // Content-Length 無し（chunked）で 64 KiB を超える: 読みながらの上限で止まるべき。
+            response.writeHead(200, { "content-type": "application/json" });
+            const head = `{"success":true,"transaction":"${tx}","network":"${String(network)}","pad":"`;
+            response.write(head);
+            for (let i = 0; i < 70; i += 1) response.write("p".repeat(1024));
+            response.end('"}');
+            return;
+          }
+          case "exact-64k": {
+            // ちょうど 64 KiB の本文（Content-Length つき）は通る。
+            const prefix = `{"success":true,"transaction":"${tx}","network":"${String(network)}","pad":"`;
+            const suffix = '"}';
+            send(200, prefix + "p".repeat(64 * 1024 - Buffer.byteLength(prefix) - Buffer.byteLength(suffix)) + suffix);
+            return;
+          }
           default:
             send(200, { success: true, transaction: tx, network, payer: PAYER, amount: 10000, extensions: { "settlement-status": { status: "confirmed", paymentId: "pay_1", statusUrl: "/status/pay_1" } } });
         }

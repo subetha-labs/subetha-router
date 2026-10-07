@@ -229,7 +229,7 @@ describe("x402 受信 kind circle: 売り手証明", () => {
 });
 
 describe("x402 受信 kind circle: 決済の結果の表（設計 §6）", () => {
-  const unknownModes = ["unknown", "reject", "pending", "registration-required", "conflict", "bad-tx", "no-tx", "bad-network", "malformed", "huge"] as const;
+  const unknownModes = ["unknown", "reject", "pending", "registration-required", "conflict", "bad-tx", "no-tx", "bad-network", "malformed", "huge", "huge-chunked"] as const;
   for (const mode of unknownModes) {
     it(`settle ${mode} → unknown（要求 1 回、文字列を転送しない）`, async () => {
       const fx = await facilitator();
@@ -264,6 +264,13 @@ describe("x402 受信 kind circle: 決済の結果の表（設計 §6）", () =>
     const offer = await issue(rail);
     expect((await rail.settle(offer, credentialFor(offer))).outcome).toBe("settled");
     expect(CIRCLE_RESPONSE_MAX_BYTES).toBe(64 * 1024);
+    // ちょうど 64 KiB は通る（上限は「超えたら」）。
+    const exact = await facilitator();
+    exact.state.settle = "exact-64k";
+    const rail2 = railOf(exact, proof.capability);
+    const offer2 = await issue(rail2);
+    expect((await rail2.settle(offer2, credentialFor(offer2))).outcome).toBe("settled");
+    expect(Buffer.byteLength(exact.seen.lastRawBody ?? "")).toBeGreaterThan(0);
   });
 
   it("settle の期限は wire + 10 秒: wire 5 なら 11 秒の遅れでも settled、wire 0 なら 11 秒で期限切れ（1 秒は settled）", async () => {

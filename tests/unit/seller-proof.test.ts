@@ -53,7 +53,7 @@ describe("seller proof capability", () => {
     expect(proof.signCalls()).toBe(0);
   });
 
-  test("能力は proofFor 以外の署名の口を持たない（型と実体）。寿命は設定で変えられない（61 秒の証明は作れない）", () => {
+  test("能力は proofFor 以外の署名の口を持たない（型と実体）。寿命は設定で変えられない（61 秒の証明は作れない）", async () => {
     const proof = createTestSellerProof({ network: ARC });
     expect(Object.keys(proof.capability).sort()).toEqual(["address", "network", "proofFor"]);
     expect(Object.isFrozen(proof.capability)).toBe(true);
@@ -62,7 +62,12 @@ describe("seller proof capability", () => {
     // @ts-expect-error 署名の口は型にも無い
     expect(proof.capability.signMessage).toBeUndefined();
     // @ts-expect-error 寿命の設定は無い（設計 §3: 60 秒固定）
-    expect(() => createTestSellerProof({ network: ARC, lifetimeSeconds: 61 })).not.toThrow();
+    const withIgnoredOption = createTestSellerProof({ network: ARC, lifetimeSeconds: 61, now: () => 1_800_000_000_000 });
+    return withIgnoredOption.capability.proofFor("settle", HASH).then((header) => {
+      const issued = decodeSellerProofHeader(header)!;
+      // 61 を渡しても発行される証明の寿命は 60 秒。
+      expect(issued.expiresAt - issued.issuedAt).toBe(60);
+    });
     expect(Object.isFrozen(SELLER_REQUEST_TYPES)).toBe(true);
     expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest)).toBe(true);
     expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest[0])).toBe(true);
