@@ -13,9 +13,9 @@ import { address, generateKeyPairSigner } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { generatePrivateKey } from "viem/accounts";
 
-import { ConfigError, loadRuntimeConfig, routeBindingOf, type RuntimeConfig } from "../../src/config.js";
+import { ConfigError, loadRuntimeConfig, routeBindingOf, type KnownNetwork, type RuntimeConfig } from "../../src/config.js";
 import { DynamicChallengeError } from "../../src/adapters/outbound/x402-dynamic.js";
-import { composeRails, type DynamicTransportHooks, type RouterCapabilities } from "../../src/main.js";
+import { composeRails, startRouter, type DynamicTransportHooks, type RouterCapabilities } from "../../src/main.js";
 import type { SellerProofCapability } from "../../src/ports/inbound.js";
 import { startCircleFacilitator, type CircleFacilitator } from "../fixtures/circle-facilitator.js";
 import { dialTo, FIXTURE_PUBLIC_ADDRESS, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
@@ -56,7 +56,7 @@ afterEach(async () => {
   while (closers.length > 0) await closers.pop()!();
 });
 
-interface Fixtures { circle: CircleFacilitator; svm: SvmFacilitator; rpc: SolanaRpcFixture; legacy: VerifyingFacilitator; ports: Map<string, number>; dialed: string[] }
+interface Fixtures { circle: CircleFacilitator; svm: SvmFacilitator; rpc: SolanaRpcFixture; legacy: VerifyingFacilitator; ports: Map<string, number>; dialed: string[]; stuck: Set<string> }
 
 async function fixtures(): Promise<Fixtures> {
   const circle = await startCircleFacilitator(TLS, HOSTS.circle);
@@ -67,14 +67,17 @@ async function fixtures(): Promise<Fixtures> {
   closers.push(rpc.close);
   const legacy = await startVerifyingFacilitator({ tls: TLS });
   closers.push(legacy.close);
-  return { circle, svm, rpc, legacy, ports: new Map([[HOSTS.circle, circle.port], [HOSTS.svm, svm.port], [HOSTS.rpc, rpc.port], [HOSTS.legacy, legacy.port]]), dialed: [] };
+  return { circle, svm, rpc, legacy, ports: new Map([[HOSTS.circle, circle.port], [HOSTS.svm, svm.port], [HOSTS.rpc, rpc.port], [HOSTS.legacy, legacy.port]]), dialed: [], stuck: new Set() };
 }
 
 function hooksOf(fx: Fixtures): DynamicTransportHooks {
   return {
     interfaces: () => [],
     tls: { ca: [TLS.ca] },
-    lookup: (_hostname, _options, callback) => callback(null, [{ address: FIXTURE_PUBLIC_ADDRESS, family: 4 }]),
+    lookup: (hostname, _options, callback) => {
+      if (fx.stuck.has(hostname)) return; // 名前解決が永遠に答えない
+      callback(null, [{ address: FIXTURE_PUBLIC_ADDRESS, family: 4 }]);
+    },
     dialForTest: (target) => {
       fx.dialed.push(target.hostname);
       const port = fx.ports.get(target.hostname);
@@ -91,11 +94,11 @@ function profile(profileId: string, network: string, asset: string, payTo: strin
   return { profileId, sourceRail: "x402", source: { network, asset, decimals: 6, payTo }, rail: "x402", destination: { scheme: "exact", network: BASE, asset: USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" } }, par: true, maxUpstreamAmount: "100000", fee: { flat: "1000", bps: 0, min: "1000" } };
 }
 
-async function configOf(options: { arcPayTo?: string; solPayTo?: string; withLegacy?: boolean; solanaRpc?: string | null } = {}): Promise<{ config: RuntimeConfig; dir: string }> {
+async function configOf(options: { arcPayTo?: string; solPayTo?: string; withLegacy?: boolean; withArcRoute?: boolean; solanaRpc?: string | null; offerSeconds?: number; networks?: readonly KnownNetwork[] } = {}): Promise<{ config: RuntimeConfig; dir: string; env: Record<string, string> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "multirail-compose-"));
   const arcPayTo = options.arcPayTo ?? proof.address;
   const solPayTo = options.solPayTo ?? owner;
-  const routes = [route("arc", ARC, ARC_USDC, arcPayTo), route("sol", SOL, MINT, solPayTo), ...(options.withLegacy === false ? [] : [route("base", BASE, USDC, BASE_RECEIVER)])];
+  const routes = [...(options.withArcRoute === false ? [] : [route("arc", ARC, ARC_USDC, arcPayTo)]), route("sol", SOL, MINT, solPayTo), ...(options.withLegacy === false ? [] : [route("base", BASE, USDC, BASE_RECEIVER)])];
   const document = {
     router: {
       approvalTtlMs: 60_000,
@@ -115,28 +118,27 @@ async function configOf(options: { arcPayTo?: string; solPayTo?: string; withLeg
   };
   const configPath = path.join(dir, "router.config.json");
   writeFileSync(configPath, JSON.stringify(document));
-  const config = loadRuntimeConfig(
-    {
-      ROUTER_CONFIG_PATH: configPath,
-      ROUTER_PRINCIPAL_TOKENS: "judge:public",
-      ROUTER_ADAPTER_MODE: "real",
-      ROUTER_SUBETHA_FACILITATOR_URL: "https://subetha.other.test",
-      ROUTER_X402_INBOUND_FACILITATOR_URL: `https://${HOSTS.legacy}`,
-      ...(options.solanaRpc === null ? {} : { ROUTER_SOLANA_RPC_URL: options.solanaRpc ?? `https://${HOSTS.rpc}` }),
-      ROUTER_CANONICAL_BASE_URL: "https://router.test",
-      ROUTER_JOURNAL_PATH: path.join(dir, "journal.ndjson"),
-    },
-    (file) => readFileSync(file, "utf8"),
-    { networks: TEST_NETWORKS },
-  );
-  return { config, dir };
+  const env: Record<string, string> = {
+    ROUTER_CONFIG_PATH: configPath,
+    ROUTER_PRINCIPAL_TOKENS: "judge:public",
+    ROUTER_ADAPTER_MODE: "real",
+    ROUTER_SUBETHA_FACILITATOR_URL: "https://subetha.other.test",
+    ROUTER_X402_INBOUND_FACILITATOR_URL: `https://${HOSTS.legacy}`,
+    ...(options.solanaRpc === null ? {} : { ROUTER_SOLANA_RPC_URL: options.solanaRpc ?? `https://${HOSTS.rpc}` }),
+    ...(options.offerSeconds === undefined ? {} : { ROUTER_X402_INBOUND_OFFER_SECONDS: String(options.offerSeconds) }),
+    ROUTER_CANONICAL_BASE_URL: "https://router.test",
+    ROUTER_JOURNAL_PATH: path.join(dir, "journal.ndjson"),
+    ROUTER_HTTP_PORT: "0",
+  };
+  const config = loadRuntimeConfig(env, (file) => readFileSync(file, "utf8"), { networks: options.networks ?? TEST_NETWORKS });
+  return { config, dir, env };
 }
 
-function capabilitiesOf(fx: Fixtures, sellerProofs: Readonly<Record<string, SellerProofCapability>> | null = { [ARC]: proof.capability }): RouterCapabilities {
+function capabilitiesOf(fx: Fixtures, sellerProofs: Readonly<Record<string, SellerProofCapability>> | null = { [ARC]: proof.capability }, networks: readonly KnownNetwork[] = TEST_NETWORKS): RouterCapabilities {
   return {
     // 実鍵（乱数）の能力: fixture の能力は上流を loopback に限るので、TLS の fixture の網では実鍵の形を使う（署名はしない試験）。
     evmSigning: createRealEvmCapability(generatePrivateKey()).capability(BASE),
-    knownNetworksForTest: TEST_NETWORKS,
+    knownNetworksForTest: networks,
     ...(sellerProofs === null ? {} : { sellerProofs }),
     transportHooksForTest: hooksOf(fx),
     dynamicTransportHooksForTest: hooksOf(fx),
@@ -175,6 +177,16 @@ describe("合成: facilitator と adapter の選択（network ごと）", () => 
     expect(fx.svm.seen.verifyCalls).toBe(0);
     expect(fx.legacy.calls.verify).toBe(0);
 
+    // Base Sepolia の route は env の facilitator（legacy）だけ。
+    const baseRoute = config.router.routes["base"]!;
+    const baseOffer = await rails.inbound.createOffer({ routeId: "base", amount: "10000", asset: USDC, network: BASE, routeBinding: routeBindingOf(baseRoute), nowMs: Date.now() });
+    expect(baseOffer.extra["assetTransferMethod"]).toBeUndefined();
+    const baseCredential = JSON.parse(Buffer.from(await createX402Payer(generatePrivateKey()).credentialFor(baseOffer as never, 84532), "base64").toString("utf8"));
+    expect(await rails.inbound.verify(baseOffer, baseCredential, { routeId: "base" })).toEqual({ isValid: true });
+    expect(fx.legacy.calls.verify).toBe(1);
+    expect(fx.circle.seen.verifyCalls).toBe(1);
+    expect(fx.svm.seen.verifyCalls).toBe(0);
+
     // Solana の route。
     const solRoute = config.router.routes["sol"]!;
     const solOffer = await rails.inbound.createOffer({ routeId: "sol", amount: "10000", asset: MINT, network: SOL, routeBinding: routeBindingOf(solRoute), nowMs: Date.now() });
@@ -186,16 +198,25 @@ describe("合成: facilitator と adapter の選択（network ごと）", () => 
     expect(fx.svm.seen.verifyCalls).toBe(1);
     expect(fx.circle.seen.verifyCalls).toBe(1);
 
-    // 動的プロファイルも同じ選択（offer の束縛からプロファイルを引く）。
+    // 動的プロファイルも同じ選択（offer の束縛からプロファイルを引く）: Solana と Arc の両方。
     const dyn = await rails.inbound.createOffer({ routeId: "dyn-sol-to-x402", amount: "11000", asset: MINT, network: SOL, routeBinding: "dynamic|dyn-sol-to-x402|GET|https%3A%2F%2Fprovider.test%2Fv1%2Fx", nowMs: Date.now() });
     expect(dyn.payTo).toBe(owner);
-    await rails.inbound.verify(dyn, await svmCredential(dyn), { routeId: "dyn-sol-to-x402" });
+    expect(await rails.inbound.verify(dyn, await svmCredential(dyn), { routeId: "dyn-sol-to-x402" })).toEqual({ isValid: true });
     expect(fx.svm.seen.verifyCalls).toBe(2);
+    const dynArc = await rails.inbound.createOffer({ routeId: "dyn-arc-to-x402", amount: "11000", asset: ARC_USDC, network: ARC, routeBinding: "dynamic|dyn-arc-to-x402|GET|https%3A%2F%2Fprovider.test%2Fv1%2Fx", nowMs: Date.now() });
+    const dynArcCredential = JSON.parse(Buffer.from(await createX402Payer(generatePrivateKey()).credentialFor(dynArc as never, 5042002), "base64").toString("utf8"));
+    expect(rails.inbound.preflight(dynArc, dynArcCredential, Date.now())).toEqual({ ok: true });
+    // プロファイルの Circle 受信は署名を quote に束縛する（nonce を別の値にした authorization は落ちる）。
+    const rebound = { ...dynArcCredential, payload: { ...dynArcCredential.payload, authorization: { ...dynArcCredential.payload.authorization, nonce: `0x${"ee".repeat(32)}` } } };
+    expect(rails.inbound.preflight(dynArc, rebound, Date.now())).toEqual({ ok: false, reason: "nonce_mismatch" });
+    expect(await rails.inbound.verify(dynArc, dynArcCredential, { routeId: "dyn-arc-to-x402" })).toEqual({ isValid: true });
+    expect(fx.circle.seen.verifyCalls).toBe(2);
+    expect(fx.legacy.calls.verify).toBe(1);
     // quote・purchase 中に /supported・RPC へは出ない。
     expect(fx.svm.seen.supportedCalls).toBe(1);
     expect(fx.rpc.calls).toHaveLength(1);
-    // 宛先はすべて表の中（名前解決の fixture 以外へ出ていない）。
-    expect(new Set(fx.dialed).size).toBeLessThanOrEqual(4);
+    // 宛先は表の中の 4 つだけ（名前解決の fixture 以外へ出ていない）。
+    expect([...new Set(fx.dialed)].sort()).toEqual([HOSTS.circle, HOSTS.legacy, HOSTS.rpc, HOSTS.svm].sort());
   });
 });
 
@@ -213,6 +234,10 @@ describe("合成: 売り手証明の能力の束縛（route とプロファイ�
     const mixed = await configOf({ arcPayTo: proof.address });
     const profileOnly = { ...mixed.config, router: { ...mixed.config.router, dynamic: { ...mixed.config.router.dynamic!, profiles: { ...mixed.config.router.dynamic!.profiles, "dyn-arc-to-x402": { ...mixed.config.router.dynamic!.profiles["dyn-arc-to-x402"]!, source: { ...mixed.config.router.dynamic!.profiles["dyn-arc-to-x402"]!.source, payTo: otherKey.address } } } } } };
     expect(() => composeRails(profileOnly as RuntimeConfig, capabilitiesOf(fx), () => {}, () => {})).toThrow(/dynamic.profiles.dyn-arc-to-x402: the seller proof capability is bound to a different network or address/);
+    // Arc の静的 route が無く、プロファイルだけが Circle を使う構成でも、能力の欠落・network の不一致はプロファイルで止まる。
+    const profilesOnly = await configOf({ withArcRoute: false });
+    expect(() => composeRails(profilesOnly.config, capabilitiesOf(fx, null), () => {}, () => {})).toThrow(/dynamic.profiles.dyn-arc-to-x402: a seller proof capability is required/);
+    expect(() => composeRails(profilesOnly.config, capabilitiesOf(fx, { [ARC]: otherNetwork }), () => {}, () => {})).toThrow(/dynamic.profiles.dyn-arc-to-x402: the seller proof capability is bound to a different network/);
   });
 });
 
@@ -260,4 +285,88 @@ describe("合成: 拒否ホスト", () => {
     }
     expect(fx.dialed.length).toBe(dialedBefore);
   });
+});
+
+describe("合成: 起動時の検査の否定（T4-b の各行を合成で）と startRouter の境界", () => {
+  const negatives: [string, (fx: Fixtures) => void, RegExp][] = [
+    ["feePayer が 2 つ", (fx) => { fx.svm.state.kinds = [...fx.svm.state.kinds, { x402Version: 2, scheme: "exact", network: SOL, extra: { feePayer: "11111111111111111111111111111112" } }]; }, /more than one feePayer/],
+    ["feePayer の形違い", (fx) => { fx.svm.state.kinds = [{ x402Version: 2, scheme: "exact", network: SOL, extra: { feePayer: "abc" } }]; }, /well-formed feePayer/],
+    ["feePayer = payTo（隔離）", (fx) => { fx.svm.state.kinds = [{ x402Version: 2, scheme: "exact", network: SOL, extra: { feePayer: owner } }]; }, /collides with a fixed account/],
+    ["ATA の owner が違う", (fx) => { fx.rpc.state.reply = "ok"; (fx.rpc as unknown as { accountsOverride?: unknown }).accountsOverride = undefined; }, /./],
+    ["/supported が 64 KiB 超", (fx) => { fx.svm.state.supportedReply = "huge"; }, /did not return a JSON object/],
+    ["RPC が redirect", (fx) => { fx.rpc.state.reply = "redirect"; }, /RPC could not be read/],
+    ["/supported の名前解決が止まる", (fx) => { fx.stuck.add(HOSTS.svm); }, /could not be read/],
+  ];
+  for (const [name, arrange, pattern] of negatives) {
+    it(`${name} → startup が ConfigError（core は作られない）`, async () => {
+      const fx = await fixtures();
+      if (name === "ATA の owner が違う") {
+        // owner の違う ATA: RPC fixture を別の owner で立て直す。
+        await fx.rpc.close();
+        const other = String((await generateKeyPairSigner()).address);
+        const rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls: TLS, ata: { address: ata, owner: other } });
+        closers.push(rpc.close);
+        fx.ports.set(HOSTS.rpc, rpc.port);
+      } else {
+        arrange(fx);
+      }
+      const { config } = await configOf();
+      const rails = composeRails(config, capabilitiesOf(fx), () => {}, () => {});
+      const started = Date.now();
+      await expect(rails.startup!()).rejects.toThrow(name === "ATA の owner が違う" ? /not owned by the configured payTo/ : pattern);
+      expect(Date.now() - started).toBeLessThan(8_000);
+      // 起動時の検査が通っていないので、SVM の offer は出せない（preflight も同じ）。
+      await expect(rails.inbound.createOffer({ routeId: "sol", amount: "10000", asset: MINT, network: SOL, routeBinding: routeBindingOf(config.router.routes["sol"]!), nowMs: Date.now() })).rejects.toThrow(/startup checks have not run/);
+    }, 20_000);
+  }
+
+  it("startRouter は起動時の検査が失敗すると listen せずに落ちる（journal も server も作らない）", async () => {
+    const fx = await fixtures();
+    fx.svm.state.kinds = [];
+    const { env } = await configOf();
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(env)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
+    }
+    const written: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => { written.push(String(chunk)); return true; }) as typeof process.stdout.write;
+    try {
+      await expect(startRouter(capabilitiesOf(fx))).rejects.toThrow(/no exact kind/);
+    } finally {
+      process.stdout.write = originalWrite;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    expect(written.join("")).not.toContain("listening");
+    expect(fx.svm.seen.supportedCalls).toBe(1);
+  });
+
+  it("Circle の静的 rail: 表の domain・有効期間（env）と wire の分離・診断の転送・名前解決の期限", async () => {
+    const fx = await fixtures();
+    // 表の Arc の domain を「USD Coin/2」に変えると、要求の extra.name もそれになる（adapter の既定 USDC/2 ではない）。
+    const networks: KnownNetwork[] = TEST_NETWORKS.map((n) => (n.network === ARC ? { ...n, assets: n.assets.map((a) => ({ ...a, domain: { name: "USD Coin", version: "2" } })) } : n));
+    const { config } = await configOf({ offerSeconds: 600, networks });
+    const notes: string[] = [];
+    const rails = composeRails(config, capabilitiesOf(fx, { [ARC]: proof.capability }, networks), () => {}, (m) => notes.push(m));
+    await rails.startup!();
+    const now = Date.now();
+    const offer = await rails.inbound.createOffer({ routeId: "arc", amount: "10000", asset: ARC_USDC, network: ARC, routeBinding: routeBindingOf(config.router.routes["arc"]!), nowMs: now });
+    expect(offer.maxTimeoutSeconds).toBe(30);
+    expect(offer.extra.expiresAt).toBe(Math.floor(now / 1000) + 600);
+    expect(offer.extra["name"]).toBe("USD Coin");
+    const credential = JSON.parse(Buffer.from(await createX402Payer(generatePrivateKey()).credentialFor(offer as never, 5042002), "base64").toString("utf8"));
+    fx.circle.state.settle = "registration-required";
+    expect(await rails.inbound.settle(offer, credential, { routeId: "arc" })).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(notes).toEqual(["router: facilitator diagnostic facilitator_trial_exhausted (routes.arc)"]);
+    expect((fx.circle.seen.lastRequirements as { extra: { name: string } }).extra.name).toBe("USD Coin");
+    // 名前解決が止まれば、HTTP の期限（10 秒）を待たずに DNS の期限で失敗する。
+    fx.stuck.add(HOSTS.circle);
+    const started = Date.now();
+    await expect(rails.inbound.verify(offer, credential, { routeId: "arc" })).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(8_000);
+  }, 30_000);
 });

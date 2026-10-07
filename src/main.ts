@@ -519,7 +519,9 @@ export function composeRails(
         throw new ConfigError(`${at}.source.payTo is required for x402 inbound`);
       }
       const facilitator = facilitatorFor(route.source.network, at);
-      const transport = transportFor(inboundLoopback, report, staticHooks);
+      const isLegacy = route.source.network === LEGACY_X402_INBOUND_NETWORK;
+      // 既存の Base Sepolia は今までの transport。新しい静的 rail（Circle・SVM）は名前解決にも期限を置く（SR-2。止まった DNS が HTTP の期限を越えて待たない）。
+      const transport = isLegacy ? transportFor(inboundLoopback, report, staticHooks) : createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } });
       // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
       // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
       inboundRails[`x402:${route.routeId}`] =
