@@ -229,6 +229,15 @@ journal の先頭バイト列が不変 → `subetha-egress check` → 入口を�
 最大 6 秒、3 本）を行うので、入口の起動待ちは 120 秒（replay の分の余裕を含む運用上の値で、端から端の保証ではない）、入れ替えの待ちは 180 秒の経過時間にしてある）。
 **戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
 
+**実施の記録（G-4、2026-10-07 11:03Z。owner の決定「進めて良いです」）**: PR #68（`ce7de77`）で `RAILS_ACTIVATION = { arc: true, solana: true }`。
+イメージ `b-ce7de77` は手元で作った（§6。製品のファイルは PR の最初の試験済みの commit から変えていないことを `git diff` で確かめ、読み込み済みのイメージに tag を付け直した）。
+入れ替えは `deploy/swap-image.sh`（Codex のレビュー 7 回: #1 は有効化の変更に APPROVE WITH CHANGES、#2〜#6 は script の失敗時の扱いに REJECT、#7 で APPROVE WITH CHANGES を反映。
+加えて偽の docker・systemctl・curl による 12 通りの模擬実行で、exit 0/1/2 の各経路と「ログの中身が出ない」ことを確かめた）。結果: 11:03:26Z 開始、11:03:37Z 終了、exit 0。
+入口の閉鎖は約 7 秒。journal の先頭 93,818 バイトは不変、`subetha-egress check` 合格、子の listening 行あり、`could not start the Router` 0 行。
+rollback は `subetha-router-prev-20261007T110330Z`（`b-4d2c925`。それより古い prev は削除）。公開の MCP を HTTPS で直接呼んで確認: route 4 本
+（`md-mpp-eth-snapshot-arc` の受取 `0xAF42…b4Ea`、`md-x402-eth-snapshot-sol` の受取 `GHGd…sg4d`）、動的プロファイル 6 本、`dynamic.enabled: true`。
+**AC-6（公開の有効化）はこれで満たした。**
+
 **有効にした後に見るもの**（hosted の入口は Router の process の stderr を転送しないので、**ログの不在は成功の証拠にならない**。見るのは次の口）:
 起動の成否は `docker logs` の `router: {"event":"listening",...}` の有無（Solana の起動時の検査が落ちれば Router は起動せず、入口は `could not start the Router` で終わる。
 理由は上記のとおり `tools/remote-router-process.ts` を直接起動して読む）。稼働中は journal（ボリュームの `journal.ndjson`）の終端: `unknown`（settle の要求の後の失敗。自動で再 settle しない。
