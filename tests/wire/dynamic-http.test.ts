@@ -347,8 +347,8 @@ describe("client", () => {
     expect(listed.dynamic).toMatchObject({ enabled: true, profiles: [{ profileId: PROFILE_ID }] });
   });
 
-  test("動的購入の期限は quote の期限と別（既定 120 秒）: 上流の支払いが長くても delivered。静的の購入は従来どおり timeoutMs", async () => {
-    expect(DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS).toBe(120_000);
+  test("購入の期限は quote の期限と別（既定 180 秒、静的も動的も）: 上流の支払いが長くても delivered。executeTimeoutMs を短くすれば静的も unknown", async () => {
+    expect(DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS).toBe(180_000);
     const { client } = await boot();
     // 既定（executeTimeoutMs 未指定）でも、quote の期限 400 ms より長い支払いが通る。
     const c = client(undefined, { timeoutMs: 400 });
@@ -357,10 +357,15 @@ describe("client", () => {
     outbound.payDelayMs = 1_200;
     const result = await c.execute({ quote, requestId: "r1", approval: { approved: true, quoteId: quote.quoteId }, credential: credentialFor(quote.source.offer) });
     expect(result).toMatchObject({ outcome: "delivered", snapshot: BODY });
-    // 静的 route の購入は timeoutMs のまま（同じ遅さなら unknown になる）。
+    // 静的 route の購入も executeTimeoutMs（multirail 設計 §4.4）: quote の timeoutMs 400 ms より長い支払いが通る。
     const s = await c.quote({ routeId: STATIC_ROUTE, requestId: "s1" });
     const sq = (s as { quote: QuoteView }).quote;
-    expect(await c.execute({ quote: sq, requestId: "s1", approval: { approved: true, quoteId: sq.quoteId }, credential: credentialFor(sq.source.offer) })).toMatchObject({ outcome: "unknown", reason: "transport_uncertain" });
+    expect(await c.execute({ quote: sq, requestId: "s1", approval: { approved: true, quoteId: sq.quoteId }, credential: credentialFor(sq.source.offer) })).toMatchObject({ outcome: "delivered" });
+    // executeTimeoutMs を明示して短くすれば、静的の購入も期限で unknown になる（期限が executeTimeoutMs で決まることの確認）。
+    const tight = client(undefined, { timeoutMs: 5_000, executeTimeoutMs: 300 });
+    const s2 = await tight.quote({ routeId: STATIC_ROUTE, requestId: "s2" });
+    const sq2 = (s2 as { quote: QuoteView }).quote;
+    expect(await tight.execute({ quote: sq2, requestId: "s2", approval: { approved: true, quoteId: sq2.quoteId }, credential: credentialFor(sq2.source.offer) })).toMatchObject({ outcome: "unknown", reason: "transport_uncertain" });
   });
 
   test("動的 quote の期限: quoteTimeoutMs → 明示の timeoutMs → 既定 30 秒。明示した timeoutMs は従来どおり効く", async () => {

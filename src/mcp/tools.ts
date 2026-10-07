@@ -157,6 +157,22 @@ function dynamicSubjectFields(quote: QuoteView): Record<string, unknown> {
   };
 }
 
+/**
+ * レールの補足（multirail 設計 §7）: Solana の受信は `npm run sign` が transaction を**部分署名するだけ**で、送信と手数料は facilitator の
+ * fee payer が持つ。Arc は Circle の facilitator 経由で、settle に数十秒掛かり得る。EVM の x402 は従来どおり。
+ */
+function railHintOf(quote: QuoteView): string {
+  const network = String((quote.source as Record<string, unknown>)["network"] ?? "");
+  if (network.startsWith("solana:")) {
+    return " This offer is paid on Solana (x402 exact): `npm run sign` builds and partially signs a transaction with your Solana key " +
+      "(`SOLANA_PAYER_PRIVATE_KEY`; `npm run wallet:new:solana`); nothing moves until the Router settles it through the facilitator, whose fee payer broadcasts.";
+  }
+  if (network === "eip155:5042002") {
+    return " This offer is paid on Arc testnet (x402 exact via Circle's facilitator): `npm run sign` only signs; settlement can take up to about a minute.";
+  }
+  return "";
+}
+
 /** 動的 quote の `nextStep`（FR-10）。開示の前提を文でも書く。 */
 function dynamicNextStep(quote: QuoteView): string {
   const fundsMove = fundsMoveBeforePurchase(quote);
@@ -300,7 +316,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
             `${TOOL_NAMES.purchase} is called. Get approval FIRST, then build the credential. ` +
             "If the human does not approve, do not build it."
           : "Explicit human approval is required. If the human approves, call " +
-            `${TOOL_NAMES.purchase} with this quoteId as \`approval\`. If not, do not call it.`,
+            `${TOOL_NAMES.purchase} with this quoteId as \`approval\`. If not, do not call it.` +
+            railHintOf(result.quote),
         subject: approvalSubject(result.quote),
       });
     },
