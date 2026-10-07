@@ -33,8 +33,10 @@ COPY tools ./tools
 COPY tests/fixtures ./tests/fixtures
 
 # 出荷するものだけを型検査する（`tests/wire` と `examples` は実行時に使わない）。
+# 条件は `tsconfig.json` と同じ（`lib` は ES2023 だけ: DOM の型を混ぜない。`skipLibCheck`: 依存の `.d.ts` は検査しない）。
+# T8-b で入口が `src/main.ts` 全体を引き込むようになり、DOM の `BodyInit` との衝突と、依存の型検査によるヒープ不足（本番ホスト 1.8 GB）が出た。
 RUN npx --no-install tsc --noEmit \
-      --strict --module nodenext --moduleResolution nodenext --target es2023 --types node \
+      --strict --module nodenext --moduleResolution nodenext --target es2023 --lib es2023 --types node --skipLibCheck \
       tools/remote-mcp.ts
 
 FROM node:22-bookworm-slim AS runtime
