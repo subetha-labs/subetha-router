@@ -15,49 +15,36 @@
  */
 
 import { reportStartupFailure, startRouter, type RouterCapabilities } from "../src/main.js";
-import { createRealEvmCapability } from "./real-evm-capability.js";
-import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
+import { ProcessEntryError, routerProcessCapabilitiesOf } from "./rails-entry.js";
 
-/** x402 送信用の鍵。無ければ x402 送信 route を設定してはいけない。 */
-const evmKey = process.env["SUBETHA_OUTBOUND_X402_KEY"];
-/** MPP 送信用の鍵。無ければ MPP 送信 route を設定してはいけない。 */
-const mppKey = process.env["SUBETHA_OUTBOUND_MPP_KEY"];
 /**
- * Tempo の RPC。**認証付きを強く推奨**。
- *
- * 既定は公開エンドポイント（`rpc.moderato.tempo.xyz`）だが、Cloudflare のような
- * 共有 egress IP から叩くと**レート制限を受けやすい**。Router は送金の前に
- * chainId / nonce / 見積りを読むので、ここで詰まると送信レグが不安定になる。
- * 認証付き RPC の URL を渡せば、その経路を避けられる。
- *
- * **URL 自体が資格情報を含むことがある**（API キー入りのパス）。ログに出さない。
+ * 能力の組み立ては純粋関数 `routerProcessCapabilitiesOf`（`tools/rails-entry.ts`）。ここは env を渡して結果を注入するだけ。
+ * - 送信の鍵（`SUBETHA_OUTBOUND_X402_KEY`・`SUBETHA_OUTBOUND_MPP_KEY`）。片方だけでも起動できる（その route を設定しなければよい）
+ * - Tempo の RPC（`SUBETHA_TEMPO_RPC_URL`）。**認証付きを強く推奨**（公開エンドポイントは共有 egress IP からレート制限を受けやすい）。
+ *   URL 自体が資格情報を含むことがあるのでログに出さない
+ * - 多レール（Arc・Solana の受信。multirail 設計 §3・§8）: ホストが渡す内部の env `SUBETHA_RAILS_ACTIVATION` から有効化を復元し、
+ *   **設定生成と同じ値**で能力を作る（Arc: 売り手証明の能力。Solana: 起動時の検査の RPC を依存先に）。無効なら該当の env は読まない
+ * 失敗は固定文だけ（鍵・URL の値は出さない）。
  */
-const mppRpcUrl = process.env["SUBETHA_TEMPO_RPC_URL"];
-
-if ((evmKey === undefined || evmKey === "") && (mppKey === undefined || mppKey === "")) {
+let capabilities: RouterCapabilities;
+try {
+  capabilities = routerProcessCapabilitiesOf(process.env);
+} catch (error) {
+  // 固定文だけ（理由の code で選ぶ。例外の文字列は出さない）。
+  const code = error instanceof ProcessEntryError ? error.code : undefined;
   process.stderr.write(
-    "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required\n",
+    code === "outbound_keys"
+      ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required\n"
+      : code === "rails"
+        ? "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)\n"
+        : "router process capabilities could not be created\n",
   );
   process.exit(2);
 }
 
-const capabilities: RouterCapabilities = {
-  // 動的上流 URL の拒否ホスト（設計 §7.4）: 送信 MPP の RPC。URL は値ごと渡すが、使うのはホスト名だけ（ログには出ない）。
-  dependencyUrls: [mppRpcUrl === undefined || mppRpcUrl === "" ? TEMPO_MODERATO_RPC : mppRpcUrl],
-  ...(evmKey === undefined || evmKey === ""
-    ? {}
-    : { evmSigning: createRealEvmCapability(evmKey).capability("eip155:84532") }),
-  ...(mppKey === undefined || mppKey === ""
-    ? {}
-    : {
-        mppTempo: createRealMppCapability(mppKey, {
-          ...(mppRpcUrl === undefined || mppRpcUrl === "" ? {} : { rpcUrl: mppRpcUrl }),
-        }).capability(),
-      }),
-};
-
 // どちらの RPC を使っているかだけ示す。**URL は出さない**（キーを含み得る）。
-if (mppKey !== undefined && mppKey !== "") {
+const mppRpcUrl = process.env["SUBETHA_TEMPO_RPC_URL"];
+if (capabilities.mppTempo !== undefined) {
   process.stderr.write(
     `tempo rpc: ${mppRpcUrl === undefined || mppRpcUrl === "" ? "public (rate-limited from shared egress IPs)" : "configured"}\n`,
   );

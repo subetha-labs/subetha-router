@@ -26,7 +26,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpIngress } from "../src/mcp/ingress.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
-import { INBOUND, routerConfigOf } from "./remote-mcp-config.js";
+import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation } from "./remote-mcp-config.js";
+import { railsChildEnvOf, railsOptionsOf } from "./rails-entry.js";
 
 function note(message: string): void {
   process.stderr.write(`${message}\n`);
@@ -41,10 +42,44 @@ function required(name: string): string {
   return value;
 }
 
-async function start(): Promise<void> {
+/** ホストの起動の選択肢。公開の入口と受け入れ用の起動（`tools/rails-acceptance-run.ts`）が同じ関数を使う。 */
+export interface HostOptions {
+  /** 多レールの有効化。公開の入口は定数 `RAILS_ACTIVATION`（どちらも false）。受け入れ用の起動だけが true を渡す。 */
+  readonly activation: RailsActivation;
+  /** MCP の入口を bind するアドレス（公開は 0.0.0.0、受け入れは 127.0.0.1）。 */
+  readonly bind: string;
+  readonly port: number;
+  /** journal の固定パス（受け入れ用の起動は公開のものと別にする）。 */
+  readonly journalPath: string;
+}
+
+export interface RunningHost {
+  readonly mcpPort: number;
+  readonly routerPort: number;
+  readonly journalPath: string;
+  stop(): void;
+}
+
+/** 公開の入口の journal の既定（受け入れ用の起動はこれと別のパスでなければならない）。 */
+export function publicJournalPathOf(env: Readonly<Record<string, string | undefined>>): string {
+  return env["SUBETHA_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "journal.ndjson");
+}
+
+export async function startHost(options: HostOptions): Promise<RunningHost> {
   // 送信レグ（Provider への支払い）は運営の資金。受信レグの鍵はここには無い。
   const outboundKey = required("SUBETHA_OUTBOUND_PRIVATE_KEY");
   const receiver = required("SUBETHA_ROUTER_RECEIVER");
+  /**
+   * 多レール（Arc・Solana の受信。multirail 設計 §8）: 1 つの値 `activation` が設定生成と子プロセスの能力の両方を決める。
+   * 無効なら受取鍵・受取 owner・RPC の env は読まない。有効で env が無い・形が違うときは起動しない（固定文のみ）。
+   */
+  let rails;
+  try {
+    rails = railsOptionsOf(options.activation, process.env);
+  } catch {
+    note("rails receivers could not be derived (check SUBETHA_ARC_RECEIVER_KEY / SUBETHA_SOLANA_RECEIVER)");
+    process.exit(2);
+  }
   /**
    * MPP 受信を公開するかどうか。**両方そろって初めて有効**:
    * - `SUBETHA_MPP_INBOUND_SECRET`: challenge の HMAC 束縛鍵（32 バイト以上）
@@ -59,7 +94,7 @@ async function start(): Promise<void> {
    */
   const x402OutboundKey = process.env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey;
   const mppInboundEnabled = mppInboundSecret !== "";
-  const port = Number(process.env["PORT"] ?? "8787");
+  const port = options.port;
 
   /**
    * 使い捨ての作業領域。**config と証拠ログだけ**を置く（起動ごとに新しくてよい）。
@@ -75,10 +110,15 @@ async function start(): Promise<void> {
    * コンテナで動かす場合は、このディレクトリを**ボリュームとして外に出す**こと
    * （`docs/DEPLOY.md`）。出さないとコンテナ作り直しで消える。
    */
-  const journalPath =
-    process.env["SUBETHA_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "journal.ndjson");
+  const journalPath = options.journalPath;
   await mkdir(path.dirname(journalPath), { recursive: true });
-  const config = routerConfigOf(process.env, receiver, mppInboundEnabled);
+  let config: Record<string, unknown>;
+  try {
+    config = routerConfigOf(process.env, receiver, mppInboundEnabled, rails);
+  } catch {
+    note("router config could not be generated (check the rails receivers)");
+    process.exit(2);
+  }
   const configPath = path.join(work, "router.config.json");
   await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
 
@@ -114,6 +154,8 @@ async function start(): Promise<void> {
             ROUTER_MPP_INBOUND_OFFER_SECONDS: process.env["SUBETHA_OFFER_SECONDS"] ?? "600",
           }
         : {}),
+      // 多レール: 有効化の値と、有効なレールの受取鍵・RPC だけ（`tools/rails-entry.ts`）。
+      ...railsChildEnvOf(options.activation, process.env),
     });
   } catch (error) {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
@@ -148,12 +190,13 @@ async function start(): Promise<void> {
       // リモートはステートレス: 呼び出し側が quote を持ち回る（慣行に合わせる）。
       // 送信元は入口が自分で導く（外から来た `x-router-source` は使わない）。
       const mcp = await buildServer({ stateless: true, source: sourceOfRequest(req.headers, req.socket.remoteAddress) });
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      // SDK 1.32 の型は `exactOptionalPropertyTypes` と合わない（試験と同じ扱い）。値は変えない。
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined } as never);
       res.on("close", () => {
         void transport.close();
         void mcp.close();
       });
-      await mcp.connect(transport);
+      await mcp.connect(transport as never);
       await transport.handleRequest(req, res, body);
     },
   });
@@ -165,8 +208,24 @@ async function start(): Promise<void> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
-  http.listen(port, "0.0.0.0", () => {
-    note(`subetha-router remote MCP on :${port}/mcp (inbound payer: the caller's own key)`);
+  const mcpPort = await new Promise<number>((resolve) => {
+    http.listen(port, options.bind, () => {
+      const address = http.address();
+      const bound = typeof address === "object" && address !== null ? address.port : port;
+      note(`subetha-router remote MCP on ${options.bind}:${bound}/mcp (inbound payer: the caller's own key)`);
+      resolve(bound);
+    });
+  });
+  return { mcpPort, routerPort: router.port, journalPath, stop };
+}
+
+/** 公開の入口: 多レールは定数で無効、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
+async function start(): Promise<void> {
+  await startHost({
+    activation: RAILS_ACTIVATION,
+    bind: "0.0.0.0",
+    port: Number(process.env["PORT"] ?? "8787"),
+    journalPath: publicJournalPathOf(process.env),
   });
 }
 
