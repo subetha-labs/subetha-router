@@ -1,7 +1,7 @@
 /**
  * SVM 送信の **process の中断**（送信の設計 §7.2「中断」、AC-10。タスク U8-b）。
  *
- * Router を**子 process**で起動し（`tests/fixtures/router-rails-process.ts`）、SVM の送信の停止点 `afterReserve`／`afterSign`／`beforeSend` で
+ * Router を**子 process**で起動し（`tests/fixtures/router-svm-process.ts`）、SVM の送信の停止点 `afterReserve`／`afterSign`／`beforeSend` で
  * 子が自分に SIGKILL する（core の catch も終端の追記も通らない）。親が fixture（Base の facilitator・SVM の facilitator・Solana RPC・Provider）を持ち、
  * journal・署名の記録 file・Provider の `seen.paid` で観測する:
  * - 停止前: journal に `destination_message_reserved`、intent は終端でない。署名の回数は停止点で決まる（afterReserve 0、afterSign・beforeSend 1）。支払い要求 0
@@ -122,7 +122,7 @@ async function world(): Promise<World> {
 }
 
 async function boot(w: World, stopAt?: string): Promise<Listening> {
-  const child = await startListening("tests/fixtures/router-rails-process.ts", [], { ...w.env, ...(stopAt === undefined ? {} : { SUBETHA_TEST_SVM_STOP_AT: stopAt }) }, { listenTimeoutMs: 40_000 });
+  const child = await startListening("tests/fixtures/router-svm-process.ts", [], { ...w.env, ...(stopAt === undefined ? {} : { SUBETHA_TEST_SVM_STOP_AT: stopAt }) }, { listenTimeoutMs: 40_000 });
   w.child = child;
   closers.push(async () => {
     await child.stop();
@@ -219,6 +219,42 @@ describe("停止点で SIGKILL → 予約の行は残り、再起動で unknown�
       expect(w.provider.seen.paid).toHaveLength(1);
     });
   }
+
+  test("source_settled の最中（受信の settle の後、送信の destination_pending を書く前の読み直し）に親から SIGKILL → 再起動で unknown（interrupted_at_restart）。受信の証跡は残り、署名 0・支払い 0、再提出でも送信しない", async () => {
+    const w = await world();
+    const first = await boot(w);
+    const quote = await quoteOf(first, "s1");
+    const credential = await credentialOf(quote);
+    // 402 の読取は quote（1）・purchase の受信前（2）・deliver の読み直し（3）。3 回目だけ Provider で止める。
+    w.provider.state.challengeDelayMs = 20_000;
+    w.provider.state.challengeDelayAfter = 2;
+    const inflight = client(first).execute({ quote, requestId: "s1", approval: { approved: true, quoteId: quote.quoteId }, credential });
+    await waitFor(() => journalEvents(w, quote.paymentId).includes("source_settled") && w.provider.seen.challenges >= 3, "source_settled and the post-settlement challenge read");
+    expect(journalEvents(w, quote.paymentId)).not.toContain("destination_pending");
+    await first.kill("SIGKILL");
+    expect((await inflight).outcome).toBe("unknown");
+    w.provider.state.challengeDelayMs = 0;
+    expect(signLines(w).signs).toBe(0);
+    expect(w.provider.seen.paid).toHaveLength(0);
+    expect(w.legacy.calls).toMatchObject({ verify: 1, settle: 1 });
+
+    const second = await boot(w);
+    expect(await client(second).status(quote.paymentId)).toMatchObject({ found: true, projection: { status: "unknown", terminalReason: "interrupted_at_restart" } });
+    const events = journalEvents(w, quote.paymentId);
+    expect(events).toContain("source_settled");
+    expect(events.at(-1)).toBe("unknown");
+    expect(events).not.toContain("destination_pending");
+    expect(readFileSync(w.journalPath, "utf8")).toContain("\"txRef\"");
+    const again = await client(second).execute({ quote, requestId: "s1", approval: { approved: true, quoteId: quote.quoteId }, credential });
+    expect(again).toMatchObject({ outcome: "unknown", reason: "interrupted_at_restart" });
+    expect(signLines(w).signs).toBe(0);
+    expect(w.provider.seen.paid).toHaveLength(0);
+    expect(w.legacy.calls).toMatchObject({ settle: 1 });
+    // 受信は確定済みなので、その後の購入は通る（予約も残っていないので同じ message でも衝突しない）。
+    const next = await quoteOf(second, "s2");
+    expect((await client(second).execute({ quote: next, requestId: "s2", approval: { approved: true, quoteId: next.quoteId }, credential: await credentialOf(next) })).outcome).toBe("delivered");
+    expect(signLines(w).signs).toBe(1);
+  });
 
   test("dropAfterSettle: facilitator の settle の後に Provider が切る → unknown。再起動後の再提出でも再送信 0", async () => {
     const w = await world();

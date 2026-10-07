@@ -394,7 +394,8 @@ export class IntentStore {
     for (const intent of pending) {
       // メモリ上だけの確定にせず、`unknown` を journal にも残す。
       await this.append(intent.paymentId, "unknown", {
-        outcome: intent.status === "source_pending" ? intent.destination.outcome : "unknown",
+        // 送信を始める前（`source_pending`・`source_settled`）なら送信の結果はそのまま（未送出）。送信の途中なら不明。
+        outcome: intent.status === "source_pending" || intent.status === "source_settled" ? intent.destination.outcome : "unknown",
         reason: "interrupted_at_restart",
       });
     }

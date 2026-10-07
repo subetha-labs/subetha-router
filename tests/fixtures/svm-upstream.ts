@@ -35,6 +35,10 @@ export interface SvmUpstreamState {
   accepts: Record<string, unknown>[] | undefined;
   /** 402 の代わりに返す状態コード。 */
   challengeStatus: number;
+  /** 402 を返すまでの待ち（ミリ秒。settle の後の読み直しの最中に process を落とす試験用）。 */
+  challengeDelayMs: number;
+  /** この回数までの 402 は待たない（例: 2 なら quote と purchase の受信前の読取は即答し、deliver の読み直し（3 回目）だけ待つ）。 */
+  challengeDelayAfter: number;
   /** 支払いつきの要求の扱い。 */
   payMode: "settle" | "verify-only" | "status-500" | "status-404" | "no-receipt-200" | "receipt-then-502" | "drop-after-settle" | "payer-mismatch" | "receipt-only";
   /** 200 の本文。 */
@@ -105,6 +109,8 @@ export async function startSvmUpstream(tls: TlsMaterial, facilitator: { port: nu
     topLevel: {},
     accepts: undefined,
     challengeStatus: 402,
+    challengeDelayMs: 0,
+    challengeDelayAfter: 0,
     payMode: "settle",
     body: { ok: true, source: "svm-provider" },
     payDelayMs: 0,
@@ -125,8 +131,12 @@ export async function startSvmUpstream(tls: TlsMaterial, facilitator: { port: nu
     if (typeof signature !== "string") {
       seen.challenges += 1;
       const required = { x402Version: 2, error: "payment_required", resource: { url: requestedUrl }, accepts: acceptsOf(), ...state.topLevel };
-      response.writeHead(state.challengeStatus, { "content-type": "application/json", "PAYMENT-REQUIRED": encodePaymentRequiredHeader(required as never) });
-      response.end(JSON.stringify({ x402Version: 2 }));
+      const sendChallenge = (): void => {
+        response.writeHead(state.challengeStatus, { "content-type": "application/json", "PAYMENT-REQUIRED": encodePaymentRequiredHeader(required as never) });
+        response.end(JSON.stringify({ x402Version: 2 }));
+      };
+      if (state.challengeDelayMs === 0 || seen.challenges <= state.challengeDelayAfter) sendChallenge();
+      else setTimeout(sendChallenge, state.challengeDelayMs);
       return;
     }
     let payload: unknown;
