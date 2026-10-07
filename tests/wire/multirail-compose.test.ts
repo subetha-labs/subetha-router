@@ -373,3 +373,36 @@ describe("合成: 起動時の検査の否定（T4-b の各行を合成で）と
     expect(Date.now() - started).toBeLessThan(8_000);
   }, 30_000);
 });
+
+describe("合成: settle の後の追跡（設計 §5.8）は起動時の検査と同じ transport で設定の RPC へ", () => {
+  it("confirm の timeout の後、RPC の名前解決が止まっていれば追跡は期限で終わり unknown（接続せず、HTTP の期限を待たない）", async () => {
+    const fx = await fixtures();
+    const { config } = await configOf();
+    const notes: string[] = [];
+    const rails = composeRails(config, capabilitiesOf(fx), () => {}, (m) => notes.push(m));
+    await rails.startup!();
+    const solRoute = config.router.routes["sol"]!;
+    const offer = await rails.inbound.createOffer({ routeId: "sol", amount: "10000", asset: MINT, network: SOL, routeBinding: routeBindingOf(solRoute), nowMs: Date.now() });
+    const credential = await svmCredential(offer);
+    expect(await rails.inbound.verify(offer, credential, { routeId: "sol" })).toEqual({ isValid: true });
+    fx.svm.state.confirm = "timeout";
+    fx.rpc.state.signatureStatuses = ["confirmed"];
+    fx.stuck.add(HOSTS.rpc);
+    const rpcDials = fx.dialed.filter((h) => h === HOSTS.rpc).length;
+    const started = Date.now();
+    expect(await rails.inbound.settle(offer, credential, { routeId: "sol" })).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    // 完了の期限 15 秒（既定）の内側で終わる。RPC には接続していない（名前解決で止まる）。
+    expect(Date.now() - started).toBeLessThan(17_000);
+    expect(fx.dialed.filter((h) => h === HOSTS.rpc)).toHaveLength(rpcDials);
+    expect(fx.rpc.calls.filter((c) => c.method === "getSignatureStatuses")).toHaveLength(0);
+    expect(notes.filter((n) => n.includes("svm_settle_followed_up"))).toEqual([]);
+    // 名前解決が戻れば、同じ構成の次の settle は追跡で settled（診断は route の名で出る）。
+    fx.stuck.delete(HOSTS.rpc);
+    const offer2 = await rails.inbound.createOffer({ routeId: "sol", amount: "10000", asset: MINT, network: SOL, routeBinding: routeBindingOf(solRoute), nowMs: Date.now() });
+    const credential2 = await svmCredential(offer2);
+    expect(await rails.inbound.verify(offer2, credential2, { routeId: "sol" })).toEqual({ isValid: true });
+    const settled = await rails.inbound.settle(offer2, credential2, { routeId: "sol" });
+    expect(settled.outcome).toBe("settled");
+    expect(notes).toContain("router: facilitator diagnostic svm_settle_followed_up (routes.sol)");
+  }, 40_000);
+});

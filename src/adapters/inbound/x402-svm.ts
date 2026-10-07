@@ -302,6 +302,15 @@ export const SVM_RESPONSE_MAX_BYTES = 64 * 1024;
 export interface X402SvmInboundOptions {
   readonly facilitatorUrl: string;
   readonly transport: GuardedTransport;
+  /**
+   * settle の応答の後の期限つきの追跡（設計 §5.8、D-9）に使う Solana の JSON-RPC。無ければ追跡しない（応答が形どおりの成功でなければ `unknown`）。
+   * transport は起動時の検査と同じ方針の guarded transport（loopback 不可・DNS の期限）を合成が渡す。
+   */
+  readonly rpc?: { readonly url: string; readonly transport: GuardedTransport };
+  /** 追跡の期限（既定 30 秒）と間隔（既定 2 秒）。試験は短くする。 */
+  readonly followUp?: { readonly totalMs?: number; readonly intervalMs?: number };
+  /** 運用者向けの固定の診断コード（`svm_settle_followed_up`）。値は渡さない。 */
+  readonly onDiagnostic?: (code: string) => void;
   /** 起動時の検査で固定した値（`resolveSvmInboundPolicy`）。合成側は起動時の検査が埋める置き場を関数で渡す（埋まる前は throw）。 */
   readonly policy: SvmInboundPolicy | (() => SvmInboundPolicy);
   /** wire の `maxTimeoutSeconds`。既定 40。 */
@@ -313,6 +322,48 @@ export interface X402SvmInboundOptions {
 }
 
 const BASE58_SIGNATURE_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
+
+/** settle の応答の後の追跡の既定（設計 §5.8）: 完了の期限 15 秒、間隔 2 秒、RPC の 1 要求の期限 10 秒（残り時間でさらに切る）。 */
+export const SVM_SETTLE_FOLLOW_UP_DEFAULTS = Object.freeze({ totalMs: 15_000, intervalMs: 2_000, requestTimeoutMs: 10_000 });
+
+export function svmSettleFollowUpOf(options: Pick<X402SvmInboundOptions, "followUp">): { readonly totalMs: number; readonly intervalMs: number; readonly requestTimeoutMs: number } {
+  const totalMs = options.followUp?.totalMs ?? SVM_SETTLE_FOLLOW_UP_DEFAULTS.totalMs;
+  const intervalMs = options.followUp?.intervalMs ?? SVM_SETTLE_FOLLOW_UP_DEFAULTS.intervalMs;
+  if (!Number.isFinite(totalMs) || totalMs <= 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error("svm inbound: follow-up totalMs and intervalMs must be positive");
+  }
+  return { totalMs, intervalMs, requestTimeoutMs: Math.min(SVM_SETTLE_FOLLOW_UP_DEFAULTS.requestTimeoutMs, totalMs) };
+}
+
+/** 追跡に入る条件（設計 §5.8 の 2）: 本文が JSON object で、`transaction` が署名の形で、`network` が offer と一致。HTTP status は問わない。 */
+export function svmFollowUpSignatureOf(json: unknown, offer: Pick<InboundOffer, "network">): string | undefined {
+  if (typeof json !== "object" || json === null || Array.isArray(json)) return undefined;
+  const record = json as Record<string, unknown>;
+  if (record["network"] !== offer.network) return undefined;
+  const transaction = record["transaction"];
+  return isSvmSignature(transaction) ? transaction : undefined;
+}
+
+const SVM_COMMITMENTS: ReadonlySet<unknown> = new Set(["processed", "confirmed", "finalized"]);
+
+/**
+ * `getSignatureStatuses` の 1 件の判定（設計 §5.8 の 4）。**形の正しい status**（object で `err` の欄を持ち、`confirmationStatus` が
+ * processed／confirmed／finalized）だけを判定に使う。`null`（知らない署名）・形の違うもの（`{}`、`err` の欄の無いもの）は `pending`。
+ */
+export function svmSignatureStatusOf(json: unknown): "settled" | "failed" | "pending" {
+  if (typeof json !== "object" || json === null || Array.isArray(json)) return "pending";
+  const result = (json as Record<string, unknown>)["result"];
+  if (typeof result !== "object" || result === null) return "pending";
+  const value = (result as Record<string, unknown>)["value"];
+  if (!Array.isArray(value)) return "pending";
+  const entry = value[0];
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "pending";
+  const status = entry as Record<string, unknown>;
+  if (!Object.hasOwn(status, "err") || !SVM_COMMITMENTS.has(status["confirmationStatus"])) return "pending";
+  if (status["err"] !== null) return "failed";
+  const confirmation = status["confirmationStatus"];
+  return confirmation === "confirmed" || confirmation === "finalized" ? "settled" : "pending";
+}
 
 /** settle の `transaction` が SVM の signature の形（base58 で 64 バイト）か。 */
 export function isSvmSignature(value: unknown): value is string {
@@ -343,6 +394,56 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
   const offerSeconds = options.offerSeconds ?? SVM_DEFAULT_OFFER_SECONDS;
   const verifyTimeoutMs = deadlines.verifyMs;
   const settleTimeoutMs = deadlines.settleMs;
+  const followUp = svmSettleFollowUpOf(options);
+  const rpc = options.rpc;
+
+  /**
+   * settle の応答の後の期限つきの追跡（設計 §5.8）。設定の RPC に `getSignatureStatuses` だけを、間隔ごとに、期限まで。
+   * confirmed／finalized（`err` 無し）→ `settled`。`err` あり → 打ち切って `unknown`。それ以外・RPC の失敗 → 次の間隔。期限で `unknown`。
+   */
+  async function followSignature(signature: string, routeId: string): Promise<SettleResult> {
+    if (rpc === undefined) return { outcome: "unknown", reason: "source_settle_unknown" };
+    const startedAt = Date.now();
+    const deadlineAt = startedAt + followUp.totalMs;
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSignatureStatuses", params: [[signature], { searchTransactionHistory: true }] });
+    let polls = 0;
+    for (;;) {
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) break;
+      polls += 1;
+      let status: "settled" | "failed" | "pending" = "pending";
+      try {
+        const response = await rpc.transport.fetch(
+          rpc.url,
+          { method: "POST", headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(Math.min(followUp.requestTimeoutMs, remaining)) },
+          { routeId, operation: "svm_settle_follow_up" },
+        );
+        const read = await readBoundedBody(response, SVM_RESPONSE_MAX_BYTES);
+        if (response.status === 200 && read.ok) {
+          let json: unknown;
+          try {
+            json = JSON.parse(new TextDecoder("utf-8", { fatal: false }).decode(read.bytes));
+          } catch {
+            json = undefined;
+          }
+          status = svmSignatureStatusOf(json);
+        }
+      } catch (error) {
+        // transport の失敗（timeout・切断・上限超過）は報告して次の間隔へ（期限が守る）。
+        rpc.transport.report(error, { routeId, operation: "svm_settle_follow_up" });
+      }
+      if (status === "settled") {
+        options.onDiagnostic?.("svm_settle_followed_up");
+        return { outcome: "settled", txRef: signature };
+      }
+      if (status === "failed") break;
+      const wait = Math.min(followUp.intervalMs, deadlineAt - Date.now());
+      if (wait <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    void polls;
+    return { outcome: "unknown", reason: "source_settle_unknown" };
+  }
 
   async function post(path: string, requestText: string, context: TransportContext, deadlineMs: number): Promise<{ status: number; json: unknown }> {
     const response = await transport.fetch(
@@ -424,19 +525,26 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは core が `unknown` にする。自動再 settle はしない。
-      const { status, json } = await post("/settle", requestTextOf(offer, credential), { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs);
-      if (status !== 200 || typeof json !== "object" || json === null || Array.isArray(json)) {
+      const routeId = context?.routeId ?? "-";
+      const { status, json } = await post("/settle", requestTextOf(offer, credential), { routeId, operation: "facilitator_settle" }, settleTimeoutMs);
+      const wellFormedSuccess =
+        status === 200 && typeof json === "object" && json !== null && !Array.isArray(json)
+          ? ((): string | undefined => {
+              const record = json as Record<string, unknown>;
+              if (record["success"] !== true || record["network"] !== offer.network) return undefined;
+              const txRef = record["transaction"];
+              return isSvmSignature(txRef) ? txRef : undefined;
+            })()
+          : undefined;
+      if (wellFormedSuccess !== undefined) {
+        return { outcome: "settled", txRef: wellFormedSuccess };
+      }
+      // 形どおりの成功でない。署名を含むなら期限つきの追跡（設計 §5.8）。含まなければ `unknown`。
+      const signature = svmFollowUpSignatureOf(json, offer);
+      if (signature === undefined) {
         return { outcome: "unknown", reason: "source_settle_unknown" };
       }
-      const record = json as Record<string, unknown>;
-      if (record["success"] !== true || record["network"] !== offer.network) {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
-      }
-      const txRef = record["transaction"];
-      if (!isSvmSignature(txRef)) {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
-      }
-      return { outcome: "settled", txRef };
+      return followSignature(signature, routeId);
     },
   };
 }
