@@ -22,11 +22,14 @@ export interface RouterClientOptions {
    */
   readonly quoteTimeoutMs?: number;
   /**
-   * **動的購入**（R3）の期限。既定 120 秒（`DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS`）。静的 route の購入は従来どおり `timeoutMs`。
-   * 動的購入は、settle 前の上流の読み直し（5 秒）・MPP 送信の再見積り（6 秒）・受信 verify と settle（各 10 秒）・送信前の読み直し（5 秒）・
-   * 送信（最悪 66 秒。設計 §3.4）を含み、合計で 102 秒ほどになり得る。短く切ると、Router が支払いを続けているのに `unknown` になる。
+   * **購入**（R3。静的も動的も）の期限。既定 180 秒（`DEFAULT_EXECUTE_TIMEOUT_MS`。multirail 設計 §4.4）。
+   * 動的購入は、settle 前の上流の読み直し（5 秒）・MPP 送信の再見積り（6 秒）・受信 verify と settle（10 秒＋最大 50 秒）・送信前の読み直し（5 秒）・
+   * 送信（最悪 66 秒。設計 §3.4）を含み、合計で 142 秒ほどになり得る。Arc（Circle）・Solana の静的購入も settle に 40〜50 秒掛かり得る。
+   * 短く切ると、Router が支払いを続けているのに `unknown` になる。購入を短く抑えたい呼び出し側はこれを明示する（`timeoutMs` は購入に効かない）。
    */
   readonly executeTimeoutMs?: number;
+  /** **試験専用。** 要求の期限の signal を作る関数（既定 `AbortSignal.timeout`）。期限の値を観測するために差し替える。 */
+  readonly signalForTest?: (ms: number) => AbortSignal;
   /**
    * **ステートレス運用の明示的な opt-in**（既定 `false`）。
    *

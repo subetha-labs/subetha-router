@@ -185,8 +185,13 @@ function errorCodeOf(body: unknown, fallback: string): string {
   return fallback;
 }
 
-/** 動的購入の期限の既定。Router 側の最悪の所要時間（約 102 秒）に余裕を足したもの。 */
-export const DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS = 120_000;
+/**
+ * 購入（`execute`）の期限の既定。**静的も動的も同じ**（multirail 設計 §4.4）: Arc（Circle）と Solana の受信は settle に 40〜50 秒掛かり得て、
+ * 10 秒で切ると Router が続けているのに `transport_uncertain` になる。動的の最悪（約 102 秒＋ settle の増分 40 秒 = 142 秒）の内側。
+ */
+export const DEFAULT_EXECUTE_TIMEOUT_MS = 180_000;
+/** 互換の別名（以前は動的購入だけに使っていた）。 */
+export const DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS = DEFAULT_EXECUTE_TIMEOUT_MS;
 /** 動的 quote（`quoteUrl`）の期限の既定。Router 側の最悪（上流の読取 5 秒＋見積り 6 秒＋1 回 3 秒 = 14 秒）に余裕を足したもの。 */
 export const DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS = 30_000;
 
@@ -198,7 +203,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   const origin = base.origin;
   const doFetch = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
-  const executeTimeoutMs = options.executeTimeoutMs ?? DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS;
+  const executeTimeoutMs = options.executeTimeoutMs ?? DEFAULT_EXECUTE_TIMEOUT_MS;
+  const signalFor = options.signalForTest ?? ((ms: number): AbortSignal => AbortSignal.timeout(ms));
   // 動的 quote の期限: 明示の quoteTimeoutMs → 明示の timeoutMs → 既定 30 秒（明示した timeoutMs は従来どおり効く）。
   const quoteTimeoutMs = options.quoteTimeoutMs ?? options.timeoutMs ?? DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS;
 
@@ -228,7 +234,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       ...(init.body === undefined ? {} : { body: init.body }),
       // リダイレクトは追わない（資格情報を別の宛先へ運ばない）。
       redirect: "error",
-      signal: AbortSignal.timeout(init.timeoutMs ?? timeoutMs),
+      signal: signalFor(init.timeoutMs ?? timeoutMs),
     });
     let body: unknown;
     try {
@@ -420,8 +426,9 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
             // 動的 quote の持ち主の証明（quote 文書から運ぶ）。
             ...(quote.ownerKey === undefined ? {} : { "x-router-owner-key": quote.ownerKey }),
           },
-          // 動的購入は長い（最悪 96 秒ほど）。短く切ると Router が続けているのに unknown になる。静的は従来どおり。
-          ...(quote.upstream === undefined ? {} : { timeoutMs: executeTimeoutMs }),
+          // 購入は長い（動的は最悪 96 秒ほど、Arc・Solana の静的も settle に 40〜50 秒）。短く切ると Router が続けているのに unknown になる。
+          // quote・status・listing の期限（`timeoutMs`）は変えない。
+          timeoutMs: executeTimeoutMs,
         });
       } catch {
         // 送金の有無が分からない。paymentId を残して R4 で突き合わせられるようにする。

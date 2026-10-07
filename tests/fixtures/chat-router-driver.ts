@@ -75,6 +75,8 @@ async function main(): Promise<void> {
     principalId,
     revision: "t5",
     timeoutMs: 20_000,
+    // 購入の期限は timeoutMs に効かない（client の既定 180 秒）。この driver は従来の 20 秒の上限を保つ。
+    executeTimeoutMs: 20_000,
     resultProfile,
   };
 

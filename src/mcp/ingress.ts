@@ -28,7 +28,8 @@ export const DEFAULT_MCP_INGRESS_LIMITS: McpIngressLimits = Object.freeze({
   maxBodyBytes: 64 * 1024,
   receiveTimeoutMs: 10_000,
   maxConnections: 64,
-  maxRequestMs: 120_000,
+  // 要求の寿命（応答を含む）。購入の最悪（動的 142 秒。multirail 設計 §4.4）を超え、client の既定 180 秒と揃える。
+  maxRequestMs: 180_000,
 });
 
 /** 拒否の応答を書き終えるまで待つ上限。過ぎたら接続を切る。 */
