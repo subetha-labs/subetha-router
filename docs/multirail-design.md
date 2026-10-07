@@ -272,18 +272,22 @@ offer.scheme === "exact" && family(network) === "svm" → svm-payer（§5.6）
 - 設定: `x402.inboundFacilitators`（§2）。env: `SUBETHA_ARC_RECEIVER_KEY`（証明専用。受取先はその address）、`SUBETHA_SOLANA_RPC_URL`。Solana の受取 owner は設定の `payTo`
 - 登録は `ARC_PROFILES_ENABLED`／`SOLANA_PROFILES_ENABLED` の定数で（G-4 と同じ gate。初期値 `false`、受け入れ後に `true`）
 
-## 9. 新しい依存（SR-1 の記録）
+## 9. 新しい依存（SR-1 の記録。T0-a で確定、2026-10-07）
 
-| 依存 | 版 | 何を読み、どこへ接続するか |
+入れる前に版・依存の木・「何を読み何に接続するか」を dist の grep と `npm view` で確かめ、`package.json` は固定版（`^` 無し）で書く。
+
+| 依存 | 版 | 何を読み、どこへ接続するか（dist の実物） |
 |---|---|---|
-| `@x402/{core,evm,fetch}` | 2.28.0（2.27.0 から。V-3 で同一と確かめたのは **core の dist だけ**。evm・fetch は導入のタスクで diff を取る） | 変わらない |
-| `@solana/kit` | 固定版（導入時の最新。8.x） | `src/`: codec・compile（純粋）。`tools/`: 同じ＋RPC client（`getLatestBlockhash`） |
-| `@solana-program/token`・`@solana-program/compute-budget` | 固定版 | 命令の組み立てと parse（純粋） |
-| `@noble/curves` | 1.9.1（viem 経由で既に解決されている版を**直接の依存**に固定） | ed25519 の同期検証（純粋） |
-| `@x402/svm` | 2.28.0、**devDependency** | 試験の fixture（facilitator クラス）と互換の試験（client）。`src/`・`tools/` は import しない |
+| `@x402/{core,evm,fetch}` | **2.28.0**（2.27.0 から） | `core`・`fetch` の dist は同一。`evm` の esm は chunk 名のハッシュが変わるだけで、名前を正規化した diff は **0 行**。依存の変更は `@x402/core ~2.28.0` だけ |
+| `@solana/kit` | **8.4.0**（直接の依存 27 個、root の `@solana/*` は kit を含め **43 個すべて 8.4.0**。node ≥ 20.18） | `src/`: codec・compile・decompile（`@solana/transactions`・`transaction-messages`・`codecs`・`addresses`・`instructions`。fetch・WebSocket 無し）。`@solana/addresses`・`keys`・`signers` は PDA の導出と鍵に **WebCrypto（`crypto.subtle`）**を使う（起動時の ATA の導出は非同期でよい。preflight では使わない）。RPC（`@solana/rpc-transport-http`: 裸の `fetch(`）と subscription（`@solana/rpc-subscriptions`: `WebSocket`）は `tools/` だけ。`process.env` は `NODE_ENV` だけ |
+| `@solana-program/token` | **0.17.0**（依存 `@solana-program/system` 0.15.0） | 命令の組み立てと parse（純粋）。`fetchMint` は渡した RPC を使う（`src/` では呼ばない）。`process.env.NODE_ENV` だけ |
+| `@solana-program/compute-budget` | **0.19.0** | 命令の組み立てと parse（純粋）。接続・env 無し |
+| `@noble/curves` | **1.9.1**（viem 2.54.0 が解決している版と同じ。`@noble/hashes` 1.8.0 も既存） | ed25519 の**同期**検証（`abstract/edwards.js` の `verify`）。接続・env 無し |
+| `@x402/svm` | **2.28.0、devDependency** | fixture（`@x402/svm/exact/facilitator` の facilitator クラス）と互換の試験だけ。`src/`・`tools/` は import しない（`tests/unit/dependency-direction.test.ts` で固定）。自分の依存は**古い系列**（`@solana-program/token` 0.9.0・`token-2022` 0.6.1・`compute-budget` 0.11.0・`@solana/program-client-core` 6.10.0。peer `@solana/kit ^5`）で `node_modules/@x402/svm/node_modules/` に入れ子になり、`@solana/kit` 自体は root の 8.4.0 を使う（npm は peer の衝突を警告して上書き）。**kit 8.4 の上で古い program package が動くかは T4-c の fixture の試験で確かめる**（動かなければ fixture の facilitator を別 package に隔離する）。入れ子の `@solana/*` は **5.5.1**（`accounts`・`sysvars` 等、`token-2022` 0.6.1 の peer）と **6.10.0**（`program-client-core` の子孫）の 2 系列。dist に `fetch(` は無く、RPC は渡した signer・`createSolanaRpc` 経由だが、**client は network ごとの公開 RPC（`api.devnet/testnet/mainnet-beta.solana.com`）を既定で持つ**（`chunk-RXPBSPMZ.mjs:7`）——互換の試験は必ず `rpcUrl` に loopback の fixture を渡す（既定に落ちたら試験を落とす）。`crypto.subtle` は署名検証。`@solana/keys` には鍵をファイルに書く helper（`writeKeyPair`）があるが呼ばれない限り何もしない（Router・道具は使わない） |
 
-**導入前の gate（SR-1）**: 実装の最初のタスクで、入れる版（kit・program・noble・svm）と、その依存が何を読み何に接続するかを記録してから `package.json` を変える。
-`tests/unit/no-direct-fetch` の規則（`src/` は直接 fetch しない）はそのまま。`@solana/kit` の RPC client は `src/` では作らない（起動時の ATA の検査は guarded transport で JSON-RPC を POST する）。
+Memo の命令は `@solana-program/memo` を入れずに生で組む（program `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`、口座無し、data = UTF-8。SDK の client も同じ）。
+
+`tests/unit/no-direct-fetch` の規則（`src/` は直接 fetch しない）はそのまま。`src/` では `@solana/kit` の RPC client を作らない（`createSolanaRpc` 等の名前を `tests/unit/dependency-direction.test.ts` で禁止。起動時の ATA の検査は guarded transport で JSON-RPC を POST する）。
 
 ## 10. 未解決（実装の中で確かめる）
 
