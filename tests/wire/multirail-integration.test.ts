@@ -204,6 +204,14 @@ interface RouterOptions {
   readonly baseSourceAsset?: string;
   /** Solana USDC の区分を外す（`bucket_not_allowed` の試験）。 */
   readonly dropSolBucket?: boolean;
+  /** Solana USDC の区分の 1 件の上限（既定 20000。D-14 の試験）。静的・動的とも。 */
+  readonly solMaxPerPurchase?: string;
+  /** Solana 宛の動的プロファイルの `maxUpstreamAmount`（既定 10000。区分の上限を profile より先に当てない試験用）。 */
+  readonly solMaxUpstream?: string;
+  /** 動的の予算の区分ごとの通算の上限（静的とは別の台帳）。 */
+  readonly dynamicMaxTotal?: Partial<Record<"arc" | "sol", string>>;
+  /** 旧い区分（Base USDC・Tempo pathUSD）の 1 件の上限（既定 20000。源の区分を先に当てない試験用）。 */
+  readonly oldMaxPerPurchase?: string;
 }
 
 function staticRoute(routeId: string, source: { network: string; asset: string; payTo: string; rail?: "x402" | "mpp" }, destination: "x402" | "mpp" | "arc" | "sol"): Record<string, unknown> {
@@ -276,10 +284,10 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
   };
   const upstreams = Object.fromEntries(routes.map((route) => [route["routeId"] as string, upstreamOf(route)]));
   const bucket = (network: string, asset: string, maxTotal: string, maxPerPurchase: string) => ({ network, asset, maxTotal, maxPerPurchase });
-  const newBuckets = (maxPerPurchase: string) => [
-    bucket(ARC, ARC_USDC, options.maxTotal?.arc ?? "1000000", maxPerPurchase),
+  const newBuckets = (maxPerPurchase: string, totals: { arc?: string; sol?: string } = options.maxTotal ?? {}) => [
+    bucket(ARC, ARC_USDC, totals.arc ?? "1000000", maxPerPurchase),
     ...(options.arcSourceAsset === undefined ? [] : [bucket(ARC, options.arcSourceAsset, options.maxTotal?.arcAlt ?? "1000000", maxPerPurchase)]),
-    ...(options.dropSolBucket ? [] : [bucket(SOL, MINT, options.maxTotal?.sol ?? "1000000", maxPerPurchase)]),
+    ...(options.dropSolBucket ? [] : [bucket(SOL, MINT, totals.sol ?? "1000000", options.solMaxPerPurchase ?? maxPerPurchase)]),
   ];
   const oldBuckets = (maxPerPurchase: string) => [
     bucket(BASE, USDC, options.maxTotal?.base ?? "1000000", maxPerPurchase),
@@ -297,8 +305,8 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
           // 送信（D-12）: 動的 O-1〜O-4。
           [PROFILES.x402Arc]: profile(PROFILES.x402Arc, { rail: "x402", ...base, asset: USDC }, "arc"),
           [PROFILES.mppArc]: profile(PROFILES.mppArc, { ...tempo }, "arc"),
-          [PROFILES.x402Sol]: profile(PROFILES.x402Sol, { rail: "x402", ...base, asset: USDC }, "sol"),
-          [PROFILES.mppSol]: profile(PROFILES.mppSol, { ...tempo }, "sol"),
+          [PROFILES.x402Sol]: { ...profile(PROFILES.x402Sol, { rail: "x402", ...base, asset: USDC }, "sol"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
+          [PROFILES.mppSol]: { ...profile(PROFILES.mppSol, { ...tempo }, "sol"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
         }),
     [PROFILES.baseMpp]: profile(PROFILES.baseMpp, { rail: "x402", ...base, asset: USDC }, "mpp"),
     [PROFILES.tempoX402]: profile(PROFILES.tempoX402, { rail: "mpp", network: TEMPO, asset: PATHUSD, payTo: BASE_RECEIVER }, "x402"),
@@ -308,11 +316,11 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
       approvalTtlMs: 60_000,
       routes: Object.fromEntries(routes.map((route) => [route["routeId"] as string, route])),
       // 同じ区分に落ちる受信と送信は合算される（Base → Base は 10000 + 1000）ので、1 件の上限は 20000。
-      budget: { maxPurchases: options.maxPurchases ?? 50, buckets: [...(legacy ? [] : newBuckets("20000")), ...oldBuckets("20000")] },
+      budget: { maxPurchases: options.maxPurchases ?? 50, buckets: [...(legacy ? [] : newBuckets("20000")), ...oldBuckets(options.oldMaxPerPurchase ?? "20000")] },
       dynamic: {
         enabled: true,
         profiles,
-        budget: { maxPurchases: options.dynamicMaxPurchases ?? 50, buckets: [...(legacy ? [] : newBuckets("20000")), ...oldBuckets("20000")] },
+        budget: { maxPurchases: options.dynamicMaxPurchases ?? 50, buckets: [...(legacy ? [] : newBuckets("20000", options.dynamicMaxTotal ?? options.maxTotal ?? {})), ...oldBuckets(options.oldMaxPerPurchase ?? "20000")] },
         limits: { ...DEFAULT_DYNAMIC_LIMITS, quotesPerMinuteGlobal: 1000, quotesPerMinutePerSource: 1000, purchasesPerMinuteGlobal: 1000, purchasesPerMinutePerSource: 1000, perHostPerMinute: 1000, perAddressPerMinute: 1000, perAddressConcurrent: 64, perHostConcurrent: 64, concurrentGlobal: 64, concurrentPerSource: 64 },
         denyHosts: [],
       },
@@ -1074,6 +1082,7 @@ describe("送信: 残高の hook（D-15。Solana の実配線）", () => {
     const signsBefore = solSigner.signCount();
     const quote = await staticQuote(router, ROUTES.tempoSol, "b1");
     const credential = await credentialFor(fixtures, quote);
+    const tempoRequestsAfterCredential = fixtures.tempoRpc.http.requests;
     fixtures.solRpc.state.atas = fixtures.solRpc.state.atas.map((a) => (a.address === solRouterAta ? { ...a, amount: "9999" } : a));
     const short = await purchase(router, quote, credential, "b1");
     // Router は awaiting_payment / operator_funds_unavailable（journal は source_failed、source_pending 無し。受信の verify は呼ばれない）。
@@ -1083,7 +1092,8 @@ describe("送信: 残高の hook（D-15。Solana の実配線）", () => {
     expect(short.outcome).not.toBe("delivered");
     expect(solSigner.signCount() - signsBefore).toBe(0);
     expect(fixtures.solProvider.seen.paid).toHaveLength(0);
-    expect(inboundCalls(fixtures).legacy).toEqual({ verify: 0, settle: 0 });
+    // 受信は Tempo の MPP: verify は chain の読取なので、credential の後に Tempo RPC への要求が増えていないことが「verify 前に止めた」証拠。
+    expect(fixtures.tempoRpc.http.requests).toBe(tempoRequestsAfterCredential);
     // RPC が落ちていても同じ（throw は不足と同じ扱い）: 届かず、署名 0。
     fixtures.solRpc.state.reply = "rpc-error";
     expect((await purchase(router, quote, credential, "b1")).outcome).not.toBe("delivered");
@@ -1110,6 +1120,22 @@ describe("送信: 残高の hook（D-15。Solana の実配線）", () => {
     expect(await router.client().status(quote.paymentId, quote.ownerKey)).toMatchObject({ found: true, projection: { status: "awaiting_payment" } });
     expect(solSigner.signCount() - signsBefore).toBe(0);
     expect(fixtures.solProvider.seen.paid).toHaveLength(0);
+    // 受信（Base の x402）の verify・settle は呼ばれていない。
+    expect(inboundCalls(fixtures).legacy).toEqual({ verify: 0, settle: 0 });
+    // 残高の RPC だけが落ちる（他の method は答える）→ 同じく operator_funds_unavailable。
+    fixtures.solRpc.state.atas = fixtures.solRpc.state.atas.map((a) => (a.address === solRouterAta ? { ...a, amount: "1000000" } : a));
+    fixtures.solRpc.state.failMethods = ["getTokenAccountBalance"];
+    const quote2 = await dynamicQuote(router, PROFILES.x402Sol, "b3");
+    expect((await purchase(router, quote2, await credentialFor(fixtures, quote2), "b3")).outcome).not.toBe("delivered");
+    expect(await router.client().status(quote2.paymentId, quote2.ownerKey)).toMatchObject({ found: true, projection: { status: "awaiting_payment" } });
+    expect(inboundCalls(fixtures).legacy).toEqual({ verify: 0, settle: 0 });
+    expect(solSigner.signCount() - signsBefore).toBe(0);
+    expect(fixtures.solProvider.seen.paid).toHaveLength(0);
+    // 復旧すれば届く。
+    fixtures.solRpc.state.failMethods = [];
+    const quote3 = await dynamicQuote(router, PROFILES.x402Sol, "b4");
+    expect(await purchase(router, quote3, await credentialFor(fixtures, quote3), "b4")).toMatchObject({ outcome: "delivered" });
+    expect(solSigner.signCount() - signsBefore).toBe(1);
   });
 });
 
@@ -1131,6 +1157,40 @@ describe("送信: 予算（FR-29・D-14）。受信と送信は同じ (network, 
     expect(solSigner.signCount() - signsBefore).toBe(1);
   });
 
+  test("Arc USDC の区分 11,000: Arc 受信の購入（arc-x402、源 10,000）と Arc 送信の購入（base-arc、宛先 1,000 = Provider の offer）が順に同じ区分を使い、3 件目は bucket_limit（D-14。受信→送信の構成そのものは範囲外）", async () => {
+    const fixtures = await startFixtures();
+    // 合算 10,000 + 1,000 = 11,000 ちょうど。3 件目はどちらの向き（+1,000 / +10,000）でも超える。
+    const router = await startRouter(fixtures, { maxTotal: { arc: "11000" } });
+    const inboundQuote = await staticQuote(router, ROUTES.arcX402, "a1");
+    expect(await purchase(router, inboundQuote, await credentialFor(fixtures, inboundQuote), "a1")).toMatchObject({ outcome: "delivered" });
+    const outboundQuote = await staticQuote(router, ROUTES.baseArc, "a2");
+    expect(await purchase(router, outboundQuote, await credentialFor(fixtures, outboundQuote), "a2")).toMatchObject({ outcome: "delivered" });
+    expect(providerPayments(fixtures).arcPayments).toBe(1);
+    const q3 = await staticQuote(router, ROUTES.baseArc, "a3");
+    expect(await purchase(router, q3, await credentialFor(fixtures, q3), "a3")).toMatchObject({ outcome: "rejected", error: "bucket_limit", status: 429 });
+    const q4 = await staticQuote(router, ROUTES.arcX402, "a4");
+    expect(await purchase(router, q4, await credentialFor(fixtures, q4), "a4")).toMatchObject({ outcome: "rejected", error: "bucket_limit", status: 429 });
+    expect(providerPayments(fixtures).arcPayments).toBe(1);
+  });
+
+  test("動的の台帳でも合算: Solana 受信の動的（dyn-sol-to-x402、源 2,000）と Solana 送信の動的（dyn-x402-to-sol、宛先 10,000）が同じ区分（上限 12,000）を使い、3 件目は不成立", async () => {
+    const fixtures = await startFixtures();
+    // dyn-sol-to-x402 の源は上流 1,000 ＋ 手数料 1,000 = 2,000（Solana USDC）。送信の dyn-x402-to-sol の宛先は 10,000。合計 12,000 を上限に。
+    const router = await startRouter(fixtures, { dynamicMaxTotal: { sol: "12000" } });
+    const d1 = await dynamicQuote(router, PROFILES.solX402, "e1");
+    expect(offerOf(d1).amount).toBe("2000");
+    expect(await purchase(router, d1, await credentialFor(fixtures, d1), "e1")).toMatchObject({ outcome: "delivered" });
+    const d2 = await dynamicQuote(router, PROFILES.x402Sol, "e2");
+    expect(await purchase(router, d2, await credentialFor(fixtures, d2), "e2")).toMatchObject({ outcome: "delivered" });
+    expect(providerPayments(fixtures).solPayments).toBe(1);
+    // 3 件目（どちらの向きでも）は購入で通算の上限（動的の予算は購入の予約で見る）。
+    const d3 = await dynamicQuote(router, PROFILES.x402Sol, "e3");
+    expect(await purchase(router, d3, await credentialFor(fixtures, d3), "e3")).toMatchObject({ outcome: "rejected", error: "bucket_limit" });
+    const d4 = await dynamicQuote(router, PROFILES.solX402, "e4");
+    expect(await purchase(router, d4, await credentialFor(fixtures, d4), "e4")).toMatchObject({ outcome: "rejected", error: "bucket_limit" });
+    expect(providerPayments(fixtures).solPayments).toBe(1);
+  });
+
   test("静的と動的は別の台帳: 静的の Solana の区分を使い切っても動的の Solana 送信は通る", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures, { maxTotal: { sol: "10000" } });
@@ -1142,19 +1202,39 @@ describe("送信: 予算（FR-29・D-14）。受信と送信は同じ (network, 
     expect(await purchase(router, q3, await credentialFor(fixtures, q3), "h3")).toMatchObject({ outcome: "delivered" });
   });
 
-  test("D-14 の 1 件の上限（20,000）: 上限を超える上流の額の動的 quote は不成立、区分の無い (network, asset) は bucket_not_allowed", async () => {
+  test("D-14 の 1 件の上限: 静的は上限 9,999 で購入が per_purchase_limit、10,000 ちょうどで届く。動的は profile の上限を広げても区分の上限 20,000 で止まり、20,000 ちょうどは届く", async () => {
     const fixtures = await startFixtures();
-    const router = await startRouter(fixtures);
+    // 静的: Solana の区分の 1 件の上限を 9,999 に。tempo-sol の送信の 10,000 が超える → purchase で per_purchase_limit。
+    let router = await startRouter(fixtures, { solMaxPerPurchase: "9999" });
+    const q1 = await staticQuote(router, ROUTES.tempoSol, "i0");
+    expect(await purchase(router, q1, await credentialFor(fixtures, q1), "i0")).toMatchObject({ outcome: "rejected", error: "per_purchase_limit", status: 429 });
+    expect(fixtures.solProvider.seen.paid).toHaveLength(0);
+    await router.close();
+    closers.splice(closers.indexOf(router.close), 1);
+    // 境界: 10,000 ちょうどは届く。
+    router = await startRouter(fixtures, { solMaxPerPurchase: "10000" });
+    const q2 = await staticQuote(router, ROUTES.tempoSol, "i0b");
+    expect(await purchase(router, q2, await credentialFor(fixtures, q2), "i0b")).toMatchObject({ outcome: "delivered" });
+    await router.close();
+    closers.splice(closers.indexOf(router.close), 1);
+    // 動的: Solana の区分の 1 件の上限は既定の 20,000、profile の上限は 30,000 なので 20,001 は profile を通る。源（Base USDC = 上流 + 手数料 1,000）の区分の上限は
+    // 30,000 に広げて先に当たらないようにする。止めるのは宛先の区分の上限（動的は quote の段で見る: dynamic.ts）。
+    router = await startRouter(fixtures, { solMaxUpstream: "30000", oldMaxPerPurchase: "30000" });
     fixtures.solProvider.state.amount = "20001";
     expect(await router.client().quoteUrl({ profileId: PROFILES.x402Sol, url: SOL_URL, requestId: "i1" })).toMatchObject({ ok: false });
+    // 境界: 20,000 ちょうどは quote も購入も通る（Router の ATA の残高は 1,000,000）。
+    fixtures.solProvider.state.amount = "20000";
+    const q3 = await dynamicQuote(router, PROFILES.x402Sol, "i1b");
+    expect(await purchase(router, q3, await credentialFor(fixtures, q3), "i1b")).toMatchObject({ outcome: "delivered" });
     fixtures.solProvider.state.amount = "10000";
     await router.close();
     closers.splice(closers.indexOf(router.close), 1);
     const noBucket = await startRouter(fixtures, { dropSolBucket: true });
-    const q2 = await staticQuote(noBucket, ROUTES.tempoSol, "i2");
-    expect(await purchase(noBucket, q2, await credentialFor(fixtures, q2), "i2")).toMatchObject({ outcome: "rejected", error: "bucket_not_allowed" });
+    const paidBefore = fixtures.solProvider.seen.paid.length;
+    const q5 = await staticQuote(noBucket, ROUTES.tempoSol, "i2");
+    expect(await purchase(noBucket, q5, await credentialFor(fixtures, q5), "i2")).toMatchObject({ outcome: "rejected", error: "bucket_not_allowed" });
     // 動的は quote の段で不成立（client には一般の quote_failed として見える。core の理由は `bucket_not_allowed`: dynamic.ts）。
     expect(await noBucket.client().quoteUrl({ profileId: PROFILES.x402Sol, url: SOL_URL, requestId: "i3" })).toMatchObject({ ok: false });
-    expect(fixtures.solProvider.seen.paid).toHaveLength(0);
+    expect(fixtures.solProvider.seen.paid).toHaveLength(paidBefore);
   });
 });
