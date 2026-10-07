@@ -129,8 +129,8 @@ export function standardAccept(overrides: X402Accept = {}): X402Accept {
 }
 
 /** 成功の応答（JSON object ＋ 整合する receipt）。`payer` は支払い元のアドレス。 */
-export function paidOk(payer: string, body: unknown = { ok: true }): PayResponse {
-  return { status: 200, body: JSON.stringify(body), contentType: "application/json", receipt: { success: true, network: FIXTURE_NETWORK, transaction: FIXTURE_TX, payer } };
+export function paidOk(payer: string, body: unknown = { ok: true }, network: string = FIXTURE_NETWORK): PayResponse {
+  return { status: 200, body: JSON.stringify(body), contentType: "application/json", receipt: { success: true, network, transaction: FIXTURE_TX, payer } };
 }
 
 export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"): Promise<X402Upstream> {

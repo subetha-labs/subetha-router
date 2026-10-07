@@ -22,7 +22,8 @@ import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
 import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
-import { createX402DynamicPath, type X402DynamicOptions } from "./x402-dynamic.js";
+import { createRebuildingSigner, createX402DynamicPath, EVM_RECEIPT_FORM, isSigningRefusal, paidOutcomeOf, type X402DynamicOptions } from "./x402-dynamic.js";
+import { DYNAMIC_RESPONSE_LIMITS } from "../../net/bounded-body.js";
 
 export interface SyntheticX402Options {
   /** `routeId` → 上流 canonical URL（loopback の fixture に限る）。 */
@@ -211,10 +212,15 @@ export interface X402OutboundOptions {
   /** 承認の期限（`PayRequest.deadlineMs`）の時計。既定 `Date.now`。 */
   readonly now?: () => number;
   /**
-   * Base 以外の EVM の network（Arc）で `true`: 静的 route も組み直しの署名器で署名する（送信の設計 §3.2。U4 で実装）。
-   * Base は `false`（SDK の typed data をそのまま渡す従来の経路）。
+   * Base 以外の EVM の network（Arc）で `true`: 静的 route も**組み直しの署名器**（`createRebuildingSigner`）で署名し、
+   * 領収は共有の表（`paidOutcomeOf`）で読む（送信の設計 §3.2）。Base は `false`（SDK の typed data をそのまま渡す従来の経路）。
    */
   readonly rebuildSignatures?: boolean;
+  /**
+   * 組み直しに使う EIP-712 domain の権威（表の資産 → domain。資産は小文字で引く）。`rebuildSignatures` のときに必須。
+   * 静的 route は `tokenDomain` を持たないので、合成が表から渡す。
+   */
+  readonly tokenDomains?: Readonly<Record<string, { readonly name: string; readonly version: string }>>;
 }
 
 /** 照合に使う承認済み offer の必須フィールド（field 単位で見る）。 */
@@ -274,14 +280,17 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   const capability = options.capability;
   const transport = options.transport;
   const now = options.now ?? Date.now;
-  if (options.rebuildSignatures === true) {
-    // 組み直しの静的経路は U4 で足す。それまでは Base 以外の静的 x402 を組ませない（fail closed）。
-    throw new Error("rebuildSignatures is not implemented yet (outbound tasks U4)");
+  const rebuild = options.rebuildSignatures === true;
+  const tokenDomains = new Map(Object.entries(options.tokenDomains ?? {}).map(([asset, domain]) => [asset.toLowerCase(), domain]));
+  if (rebuild && tokenDomains.size === 0) {
+    throw new Error("rebuildSignatures requires the token domains of the table");
   }
+  const receiptForm = EVM_RECEIPT_FORM(capability.signer.address);
   /** 運用者の集合（小文字化）。自分の署名者は常に含む。 */
   const operatorAddresses = new Set([capability.signer.address, ...(options.operatorAddresses ?? [])].map((address) => address.toLowerCase()));
   const isOperator = (address: string): boolean => operatorAddresses.has(address.toLowerCase());
-  const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, options.dynamic);
+  // 運用者の集合は静的と動的で同じ 1 つ（動的の option に無ければ adapter のものを渡す。FR-38）。
+  const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, { ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }), ...options.dynamic });
 
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
   const upstreams = new Map<string, string>();
@@ -323,6 +332,61 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       }
     });
     return offers;
+  }
+
+  /**
+   * 組み直しの静的経路（送信の設計 §3.2。Base 以外の EVM、Arc）: 動的と同じ形——表の domain・承認値だけで typed data を組み直し、
+   * 単一候補の `x402Client`、arm、`createPaymentPayload` の後の検査、送出の直前の期限、共有の領収の表。SDK の typed data は署名器に届かない。
+   */
+  async function payRebuilt(request: PayRequest, url: string, approved: DestinationOffer, approvedJson: string, challenge: Challenge, selected: PaymentRequirements): Promise<PayResult> {
+    const tokenDomain = tokenDomains.get(approved.asset.toLowerCase());
+    if (tokenDomain === undefined) {
+      return { outcome: "not_sent", reason: "destination_offer_not_allowed" };
+    }
+    const guard = createRebuildingSigner({ signer: capability.signer, destination: { network: approved.network, asset: approved.asset, tokenDomain }, offer: approved, now, deadlineMs: request.deadlineMs });
+    const client = new x402Client((_version, requirements) => {
+      if (requirements.length !== 1 || !sameOfferFields(approved, requirements[0]!)) {
+        throw new NotSentError("destination_selected_offer_mismatch");
+      }
+      return requirements[0]!;
+    });
+    client.setSpendControls({
+      maxAmountPerPayment: false,
+      allowedAssets: [{ network: asNetwork(approved.network), asset: approved.asset, maxAmountPerPayment: approved.amount }],
+    });
+    client.register(asNetwork(capability.network), new ExactEvmScheme(guard.signer));
+    client.onBeforePaymentCreation(async (context) => {
+      if (!sameOfferFields(approved, context.selectedRequirements) || context.paymentRequired.x402Version !== 2) {
+        throw new NotSentError("destination_selected_offer_mismatch");
+      }
+      guard.arm();
+    });
+    const httpClient = new x402HTTPClient(client);
+    let payload;
+    try {
+      payload = await httpClient.createPaymentPayload({ ...challenge.parsed, accepts: [selected] });
+    } catch (error) {
+      return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
+    }
+    const accepted = (payload as { accepted?: unknown }).accepted;
+    // SDK が返した payload そのものを検査する（入力の検査では返り値を保証しない）: 署名 1 回・accepted の一致・v2。
+    if (guard.signatures() !== 1 || accepted === undefined || !sameOfferFields(approved, accepted as PaymentRequirements) || stableJson(accepted) !== stableJson(selected) || payload.x402Version !== 2) {
+      return { outcome: "not_sent", reason: "destination_payload_mismatch" };
+    }
+    const payCtx = { routeId: request.routeId, operation: "pay" };
+    // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。
+    const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
+    if (!(now() < request.deadlineMs)) {
+      return { outcome: "not_sent", reason: "destination_deadline" };
+    }
+    let response: Response;
+    try {
+      response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(timeoutMs) }, payCtx);
+    } catch {
+      return { outcome: "unknown", reason: "destination_pay_unknown" };
+    }
+    void approvedJson;
+    return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
   }
 
   return {
@@ -371,6 +435,9 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       // 保存した offer の再検査: 運用者自身へは払わない（FR-38）。
       if (isOperator(approved.payTo)) {
         return { outcome: "not_sent", reason: "destination_offer_not_allowed" };
+      }
+      if (rebuild) {
+        return payRebuilt(request, url, approved, approvedJson, challenge, selected);
       }
 
       const chainId = evmChainIdOf(approved.network);

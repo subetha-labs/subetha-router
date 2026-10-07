@@ -149,6 +149,7 @@ export async function paidOutcomeOf(
   return { outcome: "rejected", reason: "destination_rejected" };
 }
 
+
 export interface X402DynamicOptions {
   /**
    * 運用者の集合（送信の設計 §2.3、FR-38）: 受信の受取先・送信の署名者・それらの ATA。ここへ払う offer は候補にしない。

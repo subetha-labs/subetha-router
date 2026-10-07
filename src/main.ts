@@ -36,8 +36,10 @@ import {
   type DynamicProfile,
   type KnownNetwork,
   type RouteConfig,
+  type RouterConfig,
   type RuntimeConfig,
 } from "./config.js";
+import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
 import { DynamicGate } from "./core/dynamic-gate.js";
@@ -48,6 +50,7 @@ import type {
   EvmSigningCapability,
   MppTempoCapability,
   OutboundRail,
+  SvmSigningCapability,
 } from "./ports/outbound.js";
 
 /**
@@ -72,8 +75,15 @@ class SignerNotAuthorizedError extends Error {
  * （任意のプラグイン読み込みを許さないため）。
  */
 export interface RouterCapabilities {
-  /** 送信レール A（x402 / EVM）の署名能力。 */
+  /** 送信レール A（x402 / EVM）の署名能力（Base。既存）。 */
   readonly evmSigning?: EvmSigningCapability;
+  /**
+   * network ごとの x402（EVM）の署名能力（送信の設計 §2.1、FR-27）。key = network。`evmSigning` の network と重複すれば起動しない。
+   * Arc は Base と同じ鍵を別の札で（D-11）。
+   */
+  readonly evmSigningByNetwork?: Readonly<Record<string, EvmSigningCapability>>;
+  /** network ごとの SVM の署名能力（`solana:…`）。adapter は U8 で合成する。 */
+  readonly svmSigning?: Readonly<Record<string, SvmSigningCapability>>;
   /** 送信レール B（MPP / Tempo charge）の支払い能力。 */
   readonly mppTempo?: MppTempoCapability;
   /**
@@ -154,14 +164,98 @@ function profileIdOfBinding(binding: string): string | undefined {
  * `routeId` から送信レールを引く（core は rail 名で分岐しない）。allowlist は
  * 構成の `routes[].rail` だけで、未登録の routeId はどのレールにも届かない。
  */
+/** 送信の組の鍵 `(rail, network)`（送信の設計 §2.2、FR-27）。 */
+export function outboundPairKeyOf(rail: string, network: string): string {
+  return `${rail}:${network}`;
+}
+
+const BASE_SEPOLIA_NETWORK = "eip155:84532";
+const SVM_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** base58 で 32 バイトに復号できる公開鍵か（文字数では足りない: 33 個の `1` は 33 バイトのゼロ）。 */
+function isSvmPublicKey(value: string): boolean {
+  if (!SVM_ADDRESS_PATTERN.test(value)) return false;
+  try {
+    return getBase58Encoder().encode(value).length === 32;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SVM の使い方（送信の設計 §2.2）: 受信（`sourceRail: "x402"` の Solana）と送信（Solana 宛の route／プロファイル）のどちらかがあれば
+ * Solana RPC は依存先・拒否ホストに入る。純粋関数（試験で確かめる）。
+ */
+export function svmUsageOf(
+  routes: Readonly<Record<string, { readonly sourceRail?: string; readonly source: { readonly network: string }; readonly destination: { readonly network: string } }>>,
+  profiles: Readonly<Record<string, { readonly sourceRail: string; readonly source: { readonly network: string }; readonly destination: { readonly network: string } }>>,
+): { readonly inbound: boolean; readonly outbound: boolean } {
+  const all = [...Object.values(routes), ...Object.values(profiles)];
+  return {
+    inbound: all.some((entry) => entry.sourceRail === "x402" && networkFamilyOf(entry.source.network) === "svm"),
+    outbound: all.some((entry) => networkFamilyOf(entry.destination.network) === "svm"),
+  };
+}
+
+/** Solana RPC の transport（受信の起動時の検査・追跡と、送信で共有。送信の設計 §2.2）: fixture の差し替えの上に、loopback の方針と DNS の期限。 */
+function svmRpcTransportOf(hooks: DynamicTransportHooks, allowLoopback: boolean, report: (event: TransportEvent) => void): GuardedTransport {
+  return createGuardedTransport({ ...hooks, allowLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+}
+
+/**
+ * 注入された送信能力を network で引ける形に（送信の設計 §2.2、FR-27）。起動時の検査（fail closed）:
+ * `evmSigningByNetwork`／`svmSigning` の key と能力の `network` の完全一致、`evmSigning` との重複、family（EVM は `eip155:`、SVM は `solana:`）、
+ * SVM の `address` の形（base58 32 バイト相当）。純粋関数（試験で確かめる）。
+ */
+export function outboundCapabilitiesOf(capabilities: Pick<RouterCapabilities, "evmSigning" | "evmSigningByNetwork" | "svmSigning">): {
+  readonly evmByNetwork: ReadonlyMap<string, EvmSigningCapability>;
+  readonly svmByNetwork: ReadonlyMap<string, SvmSigningCapability>;
+} {
+  const evmByNetwork = new Map<string, EvmSigningCapability>();
+  if (capabilities.evmSigning !== undefined) {
+    if (networkFamilyOf(capabilities.evmSigning.network) !== "evm") throw new SignerNotAuthorizedError();
+    evmByNetwork.set(capabilities.evmSigning.network, capabilities.evmSigning);
+  }
+  for (const [key, capability] of Object.entries(capabilities.evmSigningByNetwork ?? {})) {
+    if (key !== capability.network || networkFamilyOf(key) !== "evm" || evmByNetwork.has(key)) throw new SignerNotAuthorizedError();
+    evmByNetwork.set(key, capability);
+  }
+  const svmByNetwork = new Map<string, SvmSigningCapability>();
+  for (const [key, capability] of Object.entries(capabilities.svmSigning ?? {})) {
+    if (key !== capability.network || networkFamilyOf(key) !== "svm" || svmByNetwork.has(key) || !isSvmPublicKey(capability.address)) throw new SignerNotAuthorizedError();
+    svmByNetwork.set(key, capability);
+  }
+  return { evmByNetwork, svmByNetwork };
+}
+
+/**
+ * 運用者の集合（送信の設計 §2.3、FR-38）: (a) `sourceRail` が x402／mpp の route・プロファイルの受信の受取先、(b) 注入された送信能力の公開アドレス。
+ * **Provider の宛先（静的 route の `destination.payTo`）は入れない**。(c) の ATA は SVM の adapter の startup で足す。純粋関数。
+ */
+export function operatorAddressesOf(
+  router: Pick<RouterConfig, "routes">,
+  profiles: Readonly<Record<string, DynamicProfile>>,
+  capabilities: { readonly evmByNetwork: ReadonlyMap<string, EvmSigningCapability>; readonly svmByNetwork: ReadonlyMap<string, SvmSigningCapability>; readonly mppTempo?: MppTempoCapability },
+): readonly string[] {
+  const addresses = new Set<string>();
+  for (const route of Object.values(router.routes)) {
+    if ((route.sourceRail === "x402" || route.sourceRail === "mpp") && route.source.payTo !== undefined) addresses.add(route.source.payTo);
+  }
+  for (const profile of Object.values(profiles)) addresses.add(profile.source.payTo);
+  for (const capability of capabilities.evmByNetwork.values()) addresses.add(capability.signer.address);
+  for (const capability of capabilities.svmByNetwork.values()) addresses.add(capability.address);
+  if (capabilities.mppTempo !== undefined) addresses.add(capabilities.mppTempo.account.address);
+  return [...addresses];
+}
+
 function railByRoute(
-  routes: Readonly<Record<string, { readonly rail?: string }>>,
+  routes: Readonly<Record<string, { readonly rail?: string; readonly destination: { readonly network: string } }>>,
   rails: Readonly<Record<string, OutboundRail>>,
   profiles: Readonly<Record<string, DynamicProfile>> = {},
 ): OutboundRail {
   const byRoute = new Map<string, OutboundRail>();
   for (const [routeId, route] of Object.entries(routes)) {
-    const rail = rails[route.rail ?? "x402"];
+    const rail = rails[outboundPairKeyOf(route.rail ?? "x402", route.destination.network)];
     if (rail === undefined) {
       throw new SignerNotAuthorizedError();
     }
@@ -169,7 +263,7 @@ function railByRoute(
   }
   // 動的プロファイルも同じ Map で引く（ID の名前空間は route と共通）。
   for (const [profileId, profile] of Object.entries(profiles)) {
-    const rail = rails[profile.rail];
+    const rail = rails[outboundPairKeyOf(profile.rail, profile.destination.network)];
     if (rail === undefined) {
       throw new SignerNotAuthorizedError();
     }
@@ -348,7 +442,9 @@ export function composeRails(
     ...Object.values(profiles).filter((profile) => profile.sourceRail === "x402").map((profile) => profile.source.network),
   ]);
   const usesSvmInbound = [...x402InboundNetworks].some((network) => networkFamilyOf(network) === "svm");
-  const solanaRpcUrl = usesSvmInbound ? (real.solanaRpcUrl ?? DEFAULT_SOLANA_RPC_URL) : undefined;
+  // SVM の送信（送信の設計 §2.2）: 受信が無くても、Solana 宛の route／プロファイルがあれば RPC は依存先・拒否ホストに入る。
+  const usesSvmOutbound = svmUsageOf(config.router.routes, profiles).outbound;
+  const solanaRpcUrl = usesSvmInbound || usesSvmOutbound ? (real.solanaRpcUrl ?? DEFAULT_SOLANA_RPC_URL) : undefined;
   const denyHosts =
     dynamicConfig === undefined
       ? []
@@ -361,51 +457,75 @@ export function composeRails(
           ...mppInboundChains.map((chainId) => mppInboundRpcUrlFor(chainId)),
           ...(capabilities.dependencyUrls ?? []),
         ]);
-  const dynamicOptionsFor = (rail: "x402" | "mpp") => {
+  // 送信の能力を network で引く（送信の設計 §2.1〜§2.2、FR-27）。起動時の検査: key と能力の network の完全一致、重複、family。
+  const { evmByNetwork, svmByNetwork } = outboundCapabilitiesOf(capabilities);
+  // 運用者の集合（送信の設計 §2.3、FR-38）: (a) 受信の受取先、(b) 注入された送信能力の公開アドレス。(c) の ATA は SVM の adapter の startup で足す（U8）。
+  const operatorAddresses = operatorAddressesOf(config.router, profiles, { evmByNetwork, svmByNetwork, ...(capabilities.mppTempo === undefined ? {} : { mppTempo: capabilities.mppTempo }) });
+
+  const dynamicOptionsFor = (rail: "x402" | "mpp", network: string) => {
     if (dynamicTransport === undefined) return {};
-    const own = Object.fromEntries(Object.entries(profiles).filter(([, profile]) => profile.rail === rail));
-    return Object.keys(own).length === 0 ? {} : { dynamic: { profiles: own, transport: dynamicTransport, denyHosts } };
+    const own = Object.fromEntries(Object.entries(profiles).filter(([, profile]) => profile.rail === rail && profile.destination.network === network));
+    return Object.keys(own).length === 0 ? {} : { dynamic: { profiles: own, transport: dynamicTransport, denyHosts, operatorAddresses } };
   };
 
-  // 経路ごとに必要な能力だけを要求する（レール B だけの構成でも A の鍵を要求しない）。プロファイルのレールも数える。
-  const railsInUse = new Set([
-    ...Object.values(config.router.routes).map((route) => route.rail ?? "x402"),
-    ...Object.values(profiles).map((profile) => profile.rail),
-  ]);
-  /** そのレールが担当する経路の上流だけを渡す（A の検査を B の URL に掛けない）。 */
-  const upstreamsFor = (rail: string): Record<string, string> =>
+  // 経路ごとに必要な能力だけを要求する（レール B だけの構成でも A の鍵を要求しない）。組は (rail, network)。プロファイルも数える。
+  const pairsInUse = new Map<string, { readonly rail: string; readonly network: string }>();
+  for (const route of Object.values(config.router.routes)) {
+    const rail = route.rail ?? "x402";
+    pairsInUse.set(outboundPairKeyOf(rail, route.destination.network), { rail, network: route.destination.network });
+  }
+  for (const profile of Object.values(profiles)) {
+    pairsInUse.set(outboundPairKeyOf(profile.rail, profile.destination.network), { rail: profile.rail, network: profile.destination.network });
+  }
+  /** その組が担当する経路の上流だけを渡す（A の検査を B の URL に掛けない）。 */
+  const upstreamsFor = (rail: string, network: string): Record<string, string> =>
     Object.fromEntries(
       Object.entries(config.router.routes)
-        .filter(([, route]) => (route.rail ?? "x402") === rail)
+        .filter(([, route]) => (route.rail ?? "x402") === rail && route.destination.network === network)
         .map(([routeId]) => [routeId, real.upstreams[routeId] as string]),
     );
+  /** 組み直しに使う EIP-712 domain（表）。静的 route は `tokenDomain` を持たないので、その network の資産の domain を全部渡す。 */
+  const tokenDomainsFor = (network: string): Record<string, { name: string; version: string }> => {
+    const entry = knownNetworkOf(networks, network);
+    return Object.fromEntries((entry?.assets ?? []).filter((asset) => asset.domain !== undefined).map((asset) => [asset.id.toLowerCase(), asset.domain!]));
+  };
 
   const rails: Record<string, OutboundRail> = {};
-  for (const rail of railsInUse) {
-    if (rail === "x402") {
-      const capability = capabilities.evmSigning;
+  for (const [key, pair] of pairsInUse) {
+    if (pair.rail === "x402" && networkFamilyOf(pair.network) === "evm") {
+      const capability = evmByNetwork.get(pair.network);
       if (capability === undefined) {
-        // 実 SDK 配線はできているが、署名能力が無い。偽の署名者で代替しない。
+        // 実 SDK 配線はできているが、この network の署名能力が無い。偽の署名者で代替しない。
         throw new SignerNotAuthorizedError();
       }
-      rails[rail] = createX402Outbound({
-        upstreams: upstreamsFor(rail),
+      const rebuild = pair.network !== BASE_SEPOLIA_NETWORK;
+      rails[key] = createX402Outbound({
+        upstreams: upstreamsFor(pair.rail, pair.network),
         capability,
         transport: transportFor(capability.kind === "non-signing-fixture", report, staticHooks),
-        ...dynamicOptionsFor("x402"),
+        operatorAddresses,
+        // Base 以外の EVM（Arc）は組み直しの署名器で（送信の設計 §3.2）。Base は従来の経路。
+        rebuildSignatures: rebuild,
+        ...(rebuild ? { tokenDomains: tokenDomainsFor(pair.network) } : {}),
+        ...dynamicOptionsFor("x402", pair.network),
       });
       continue;
     }
-    if (rail === "mpp") {
+    if (pair.rail === "x402" && networkFamilyOf(pair.network) === "svm") {
+      // SVM の送信の adapter は U7・U8 で足す。それまでは組ませない（fail closed）。
+      throw new SignerNotAuthorizedError();
+    }
+    if (pair.rail === "mpp") {
       const capability = capabilities.mppTempo;
       if (capability === undefined) {
         throw new SignerNotAuthorizedError();
       }
-      rails[rail] = createMppOutbound({
-        upstreams: upstreamsFor(rail),
+      rails[key] = createMppOutbound({
+        upstreams: upstreamsFor(pair.rail, pair.network),
         capability,
         transport: transportFor(capability.kind === "non-signing-fixture", report, staticHooks),
-        ...dynamicOptionsFor("mpp"),
+        operatorAddresses,
+        ...dynamicOptionsFor("mpp", pair.network),
       });
       continue;
     }
@@ -477,7 +597,7 @@ export function composeRails(
       if (shared === undefined) {
         const created = new SvmPolicyHolder();
         // 起動時の検査と settle の後の追跡（設計 §5.8）の transport: 同じ方針（fixture の差し替えの上に、loopback の方針と DNS の期限）。
-        const rpcTransport = createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 4 } });
+        const rpcTransport = svmRpcTransportOf(staticHooks, inboundLoopback, report);
         shared = { holder: created, transport: rpcTransport };
         svmHolders.set(key, shared);
         startupChecks.push(async () => {
@@ -609,10 +729,13 @@ export function composeRails(
    * （既存の互換）、どちらも無ければ `undefined`（core は検査しない）。組ごとの rail の選択は U4 で `railByRoute` に揃える。
    */
   const balanceOfFor = async (id: string, asset: string): Promise<bigint | undefined> => {
-    const railName = config.router.routes[id]?.rail ?? profiles[id]?.rail ?? (config.router.routes[id] === undefined ? undefined : "x402");
-    const rail = railName === undefined ? undefined : rails[railName];
+    const route = config.router.routes[id];
+    const profile = profiles[id];
+    const pair = route !== undefined ? { rail: route.rail ?? "x402", network: route.destination.network } : profile !== undefined ? { rail: profile.rail, network: profile.destination.network } : undefined;
+    if (pair === undefined) return undefined;
+    const rail = rails[outboundPairKeyOf(pair.rail, pair.network)];
     if (rail?.balanceOf !== undefined) return rail.balanceOf(id, asset);
-    const capability = railName === "x402" ? capabilities.evmSigning : railName === "mpp" ? capabilities.mppTempo : undefined;
+    const capability = pair.rail === "x402" ? evmByNetwork.get(pair.network) : pair.rail === "mpp" ? capabilities.mppTempo : undefined;
     if (capability?.balanceOf !== undefined) return capability.balanceOf(asset);
     return undefined;
   };
@@ -642,7 +765,7 @@ export function composeRails(
                 const probe = { scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, amount: "1", payTo: capabilities.mppTempo.account.address };
                 let estimate;
                 try {
-                  estimate = await rails["mpp"]!.estimateFee!(profile.profileId, probe, { url: "https://startup.invalid/" });
+                  estimate = await rails[outboundPairKeyOf("mpp", profile.destination.network)]!.estimateFee!(profile.profileId, probe, { url: "https://startup.invalid/" });
                 } catch {
                   throw new ConfigError(`dynamic profile ${profile.profileId}: the Tempo RPC did not answer a read-only fee estimate at startup`);
                 }

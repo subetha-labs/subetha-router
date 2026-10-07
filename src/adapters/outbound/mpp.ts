@@ -248,7 +248,8 @@ function payerMatches(payer: unknown, chainId: number, address: string): boolean
 export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 10_000;
   const capability = options.capability;
-  const dynamic = options.dynamic === undefined ? undefined : createMppDynamicPath(capability, options.dynamic);
+  // 運用者の集合は静的と動的で同じ 1 つ（動的の option に無ければ adapter のものを渡す。FR-38）。
+  const dynamic = options.dynamic === undefined ? undefined : createMppDynamicPath(capability, { ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }), ...options.dynamic });
 
   const upstreams = new Map<string, string>();
   for (const [routeId, raw] of Object.entries(options.upstreams)) {
