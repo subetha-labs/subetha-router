@@ -1,17 +1,17 @@
 # タスク分解: Arc と Solana で払う（S-1・S-2）
 
-> 2026-10-06、第 2 版。入力は `docs/multirail-requirements.md`（要件 v3、owner の決定 §0、確認の結果 §2.5）と `docs/multirail-design.md`（設計 第 3 版、owner 承認
+> 2026-10-06、第 3 版。入力は `docs/multirail-requirements.md`（要件 v3、owner の決定 §0、確認の結果 §2.5）と `docs/multirail-design.md`（設計 第 3 版、owner 承認
 > 「現在の設計で良いです」2026-10-06）。以下「設計 §x」「要件 FR-x」はそれらを指す。本書はタスクフェーズの成果物で、コード・実行結果・合格の主張は含まない。
-> 記載のコマンドは**計画であり未実行**。第 1 版は独立レビューで APPROVE WITH CHANGES（高 3・中 4）。指摘と反映先は §4。
+> 記載のコマンドは**計画であり未実行**。第 1 版は独立レビューで APPROVE WITH CHANGES（高 3・中 4）、第 2 版は範囲限定で APPROVE WITH CHANGES（高 1・中 4・低 1）。指摘と反映先は §4。
 
 ## 0. 全タスク共通
 
 - **担当**: 親（controller）が状態・commit を持ち、実装後に実ソースを読み戻してテストを実際に実行する。レビューは `gpt-6-astra`・read-only で差分を見る
 - **順序**: まず落ちるテストを書き、赤を確かめてから実装する。完了条件の試験は**守っているコードを外して落ちること**（sabotage）を確かめ、結果を PR に書く
 - **完了コマンド**: focused（当該テスト）→ `npm run types` → `npm test`。skip と失敗を区別して報告する。「Linux」と書いた完了条件は Linux（Colima の `node:22-bookworm`）で実行した結果を要する
-- **資金**: **Router の購入の settle（資金が動く決済）は T10 G-3 だけ**。T9 までのどのタスクも settle を呼ばない。例外として許すのは、T6 の使い捨て口座への **faucet の testnet 資産**の受け取りと、
+- **資金**: **Router の購入の settle（資金が動く決済）は T10 G-3 だけ**。T9 までのどのタスクも**本物の facilitator の `/settle`** を呼ばない（loopback の fixture の settle は試験であり、資金は動かない）。例外として許すのは、T6 の使い捨て口座への **faucet の testnet 資産**の受け取りと、
   送信しない部分署名（SVM）・署名だけ（EIP-3009）。**mainnet の資産は一切使わない**（SR-6）
-- **外部への接続**（T9 まで）: T0-a の npm の取得、T6 の **未払いの読取**だけ——x402.org の `/supported`・`/verify`、Circle の `/supported`・`/verify`、Solana devnet の `getLatestBlockhash`
+- **外部への接続**（T9 まで）: T0-a の npm の取得、T6 の **faucet（faucet.circle.com）の受け取り**と **未払いの読取**だけ——x402.org の `/supported`・`/verify`、Circle の `/supported`・`/verify`、Solana devnet の `getLatestBlockhash`
   （各 1〜数回。日時・回数を記録）。それ以外の試験はすべて loopback の fixture
 - **既定で無効**: T9 まで、Arc・Solana の route／プロファイルは**本番の入口の設定に出さない**（`ARC_PROFILES_ENABLED`／`SOLANA_PROFILES_ENABLED` = `false`）。T8-a がそれを試験で固定する
 - **既存を壊さない**（SR-4・FR-5）: 各タスクで既存テスト全通過（AC-5）。試験の数・内容を減らさない。既存の Base Sepolia・Tempo の経路で**意図して変えるのは次の 3 つだけ**で、各タスクに明記する:
@@ -30,22 +30,22 @@
 T0-a 依存の記録と導入
 T1 表と設定（parse だけ）                       ← T0-a（base58 の codec）
 T2 core の EVM 前提                             ← T1
-T3 Arc 受信（adapter・能力の port・fixture）     ← T1
+T3 Arc 受信（adapter・能力の port・fixture）     ← T1（port の型は T3 が導入する）
 T4-a SVM の transaction 検査・payer fixture・最小 RPC fixture ← T0-a, T1
 T4-b SVM の起動時の検査（/supported・ATA・transport）        ← T4-a
 T4-c SVM adapter（offer・verify・settle・§6）                ← T4-b
-T5 道具（sign・svm-payer・wallet・能力）         ← T0-a, T1, T4-a
+T5 道具（sign・svm-payer・wallet・能力）         ← T0-a, T1, T3（能力の port）, T4-a
 T6 実機の確認（/verify だけ。U-2）              ← T3, T4-c, T5
 T7-a client・MCP                                ← T2
-T7-b 合成（main.ts の配線・transport の否定・拒否ホスト） ← T3, T4-c, T7-a
-T7-c 統合・回復                                 ← T7-b, T6
+T7-b 合成（main.ts の配線・transport の否定・拒否ホスト） ← T3, T4-c, T6, T7-a
+T7-c 統合・回復                                 ← T7-b
 T8-a 本番の入口の設定生成（無効のまま）          ← T7-c
-T8-b 本番の入口の process（能力の注入）          ← T8-a
+T8-b 本番の入口の process（能力の注入・受け入れ用の起動）← T8-a
 T9 文書                                         ← T8-b
 T10 gate（owner）                               ← T9
 ```
 
-T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 は T0-a の導入の後。
+T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）。T1 の後は T2・T3・T4-a が並行できる。
 
 ## 2. タスク
 
@@ -130,7 +130,8 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
   - verify・settle の payload に `challengeNonce` が無い。**本物の verify の論理**（fixture の facilitator）が Router の形を受ける。settle の期限 50 秒（49 秒で通り 51 秒で `unknown`）
   - 順序と衛生: verify が `isValid: false` なら settle 0 回／`invalidReason` を転送しない
   - §6 の表の各行（SVM 版: `transaction` が base58 64 バイトでない → `unknown`、64 バイト → `settled`）。settle は 1 回だけ
-  - fee payer が変わった後（fixture の `/supported` を変えて再起動）、発行済みの quote は verify で落ちる（AC-4）
+  - fee payer が変わった後（fixture の `/supported` を変えて **adapter を作り直す**。process の再起動と journal の回復は T7-c）、発行済みの quote は verify で落ちる（AC-4）
+  - transport（SR-2、**Linux**）: verify・settle の要求が guarded transport を通る——redirect を追わない（3xx で `isValid: false`／`unknown`、Location へ 0 接続）、応答の上限、期限、`fixtureFacilitators` 無しで loopback の facilitator は 0 接続。既存の x402 adapter の transport の試験を共有の形にして SVM でも走らせる
   - quote・purchase の中で RPC・`/supported` に出ない（接続を数える）
 - **sabotage**: settle の形の検査を「非空」に戻す／`challengeNonce` を payload に残す／memo を offer から外す → 各試験が落ちる
 
@@ -147,7 +148,7 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
 
 | 内容 | 成果物 | 完了条件 |
 |---|---|---|
-| 使い捨ての ed25519 鍵（`wallet:new:solana`）と devnet の USDC（faucet.circle.com。devnet SOL は不要——fee payer は facilitator）。**offer は T4-c の adapter に作らせ**（`createOffer`。`feePayer` は本物の `/supported` から）、T5 の道具で署名し、x402.org の **`/verify` だけ**に出す。Circle は、Arc testnet の USDC を faucet で得られれば、T3 の adapter の offer と売り手証明（使い捨ての受取鍵）で `/verify` だけ（得られなければ T10 G-3 に送る）。道具は `tools/rails-verify-probe.ts`（`/settle` の経路を持たない） | 設計 §10 の U-2 の行に結果（日時・`isValid`・`invalidReason` の有無。鍵・URL・本文は書かない）、`.claude_workflow/local/` に記録 | `isValid: true` が 1 回ずつ。false なら理由を設計に照らし、**設計を改訂してから T7-b に進む**。外部の要求は `/supported` 1 回・`getLatestBlockhash` 1 回・`/verify` 数回。settle 0 回 |
+| 使い捨ての ed25519 鍵（`wallet:new:solana`）と devnet の USDC（faucet.circle.com。devnet SOL は不要——fee payer は facilitator）。**offer は T4-c の adapter に作らせ**（`createOffer`。`feePayer` は本物の `/supported` から）、T5 の道具で署名し、x402.org の **`/verify` だけ**に出す。Circle は、Arc testnet の USDC を faucet で得られれば、T3 の adapter の offer と売り手証明（使い捨ての受取鍵）で `/verify` だけ（得られなければ T10 G-3 に送る）。道具は `tools/rails-verify-probe.ts`（`/settle` の経路を持たない） | 設計 §10 の U-2 の行に結果（日時・`isValid`・`invalidReason` の有無。鍵・URL・本文は書かない）、`.claude_workflow/local/` に記録 | **必須**: SVM の `isValid: true` が 1 回。**条件つき**: Circle は Arc testnet の USDC が faucet で得られれば `isValid: true` 1 回、得られなければその事実を記録して G-3 に送る。false なら理由を設計に照らし、**設計を改訂してから T7-b に進む**。外部の要求は `/supported` 1 回・`getLatestBlockhash` 1 回・`/verify` 数回。settle 0 回 |
 
 ### T7-a — client・MCP（設計 §4.4、AC-6）
 
@@ -175,7 +176,7 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
   - AC-3（各 1 本、結果と回数を書く）: 別の宛先・額・mint・桁・fee payer が Router 向き・transfer 2 つ・不明な program・memo の書き換え・lookup table → `rejected` と facilitator・RPC への要求 0。
     再提出: 別の quote（`nonce_mismatch`、要求 0）・別の route（`route_binding_mismatch`、要求 0）・**同じ quote の並行**（settle は合計 1 回。2 本目は既存の結果）・**再起動後**（settle 1 回のまま）。
     昇格前の同じ credential の再試行は通る（要求はあるが settle は 1 回）
-  - AC-4: settle の応答の喪失・crash・形の違う／network の違う／識別子の無い成功応答で `unknown` が耐久的に残り、再起動後に settle が再発しない（要求数）。**両レグの予約が保たれる**（予算の残が減ったまま）
+  - AC-4: settle の応答の喪失・crash・形の違う／network の違う／識別子の無い成功応答で `unknown` が耐久的に残り、再起動後に settle が再発しない（要求数）。**両レグの予約が保たれる**（予算の残が減ったまま）。fee payer が変わった後の **process の再起動**で、発行済みの quote が verify で落ちる
   - FR-5・FR-6: 旧い journal（Base Sepolia・Tempo の記録）を読んで新しい記録と混在した identity を保つ／権威の欄（facilitator の kind・表の資産）を変えた再起動で発行済みの quote が `quote_changed`／
     再起動後の予算の合計が復元される／`(network, asset)` の区分が別（Arc の消費が Base Sepolia の予算を減らさない）
   - AC-6: `ownerKey` 無しの status が読めない、結果の保存と再読取が既存どおり
@@ -191,9 +192,11 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
 
 ### T8-b — 本番の入口の process（設計 §3・§8）
 
-- **範囲**: `tools/remote-router-process.ts`（env `SUBETHA_ARC_RECEIVER_KEY` → `real-seller-proof-capability`、`SUBETHA_SOLANA_RPC_URL`、`startRouter` への注入）
-- **完了条件（unit。鍵は乱数）**: 定数が `true` のとき、env から能力が作られ **route とプロファイルの両方**に束縛される（`address` = 設定の `payTo`、`network` = Arc）／env が無い・鍵の形違い・`payTo` と違う鍵 → 起動しない／
-  Solana RPC の URL が拒否ホストと `dependencyUrls` に入る／定数が `false` のとき env を読まない／鍵の値がログ・エラーに出ない。**SR-3 の 2 回目のレビュー**（証明の境界: T3 と本入口の実ソース）をこの PR で依頼する
+- **範囲**: `tools/remote-router-process.ts`（env `SUBETHA_ARC_RECEIVER_KEY` → `real-seller-proof-capability`、`SUBETHA_SOLANA_RPC_URL`、`startRouter` への注入）。**有効化は 1 つの値 `activation: { arc, solana }`** で、設定生成（T8-a）と能力の注入の**両方**がそれを見る。本番の入口は定数（`false`）を渡す。
+  **受け入れ用の起動 `tools/rails-acceptance-run.ts`**（G-3 用）: 同じ生成器と同じ process の入口に `activation` を `true` で渡し、別の journal・公開しない port・本番の env（鍵・facilitator）で起動する。公開の process の定数は触らない
+- **完了条件（unit。鍵は乱数）**: `activation` が `true` のとき、env から能力が作られ **route とプロファイルの両方**に束縛される（`address` = 設定の `payTo`、`network` = Arc）／env が無い・鍵の形違い・`payTo` と違う鍵 → 起動しない／
+  Solana RPC の URL が拒否ホストと `dependencyUrls` に入る／`activation` が `false` のとき env を読まず、新しい route・プロファイル・facilitator も出ない／鍵の値がログ・エラーに出ない／
+  受け入れ用の起動が fixture の構成で: `activation` `true` の設定と能力で起動し、別の journal を使い、公開の process の設定（定数 `false`）を変えない。**SR-3 の 2 回目のレビュー**（証明の境界: T3 と本入口の実ソース）をこの PR で依頼する
 - **sabotage**: `payTo` の照合を外す／能力を route だけに束縛する → 試験が落ちる
 
 ### T9 — 文書
@@ -207,8 +210,8 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
 | 段 | 内容 | 条件 |
 |---|---|---|
 | G-1 | 鍵と口座: Arc の証明専用の受取鍵を作る（ホストの env。Base Sepolia の鍵とは別）。Solana の受取 owner の鍵は**ホストに置かない**（運用者の手元）。ATA を作る（rent 1,488,440 lamports は運用者）。使い捨ての payer に Arc testnet USDC・devnet USDC を faucet で入れる | owner の確認。mainnet の資産は使わない |
-| G-2 | 配備（無効のまま）: `inboundFacilitators`・env を入れて再起動。起動時の検査（`/supported`・ATA）が通ること。**SSRF 防御 B（egress）の配備の受け入れ**を従来どおり実行（新しいホストへの egress が許され、それ以外は拒まれる）。rollback の container を 1 つ保つ | owner の確認（配備） |
-| G-3 | 受け入れの購入: **本番の設定生成に有効化の上書きを与えた別インスタンス**（T18 の試行 `tools/dyn-mpp-priority-trial.ts` と同じ形。本番の鍵・本番と同じ facilitator・公開しない port）で、AC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、静的・動的）。各 1 件、使い捨て口座。証拠: Arc は settle の tx が Arc の RPC で `success` かつ受取先の残高の増分、Solana は signature が devnet で confirmed かつ ATA の残高の増分、結果の `proof.onChainFinality` が `not_checked`。U-1（settle の `success` までの時間、`settlement_pending` の有無）・U-4 を記録 | owner の確認（支払いごとに quote を見せる）。`settlement_pending` が出たら設計 §10 U-1 を改訂（`/status` の polling の設計）してから G-4 |
+| G-2 | 配備（無効のまま）: env（鍵・RPC）を置き、公開の process を再起動。無効なので新しい route・facilitator・起動時の検査は**動かない**——確かめるのは「起動して既存の経路が従来どおり」と、**SSRF 防御 B（egress）の配備の受け入れ**（新しいホスト Circle・x402.org・Solana RPC への egress が許され、それ以外は拒まれる）。rollback の container を 1 つ保つ | owner の確認（配備） |
+| G-3 | 受け入れの購入: **T8-b の受け入れ用の起動**（`tools/rails-acceptance-run.ts`。本番の鍵・本番と同じ facilitator・別の journal・公開しない port）で。**最初に**その起動で `/supported`・ATA の起動時の検査が通ることを確かめ（これが本番 env での検査の証拠）、次にAC-1（Arc → Tempo、静的・動的）、AC-2（Solana → Base または Tempo、静的・動的）。各 1 件、使い捨て口座。証拠: Arc は settle の tx が Arc の RPC で `success` かつ受取先の残高の増分、Solana は signature が devnet で confirmed かつ ATA の残高の増分、結果の `proof.onChainFinality` が `not_checked`。U-1（settle の `success` までの時間、`settlement_pending` の有無）・U-4 を記録 | owner の確認（支払いごとに quote を見せる）。`settlement_pending` が出たら設計 §10 U-1 を改訂（`/status` の polling の設計）してから G-4 |
 | G-4 | 有効化: `ARC_PROFILES_ENABLED`／`SOLANA_PROFILES_ENABLED` = `true` の PR と配備。CLAUDE.md の route の表を更新 | owner の確認 |
 | U-5 | Base Sepolia の `success: false` の写像を揃えるか | owner の決定（急がない） |
 
@@ -221,7 +224,7 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
 | 3 | T4-a（transaction と封筒）・T7-c（再提出・並行・再起動） |
 | 4 | T3・T4-c（応答の形）・T7-c（耐久性・予約・再起動） |
 | 5 | 全タスク・T7-c（Linux） |
-| 6 | T2・T5・T7-a・T7-c・T9 |
+| 6 | T2・T5・T7-a・T7-c・T8-a・T8-b・T9・T10 G-4（公開の有効化。listing の試験は公開の受け入れではない） |
 | 7 | T1・T3・T4-a（行列）・T4-b・T4-c・T5・T7-a・T7-b・T7-c・T8-a・T8-b（各 sabotage） |
 
 ## 4. 独立レビューの記録
@@ -229,6 +232,7 @@ T3 は T0-a と並行できる（依存を増やさない）。T1・T4-a・T5 �
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
 | 1 | 2026-10-06 | `gpt-6-astra`（read-only。第 1 版 `fc8422b`） | **APPROVE WITH CHANGES**（高 3・中 4） |
+| 2 | 2026-10-06 | `gpt-6-astra`（read-only・範囲限定。第 2 版 `796ed1b`） | **APPROVE WITH CHANGES**（高 1・中 4・低 1）: G-3 の有効化の仕組みが無い → T8-b に `activation` と受け入れ用の起動。G-2 が無効のまま起動時の検査を求めていた → G-2 は配備と防御 B、検査は G-3 の起動。依存図（T3 と T0-a、T5 ← T3、T7-b ← T6）→ §1。SVM の verify・settle の transport → T4-c。資金・接続の規則（fixture の settle、faucet）と T6 の条件 → §0・T6。T4-c の再起動は adapter の作り直し、process は T7-c。AC-6 に T8・G-4。第 3 版で反映 |
 
 | # | 指摘（第 1 版） | 反映 |
 |---|---|---|
