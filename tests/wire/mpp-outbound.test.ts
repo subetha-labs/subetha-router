@@ -33,10 +33,12 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
   return fixture;
 }
 
-function railOf(fixture: Listening, spy: ReturnType<typeof createPayerSpy>) {
+function railOf(fixture: Listening, spy: ReturnType<typeof createPayerSpy>, options: { now?: () => number; operatorAddresses?: readonly string[] } = {}) {
   return createMppOutbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
     capability: spy.capability(),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
   });
 }
 
@@ -342,5 +344,32 @@ describe("mpp outbound over the installed official mppx client", () => {
     expect(
       await abortRail.pay({ routeId: ROUTE_ID, offer: abortOffer, paymentId: "b13", attempt: 1, deadlineMs: Date.now() + 600_000 }),
     ).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+  });
+});
+
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("静的 MPP: 承認の期限と運用者の集合", () => {
+  it("期限が送金 RPC の委譲の直前に切れていれば not_sent（送金 0・支払い要求 0。json-rpc の account は署名口が無く、送金 RPC が署名）", async () => {
+    const fixture = await startUpstream();
+    const spy = createPayerSpy();
+    const rail = railOf(fixture, spy, { now: () => Date.now() + 10_000_000 });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.sendAttempts()).toBe(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("運用者の集合にある受取先の challenge は候補に出ず、保存した offer でも pay の再検査で not_sent（送金 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createPayerSpy();
+    const offer = (await railOf(fixture, spy).readChallenge(ROUTE_ID))[0]!;
+    const guarded = railOf(fixture, spy, { operatorAddresses: [RECIPIENT] });
+    expect(await guarded.readChallenge(ROUTE_ID)).toEqual([]);
+    const result = await guarded.pay({ routeId: ROUTE_ID, offer, paymentId: "o1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(spy.sendAttempts()).toBe(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
   });
 });

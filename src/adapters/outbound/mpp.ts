@@ -39,6 +39,50 @@ export interface MppOutboundOptions {
    * 静的 route の挙動はこの有無で変わらない。
    */
   readonly dynamic?: MppDynamicOptions;
+  /** 運用者の集合（送信の設計 §2.3、FR-38）。ここへ払う challenge は候補にせず、`pay` でも再検査する。自分の account は常に含む。 */
+  readonly operatorAddresses?: readonly string[];
+  /** 承認の期限（`PayRequest.deadlineMs`）の時計。既定 `Date.now`。 */
+  readonly now?: () => number;
+}
+
+/** 承認の期限で、実署名または送金 RPC の委譲を**その前に**断った（送信の設計 §2.4、FR-36）。 */
+export class DeadlineRefusedError extends Error {
+  readonly reason = "destination_deadline";
+  constructor() {
+    super("destination_deadline");
+    this.name = "DeadlineRefusedError";
+  }
+}
+
+/** 期限の状態（1 支払いごと）。`refused` は実署名・送金 RPC の委譲の前に断ったときだけ立つ。 */
+export interface DeadlineState {
+  readonly deadlineMs: number;
+  refused: boolean;
+  /** 包んだ account の署名口を呼んだ回数（json-rpc の account には署名口が無い: 送金 RPC で数える）。 */
+  signatures: number;
+}
+
+const SIGNING_METHODS = ["signTransaction", "signTypedData", "signMessage", "sign", "signAuthorization"] as const;
+
+/**
+ * account の署名口を、承認の期限を**実際の委譲の直前**に見る wrapper で包む。期限を過ぎていれば `DeadlineRefusedError` を投げ、
+ * `state.refused` を立てる（送金 RPC の委譲より前の拒否だけが `not_sent` になる）。署名口の無い account（json-rpc）はそのまま。
+ */
+export function wrapAccountWithDeadline<A extends object>(account: A, state: DeadlineState, now: () => number): A {
+  const wrapped: Record<string, unknown> = { ...(account as Record<string, unknown>) };
+  for (const method of SIGNING_METHODS) {
+    const original = (account as Record<string, unknown>)[method];
+    if (typeof original !== "function") continue;
+    wrapped[method] = async (...args: unknown[]): Promise<unknown> => {
+      if (!(now() < state.deadlineMs)) {
+        state.refused = true;
+        throw new DeadlineRefusedError();
+      }
+      state.signatures += 1;
+      return (original as (...a: unknown[]) => Promise<unknown>).apply(account, args);
+    };
+  }
+  return wrapped as A;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -235,6 +279,10 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
    * 受取先・チェーン allowlist にも承認値そのものを渡す（SDK が先に弾く）。
    */
   const transport = options.transport;
+  const now = options.now ?? Date.now;
+  /** 運用者の集合（小文字化）。自分の account は常に含む（FR-38）。 */
+  const operatorAddresses = new Set([capability.account.address, ...(options.operatorAddresses ?? [])].map((address) => address.toLowerCase()));
+  const isOperator = (address: string): boolean => operatorAddresses.has(address.toLowerCase());
 
   /** request-local な文脈。1 回の `pay` の中で `pay_challenge` → `pay` と進める（adapter 全体では共有しない）。 */
   type MutableContext = { routeId: string; operation: string };
@@ -282,9 +330,11 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     approved?: { readonly chainId: number; readonly recipient: string },
     /** 注入された支払い能力への到達と送金要求回数を記録する。 */
     reach?: { touched: boolean; sends: number },
+    /** 承認の期限（支払いのときだけ）。署名口と送金 RPC の委譲の直前に見る。 */
+    deadline?: DeadlineState,
   ) {
     const method = tempo.charge({
-      account: capability.account,
+      account: deadline === undefined ? capability.account : wrapAccountWithDeadline(capability.account, deadline, now),
       getClient: async (parameters) => {
         if (reach !== undefined) {
           reach.touched = true;
@@ -318,6 +368,11 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
           if (reach.sends >= 1) {
             // 1 度目の成否が不明でも、SDK / viem の内部 fallback に 2 度目を出させない。
             throw new DuplicateSendError();
+          }
+          // 送金 RPC の委譲の直前に、承認の期限（FR-36）。ここで断れば資金は動いていない。
+          if (deadline !== undefined && !(now() < deadline.deadlineMs)) {
+            deadline.refused = true;
+            throw new DeadlineRefusedError();
           }
           reach.sends += 1;
           return injectedRequest(args, { retryCount: 0 });
@@ -391,8 +446,8 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       const offers: DestinationOffer[] = [];
       for (const challenge of prepared.challenges) {
         const view = viewOf(challenge);
-        // scope は canonical URL への束縛。別リソースの challenge は候補にしない。
-        if (view !== undefined && view.scope === `GET ${url}`) {
+        // scope は canonical URL への束縛。別リソースの challenge は候補にしない。運用者自身への支払いも候補にしない（FR-38）。
+        if (view !== undefined && view.scope === `GET ${url}` && !isOperator(view.recipient)) {
           offers.push(offerOf(view));
         }
       }
@@ -418,6 +473,10 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       if (approvedTerms === undefined) {
         return { outcome: "not_sent", reason: "destination_offer_unbound" };
       }
+      // 保存した offer の再検査: 運用者自身へは払わない（FR-38）。
+      if (isOperator(approved.payTo)) {
+        return { outcome: "not_sent", reason: "destination_offer_not_allowed" };
+      }
       const chainIdMatch = /^eip155:(\d+)$/.exec(approved.network);
       if (chainIdMatch === null) {
         return { outcome: "not_sent", reason: "destination_network_unsupported" };
@@ -440,8 +499,9 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       // push mode では credential 生成の途中で既に broadcast され得るので、能力に触れたかを
       // 記録し、触れた後の失敗は `not_sent` と断定しない。
       const reach = { touched: false, sends: 0 };
+      const deadline: DeadlineState = { deadlineMs: request.deadlineMs, refused: false, signatures: 0 };
       const ctx: MutableContext = { routeId: request.routeId, operation: "pay_challenge" };
-      const mppx = createClient(ctx, { chainId, recipient: approved.payTo }, reach);
+      const mppx = createClient(ctx, { chainId, recipient: approved.payTo }, reach, deadline);
       const init = baseInit();
 
       // 送金直前に読み直す（凍結した challenge をそのまま払わない）。
@@ -484,6 +544,10 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       try {
         credential = await prepared.createCredential();
       } catch {
+        // 承認の期限で、実署名または送金 RPC の委譲の前に断った（送金 0）。raw は出ていない（送信の設計 §2.4 の (A)・(B)）。
+        if (deadline.refused && reach.sends === 0) {
+          return { outcome: "not_sent", reason: "destination_deadline" };
+        }
         // 能力に触れる前の失敗（allowlist 違反など）なら、まだ何も動いていない。
         if (!reach.touched) {
           return { outcome: "not_sent", reason: "destination_not_signed" };

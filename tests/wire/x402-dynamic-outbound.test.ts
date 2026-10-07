@@ -100,7 +100,7 @@ interface Harness {
   pay(offer: DestinationOffer, url?: string): ReturnType<OutboundRail["pay"]>;
 }
 
-async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: number; denyHosts?: readonly string[]; profile?: DynamicProfile } = {}): Promise<Harness> {
+async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: number; denyHosts?: readonly string[]; profile?: DynamicProfile; now?: () => number; operatorAddresses?: readonly string[]; afterSign?: () => void } = {}): Promise<Harness> {
   const upstream = await startX402Upstream(TLS);
   closers.push(upstream.close);
   const account = privateKeyToAccount(generatePrivateKey());
@@ -135,7 +135,9 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
         address: account.address,
         signTypedData: async (message: TypedData) => {
           signed.push(message);
-          return account.signTypedData(message as never);
+          const signature = await account.signTypedData(message as never);
+          options.afterSign?.();
+          return signature;
         },
       },
     },
@@ -145,6 +147,8 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
       ...(options.denyHosts === undefined ? {} : { denyHosts: options.denyHosts }),
       ...(options.unpaidTimeoutMs === undefined ? {} : { unpaidTimeoutMs: options.unpaidTimeoutMs }),
       ...(options.paidTimeoutMs === undefined ? {} : { paidTimeoutMs: options.paidTimeoutMs }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
     },
   });
   upstream.state.pay = () => paidOk(account.address, { price: 1 });
@@ -704,4 +708,40 @@ test("動的経路は loopback を許す transport を受け取らない（起�
       dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: unbounded },
     }),
   ).toThrow("DNS deadline");
+});
+
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("動的 x402: 承認の期限と運用者の集合", () => {
+  const FAR = 10_000_000;
+
+  test("期限が実署名の委譲の直前に切れていれば not_sent（署名 0・支払い要求 0）。arm の後に SDK が待っても署名しない", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    // SDK が署名器を呼ぶ直前（arm の後）で時計を進める。
+    sdk.tamper = (message) => { offset = FAR; return message; };
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("署名の後・送出の前に切れれば not_sent（署名 1・支払い要求 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset, afterSign: () => { offset = FAR; } });
+    const offer = await h.quote();
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(1);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("運用者の集合にある受取先の offer は候補に出ず、保存した offer でも pay の再検査で not_sent", async () => {
+    const plain = await harness();
+    const offer = await plain.quote();
+    const h = await harness({ operatorAddresses: [FIXTURE_PAY_TO] });
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
 });

@@ -252,6 +252,16 @@ export function checkDynamicX402Offer(
 }
 
 /** 署名の境界で止めた（元の署名器は呼んでいない）。 */
+/** `cause` を辿って、指定の理由の `SigningRefusedError` かを見る（SDK は元の例外を包むことがある）。 */
+export function isSigningRefusal(error: unknown, reason: string): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof SigningRefusedError && current.reason === reason) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export class SigningRefusedError extends Error {
   constructor(readonly reason: string) {
     super(reason);
@@ -307,6 +317,10 @@ export function createRebuildingSigner(args: {
         throw new SigningRefusedError("destination_signer_not_armed");
       }
       armed = false;
+      // 承認の期限は署名口の入口（実際の署名の委譲の前。arm の後に SDK が待っても期限後には署名しない。送信の設計 §2.4）。
+      if (args.deadlineMs !== undefined && !(args.now() < args.deadlineMs)) {
+        throw new SigningRefusedError("destination_deadline");
+      }
       if (!isRecord(message) || message.primaryType !== "TransferWithAuthorization") {
         throw new SigningRefusedError("destination_unsupported_asset_transfer_method");
       }
@@ -351,10 +365,6 @@ export function createRebuildingSigner(args: {
         !BYTES32_PATTERN.test(nonce)
       ) {
         throw new SigningRefusedError("destination_signing_validity_out_of_range");
-      }
-      // 承認の期限は**ここ**（実際の署名の委譲の直前）で見る。arm の前では SDK が間で待てば期限後に署名できる（送信の設計 §2.4）。
-      if (args.deadlineMs !== undefined && !(args.now() < args.deadlineMs)) {
-        throw new SigningRefusedError("destination_deadline");
       }
       signatures += 1;
       return args.signer.signTypedData({
@@ -569,9 +579,9 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       try {
         // 上流のトップレベルの欄（`extensions`・`error` など）は SDK に渡さない。渡すのは確かめた 3 つだけ。
         payload = await httpClient.createPaymentPayload({ x402Version: 2, resource: challenge.resource, accepts: [selected] } as PaymentRequired);
-      } catch {
-        // payload 生成の失敗は送信前。署名の境界で止めた場合もここに来る。
-        return { outcome: "not_sent", reason: "destination_not_signed" };
+      } catch (error) {
+        // payload 生成の失敗は送信前。署名の境界で止めた場合もここに来る。期限の拒否は理由をそのまま出す。
+        return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
       }
       if (guard.signatures() !== 1 || stableJson((payload as { accepted?: unknown }).accepted) !== approvedJson || payload.x402Version !== 2) {
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };

@@ -21,6 +21,7 @@ import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
 import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
+import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
 import { createX402DynamicPath, type X402DynamicOptions } from "./x402-dynamic.js";
 
 export interface SyntheticX402Options {
@@ -202,6 +203,18 @@ export interface X402OutboundOptions {
    * 静的 route の挙動はこの有無で変わらない。
    */
   readonly dynamic?: X402DynamicOptions;
+  /**
+   * 運用者の集合（送信の設計 §2.3、FR-38）: 受信の受取先・送信の署名者・それらの ATA。ここへ払う offer は候補にせず、`pay` でも再検査する。
+   * 自分の署名者は常に含む。EVM は小文字化して比較する。
+   */
+  readonly operatorAddresses?: readonly string[];
+  /** 承認の期限（`PayRequest.deadlineMs`）の時計。既定 `Date.now`。 */
+  readonly now?: () => number;
+  /**
+   * Base 以外の EVM の network（Arc）で `true`: 静的 route も組み直しの署名器で署名する（送信の設計 §3.2。U4 で実装）。
+   * Base は `false`（SDK の typed data をそのまま渡す従来の経路）。
+   */
+  readonly rebuildSignatures?: boolean;
 }
 
 /** 照合に使う承認済み offer の必須フィールド（field 単位で見る）。 */
@@ -244,36 +257,30 @@ class NotSentError extends Error {
   }
 }
 
-/** 402 応答の `PAYMENT-REQUIRED` を**生の JSON としても**読む（未知フィールドを落とさない）。 */
-function decodeRawPaymentRequired(header: string): { accepts: readonly unknown[] } {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
-  } catch {
-    throw new Error("upstream PAYMENT-REQUIRED header is not base64 JSON");
+/** `cause` を辿って、承認の期限で止めた拒否かを見る（SDK は元の例外を包むことがある）。 */
+function isDeadlineRefusal(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof NotSentError && current.reason === "destination_deadline") return true;
+    current = (current as { cause?: unknown }).cause;
   }
-  if (!isRecord(raw) || !Array.isArray(raw["accepts"])) {
-    throw new Error("upstream PAYMENT-REQUIRED has no accepts[]");
-  }
-  return { accepts: raw["accepts"] };
+  return false;
 }
 
-interface Challenge {
-  /**
-   * SDK が検証・選択に使う形（公式 decoder が zod 検証した結果）。
-   * v2 であることは**実行時に**確かめる（SDK 型の `x402Version` は `number`）。
-   */
-  readonly parsed: PaymentRequired;
-  /** 未知のトップレベル / extra フィールドまで保った生の accepts。 */
-  readonly rawAccepts: readonly unknown[];
-  /** `PAYMENT-REQUIRED` ヘッダそのもの。 */
-  readonly header: string;
-}
+type Challenge = X402Challenge;
 
 export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 5_000;
   const capability = options.capability;
   const transport = options.transport;
+  const now = options.now ?? Date.now;
+  if (options.rebuildSignatures === true) {
+    // 組み直しの静的経路は U4 で足す。それまでは Base 以外の静的 x402 を組ませない（fail closed）。
+    throw new Error("rebuildSignatures is not implemented yet (outbound tasks U4)");
+  }
+  /** 運用者の集合（小文字化）。自分の署名者は常に含む。 */
+  const operatorAddresses = new Set([capability.signer.address, ...(options.operatorAddresses ?? [])].map((address) => address.toLowerCase()));
+  const isOperator = (address: string): boolean => operatorAddresses.has(address.toLowerCase());
   const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, options.dynamic);
 
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
@@ -301,55 +308,17 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
     return url;
   }
 
-  /** 純粋読取の GET（支払いヘッダを付けない）。 */
-  async function getChallenge(url: string, ctx: { routeId: string; operation: string }): Promise<Challenge> {
-    const response = await transport.fetch(url, {
-      method: "GET",
-      redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
-    }, ctx);
-    if (response.status !== 402) {
-      discardBody(response); // 読まない body は捨てて接続を即時に解放する（設計 §3.3-7）
-      throw new Error(`upstream challenge returned status ${response.status}`);
-    }
-    const header = response.headers.get("PAYMENT-REQUIRED");
-    let body: unknown;
-    try {
-      body = await response.text();
-    } catch (error) {
-      transport.report(error, ctx);
-      throw error;
-    }
-    if (header === null || header === "") {
-      throw new Error("upstream challenge has no v2 PAYMENT-REQUIRED header");
-    }
-    // 実 SDK に読ませて検証する（自前の解釈で置き換えない）。
-    const httpClient = new x402HTTPClient(new x402Client());
-    const parsed = httpClient.getPaymentRequiredResponse(
-      (name) => response.headers.get(name),
-      body,
-    );
-    if (parsed.x402Version !== 2) {
-      throw new Error("upstream challenge is not x402 v2");
-    }
-    const { accepts } = decodeRawPaymentRequired(header);
-    // SDK が読んだ件数と生の件数が違えば、どの要素を承認したのか一致させられない。
-    if (accepts.length !== parsed.accepts.length) {
-      throw new Error("upstream challenge accepts[] could not be matched to the SDK view");
-    }
-    // canonical resource の束縛（クエリ無しの GET 1 本）。
-    if (parsed.resource.url !== url) {
-      throw new Error("upstream challenge resource does not match the canonical URL");
-    }
-    return { parsed, rawAccepts: accepts, header };
+  /** 純粋読取の GET（支払いヘッダを付けない）。共有の読取（`x402-challenge.ts`）。 */
+  function getChallenge(url: string, ctx: { routeId: string; operation: string }): Promise<Challenge> {
+    return readX402Challenge(transport, url, ctx, timeoutMs);
   }
 
   function offersOf(challenge: Challenge): readonly DestinationOffer[] {
     const offers: DestinationOffer[] = [];
     challenge.rawAccepts.forEach((entry, index) => {
       const offer = offerOf(entry);
-      // SDK が読んだ必須フィールドと生の値が食い違う要素は候補にしない。
-      if (offer !== undefined && sameOfferFields(offer, challenge.parsed.accepts[index]!)) {
+      // SDK が読んだ必須フィールドと生の値が食い違う要素は候補にしない。運用者自身への支払いも候補にしない（FR-38）。
+      if (offer !== undefined && sameOfferFields(offer, challenge.parsed.accepts[index]!) && !isOperator(offer.payTo)) {
         offers.push(offer);
       }
     });
@@ -399,6 +368,10 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       if (!sameOfferFields(approved, selected)) {
         return { outcome: "not_sent", reason: "destination_offer_changed" };
       }
+      // 保存した offer の再検査: 運用者自身へは払わない（FR-38）。
+      if (isOperator(approved.payTo)) {
+        return { outcome: "not_sent", reason: "destination_offer_not_allowed" };
+      }
 
       const chainId = evmChainIdOf(approved.network);
       let armed = false;
@@ -434,6 +407,10 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
             inner["value"] !== BigInt(approved.amount);
           if (mismatch) {
             throw new NotSentError("destination_signing_args_mismatch");
+          }
+          // 承認の期限は**実際の署名の委譲の直前**で見る（送信の設計 §2.4、FR-36）。
+          if (!(now() < request.deadlineMs)) {
+            throw new NotSentError("destination_deadline");
           }
           return capability.signer.signTypedData(message);
         },
@@ -479,9 +456,9 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
           ...challenge.parsed,
           accepts: [selected],
         });
-      } catch {
-        // payload 生成の失敗は**送信前**。署名も送信もしていない。
-        return { outcome: "not_sent", reason: "destination_not_signed" };
+      } catch (error) {
+        // payload 生成の失敗は**送信前**。署名も送信もしていない。期限の拒否は理由をそのまま出す（他の拒否は固定の理由）。
+        return { outcome: "not_sent", reason: isDeadlineRefusal(error) ? "destination_deadline" : "destination_not_signed" };
       } finally {
         armed = false;
       }
@@ -496,6 +473,10 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };
       }
 
+      // 送出の直前にもう一度、承認の期限（FR-36）。署名だけでは資金は動かない。
+      if (!(now() < request.deadlineMs)) {
+        return { outcome: "not_sent", reason: "destination_deadline" };
+      }
       const payCtx = { routeId: request.routeId, operation: "pay" };
       let response: Response;
       try {

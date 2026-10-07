@@ -36,10 +36,12 @@ async function startUpstream(args: readonly string[] = []): Promise<Listening> {
   return fixture;
 }
 
-function railOf(fixture: Listening, spy: SignerSpy, network = NETWORK) {
+function railOf(fixture: Listening, spy: SignerSpy, network = NETWORK, options: { now?: () => number; operatorAddresses?: readonly string[]; capability?: ReturnType<SignerSpy["capability"]> } = {}) {
   return createX402Outbound({ transport: createGuardedTransport({ allowLoopback: true, report: () => {} }),
     upstreams: { [ROUTE_ID]: `${fixture.baseUrl}/v1/eth/snapshot` },
-    capability: spy.capability(network),
+    capability: options.capability ?? spy.capability(network),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
   });
 }
 
@@ -304,5 +306,52 @@ describe("x402 outbound over the installed official SDK", () => {
         capability: createSignerSpy().capability(NETWORK),
       }),
     ).toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("静的 x402: 承認の期限と運用者の集合", () => {
+  const FAR = 10_000_000;
+
+  it("期限が実署名の委譲の直前に切れていれば not_sent（署名 0・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    const rail = railOf(fixture, spy, NETWORK, { now: () => Date.now() + FAR });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("署名の後・送出の前に切れれば not_sent（署名 1・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let signedAt: number | undefined;
+    const inner = spy.capability(NETWORK);
+    const capability = { ...inner, signer: { ...inner.signer, signTypedData: async (message: Parameters<typeof inner.signer.signTypedData>[0]) => { const signature = await inner.signer.signTypedData(message); signedAt = Date.now(); return signature; } } };
+    const rail = railOf(fixture, spy, NETWORK, { capability, now: () => (signedAt === undefined ? Date.now() : Date.now() + FAR) });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d2", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(1);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("運用者の集合にある受取先の offer は候補に出ず、保存した offer でも pay の再検査で not_sent（署名 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    const plain = railOf(fixture, spy);
+    const offer = (await plain.readChallenge(ROUTE_ID))[0]!;
+    const guarded = railOf(fixture, spy, NETWORK, { operatorAddresses: [PAY_TO.toUpperCase().replace("0X", "0x")] });
+    expect(await guarded.readChallenge(ROUTE_ID)).toEqual([]);
+    const result = await guarded.pay({ routeId: ROUTE_ID, offer, paymentId: "o1", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(spy.calls).toHaveLength(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+    // 自分の署名者宛ても候補にしない（集合に無くても常に含む）。
+    const self = railOf(fixture, spy, NETWORK, { operatorAddresses: [] });
+    expect(await self.pay({ routeId: ROUTE_ID, offer: { ...offer, payTo: spy.address }, paymentId: "o2", attempt: 1, deadlineMs: Date.now() + 600_000 })).toMatchObject({ outcome: "not_sent" });
   });
 });

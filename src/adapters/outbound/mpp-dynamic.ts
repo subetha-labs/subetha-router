@@ -47,6 +47,8 @@ export interface MppDynamicOptions {
   /** 見積り 1 件に使える時間の合計（client の取得を含む）。既定 6 秒。各 RPC の期限は `min(1 回の上限, 残り)`。 */
   readonly estimateRpcBudgetMs?: number;
   readonly now?: () => number;
+  /** 運用者の集合（送信の設計 §2.3、FR-38）。自分の account と受信の受取先に足す。 */
+  readonly operatorAddresses?: readonly string[];
 }
 
 /**
@@ -371,6 +373,8 @@ export interface GuardedTempoAccount {
   signatures(): number;
   /** 署名した raw（まだ無ければ `undefined`）。 */
   signedRaw(): Hex | undefined;
+  /** 承認の期限で、実署名の委譲の直前に断った（FR-36 の (A)）。 */
+  deadlineRefused(): boolean;
 }
 
 /**
@@ -386,6 +390,8 @@ export function createGuardedTempoAccount(args: {
   /** 署名の直前に読んだ最新ブロックの baseFee（設計 §8.2。単価は Router が決める）。 */
   readonly baseFee: bigint;
   readonly now: () => number;
+  /** 承認の絶対期限（FR-36）。実署名の委譲の直前に見る。無ければ期限なし（試験用）。 */
+  readonly deadlineMs?: number;
 }): GuardedTempoAccount {
   const inner = args.account as Account & { signTransaction?: (transaction: unknown, options?: unknown) => Promise<Hex> };
   if (inner.type !== "local" || typeof inner.signTransaction !== "function") {
@@ -395,6 +401,7 @@ export function createGuardedTempoAccount(args: {
   let used = false;
   let signatures = 0;
   let signedRaw: Hex | undefined;
+  let deadlineRefused = false;
 
   const account = {
     address: inner.address,
@@ -405,6 +412,11 @@ export function createGuardedTempoAccount(args: {
         throw new TempoSigningRefusedError("destination_second_signature_refused");
       }
       used = true;
+      // 承認の期限は署名口の入口（実際の署名の委譲の前。SDK がここまで待っても期限後には署名しない。送信の設計 §2.4）。
+      if (args.deadlineMs !== undefined && !(args.now() < args.deadlineMs)) {
+        deadlineRefused = true;
+        throw new TempoSigningRefusedError("destination_deadline");
+      }
       if (!isRecord(transaction)) {
         throw new TempoSigningRefusedError("destination_signing_args_mismatch");
       }
@@ -476,7 +488,7 @@ export function createGuardedTempoAccount(args: {
       return raw;
     },
   };
-  return { account, approved, signatures: () => signatures, signedRaw: () => signedRaw };
+  return { account, approved, signatures: () => signatures, signedRaw: () => signedRaw, deadlineRefused: () => deadlineRefused };
 }
 
 export function approvedTransferOf(profile: DynamicProfile, offer: DestinationOffer, sender: string, maxFee: bigint): ApprovedTransfer {
@@ -706,7 +718,7 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
   }
 
   function operatorAddressesOf(profile: DynamicProfile): string[] {
-    return [capability.account.address, profile.source.payTo];
+    return [capability.account.address, profile.source.payTo, ...(options.operatorAddresses ?? [])];
   }
 
   interface Candidate {
@@ -926,8 +938,10 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
       } catch {
         return { outcome: "not_sent", reason: "destination_rejected" };
       }
-      const guard = createGuardedTempoAccount({ account: capability.account, profile, offer: approved, maxFee: cap, baseFee, now });
+      const guard = createGuardedTempoAccount({ account: capability.account, profile, offer: approved, maxFee: cap, baseFee, now, deadlineMs: request.deadlineMs });
       let sends = 0;
+      /** 承認の期限で送金 RPC の委譲の前に断った（FR-36 の (B)。raw は出ていない）。 */
+      let sendDeadlineRefused = false;
       /** 送金の RPC が接続の前に断られた（raw は出ていない）。署名後でも `not_sent` と言える唯一の場合。 */
       let sendRefusedBeforeDispatch = false;
       /**
@@ -970,6 +984,11 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
         const signed = guard.signedRaw();
         if (typeof raw !== "string" || signed === undefined || raw !== signed) {
           throw new TempoSigningRefusedError("destination_send_not_the_signed_transaction");
+        }
+        // 送金 RPC の委譲の直前に、承認の期限（FR-36 の (B)）。ここで断れば資金は動いていない。
+        if (!(now() < request.deadlineMs)) {
+          sendDeadlineRefused = true;
+          throw new TempoSigningRefusedError("destination_deadline");
         }
         checkRawTempoTransfer(signed, guard.approved, now());
         sends += 1;
@@ -1015,6 +1034,10 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
           new Response(null, { status: 402, headers: { [Constants.Headers.wwwAuthenticate]: Challenge.serialize(selected.challenge) } }),
         );
       } catch {
+        // 承認の期限で、実署名の前 (A) または送金 RPC の前 (B) に断った。送金 0 なので未送出が確か。
+        if ((guard.deadlineRefused() || sendDeadlineRefused) && sends === 0) {
+          return { outcome: "not_sent", reason: "destination_deadline" };
+        }
         if (guard.signatures() === 0) {
           return { outcome: "not_sent", reason: "destination_not_signed" };
         }

@@ -498,6 +498,8 @@ async function harness(
     estimateRpcBudgetMs?: number;
     /** 門: この番号（1 始まり）以降の admit を断る。 */
     refuseAdmitAt?: number;
+    now?: () => number;
+    operatorAddresses?: readonly string[];
   } = {},
 ): Promise<Harness> {
   const rpc = await startTempoRpc({ tls: TLS });
@@ -546,6 +548,8 @@ async function harness(
       ...(options.rpcTimeoutMs === undefined ? {} : { rpcTimeoutMs: options.rpcTimeoutMs }),
       ...(options.estimateRpcTimeoutMs === undefined ? {} : { estimateRpcTimeoutMs: options.estimateRpcTimeoutMs }),
       ...(options.estimateRpcBudgetMs === undefined ? {} : { estimateRpcBudgetMs: options.estimateRpcBudgetMs }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
     },
   });
   return {
@@ -1339,3 +1343,48 @@ describe("pay: 署名時の上限は request.maxFee（quote の cap）", () => {
   });
 });
 
+/* ------------------------------------------------------------------ 期限と運用者の集合（送信の設計 §2.3・§2.4、FR-36・FR-38。タスク U3） */
+
+describe("動的 MPP: 承認の期限と運用者の集合", () => {
+  const FAR = 10_000_000;
+
+  test("(A) 期限が実署名の委譲の直前に切れていれば not_sent（署名 0・送金 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    // SDK が facade の署名口を呼ぶ直前で時計を進める（facade の内側の検査が期限で止める）。
+    sdk.wrapAccount = ((facade: FacadeLike) => ({
+      address: facade.address,
+      type: "local",
+      signTransaction: async (tx: unknown, opts?: unknown) => { offset = FAR; return facade.signTransaction(tx, opts); },
+    })) as never;
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.sends()).toBe(0);
+  });
+
+  test("(B) 署名の後・送金 RPC の委譲の前に切れれば not_sent（署名 1・送金 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    sdk.wrapAccount = ((facade: FacadeLike) => ({
+      address: facade.address,
+      type: "local",
+      signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await facade.signTransaction(tx, opts); offset = FAR; return raw; },
+    })) as never;
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.innerSigned).toHaveLength(1);
+    expect(h.sends()).toBe(0);
+  });
+
+  test("運用者の集合にある受取先の challenge は候補に出ず、保存した offer でも pay で送らない", async () => {
+    const plain = await harness();
+    const offer = await plain.quote();
+    const h = await harness({ operatorAddresses: [MPP_FIXTURE_RECIPIENT] });
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    const result = await h.pay(offer);
+    expect(result.outcome).toBe("not_sent");
+    expect(h.innerSigned).toHaveLength(0);
+    expect(h.sends()).toBe(0);
+  });
+});
