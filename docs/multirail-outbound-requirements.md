@@ -13,10 +13,21 @@
 > fee payer の隔離の列挙（FR-24・FR-35）。blockhash の期限は秒の保証ではなく取得〜署名の局所的な制限と送出直前の再検査に（FR-34・FR-36）。残高の事前確認は owner の判断（D-15）。
 > 有効化は受信・送信で独立（FR-30）。静的・動的の予算は別で、方向間の共有は可用性の問題（FR-29・D-14）。SDK の事実と Provider 側の仮定を分離（§2）。AC を分け、失敗の表を送信専用に（§6）。
 
-## 0. owner の指示（2026-10-07）
+## 0. owner の指示と決定（2026-10-07）
 
 「Arc と Solana の受信レールだけでなく、**Arc と Solana を利用している Provider も Router から利用できるように**してほしい」。
-本書はこれを **S-3（送信 = Arc）と S-4（送信 = Solana）の両方**を範囲とする要件に起こしたもの。順・公開する組・鍵と資金・Provider の置き場は §8 で owner に決めてもらう。
+本書はこれを **S-3（送信 = Arc）と S-4（送信 = Solana）の両方**を範囲とする要件に起こしたもの。§8 の問いは **2026-10-07 に owner が「推奨で進めてください」と決定**した:
+
+| # | 決定 |
+|---|---|
+| D-10 | Provider は owner の `subetha-provider-x402` を Arc 用・Solana 用に 2 つ追加で配備（facilitator は Provider 側の設定）。Router の開発は fixture で先に進め、URL と受取先（Solana は owner の公開鍵と事前に作った ATA）が決まり次第、静的 route に入れる |
+| D-11 | Arc の送信鍵は Base／Tempo と同じ EVM 鍵（`SUBETHA_OUTBOUND_X402_KEY` を Arc にも束ねる。env は増やさない）。Solana の送信鍵は**新しい ed25519 鍵**（受信の受取 owner の鍵とは別）。鍵は Router の開発側が作り G-1′ で owner が承認、資金（Arc testnet USDC・devnet USDC、Router の ATA の rent）は owner |
+| D-12 | 先に静的 2（O-1 Base→Arc、O-4 Tempo→Solana）＋動的 4（O-1〜O-4）。O-5・O-6 は D-17 |
+| D-13 | S-3 → S-4 の順で作り、Arc は AC-13 の後に先に有効化（レールごとに独立） |
+| D-14 | 予算は受信の D-7 と同じ桁。方向間の枠の共有（片方向が他方を止め得る）は testnet では受容 |
+| D-15 | Solana の残高の事前確認を動的（既存の hook・purchase の受信 verify の前）と静的（同じ時点の hook を足す）の両方に。RPC 失敗は不足扱い。EVM は見送り（受信成立後に不足が分かるリスクを受容） |
+| D-16 | 同レール同チェーン（Arc → Arc、Solana → Solana）は範囲外 |
+| D-17 | Arc ↔ Solana は testnet では par。足すときは AC-13／AC-14 と同じ購入と gate を通す |
 
 ## 1. 今の Router（送信側）が持つもの
 
