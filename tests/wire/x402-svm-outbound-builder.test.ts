@@ -80,9 +80,10 @@ describe("AC-9 (c): builder の変異は署名前の検査で止まる（signer 
       const before = builder.calls;
       const result = await h.rail.pay(requestOf(h, offers[0]!));
       expect(builder.calls).toBeGreaterThan(before); // 壊れた builder が本当に使われた
-      expect(result).toEqual({ outcome: "not_sent", reason: "destination_message_mismatch" });
-      expect(h.signer.signCount()).toBe(0);
+      // **署名器の回数が先**: 署名前の検査を外した変異は、第 2 層が理由を変える前にここ（signer 1）で落ちる。
+      expect(h.signer.signCount(), "signer must not be called for a corrupted message").toBe(0);
       expect(h.signer.signed).toEqual([]);
+      expect(result).toEqual({ outcome: "not_sent", reason: "destination_message_mismatch" });
       expect(h.upstream.seen.paid).toHaveLength(0);
       expect(h.fac.seen.verifyCalls).toBe(0);
       // 予約（hash）にも達しない（検査は予約の前）。
