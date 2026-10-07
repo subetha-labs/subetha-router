@@ -59,20 +59,20 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
     assets: [{ id: "0x20c0000000000000000000000000000000000000", decimals: 6 }],
   },
   {
-    // Arc testnet（Circle）。送信（S-3）は別紙で足す。
+    // Arc testnet（Circle）。送信（S-3）は x402（EIP-3009。送信の設計 §3）。
     network: "eip155:5042002",
     family: "evm",
     inbound: ["x402"],
-    outbound: [],
+    outbound: ["x402"],
     x402Facilitator: "circle",
     assets: [{ id: "0x3600000000000000000000000000000000000000", decimals: 6, domain: { name: "USDC", version: "2" } }],
   },
   {
-    // Solana devnet。送信（S-4）は別紙で足す。
+    // Solana devnet。送信（S-4）は x402 の SVM `exact`（送信の設計 §4）。
     network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
     family: "svm",
     inbound: ["x402"],
-    outbound: [],
+    outbound: ["x402"],
     x402Facilitator: "x402",
     assets: [{ id: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }],
   },
@@ -136,10 +136,12 @@ interface TermsToValidate {
   readonly decimals?: number;
   readonly payTo?: string;
   readonly tokenDomain?: { readonly name: string; readonly version: string };
+  /** SVM の送信先の token program（送信の設計 §1.1）。表が権威で、設定に値があれば一致を要求する。 */
+  readonly tokenProgram?: string;
 }
 
 /**
- * 表との照合（設計 §1）。network・向きとレール・資産・桁・domain・feeAsset・受取先の形。
+ * 表との照合（設計 §1）。network・向きとレール・資産・桁・domain・feeAsset・受取先の形。SVM は token program（送信の設計 §1.1）。
  * 違いは `config_invalid`（`ConfigError`）。値はメッセージに出さない（設定の内容を起動ログに写さない）。
  */
 function validateTermsAgainstTable(at: string, terms: TermsToValidate, networks: readonly KnownNetwork[]): void {
@@ -162,11 +164,22 @@ function validateTermsAgainstTable(at: string, terms: TermsToValidate, networks:
     throw new ConfigError(`${at}.payTo is not a well-formed address for this network`);
   }
   if (terms.tokenDomain !== undefined) {
+    if (entry.family === "svm") {
+      throw new ConfigError(`${at}.tokenDomain is not allowed on an svm network`);
+    }
     if (asset.domain === undefined) {
       throw new ConfigError(`${at}.tokenDomain: the known asset has no EIP-712 domain`);
     }
     if (terms.tokenDomain.name !== asset.domain.name || terms.tokenDomain.version !== asset.domain.version) {
       throw new ConfigError(`${at}.tokenDomain does not match the known asset`);
+    }
+  }
+  if (terms.tokenProgram !== undefined) {
+    if (entry.family !== "svm") {
+      throw new ConfigError(`${at}.tokenProgram is only allowed on an svm network`);
+    }
+    if (asset.tokenProgram === undefined || terms.tokenProgram !== asset.tokenProgram) {
+      throw new ConfigError(`${at}.tokenProgram does not match the known asset`);
     }
   }
 }
@@ -252,8 +265,10 @@ export interface DynamicProfile {
     readonly network: string;
     readonly asset: string;
     readonly decimals: number;
-    /** x402 送信: EIP-712 domain の権威（上流の offer ではなくここ）。 */
+    /** x402 送信（EVM）: EIP-712 domain の権威（上流の offer ではなくここ）。SVM の宛先には無い。 */
     readonly tokenDomain?: { readonly name: string; readonly version: string };
+    /** x402 送信（SVM）: token program（任意。表が権威で、あれば一致を要求）。mint は `asset`。 */
+    readonly tokenProgram?: string;
     /** mpp 送信: 手数料に使ってよい資産。 */
     readonly feeAsset?: string;
     /**
@@ -728,11 +743,32 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     throw new ConfigError(`${at}.source.payTo must be a well-formed address for its network`);
   }
   const destination = requireRecord(value, "destination", at);
+  const destinationNetwork = requireString(destination, "network", `${at}.destination`);
+  // SVM の宛先の mint は `asset`（受信の `source.asset` と同じ約束）。別の欄は受けない。
+  if (Object.hasOwn(destination, "mint")) {
+    throw new ConfigError(`${at}.destination.mint is not a field (the SVM mint is destination.asset)`);
+  }
   let tokenDomain: { name: string; version: string } | undefined;
+  let tokenProgram: string | undefined;
   let feeAsset: string | undefined;
   let maxFee: string | undefined;
   let feeMargin: number | undefined;
-  if (rail === "x402") {
+  if (rail === "x402" && networkFamilyOf(destinationNetwork) === "svm") {
+    // SVM の x402 送信（送信の設計 §1.2）: domain は無い。token program は任意（表と照合）。桁は必須（下の requireDecimals）。
+    if (Object.hasOwn(destination, "tokenDomain")) {
+      throw new ConfigError(`${at}.destination.tokenDomain is not allowed for an svm destination`);
+    }
+    const program = destination["tokenProgram"];
+    if (program !== undefined) {
+      if (typeof program !== "string" || program === "") {
+        throw new ConfigError(`${at}.destination.tokenProgram must be a non-empty string`);
+      }
+      tokenProgram = program;
+    }
+  } else if (rail === "x402") {
+    if (Object.hasOwn(destination, "tokenProgram")) {
+      throw new ConfigError(`${at}.destination.tokenProgram is only for an svm destination`);
+    }
     const domain = requireRecord(destination, "tokenDomain", `${at}.destination`);
     tokenDomain = {
       name: requireString(domain, "name", `${at}.destination.tokenDomain`),
@@ -790,10 +826,11 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     rail,
     destination: {
       scheme: requireString(destination, "scheme", `${at}.destination`),
-      network: requireString(destination, "network", `${at}.destination`),
+      network: destinationNetwork,
       asset: requireString(destination, "asset", `${at}.destination`),
       decimals: destinationDecimals,
       ...(tokenDomain === undefined ? {} : { tokenDomain }),
+      ...(tokenProgram === undefined ? {} : { tokenProgram }),
       ...(feeAsset === undefined ? {} : { feeAsset }),
       ...(maxFee === undefined ? {} : { maxFee }),
       ...(feeMargin === undefined ? {} : { feeMargin }),
@@ -886,7 +923,7 @@ export function parseRouterConfig(raw: unknown, options: RouterConfigOptions = {
 /**
  * 表との照合（multirail 設計 §1）。範囲は x402／mpp の受信（`sourceRail`）と x402／mpp の送信（`rail`）だけ。
  * `subetha` 受信（既定）と rail 未指定の route は今の検査のまま。静的 route の destination は network・向き・資産・受取先の形、
- * source と動的プロファイルはそれに桁（x402 送信は `tokenDomain`）を足して見る。
+ * source と動的プロファイルはそれに桁（x402 送信は EVM の `tokenDomain`、SVM の `tokenProgram`）を足して見る。
  */
 export function validateRouterConfigAgainstTable(router: RouterConfig, networks: readonly KnownNetwork[]): void {
   for (const route of Object.values(router.routes)) {
@@ -909,6 +946,7 @@ export function validateRouterConfigAgainstTable(router: RouterConfig, networks:
       decimals: profile.destination.decimals,
       // mpp 送信の `feeAsset` は送信資産そのものに限る（`parseDynamicProfile`）ので、資産の照合で一緒に決まる。
       ...(profile.destination.tokenDomain === undefined ? {} : { tokenDomain: profile.destination.tokenDomain }),
+      ...(profile.destination.tokenProgram === undefined ? {} : { tokenProgram: profile.destination.tokenProgram }),
     }, networks);
   }
 }

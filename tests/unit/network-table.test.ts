@@ -18,6 +18,7 @@ import {
   isWellFormedPayTo,
   loadRuntimeConfig,
   parseRouterConfig,
+  validateRouterConfigAgainstTable,
   type KnownNetwork,
 } from "../../src/config.js";
 import { TEST_NETWORKS } from "../fixtures/known-networks.js";
@@ -115,7 +116,7 @@ describe("表の照合は networks を渡したときだけ", () => {
 describe("否定（static route）", () => {
   test("表に無い network", () => expectInvalid(config([route({}, { network: "eip155:1" })]), /source\.network is not a known network/));
   test("向きとレールが表に無い（Tempo で x402 受信）", () => expectInvalid(config([route({}, { network: "eip155:42431", asset: PATHUSD })]), /inbound rail "x402" is not allowed/));
-  test("送信の向きが表に無い（Arc へ送信は S-3）", () => expectInvalid(config([route({ rail: "x402" }, {}, { scheme: "exact", network: "eip155:5042002", asset: ARC_USDC })]), /outbound rail "x402" is not allowed/));
+  test("送信の向きが表に無い（Tempo へ x402 送信）", () => expectInvalid(config([route({ rail: "x402" }, {}, { scheme: "exact", network: "eip155:42431", asset: PATHUSD })]), /outbound rail "x402" is not allowed/));
   test("表に無い資産", () => expectInvalid(config([route({}, { asset: "0x000000000000000000000000000000000000beef" })]), /source\.asset is not a known asset/));
   test("桁が違う（Arc のネイティブ USDC 18 桁は設定できない。FR-7）", () => expectInvalid(config([route({}, { network: "eip155:5042002", asset: ARC_USDC, decimals: 18 })]), /source\.decimals does not match/));
   test("EVM の payTo が 0x＋40 hex でない", () => expectInvalid(config([route({}, { payTo: "0x1234" })]), /source\.payTo must be a well-formed address/));
@@ -126,10 +127,85 @@ describe("否定（static route）", () => {
     expectInvalid(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: thirtyOne })]), /source\.payTo must be a well-formed address/);
   });
   test("送信の payTo の形（EVM）", () => expectInvalid(config([route({}, {}, { payTo: "not-an-address" })]), /destination\.payTo is not a well-formed address/));
-  test("Solana は受信だけ（表のとおり）。owner の公開鍵は通る", () => {
+  test("Solana の受信は owner の公開鍵で通り、mpp 送信は表に無い", () => {
     const parsed = parseRouterConfig(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), { networks: KNOWN_NETWORKS });
     expect(parsed.routes["r"]?.source.payTo).toBe(SOL_OWNER);
-    expectInvalid(config([route({ rail: "x402" }, {}, { scheme: "exact", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), /outbound rail "x402" is not allowed/);
+    expectInvalid(config([route({ rail: "mpp" }, {}, { scheme: "tempo/charge", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), /outbound rail "mpp" is not allowed/);
+  });
+});
+
+/** 送信の表（送信の設計 §1、FR-26・FR-28。タスク U1）: Arc・Solana 宛の x402 送信を表で許し、SVM の宛先は mint（= asset）・桁・token program で照合する。 */
+describe("送信の表（Arc・Solana 宛。U1）", () => {
+  const SOL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+  const ARC_PROVIDER = "0xAF42CFfe4B35A05098613d962aF43CDc43fBb4Ea";
+  const arcRoute = route({ routeId: "arc", canonicalPath: "/v1/routes/arc/resource", rail: "x402" }, {}, { scheme: "exact", network: "eip155:5042002", asset: ARC_USDC, payTo: ARC_PROVIDER });
+  const solRoute = route({ routeId: "sol", canonicalPath: "/v1/routes/sol/resource", rail: "x402" }, {}, { scheme: "exact", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER });
+  const arcProfile = (destination: Json = {}): Json =>
+    profile({ profileId: "pa", rail: "x402" }, {}, { scheme: "exact", network: "eip155:5042002", asset: ARC_USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" }, feeAsset: undefined, maxFee: undefined, ...destination });
+  const solProfile = (destination: Json = {}): Json =>
+    profile({ profileId: "ps", rail: "x402" }, {}, { scheme: "exact", network: SOL_DEVNET, asset: SOL_USDC, decimals: 6, feeAsset: undefined, maxFee: undefined, ...destination });
+
+  test("表: Arc 宛・Solana 宛の静的 x402 送信が本番の表で通る（payTo は EVM の 0x／SVM の owner の公開鍵）", () => {
+    const parsed = parseRouterConfig(config([arcRoute, solRoute]), { networks: KNOWN_NETWORKS });
+    expect(parsed.routes["arc"]?.destination.network).toBe("eip155:5042002");
+    expect(parsed.routes["sol"]?.destination.payTo).toBe(SOL_OWNER);
+    expect(KNOWN_NETWORKS.find((entry) => entry.network === "eip155:5042002")?.outbound).toEqual(["x402"]);
+    expect(KNOWN_NETWORKS.find((entry) => entry.network === SOL_DEVNET)?.outbound).toEqual(["x402"]);
+  });
+  test("表: 試験の表も Arc・Solana の送信を許す（本番の項目をそのまま保つ）", () => {
+    expect(TEST_NETWORKS.find((entry) => entry.network === SOL_DEVNET)?.outbound).toEqual(["x402"]);
+    expect(TEST_NETWORKS.find((entry) => entry.network === "eip155:5042002")?.outbound).toEqual(["x402"]);
+  });
+  test("動的: Arc 宛は tokenDomain（USDC/2）で通る。Solana 宛は tokenDomain 無し・decimals ありで通り、asset が mint", () => {
+    const parsed = parseRouterConfig(config([route()], [arcProfile(), solProfile()]), { networks: KNOWN_NETWORKS });
+    expect(parsed.dynamic?.profiles["pa"]?.destination.tokenDomain).toEqual({ name: "USDC", version: "2" });
+    expect(parsed.dynamic?.profiles["ps"]?.destination.tokenDomain).toBeUndefined();
+    expect(parsed.dynamic?.profiles["ps"]?.destination.asset).toBe(SOL_USDC);
+    expect(parsed.dynamic?.profiles["ps"]?.destination.tokenProgram).toBeUndefined();
+  });
+  test("動的: Solana 宛の tokenProgram は任意で、表と一致すれば保たれ、違えば config_invalid", () => {
+    const parsed = parseRouterConfig(config([route()], [solProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]), { networks: KNOWN_NETWORKS });
+    expect(parsed.dynamic?.profiles["ps"]?.destination.tokenProgram).toBe(SOL_TOKEN_PROGRAM);
+    expectInvalid(config([route()], [solProfile({ tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" })]), /profiles\.ps\.destination\.tokenProgram does not match the known asset/);
+    expectInvalid(config([route()], [solProfile({ tokenProgram: "" })]), /profiles\.ps\.destination\.tokenProgram must be a non-empty string/);
+  });
+  test("動的: Solana 宛に tokenDomain があれば拒否、decimals が無ければ拒否（parse の段で）", () => {
+    expectInvalid(config([route()], [solProfile({ tokenDomain: { name: "USDC", version: "2" } })]), /profiles\.ps\.destination\.tokenDomain is not allowed for an svm destination/);
+    expectInvalid(config([route()], [solProfile({ decimals: undefined })]), /profiles\.ps\.destination\.decimals/);
+  });
+  test("動的: EVM 宛に tokenProgram があれば拒否、`mint` の欄は受けない（mint は asset）", () => {
+    expectInvalid(config([route()], [arcProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]), /profiles\.pa\.destination\.tokenProgram is only for an svm destination/);
+    expectInvalid(config([route()], [solProfile({ mint: SOL_USDC })]), /profiles\.ps\.destination\.mint is not a field/);
+  });
+  test("表の照合そのもの（parse を通さずに）: svm の宛先に tokenDomain、evm の宛先に tokenProgram があれば表の段で拒む", () => {
+    const parsed = parseRouterConfig(config([route()], [arcProfile(), solProfile()]));
+    const withDomainOnSvm = {
+      ...parsed,
+      dynamic: { ...parsed.dynamic!, profiles: { ...parsed.dynamic!.profiles, ps: { ...parsed.dynamic!.profiles["ps"]!, destination: { ...parsed.dynamic!.profiles["ps"]!.destination, tokenDomain: { name: "USDC", version: "2" } } } } },
+    };
+    expect(() => validateRouterConfigAgainstTable(withDomainOnSvm, KNOWN_NETWORKS)).toThrow(/profiles\.ps\.destination\.tokenDomain is not allowed on an svm network/);
+    const withProgramOnEvm = {
+      ...parsed,
+      dynamic: { ...parsed.dynamic!, profiles: { ...parsed.dynamic!.profiles, pa: { ...parsed.dynamic!.profiles["pa"]!, destination: { ...parsed.dynamic!.profiles["pa"]!.destination, tokenProgram: SOL_TOKEN_PROGRAM } } } },
+    };
+    expect(() => validateRouterConfigAgainstTable(withProgramOnEvm, KNOWN_NETWORKS)).toThrow(/profiles\.pa\.destination\.tokenProgram is only allowed on an svm network/);
+    const withWrongProgram = {
+      ...parsed,
+      dynamic: { ...parsed.dynamic!, profiles: { ...parsed.dynamic!.profiles, ps: { ...parsed.dynamic!.profiles["ps"]!, destination: { ...parsed.dynamic!.profiles["ps"]!.destination, tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" } } } },
+    };
+    expect(() => validateRouterConfigAgainstTable(withWrongProgram, KNOWN_NETWORKS)).toThrow(/profiles\.ps\.destination\.tokenProgram does not match the known asset/);
+    expect(() => validateRouterConfigAgainstTable(parsed, KNOWN_NETWORKS)).not.toThrow();
+  });
+  test("parse の契約（networks 無し）: Solana 宛の x402 プロファイルは表無しでも parse でき、tokenDomain・mint・EVM の tokenProgram は parse の段で落ちる", () => {
+    const parsed = parseRouterConfig(config([route()], [solProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]));
+    expect(parsed.dynamic?.profiles["ps"]?.destination.tokenProgram).toBe(SOL_TOKEN_PROGRAM);
+    expect(() => parseRouterConfig(config([route()], [solProfile({ tokenDomain: { name: "USDC", version: "2" } })]))).toThrow(/tokenDomain is not allowed for an svm destination/);
+    expect(() => parseRouterConfig(config([route()], [solProfile({ mint: SOL_USDC })]))).toThrow(/destination\.mint is not a field/);
+    expect(() => parseRouterConfig(config([route()], [arcProfile({ tokenProgram: SOL_TOKEN_PROGRAM })]))).toThrow(/tokenProgram is only for an svm destination/);
+  });
+  test("動的: Solana 宛の桁が表と違う・資産が表に無い", () => {
+    expectInvalid(config([route()], [solProfile({ decimals: 9 })]), /profiles\.ps\.destination\.decimals does not match/);
+    expectInvalid(config([route()], [solProfile({ asset: SOL_OWNER })]), /profiles\.ps\.destination\.asset is not a known asset/);
   });
 });
 
@@ -246,8 +322,8 @@ describe("本番と試験の表", () => {
       expect(test?.x402Facilitator).toBe(entry.x402Facilitator);
       for (const asset of entry.assets) expect(test?.assets.some((a) => a.id === asset.id && a.decimals === asset.decimals && a.domain?.name === asset.domain?.name && a.tokenProgram === asset.tokenProgram)).toBe(true);
     }
-    // 本番が拒む向きは試験の表でも拒む（Arc への送信、Tempo での x402 受信）。
-    expectInvalid(config([route({ rail: "x402" }, {}, { scheme: "exact", network: "eip155:5042002", asset: ARC_USDC })]), /outbound rail "x402" is not allowed/, TEST_NETWORKS);
+    // 本番が拒む向きは試験の表でも拒む（Solana への mpp 送信、Tempo での x402 受信）。
+    expectInvalid(config([route({ rail: "mpp" }, {}, { scheme: "tempo/charge", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), /outbound rail "mpp" is not allowed/, TEST_NETWORKS);
     expectInvalid(config([route({}, { network: "eip155:42431", asset: PATHUSD })]), /inbound rail "x402" is not allowed/, TEST_NETWORKS);
   });
 
