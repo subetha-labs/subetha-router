@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "vitest";
 import { recoverTypedDataAddress } from "viem";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 
 import {
   bodyHashOf,
@@ -13,6 +14,7 @@ import {
   SELLER_PROOF_LIFETIME_SECONDS,
   SELLER_REQUEST_TYPES,
   sellerProofDomainOf,
+  type SellerProofCapabilityOptions,
 } from "../../src/adapters/inbound/seller-proof.js";
 import { createTestSellerProof } from "../fixtures/seller-proof-capability.js";
 
@@ -66,13 +68,30 @@ describe("seller proof capability", () => {
     expect(Object.isFrozen(SELLER_REQUEST_TYPES.SellerRequest[0])).toBe(true);
   });
 
-  test("設定は作るときに写す: options を後から変えても署名の network・payTo は変わらない", async () => {
-    const options = { network: ARC, now: () => 1_800_000_000_000 };
-    const proof = createTestSellerProof(options);
-    (options as { network: string }).network = "eip155:84532";
-    const envelope = decodeSellerProofHeader(await proof.capability.proofFor("verify", HASH))!;
+  test("設定は作るときに写す: 渡した options を後から変えても署名の network は変わらない", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    // 呼び出し側が持ち続ける可変の options を**そのまま**渡す（fixture の写しを通さない）。
+    const options = {
+      network: ARC,
+      address: account.address,
+      now: () => 1_800_000_000_000,
+      signSellerRequest: async (typedData: Parameters<SellerProofCapabilityOptions["signSellerRequest"]>[0]) =>
+        account.signTypedData({ domain: typedData.domain, types: typedData.types, primaryType: typedData.primaryType, message: typedData.message }),
+    };
+    const capability = createSellerProofCapability(options);
+    options.network = "eip155:84532";
+    const envelope = decodeSellerProofHeader(await capability.proofFor("verify", HASH))!;
     expect(envelope.network).toBe(ARC);
-    expect(proof.capability.network).toBe(ARC);
+    expect(capability.network).toBe(ARC);
+    // 署名された message の network も写した値（ARC）: ARC で recover して署名者に戻る。
+    const recovered = await recoverTypedDataAddress({
+      domain: sellerProofDomainOf(5042002),
+      types: SELLER_REQUEST_TYPES,
+      primaryType: "SellerRequest",
+      message: { purpose: "verify", method: "POST", bodyHash: HASH, network: ARC, payTo: envelope.payTo, nonce: envelope.nonce, issuedAt: BigInt(envelope.issuedAt), expiresAt: BigInt(envelope.expiresAt) },
+      signature: envelope.signature,
+    });
+    expect(recovered).toBe(account.address);
   });
 
   test("network は eip155 だけ、アドレスの形を要求する", () => {
