@@ -197,7 +197,7 @@ offer の抑止のため）ので、実行の守りは再開の検査。数値�
 ## 4. 変えないこと・限界
 
 - 署名の境界・送信の境界の検査の中身（T9）は変えない。変わるのは上限の値の出所だけ
-- quote と purchase の間（最大 10 分）に単価が上がれば、purchase の再見積り（§1.4）か署名前の検査（`destination_rejected`）で止まる。
+- quote と purchase の間（最大 10 分）に単価が上がれば、purchase の再見積り（§1.4）か署名前の検査（`destination_not_signed`。2026-10-08 の U8-b で送信 adapter の固定の理由を `SAFE_REASONS` に足し、journal と応答にそのまま残る。以前は `destination_rejected` に潰れていた）で止まる。
   **どちらの受信レールでも、受信 settle の後に止まれば呼び出し側は払っていて届かない**（本設計 §6.2 の順序: settle → 送信。返金しない。FR-10）。
   再見積りは x402 受信でこれを避ける手段で、MPP 受信の前払いは取り消せない。開示（`disclosures`）: MPP 送信のプロファイルでは**受信レールに依らず**
   `routerMayRejectAfterSettle: ["fee_too_high"]`（settle の後、署名前の検査で止まり得る。返金しない）を出し、MPP 受信の `routerMayRejectAfterFundsMoved` には
@@ -211,7 +211,7 @@ offer の抑止のため）ので、実行の守りは再開の検査。数値�
   `quote 10 × 1 + MPP 送信の purchase 10 × (1 + 1 + 1) + MPP 受信の purchase の RPC`（purchase の全体の枠は 10／分で両プロファイルの合計）。
   R = 4／5（非対応）のノードでは見積りだけで 40／50 になり、purchase の RPC（1 件 9／11）と合わせると枠に収まらない。**非対応のノードは運用の条件から外す**
   （`DEPLOY.md` §2b の条件に足す。起動時の `verify` でも `eth_fillTransaction` の有無を読取で確かめる）。
-  枠で止まる purchase は、再見積りなら `fee_estimate_unavailable`、送信の読取なら `destination_rejected`、**送金の RPC なら `not_sent`**（§3.4。署名後でも接続の前）。
+  枠で止まる purchase は、再見積りなら `fee_estimate_unavailable`、送信の読取なら `destination_rejected`（adapter の理由が固定の一覧に無いときの既定）、**送金の RPC なら `not_sent`**（§3.4。署名後でも接続の前）。
   **容量は可用性の話で、安全の話は §3.4 の分類が持つ**。試験: (a) fixture を R 1 にして quote を全体の上限まで出した直後に purchase が通ること、
   (b) 送金の RPC の門を閉じて `not_sent`（raw は出ていない）になること、(c) 送金の RPC が接続後に失敗して `unknown` のままであること。
   見積りの短時間キャッシュはこのスライスでは入れない

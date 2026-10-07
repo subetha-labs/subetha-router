@@ -281,6 +281,24 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   // 動的 MPP 送信の cap（`docs/dynamic-gas-fee-design.md` §3.4）。
   "destination_fee_cap_invalid",
   "destination_send_refused_before_dispatch",
+  // 送信 adapter の未送出の理由（送信の設計 §4.5・§5。固定文字列で、上流の内容は含まない）。journal と状態の射影にそのまま残す。
+  "destination_deadline",
+  "destination_offer_changed",
+  "destination_offer_not_allowed",
+  "destination_challenge_unreadable",
+  "destination_signer_network_mismatch",
+  "destination_reservation_unsupported",
+  "destination_ata_missing",
+  "destination_blockhash_unavailable",
+  "destination_blockhash_stale",
+  "destination_memo_invalid",
+  "destination_message_mismatch",
+  "destination_message_collision",
+  "destination_message_record_unavailable",
+  "destination_not_signed",
+  "destination_payload_mismatch",
+  "destination_receipt_unverified",
+  "destination_receipt_payer_mismatch",
 ]);
 
 /** adapter が返してよい preflight 理由。これ以外は固定コードに置き換える。 */
