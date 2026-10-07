@@ -307,8 +307,11 @@ export interface X402SvmInboundOptions {
    * transport は起動時の検査と同じ方針の guarded transport（loopback 不可・DNS の期限）を合成が渡す。
    */
   readonly rpc?: { readonly url: string; readonly transport: GuardedTransport };
-  /** 追跡の期限（既定 30 秒）と間隔（既定 2 秒）。試験は短くする。 */
-  readonly followUp?: { readonly totalMs?: number; readonly intervalMs?: number };
+  /**
+   * 追跡の完了の期限（既定 15 秒）と間隔（既定 2 秒）。試験は短くする。`clock`（単調なミリ秒。既定 `performance.now`）と `sleep` は試験の注入口
+   * （本番は既定のまま）。
+   */
+  readonly followUp?: { readonly totalMs?: number; readonly intervalMs?: number; readonly clock?: () => number; readonly sleep?: (ms: number) => Promise<void> };
   /** 運用者向けの固定の診断コード（`svm_settle_followed_up`）。値は渡さない。 */
   readonly onDiagnostic?: (code: string) => void;
   /** 起動時の検査で固定した値（`resolveSvmInboundPolicy`）。合成側は起動時の検査が埋める置き場を関数で渡す（埋まる前は throw）。 */
@@ -333,6 +336,15 @@ export function svmSettleFollowUpOf(options: Pick<X402SvmInboundOptions, "follow
     throw new Error("svm inbound: follow-up totalMs and intervalMs must be positive");
   }
   return { totalMs, intervalMs, requestTimeoutMs: Math.min(SVM_SETTLE_FOLLOW_UP_DEFAULTS.requestTimeoutMs, totalMs) };
+}
+
+/**
+ * 追跡の 1 要求の期限: 要求ごとの上限（10 秒）と完了の期限までの残りの小さい方（設計 §5.8 の 3）。
+ * **整数に切り下げる**: `AbortSignal.timeout` は整数しか受け付けず、単調時計（`performance.now`）の残りは小数になる。小数のまま渡すと
+ * 要求が RangeError で失敗し、残りが 10 秒を切った後の要求が全部失敗する（adapter の試験で見つけた）。
+ */
+export function svmFollowUpRequestTimeoutOf(remainingMs: number, requestTimeoutMs: number = SVM_SETTLE_FOLLOW_UP_DEFAULTS.requestTimeoutMs): number {
+  return Math.max(0, Math.floor(Math.min(requestTimeoutMs, remainingMs)));
 }
 
 /** 追跡に入る条件（設計 §5.8 の 2）: 本文が JSON object で、`transaction` が署名の形で、`network` が offer と一致。HTTP status は問わない。 */
@@ -396,6 +408,8 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
   const settleTimeoutMs = deadlines.settleMs;
   const followUp = svmSettleFollowUpOf(options);
   const rpc = options.rpc;
+  const clock = options.followUp?.clock ?? ((): number => performance.now());
+  const sleep = options.followUp?.sleep ?? ((ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)));
 
   /**
    * settle の応答の後の期限つきの追跡（設計 §5.8）。設定の RPC に `getSignatureStatuses` だけを、間隔ごとに、期限まで。
@@ -403,19 +417,16 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
    */
   async function followSignature(signature: string, routeId: string): Promise<SettleResult> {
     if (rpc === undefined) return { outcome: "unknown", reason: "source_settle_unknown" };
-    const startedAt = Date.now();
-    const deadlineAt = startedAt + followUp.totalMs;
+    const deadlineAt = clock() + followUp.totalMs;
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSignatureStatuses", params: [[signature], { searchTransactionHistory: true }] });
-    let polls = 0;
     for (;;) {
-      const remaining = deadlineAt - Date.now();
+      const remaining = deadlineAt - clock();
       if (remaining <= 0) break;
-      polls += 1;
       let status: "settled" | "failed" | "pending" = "pending";
       try {
         const response = await rpc.transport.fetch(
           rpc.url,
-          { method: "POST", headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(Math.min(followUp.requestTimeoutMs, remaining)) },
+          { method: "POST", headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(svmFollowUpRequestTimeoutOf(remaining, followUp.requestTimeoutMs)) },
           { routeId, operation: "svm_settle_follow_up" },
         );
         const read = await readBoundedBody(response, SVM_RESPONSE_MAX_BYTES);
@@ -432,16 +443,17 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
         // transport の失敗（timeout・切断・上限超過）は報告して次の間隔へ（期限が守る）。
         rpc.transport.report(error, { routeId, operation: "svm_settle_follow_up" });
       }
+      // 完了の期限は応答を読んだ後にも見る（要求の期限は取り消しを予約するだけで、続きが期限の前に走ることを保証しない）。
+      if (clock() > deadlineAt) break;
       if (status === "settled") {
         options.onDiagnostic?.("svm_settle_followed_up");
         return { outcome: "settled", txRef: signature };
       }
       if (status === "failed") break;
-      const wait = Math.min(followUp.intervalMs, deadlineAt - Date.now());
+      const wait = Math.min(followUp.intervalMs, deadlineAt - clock());
       if (wait <= 0) break;
-      await new Promise((resolve) => setTimeout(resolve, wait));
+      await sleep(wait);
     }
-    void polls;
     return { outcome: "unknown", reason: "source_settle_unknown" };
   }
 

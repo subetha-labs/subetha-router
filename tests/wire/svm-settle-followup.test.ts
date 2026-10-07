@@ -7,7 +7,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { address, generateKeyPairSigner, getBase58Decoder } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 
-import { createX402SvmInbound, SVM_SETTLE_FOLLOW_UP_DEFAULTS, svmFollowUpSignatureOf, svmSettleFollowUpOf, svmSignatureStatusOf, type SvmInboundPolicy } from "../../src/adapters/inbound/x402-svm.js";
+import { createX402SvmInbound, SVM_SETTLE_FOLLOW_UP_DEFAULTS, svmFollowUpRequestTimeoutOf, svmFollowUpSignatureOf, svmSettleFollowUpOf, svmSignatureStatusOf, type SvmInboundPolicy } from "../../src/adapters/inbound/x402-svm.js";
+import { startSink } from "../fixtures/circle-facilitator.js";
 import { resolveSvmInboundPolicy } from "../../src/adapters/inbound/x402-svm-startup.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
@@ -61,15 +62,31 @@ type Rail = ReturnType<typeof createX402SvmInbound>;
 interface Booted { fac: SvmFacilitator; rpc: SolanaRpcFixture; rail: Rail; policy: SvmInboundPolicy; diagnostics: string[] }
 
 /** 起動時の検査で policy を固定してから adapter を組む（本番と同じ順）。追跡の RPC は起動時の検査と同じ transport。 */
-async function boot(options: { followUp?: { totalMs: number; intervalMs: number }; withRpc?: boolean; stuckRpc?: boolean } = {}): Promise<Booted> {
+type FollowUpOptions = NonNullable<Parameters<typeof createX402SvmInbound>[0]["followUp"]>;
+
+/** 決定的な時計: `sleep` が時計を進める。`jumpOnReadMs` は `clock()` を読むたびに進める量（遅い処理の再現）。 */
+function fakeTime(options: { jumpOnReadMs?: number } = {}): { followUp: Pick<FollowUpOptions, "clock" | "sleep">; now: () => number; sleeps: number[] } {
+  let t = 0;
+  const sleeps: number[] = [];
+  return {
+    followUp: {
+      clock: () => { t += options.jumpOnReadMs ?? 0; return t; },
+      sleep: async (ms) => { sleeps.push(ms); t += ms; },
+    },
+    now: () => t,
+    sleeps,
+  };
+}
+
+async function boot(options: { followUp?: FollowUpOptions; withRpc?: boolean; stuckRpc?: boolean; extraRoutes?: Record<string, number> } = {}): Promise<Booted> {
   const fac = await startSvmFacilitator(TLS, SOL, undefined, FAC_HOST);
   closers.push(fac.close);
   const rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls: TLS, ata: { address: ata, owner } });
   closers.push(rpc.close);
-  const transport = transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port });
+  const transport = transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port, ...(options.extraRoutes ?? {}) });
   const policy = await resolveSvmInboundPolicy({ network: SOL, facilitatorUrl: `https://${FAC_HOST}`, rpcUrl: `https://${RPC_HOST}`, payTo: owner, mint: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM_ADDRESS, transport });
   const diagnostics: string[] = [];
-  const rpcTransport = options.stuckRpc === true ? transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port }, new Set([RPC_HOST])) : transport;
+  const rpcTransport = options.stuckRpc === true ? transportTo({ [FAC_HOST]: fac.port, [RPC_HOST]: rpc.port, ...(options.extraRoutes ?? {}) }, new Set([RPC_HOST])) : transport;
   const rail = createX402SvmInbound({
     facilitatorUrl: `https://${FAC_HOST}`,
     transport,
@@ -113,6 +130,16 @@ describe("追跡の既定と判定（純粋関数）", () => {
     expect(svmSettleFollowUpOf({ followUp: { totalMs: 1_000, intervalMs: 100 } })).toEqual({ totalMs: 1_000, intervalMs: 100, requestTimeoutMs: 1_000 });
     expect(() => svmSettleFollowUpOf({ followUp: { totalMs: 0 } })).toThrow(/must be positive/);
     expect(() => svmSettleFollowUpOf({ followUp: { intervalMs: -1 } })).toThrow(/must be positive/);
+    // 1 要求の期限は「要求ごとの上限（10 秒）」と「完了の期限までの残り」の小さい方（残りが上限より大きくても 10 秒で切る）。
+    expect(svmFollowUpRequestTimeoutOf(30_000)).toBe(10_000);
+    expect(svmFollowUpRequestTimeoutOf(4_000)).toBe(4_000);
+    expect(svmFollowUpRequestTimeoutOf(0)).toBe(0);
+    expect(svmFollowUpRequestTimeoutOf(-5)).toBe(0);
+    expect(svmFollowUpRequestTimeoutOf(700, 500)).toBe(500);
+    // 単調時計の残りは小数: 整数に切り下げる（`AbortSignal.timeout` は整数しか受け付けない。小数のままだと要求が RangeError で全部失敗した）。
+    expect(svmFollowUpRequestTimeoutOf(1499.995)).toBe(1499);
+    expect(svmFollowUpRequestTimeoutOf(0.5)).toBe(0);
+    expect(Number.isInteger(svmFollowUpRequestTimeoutOf(12_345.678))).toBe(true);
   });
 
   it("追跡に入る条件: JSON object・署名の形・network 一致。HTTP status は見ない", () => {
@@ -166,15 +193,46 @@ describe("追跡（facilitator の confirm の timeout → settlement_pending �
     const first = await settleAfterTimeout(b, ["finalized"]);
     expect(first.result).toEqual({ outcome: "settled", txRef: first.signature });
     expect(followUpCalls(b.rpc)).toHaveLength(1);
-    const c = await boot({ followUp: { totalMs: 1_200, intervalMs: 500 } });
+    // 決定的な時計（sleep が時計を進める）: 要求は t = 0・500・1000 の**ちょうど 3 回**、待ちは 500・500・200（残りで切る）、期限で unknown。
+    const time = fakeTime();
+    const c = await boot({ followUp: { totalMs: 1_200, intervalMs: 500, ...time.followUp } });
     const pending = await settleAfterTimeout(c, ["processed"]);
     expect(pending.result).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
-    expect(pending.elapsedMs).toBeGreaterThanOrEqual(1_100);
-    expect(pending.elapsedMs).toBeLessThan(2_500);
-    const polls = followUpCalls(c.rpc).length;
-    expect(polls).toBeGreaterThanOrEqual(3);
-    expect(polls).toBeLessThanOrEqual(Math.ceil(1_200 / 500) + 1);
+    expect(followUpCalls(c.rpc)).toHaveLength(3);
+    expect(time.sleeps).toEqual([500, 500, 200]);
+    expect(time.now()).toBe(1_200);
     expect(c.diagnostics).toEqual([]);
+    // 実時間でも完了の期限の内側で終わる（回数は上限以下）。
+    const real = await boot({ followUp: { totalMs: 1_200, intervalMs: 500 } });
+    const measured = await settleAfterTimeout(real, ["processed"]);
+    expect(measured.result).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(measured.elapsedMs).toBeGreaterThanOrEqual(1_100);
+    expect(measured.elapsedMs).toBeLessThan(2_500);
+    expect(followUpCalls(real.rpc).length).toBeLessThanOrEqual(Math.ceil(1_200 / 500) + 1);
+  });
+
+  it("応答が confirmed でも、読み終えた時点で完了の期限を過ぎていれば settled にしない（要求の期限は取り消しの予約で、続きの時刻は保証しない）", async () => {
+    // clock() を読むたびに 700 ms 進む: 要求前の検査 t=700（残り 500）、応答後の検査 t=1400 > 期限 1200 → 打ち切り。
+    const time = fakeTime({ jumpOnReadMs: 700 });
+    const b = await boot({ followUp: { totalMs: 1_200, intervalMs: 500, ...time.followUp } });
+    const { result } = await settleAfterTimeout(b, ["confirmed"]);
+    expect(result).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(followUpCalls(b.rpc)).toHaveLength(1);
+    expect(b.diagnostics).toEqual([]);
+  });
+
+  it("RPC が redirect を返しても追わない（redirect 先には接続 0）→ 期限で unknown", async () => {
+    const sink = await startSink(TLS);
+    closers.push(sink.close);
+    const SINK_HOST = "static.provider.test";
+    const b = await boot({ followUp: { totalMs: 500, intervalMs: 100 }, extraRoutes: { [SINK_HOST]: sink.port } });
+    b.rpc.state.reply = "redirect";
+    b.rpc.state.redirectTo = `https://${SINK_HOST}/`;
+    const { result, elapsedMs } = await settleAfterTimeout(b, ["confirmed"]);
+    expect(result).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(followUpCalls(b.rpc).length).toBeGreaterThanOrEqual(1);
+    expect(sink.connections()).toBe(0);
   });
 
   it("err（processed・confirmed のどちらと組でも）→ 1 回で打ち切って unknown。形の違う status（{}、err の欄無し）は再度 → [{}, confirmed] は settled", async () => {
@@ -268,7 +326,8 @@ describe("追跡（facilitator の confirm の timeout → settlement_pending �
     const stuck = await boot({ stuckRpc: true, followUp: { totalMs: 1_000, intervalMs: 100 } });
     const { result, elapsedMs } = await settleAfterTimeout(stuck, ["confirmed"]);
     expect(result).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
-    expect(elapsedMs).toBeLessThan(4_500);
+    // 要求の期限（残り時間）が名前解決にも効くので、DNS の期限（3 秒）を待たずに完了の期限（1 秒）で終わる。
+    expect(elapsedMs).toBeLessThan(2_000);
     expect(followUpCalls(stuck.rpc)).toHaveLength(0);
     const none = await boot({ withRpc: false });
     const plain = await settleAfterTimeout(none, ["confirmed"]);

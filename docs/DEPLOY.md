@@ -222,8 +222,8 @@ U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の�
 **facilitator が止まれば資金は動かない、とは言えない**）と、`subetha_router_status` の射影。Circle の trial が尽きた（HTTP 403 `registration_required`）ときの診断
 `facilitator diagnostic facilitator_trial_exhausted` と、動的 URL が Circle・x402.org・Solana RPC に向いたときの `destination_blocked` は Router の process の stderr にしか出ない——
 hosted では journal の `unknown` と呼び出し側への `url` の拒否として現れる。Solana の settle が `settlement_pending` でも、Router は設定の RPC で最長 15 秒
-確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。hosted で追跡が働いた回数は
-journal の `source_settled` のうち Solana のものと、受け入れ用の起動のログで数える）。
+確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。**journal では追跡で確定した settle と facilitator が直接成功を返した settle を
+区別できない**（どちらも `source_settled`）ので、hosted の Router で追跡が働いた回数は分からない。数えられるのは、受け入れ用の起動のように stderr が読める起動だけ）。
 
 ### journal を残す（`-v` は必須）
 

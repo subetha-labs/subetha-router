@@ -34,7 +34,7 @@ export interface SolanaRpcState {
   reply: "ok" | "huge" | "malformed" | "redirect" | "error" | "rpc-error";
   /**
    * `getSignatureStatuses` の応答の列（設計 §5.8 の試験用）。呼ばれるたびに 1 つ消費し、最後の値を繰り返す。
-   * `null` は「知らない署名」、`processed`／`confirmed`／`finalized` はその確定度、`err` はチェーン上の失敗。未設定なら `null`。
+   * `null` は「知らない署名」、`processed`／`confirmed`／`finalized` はその確定度、`err` はチェーン上の失敗。未設定・空の列なら `null`。
    */
   signatureStatuses: Array<"null" | "processed" | "confirmed" | "finalized" | "err" | "err-confirmed" | "empty" | "no-err-key"> | undefined;
   redirectTo: string | undefined;
@@ -115,7 +115,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
       calls.push({ method, params });
       const id = body["id"];
       if (method === "getSignatureStatuses") {
-        const queue = state.signatureStatuses ?? ["null"];
+        const queue = state.signatureStatuses === undefined || state.signatureStatuses.length === 0 ? ["null"] : state.signatureStatuses;
         const kind = queue.length > 1 ? queue.shift()! : queue[0]!;
         const entry =
           kind === "null" ? null
