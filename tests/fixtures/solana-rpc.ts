@@ -64,6 +64,16 @@ export interface SolanaRpcFixture {
   close(): Promise<void>;
 }
 
+/** base units の 10 進文字列 → `uiAmountString`（文字列の算術。`Number` を通さないので精度を失わない）。 */
+export function uiAmountStringOf(amount: string, decimals: number): string {
+  if (!/^(0|[1-9][0-9]*)$/.test(amount)) throw new Error("fixture: amount must be a decimal string");
+  if (decimals === 0) return amount;
+  const padded = amount.padStart(decimals + 1, "0");
+  const whole = padded.slice(0, padded.length - decimals);
+  const fraction = padded.slice(padded.length - decimals).replace(/0+$/, "");
+  return fraction === "" ? whole : `${whole}.${fraction}`;
+}
+
 export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<SolanaRpcFixture> {
   const tokenProgram = accounts.tokenProgram ?? TOKEN_PROGRAM_ADDRESS;
   const blockhash = accounts.blockhash ?? "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD";
@@ -162,7 +172,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
           return;
         }
         const amount = ata.amount ?? "0";
-        reply({ context: { slot: 1 }, value: { amount, decimals: accounts.decimals, uiAmount: Number(amount) / 10 ** accounts.decimals, uiAmountString: String(Number(amount) / 10 ** accounts.decimals) } }, id);
+        reply({ context: { slot: 1 }, value: { amount, decimals: accounts.decimals, uiAmount: Number(uiAmountStringOf(amount, accounts.decimals)), uiAmountString: uiAmountStringOf(amount, accounts.decimals) } }, id);
         return;
       }
       if (method === "getAccountInfo") {
@@ -181,7 +191,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
           const mint = ata.mint ?? accounts.mint;
           const amount = ata.amount ?? "0";
           const data = encoding === "jsonParsed"
-            ? { program: "spl-token", parsed: { type: "account", info: { mint, owner: ata.owner, state: "initialized", isNative: false, tokenAmount: { amount, decimals: accounts.decimals, uiAmount: Number(amount) / 10 ** accounts.decimals, uiAmountString: String(Number(amount) / 10 ** accounts.decimals) } } }, space: 165 }
+            ? { program: "spl-token", parsed: { type: "account", info: { mint, owner: ata.owner, state: "initialized", isNative: false, tokenAmount: { amount, decimals: accounts.decimals, uiAmount: Number(uiAmountStringOf(amount, accounts.decimals)), uiAmountString: uiAmountStringOf(amount, accounts.decimals) } } }, space: 165 }
             : [Buffer.from(getTokenEncoder().encode({ mint: address(mint), owner: address(ata.owner), amount: BigInt(amount), delegate: null, state: 1, isNative: null, delegatedAmount: 0n, closeAuthority: null })).toString("base64"), "base64"];
           reply({ context: { slot: 1 }, value: { data, executable: false, lamports: 2_039_280, owner: program, rentEpoch: 0, space: 165 } }, id);
           return;
