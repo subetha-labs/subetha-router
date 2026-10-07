@@ -203,10 +203,12 @@ docker exec <動かしたコンテナ> sh -c 'for p in /proc/[0-9]*; do [ "${p#/
 
 **受け入れの記録（G-3、2026-10-07 07:53–07:57Z）**: owner の決定（デモ運用なので公開の停止を許容、testnet なので購入ごとの承認は不要）のもと、公開の Router を止めて
 受け入れ用の Router を単独で起動した。**両レールの起動時の検査（x402.org の `/supported`、devnet の ATA）は本番 env で通った。** 使い捨ての payer で 4 件:
-Arc 静的 → Provider B/MPP は delivered（Arc tx `0x205c8a…f691`、7.6 秒）、Arc 動的 → Provider B の URL は delivered（`0x3085f3…20c0`、6.9 秒）、
-Solana 静的 → Provider A/x402 は delivered（signature `g8MKCq…`、finalized、6.7 秒）、**Solana 動的 → Provider A の URL は `unknown`**（`source_settle_unknown`、5.6 秒）。
-4 件目はチェーン上では成立している（signature `4gRU9q…`、memo = quote の nonce、11,000、purchase の約 3 秒後に finalized）が、facilitator の settle 応答が形どおりの成功でなく
-（確定待ちの timeout と見られる。応答本文は Router が記録しない）、Router は FR-19 どおり `unknown` を残して再 settle も送信もしなかった。呼び出し側は 0.011 USDC を払って
+Arc 静的 → Provider B/MPP は delivered（Arc tx `0x205c8a…f691`、Arc の RPC で `success`、block 65933098、7.6 秒）、Arc 動的 → Provider B の URL は delivered
+（`0x3085f3…20c0`、`success`、block 65933150、6.9 秒）、Solana 静的 → Provider A/x402 は delivered（signature `g8MKCq…`、devnet で finalized、6.7 秒）、
+**Solana 動的 → Provider A の URL は `unknown`**（`source_settle_unknown`、5.6 秒。**AC-2 の動的は未達**: `delivered` が条件で、facilitator が返したはずの signature も Router には無い）。
+4 件目はチェーン上では成立している（後から受取 ATA の署名を辿ると signature `4gRU9q…`、memo = quote の nonce、11,000、finalized。blockTime は 07:55:39Z で、
+journal の `unknown` は 07:55:40.562Z。確定が観測された時刻と facilitator の応答の前後関係は分からない）が、facilitator の settle 応答が形どおりの成功でなく
+（確定待ちの timeout が有力な見立て。応答本文は Router が記録しない）、Router は FR-19 どおり `unknown` を残して再 settle も送信もしなかった。呼び出し側は 0.011 USDC を払って
 データを受け取っていない（開示どおり返金なし）。受取先の残高の増分: Arc 0.021 USDC、Solana の ATA 0.021 USDC。`proof.onChainFinality` は `not_checked`。
 U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の後にチェーンで確定する」ケースが実際に出たので、G-4 の前に設計 §10 U-1 の改訂（期限つきの追跡か、
 現状のままか）を owner が決める。** 終了後は公開の Router を戻し、`/healthz`・`subetha-egress check`・公開の一覧（従来の 2 route）を確認。公開の停止は約 4 分。
