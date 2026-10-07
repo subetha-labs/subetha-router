@@ -20,7 +20,8 @@ const SOURCE_TOKEN = "0x0000000000000000000000000000000000005ce7";
 const SOURCE_CHAIN_ID = "11155111";
 const SOURCE_NETWORK = `eip155:${SOURCE_CHAIN_ID}`;
 const DEST_NETWORK = "eip155:84532";
-const DEST_ASSET = "0x000000000000000000000000000000000000de57";
+// 送信先は表の資産（Base Sepolia USDC）。素の `src/main.ts` を起動する試験は本番の表で照合されるため（multirail 設計 §1）。
+const DEST_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const DEST_PAY_TO = "0x0000000000000000000000000000000000000a11";
 const CANONICAL_BASE_URL = "http://127.0.0.1:8500";
 const ALICE = { id: "alice", token: "tok-alice-synthetic" };
@@ -76,6 +77,8 @@ async function bootReal(
   const upstream = await startListening("tests/fixtures/x402-upstream.ts", [
     "--pay",
     options.pay ?? "ok",
+    "--asset",
+    DEST_ASSET,
   ]);
   started.push(upstream);
 

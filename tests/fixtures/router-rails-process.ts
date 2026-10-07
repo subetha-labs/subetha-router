@@ -11,6 +11,7 @@
 
 import { reportStartupFailure, startRouter, type RouterCapabilities } from "../../src/main.js";
 import { createPayerSpy } from "./mpp-payer-spy.js";
+import { TEST_NETWORKS } from "./known-networks.js";
 import { createSignerSpy } from "./x402-signer-spy.js";
 
 function arg(name: string, fallback: string): string {
@@ -26,6 +27,8 @@ const capabilities: RouterCapabilities = {
   ...(rails === "a" ? {} : { mppTempo: createPayerSpy().capability() }),
   // 受信 facilitator は loopback の fixture（SSRF 防御 A の fixture 例外を明示する）。
   fixtureFacilitators: true,
+  // 表の外の合成の資産で起動するため（multirail 設計 §1 の注入路）。
+  knownNetworksForTest: TEST_NETWORKS,
 };
 
 startRouter(capabilities).catch(reportStartupFailure);

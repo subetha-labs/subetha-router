@@ -2,8 +2,167 @@
  * allowlist と上限（設計 §3 / §5）。秘密は保持せず、上流 URL も core には出さない。
  */
 
-/** 受信レグの受取先アドレス形式（x402 受信で使う）。 */
+import { getBase58Encoder } from "@solana/kit";
+
+/** 受信レグの受取先アドレス形式（EVM）。 */
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+/** base58（Bitcoin alphabet）。SVM の公開鍵は 32 バイトで 32〜44 文字。 */
+const BASE58_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * network の表（multirail 設計 §1、FR-3）。**コードだけ**が権威で、env・設定ファイルからは変えられない。
+ * 本番の入口は `KNOWN_NETWORKS` しか使えない。試験の起動側は `knownNetworksForTest`（`src/main.ts`）で自分の表を渡す。
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+export type NetworkFamily = "evm" | "svm";
+export type InboundRailName = "x402" | "mpp";
+export type OutboundRailName = "x402" | "mpp";
+export type X402FacilitatorKind = "x402" | "circle";
+
+export interface KnownAsset {
+  /** EVM: `0x` アドレス（比較は小文字化）。SVM: mint（base58。比較はそのまま）。 */
+  readonly id: string;
+  readonly decimals: number;
+  /** EVM/x402 の EIP-712 domain。x402 で使う資産に必須。 */
+  readonly domain?: { readonly name: string; readonly version: string };
+  /** SVM の token program。 */
+  readonly tokenProgram?: string;
+}
+
+export interface KnownNetwork {
+  /** CAIP-2。 */
+  readonly network: string;
+  readonly family: NetworkFamily;
+  /** この network で許す受信レール（`sourceRail`）。 */
+  readonly inbound: readonly InboundRailName[];
+  /** この network で許す送信レール（静的の `rail`・動的の `rail`）。 */
+  readonly outbound: readonly OutboundRailName[];
+  /** x402 受信の facilitator の種類（受信 x402 を許すときだけ）。 */
+  readonly x402Facilitator?: X402FacilitatorKind;
+  readonly assets: readonly KnownAsset[];
+}
+
+export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
+  {
+    network: "eip155:84532",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: ["x402"],
+    x402Facilitator: "x402",
+    assets: [{ id: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, domain: { name: "USDC", version: "2" } }],
+  },
+  {
+    network: "eip155:42431",
+    family: "evm",
+    inbound: ["mpp"],
+    outbound: ["mpp"],
+    assets: [{ id: "0x20c0000000000000000000000000000000000000", decimals: 6 }],
+  },
+  {
+    // Arc testnet（Circle）。送信（S-3）は別紙で足す。
+    network: "eip155:5042002",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: [],
+    x402Facilitator: "circle",
+    assets: [{ id: "0x3600000000000000000000000000000000000000", decimals: 6, domain: { name: "USDC", version: "2" } }],
+  },
+  {
+    // Solana devnet。送信（S-4）は別紙で足す。
+    network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    family: "svm",
+    inbound: ["x402"],
+    outbound: [],
+    x402Facilitator: "x402",
+    assets: [{ id: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }],
+  },
+]);
+
+/** CAIP-2 の名前空間から族を引く。知らない名前空間は `undefined`（呼び出し側は EVM の規則に落とす: 既存の構成を壊さない）。 */
+export function networkFamilyOf(network: string): NetworkFamily | undefined {
+  if (network.startsWith("eip155:")) return "evm";
+  if (network.startsWith("solana:")) return "svm";
+  return undefined;
+}
+
+/** 資産の比較の鍵。EVM は小文字化、SVM はそのまま（base58 は大文字小文字を区別する）。予算の鍵には使わない（設定の文字列のまま）。 */
+export function assetKeyOf(network: string, asset: string): string {
+  return networkFamilyOf(network) === "svm" ? asset : asset.toLowerCase();
+}
+
+/** 受取先の形。EVM: `0x`＋40 hex。SVM: base58 を decode して 32 バイト（owner の公開鍵。ATA ではない）。 */
+export function isWellFormedPayTo(network: string, payTo: string): boolean {
+  if (networkFamilyOf(network) === "svm") {
+    if (!BASE58_PATTERN.test(payTo)) return false;
+    try {
+      return getBase58Encoder().encode(payTo).length === 32;
+    } catch {
+      return false;
+    }
+  }
+  return ADDRESS_PATTERN.test(payTo);
+}
+
+export function knownNetworkOf(networks: readonly KnownNetwork[], network: string): KnownNetwork | undefined {
+  return networks.find((entry) => entry.network === network);
+}
+
+export function knownAssetOf(entry: KnownNetwork, asset: string): KnownAsset | undefined {
+  const key = assetKeyOf(entry.network, asset);
+  return entry.assets.find((known) => assetKeyOf(entry.network, known.id) === key);
+}
+
+interface TermsToValidate {
+  readonly direction: "inbound" | "outbound";
+  readonly rail: string;
+  readonly network: string;
+  readonly asset: string;
+  readonly decimals?: number;
+  readonly payTo?: string;
+  readonly tokenDomain?: { readonly name: string; readonly version: string };
+  readonly feeAsset?: string;
+}
+
+/**
+ * 表との照合（設計 §1）。network・向きとレール・資産・桁・domain・feeAsset・受取先の形。
+ * 違いは `config_invalid`（`ConfigError`）。値はメッセージに出さない（設定の内容を起動ログに写さない）。
+ */
+function validateTermsAgainstTable(at: string, terms: TermsToValidate, networks: readonly KnownNetwork[]): void {
+  const entry = knownNetworkOf(networks, terms.network);
+  if (entry === undefined) {
+    throw new ConfigError(`${at}.network is not a known network`);
+  }
+  const allowed: readonly string[] = terms.direction === "inbound" ? entry.inbound : entry.outbound;
+  if (!allowed.includes(terms.rail)) {
+    throw new ConfigError(`${at}: ${terms.direction} rail "${terms.rail}" is not allowed on this network`);
+  }
+  const asset = knownAssetOf(entry, terms.asset);
+  if (asset === undefined) {
+    throw new ConfigError(`${at}.asset is not a known asset on this network`);
+  }
+  if (terms.decimals !== undefined && terms.decimals !== asset.decimals) {
+    throw new ConfigError(`${at}.decimals does not match the known asset`);
+  }
+  if (terms.payTo !== undefined && !isWellFormedPayTo(terms.network, terms.payTo)) {
+    throw new ConfigError(`${at}.payTo is not a well-formed address for this network`);
+  }
+  if (terms.tokenDomain !== undefined) {
+    if (asset.domain === undefined) {
+      throw new ConfigError(`${at}.tokenDomain: the known asset has no EIP-712 domain`);
+    }
+    if (terms.tokenDomain.name !== asset.domain.name || terms.tokenDomain.version !== asset.domain.version) {
+      throw new ConfigError(`${at}.tokenDomain does not match the known asset`);
+    }
+  }
+  if (terms.feeAsset !== undefined && knownAssetOf(entry, terms.feeAsset) === undefined) {
+    throw new ConfigError(`${at}.feeAsset is not a known asset on this network`);
+  }
+}
+
+/** `parseRouterConfig` の選択肢。`networks` を渡したときだけ表と照合する。 */
+export interface RouterConfigOptions {
+  readonly networks?: readonly KnownNetwork[];
+}
 
 export interface SourceTerms {
   readonly amount: string;
@@ -293,6 +452,14 @@ export interface HttpConfig {
  * 実レールの接続先（設計 §4.1 / §4.2）。**値の差し替えだけで実 facilitator・実上流へ届く**
  * 形にし、コード側に URL・資産を埋め込まない。署名能力はここではなく注入で渡す。
  */
+export interface X402InboundFacilitator {
+  readonly kind: X402FacilitatorKind;
+  readonly url: string;
+}
+
+/** 既存の env `ROUTER_X402_INBOUND_FACILITATOR_URL` が担当する network。 */
+export const LEGACY_X402_INBOUND_NETWORK = "eip155:84532";
+
 export interface RealRailsConfig {
   /** 実 SubEtha facilitator の base URL（設定 1 本だけ）。 */
   readonly subethaFacilitatorUrl: string;
@@ -304,6 +471,12 @@ export interface RealRailsConfig {
    * `sourceRail: "x402"` の route があるときだけ必須。
    */
   readonly x402InboundFacilitatorUrl?: string;
+  /**
+   * x402 受信の facilitator を **network ごと**に（設定ファイル `x402.inboundFacilitators`。multirail 設計 §2、FR-1）。
+   * `eip155:84532` は env（上の欄）が担当で、ここには書けない（優先順位を持たない）。
+   * ホストは拒否ホストと `dependencyUrls` に入る（合成側）。
+   */
+  readonly x402InboundFacilitators?: Readonly<Record<string, X402InboundFacilitator>>;
   /**
    * x402 受信 offer の有効期間（秒）。`ROUTER_X402_INBOUND_OFFER_SECONDS`。
    * 承認期限は `min(approvalTtlMs, offerExpiry)` なので、**ここが実効的な上限**になる。
@@ -427,9 +600,11 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
     throw new ConfigError(`${at}.sourceRail must be "subetha", "x402" or "mpp" when present`);
   }
   const sourceRail = sourceRailRaw as string | undefined;
+  const sourceNetwork = requireString(source, "network", `${at}.source`);
   const sourcePayToRaw = source["payTo"];
-  if (sourcePayToRaw !== undefined && (typeof sourcePayToRaw !== "string" || !ADDRESS_PATTERN.test(sourcePayToRaw))) {
-    throw new ConfigError(`${at}.source.payTo must be a 0x address when present`);
+  // 受取先の形は network の族で決める（EVM: 0x、SVM: base58 の 32 バイト）。
+  if (sourcePayToRaw !== undefined && (typeof sourcePayToRaw !== "string" || !isWellFormedPayTo(sourceNetwork, sourcePayToRaw))) {
+    throw new ConfigError(`${at}.source.payTo must be a well-formed address for its network when present`);
   }
   const sourcePayTo = sourcePayToRaw as string | undefined;
   // 受取先が構成に要るのは Router が自分で offer を作るレール（x402 / mpp）。
@@ -437,7 +612,7 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
   if ((sourceRail === "x402" || sourceRail === "mpp") && sourcePayTo === undefined) {
     throw new ConfigError(`${at}.source.payTo is required when sourceRail is "${sourceRail}"`);
   }
-  return {
+  const route: RouteConfig = {
     routeId,
     canonicalPath,
     ...(rail === undefined ? {} : { rail }),
@@ -446,7 +621,7 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
       amount: requireString(source, "amount", `${at}.source`),
       asset: requireString(source, "asset", `${at}.source`),
       decimals: requireNumber(source, "decimals", `${at}.source`),
-      network: requireString(source, "network", `${at}.source`),
+      network: sourceNetwork,
       ...(sourcePayTo === undefined ? {} : { payTo: sourcePayTo }),
     },
     destination: {
@@ -456,6 +631,7 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
       payTo: requireString(destination, "payTo", `${at}.destination`),
     },
   };
+  return route;
 }
 
 function parseBudget(value: Record<string, unknown>): BudgetLimits {
@@ -529,9 +705,10 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     throw new ConfigError(`${at}.par must be true (the operator declares the pair as 1:1)`);
   }
   const source = requireRecord(value, "source", at);
+  const sourceNetwork = requireString(source, "network", `${at}.source`);
   const payTo = requireString(source, "payTo", `${at}.source`);
-  if (!ADDRESS_PATTERN.test(payTo)) {
-    throw new ConfigError(`${at}.source.payTo must be a 0x address`);
+  if (!isWellFormedPayTo(sourceNetwork, payTo)) {
+    throw new ConfigError(`${at}.source.payTo must be a well-formed address for its network`);
   }
   const destination = requireRecord(value, "destination", at);
   let tokenDomain: { name: string; version: string } | undefined;
@@ -584,11 +761,11 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
       throw new ConfigError(`${at}: source.decimals must equal destination.decimals for an mpp outbound profile (the fee bound is compared in base units)`);
     }
   }
-  return {
+  const profile: DynamicProfile = {
     profileId,
     sourceRail,
     source: {
-      network: requireString(source, "network", `${at}.source`),
+      network: sourceNetwork,
       asset: requireString(source, "asset", `${at}.source`),
       decimals: sourceDecimals,
       payTo,
@@ -612,6 +789,7 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
       min: feeMin,
     },
   };
+  return profile;
 }
 
 function parseDynamicLimits(value: unknown): DynamicLimits {
@@ -680,7 +858,45 @@ function parseDynamic(value: unknown, routes: Readonly<Record<string, unknown>>)
 }
 
 /** allowlist・上限・canonical だけを持つ非秘密の構成ファイル。 */
-export function parseRouterConfig(raw: unknown): RouterConfig {
+export function parseRouterConfig(raw: unknown, options: RouterConfigOptions = {}): RouterConfig {
+  const router = parseRouterConfigUnchecked(raw);
+  if (options.networks !== undefined) {
+    validateRouterConfigAgainstTable(router, options.networks);
+  }
+  return router;
+}
+
+/**
+ * 表との照合（multirail 設計 §1）。範囲は x402／mpp の受信（`sourceRail`）と x402／mpp の送信（`rail`）だけ。
+ * `subetha` 受信（既定）と rail 未指定の route は今の検査のまま。静的 route の destination は network・向き・資産・受取先の形、
+ * source と動的プロファイルはそれに桁（x402 送信は `tokenDomain`、mpp 送信は `feeAsset`）を足して見る。
+ */
+export function validateRouterConfigAgainstTable(router: RouterConfig, networks: readonly KnownNetwork[]): void {
+  for (const route of Object.values(router.routes)) {
+    const at = `routes.${route.routeId}`;
+    if (route.sourceRail === "x402" || route.sourceRail === "mpp") {
+      validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: route.sourceRail, network: route.source.network, asset: route.source.asset, decimals: route.source.decimals, ...(route.source.payTo === undefined ? {} : { payTo: route.source.payTo }) }, networks);
+    }
+    if (route.rail === "x402" || route.rail === "mpp") {
+      validateTermsAgainstTable(`${at}.destination`, { direction: "outbound", rail: route.rail, network: route.destination.network, asset: route.destination.asset, payTo: route.destination.payTo }, networks);
+    }
+  }
+  for (const profile of Object.values(router.dynamic?.profiles ?? {})) {
+    const at = `dynamic.profiles.${profile.profileId}`;
+    validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals, payTo: profile.source.payTo }, networks);
+    validateTermsAgainstTable(`${at}.destination`, {
+      direction: "outbound",
+      rail: profile.rail,
+      network: profile.destination.network,
+      asset: profile.destination.asset,
+      decimals: profile.destination.decimals,
+      ...(profile.destination.tokenDomain === undefined ? {} : { tokenDomain: profile.destination.tokenDomain }),
+      ...(profile.destination.feeAsset === undefined ? {} : { feeAsset: profile.destination.feeAsset }),
+    }, networks);
+  }
+}
+
+function parseRouterConfigUnchecked(raw: unknown): RouterConfig {
   if (!isRecord(raw)) {
     throw new ConfigError("router must be an object");
   }
@@ -785,6 +1001,7 @@ function parseReal(
   raw: unknown,
   router: RouterConfig,
   env: Readonly<Record<string, string | undefined>>,
+  networks?: readonly KnownNetwork[],
 ): RealRailsConfig {
   const inboundFacilitatorUrl = env["ROUTER_X402_INBOUND_FACILITATOR_URL"];
   const inboundOfferSeconds = parseOfferSeconds(
@@ -813,6 +1030,7 @@ function parseReal(
   if (!isRecord(raw)) {
     throw new ConfigError("x402 section is required when ROUTER_ADAPTER_MODE=real");
   }
+  const inboundFacilitators = parseInboundFacilitators(raw["inboundFacilitators"], router, inboundFacilitatorUrl, networks);
   const upstreams = requireRecord(raw, "upstreams", "x402");
   const resolved: Record<string, string> = {};
   for (const routeId of Object.keys(router.routes)) {
@@ -827,6 +1045,7 @@ function parseReal(
     ...(mppInboundOfferSeconds === undefined ? {} : { mppInboundOfferSeconds }),
     ...(mppInboundRpcUrl === undefined ? {} : { mppInboundRpcUrl }),
     ...(mppInboundSecret === undefined ? {} : { mppInboundSecret }),
+    ...(inboundFacilitators === undefined ? {} : { x402InboundFacilitators: inboundFacilitators }),
     ...(inboundFacilitatorUrl === undefined
       ? {}
       : {
@@ -842,6 +1061,72 @@ function parseReal(
     ).replace(/\/$/, ""),
     upstreams: resolved,
   };
+}
+
+/**
+ * `x402.inboundFacilitators`（multirail 設計 §2）。`network` → `{ kind, url }`。
+ * - URL は絶対 http(s)、query・userinfo・fragment 不可（`assertAbsoluteHttpUrl`）
+ * - `eip155:84532` は env の担当なので、両方に書けば `config_invalid`
+ * - 表（`networks`）があれば、network が表にあり `kind` が表の種類と一致すること、そして x402 受信を使う network ごとに
+ *   facilitator があること（`eip155:84532` は env）を要求する
+ */
+function parseInboundFacilitators(
+  raw: unknown,
+  router: RouterConfig,
+  legacyUrl: string | undefined,
+  networks?: readonly KnownNetwork[],
+): Readonly<Record<string, X402InboundFacilitator>> | undefined {
+  const at = "x402.inboundFacilitators";
+  let parsed: Record<string, X402InboundFacilitator> | undefined;
+  if (raw !== undefined) {
+    if (!isRecord(raw)) {
+      throw new ConfigError(`${at} must be an object when present`);
+    }
+    parsed = {};
+    for (const [network, value] of Object.entries(raw)) {
+      const here = `${at}["${network}"]`;
+      if (networkFamilyOf(network) === undefined) {
+        throw new ConfigError(`${here}: the key must be a CAIP-2 network (eip155:… or solana:…)`);
+      }
+      if (!isRecord(value)) {
+        throw new ConfigError(`${here} must be an object`);
+      }
+      const kind = value["kind"];
+      if (kind !== "x402" && kind !== "circle") {
+        throw new ConfigError(`${here}.kind must be "x402" or "circle"`);
+      }
+      const url = assertAbsoluteHttpUrl(requireString(value, "url", here), `${here}.url`).replace(/\/$/, "");
+      if (network === LEGACY_X402_INBOUND_NETWORK && legacyUrl !== undefined && legacyUrl !== "") {
+        throw new ConfigError(`${here} conflicts with ROUTER_X402_INBOUND_FACILITATOR_URL (that env owns ${LEGACY_X402_INBOUND_NETWORK})`);
+      }
+      if (networks !== undefined) {
+        const entry = knownNetworkOf(networks, network);
+        if (entry === undefined) {
+          throw new ConfigError(`${here}: not a known network`);
+        }
+        if (entry.x402Facilitator !== kind) {
+          throw new ConfigError(`${here}.kind does not match the known network's facilitator kind`);
+        }
+      }
+      parsed[network] = { kind, url };
+    }
+  }
+  if (networks !== undefined) {
+    const inboundNetworks = new Set<string>();
+    for (const route of Object.values(router.routes)) {
+      if (route.sourceRail === "x402") inboundNetworks.add(route.source.network);
+    }
+    for (const profile of Object.values(router.dynamic?.profiles ?? {})) {
+      if (profile.sourceRail === "x402") inboundNetworks.add(profile.source.network);
+    }
+    for (const network of inboundNetworks) {
+      const hasLegacy = network === LEGACY_X402_INBOUND_NETWORK && legacyUrl !== undefined && legacyUrl !== "";
+      if (!hasLegacy && parsed?.[network] === undefined) {
+        throw new ConfigError(`${at}: a facilitator is required for every x402 inbound network (missing one)`);
+      }
+    }
+  }
+  return parsed;
 }
 
 /** 受信 offer の有効期間（秒）。1..3600 の整数だけを受ける。 */
@@ -869,9 +1154,18 @@ function parsePort(raw: string | undefined, fallback: number): number {
  * env と非秘密の構成ファイルからランタイム構成を組む。
  * 既定の `ROUTER_ADAPTER_MODE` は `real` で、合成レールへは**落とさない**。
  */
+/**
+ * `loadRuntimeConfig` の選択肢。`networks` は **real モードのときだけ**使う（synthetic の harness は表の外の network・資産で起動する）。
+ * 本番の入口（`startRouter` の既定）は `KNOWN_NETWORKS`、試験の起動側は `knownNetworksForTest`。渡さなければ照合しない。
+ */
+export interface RuntimeConfigOptions {
+  readonly networks?: readonly KnownNetwork[];
+}
+
 export function loadRuntimeConfig(
   env: Readonly<Record<string, string | undefined>>,
   readConfigFile: (path: string) => string,
+  options: RuntimeConfigOptions = {},
 ): RuntimeConfig {
   const configPath = env["ROUTER_CONFIG_PATH"];
   if (configPath === undefined || configPath === "") {
@@ -887,11 +1181,13 @@ export function loadRuntimeConfig(
     throw new ConfigError("config file must contain a JSON object");
   }
 
-  const router = parseRouterConfig(document["router"]);
   const mode = env["ROUTER_ADAPTER_MODE"] ?? "real";
   if (mode !== "real" && mode !== "synthetic") {
     throw new ConfigError("ROUTER_ADAPTER_MODE must be 'real' or 'synthetic'");
   }
+  const networks = mode === "real" ? options.networks : undefined;
+  // 表との照合は、実レールの env・設定（facilitator の URL 等）の不足を先に報告してから行う（既存の起動失敗の文言を変えない）。
+  const router = parseRouterConfig(document["router"]);
   const canonicalBaseUrl = (env["ROUTER_CANONICAL_BASE_URL"] ?? "http://127.0.0.1:8500").replace(
     /\/$/,
     "",
@@ -900,6 +1196,13 @@ export function loadRuntimeConfig(
     new URL(canonicalBaseUrl);
   } catch {
     throw new ConfigError("ROUTER_CANONICAL_BASE_URL must be an absolute URL");
+  }
+
+  const rails = mode === "synthetic"
+    ? { synthetic: parseSynthetic(document["synthetic"], router) }
+    : { real: parseReal(document["x402"], router, env, networks) };
+  if (networks !== undefined) {
+    validateRouterConfigAgainstTable(router, networks);
   }
 
   return {
@@ -912,8 +1215,6 @@ export function loadRuntimeConfig(
     journalPath: env["ROUTER_JOURNAL_PATH"] ?? "runtime/journal.ndjson",
     principals: parsePrincipals(env["ROUTER_PRINCIPAL_TOKENS"]),
     adapterMode: mode,
-    ...(mode === "synthetic"
-      ? { synthetic: parseSynthetic(document["synthetic"], router) }
-      : { real: parseReal(document["x402"], router, env) }),
+    ...rails,
   };
 }

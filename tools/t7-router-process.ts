@@ -5,6 +5,7 @@
  */
 
 import { reportStartupFailure, startRouter } from "../src/main.js";
+import { TEST_NETWORKS } from "../tests/fixtures/known-networks.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
 import { createRealMppCapability } from "./real-mpp-capability.js";
 
@@ -14,8 +15,9 @@ if (key === undefined || key === "") {
   process.exit(2);
 }
 const isB = process.argv.includes("--rail") && process.argv[process.argv.indexOf("--rail") + 1] === "b";
+// ローカルの e2e 起動側（本番の入口ではない）。合成の資産（`eip155:11155111` の SOURCE_TOKEN 等）で起動するため試験の表を渡す。
 startRouter(
   isB
-    ? { mppTempo: createRealMppCapability(key).capability() }
-    : { evmSigning: createRealEvmCapability(key).capability("eip155:84532") },
+    ? { mppTempo: createRealMppCapability(key).capability(), knownNetworksForTest: TEST_NETWORKS }
+    : { evmSigning: createRealEvmCapability(key).capability("eip155:84532"), knownNetworksForTest: TEST_NETWORKS },
 ).catch(reportStartupFailure);
