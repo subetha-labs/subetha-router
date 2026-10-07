@@ -24,7 +24,7 @@ function svm(overrides: Record<string, unknown> = {}, extra: Record<string, unkn
   return { scheme: "exact", network: SOL, asset: MINT, amount: "10000", payTo: OWNER, maxTimeoutSeconds: 40, extra: { feePayer: OWNER, memo: NONCE, challengeNonce: NONCE, expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: false, ...extra }, ...overrides };
 }
 function mpp(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true }, ...overrides };
+  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: 'Payment id="x"', expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true }, ...overrides };
 }
 
 describe("classifyOffer: 振り分け", () => {
@@ -67,6 +67,12 @@ describe("classifyOffer: 署名の前に拒む（SR-7）", () => {
     ["MPP を x402 の network に", mpp({ network: "eip155:84532", asset: USDC }), /only accepted on the table's MPP networks/],
     ["x402 を Tempo に", evm({ network: "eip155:42431", asset: PATHUSD }), /not accepted on that network/],
     ["額が整数でない", evm({ amount: "1.5" }), /not a base-unit integer/],
+    ["nonce が無い", evm({}, { challengeNonce: undefined }), /challengeNonce/],
+    ["nonce の形違い", evm({}, { challengeNonce: "abc" }), /challengeNonce/],
+    ["MPP の challenge 無し", mpp({ extra: { challengeNonce: NONCE, expiresAt: EXPIRES } }), /mppx challenge/],
+    ["SVM の extra が桁を名乗って表と違う", svm({}, { decimals: 18 }), /decimals conflict/],
+    ["SVM の extra が token program を名乗って表と違う", svm({}, { tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" }), /token program conflicts/],
+    ["SVM の extra が mint を名乗って表と違う", svm({}, { mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" }), /mint conflicts/],
     ["offer でない", "x" as unknown as Record<string, unknown>, /no readable/],
   ];
   for (const [name, offer, pattern] of cases) {

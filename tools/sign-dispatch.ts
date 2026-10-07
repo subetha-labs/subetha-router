@@ -26,6 +26,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
+const NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 /** offer を読んで、どの payer で署名するか（または拒む理由）を決める。 */
 export function classifyOffer(offer: unknown, nowMs: number, networks: readonly KnownNetwork[] = KNOWN_NETWORKS, maxAmount: bigint = SIGN_MAX_AMOUNT): SignDispatch {
@@ -41,6 +42,8 @@ export function classifyOffer(offer: unknown, nowMs: number, networks: readonly 
   const expiresAt = extra?.["expiresAt"];
   if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return { kind: "refuse", reason: "the offer has no expiresAt" };
   if (expiresAt * 1000 <= nowMs) return { kind: "refuse", reason: "the offer has expired; take a new quote and ask for approval again" };
+  // 共通の欄: nonce（Router の封筒の `challengeNonce`）。無ければ、どのレールでも Router の preflight が落とす（MPP なら送金した後に）。
+  if (typeof extra?.["challengeNonce"] !== "string" || !NONCE_PATTERN.test(extra["challengeNonce"])) return { kind: "refuse", reason: "the offer has no well-formed challengeNonce" };
   const entry = knownNetworkOf(networks, network);
   if (entry === undefined) return { kind: "refuse", reason: "the offer network is not in the table of known networks" };
   const known = knownAssetOf(entry, asset);
@@ -50,6 +53,8 @@ export function classifyOffer(offer: unknown, nowMs: number, networks: readonly 
   if (scheme === "tempo/charge") {
     const chainId = evmChainIdOf(network);
     if (chainId === undefined || !entry.inbound.includes("mpp")) return { kind: "refuse", reason: "MPP offers are only accepted on the table's MPP networks" };
+    // MPP の payer は serialized challenge（`extra.challenge`）で払う。無い offer は**送金の前に**拒む。
+    if (typeof extra?.["challenge"] !== "string" || extra["challenge"] === "") return { kind: "refuse", reason: "the MPP offer does not carry the mppx challenge" };
     return { kind: "mpp", chainId, asset, payTo, amount };
   }
   if (scheme !== "exact") return { kind: "refuse", reason: "the offer scheme is neither exact nor tempo/charge" };
@@ -73,5 +78,9 @@ export function classifyOffer(offer: unknown, nowMs: number, networks: readonly 
   const challengeNonce = extra?.["challengeNonce"];
   if (typeof feePayer !== "string" || !isWellFormedPayTo(network, feePayer)) return { kind: "refuse", reason: "the offer has no well-formed feePayer" };
   if (typeof memo !== "string" || memo === "" || memo !== challengeNonce) return { kind: "refuse", reason: "the offer memo must be the challengeNonce" };
+  // offer の extra が桁・token program・mint を名乗っていて表と違えば拒む（表が権威。設計 §5.6）。
+  if (extra?.["decimals"] !== undefined && extra["decimals"] !== known.decimals) return { kind: "refuse", reason: "the offer's decimals conflict with the table" };
+  if (extra?.["tokenProgram"] !== undefined && extra["tokenProgram"] !== known.tokenProgram) return { kind: "refuse", reason: "the offer's token program conflicts with the table" };
+  if (extra?.["mint"] !== undefined && extra["mint"] !== known.id) return { kind: "refuse", reason: "the offer's mint conflicts with the table" };
   return { kind: "x402-svm", mint: known.id, decimals: known.decimals, tokenProgram: known.tokenProgram, payTo, feePayer, memo, amount };
 }
