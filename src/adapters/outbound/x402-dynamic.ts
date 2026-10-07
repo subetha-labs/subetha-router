@@ -149,6 +149,42 @@ export async function paidOutcomeOf(
   return { outcome: "rejected", reason: "destination_rejected" };
 }
 
+/**
+ * 送出した後の応答から結果を決める（送信の設計 §5 の 1 枚の表。動的 EVM・静的 Arc・SVM が共有する）。
+ * 整合した領収 ∧ 200 → 本文（`deliveredBodyOf`）、整合 ∧ 200 以外 → `paid_no_data`、`payer` だけ違う → `unknown`、
+ * 領収なし: 2xx → `unknown`、≥ 500 → `unknown`、それ以外 → `rejected`。本文は整合した 200 のときだけ読む。
+ */
+export async function paidOutcomeOf(
+  response: Response,
+  approved: DestinationOffer,
+  form: ReceiptForm,
+  deps: { readonly maxBodyBytes: number; readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void; readonly ctx: { routeId: string; operation: string } },
+): Promise<PayResult> {
+  const receipt = receiptOf(response, approved, form);
+  if (receipt.kind === "settled") {
+    if (response.status === 200) {
+      return deliveredBodyOf(response, receipt, deps);
+    }
+    // 整合した receipt があるのに 200 でない。支払いは成立していて、データは無い。
+    discardBody(response);
+    return { outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: receipt.header };
+  }
+  // receipt が無い・不整合。本文は読まない。
+  discardBody(response);
+  if (receipt.kind === "payer_mismatch") {
+    return { outcome: "unknown", reason: "destination_receipt_payer_mismatch" };
+  }
+  if (response.status >= 200 && response.status < 300) {
+    return { outcome: "unknown", reason: "destination_receipt_unverified" };
+  }
+  if (response.status >= 500) {
+    return { outcome: "unknown", reason: "destination_pay_unknown" };
+  }
+  // 402 を含む 4xx: 上流は「受け付けなかった」と答えた。再署名はしない。
+  // **未決済の証明ではない**（署名済みの authorization は `validBefore` まで有効で、上流は後から決済できる）。
+  return { outcome: "rejected", reason: "destination_rejected" };
+}
+
 export interface X402DynamicOptions {
   /**
    * 運用者の集合（送信の設計 §2.3、FR-38）: 受信の受取先・送信の署名者・それらの ATA。ここへ払う offer は候補にしない。
