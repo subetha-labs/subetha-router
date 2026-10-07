@@ -80,12 +80,25 @@ export class DynamicTargetUnsupportedError extends Error {
   }
 }
 
+/** message の hash の予約の結果（送信の設計 §2.5、FR-37）。`collision` は同じ message に二度署名しないための拒否。 */
+export type MessageReservation = "reserved" | "collision" | "unavailable";
+
 export interface PayRequest {
   readonly routeId: string;
   /** 承認済み `selectedOffer`。凍結した accepts をそのまま渡さない。 */
   readonly offer: DestinationOffer;
   readonly paymentId: string;
   readonly attempt: number;
+  /**
+   * 承認の絶対期限（ミリ秒。`intent.approvalDeadlineMs`）。adapter は**実際の署名の委譲の直前と送出の直前**に `now < deadlineMs` を見て、
+   * 過ぎていれば `not_sent`（送信の設計 §2.4、FR-36）。
+   */
+  readonly deadlineMs: number;
+  /**
+   * 署名する message の hash（sha256 の小文字 hex 64 文字）を**署名の前に**排他的に予約する（送信の設計 §2.5、FR-37）。
+   * core が journal に束ねて渡す。使うのは SVM の rail だけ。無ければその rail は署名しない（fail closed）。
+   */
+  readonly reserveMessage?: (messageHash: string) => Promise<MessageReservation>;
   /** 動的購入のときだけ。静的 route では付けない。 */
   readonly target?: UpstreamTarget;
   /**
@@ -122,7 +135,22 @@ export type PayResult =
   /** 送金有無が不明。自動再送しない。 */
   | { readonly outcome: "unknown"; readonly reason: string };
 
+/**
+ * SVM の送信の署名の能力（送信の設計 §2.1）。署名器が受け取るのは **Router が組んで検査した message の bytes の写しだけ**。
+ * 同期（`@noble/curves`）。`address` は base58 32 バイト。
+ */
+export interface SvmSigningCapability {
+  readonly network: string;
+  readonly address: string;
+  readonly sign: (messageBytes: Uint8Array) => Uint8Array;
+  readonly kind: "real-key" | "fixture-key";
+}
+
 export interface OutboundRail {
+  /** 起動時の非同期の準備（SVM: ATA の導出と静的の宛先の検査）。無い rail は何もしない。 */
+  startup?(): Promise<void>;
+  /** 支払い元の残高（base units）。持たない rail は未定義（core は「検査なし」と読む）。 */
+  balanceOf?(routeId: string, asset: string): Promise<bigint>;
   /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
   readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]>;
   pay(request: PayRequest): Promise<PayResult>;
