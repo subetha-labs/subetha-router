@@ -15,7 +15,19 @@ type TypedData = { domain: Record<string, unknown>; types: Record<string, unknow
 const sdk = vi.hoisted(() => ({
   /** SDK が署名器（adapter の guarded signer）を呼ぶ直前（arm の後）に走る hook。 */
   beforeSign: undefined as undefined | (() => void),
+  /** adapter が支払いヘッダを符号化している間に走る hook（送出の直前の検査の**前**）。 */
+  duringEncode: undefined as undefined | (() => void),
 }));
+vi.mock("@x402/fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/fetch")>();
+  class HookedHttpClient extends actual.x402HTTPClient {
+    override encodePaymentSignatureHeader(payload: Parameters<InstanceType<typeof actual.x402HTTPClient>["encodePaymentSignatureHeader"]>[0]): Record<string, string> {
+      sdk.duringEncode?.();
+      return super.encodePaymentSignatureHeader(payload);
+    }
+  }
+  return { ...actual, x402HTTPClient: HookedHttpClient };
+});
 vi.mock("@x402/evm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@x402/evm")>();
   class HookedScheme extends actual.ExactEvmScheme {
@@ -47,6 +59,7 @@ const running: Listening[] = [];
 
 afterEach(async () => {
   sdk.beforeSign = undefined;
+  sdk.duringEncode = undefined;
   while (running.length > 0) {
     await running.pop()?.stop();
   }
@@ -390,6 +403,19 @@ describe("静的 x402: 期限の検査は arm の後、署名器の委譲の直�
     const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d3", attempt: 1, deadlineMs: Date.now() + 600_000 });
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
     expect(spy.calls).toHaveLength(0);
+    expect((await upstreamCalls(fixture)).payCalls).toBe(0);
+  });
+
+  it("署名の後、支払いヘッダを符号化している間に切れても送らない（検査は符号化の後・送出の直前。署名 1・支払い要求 0）", async () => {
+    const fixture = await startUpstream();
+    const spy = createSignerSpy();
+    let expired = false;
+    sdk.duringEncode = () => { expired = true; };
+    const rail = railOf(fixture, spy, NETWORK, { now: () => (expired ? Date.now() + 10_000_000 : Date.now()) });
+    const offer = (await rail.readChallenge(ROUTE_ID))[0]!;
+    const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "d5", attempt: 1, deadlineMs: Date.now() + 600_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(spy.calls).toHaveLength(1);
     expect((await upstreamCalls(fixture)).payCalls).toBe(0);
   });
 

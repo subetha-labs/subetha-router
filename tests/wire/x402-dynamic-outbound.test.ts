@@ -19,7 +19,20 @@ const sdk = vi.hoisted(() => ({
   tamper: undefined as undefined | ((message: TypedData) => TypedData),
   /** 1 件の支払いの中で、SDK が余分に署名を求める回数。 */
   extraSignatures: 0,
+  /** adapter が支払いヘッダを符号化している間に走る hook（送出の直前の検査の**前**）。 */
+  duringEncode: undefined as undefined | (() => void),
 }));
+
+vi.mock("@x402/fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@x402/fetch")>();
+  class HookedHttpClient extends actual.x402HTTPClient {
+    override encodePaymentSignatureHeader(payload: Parameters<InstanceType<typeof actual.x402HTTPClient>["encodePaymentSignatureHeader"]>[0]): Record<string, string> {
+      sdk.duringEncode?.();
+      return super.encodePaymentSignatureHeader(payload);
+    }
+  }
+  return { ...actual, x402HTTPClient: HookedHttpClient };
+});
 
 vi.mock("@x402/evm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@x402/evm")>();
@@ -76,6 +89,7 @@ const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   sdk.tamper = undefined;
   sdk.extraSignatures = 0;
+  sdk.duringEncode = undefined;
   // 1 つが失敗しても残りを片付ける。
   const failures: unknown[] = [];
   while (closers.length > 0) {
@@ -723,6 +737,16 @@ describe("動的 x402: 承認の期限と運用者の集合", () => {
     sdk.tamper = (message) => { offset = FAR; return message; };
     expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
     expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
+  });
+
+  test("署名の後、支払いヘッダを符号化している間に切れても送らない（検査は符号化の後・送出の直前。署名 1・支払い要求 0）", async () => {
+    let offset = 0;
+    const h = await harness({ now: () => Date.now() + offset });
+    const offer = await h.quote();
+    sdk.duringEncode = () => { offset = FAR; };
+    expect(await h.pay(offer)).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(h.signed).toHaveLength(1);
     expect(h.upstream.seen.payments).toHaveLength(0);
   });
 
