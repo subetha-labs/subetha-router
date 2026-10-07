@@ -92,6 +92,15 @@ export function networkFamilyOf(network: string): NetworkFamily | undefined {
   return undefined;
 }
 
+/** `eip155:<id>` の数値 chainId。EVM でなければ `undefined`（呼び出し側は署名を拒む）。 */
+export function evmChainIdOf(network: string): number | undefined {
+  const match = /^eip155:([1-9][0-9]{0,15})$/.exec(network);
+  if (match === null) return undefined;
+  const id = Number(match[1]);
+  // 安全な整数の外は丸まって別の chainId になるので受けない。
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
 /** 資産の比較の鍵。EVM は小文字化、SVM はそのまま（base58 は大文字小文字を区別する）。予算の鍵には使わない（設定の文字列のまま）。 */
 export function assetKeyOf(network: string, asset: string): string {
   return networkFamilyOf(network) === "svm" ? asset : asset.toLowerCase();

@@ -122,7 +122,6 @@ export async function guarded(run: () => Promise<Record<string, unknown>>): Prom
  */
 export interface McpServerOptions {
   readonly payer?: InboundPayer;
-  readonly inboundChainId?: number;
   /**
    * **ステートレス（リモート HTTP）運用の opt-in**。
    * 呼び出し側が quote を持ち回る前提にする。stdio（ローカル）では渡さない。
@@ -176,7 +175,6 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
     mode,
     evidence,
     ...(options.payer === undefined ? {} : { payer: options.payer }),
-    ...(options.inboundChainId === undefined ? {} : { inboundChainId: options.inboundChainId }),
   });
 
   const server = new McpServer({ name: "subetha-router", version: "0.1.0" });

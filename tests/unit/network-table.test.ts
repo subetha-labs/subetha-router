@@ -13,6 +13,7 @@ import {
   ConfigError,
   KNOWN_NETWORKS,
   assetKeyOf,
+  evmChainIdOf,
   isCaip2Network,
   isWellFormedPayTo,
   loadRuntimeConfig,
@@ -257,5 +258,18 @@ describe("本番と試験の表", () => {
     expect(isWellFormedPayTo(SOL_DEVNET, SOL_OWNER.toLowerCase())).toBe(false);
     expect(isWellFormedPayTo("eip155:84532", RECEIVER)).toBe(true);
     expect(isWellFormedPayTo("eip155:84532", SOL_OWNER)).toBe(false);
+  });
+});
+
+describe("evmChainIdOf", () => {
+  test("eip155 の数値だけを返し、安全な整数の外と EVM 以外は undefined", () => {
+    expect(evmChainIdOf("eip155:84532")).toBe(84532);
+    expect(evmChainIdOf("eip155:5042002")).toBe(5042002);
+    expect(evmChainIdOf("eip155:9007199254740991")).toBe(9007199254740991);
+    expect(evmChainIdOf("eip155:9007199254740993")).toBeUndefined();
+    expect(evmChainIdOf("eip155:0")).toBeUndefined();
+    expect(evmChainIdOf("eip155:084532")).toBeUndefined();
+    expect(evmChainIdOf("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1")).toBeUndefined();
+    expect(evmChainIdOf("eip155:")).toBeUndefined();
   });
 });

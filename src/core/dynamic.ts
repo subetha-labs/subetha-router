@@ -12,7 +12,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import { dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig } from "../config.js";
+import { assetKeyOf, dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig } from "../config.js";
 import { parseUpstreamUrl } from "../net/upstream-url.js";
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, OutboundRail } from "../ports/outbound.js";
@@ -627,8 +627,9 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
   /** 残高の事前確認（設計 §6.6）。元本の資産と手数料の資産を別々に（同じなら合算で）。読めなければ不足とみなす。 */
   async function fundsAvailable(profile: DynamicProfile, intent: Intent): Promise<boolean> {
     const needed = new Map<string, bigint>();
+    // 資産の鍵は network の族で決める（EVM は小文字化、SVM の mint は大文字小文字を保つ。multirail 設計 §1、FR-4）。能力にはこの鍵を渡す。
     const add = (asset: string, amount: bigint): void => {
-      const key = asset.toLowerCase();
+      const key = assetKeyOf(profile.destination.network, asset);
       needed.set(key, (needed.get(key) ?? 0n) + amount);
     };
     add(profile.destination.asset, BigInt(intent.dynamic!.pricing.upstreamAmount));

@@ -10,11 +10,11 @@
  * 必要な env は README（MCP の節）に列挙。稼働中の Router に接続するだけで、Router は起動しない。
  */
 
+import { evmChainIdOf } from "../src/config.js";
 import { main } from "../src/mcp/server.js";
 import { createX402Payer } from "./x402-payer.js";
 
 /** 受信レグのチェーン（Base Sepolia）。offer の network と一致しなければ署名は失敗する。 */
-const INBOUND_CHAIN_ID = Number(process.env["T9_INBOUND_CHAIN_ID"] ?? "84532");
 
 const key = process.env["T9_MCP_PAYER_PRIVATE_KEY"];
 if (key === undefined || key === "") {
@@ -24,15 +24,24 @@ if (key === undefined || key === "") {
   process.exit(2);
 }
 
+/** この payer が署名する chain（既定 Base Sepolia）。offer の network がこれと違えば署名しない（能力側の chain の方針）。 */
+const INBOUND_CHAIN_ID = Number(process.env["T9_INBOUND_CHAIN_ID"] ?? "84532");
+if (!Number.isSafeInteger(INBOUND_CHAIN_ID) || INBOUND_CHAIN_ID <= 0) {
+  process.stderr.write("T9_INBOUND_CHAIN_ID must be a positive integer\n");
+  process.exit(2);
+}
+
 const payer = createX402Payer(key);
 
 void main({
   payer: {
     address: payer.address,
-    credentialFor: (offer, chainId) =>
-      payer.credentialFor(offer as never, chainId),
+    credentialFor: (offer, network) => {
+      const chainId = evmChainIdOf(network);
+      if (chainId === undefined || chainId !== INBOUND_CHAIN_ID) throw new Error("offer is not on the configured inbound chain");
+      return payer.credentialFor(offer as never, chainId);
+    },
   },
-  inboundChainId: INBOUND_CHAIN_ID,
 }).catch((error: unknown) => {
   process.stderr.write(
     `subetha-router MCP (real) failed: ${error instanceof Error ? error.message : "unknown"}\n`,

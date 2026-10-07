@@ -511,6 +511,37 @@ describe("動的 purchase", () => {
     expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
   });
 
+  test("残高の事前確認: 資産の鍵は network の族で決める（SVM の mint は大文字小文字を保ち、EVM は小文字化。FR-4）", async () => {
+    const SOL = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+    const MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+    const svm: DynamicProfile = { ...PROFILE, destination: { scheme: "exact", network: SOL, asset: MINT, decimals: 6, tokenDomain: { name: "USDC", version: "2" } } };
+    const config = baseConfig({ profile: svm });
+    const withBucket: RouterConfig = { ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets: [...config.dynamic!.budget.buckets, { network: SOL, asset: MINT, maxTotal: "10000", maxPerPurchase: "5000" }] } } };
+    outbound.offers = [{ ...outbound.offers[0]!, network: SOL, asset: MINT }];
+    const asked: string[] = [];
+    const core = await boot(withBucket, { balanceOf: async (_profileId, asset) => { asked.push(asset); return 0n; } });
+    const outcome = await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "alice" });
+    expect(outcome).toMatchObject({ ok: true });
+    const quote = outcome as OkQuote;
+    expect(await core.purchase(purchaseArgs(quote))).toEqual({ paymentId: quote.paymentId, status: "awaiting_payment", code: "operator_funds_unavailable" });
+    // 小文字化されていない（base58 はそのまま）。
+    expect(asked).toEqual([MINT]);
+    expect(inbound.settleCalls).toBe(0);
+  });
+
+  test("残高の事前確認: EVM の対照——大文字混じりの設定でも小文字化した鍵が渡る", async () => {
+    const MIXED = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+    const mixed: DynamicProfile = { ...PROFILE, destination: { ...PROFILE.destination, asset: MIXED } };
+    // 予算の区分の鍵は設定の文字列そのもの（小文字化しない）なので、区分も同じ書き方で持つ。
+    const config = baseConfig({ profile: mixed });
+    const withBucket: RouterConfig = { ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets: config.dynamic!.budget.buckets.map((b) => (b.asset === DST_ASSET ? { ...b, asset: MIXED } : b)) } } };
+    const askedEvm: string[] = [];
+    const evmCore = await boot(withBucket, { balanceOf: async (_profileId, asset) => { askedEvm.push(asset); return 0n; } });
+    const q2 = await quoteOk(evmCore);
+    expect((await evmCore.purchase(purchaseArgs(q2))).code).toBe("operator_funds_unavailable");
+    expect(askedEvm).toEqual([DST_ASSET]);
+  });
+
   test("残高の事前確認（mpp 送信）: 元本と手数料が同じ資産なら合算。読めなければ不足", async () => {
     const mpp: DynamicProfile = { ...PROFILE, profileId: "dyn-x402-to-mpp", sourceRail: "x402", rail: "mpp", source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, destination: { scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, decimals: 6, feeAsset: SRC_ASSET, maxFee: "5000", feeMargin: 20_000 } };
     outbound.offers = [{ scheme: "tempo/charge", network: SRC_NETWORK, asset: SRC_ASSET, amount: "5000", payTo: "0x0000000000000000000000000000000000000b22", extra: { realm: "r", terms: "{}" } }];
