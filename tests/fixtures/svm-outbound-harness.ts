@@ -140,4 +140,3 @@ export function paidTransactionOk(h: Harness, index: number, amount: string, mem
 export function rpcMethods(h: Harness): string[] {
   return h.rpc.calls.map((c) => c.method);
 }
-

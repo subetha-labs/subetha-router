@@ -21,6 +21,7 @@ import { resolveSvmInboundPolicy } from "./adapters/inbound/x402-svm-startup.js"
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
+import { createX402SvmOutbound } from "./adapters/outbound/x402-svm.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "./net/bounded-body.js";
 import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
 import { denyHostsOf } from "./net/upstream-url.js";
@@ -461,6 +462,8 @@ export function composeRails(
   const { evmByNetwork, svmByNetwork } = outboundCapabilitiesOf(capabilities);
   // 運用者の集合（送信の設計 §2.3、FR-38）: (a) 受信の受取先、(b) 注入された送信能力の公開アドレス。(c) の ATA は SVM の adapter の startup で足す（U8）。
   const operatorAddresses = operatorAddressesOf(config.router, profiles, { evmByNetwork, svmByNetwork, ...(capabilities.mppTempo === undefined ? {} : { mppTempo: capabilities.mppTempo }) });
+  /** SVM の adapter が共有する可変の集合（`startup()` が (c) の ATA を足す。EVM・MPP の adapter は配列の写しで足りる: ATA は SVM の offer にしか現れない）。 */
+  const operatorSet = new Set<string>(operatorAddresses);
 
   const dynamicOptionsFor = (rail: "x402" | "mpp", network: string) => {
     if (dynamicTransport === undefined) return {};
@@ -491,6 +494,8 @@ export function composeRails(
   };
 
   const rails: Record<string, OutboundRail> = {};
+  /** SVM の送信 adapter の `startup()`（後で `startupChecks` に入れる。受信の検査の後に走る）。 */
+  const svmStartups: Array<() => Promise<void>> = [];
   for (const [key, pair] of pairsInUse) {
     if (pair.rail === "x402" && networkFamilyOf(pair.network) === "evm") {
       const capability = evmByNetwork.get(pair.network);
@@ -512,8 +517,41 @@ export function composeRails(
       continue;
     }
     if (pair.rail === "x402" && networkFamilyOf(pair.network) === "svm") {
-      // SVM の送信の adapter は U7・U8 で足す。それまでは組ませない（fail closed）。
-      throw new SignerNotAuthorizedError();
+      const capability = svmByNetwork.get(pair.network);
+      if (capability === undefined || solanaRpcUrl === undefined) {
+        // この network の署名能力が無い（U8-a。偽の署名者で代替しない）。
+        throw new SignerNotAuthorizedError();
+      }
+      // 表の資産（この network の資産は 1 つ）: mint・桁・token program。送信の宛先が別の資産なら設定の照合で既に落ちている。
+      const entry = knownNetworkOf(networks, pair.network);
+      const known = entry?.assets[0];
+      if (entry === undefined || known === undefined || known.tokenProgram === undefined || entry.assets.length !== 1) {
+        throw new ConfigError(`outbound ${pair.network}: the table must list exactly one asset with a token program`);
+      }
+      const ownRoutes = Object.entries(config.router.routes).filter(([, route]) => (route.rail ?? "x402") === "x402" && route.destination.network === pair.network);
+      for (const [routeId, route] of ownRoutes) {
+        if (route.destination.asset !== known.id) throw new ConfigError(`routes.${routeId}: the destination asset is not the table's mint for ${pair.network}`);
+      }
+      const ownProfiles = Object.fromEntries(Object.entries(profiles).filter(([, profile]) => profile.rail === "x402" && profile.destination.network === pair.network));
+      // RPC は受信の起動時の検査と同じ作り（fixture の差し替えの上に loopback の方針と DNS の期限。送信の設計 §2.2）。
+      const rpcTransport = svmRpcTransportOf(staticHooks, capabilities.fixtureFacilitators === true, report);
+      const svmRail = createX402SvmOutbound({
+        network: pair.network,
+        upstreams: upstreamsFor(pair.rail, pair.network),
+        destinations: Object.fromEntries(ownRoutes.map(([routeId, route]) => [routeId, { payTo: route.destination.payTo, asset: route.destination.asset, scheme: route.destination.scheme }])),
+        capability,
+        transport: transportFor(false, report, staticHooks),
+        rpc: { url: solanaRpcUrl, transport: rpcTransport },
+        operatorAddresses: operatorSet,
+        mint: known.id,
+        decimals: known.decimals,
+        tokenProgram: known.tokenProgram,
+        ...(dynamicTransport === undefined || Object.keys(ownProfiles).length === 0 ? {} : { dynamic: { profiles: ownProfiles, transport: dynamicTransport, denyHosts } }),
+      });
+      rails[key] = svmRail;
+      // 起動時の非同期の準備（Router の ATA・運用者の ATA・静的の宛先 ATA の検査）。`startRouter` が core を作る前に待つ。
+      svmStartups.push(() => svmRail.startup());
+      continue;
     }
     if (pair.rail === "mpp") {
       const capability = capabilities.mppTempo;
@@ -776,6 +814,9 @@ export function composeRails(
             }
           },
         };
+
+  // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。
+  startupChecks.push(...svmStartups);
 
   return {
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
