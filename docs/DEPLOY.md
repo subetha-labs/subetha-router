@@ -213,6 +213,11 @@ journal の `unknown` は 07:55:40.562Z。確定が観測された時刻と faci
 U-4: Circle の wire 30 秒は十分。**U-1: SVM では「settle の応答の後にチェーンで確定する」ケースが実際に出たので、G-4 の前に設計 §10 U-1 の改訂（期限つきの追跡か、
 現状のままか）を owner が決める。** 終了後は公開の Router を戻し、`/healthz`・`subetha-egress check`・公開の一覧（従来の 2 route）を確認。公開の停止は約 4 分。
 
+**再試行の記録（G-3、2026-10-07 09:40–09:42Z、T11 の後）**: 追跡（設計 §5.8）を含むイメージ `b-4d2c925` に公開の Router を入れ替え（無効のまま。rollback は
+`subetha-router-prev-20261007T094049Z` = `b-478c0f9`）、同じ手順で受け入れ用を単独で起動し、Solana → Provider A を動的（`dyn-sol-to-x402`、signature `2iBaHM…`、finalized、6.5 秒）と
+静的（`md-x402-eth-snapshot-sol`、signature `bZUbak…`、finalized、4.4 秒）で各 1 件、どちらも **delivered**。受取 ATA は 0.021 → 0.042 USDC。これで **AC-2 の動的も満たした**
+（AC-1 は 1 回目で満たしている）。追跡が働いたかは hosted では観測できない（上記の制限）。公開の停止は約 1 分。
+
 **有効化（G-4。owner の判断）**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION` を `{ arc: true, solana: true }`（片方だけでもよい）に変えて、§6 の手順でイメージを作り直して入れ替える。
 **戻すのも同じ 1 箇所**（`false`）。無効にした Router は、その route・プロファイルを一覧から外し、発行済みの quote は支払いの前に `quote_changed` で止まる（journal の記録と予算は保つ）。
 
