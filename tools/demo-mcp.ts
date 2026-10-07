@@ -162,10 +162,11 @@ async function start(): Promise<void> {
   await main({
     payer: {
       address: payer.address,
-      // offer の network から chainId を引く（EVM 以外の offer にはこの payer は署名しない）。
+      // offer の network から chainId を引く。この payer は **INBOUND の chain にだけ**署名する（能力側の chain の方針。
+      // Router の preflight が network の改変を拒むとしても、別 chain で有効な署名を作らない）。
       credentialFor: (offer, network) => {
         const chainId = evmChainIdOf(network);
-        if (chainId === undefined) throw new Error("not an EVM network");
+        if (chainId === undefined || chainId !== INBOUND.chainId) throw new Error("offer is not on the configured inbound chain");
         return payer.credentialFor(offer as never, chainId);
       },
     },

@@ -24,6 +24,13 @@ if (key === undefined || key === "") {
   process.exit(2);
 }
 
+/** この payer が署名する chain（既定 Base Sepolia）。offer の network がこれと違えば署名しない（能力側の chain の方針）。 */
+const INBOUND_CHAIN_ID = Number(process.env["T9_INBOUND_CHAIN_ID"] ?? "84532");
+if (!Number.isSafeInteger(INBOUND_CHAIN_ID) || INBOUND_CHAIN_ID <= 0) {
+  process.stderr.write("T9_INBOUND_CHAIN_ID must be a positive integer\n");
+  process.exit(2);
+}
+
 const payer = createX402Payer(key);
 
 void main({
@@ -31,7 +38,7 @@ void main({
     address: payer.address,
     credentialFor: (offer, network) => {
       const chainId = evmChainIdOf(network);
-      if (chainId === undefined) throw new Error("not an EVM network");
+      if (chainId === undefined || chainId !== INBOUND_CHAIN_ID) throw new Error("offer is not on the configured inbound chain");
       return payer.credentialFor(offer as never, chainId);
     },
   },

@@ -16,7 +16,8 @@ function quoteWith(network: string): Record<string, unknown> {
     paymentId: "p1",
     routeId: "r",
     approval: { required: true, boundTo: "q1", deadlineMs: Date.now() + 60_000 },
-    source: { rail: "x402", network, offer: { scheme: "exact", network, asset: "A", amount: "1", payTo: "P", maxTimeoutSeconds: 1, extra: {} } },
+    // 外側の `source.network` は offer と**わざと違える**（能力に渡るのは offer の network であることを見る）。
+    source: { rail: "x402", network: "eip155:1", offer: { scheme: "exact", network, asset: "A", amount: "1", payTo: "P", maxTimeoutSeconds: 1, extra: {} } },
     destination: { network: "eip155:84532" },
   };
 }
