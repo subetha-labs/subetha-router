@@ -5,12 +5,13 @@
 # 方針:
 # - コンテナや入口を変える前に、イメージと旧コンテナの ID を確かめる（それまでの失敗は一時ファイル以外に何も変えない）
 # - その後の失敗（ERR・INT・TERM）は復旧する: 名前を占めている新コンテナを消し、旧コンテナを ID で元の名前に戻して起動し、入口を開け直す
-# - docker・systemctl の呼び出しには上限（timeout -k）を付ける。上限に当たった（または結果を受け取る前に割り込まれた）変更操作
-#   （stop・rename・run）は daemon 側で続いているかもしれず、docker はその順序を保証しない。復旧は最善を尽くすが、そういう操作が
-#   1 つでもあれば **状態不明**（exit 2）として報告し、復旧したとは言わない。復旧の各段も同じ: 確認できなければ状態不明
-# - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、ループの中の各要求にも残りの予算を渡す。ログの中身は一切出さない
-#   （固定の文と行数だけ）
-set -euo pipefail
+# - docker・systemctl の呼び出しには上限（timeout -k）を付ける。変更操作（stop・rename・run）は、daemon が答えた（成功か、
+#   "Error response from daemon"）と確認できるまで未確定。上限に当たった・結果の前に割り込まれた・接続が切れた操作は daemon 側で
+#   続いているかもしれず、docker はその順序を保証しない。復旧は最善を尽くすが、未確定の操作が 1 つでもあれば **状態不明**（exit 2）
+#   として報告し、復旧したとは言わない。復旧の各段も同じ: 確認できなければ状態不明
+# - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、ループの中の各要求にも残りの予算を渡す（失敗時の診断の docker logs だけ
+#   別枠 10 秒）。ログの中身は一切出さない（固定の文と行数だけ）
+set -Eeuo pipefail   # -E: ERR trap は関数の中でも効く（sc・dt の中の失敗も復旧に入る）
 
 IMG="${1:?usage: swap-image.sh <image:tag>}"
 NAME=subetha-router
@@ -28,11 +29,13 @@ TS=$(date -u +%Y%m%dT%H%M%SZ)
 PREV="$NAME-prev-$TS"
 LOGTMP=$(mktemp)
 ERRTMP=$(mktemp)
+OUTTMP=$(mktemp)
 JBEFORE=$(mktemp)
+DIAG_LOGS_S=10    # 失敗時の診断で docker logs に許す上限（待ちの予算とは別枠）
 
 OLD_ID=
 INGRESS_CLOSED=0
-PENDING=          # 結果を確認できていない変更操作（stop / rename / run）。空でなければ復旧は状態不明で終わる
+PENDING=          # daemon の答えを確認できていない変更操作（stop / rename / run）。空でなければ復旧は状態不明で終わる
 NEW_ID=
 DONE=0
 UNRESOLVED=0      # 復旧の中で確認できなかった操作があれば 1
@@ -41,7 +44,7 @@ UNRESOLVED=0      # 復旧の中で確認できなかった操作があれば 1
 dt() { local t=$1; shift; timeout -k 5 "$t" docker "$@"; }
 d() { dt 30 "$@"; }
 sc() { timeout -k 5 30 systemctl "$@"; }
-cleanup_tmp() { rm -f "$LOGTMP" "$ERRTMP" "$JBEFORE"; }
+cleanup_tmp() { rm -f "$LOGTMP" "$ERRTMP" "$OUTTMP" "$JBEFORE"; }
 left() { echo $(( $1 - (SECONDS - $2) )); }   # <budget> <t0> → 残りの秒数（負もあり得る）
 capped() { # <budget> <t0> <cap> → 残りの秒数を 1..cap に収める
   local r; r=$(left "$1" "$2")
@@ -49,7 +52,21 @@ capped() { # <budget> <t0> <cap> → 残りの秒数を 1..cap に収める
   [ "$r" -lt 1 ] && r=1
   echo "$r"
 }
-is_timeout() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+is_timeout() { [[ "$1" == 124 || "$1" == 137 ]]; }
+# 変更操作（この shell で実行。$(...) の中では PENDING が親に残らないので使わない）。daemon が答えたときだけ未確定を解く。
+# docker の stderr は出さない（env-file の行などが混じりうる）。
+mutate() { # <op> <docker args...>; stdout は透過
+  local op=$1 rc=0; shift
+  PENDING=$op
+  timeout -k 5 30 docker "$@" 2>"$ERRTMP" || rc=$?
+  if [ "$rc" = 0 ]; then PENDING=; return 0; fi
+  if ! is_timeout "$rc" && grep -q "Error response from daemon" "$ERRTMP"; then
+    PENDING=; echo "docker $op failed (rc=$rc, the daemon answered)" >&2
+  else
+    echo "docker $op failed (rc=$rc, unconfirmed: timeout or connection lost)" >&2
+  fi
+  return "$rc"
+}
 
 # inspect の結果を 3 値で返す: 0 = 値を stdout に出した、2 = 不在（No such object）、3 = 確認できない（timeout・その他）。
 inspect_or() { # <format> <id-or-name> [timeout-s]
@@ -65,8 +82,8 @@ health_ok() { # 入口の /healthz。応答は変数に取ってから見る（�
   r=$(curl -sf --max-time "$1" "$HEALTH" 2>/dev/null) || return 1
   [[ "$r" == *'"router":"up"'* ]]
 }
-log_summary() { # ログの中身は出さない。固定の文と行数だけ。
-  dt "${2:-30}" logs "$1" > "$LOGTMP" 2>&1 || { echo "(could not read the container logs)"; return 0; }
+log_summary() { # ログの中身は出さない。固定の文と行数だけ。docker logs は別枠 DIAG_LOGS_S 秒。
+  dt "$DIAG_LOGS_S" logs "$1" > "$LOGTMP" 2>&1 || { echo "(could not read the container logs)"; return 0; }
   if grep -q '"event":"listening"' "$LOGTMP"; then echo "child listening line: present"; else echo "child listening line: absent"; fi
   if grep -q '^subetha-router remote MCP on ' "$LOGTMP"; then echo "ingress bind line: present"; else echo "ingress bind line: absent"; fi
   printf 'could-not-start lines: %s\n' "$(grep -cx 'could not start the Router' "$LOGTMP" || true)"
@@ -165,19 +182,11 @@ case $rc in
   124|137) echo "could not query caddy (systemctl did not answer)" >&2; false ;;
 esac
 
-# 変更操作は、結果を受け取るまで PENDING に記す（daemon が答えた = 完了か失敗が確定。上限や割り込みは未確定のまま）。
-PENDING=stop; rc=0; d stop "$OLD_ID" >/dev/null || rc=$?
-is_timeout "$rc" || PENDING=
-[ "$rc" = 0 ] || { echo "docker stop failed (rc=$rc)" >&2; false; }
-
-PENDING=rename; rc=0; d rename "$OLD_ID" "$PREV" || rc=$?
-is_timeout "$rc" || PENDING=
-[ "$rc" = 0 ] || { echo "docker rename failed (rc=$rc)" >&2; false; }
-
-PENDING=run; rc=0
-NEW_ID=$(d run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG") || rc=$?
-is_timeout "$rc" || PENDING=
-[ "$rc" = 0 ] || { echo "docker run failed (rc=$rc)" >&2; false; }
+# 変更操作は mutate で（daemon が答えたと確認できるまで PENDING。失敗は ERR で restore へ）。
+mutate stop stop "$OLD_ID" >/dev/null
+mutate rename rename "$OLD_ID" "$PREV"
+mutate run run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG" > "$OUTTMP"
+NEW_ID=$(tr -d '[:space:]' < "$OUTTMP")
 [ -n "$NEW_ID" ]
 echo "new container: $NEW_ID"
 
