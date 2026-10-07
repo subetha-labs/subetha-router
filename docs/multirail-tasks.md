@@ -44,6 +44,7 @@ T8-a 本番の入口の設定生成（無効のまま）          ← T7-c
 T8-b 本番の入口の process（能力の注入・受け入れ用の起動）← T8-a
 T9 文書                                         ← T8-b
 T10 gate（owner）                               ← T9
+T11 SVM の settle の追跡（設計 §5.8、D-9）        ← T10 の G-3 の結果。G-4 の前
 ```
 
 T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）。T1 の後は T2・T3・T4-a が並行できる。
@@ -206,6 +207,23 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
   `wallet:new:solana`、MPP の開示は変えない）、`docs/ENGINEERING.md`（新しい adapter と能力）。設計 §9・§10 の更新（T0-a・T6 の結果）
 - **完了条件**: 文書に鍵・URL の秘密・絶対パスが無い（grep）。手順を fixture の構成で 1 度なぞる
 
+### T11 — SVM の settle の応答の後の期限つきの追跡（設計 §5.8、D-9。G-3 の 4 件目の結果で足した）
+
+- **範囲**: `src/adapters/inbound/x402-svm.ts`（`settle` の中の追跡。options `rpc: { url, transport }`・`followUp: { totalMs, intervalMs }`・`onDiagnostic`）、`src/main.ts`（合成が起動時の検査と同じ guarded transport と
+  `ROUTER_SOLANA_RPC_URL` を渡す）、`tests/fixtures/solana-rpc.ts`（`getSignatureStatuses` と応答の列: `confirmed`／`finalized`／`processed`／`null`／`err`／malformed／huge／HTTP 500／遅延）。core は変えない
+- **完了条件（wire、Linux）**:
+  - facilitator の fixture を `confirm: "timeout"`（SDK の実物が `settlement_pending` と署名を返す）にして、RPC の列 `[null, null, confirmed]` → `settled`（txRef = 署名）、RPC の要求はちょうど 3、診断 `svm_settle_followed_up` が 1 回。
+    `finalized` も同じ。`processed` が続く → 期限（完了の期限。全体の時間も測る）で `unknown`、要求は ⌈totalMs / intervalMs⌉ ＋ 1 以下で**ちょうどの数**を書く
+  - `err` が非 null（**`confirmationStatus: "confirmed"` と組にして**、確定度の検査が変異を隠さないように）→ 1 回で打ち切って `unknown`／形の違う status（`{}`、`err` の欄が無い）は再度 → 列 `[{}, confirmed]` で `settled`／
+    署名の無い失敗（`transaction: ""`）・**空でない形違いの署名（base58 でない、base58 だが 64 バイトでない）** → RPC 0 で `unknown`／`network` が違う・無い → RPC 0／形どおりの成功 → RPC 0（従来どおり）／
+    **署名を含む HTTP 4xx・5xx** → 追跡に入る／RPC の要求の params が `[[signature], { searchTransactionHistory: true }]` で method が `getSignatureStatuses`（本文を照合）
+  - RPC の失敗（HTTP 500・JSON でない・64 KiB 超・timeout・名前解決の停止）は期限の内側で `unknown`（各 1 本。全体の時間の上限を書く）。`getTransaction` 等の他の method を呼ばない（fixture が `method not found` を返し、回数 0）
+  - 統合（T7-c の harness）: Solana の静的と動的の購入で `confirm: "timeout"` → `delivered`、journal は `source_settled` を経る。再起動後の再提出は既存の結果（settle・RPC の追加 0）。追跡の途中の再起動 → `interrupted_at_restart`
+  - 合成: 追跡の RPC は起動時の検査と同じ transport（loopback 不可・DNS の期限）で、ホストは拒否ホストに入ったまま。`ROUTER_SOLANA_RPC_URL` を変えれば追跡の宛先も変わる
+  - 文書: 設計 §5.5・§5.8・§6・§10、要件 FR-18・D-9、`docs/DEPLOY.md` §2c（有効にした後に見るもの: 診断の回数）
+- **sabotage**: `err === null` の検査を外す／期限を外す／署名の形の検査を外す／`network` の照合を外す／`processed` を確定扱いにする → 各試験が落ちる。Codex のレビュー（1 回以上）
+- **その後**: イメージを作り直して配備（G-2 と同じ手順、無効のまま）→ G-3 の再試行（Solana の動的と静的を各 1 件。`delivered` と、追跡が働いた場合はその診断）→ G-4
+
 ### T10 — gate（owner の確認の上で。設計 §8・§10、AC-1・AC-2、U-1・U-4・U-5）
 
 | 段 | 内容 | 条件 |
@@ -247,5 +265,5 @@ T0-a と並行できるタスクは無い（T1 が base58 の codec を要る）
 
 ## 5. 本書で決めていないこと
 
-- T10 G-3 で `settlement_pending` が出た場合の `/status` の polling の形（設計 §10 U-1。出てから設計する）
+- Circle で `settlement_pending` が出た場合の `/status` の polling の形（設計 §10 U-1。G-3 では出なかった。SVM の側は D-9・T11 で決めた）
 - S-3・S-4（送信）のタスクは別紙

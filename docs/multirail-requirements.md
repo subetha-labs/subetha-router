@@ -19,6 +19,7 @@
 | D-6 | 静的 route と動的プロファイルの**両方**を足す |
 | D-7 | 予算は既存と同じ桁（動的 1 件 20,000、通算 100,000,000、件数 1,000）。`npm run sign` の受信の上限は **20,000** |
 | D-8 | testnet は trial で運用し、facilitator の応答の照合は形まで（FR-20・FR-21）。Circle の本番 API key は取らない（mainnet は対象外） |
+| D-9 | **SVM の settle の追跡**（2026-10-07、G-3 の結果）: facilitator の settle 応答が形どおりの成功でなく（`settlement_pending` 等）署名を含むとき、Router は設定の RPC で `getSignatureStatuses` を**期限つき**（完了の期限 15 秒、間隔 2 秒）で追い、形の正しい status で **`err === null` かつ `confirmationStatus` が `confirmed` または `finalized`** なら `settled` として送信に進む（finality は主張しない）。それ以外は従来どおり `unknown`。FR-19〜21 の例外（設計 §5.8）。owner の選択（追跡を足す。Arc だけ先に有効化しない） |
 
 ## 1. 今の Router が持つもの（ソースで確認。第 2 版で誤りを直し、EVM 前提の箇所を足した）
 
@@ -169,17 +170,20 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
   - 再提出（訂正 2026-10-06）: preflight は「同じ transaction の 2 度目」をそれ自体では拒まない。二重の settle を防ぐのは既存の規則（静的: verify 失敗で終端・settle 1 回、動的: 昇格前の再試行は許し昇格後は 1 回、quote ごとの lock）。別の quote への再提出は memo（= その quote の nonce）で落ちる
 - **FR-17**: 呼び出し側の道具（`npm run sign`）は Solana の offer を見分けて SVM の transaction を組み、部分署名する。ed25519 の鍵は env。**署名だけで資金は動かない**（facilitator が
   送信する）——x402/EVM と同じ開示（承認 → 署名の順は変えない）
-- **FR-18**: 受信で Router が Solana の RPC に出るのは起動時の ATA の検査だけ（quote・purchase の中では facilitator だけ）。`@x402/svm` の simulate 等は受信では使わない
+- **FR-18**: 受信で Router が Solana の RPC に出るのは、起動時の ATA の検査と、**settle の要求を出した後に facilitator の応答が形どおりの成功でなく署名を含むときの、期限つきの確定の追跡**（`getSignatureStatuses` だけ。D-9、設計 §5.8）だけ。
+  quote・verify の中では facilitator だけ。`@x402/svm` の simulate 等は受信では使わない
 
 ### 4.5 決済の不確かさと facilitator の信頼（S-1・S-2 共通）
 
 - **FR-19**: settle の要求が**出た後**の失敗（timeout・応答の喪失・エラー）は `unknown` とし、予約を保ち、**自動で再 settle しない**（既存の設計 §6.5 と同じ）。「facilitator が止まれば
-  資金は動かない」とは**言わない**（要求が届いた後に止まり得る）
-- **FR-20**: settle の成功は、facilitator の応答が**形どおり**であることで判定する: 成功の印、`network` が発行 offer の network と**一致**、`transaction` が **その network の識別子の形**
+  資金は動かない」とは**言わない**（要求が届いた後に止まり得る）。**例外（D-9、SVM だけ）**: 失敗の応答が署名を含むときは、期限つきの追跡の結果（設計 §5.8）に従う。追跡は再 settle ではない（新しい要求を facilitator に出さない）
+- **FR-20**: settle の成功は、facilitator の応答が**形どおり**であることで判定する: 成功の印、`network` が発行 offer の network と**一致**、`transaction` が **その network の識別子の形**。
+  **または（D-9、SVM だけ）**、`network` が一致し `transaction` が署名の形の失敗の応答について、設定の RPC の `getSignatureStatuses` が期限内に `err === null`・`confirmed`／`finalized` を返したこと
   （EVM は 32 バイトの hash、SVM は base58 の signature）。形が違う・network が違う・識別子が無い応答は `unknown`（既存の MPP 受信の「証跡なしで settled にしない」と同じ）。
   発行 offer は transaction の識別子を持たないので、識別子の**値**を offer と照合することはできない。Solana の `confirmed` は最終性の主張ではなく、`proof.onChainFinality: "not_checked"` のまま
 - **FR-21**: facilitator の応答を**信じる範囲**を明示する: Router が自分で確かめるのは credential の形（FR-16）と応答の形（FR-20）。**形の正しい偽の成功**（facilitator が嘘を言う）は、
   チェーンを独立に読まない限り見分けられず、本書では**受容するリスク**（§7）。独立したチェーンの照合（受取先の残高・transaction の存在）は範囲外（将来の別紙）
+  **D-9 の注**: 追跡は「facilitator が申告した署名の transaction がチェーンで確定したか」を読むだけで、その transaction の memo・額・宛先を読み直して「この offer が払われた」と独立に証明するものではない（信頼の範囲は形どおりの成功の経路と同じ）
 
 ### 4.6 Arc の送信（S-3）・Solana の送信（S-4）
 
@@ -253,6 +257,7 @@ Arc・Solana・Base の mainnet は含まない（既存の方針。資産ペア
 | D-6 | **静的 route と動的プロファイル**: 両方足すか | 両方（静的は審査員の 1 コマンドの経路、動的は主張の本体） |
 | D-7 | **予算と損失の上限**: 新しい `(network, asset)` の静的・動的の区分の `maxTotal`・`maxPerPurchase`・件数、`npm run sign` の受信の上限 | 既存と同じ桁（動的 1 件 20,000、通算 100,000,000、件数 1,000）。sign の上限は 20,000 |
 | D-8 | **信頼の形**: facilitator の応答を信じる範囲（FR-21）と、Circle の本番 API key を取るか | testnet は trial、応答の照合は FR-20 の範囲 |
+| D-9 | **SVM の settle が「応答は失敗・チェーンは成立」になったとき**（G-3 の 4 件目）どうするか | 期限つきの追跡を足す（設計 §5.8）。現状のまま有効化・Arc だけ有効化は選ばない |
 
 ## 9. 本書で決めていないこと
 
