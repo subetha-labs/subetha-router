@@ -44,6 +44,67 @@ const OUTBOUND_X402 = {
   payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
 } as const;
 
+/* ------------------------------------------------------------------ 多レール（Arc・Solana の受信。multirail 設計 §8、タスク T8-a） */
+
+/**
+ * Arc testnet の USDC で払う受信（facilitator は Circle、kind `circle`。表 `KNOWN_NETWORKS` と同じ network・資産）。
+ * 受取先は**証明専用の受取鍵の address**（env `SUBETHA_ARC_RECEIVER_KEY` から T8-b の入口が導く。設定には address だけが入る）。
+ */
+export const INBOUND_ARC = {
+  network: "eip155:5042002",
+  asset: "0x3600000000000000000000000000000000000000",
+  amount: "10000",
+  facilitator: { kind: "circle", url: "https://api.circle.com/v1/facilitator/x402" },
+} as const;
+/**
+ * Solana devnet の USDC で払う受信（facilitator は x402.org、kind `x402`、SVM の `exact`）。
+ * 受取先は受取 owner の address（鍵はホストに置かない。ATA は運用者が作る。設計 §5.1・T10 G-1）。
+ */
+export const INBOUND_SOL = {
+  network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+  asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  amount: "10000",
+  facilitator: { kind: "x402", url: "https://www.x402.org/facilitator" },
+} as const;
+/** 静的 route（設計 §8・D-6）: Arc USDC → Provider B（MPP）、Solana USDC → Provider A（x402）。 */
+export const ROUTE_ARC = "md-mpp-eth-snapshot-arc";
+export const ROUTE_SOL = "md-x402-eth-snapshot-sol";
+
+/** どのレールを登録するか。T8-b の入口（公開の process・受け入れ用の起動）と設定生成の**両方**がこの 1 つの値を見る。 */
+export interface RailsActivation {
+  readonly arc: boolean;
+  readonly solana: boolean;
+}
+/** 受取先（有効なレールの分だけ要る）。Arc は証明専用の受取鍵の address、Solana は受取 owner の address。 */
+export interface RailReceivers {
+  readonly arc?: string;
+  readonly solana?: string;
+}
+export interface RailsOptions {
+  readonly activation: RailsActivation;
+  readonly receivers: RailReceivers;
+}
+/**
+ * 公開の process の既定: **どちらも無効**（T10 の G-4 で、受け入れ（G-3）の後に `true` へ。G-4 と同じ gate）。
+ * env からは変えられない。受け入れ用の起動（`tools/rails-acceptance-run.ts`）だけが `true` を渡す。
+ */
+export const RAILS_ACTIVATION: RailsActivation = Object.freeze({ arc: false, solana: false });
+export const RAILS_DISABLED: RailsOptions = Object.freeze({ activation: RAILS_ACTIVATION, receivers: Object.freeze({}) });
+
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const BASE58_32 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** 有効なレールの受取先を取り出す。無い・形が違うなら起動しない（値は出さない）。 */
+function receiverOf(rails: RailsOptions, rail: "arc" | "solana"): string | undefined {
+  if (!rails.activation[rail]) return undefined;
+  const value = rails.receivers[rail];
+  const wellFormed = typeof value === "string" && (rail === "arc" ? EVM_ADDRESS.test(value) : BASE58_32.test(value));
+  if (!wellFormed) {
+    throw new Error(`the ${rail} rail is activated but its receiver address is missing or malformed`);
+  }
+  return value;
+}
+
 /** 本番の公開ホスト名（`docs/DEPLOY.md`）。動的上流 URL の拒否ホストに入れる（自分自身には向けない）。 */
 export const PUBLIC_HOSTNAME = "router.subethalabs.com";
 
@@ -74,9 +135,35 @@ const MPP_OUTBOUND_PROFILE_ENABLED = true;
  * 登録する動的プロファイル。1 つも無ければ `undefined`（`dynamic` の節を書かない。空の `profiles` は設定の検証が拒否する）。
  * x402 送信（`dyn-mpp-to-x402`）は MPP 受信の秘密と x402 送信の鍵がそろっているとき（経路 2 と同じ条件）だけ。
  */
-export function dynamicProfilesOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean): Record<string, unknown> | undefined {
+export function dynamicProfilesOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean, rails: RailsOptions = RAILS_DISABLED): Record<string, unknown> | undefined {
   void env;
+  const arcReceiver = receiverOf(rails, "arc");
+  const solReceiver = receiverOf(rails, "solana");
+  /** 新しいレールの source から x402・MPP の送信へ（par 1:1、手数料は既存の規則）。 */
+  const toMpp = (profileId: string, source: { network: string; asset: string }, payTo: string): Record<string, unknown> => ({
+    profileId,
+    sourceRail: "x402",
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo },
+    rail: "mpp",
+    destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, decimals: 6, feeAsset: OUTBOUND.asset, maxFee: DYNAMIC_MAX_FEE_CEILING, feeMargin: DYNAMIC_FEE_MARGIN_BPS },
+    par: true,
+    maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+    fee: DYNAMIC_FEE_MPP_OUT,
+  });
+  const toX402 = (profileId: string, source: { network: string; asset: string }, payTo: string): Record<string, unknown> => ({
+    profileId,
+    sourceRail: "x402",
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo },
+    rail: "x402",
+    destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, decimals: 6, tokenDomain: { name: "USDC", version: "2" } },
+    par: true,
+    maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+    fee: DYNAMIC_FEE_X402_OUT,
+  });
   const profiles: Record<string, unknown> = {
+    // 多レール（設計 §8）: 有効なレールの分だけ。公開の process は `RAILS_ACTIVATION`（どちらも false）。
+    ...(arcReceiver === undefined ? {} : { "dyn-arc-to-mpp": toMpp("dyn-arc-to-mpp", INBOUND_ARC, arcReceiver), "dyn-arc-to-x402": toX402("dyn-arc-to-x402", INBOUND_ARC, arcReceiver) }),
+    ...(solReceiver === undefined ? {} : { "dyn-sol-to-x402": toX402("dyn-sol-to-x402", INBOUND_SOL, solReceiver), "dyn-sol-to-mpp": toMpp("dyn-sol-to-mpp", INBOUND_SOL, solReceiver) }),
     ...(MPP_OUTBOUND_PROFILE_ENABLED
       ? {
           "dyn-x402-to-mpp": {
@@ -121,7 +208,15 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
  * 本番の入口が Router に渡す設定。**鍵と子プロセスの起動から切り離した純粋関数**。動的機能の有効・無効と
  * プロファイルの構成はこの関数と `MPP_OUTBOUND_PROFILE_ENABLED` だけで決まり、env からは変えられない（予算の額・件数と追加の拒否ホストは env）。
  */
-export function routerConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean): Record<string, unknown> {
+export function routerConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, mppInboundEnabled: boolean, rails: RailsOptions = RAILS_DISABLED): Record<string, unknown> {
+  const arcReceiver = receiverOf(rails, "arc");
+  const solReceiver = receiverOf(rails, "solana");
+  /** 新しい `(network, asset)` の区分（D-7: 既存と同じ桁）。静的は 1 件 10,000、動的は 1 件 20,000。 */
+  const railBuckets = (maxPerPurchase: string, maxTotal: string): Record<string, unknown>[] => [
+    ...(arcReceiver === undefined ? [] : [{ network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, maxTotal, maxPerPurchase }]),
+    ...(solReceiver === undefined ? [] : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase }]),
+  ];
+  const profiles = dynamicProfilesOf(env, receiver, mppInboundEnabled, rails);
   return {
     router: {
       /**
@@ -175,6 +270,31 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
               },
             }
           : {}),
+        // 多レール（設計 §8・D-6）: Arc USDC → Provider B（MPP）、Solana USDC → Provider A（x402）。有効なレールの分だけ。
+        ...(arcReceiver === undefined
+          ? {}
+          : {
+              [ROUTE_ARC]: {
+                routeId: ROUTE_ARC,
+                canonicalPath: `/v1/routes/${ROUTE_ARC}/resource`,
+                rail: "mpp",
+                sourceRail: "x402",
+                source: { amount: INBOUND_ARC.amount, asset: INBOUND_ARC.asset, decimals: 6, network: INBOUND_ARC.network, payTo: arcReceiver },
+                destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, payTo: OUTBOUND.payTo },
+              },
+            }),
+        ...(solReceiver === undefined
+          ? {}
+          : {
+              [ROUTE_SOL]: {
+                routeId: ROUTE_SOL,
+                canonicalPath: `/v1/routes/${ROUTE_SOL}/resource`,
+                rail: "x402",
+                sourceRail: "x402",
+                source: { amount: INBOUND_SOL.amount, asset: INBOUND_SOL.asset, decimals: 6, network: INBOUND_SOL.network, payTo: solReceiver },
+                destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
+              },
+            }),
       },
       // 「予算の続く限り」使えるように大きく取るが、暴走時に止まるようゼロにはしない。
       // bucket は (network, asset) 単位。2 経路は同じ 2 組を向きだけ変えて使うので、
@@ -194,6 +314,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
             maxTotal: env["SUBETHA_OUTBOUND_MAX_TOTAL"] ?? "1000000000",
             maxPerPurchase: "10000",
           },
+          ...railBuckets("10000", env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000"),
         ],
       },
       /**
@@ -210,17 +331,18 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
        *   条件 6: 手数料の仕様の確立（`docs/dynamic-gas-fee-design.md` §7）、Router の単価での testnet の試行（同 §8.5）
        * 値を変える場所はこの関数と `MPP_OUTBOUND_PROFILE_ENABLED` だけ。戻すのも同じ（`enabled: false`／`false`）。
        */
-      ...(dynamicProfilesOf(env, receiver, mppInboundEnabled) === undefined
+      ...(profiles === undefined
         ? {}
         : {
             dynamic: {
               enabled: true,
-              profiles: dynamicProfilesOf(env, receiver, mppInboundEnabled),
+              profiles,
               budget: {
                 maxPurchases: Number(env["SUBETHA_DYNAMIC_MAX_PURCHASES"] ?? "1000"),
                 buckets: [
                   { network: INBOUND.network, asset: INBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
                   { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
+                  ...railBuckets("20000", env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000"),
                 ],
               },
               // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
@@ -233,7 +355,18 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
       upstreams: {
         [ROUTE]: UPSTREAM,
         ...(mppInboundEnabled ? { [ROUTE_MPP_IN]: UPSTREAM_X402 } : {}),
+        ...(arcReceiver === undefined ? {} : { [ROUTE_ARC]: UPSTREAM }),
+        ...(solReceiver === undefined ? {} : { [ROUTE_SOL]: UPSTREAM_X402 }),
       },
+      // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
+      ...(arcReceiver === undefined && solReceiver === undefined
+        ? {}
+        : {
+            inboundFacilitators: {
+              ...(arcReceiver === undefined ? {} : { [INBOUND_ARC.network]: INBOUND_ARC.facilitator }),
+              ...(solReceiver === undefined ? {} : { [INBOUND_SOL.network]: INBOUND_SOL.facilitator }),
+            },
+          }),
     },
   };
 }
