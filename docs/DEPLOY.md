@@ -124,6 +124,14 @@ Router の process の能力の注入の**両方**がそれを見る（`tools/ra
 **配備（G-2。無効のまま）**: env（上の 1〜3）を置いて公開の process を再起動する。無効なので新しい route・facilitator・起動時の検査は**動かない**——確かめるのは
 「起動して既存の経路が従来どおり」と、egress 制御（§8b）が **Circle（`api.circle.com`）・x402.org・Solana の RPC** への egress を許し、それ以外を拒むこと。rollback の container を 1 つ保つ。
 
+**配備の記録（G-2、2026-10-07）**: owner の決定で、T6 の使い捨ての受取（Arc の証明専用の鍵、Solana の受取 owner と ATA。どちらも testnet）をそのまま本番の受取にした。
+本番の env に `SUBETHA_ARC_RECEIVER_KEY`・`SUBETHA_SOLANA_RECEIVER` を置き、イメージ `b-478c0f9`（多レールのコードを含み、`RAILS_ACTIVATION` は無効）に入れ替えた
+（07:44Z。入口の閉鎖は約 15 秒、journal の先頭バイト列は不変、`subetha-egress check` 合格、rollback は `subetha-router-prev-20261007T074436Z` = `b-b1524b0`）。
+確かめたこと: 公開 MCP の一覧は従来の 2 route・2 プロファイルのまま、既存 route の quote が成立、コンテナの中から Circle・x402.org・Solana devnet RPC に届き、IMDS と
+ホスト自身のアドレスは遮断される（egress は「公開経路でない宛先を拒む」方式なので新しいホストの追加は不要）、Router の子プロセスには有効化の値が空で渡り、
+Arc の鍵は渡っていない。**イメージは手元（arm64）で作って `docker save`/`docker load` で入れた**: ホスト（1.8 GB）でのビルドは型検査でヒープ不足になった
+（Dockerfile の型検査の条件を `tsconfig.json` に揃えた。PR #62）。
+
 **受け入れ（G-3。owner の確認の上で、支払いごとに quote を見せる）**: 公開の process の定数は触らず、**受け入れ用の起動**で行う。
 egress 制御の network `subetha-router-net` には **Router を 1 つだけ**置く決まり（§8b.1。runner は 2 つ目のメンバーを FAIL にし、同じ bridge の中の通信は
 フィルタを通らない）なので、受け入れの間は**公開の Router を止める**（`docker stop subetha-router`。終わったら `docker start subetha-router`。
