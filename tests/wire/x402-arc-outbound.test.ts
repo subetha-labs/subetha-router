@@ -143,18 +143,26 @@ describe("静的 route（組み直しの署名器）", () => {
     expect(h.upstream.seen.payments).toHaveLength(1);
   });
 
-  test("SDK の typed data を書き換えても（宛先・額・domain）、署名器に届くのは組み直した承認値。SDK の object は署名器に届かない", async () => {
+  test("SDK の typed data の domain の name/version と types を書き換えても、署名器に届くのは表の domain と固定の型（SDK の object は署名器に届かない。従来の passthrough なら書き換えが届く）", async () => {
     const h = await harness();
     const offer = (await h.rail.readChallenge(ROUTE))[0]!;
-    sdk.tamper = (message) => ({ ...message, domain: { ...message.domain, chainId: 84532 }, message: { ...message.message, to: "0x0000000000000000000000000000000000000bad", value: 999_999n } });
+    // passthrough の guarded signer は chainId・contract・to・from・value しか見ない。name/version と types の書き換えは、組み直しでしか消えない。
+    sdk.tamper = (message) => ({ ...message, domain: { ...message.domain, name: "EVIL", version: "9" }, types: { ...message.types, TransferWithAuthorization: [...(message.types["TransferWithAuthorization"] as unknown[]), { name: "extra", type: "uint256" }] } });
     const result = await pay(h, ROUTE, offer);
-    // 組み直しの署名器は SDK の値を照合して拒むか（from/to/value の不一致）、組み直した値で署名する。どちらでも書き換えた値には署名しない。
-    for (const typed of h.signed) {
-      expect(typed.domain).toMatchObject({ chainId: 5042002, verifyingContract: getAddress(ARC_USDC) });
-      expect(typed.message).toMatchObject({ to: getAddress(ARC_PROVIDER), value: 1000n });
-    }
-    expect(result.outcome === "paid" || result.outcome === "not_sent").toBe(true);
-    if (result.outcome === "not_sent") expect(h.signed).toHaveLength(0);
+    expect(result).toMatchObject({ outcome: "paid" });
+    expect(h.signed).toHaveLength(1);
+    const typed = h.signed[0]!;
+    expect(typed.domain).toEqual({ name: "USDC", version: "2", chainId: 5042002, verifyingContract: getAddress(ARC_USDC) });
+    expect((typed.types["TransferWithAuthorization"] as { name: string }[]).map((field) => field.name)).toEqual(["from", "to", "value", "validAfter", "validBefore", "nonce"]);
+  });
+
+  test("SDK の typed data の宛先・額を書き換えれば署名しない（組み直しの照合）", async () => {
+    const h = await harness();
+    const offer = (await h.rail.readChallenge(ROUTE))[0]!;
+    sdk.tamper = (message) => ({ ...message, message: { ...message.message, to: "0x0000000000000000000000000000000000000bad", value: 999_999n } });
+    expect(await pay(h, ROUTE, offer)).toMatchObject({ outcome: "not_sent" });
+    expect(h.signed).toHaveLength(0);
+    expect(h.upstream.seen.payments).toHaveLength(0);
   });
 
   test("FR-33: Arc の送信で接続する先は Provider のホストだけ（chain の RPC には出ない）", async () => {
