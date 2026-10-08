@@ -10,7 +10,8 @@
 import { execFileSync } from "node:child_process";
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { address, generateKeyPairSigner, getBase58Decoder, getTransactionEncoder, partiallySignTransactionMessageWithSigners } from "@solana/kit";
+import { ed25519 } from "@noble/curves/ed25519";
+import { address, generateKeyPairSigner, getAddressEncoder, getBase58Decoder, getTransactionEncoder, partiallySignTransactionMessageWithSigners } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { createPayKit, Signer, usd } from "@solana/pay-kit";
 import { Challenge, Credential, Method } from "mppx";
@@ -228,6 +229,8 @@ describe("RPC の fixture は pay-kit の server の verify を満たす（M4-b 
       const payerKey = await generateKeyPairSigner();
       const payerAta = await ataOf(String(payerKey.address));
       let seen: Record<string, unknown> | undefined;
+      let produced: Uint8Array | undefined;
+      let feePayerKey: string | undefined;
       const method = Method.toClient(mppSolanaChargeMethod, {
         async createCredential({ challenge }) {
           seen = challenge as unknown as Record<string, unknown>;
@@ -250,7 +253,9 @@ describe("RPC の fixture は pay-kit の server の verify を満たす（M4-b 
             tokenProgram: request.methodDetails.tokenProgram ?? TOKEN_PROGRAM,
           });
           const signed = await partiallySignTransactionMessageWithSigners(message);
-          return Credential.serialize({ challenge, payload: { type: "transaction", transaction: Buffer.from(getTransactionEncoder().encode(signed)).toString("base64") } } as never);
+          produced = Uint8Array.from(getTransactionEncoder().encode(signed));
+          feePayerKey = request.methodDetails.feePayerKey;
+          return Credential.serialize({ challenge, payload: { type: "transaction", transaction: Buffer.from(produced).toString("base64") } } as never);
         },
       });
       const client = ClientMppx.create({ methods: [method], polyfill: false, maxPaymentRetries: 0 } as never) as unknown as { rawFetch: typeof fetch; preparePayment: (response: Response, options: { request: RequestInit }) => Promise<{ challenge: Record<string, unknown>; createCredential: () => Promise<string>; setCredential: (init: RequestInit, credential: string) => RequestInit }> };
@@ -266,12 +271,21 @@ describe("RPC の fixture は pay-kit の server の verify を満たす（M4-b 
       expect(paid.status).toBe(200);
       const receipt = JSON.parse(Buffer.from(paid.headers.get("payment-receipt")!, "base64url").toString("utf8")) as Record<string, unknown>;
       expect(receipt).toMatchObject({ method: "solana", status: "success" });
-      // server が共同署名して送出した（fee payer の署名 [0] が入った wire）。領収の reference はその署名。
+      // server が共同署名して送出した: 送った wire は [0] が空・[1] が payer の署名。受けた wire は同じ message・同じ [1] で、[0] が feePayerKey で検証できる署名。
       expect(rpc.state.sent.length).toBe(sentBefore + 1);
-      const sentBytes = Buffer.from(rpc.state.sent.at(-1)!, "base64");
+      const sentBytes = new Uint8Array(Buffer.from(rpc.state.sent.at(-1)!, "base64"));
+      expect(produced![0]).toBe(2);
+      expect(produced!.subarray(1, 65).every((b) => b === 0)).toBe(true);
       expect(sentBytes[0]).toBe(2);
-      expect(sentBytes.subarray(1, 65).some((b) => b !== 0)).toBe(true);
-      expect(receipt["reference"]).toBe(getBase58Decoder().decode(new Uint8Array(sentBytes.subarray(1, 65))));
+      const message = sentBytes.subarray(129);
+      expect(Buffer.compare(Buffer.from(message), Buffer.from(produced!.subarray(129)))).toBe(0);
+      expect(Buffer.compare(Buffer.from(sentBytes.subarray(65, 129)), Buffer.from(produced!.subarray(65, 129)))).toBe(0);
+      const feePayerSignature = sentBytes.subarray(1, 65);
+      expect(feePayerSignature.some((b) => b !== 0)).toBe(true);
+      expect(ed25519.verify(feePayerSignature, message, new Uint8Array(getAddressEncoder().encode(address(feePayerKey!))))).toBe(true);
+      expect(ed25519.verify(sentBytes.subarray(65, 129), message, new Uint8Array(getAddressEncoder().encode(payerKey.address)))).toBe(true);
+      // 領収の reference は共同署名後の [0]。
+      expect(receipt["reference"]).toBe(getBase58Decoder().decode(feePayerSignature));
     } finally {
       rpc.state.signatureStatuses = undefined;
       await d.close();
