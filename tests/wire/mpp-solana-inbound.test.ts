@@ -274,12 +274,29 @@ describe("MPP Solana 受信: transaction 型（pay-kit の client の既定）�
     expect(await b.rail.verify(offer, { ...credential, payload: { challengeNonce: offer.extra.challengeNonce, credential: "" } }, { routeId: ROUTE_ID })).toEqual({ isValid: false });
   });
 
-  it("settle は verify と同じ検査をもう一度する（改竄した credential を settle に直接渡しても送出しない → rejected）", async () => {
+  it("verify の証拠の無い settle（transaction 型）は RPC 無しの同じ検査をする: 別 offer の credential は送出せずに rejected、正しい credential は送出して settled", async () => {
     const b = await boot();
     const offer = await issue(b.rail);
     const other = await issue(b.rail);
-    const credential = await b.payer.credentialFor(other);
-    expect(await b.rail.settle(offer, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    const foreign = await b.payer.credentialFor(other);
+    const mark = b.mark();
+    expect(await b.rail.settle(offer, foreign, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    expect(b.since(mark)).toEqual([]);
+    expect(b.rpc.state.sent).toEqual([]);
+    const credential = await b.payer.credentialFor(offer);
+    b.rpc.state.signatureStatuses = ["confirmed"];
+    const mark2 = b.mark();
+    expect(await b.rail.settle(offer, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: signatureOfCredential(credential) });
+    expect(b.since(mark2).map((c) => c.method)).toEqual(["sendTransaction", "getSignatureStatuses"]);
+  });
+
+  it("verify の証拠は offer の nonce と wire に束縛される: 別 offer の nonce の下では使われない（RPC 無しの再検査で rejected）", async () => {
+    const b = await boot();
+    const offer = await issue(b.rail);
+    const credential = await b.payer.credentialFor(offer);
+    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    const other = await issue(b.rail);
+    expect(await b.rail.settle(other, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
     expect(b.rpc.state.sent).toEqual([]);
   });
 });
@@ -398,6 +415,16 @@ describe("MPP Solana 受信: transaction 型の settle の分岐（設計 §3.5 
     expect(b.diagnostics).toEqual([]);
   });
 
+  it("1 要求の期限は min(10 秒, 全体の残り): 全体の期限が 300 ms なら、応答の無い送出は 300 ms で切れる（10 秒は待たない）→ unknown", async () => {
+    const b = await boot({ extra: { settleDeadlineMs: 300 } });
+    const p = await paid(b);
+    b.rpc.state.sendReply = "no-response";
+    const started = Date.now();
+    expect(await b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(b.since(p.mark).filter((c) => c.method === "sendTransaction")).toHaveLength(1);
+  }, 15_000);
+
   it("送出の応答の署名が自分の署名と違う → unknown（追跡しない）", async () => {
     const b = await boot();
     const p = await paid(b);
@@ -444,18 +471,51 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     return { offer, credential, signature, mark: b.mark() };
   }
 
-  it("verify は getTransaction（base64・confirmed・version 0）を 1 回読んで §3.3 に掛ける。settle は RPC 無しで settled（txRef = 署名）", async () => {
+  it("verify は getTransaction（base64・confirmed・version 0）を 1 回読んで §3.3 に掛ける。settle は **RPC 無し**で settled（txRef = 署名）: verify の後に chain が読めなくなっても、期限が過ぎても settled のまま", async () => {
     const b = await boot({ bound: new Set() });
     const p = await pushed(b);
     expect(b.rail.preflight(p.offer, p.credential, Date.now())).toEqual({ ok: true });
     expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
     expect(b.since(p.mark)).toEqual([{ method: "getTransaction", params: [p.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" }] }]);
     const mark = b.mark();
+    // verify の後に RPC が transaction を返さなくなり、さらに届かなくなっても、settle は証拠で判定する（payer は送金済み）。
+    b.rpc.state.transactions.delete(p.signature);
+    await b.rpc.close();
     expect(await b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: p.signature });
-    // settle も同じ検査をもう一度（getTransaction 1 回）。送出はしない。
-    expect(b.since(mark).map((c) => c.method)).toEqual(["getTransaction"]);
+    expect(b.since(mark)).toEqual([]);
     expect(b.rpc.state.sent).toHaveLength(1); // payer の fixture の送出だけ
     expect(b.diagnostics).toEqual([]);
+    // 期限の短い offer: verify の後に期限が過ぎても settle は settled（HMAC の再検査をしない）。
+    const short = await boot({ bound: new Set(), extra: { maxTimeoutSeconds: 1 } });
+    const q = await pushed(short);
+    expect(await short.rail.verify(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(await short.rail.settle(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: q.signature });
+  });
+
+  it("verify の証拠の無い settle（signature 型）は判定しない → throw（core は source_settle_unknown）。消費済みなら証拠が無くても rejected（RPC 無し）", async () => {
+    const b = await boot({ bound: new Set() });
+    const p = await pushed(b);
+    const mark = b.mark();
+    await expect(b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
+    expect(b.since(mark)).toEqual([]);
+    b.holder.bind(new Set([p.signature]));
+    expect(await b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    expect(b.since(mark)).toEqual([]);
+  });
+
+  it("HMAC は RPC の前: 改竄した signature 型の credential は getTransaction を読まずに invalid。slot の無い・0 の応答は invalid", async () => {
+    const b = await boot();
+    const p = await pushed(b);
+    const decoded = Credential.deserialize(wireOf(p.credential));
+    const tampered: PaymentCredential = { ...p.credential, payload: { ...p.credential.payload, credential: Credential.serialize({ ...decoded, challenge: { ...decoded.challenge, request: { ...(decoded.challenge.request as Record<string, unknown>), amount: "1" } } } as never) } };
+    expect(await b.rail.verify(p.offer, tampered, { routeId: ROUTE_ID })).toEqual({ isValid: false });
+    expect(b.since(p.mark)).toEqual([]);
+    const entry = b.rpc.state.transactions.get(p.signature)!;
+    b.rpc.state.transactions.set(p.signature, { ...entry, slot: 0 });
+    await expect(b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/expected form/);
+    b.rpc.state.transactions.set(p.signature, entry);
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
   });
 
   it("verify_failed: chain に無い（null）、meta.err、blockTime が無い・発行より前・期限より後、署名と bytes の不一致。期限ちょうどは通る", async () => {
@@ -496,7 +556,8 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     const p = await pushed(b);
     b.rpc.state.reply = "malformed";
     await expect(b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow();
-    await expect(b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow();
+    // verify が通っていないので settle は判定しない（throw）。
+    await expect(b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
     b.rpc.state.reply = "ok";
     await b.rpc.close();
     await expect(b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow();
@@ -645,7 +706,7 @@ function purchaseArgs(quote: OkQuote, requestId: string, credential: PaymentCred
 }
 
 describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () => {
-  it("静的 route とプロファイルが同じ adapter を共有し、startup は ATA を 1 回だけ読む。Tempo の MPP 受信は今までどおり別の adapter。両型で source_settled → 既存の送信で delivered（静的・動的）", async () => {
+  it("静的 route とプロファイルが同じ adapter を共有し、startup は ATA を 1 回だけ読む。Tempo の MPP 受信は今までどおり別の adapter。両型 × 静的・動的の 4 組で source_settled → 送信（stub）で delivered。同じ quote の並行 purchase は core の lock で 1 回の送出", async () => {
     const c = await compose();
     expect(c.rails.startup).toBeDefined();
     const outbound = new StubOutbound();
@@ -657,9 +718,12 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     expect(q1.source.offer).toMatchObject({ scheme: MPP_SOLANA_SCHEME, network: SOL, asset: MINT, payTo: owner, amount: "10000" });
     expect(q1.source.offer.extra["fundsMoveOnCredential"]).toBe(true);
     const cred1 = await c.payer.credentialFor(q1.source.offer);
-    const p1 = await core.purchase(purchaseArgs(q1, "req-1", cred1));
+    // 同じ quote・同じ credential の並行 purchase: core の lock で直列、2 件目は同じ結果を返す。送出は 1 回。
+    const [p1, p1b] = await Promise.all([core.purchase(purchaseArgs(q1, "req-1", cred1)), core.purchase(purchaseArgs(q1, "req-1", cred1))]);
     expect(p1.status, JSON.stringify(p1)).toBe("delivered");
+    expect(p1b.status, JSON.stringify(p1b)).toBe("delivered");
     expect(outbound.payCalls).toBe(1);
+    expect(c.rpc.state.sent).toHaveLength(1);
     expect(core.status(q1.paymentId, "judge")?.source.txRef).toBe(signatureOfCredential(cred1));
     // 動的: signature 型（`rejected` → `unknown` の写像はここでは出ない: 成功の経路）。
     const q2 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-2");
@@ -672,13 +736,23 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     const tempo = await staticQuote(core, "r-tempo", "req-3");
     expect(tempo.source.offer.scheme).toBe("tempo/charge");
     expect(tempo.source.offer.extra["fundsMoveOnCredential"]).toBe(true);
-    // 送出は静的の 1 回 + payer の fixture の 1 回（signature 型）。
-    expect(c.rpc.state.sent).toHaveLength(2);
-    // journal の集合: 両方の署名が消費済み。settle を直接呼ぶと rejected（送出しない）。
-    for (const [quote, credential] of [[q1, cred1], [q2, cred2]] as const) {
+    // 残りの 2 組: 静的 × signature 型、動的 × transaction 型。
+    const q5 = await staticQuote(core, "r-solmpp", "req-5");
+    const cred5 = await c.payer.credentialFor(q5.source.offer, "signature");
+    expect((await core.purchase(purchaseArgs(q5, "req-5", cred5))).status).toBe("delivered");
+    const q6 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-6");
+    const cred6 = await c.payer.credentialFor(q6.source.offer);
+    expect((await core.purchase(purchaseArgs(q6, "req-6", cred6))).status).toBe("delivered");
+    expect(outbound.payCalls).toBe(4);
+    // 送出は Router の 2 回（transaction 型）+ payer の fixture の 2 回（signature 型）。
+    expect(c.rpc.state.sent).toHaveLength(4);
+    // journal の集合: 4 つの署名が消費済み。settle を直接呼ぶと rejected（送出しない。signature 型は RPC も読まない）。
+    const mark = c.rpc.calls.length;
+    for (const [quote, credential] of [[q1, cred1], [q2, cred2], [q5, cred5], [q6, cred6]] as const) {
       expect(await c.rails.inbound.settle(quote.source.offer, credential, { routeId: quote.routeId })).toEqual({ outcome: "rejected", reason: "source_rejected" });
     }
-    expect(c.rpc.state.sent).toHaveLength(2);
+    expect(c.rpc.calls.slice(mark)).toEqual([]);
+    expect(c.rpc.state.sent).toHaveLength(4);
     // 再起動（同じ journal に新しい合成と core）: 復元した集合でも rejected。
     await opened.pop()!.close();
     const again = await compose();
@@ -686,9 +760,13 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     const restarted = await createRouterCore({ journalPath: c.config.journalPath, config: again.config.router, inbound: (await (async () => { await again.rails.startup!(); return again.rails.inbound; })()), outbound, note: () => {}, dynamic: { ledgerDir: path.join(c.dir, "dynamic-quotes") }, onStoreLoaded: again.rails.bindConsumed });
     opened.push(restarted);
     expect(restarted.status(q1.paymentId, "judge")?.status).toBe("delivered");
-    // 署名は旧 fixture に登録されていた transaction。新 fixture には無いが、消費済みの検査は RPC の前（transaction 型）。
-    expect(await again.rails.inbound.settle(q1.source.offer, cred1, { routeId: "r-solmpp" })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    // 署名は旧 fixture に登録されていた transaction。新 fixture には無いが、消費済みの検査は RPC の前（両型）。
+    expect(restarted.status(q5.paymentId, "judge")?.status).toBe("delivered");
+    for (const [quote, credential] of [[q1, cred1], [q5, cred5], [q6, cred6], [q2, cred2]] as const) {
+      expect(await again.rails.inbound.settle(quote.source.offer, credential, { routeId: quote.routeId })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    }
     expect(rpcAgain.state.sent).toEqual([]);
+    expect(rpcAgain.calls.map((call) => call.method)).toEqual(["getAccountInfo"]);
   });
 
   it("bind の前（`onStoreLoaded` を渡さない core）: verify は通るが settle が throw → 静的の core は unknown（source_settle_unknown）。送出しない", async () => {
@@ -712,7 +790,7 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "awaiting_payment", code: "source_rejected" });
     const q2 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-2");
     const cred2 = await c.payer.credentialFor(q2.source.offer);
-    expect(await core.purchase(purchaseArgs(q2, "req-2", cred2))).toMatchObject({ status: "unknown" });
+    expect(await core.purchase(purchaseArgs(q2, "req-2", cred2))).toMatchObject({ status: "unknown", terminalReason: "source_rejected" });
     expect(c.rpc.state.sent).toHaveLength(2);
     // HMAC 改竄 → verify_failed（送出しない）。
     const q3 = await staticQuote(core, "r-solmpp", "req-3");

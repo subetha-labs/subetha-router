@@ -12,7 +12,7 @@
  * 復号・compile・比較の例外はすべて `credential_mismatch`。Memo の不一致だけ `nonce_mismatch`。例外の文言は出さない。
  */
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { ed25519 } from "@noble/curves/ed25519";
 import { address, compileTransactionMessage, getAddressEncoder, getBase58Decoder, getBase58Encoder, getCompiledTransactionMessageDecoder, getCompiledTransactionMessageEncoder, getTransactionDecoder, type Instruction } from "@solana/kit";
@@ -356,7 +356,8 @@ export type MppSolanaInbound = InboundRail & { startup(): Promise<void> };
 export const MPP_SOLANA_SETTLE_DEADLINE_MS = 50_000;
 export const MPP_SOLANA_FOLLOW_UP_DEFAULTS = Object.freeze({ totalMs: 30_000, intervalMs: 2_000, maxPolls: 15 });
 export const MPP_SOLANA_RPC_TIMEOUT_MS = 10_000;
-const MPP_SOLANA_RPC_MAX_BYTES = 64 * 1024;
+/** verify が残す証拠の上限（offer の寿命より多い数。超えたら古い順に捨てる）。 */
+export const MPP_SOLANA_EVIDENCE_MAX = 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -403,6 +404,28 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
   const followUp = { ...MPP_SOLANA_FOLLOW_UP_DEFAULTS, ...options.followUp };
   const rpcTimeoutMs = options.rpcTimeoutMs ?? MPP_SOLANA_RPC_TIMEOUT_MS;
   const rpc = options.rpc;
+
+  /**
+   * verify が通った credential の証拠（offer の nonce と wire の hash に束縛）。settle はこれを使い、**検査をやり直さない**
+   * （`signature` 型の payer は送金済み: settle での RPC の失敗や期限の経過を `rejected` = 未払いに写してはいけない。FR-47・SR-M1）。
+   * 証拠が無い settle: `transaction` 型は RPC 無しの同じ検査（送出前なので `rejected` は正しい）、`signature` 型は throw（core は `unknown`）。
+   */
+  type Evidence = { readonly kind: "transaction" | "signature"; readonly check: Extract<MppSolanaCheck, { ok: true }>; readonly bytes: Uint8Array };
+  const evidence = new Map<string, Evidence>();
+  function evidenceKeyOf(offer: InboundOffer, credential: PaymentCredential): string | undefined {
+    const wire = credential.payload["credential"];
+    if (typeof wire !== "string" || wire === "") return undefined;
+    return `${offer.extra.challengeNonce}|${createHash("sha256").update(wire).digest("base64")}`;
+  }
+  function remember(key: string, held: Evidence): void {
+    evidence.delete(key);
+    evidence.set(key, held);
+    while (evidence.size > MPP_SOLANA_EVIDENCE_MAX) {
+      const oldest = evidence.keys().next().value;
+      if (oldest === undefined) break;
+      evidence.delete(oldest);
+    }
+  }
 
   /** `startup()` が埋める（受取 owner の ATA。存在・owner・mint を RPC で確かめた値）。 */
   let policy: MppSolanaPolicy | undefined;
@@ -630,19 +653,36 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
 
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
       const checked = await checkCredential(offer, credential, context);
-      return { isValid: checked.ok };
+      if (!checked.ok) return { isValid: false };
+      const key = evidenceKeyOf(offer, credential);
+      if (key !== undefined) remember(key, { kind: checked.kind, check: checked.check, bytes: checked.bytes });
+      return { isValid: true };
     },
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
-      // verify と同じ検査をもう一度（core の呼び出し順に依存させない。RPC の失敗は throw = `source_settle_unknown`）。
-      const checked = await checkCredential(offer, credential, context);
-      if (!checked.ok) return { outcome: "rejected", reason: "source_rejected" };
+      ready();
       const routeId = context?.routeId ?? "-";
-      if (checked.kind === "signature") {
-        if (options.consumed.has(checked.check.signature)) return { outcome: "rejected", reason: "source_rejected" };
-        return { outcome: "settled", txRef: checked.check.signature };
+      const wire = credential.payload["credential"];
+      const payload = typeof wire === "string" ? mppSolanaPayloadOf(wire) : undefined;
+      if (payload === undefined) return { outcome: "rejected", reason: "source_rejected" };
+      // `signature` 型（§3.5）: 消費済みの検査が先（RPC も証拠も要らない。再起動後の replay はここで止まる）。
+      if (payload.type === "signature" && options.consumed.has(payload.signature)) return { outcome: "rejected", reason: "source_rejected" };
+      const key = evidenceKeyOf(offer, credential);
+      let held = key === undefined ? undefined : evidence.get(key);
+      if (held === undefined) {
+        if (payload.type === "signature") {
+          // verify の証拠が無い `signature` 型は判定しない（payer は送金済みかもしれない。core は `unknown` に写す）。
+          throw new Error("mpp solana inbound: settle of a signature-type credential without a prior verify");
+        }
+        // `transaction` 型: RPC 無しの同じ検査（まだ送出していないので `rejected` は未払いの宣言として正しい）。
+        const checked = await checkCredential(offer, credential, context);
+        if (!checked.ok) return { outcome: "rejected", reason: "source_rejected" };
+        held = { kind: checked.kind, check: checked.check, bytes: checked.bytes };
       }
-      return settleTransaction(checked.bytes, checked.check.signature, routeId);
+      if (held.kind === "signature") {
+        return { outcome: "settled", txRef: held.check.signature };
+      }
+      return settleTransaction(held.bytes, held.check.signature, routeId);
     },
   };
 }
