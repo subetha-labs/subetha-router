@@ -262,6 +262,7 @@ G-1′（鍵と資金: D-11、V-9）→ G-2′（無効のまま配備）→ G-3
 | D-15 | **残高の事前確認**: 元の FR-25 は Solana の残高の事前確認を求めていた。今の本番は EVM・MPP とも事前確認を注入していない。既存の仕組みは**動的だけ**（`balanceOf` は全プロファイルにあるときだけ動的 core に渡る `src/core/orchestrator.ts:335`）で、時点は **purchase の受信 verify の前**（`src/core/dynamic.ts:507`。quote 時ではない）、不足は `awaiting_payment` の `operator_funds_unavailable`。決めること: Solana に足すか、**静的 route にも足すか**（静的には今 hook が無い。設計で足す）、RPC 失敗時の結果（不足扱いで止めるか）。どの時点でも**その後の残高の減少や並行する購入は防がない** | Solana の動的に足す（既存の hook・時点。core の「全部あるとき」の規則をプロファイルごとに変える）。静的 Solana route にも同じ時点の hook を足す。RPC 失敗は不足扱い（止める）。EVM は RPC を持たないので見送り、受信成立後に不足が分かるリスクを明記 |
 | D-16 | **同レール同チェーン**（Arc → Arc、Solana → Solana）を本書の範囲外とすることの承認（受信の要件 §3.3 には書かれていない） | 範囲外。足すなら別の行列の項目として要件から |
 | D-17 | **O-5・O-6（Arc ↔ Solana）の par の宣言**（受信の D-4 に無い組）と、足すときの受け入れ・有効化の gate | testnet では par。足すときは AC-13／AC-14 と同じ購入と gate を通す |
+| D-17（決定） | **2026-10-09（JST。owner）: Arc USDC ↔ Solana USDC は testnet では par。公開は動的プロファイルだけ**（`dyn-arc-to-sol`・`dyn-sol-to-arc`。静的 route は作らない）。gate は §11 | §11 |
 
 ## 9. 本書で決めていないこと
 
@@ -277,3 +278,40 @@ G-1′（鍵と資金: D-11、V-9）→ G-2′（無効のまま配備）→ G-3
 | 1 | 2026-10-07 | `gpt-6-astra`（read-only。第 1 版 `448d9b3`） | **REJECT**（12 項目: §1 の断定、`payTo` = owner と ATA の事前作成、Memo の一意性、署名済み raw の再検査と隔離の列挙、blockhash の期限、残高の事前確認の矛盾、有効化の独立、予算の共有、SDK の事実と Provider の仮定の分離、AC の分割と失敗の表、owner の判断の不足、形式）。第 2 版で反映 |
 | 2 | 2026-10-07 | `gpt-6-astra`（read-only。第 2 版 `c9d2b34`） | **REJECT**（9 項目: hash の予約は署名前に原子的・永続的に、運用者の集合の構成元、SDK の事実の 3 点、purchase の順序と期限の断定、結果の表の既存規則との不一致、SR-2 と D-11・D-15 の範囲、AC-9 の観測可能性、FR-30 と単一の定数、§1 の限定 2 点）。第 3 版で反映 |
 | 3 | 2026-10-07 | `gpt-6-astra`（read-only。第 3 版 `8ff4db3`） | **APPROVE WITH CHANGES**（2 項目: FR-32 の表に本文の取得の条件・`rejected` の分岐・SVM の `payer` の比較を足す、FR-24 の手順に予約の後の期限の再確認を入れる）。反映済み。FR-37 は既存の `IntentStore` の直列化の中で原子的にできる（hash の未使用検査 → journal 追記・fsync → 索引）と確認 |
+
+## 11. 追補（2026-10-09）: O-5・O-6（Arc x402 ↔ Solana x402）を動的プロファイルで公開する
+
+**owner の決定（2026-10-09 JST）**: D-17 を「testnet では par」と決め、公開は**動的プロファイルだけ**（静的 route `md-sol-eth-snapshot-arc`・`md-arc-eth-snapshot-sol` は作らない）。
+前提: 送信の S-3・S-4 は本番で稼働中（G-4′ 2026-10-08）、受信の Arc・Solana（x402）も稼働中（G-4 2026-10-07）、公開中の 18 組は 2026-10-08 にすべて実購入済み（`docs/DEPLOY.md` §2e）。
+この追補で生まれるのは **5 レールの cross-rail 20 組のうち最後の 2 組**で、新しいレール・鍵・env・能力・Provider は無い。
+
+### 11.1 スコープ
+
+| # | 受信 | 送信 | プロファイル | 能力（既存） | 上流（例。呼び出し側が決める） |
+|---|---|---|---|---|---|
+| O-5 | Arc testnet USDC（x402、Circle の facilitator、売り手証明） | Solana devnet USDC（x402、Router の鍵で SVM `exact`） | `dyn-arc-to-sol` | 受信 `sellerProofs[ARC]`＋Circle、送信 `svmSigning[SOL]` | Solana Worker `provider-x402-sol.subethalabs.com` |
+| O-6 | Solana devnet USDC（x402、x402.org の facilitator） | Arc testnet USDC（x402、Router の鍵で EIP-3009） | `dyn-sol-to-arc` | 受信 x402.org（SVM）、送信 `evmSigningByNetwork[ARC]` | Arc Worker `provider-x402-arc.subethalabs.com` |
+
+やらないこと: 静的 route、同レール同チェーン（D-16 のまま）、新しい手数料の規則（x402 送信の定額 1,000 のまま）、Router 側の新しい検証（既存の動的 x402 送信の規則をそのまま使う）。
+
+### 11.2 機能要件（既存の番号の続き）
+
+- **FR-39（par の宣言）**: `dyn-arc-to-sol`・`dyn-sol-to-arc` は `par: true`（Arc USDC と Solana USDC は桁 6 で等しく、既存の「受信資産と送信資産の桁が同じ」規則を満たす）。価格は上流の額 + 手数料 1,000、上流の上限 10,000（既存）。
+- **FR-40（方向別の切り替え）**: 公開の有効化の値（`RailsActivation`）に **組の切り替え `pairs: { arcToSol, solToArc }`** を足す。内部 env `SUBETHA_RAILS_ACTIVATION` の token は `arc-to-sol`・`sol-to-arc`
+  （既存の 6 語に加える。受け入れ用の起動の `--rails` も同じ語）。公開の定数 `RAILS_ACTIVATION.pairs` は **配備時は両方 `false`**、G-4⁗ で `true`。env からは変えられない（既存の規則）。
+- **FR-41（生成の条件）**: `dyn-arc-to-sol` は `pairs.arcToSol ∧ arc.inbound（受取先あり）∧ solana.outbound` のとき、`dyn-sol-to-arc` は `pairs.solToArc ∧ solana.inbound（受取 owner あり）∧ arc.outbound` のときだけ生成する。
+  **組が `true` なのに必要なレールの方向が無ければ、設定生成は固定文で止まる**（黙って出さない、はしない: 公開の定数の取り違えを起動で気づけるように）。組が `false` なら ID は一覧に出ない。
+- **FR-42（予算）**: 新しい区分は作らない。O-5 の予約は Arc USDC の区分に 11,000・Solana USDC の区分に 10,000、O-6 はその逆。どちらも 1 件の上限（Arc 20,000、Solana 21,000）の内側。両レグが同じ区分に落ちる組ではない。
+- **FR-43（能力・env）**: 新しい鍵・env・能力・依存先は無い。子プロセスの能力の注入は `pairs` を見ない（レールの方向だけで決まる。既存どおり）。`pairs` が効くのは設定生成だけ。
+
+### 11.3 受け入れ条件
+
+- **AC-19（offline）**: 統合の行列（`tests/wire/multirail-integration.test.ts` の送信の行列）に O-5・O-6 の行を足し、どちらも `delivered`（受信は Circle／x402.org の fixture で verify 1・settle 1、送信は該当の Provider の fixture に 1 回、Solana は署名 1 回）。
+  設定生成の単体試験: 公開の定数（`pairs` 両方 `true` のとき）で一覧が **route 10・プロファイル 20**、`pairs` が `false` なら 18 のまま、組が `true` でレールの方向が無ければ固定文で止まる、
+  20 プロファイルすべてで上限額の quote の予約が区分に収まる（既存の guard row に 2 組が入る）、token の往復（`activationToEnv`／`activationFromEnv`）に 2 語が入る。sabotage: 生成の条件からレールの方向を外す → 試験が落ちる。
+- **AC-20（受け入れの購入）**: 受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`。公開の Router は止める）で O-5・O-6 を各 1 件 `delivered`。記録は AC-13／AC-14 と同じ（両レグの tx と確定、受取先・額、Provider の応答、client の結果、再読取）。
+- **AC-21（公開）**: `RAILS_ACTIVATION.pairs` を `true` にした入れ替えの後、公開の一覧が route 10・プロファイル 20、各 1 回の quote の `subject`・`disclosures` が設定どおり、**hosted Router で各 1 件の実購入**（§2e と同じ証拠: 両レグのチェーンの独立読取、残高の差分、journal、status の再取得）。CLAUDE.md・README・公開ブリーフを更新。
+
+### 11.4 gate（§6.3 と同じ形。各段 owner の確認）
+
+G-2⁗（`pairs` 両方 `false` のまま配備。公開の一覧は 18 のまま）→ G-3⁗（受け入れの購入 AC-20。公開の停止を伴う）→ G-4⁗（`pairs` 両方 `true` の PR と入れ替え、AC-21）。鍵と資金の段（G-1）は不要（Router の Arc 送信鍵 `0x5d78…` と Solana 送信鍵 `CLtW…` の ATA に devnet の残高あり。受取先は既存）。

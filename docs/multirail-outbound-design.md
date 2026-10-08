@@ -436,3 +436,45 @@ fixture の facilitator は simulate／send／confirm を模擬するので、**
 | 3 | 2026-10-07 | `gpt-6-astra`（read-only。第 3 版 `a57dd0c`） | **REJECT**（4 項目: header は 2／1／4 と口座の並びの規則、parser は検証しないので program ID・discriminator・data 長・口座数・読み残しを明示、step 10 の sabotage の検出は理由の変化で、MPP の期限の拒否の `not_sent` への写像）。第 4 版で反映 |
 | 4 | 2026-10-07 | `gpt-6-astra`（read-only。第 4 版 `64be346`） | **REJECT**（2 項目: MPP の署名後・送金 RPC 前の期限の拒否も `not_sent` に統一、Base の静的の送出直前の期限）。第 5 版で反映。header・口座の並び・命令の形・step 10 の sabotage・予約は解消と確認 |
 | 5 | 2026-10-07 | `gpt-6-astra`（read-only。第 5 版 `154c3f1`） | **APPROVE WITH CHANGES**（§2.4 の SVM の手順番号の参照 1 件。反映済み）。MPP の A／B、Base の静的の 2 点、要件の網羅、衛生を確認 |
+
+## 13. 追補（2026-10-09）: O-5・O-6 を動的プロファイルで（要件 §11、D-17 の決定）
+
+設定生成と入口だけの変更。`src/` は変えない（合成は既に (rail, network) で束ねる: 受信は profile の `source.network`、送信は `destination.network`。`dyn-arc-to-x402` が Arc 受信を、`dyn-x402-to-sol` が Solana 送信を、それぞれ本番で通している）。
+
+### 13.1 有効化の形（`tools/remote-mcp-config.ts`、`tools/rails-entry.ts`）
+
+```ts
+export interface PairsActivation { readonly arcToSol: boolean; readonly solToArc: boolean; }
+export interface RailsActivation { readonly arc: RailActivation; readonly solana: RailActivation; readonly solanaMpp: RailActivation; readonly pairs: PairsActivation; }
+export const RAILS_ACTIVATION = Object.freeze({ arc: …, solana: …, solanaMpp: …, pairs: Object.freeze({ arcToSol: false, solToArc: false }) });  // G-4⁗ で true
+export const RAILS_NONE = { …, pairs: { arcToSol: false, solToArc: false } };
+```
+
+- token: `ACTIVATION_TOKENS` に **`arc-to-sol`・`sol-to-arc`** を足す。`activationToEnv` は `pairs` の分を末尾に出し、`activationFromEnv` は同じ集合で復元する（未知・重複は今のまま拒否）。`railActive` は `pairs` を見ない（組だけでは何も動かない）。
+- `routerProcessCapabilitiesOf`（子）・`railsReceiversOf`・`railsProvidersOf` は `pairs` を見ない（FR-43）。受け入れ用の起動の `--rails` は同じ語を受け付ける（既定は変えない）。
+
+### 13.2 生成（`dynamicProfilesOf`）
+
+```ts
+const pairArcToSol = rails.activation.pairs.arcToSol, pairSolToArc = rails.activation.pairs.solToArc;
+if (pairArcToSol && (arcReceiver === undefined || !solOutbound)) throw new Error("pair arc-to-sol requires arc.inbound (receiver) and solana.outbound");
+if (pairSolToArc && (solReceiver === undefined || !arcOutbound)) throw new Error("pair sol-to-arc requires solana.inbound (receiver) and arc.outbound");
+...(pairArcToSol ? { "dyn-arc-to-sol": toSol("dyn-arc-to-sol", "x402", INBOUND_ARC, arcReceiver) } : {}),
+...(pairSolToArc ? { "dyn-sol-to-arc": toArc("dyn-sol-to-arc", "x402", INBOUND_SOL, solReceiver) } : {}),
+```
+
+- `toSol`／`toArc` は既存のまま（宛先は表の mint・桁・token program／`tokenDomain`、`par: true`、`maxUpstreamAmount` 10,000、手数料 定額 1,000）。固定文に受取先の値は出ない。
+- 予算の区分は変えない（FR-42）: Arc USDC（1 件 20,000）と Solana USDC（1 件 21,000）は両レールが有効なら既に出ている。
+
+### 13.3 試験（要件 AC-19）
+
+| 場所 | 足すもの |
+|---|---|
+| `tests/unit/remote-mcp-config.test.ts` | 公開の定数の形（`pairs`）、`pairs` 両方 `true` の生成で 20 本（ID の全列挙）、`false` で 18 本、組 `true` でレールの方向が無い 4 通り → 固定文、guard row が 20 本を回る（既存の `test.each` が `dynamicProfilesOf` の出力を回るなら `pairs` を `true` にした構成を渡す） |
+| `tests/unit/rails-entry.test.ts` | token の往復（8 語）、全部 `true` の `hostPlanOf` で 20 本と子の env の 8 語、`pairs` だけ `true` で `hostPlanOf` が固定文で止まる |
+| `tests/wire/multirail-integration.test.ts` | 送信の行列に O-5（`dyn-arc-to-sol`: 受信 Arc=Circle、送信 Solana）・O-6（`dyn-sol-to-arc`: 受信 Solana=x402.org、送信 Arc）。期待: Circle／svm の verify・settle、Provider の支払い 1、Solana の署名 1（O-5）、接続先の集合 |
+| `tests/wire/rails-process-entry.test.ts` | 受け入れ用の起動で `--rails … ,arc-to-sol,sol-to-arc` を渡すと設定に 2 本が入る（既存の「起動は probe で止まる」形） |
+
+### 13.4 変更するファイル
+
+`tools/remote-mcp-config.ts`、`tools/rails-entry.ts`、`tools/rails-acceptance-run.ts`（usage の語）、上の試験 4 本、`docs/DEPLOY.md` §2c（G-2⁗〜G-4⁗ の段と記録）、`CLAUDE.md`・`README.md`・`docs/public-brief-2026-10-08.md`（G-4⁗ の後）。
