@@ -52,6 +52,8 @@ G-A2  testnet の購入（AC-A1・AC-A10 の最終）                           
 
 ### P-0 — `src/shared/` の抽出と `sign-dispatch` の分離（設計 §3.8、U-A5）
 
+- **記録（2026-10-09、PR #129）**: 実装で設計から 2 点逸脱した（設計 §3.8 に反映済み）: 全レールの dispatcher は静的 import のまま（同期の `classifyOffer` を変えない）、`src/net/` は抽出しない（既に Router に依存せず、第 1 slice の payer は使わない）。`src/shared/networks.ts` は base58 の検査を自前の復号にして外部依存を無くした。
+
 - **範囲**: `src/config.ts` の network・asset の表と `evmChainIdOf`・`knownNetworkOf`・`knownAssetOf`・`assetKeyOf`・`networkFamilyOf`・`isWellFormedPayTo` を `src/shared/networks.ts` に、`src/net/guarded-fetch.ts`・`bounded-body.ts` の純粋な部分を `src/shared/net/` に、`src/adapters/inbound/x402-svm.ts` の `buildSvmTransactionMessage`・定数を `src/shared/svm-message.ts` に抽出し、元の module は re-export。`tools/sign-dispatch.ts` を `tools/sign-classify-evm.ts`（`classifyEvmOffer`。`mppx`・Solana・`mpp-payer` を import しない）と `tools/sign-dispatch.ts`（`classifyOffer`。MPP・Solana の module は `await import`）に分ける。`mpp-payer.ts` の `checkTempoChallenge` は `tools/sign-check-tempo.ts` に移し、両方から import。
 - **成果物**: 上の変更、`tests/unit/sign-classify-evm.test.ts`（新。`sign-dispatch.test.ts` の EVM の行を写す + module graph の行）、既存の試験は**変えない**。
 - **完了条件（unit・wire。Linux）**: 既存の全試験が変更なしで通る。`classifyEvmOffer` が `sign-dispatch.test.ts` の EVM の行と同じ結果、Solana / MPP の offer に `refuse`。子 process で `node --import tsx tools/sign-classify-evm.ts` 相当を読み込んだ後の module graph（`process.moduleLoadList` と `import.meta.resolve` の記録）に `mppx`・`@solana/` が無い。`classifyOffer` の結果が分離前と同じ（全行）。
@@ -76,7 +78,7 @@ G-A2  testnet の購入（AC-A1・AC-A10 の最終）                           
 
 ### P-2 — vendor と `src/sign`（EVM だけ）（設計 §3.8、SR-A7 の署名の検査、AC-A8 の移植の行）
 
-- **範囲**: `packages/payer/scripts/vendor.ts`（`src/shared/**`、`tools/sign-classify-evm.ts`、`tools/x402-payer.ts` を `src/vendor/` にコピーし import path を書き換える）、`src/sign/index.ts`（`sign(offer, key)`: `classifyEvmOffer` → `chainId === 84532` の gate → `createX402Payer(key).credentialFor`。他は `rail_not_enabled`。**FR-A14 の 3 者の照合は P-3b**）、CI の検査（vendor と source の一致、`packages/payer` の依存に `mppx`・`@solana/*` が無い）。
+- **範囲**: `packages/payer/scripts/vendor.ts`（**`src/shared/networks.ts`・`tools/sign-classify-evm.ts`・`tools/x402-payer.ts` の 3 つだけ**を `src/vendor/` にコピーし import path を書き換える。`src/shared/svm-message.ts` と `src/net/*` は第 1 slice では含めない = 設計 §3.8 の一覧）、`src/sign/index.ts`（`sign(offer, key)`: `classifyEvmOffer` → `chainId === 84532` の gate → `createX402Payer(key).credentialFor`。他は `rail_not_enabled`。**FR-A14 の 3 者の照合は P-3b**）、CI の検査（vendor と source の一致、`packages/payer` の依存に `mppx`・`@solana/*` が無い）。
 - **成果物**: 上の変更、`test/unit/sign.test.ts`（`tests/unit/sign-dispatch.test.ts` の EVM の行の移植 + gate + `rail_not_enabled`）、`test/unit/vendor.test.ts`。
 - **完了条件（unit。macOS・Docker）**: 移植した行が同じ結果（拒否する offer は拒否）。Arc（`eip155:5042002`）の offer は `classifyEvmOffer` では `x402-evm` だが `sign` では `rail_not_enabled`。Solana / Tempo の offer は `rail_not_enabled`（`refuse` 経由）。vendor が source と byte 一致（path の書き換え以外）。`package.json` と lockfile に `mppx`・`@solana/` が無い。
 - **focused**: `npx vitest run test/unit/sign.test.ts test/unit/vendor.test.ts`。
