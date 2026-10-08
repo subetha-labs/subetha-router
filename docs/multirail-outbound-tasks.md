@@ -197,6 +197,8 @@ U2 の後は U3 と U6-a が並行できる（writer は 1 つなので、実際
 | G-3⁗ | 受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`。公開の Router は止める）で O-5・O-6 を各 1 件 `delivered`。記録は AC-13／AC-14 と同じ（payer は使い捨て: Arc `0xfCea…`、Solana `HTaz…`） | owner の確認（公開の停止・支払い） |
 | G-4⁗ | `pairs` 両方 `true` の PR と入れ替え。**同じ PR で、`RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に変え、`pairs` を `false` にした固定の構成で 18 本を見る試験を残す**（`remote-mcp-config.test.ts`・`rails-entry.test.ts`）。一覧 20 本、各 1 回の quote、hosted で各 1 件の実購入（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20） | owner の確認 |
 
+**UG-P の記録（2026-10-08）**: U10 は PR #127（Codex APPROVE、Linux green）、G-2⁗ 18:40Z（`b-10f251c`、一覧 18 本のまま）、G-3⁗ 18:41〜18:44Z（受け入れ起動で O-5・O-6 各 1 件 delivered、両レグ確定）、G-4⁗ 18:52Z（PR #128、`b-d162524`、一覧 20 本、各 1 回の quote、hosted で各 1 件 delivered）。記録は `docs/DEPLOY.md` §2c-2。**UG-P 完了**。
+
 ## 3. 要件・設計との対応（主担当と補助）
 
 | 対象 | 主担当 | 補助（別の層の試験） |

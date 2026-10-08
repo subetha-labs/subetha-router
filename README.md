@@ -142,7 +142,7 @@ signing so the same message is never signed twice (also across a crash and resta
 pre-check; all of this is covered by fixture tests including child-process SIGKILL interruption tests, and by two independent signing-boundary reviews.
 
 **MPP on Solana, both directions, is on the hosted Router since 2026-10-08** (G-4″; `RAILS_ACTIVATION.solanaMpp`, the same one-constant
-switch, per direction; design `docs/mpp-solana-design.md`, rollout `docs/DEPLOY.md` §2d). The configuration lists 10 routes and 20 profiles (the last two, `dyn-arc-to-sol` / `dyn-sol-to-arc`, enabled 2026-10-08 and on the hosted Router from the G-4⁗ swap recorded in `docs/DEPLOY.md` §2c-2). Inbound: the caller pays
+switch, per direction; design `docs/mpp-solana-design.md`, rollout `docs/DEPLOY.md` §2d). The hosted listing has 10 routes and 20 profiles (the last two, `dyn-arc-to-sol` / `dyn-sol-to-arc`, since the G-4⁗ swap of 2026-10-08 18:52Z recorded in `docs/DEPLOY.md` §2c-2). Inbound: the caller pays
 **Solana devnet USDC over MPP** (`solana/charge`); the Router issues the challenge itself, verifies the fully-signed transaction the caller
 hands it (structure, amount, Memo, signature; no chain read), broadcasts it once at purchase and follows the confirmation
 (`md-x402-eth-snapshot-solmpp`, `md-mpp-eth-snapshot-solmpp`, `dyn-solmpp-to-*`). Outbound: the Router pays a provider that accepts only
