@@ -10,6 +10,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { ConfigError, KNOWN_NETWORKS, loadRuntimeConfig, parseRouterConfig, type RouterConfig, type RuntimeConfig } from "../../src/config.js";
+import { perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { routeListBody } from "../../src/http/projection.js";
 import {
   dynamicProfilesOf,
@@ -157,13 +158,15 @@ describe("有効にしたときだけ出る（設計 §8・D-6・D-7）", () => 
     expect(buckets.static).toContain("eip155:5042002|0x3600000000000000000000000000000000000000|10000|1000000000");
     expect(buckets.static).toContain("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1|4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU|10000|1000000000");
     expect(buckets.dynamic).toContain("eip155:5042002|0x3600000000000000000000000000000000000000|20000|100000000");
-    expect(buckets.dynamic).toContain("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1|4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU|20000|100000000");
+    expect(buckets.dynamic).toContain("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1|4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU|21000|100000000"); // 両レグが同じ区分に落ちる組の分（下の行）
     expect(buckets.static).toHaveLength(4);
     expect(buckets.dynamic).toHaveLength(4);
     // 通算の上限は既存の env の上書きをそのまま使う（新しい env は増やさない）。
     const overridden = routerOf(routerConfigOf({ SUBETHA_INBOUND_MAX_TOTAL: "777", SUBETHA_DYNAMIC_MAX_TOTAL: "555" }, RECEIVER, true, BOTH));
     expect(bucketsOf(overridden).static.filter((b) => b.endsWith("|10000|777"))).toHaveLength(3);
-    expect(bucketsOf(overridden).dynamic.filter((b) => b.endsWith("|20000|555"))).toHaveLength(4);
+    expect(bucketsOf(overridden).dynamic.filter((b) => b.endsWith("|555"))).toHaveLength(4);
+    expect(bucketsOf(overridden).dynamic.filter((b) => b.endsWith("|20000|555"))).toHaveLength(3);
+    expect(bucketsOf(overridden).dynamic.filter((b) => b.endsWith("|21000|555"))).toHaveLength(1);
     // 文字どおりの id・path・宛先（定数を書き換えても気づけるように、生成側の定数は使わない）。
     expect(ROUTE_ARC).toBe("md-mpp-eth-snapshot-arc");
     expect(ROUTE_SOL).toBe("md-x402-eth-snapshot-sol");
@@ -398,7 +401,7 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
     expect(JSON.stringify(document)).not.toContain(SOL_OWNER);
     const buckets = bucketsOf(router);
     expect(buckets.static.some((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|10000|`))).toBe(true);
-    expect(buckets.dynamic.some((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|20000|`))).toBe(true);
+    expect(buckets.dynamic.some((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|21000|`))).toBe(true);
     expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, false, SOL_OUT)).dynamic!.profiles).sort()).toEqual(["dyn-x402-to-mpp", "dyn-x402-to-sol"]);
   });
 
@@ -500,7 +503,7 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     // Solana USDC の区分（静的 10,000・動的 20,000）が 1 つずつ。
     const buckets = bucketsOf(router);
     expect(buckets.static.filter((b) => b.startsWith(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|10000|`))).toHaveLength(1);
-    expect(buckets.dynamic.filter((b) => b.startsWith(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|20000|`))).toHaveLength(1);
+    expect(buckets.dynamic.filter((b) => b.startsWith(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|21000|`))).toHaveLength(1);
     expect(buckets.static.some((b) => b.startsWith(INBOUND_ARC.network))).toBe(false);
     // 公開の一覧に出る。
     expect(listedIds(router).routes).toContain(ROUTE_SOLMPP_TO_X402);
@@ -547,7 +550,7 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     expect(JSON.stringify(document)).not.toContain(SOL_MPP_PROVIDER); // URL が空なので Provider D の受取 owner は設定に入らない
     const buckets = bucketsOf(router);
     expect(buckets.static.filter((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|10000|`))).toHaveLength(1);
-    expect(buckets.dynamic.filter((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|20000|`))).toHaveLength(1);
+    expect(buckets.dynamic.filter((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|21000|`))).toHaveLength(1);
     expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, false, rails)).dynamic!.profiles).sort()).toEqual(["dyn-x402-to-mpp", "dyn-x402-to-solmpp"]);
     // Arc・Solana の x402 受信があれば dyn-arc-to-solmpp・dyn-sol-to-solmpp も（source はそのレールの受取先）。
     const withInbound = routerOf(routerConfigOf({}, RECEIVER, true, { ...rails, activation: { arc: IN, solana: IN, solanaMpp: OUT }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } }));
@@ -625,5 +628,42 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     expect(production.routes[ROUTE_SOLMPP_OUT]?.destination.payTo).toBe(SOL_MPP_PROVIDER);
     expect(Object.keys(production.dynamic!.profiles)).toHaveLength(18);
     expect(() => routerConfigOf({}, RECEIVER, true, { ...all, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER }, upstreams: RAIL_UPSTREAMS })).toThrow(/solana mpp outbound rail is activated with an upstream URL/);
+  });
+
+  test("動的予算の 1 件の上限: 本番の 18 プロファイルすべてで上限額（上流 10,000）の quote が区分の上限に収まる。両レグが同じ Solana USDC の区分に落ちる dyn-solmpp-to-sol・dyn-sol-to-solmpp は 21,000 ちょうど（1 base unit 上回ると per_purchase_limit）。他の区分は 20,000 のまま", () => {
+    const all: RailsOptions = {
+      activation: { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } },
+      receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER },
+      providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER },
+      upstreams: RAIL_UPSTREAMS,
+    };
+    const router = routerOf(routerConfigOf({}, RECEIVER, true, all));
+    const profiles = Object.values(router.dynamic!.profiles);
+    expect(profiles).toHaveLength(18);
+    // 上限額の quote の予約が、どのプロファイルでも 1 件の上限に収まる。Tempo 宛の MPP は gas の見積りが cap になる
+    // （G-3″ の実測は 158 base unit。規則の手数料 1,000 以下なら手数料はそのまま）。cap が規則の手数料を超えれば源のレグがその分増える
+    // （天井 50,000 までは別の検査 `fee_too_high` の範囲で、本行の対象ではない）。
+    const reservationAt = (profile: (typeof profiles)[number], upstreamAmount: string) => {
+      const cap = profile.destination.maxFee === undefined ? undefined : { maxFee: profile.fee.flat, estimate: { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 0 } };
+      const pricing = priceOf(profile, upstreamAmount, cap);
+      expect(pricing, profile.profileId).toBeDefined();
+      return reservationOf(profile, pricing!);
+    };
+    for (const profile of profiles) {
+      expect(perPurchaseLimitOf(router, reservationAt(profile, profile.maxUpstreamAmount)), profile.profileId).toBeUndefined();
+    }
+    // 同じ区分を両レグで使う 2 組: 源 11,000 + 宛先 10,000 = 21,000 が上限ちょうど。上流が 1 base unit 増えると両レグで 2 増えて止まる。
+    const sameBucket = profiles.filter((profile) => profile.source.network === profile.destination.network && profile.source.asset === profile.destination.asset);
+    expect(sameBucket.map((profile) => profile.profileId).sort()).toEqual(["dyn-sol-to-solmpp", "dyn-solmpp-to-sol"]);
+    for (const profile of sameBucket) {
+      const legs = reservationAt(profile, profile.maxUpstreamAmount).legs;
+      expect(legs.reduce((sum, leg) => sum + BigInt(leg.amount), 0n)).toBe(21_000n);
+      expect(perPurchaseLimitOf(router, reservationAt(profile, "10001")), profile.profileId).toBe("per_purchase_limit");
+    }
+    const dynamicBuckets = router.dynamic!.budget.buckets;
+    expect(dynamicBuckets.find((bucket) => bucket.network === INBOUND_SOL.network && bucket.asset === INBOUND_SOL.asset)?.maxPerPurchase).toBe("21000");
+    for (const bucket of dynamicBuckets.filter((bucket) => bucket.network !== INBOUND_SOL.network)) expect(bucket.maxPerPurchase, bucket.network).toBe("20000");
+    // 静的の予算は変えない（静的 route は片レグ 10,000 のまま）。
+    for (const bucket of router.budget.buckets) expect(bucket.maxPerPurchase, bucket.network).toBe("10000");
   });
 });

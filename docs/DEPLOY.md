@@ -412,6 +412,25 @@ U-13: Provider D の確定待ちを含む送信の所要は 4.2〜8.3 秒（45 �
 journal に `unknown`（`source_settle_unknown`）、**verify の後**に期限・予算で止まった `signature` 型（資金は動いている）は `unknown`（`source_paid_unsettled`）で残る。
 どちらも Router は再送しない。呼び出し側には「`rejected` も `unknown` も未送金の証明ではない」と案内してある（CLAUDE.md）。診断（`solana mpp diagnostic …`）は受け入れ用の起動でだけ読める。
 
+**G-4″ の記録（2026-10-08 15:42Z。owner の決定「両方進めていただきたいです」= 両方向を有効）**: main `29ae9da`（PR #115: `RAILS_ACTIVATION.solanaMpp = { inbound: true, outbound: true }`）のイメージ `b-29ae9da`
+（手元で build、14 層の内容ハッシュ一致）を `swap-image.sh` で入れ替え: 15:42:18Z 開始、15:42:28Z 終了、exit 0、journal は旧の接頭辞のまま、egress ok、公開の `/healthz` ok、子の listening 行あり。
+rollback は `subetha-router-prev-20261008T154218Z`（`b-8c36c82`）。子の env は `SUBETHA_RAILS_ACTIVATION` が 6 語（`solana-mpp-in,solana-mpp-out` を含む）、受取 owner の env は子に渡っていない（名前だけ見た）。
+
+**AC-18（15:43Z〜15:49Z。公開 MCP を HTTPS で呼ぶ。支払わない）**: 一覧は **route 10・プロファイル 18**（`solmpp` の route 4・プロファイル 8 を含む）。新しい 12 組に 1 回ずつ quote（`requestId` は組ごとに新規）:
+- 静的 4 本は ok。Solana MPP 受信の 2 本（`md-x402-eth-snapshot-solmpp`・`md-mpp-eth-snapshot-solmpp`）は `solana/charge` の challenge（`feePayer: false`・devnet・token program・`externalId`）付きで `fundsMoveOnCredential: true`、
+  Base x402 の `md-solmpp-eth-snapshot` は `false`、Tempo MPP の `md-solmpp-eth-snapshot-mpp` は `tempo/charge` で `true`。宛先は表のとおり（10,000、桁 6）。
+- 動的 8 組のうち 6 組は ok: `dyn-solmpp-to-x402`・`dyn-solmpp-to-mpp`（`pricing.maxFee` 158、見積りの時刻あり）・`dyn-solmpp-to-arc`、`dyn-x402-to-solmpp`・`dyn-mpp-to-solmpp`・`dyn-arc-to-solmpp`
+  （上流 10,000 + 手数料 1,000 = 11,000、`destinationPayTo` は各 Provider の受取、`*-to-solmpp` に `maxFee` は無い、`disclosures` は MPP 受信のものだけ `fundsMoveOnCredential: true`）。
+- **2 組は `quote_failed`**（各 3 回、再現する）: `dyn-solmpp-to-sol`（I-4）と `dyn-sol-to-solmpp`（O-10）。対照の `dyn-x402-to-sol` と `dyn-arc-to-solmpp` は同じ時刻に ok。
+- 補足: 動的の quote は呼び出し元ごとに **3 件/分**（`quotesPerMinutePerSource`）で、12 組を一度に出すと残りは `rate_limited`（仕様どおり。組を分けて再実行した）。
+
+**原因**（手元の受け入れ用の起動で再現し、理由は `per_purchase_limit`）: 動的予算の区分 `(network, asset)` は 1 件の予約を**両レグの合算**で見る（要件 FR-43、`src/core/dynamic.ts` の `perPurchaseLimitOf`）。
+この 2 組だけは源（上流 10,000 + 手数料 1,000 = 11,000）と宛先（10,000）が**同じ Solana USDC の区分**に落ちて 21,000 になり、本番の生成（`tools/remote-mcp-config.ts`）の動的の 1 件の上限 20,000 を超えていた。
+wire の行列は同じ合算を 21,000 の**試験用の設定**で証明していた（`tests/wire/multirail-integration.test.ts` の I-4・O-10 の行）が、本番の設定の生成にはその組の上限を見る行が無かった。
+G-3″ はこの 2 組を購入していない（要件 AC-17 の選択は受信 I-3、送信 O-9）。hosted の入口は `quote_failed` の `reason` を返さないので、再現は手元で行った。
+**修正**（この変更）: Solana USDC の**動的**の区分だけ 1 件の上限を 21,000（= 10,000 + 1,000 + 10,000。他の区分と静的の予算は変えない）。単体試験は本番の 18 プロファイルすべてで上限額の quote が区分に収まること、
+両レグ同じ区分の 2 組は 21,000 ちょうどで通り 1 base unit 超で `per_purchase_limit` になることを見る。配備（G-2″ からのやり直し = イメージの入れ替え）と、残り 2 組の quote の記録は下に足す。
+
 ### journal を残す（`-v` は必須）
 
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
