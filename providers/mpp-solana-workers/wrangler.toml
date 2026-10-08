@@ -8,5 +8,5 @@ compatibility_flags = ["nodejs_compat"]
 routes = [{ pattern = "provider-mpp-sol.subethalabs.com", custom_domain = true }]
 
 [vars]
-PAY_TO = ""
-FEE_PAYER_PUBKEY = ""
+PAY_TO = "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc"
+FEE_PAYER_PUBKEY = "DAmvTYsraoup88EJvs3KK3gFYfofULevXVGjz2wXM5gS"
