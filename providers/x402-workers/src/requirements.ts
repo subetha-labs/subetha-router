@@ -1,19 +1,22 @@
 /**
  * §2.1 の requirements と 402 の封筒（`docs/provider-x402-workers.md`）。SDK の `x402ResourceServer` を requirements の作成と
  * `createPaymentRequiredResponse` にだけ使う（`processHTTPRequest`・`settlePayment` は使わない: §3.1）。
- * isolate ごとに 1 度 `initialize()`（facilitator の `/supported`）。失敗したら次の要求でやり直す。
+ * isolate ごとに 1 度 `initialize()`（**single-flight**: 並行する要求は同じ promise を待つ。失敗したら次の要求でやり直す）。
+ * 準備ができたと言うのは、facilitator の `/supported` に**この network の `exact` v2 の kind**（SVM は 32 バイトの `feePayer` 付き）があるときだけ。
  */
 import { x402ResourceServer } from "@x402/core/server";
 import type { FacilitatorClient } from "@x402/core/server";
-import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
+import type { PaymentPayload, PaymentRequired, PaymentRequirements, SupportedResponse } from "@x402/core/types";
 import { registerExactEvmScheme } from "@x402/evm/exact/server";
 import { registerExactSvmScheme } from "@x402/svm/exact/server";
 
 import { DESCRIPTION, MAX_TIMEOUT_SECONDS, type ProviderConfig } from "./config.js";
+import { DeadlineError, withSignal } from "./deadline.js";
+import { supportedKindOf } from "./facilitator-client.js";
 
 export interface RequirementsBuilder {
-  /** 未初期化なら `/supported` を読む（上限は呼び出し側の期限）。 */
-  ready(): Promise<void>;
+  /** 未初期化なら `/supported` を読む（**呼び出し側の signal** の内側。並行は 1 本に束ね、後続は自分の signal で待つ）。 */
+  ready(signal: AbortSignal): Promise<void>;
   requirements(): Promise<PaymentRequirements[]>;
   paymentRequired(url: string, error?: string): Promise<PaymentRequired>;
   /** 支払いの `accepted` が自分の requirements と一致する 1 件（無ければ `undefined`）。 */
@@ -30,22 +33,50 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function createRequirementsBuilder(config: ProviderConfig, facilitator: FacilitatorClient): RequirementsBuilder {
-  const server = new x402ResourceServer(facilitator);
+/** `/supported` を読む client は、初期化を始めた要求の signal を使う（`signalFor("supported")`）。 */
+export function createRequirementsBuilder(config: ProviderConfig, clientFor: (signalFor: () => AbortSignal) => FacilitatorClient): RequirementsBuilder {
+  let initSignal: AbortSignal | undefined;
+  const facilitator = clientFor(() => initSignal ?? AbortSignal.abort(new DeadlineError()));
+  // SDK の server には「読んで確かめた `/supported`」だけを渡す（`/supported` は isolate で 1 回。verify/settle は SDK から呼ばせない）。
+  let supportedChecked: SupportedResponse | undefined;
+  const sdkFacilitator: FacilitatorClient = {
+    verify: () => Promise.reject(new Error("verify is not called through the SDK")),
+    settle: () => Promise.reject(new Error("settle is not called through the SDK")),
+    getSupported: () => (supportedChecked === undefined ? Promise.reject(new Error("not initialized")) : Promise.resolve(supportedChecked)),
+  };
+  const server = new x402ResourceServer(sdkFacilitator);
   const network = config.table.network as never;
   if (config.network === "arc") registerExactEvmScheme(server, { networks: [network] });
   else registerExactSvmScheme(server, { networks: [network] }); // rpcUrl 無し: `recentBlockhash` を足させない
   let initialized = false;
+  let inflight: Promise<void> | undefined;
 
-  async function ready(): Promise<void> {
-    if (initialized) return;
+  async function initialize(): Promise<void> {
+    // `/supported` を自分でも読んで kind を確かめてから SDK を初期化する（SDK は kind の有無を検査しない）。
+    const supported = await facilitator.getSupported();
+    if (supportedKindOf(supported, config.table.network) === undefined) throw new Error("facilitator does not support this network");
+    supportedChecked = supported;
     await server.initialize();
+    if (server.getSupportedKind(2, network, "exact") === undefined) throw new Error("facilitator does not support this network");
     initialized = true;
   }
 
+  function ready(signal: AbortSignal): Promise<void> {
+    if (initialized) return Promise.resolve();
+    if (inflight === undefined) {
+      initSignal = signal;
+      inflight = initialize().finally(() => {
+        inflight = undefined;
+        initSignal = undefined;
+      });
+    }
+    return withSignal(signal, inflight);
+  }
+
+  /** 初期化済みのときだけ（`ready` の後に呼ぶ）。 */
   async function requirements(): Promise<PaymentRequirements[]> {
-    await ready();
-    return server.buildPaymentRequirementsFromOptions(
+    if (!initialized) throw new Error("not initialized");
+    const built = await server.buildPaymentRequirementsFromOptions(
       [
         {
           scheme: "exact",
@@ -57,6 +88,8 @@ export function createRequirementsBuilder(config: ProviderConfig, facilitator: F
       ],
       undefined,
     );
+    if (built.length !== 1) throw new Error("exactly one requirement expected");
+    return built;
   }
 
   return {

@@ -1,8 +1,14 @@
 /**
  * Hyperliquid の取得と Provider A の本文（`docs/provider-x402-workers.md` §2.3。記録済みの契約: `docs/t5-design.md` §1.5）。
- * 取得と形の検証は支払いの前（verify の前）。満たさなければ `DataUnavailableError`（Provider は 502、facilitator は呼ばない）。
+ * 取得と形の検証は支払いの前（verify の前）。応答は **byte の上限まで**読み、組んだ本文は **直列化して 64 KiB 以内**であることを
+ * verify の前に確かめる。満たさなければ `DataUnavailableError`（Provider は 502、facilitator は呼ばない）。
  */
-export const MAX_DATA_BYTES = 1024 * 1024;
+import { DeadlineError, withSignal } from "./deadline.js";
+
+/** Hyperliquid の応答（数十 KiB）の読取の上限。 */
+export const MAX_DATA_BYTES = 256 * 1024;
+/** 組んだ本文の上限（Router の受け取りの上限 256 KiB の内側。契約の本文は数百バイト）。 */
+export const MAX_SNAPSHOT_BYTES = 64 * 1024;
 const DECIMAL = /^-?\d+(?:\.\d+)?$/;
 
 export interface Snapshot {
@@ -39,10 +45,16 @@ export function isNonNegativeDecimal(value: string): boolean {
   return DECIMAL.test(value) && !value.startsWith("-");
 }
 
+function scaleOf(s: string): number {
+  return (s.split(".")[1] ?? "").length;
+}
+
+/** 10 進文字列を `scale` 桁の整数に（桁が足りなければ 0 を補う。多ければ呼び出し側が scale を合わせる）。 */
 function scaledOf(s: string, scale: number): bigint {
   const [whole, frac = ""] = s.split(".");
   const negative = whole!.startsWith("-");
-  const digits = (negative ? whole!.slice(1) : whole!) + frac.padEnd(scale, "0").slice(0, scale);
+  if (frac.length > scale) throw new DataUnavailableError();
+  const digits = (negative ? whole!.slice(1) : whole!) + frac.padEnd(scale, "0");
   const value = BigInt(digits);
   return negative ? -value : value;
 }
@@ -55,22 +67,31 @@ function formatScaled(value: bigint, scale: number): string {
   return `${negative ? "-" : ""}${whole}${scale === 0 ? "" : `.${frac}`}`;
 }
 
-/** 10 進文字列の引き算（桁は多い方に合わせる。指数表記を作らない）。 */
+/** `a − b` を **`a`（markPx）の桁**で（引き算は両方の桁の大きい方で正確に行い、結果を `a` の桁へ 0 方向に切り詰める）。 */
 export function subtractDecimal(a: string, b: string): string {
-  const scale = Math.max((a.split(".")[1] ?? "").length, (b.split(".")[1] ?? "").length);
-  return formatScaled(scaledOf(a, scale) - scaledOf(b, scale), scale);
+  const scale = Math.max(scaleOf(a), scaleOf(b));
+  const diff = scaledOf(a, scale) - scaledOf(b, scale);
+  const target = scaleOf(a);
+  const drop = scale - target;
+  const pow = 10n ** BigInt(drop);
+  const truncated = diff < 0n ? -((-diff) / pow) : diff / pow;
+  return formatScaled(truncated, target);
 }
 
-/** `absolute / prev × 100` を小数 2 桁（記録済みの fixture と同じく**切り捨て**: 49.72 / 2950.40 → 1.68）。`prev` が 0 なら失敗。 */
+/** `absolute / prev × 100` を小数 2 桁（**最後に 1 度だけ** 0 方向に切り詰め: 49.72 / 2950.40 → 1.68）。`prev` が 0 なら失敗。入力の桁は保つ。 */
 export function percentOf(absolute: string, prev: string): string {
-  const scale = 8;
-  const prevScaled = scaledOf(prev, scale);
-  if (prevScaled === 0n) throw new DataUnavailableError();
-  const numerator = scaledOf(absolute, scale) * 10_000n; // ×100 ×100（小数 2 桁分）
-  const negative = (numerator < 0n) !== (prevScaled < 0n);
+  const sa = scaleOf(absolute);
+  const sp = scaleOf(prev);
+  const a = scaledOf(absolute, sa);
+  const p = scaledOf(prev, sp);
+  if (p === 0n) throw new DataUnavailableError();
+  // percent×100（小数 2 桁分の整数）= a/10^sa ÷ p/10^sp × 100 × 100 = a × 10^sp × 10000 / (p × 10^sa)
+  const numerator = a * 10n ** BigInt(sp) * 10_000n;
+  const denominator = p * 10n ** BigInt(sa);
+  const negative = (numerator < 0n) !== (denominator < 0n);
   const absNum = numerator < 0n ? -numerator : numerator;
-  const absPrev = prevScaled < 0n ? -prevScaled : prevScaled;
-  const truncated = absNum / absPrev;
+  const absDen = denominator < 0n ? -denominator : denominator;
+  const truncated = absNum / absDen;
   return formatScaled(negative && truncated !== 0n ? -truncated : truncated, 2);
 }
 
@@ -101,8 +122,49 @@ export function snapshotOf(json: unknown, paymentNetwork: string, now: () => num
   };
 }
 
-export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, timeoutMs: number, doFetch: typeof fetch = fetch, now: () => number = Date.now): Promise<Snapshot> {
-  if (timeoutMs <= 0) throw new DataUnavailableError();
+/** 本文の直列化（verify の前に 1 度だけ。大きさの上限を確かめる）。 */
+export function serializeSnapshot(snapshot: Snapshot): { readonly text: string; readonly bytes: number } {
+  const text = JSON.stringify(snapshot);
+  const bytes = new TextEncoder().encode(text).byteLength;
+  if (bytes > MAX_SNAPSHOT_BYTES) throw new DataUnavailableError();
+  return { text, bytes };
+}
+
+/** 応答の本文を byte の上限まで読む（超えれば失敗。signal が切れれば `DeadlineError`）。 */
+async function readBounded(response: Response, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw new DataUnavailableError();
+  }
+  if (response.body === null) throw new DataUnavailableError();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      if (signal.aborted) throw new DeadlineError();
+      const { done, value } = await withSignal(signal, reader.read());
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new DataUnavailableError();
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, signal: AbortSignal, doFetch: typeof fetch = fetch, now: () => number = Date.now): Promise<Snapshot> {
+  if (signal.aborted) throw new DeadlineError();
   let response: Response;
   try {
     response = await doFetch(dataUrl, {
@@ -110,22 +172,20 @@ export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, tim
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "metaAndAssetCtxs" }),
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     });
   } catch {
+    if (signal.aborted) throw new DeadlineError();
     throw new DataUnavailableError();
   }
-  if (response.status !== 200) throw new DataUnavailableError();
-  let text: string;
-  try {
-    text = await response.text();
-  } catch {
+  if (response.status !== 200) {
+    await response.body?.cancel().catch(() => {});
     throw new DataUnavailableError();
   }
-  if (text.length > MAX_DATA_BYTES) throw new DataUnavailableError();
+  const bytes = await readBounded(response, MAX_DATA_BYTES, signal);
   let json: unknown;
   try {
-    json = JSON.parse(text);
+    json = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw new DataUnavailableError();
   }

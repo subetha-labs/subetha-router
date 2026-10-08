@@ -1,16 +1,15 @@
 /**
  * facilitator への自前の client（`docs/provider-x402-workers.md` §3.2）。SDK の `HTTPFacilitatorClient` は本文を見ずに認証ヘッダを作り、
  * 既定 90 秒で redirect を追うので使わない。ここでは本文を **1 度だけ**直列化し（Circle ならその文字列に売り手証明を束縛し）、
- * 期限・redirect・本文の上限・失敗の分類を自分で持つ。settle は **要求ごとに 1 回**（2 度目は throw）。
+ * **呼び出しごとに受けた signal** で署名・送出・本文の読取を止め、本文は **byte で**上限まで読む。settle は **要求ごとに 1 回**（2 度目は throw）。
  */
 import type { FacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse } from "@x402/core/types";
+import { getBase58Encoder } from "@solana/kit";
 
+import { DeadlineError, withSignal } from "./deadline.js";
 import { sellerProofFor, type SellerProofSigner } from "./seller-proof.js";
 
-export const VERIFY_TIMEOUT_MS = 4_000;
-export const SETTLE_TIMEOUT_MS = 20_000;
-export const SUPPORTED_TIMEOUT_MS = 10_000;
 export const MAX_RESPONSE_BYTES = 64 * 1024;
 
 /** 失敗の分類（固定。facilitator の文言は入れない）。 */
@@ -35,21 +34,73 @@ export interface FacilitatorClientOptions {
   /** Circle のときだけ（売り手証明）。 */
   readonly signer?: SellerProofSigner;
   readonly fetch?: typeof fetch;
+  /** 呼び出しごとの signal を返す（段の予算。要求全体の abort を含む）。 */
+  readonly signalFor: (stage: "verify" | "settle" | "supported") => AbortSignal;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 本文を上限つきで読んで JSON にする。形が違えば `undefined`。 */
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (text.length > MAX_RESPONSE_BYTES) return undefined;
+/** 本文を **byte 単位の上限**まで読む（超えれば `undefined`）。signal が切れれば reject。 */
+export async function readBoundedJson(response: Response, maxBytes: number, signal: AbortSignal): Promise<unknown> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    return undefined;
+  }
+  if (response.body === null) return undefined;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    return JSON.parse(text);
+    for (;;) {
+      if (signal.aborted) throw new DeadlineError();
+      const { done, value } = await withSignal(signal, reader.read());
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     return undefined;
   }
+}
+
+function isBase58Of(value: unknown, length: number): value is string {
+  if (typeof value !== "string" || !/^[1-9A-HJ-NP-Za-km-z]+$/.test(value)) return false;
+  try {
+    return getBase58Encoder().encode(value).length === length;
+  } catch {
+    return false;
+  }
+}
+
+/** `/supported` の応答から、この network・scheme の kind を取り出す（無い・形違いなら `undefined`）。SVM は `feePayer` が base58 32 バイト。 */
+export function supportedKindOf(json: unknown, network: string): Record<string, unknown> | undefined {
+  if (!isRecord(json) || !Array.isArray(json["kinds"])) return undefined;
+  const kind = (json["kinds"] as unknown[]).find((k) => isRecord(k) && k["x402Version"] === 2 && k["scheme"] === "exact" && k["network"] === network);
+  if (!isRecord(kind)) return undefined;
+  if (network.startsWith("solana:")) {
+    const extra = kind["extra"];
+    if (!isRecord(extra) || !isBase58Of(extra["feePayer"], 32)) return undefined;
+  }
+  return kind;
 }
 
 /** 1 要求分の client。`settle` は 1 回だけ。 */
@@ -57,65 +108,75 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
   readonly #url: string;
   readonly #signer: SellerProofSigner | undefined;
   readonly #fetch: typeof fetch;
+  readonly #signalFor: FacilitatorClientOptions["signalFor"];
   #settleCalls = 0;
 
   constructor(options: FacilitatorClientOptions) {
     this.#url = options.url.replace(/\/$/, "");
     this.#signer = options.signer;
     this.#fetch = options.fetch ?? fetch;
+    this.#signalFor = options.signalFor;
   }
 
   get settleCalls(): number {
     return this.#settleCalls;
   }
 
-  async #post(purpose: "verify" | "settle", paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements, timeoutMs: number): Promise<{ status: number; json: unknown }> {
-    // 1 度だけ直列化し、証明も送信もこの文字列に束縛する。
+  async #post(purpose: "verify" | "settle", paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements): Promise<{ status: number; json: unknown }> {
+    const signal = this.#signalFor(purpose);
+    if (signal.aborted) throw new DeadlineError();
+    // 1 度だけ直列化し、証明も送信もこの文字列に束縛する。署名も signal の内側（遅い署名の後に送らない）。
     const requestText = JSON.stringify({ x402Version: paymentPayload.x402Version, paymentPayload, paymentRequirements });
     const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.#signer !== undefined) headers["facilitator-seller-proof"] = await sellerProofFor(this.#signer, purpose, requestText);
+    if (this.#signer !== undefined) headers["facilitator-seller-proof"] = await withSignal(signal, sellerProofFor(this.#signer, purpose, requestText));
+    if (signal.aborted) throw new DeadlineError();
     let response: Response;
     try {
-      response = await this.#fetch(`${this.#url}/${purpose}`, { method: "POST", headers, body: requestText, redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
-    } catch {
+      response = await this.#fetch(`${this.#url}/${purpose}`, { method: "POST", headers, body: requestText, redirect: "error", signal });
+    } catch (error) {
+      if (signal.aborted) throw new DeadlineError();
       throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
     }
     let json: unknown;
     try {
-      json = await readJson(response);
-    } catch {
+      json = await readBoundedJson(response, MAX_RESPONSE_BYTES, signal);
+    } catch (error) {
+      if (error instanceof DeadlineError) throw error;
       json = undefined;
     }
     return { status: response.status, json };
   }
 
-  /** `isValid` の boolean を返す。HTTP の不達・期限・形違いは例外（`FacilitatorUnavailableError`）。 */
+  /** `isValid` の boolean を返す。HTTP の不達・期限・形違いは例外（`FacilitatorUnavailableError`／`DeadlineError`）。 */
   async verify(paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements): Promise<VerifyResponse> {
-    const { status, json } = await this.#post("verify", paymentPayload, paymentRequirements, VERIFY_TIMEOUT_MS);
+    const { status, json } = await this.#post("verify", paymentPayload, paymentRequirements);
     if (status === 403 && isRecord(json) && json["errorReason"] === "registration_required") throw new FacilitatorUnavailableError("facilitator_registration_required", status);
     if (status !== 200 || !isRecord(json) || typeof json["isValid"] !== "boolean") throw new FacilitatorUnavailableError("facilitator_unavailable", status);
     // 返すのは判定だけ（facilitator の文言は外に出さない）。
-    return { isValid: json["isValid"], ...(json["isValid"] ? { payer: typeof json["payer"] === "string" ? json["payer"] : undefined } : { invalidReason: "payment_invalid" }) } as VerifyResponse;
+    return (json["isValid"] ? { isValid: true } : { isValid: false, invalidReason: "payment_invalid" }) as VerifyResponse;
   }
 
   /** 1 回だけ。応答はそのまま返す（検査は `receipt.ts`）。HTTP の不達・期限・形違い・403 は例外。 */
   async settle(paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements): Promise<SettleResponse> {
     this.#settleCalls += 1;
     if (this.#settleCalls > 1) throw new SettleCalledTwiceError();
-    const { status, json } = await this.#post("settle", paymentPayload, paymentRequirements, SETTLE_TIMEOUT_MS);
+    const { status, json } = await this.#post("settle", paymentPayload, paymentRequirements);
     if (status === 403 && isRecord(json) && json["errorReason"] === "registration_required") throw new FacilitatorUnavailableError("facilitator_registration_required", status);
     if (status !== 200 || !isRecord(json) || typeof json["success"] !== "boolean") throw new FacilitatorUnavailableError("facilitator_unavailable", status);
     return json as unknown as SettleResponse;
   }
 
   async getSupported(): Promise<SupportedResponse> {
+    const signal = this.#signalFor("supported");
+    if (signal.aborted) throw new DeadlineError();
     let response: Response;
     try {
-      response = await this.#fetch(`${this.#url}/supported`, { method: "GET", redirect: "error", signal: AbortSignal.timeout(SUPPORTED_TIMEOUT_MS) });
+      response = await this.#fetch(`${this.#url}/supported`, { method: "GET", redirect: "error", signal });
     } catch {
+      if (signal.aborted) throw new DeadlineError();
       throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
     }
-    const json = await readJson(response).catch(() => undefined);
+    const json = await readBoundedJson(response, MAX_RESPONSE_BYTES, signal);
     if (response.status !== 200 || !isRecord(json) || !Array.isArray(json["kinds"])) throw new FacilitatorUnavailableError("facilitator_unavailable", response.status);
     return json as unknown as SupportedResponse;
   }

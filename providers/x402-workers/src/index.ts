@@ -1,32 +1,44 @@
 /**
  * Provider（x402 v2 `exact` の資源サーバ。Cloudflare Workers）の fetch handler（`docs/provider-x402-workers.md` §2.2・§3.1）。
- * 順序: 402（未払い）／ `accepted` の一致 → データ → verify → settle（1 回）→ 領収の検査 → 200。
- * 応答の本文とヘッダは固定文だけ（facilitator の文言・鍵・URL を含めない）。
+ * 順序: 402（未払い）／ decode と `accepted` の一致 → データ（直列化と大きさの検査まで）→ verify → settle（1 回）→ 領収の検査 → 200。
+ * 要求ごとに 1 つの期限を作り、各段には **signal** を配る（署名・送出・本文の読取を止める）。
+ * 応答の本文とヘッダは固定文だけ（facilitator の文言・鍵・URL を含めない）。鍵は env から署名の closure を作るときに 1 度読むだけ。
  */
 import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from "@x402/core/http";
 import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { configOf, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
-import { DATA_TIMEOUT_MS, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS, within } from "./deadline.js";
-import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError } from "./facilitator-client.js";
+import { configOf, isEvmKey, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
+import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS } from "./deadline.js";
+import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
 import { createRequirementsBuilder, type RequirementsBuilder } from "./requirements.js";
 import type { SellerProofSigner } from "./seller-proof.js";
-import { DataUnavailableError, fetchSnapshot, type Snapshot } from "./snapshot.js";
+import { DataUnavailableError, fetchSnapshot, serializeSnapshot } from "./snapshot.js";
 
-const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" } as const;
+const ENCODER = new TextEncoder();
 
-function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...headers } });
+/** 固定文の応答。`content-length` を明示し、本文は 1 つの文字列。 */
+function respond(status: number, text: string, headers: Record<string, string> = {}): Response {
+  return new Response(text, {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "no-store", "content-length": String(ENCODER.encode(text).byteLength), ...headers },
+  });
 }
 
-/** isolate ごとの状態（config の検査・署名の closure・requirements の builder）。鍵は closure の中だけ。 */
-interface Runtime {
+function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return respond(status, JSON.stringify(body), headers);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** isolate ごとの状態（秘密を含まない config・署名の closure・requirements の builder）。鍵は closure の中だけ。 */
+export interface Runtime {
   readonly config: ProviderConfig;
-  readonly signer: SellerProofSigner | undefined;
   readonly builder: RequirementsBuilder;
-  readonly facilitatorFor: (fetchImpl: typeof fetch) => BoundedFacilitatorClient;
+  readonly facilitatorFor: (fetchImpl: typeof fetch, signalFor: FacilitatorClientOptions["signalFor"]) => BoundedFacilitatorClient;
 }
 
 export interface Hooks {
@@ -39,20 +51,35 @@ export function runtimeOf(env: ProviderEnv, hooks: Hooks = {}): Runtime {
   const config = configOf(env);
   let signer: SellerProofSigner | undefined;
   if (config.network === "arc") {
-    const account = privateKeyToAccount(config.sellerProofKey as `0x${string}`);
+    // 鍵は env から 1 度だけ読み、account（署名の closure）にだけ渡す。config にも Runtime にも入れない。
+    const key = env.SELLER_PROOF_KEY;
+    if (!isEvmKey(key)) throw new Error("SELLER_PROOF_KEY is required for arc and must be a 0x-prefixed 32-byte hex key");
+    const account = privateKeyToAccount(key);
     if (account.address.toLowerCase() !== config.payTo.toLowerCase()) throw new Error("PAY_TO does not match the address of SELLER_PROOF_KEY");
     signer = {
       network: config.table.network,
-      chainId: 5042002,
+      chainId: config.table.chainId ?? 0,
       address: account.address,
       signTypedData: (typedData) => account.signTypedData({ domain: typedData.domain, types: typedData.types, primaryType: typedData.primaryType, message: typedData.message }),
       ...(hooks.now === undefined ? {} : { now: hooks.now }),
     };
   }
-  const fetchImpl = hooks.fetch ?? fetch;
-  const facilitatorFor = (f: typeof fetch): BoundedFacilitatorClient => new BoundedFacilitatorClient({ url: config.facilitatorUrl, ...(signer === undefined ? {} : { signer }), fetch: f });
-  const builder = createRequirementsBuilder(config, facilitatorFor(fetchImpl));
-  return { config, signer, builder, facilitatorFor };
+  const defaultFetch = hooks.fetch ?? fetch;
+  const facilitatorFor: Runtime["facilitatorFor"] = (f, signalFor) => new BoundedFacilitatorClient({ url: config.facilitatorUrl, ...(signer === undefined ? {} : { signer }), fetch: f, signalFor });
+  const builder = createRequirementsBuilder(config, (signalFor) => facilitatorFor(defaultFetch, signalFor));
+  return { config, builder, facilitatorFor };
+}
+
+async function paymentRequired(runtime: Runtime, canonical: string, error?: string): Promise<Response> {
+  const required = await runtime.builder.paymentRequired(canonical, error);
+  return json(402, error === undefined ? {} : { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(required) });
+}
+
+function facilitatorError(error: unknown): Response {
+  if (error instanceof SettleCalledTwiceError) return json(502, { error: "internal" });
+  const kind = error instanceof FacilitatorUnavailableError ? error.kind : "facilitator_unavailable";
+  if (kind === "facilitator_registration_required") console.error("provider: facilitator registration required");
+  return json(502, { error: kind });
 }
 
 export async function handle(request: Request, runtime: Runtime, hooks: Hooks = {}): Promise<Response> {
@@ -61,72 +88,74 @@ export async function handle(request: Request, runtime: Runtime, hooks: Hooks = 
   if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
   if (url.search !== "") return json(404, { error: "not_found" });
   const deadline = new RequestDeadline(hooks.now ?? Date.now);
+  try {
+    return await handleWithin(request, url, runtime, hooks, deadline);
+  } finally {
+    deadline.release();
+  }
+}
+
+async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks: Hooks, deadline: RequestDeadline): Promise<Response> {
   const canonical = `${url.origin}${RESOURCE_PATH}`;
   const fetchImpl = hooks.fetch ?? fetch;
 
-  // isolate の最初の要求: facilitator の `/supported`（上限 5 秒、要求の期限の内側）。
+  // isolate の最初の要求: facilitator の `/supported`（上限 5 秒、要求の期限の内側。並行は 1 本）。
   try {
-    await within(deadline.budgetFor(INIT_TIMEOUT_MS), runtime.builder.ready());
+    await runtime.builder.ready(deadline.stageSignal(INIT_TIMEOUT_MS));
   } catch {
     return json(503, { error: "facilitator_unavailable" });
   }
 
   const header = request.headers.get("payment-signature");
-  if (header === null || header === "") {
-    const required = await runtime.builder.paymentRequired(canonical);
-    return json(402, {}, { "payment-required": encodePaymentRequiredHeader(required) });
-  }
+  if (header === null || header === "") return paymentRequired(runtime, canonical);
 
-  // 0. decode と `accepted` の完全一致。
-  let payload: PaymentPayload;
+  // 0. decode、形の検査、`accepted` の完全一致（どれも固定の 402。facilitator もデータ源も呼ばない）。
+  let decoded: unknown;
   try {
-    payload = decodePaymentSignatureHeader(header);
+    decoded = decodePaymentSignatureHeader(header);
   } catch {
-    return json(402, { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(await runtime.builder.paymentRequired(canonical, "payment_invalid")) });
+    return paymentRequired(runtime, canonical, "payment_invalid");
   }
+  if (!isRecord(decoded) || decoded["x402Version"] !== 2 || !isRecord(decoded["accepted"]) || !isRecord(decoded["payload"])) {
+    return paymentRequired(runtime, canonical, "payment_invalid");
+  }
+  const payload = decoded as unknown as PaymentPayload;
   const requirements = await runtime.builder.match(payload);
-  if (requirements === undefined || payload.x402Version !== 2) {
-    return json(402, { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(await runtime.builder.paymentRequired(canonical, "no_matching_requirements")) });
-  }
+  if (requirements === undefined) return paymentRequired(runtime, canonical, "no_matching_requirements");
 
-  // 1. データ（支払いの前。取れなければ facilitator を呼ばない）。
-  let snapshot: Snapshot;
+  // 1. データ（支払いの前。取れない・形が違う・直列化して 64 KiB を超える → facilitator を呼ばない）。
+  let bodyText: string;
   try {
-    snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, deadline.budgetFor(DATA_TIMEOUT_MS), fetchImpl, hooks.now);
+    const snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, deadline.stageSignal(DATA_TIMEOUT_MS), fetchImpl, hooks.now);
+    bodyText = serializeSnapshot(snapshot).text;
   } catch (error) {
-    return json(502, { error: error instanceof DataUnavailableError ? "data_unavailable" : "data_unavailable" });
+    if (!(error instanceof DataUnavailableError) && !(error instanceof DeadlineError)) console.error("provider: data stage failed");
+    return json(502, { error: "data_unavailable" });
   }
 
-  // 2. verify。
-  const facilitator = runtime.facilitatorFor(fetchImpl);
+  // 2. verify（段の signal の内側で署名・送出・読取）。
+  const facilitator = runtime.facilitatorFor(fetchImpl, (stage) => deadline.stageSignal(stage === "verify" ? VERIFY_TIMEOUT_MS : stage === "settle" ? SETTLE_TIMEOUT_MS : INIT_TIMEOUT_MS));
   let verified: { isValid: boolean };
   try {
-    verified = await within(deadline.budgetFor(VERIFY_TIMEOUT_MS), facilitator.verify(payload, requirements));
+    verified = await facilitator.verify(payload, requirements);
   } catch (error) {
-    const kind = error instanceof FacilitatorUnavailableError ? error.kind : "facilitator_unavailable";
-    if (kind === "facilitator_registration_required") console.error("provider: facilitator registration required");
-    return json(502, { error: kind });
+    return facilitatorError(error);
   }
-  if (!verified.isValid) {
-    return json(402, { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(await runtime.builder.paymentRequired(canonical, "payment_invalid")) });
-  }
+  if (!verified.isValid) return paymentRequired(runtime, canonical, "payment_invalid");
 
   // 3. settle（1 回だけ。残りが足りなければ呼ばない: 送出前なので資金は動かない）。
   if (!deadline.canSettle()) return json(503, { error: "provider_busy" });
   let settled: unknown;
   try {
-    settled = await within(deadline.budgetFor(SETTLE_TIMEOUT_MS), facilitator.settle(payload, requirements));
+    settled = await facilitator.settle(payload, requirements);
   } catch (error) {
-    if (error instanceof SettleCalledTwiceError) return json(500, { error: "internal" });
-    const kind = error instanceof FacilitatorUnavailableError ? error.kind : "facilitator_unavailable";
-    if (kind === "facilitator_registration_required") console.error("provider: facilitator registration required");
-    return json(502, { error: kind });
+    return facilitatorError(error);
   }
   const receipt = checkReceipt(runtime.config.network, runtime.config.table.network, payload, settled);
   if (!receipt.ok) return json(502, { error: receipt.reason });
 
-  // 4. 200 + PAYMENT-RESPONSE + 本文（1 で取った値）。
-  return json(200, snapshot, { "payment-response": receipt.header });
+  // 4. 200 + PAYMENT-RESPONSE + 本文（1 で直列化した文字列そのもの）。
+  return respond(200, bodyText, { "payment-response": receipt.header });
 }
 
 /** Workers の入口。config の失敗は isolate の全要求で 500 固定文。 */
