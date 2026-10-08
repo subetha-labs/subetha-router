@@ -12,7 +12,7 @@ import { address } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { Credential } from "mppx";
 
-import { createCredentialHookOf, createMppSolanaOutbound, MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS, MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS, MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS, type MppSolanaOutbound, type MppSolanaOutboundOptions } from "../../src/adapters/outbound/mpp-solana.js";
+import { createAtaEvidence, createCredentialHookOf, createMppSolanaOutbound, MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS, MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS, MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS, type MppSolanaOutbound, type MppSolanaOutboundOptions } from "../../src/adapters/outbound/mpp-solana.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -274,8 +274,8 @@ describe("成功: 静的と動的が delivered（pull。pay-kit の server が�
     const after = h.mark();
     const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
     expect(h.since(after)).toEqual(["getAccountInfo"]);
-    // purchase の中の読み直し（core は settle の前と後に 402 を読み直す）: 時計が 45 秒進んでも（challenge の期限の内側 = quote の寿命の内側）読まない。
-    h.clock.now += 45_000;
+    // purchase の中の読み直し（core は settle の前と後に 402 を読み直す）: 時計が 70 秒進んでも（challenge の期限の内側 = quote の寿命の内側）読まない。
+    h.clock.now += 70_000;
     await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
     await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
     expect(h.since(after)).toEqual(["getAccountInfo"]);
@@ -290,6 +290,34 @@ describe("成功: 静的と動的が delivered（pull。pay-kit の server が�
     h.routes[PROVIDER_HOST] = other.port;
     await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
     expect(h.since(after).filter((m) => m === "getAccountInfo")).toHaveLength(3);
+  });
+
+  test("宛先 ATA の証拠（純粋）: 当たりは新しい quote の寿命まで延ばす、期限の過ぎた証拠は使わない、数では捨てない（有効な証拠は何件でも残る）", () => {
+    let now = 1_000_000;
+    const evidence = createAtaEvidence(() => now);
+    expect(evidence.has("A", now + 10_000)).toBe(false);
+    evidence.add("A", now + 10_000);
+    expect(evidence.has("A", now + 5_000)).toBe(true);
+    // 新しい quote（寿命が後）で当たると延びる: 元の期限の後でもまだ有効。
+    expect(evidence.has("A", now + 60_000)).toBe(true);
+    now += 20_000;
+    expect(evidence.has("A", now)).toBe(true);
+    // 期限（60 秒）を過ぎると無い。
+    now += 50_000;
+    expect(evidence.has("A", now + 1)).toBe(false);
+    // 数では捨てない: 5,000 件の有効な証拠が残る。期限の過ぎたものだけ掃かれる。
+    for (let i = 0; i < 5_000; i += 1) evidence.add(`B${i}`, now + 1_000_000);
+    expect(evidence.size).toBe(5_000);
+    evidence.add("C", now + 1);
+    now += 2;
+    evidence.add("D", now + 1_000_000);
+    expect(evidence.size).toBe(5_001);
+    expect(evidence.has("B0", now)).toBe(true);
+    expect(evidence.has("C", now)).toBe(false);
+    // add は後ろへしか動かさない（短い寿命の quote が長い証拠を縮めない）。
+    evidence.add("D", now + 10);
+    now += 100;
+    expect(evidence.has("D", now)).toBe(true);
   });
 
   test("feePayer: false の上流（push）は候補外（pull だけ。D-23）: readChallenge は空、pay は destination_offer_not_allowed", async () => {
