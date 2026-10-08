@@ -12,7 +12,7 @@ import { address } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { Credential } from "mppx";
 
-import { createMppSolanaOutbound, MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS, MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS, MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS, type MppSolanaOutbound, type MppSolanaOutboundOptions } from "../../src/adapters/outbound/mpp-solana.js";
+import { createCredentialHookOf, createMppSolanaOutbound, MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS, MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS, MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS, type MppSolanaOutbound, type MppSolanaOutboundOptions } from "../../src/adapters/outbound/mpp-solana.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -368,6 +368,59 @@ describe("送出前の失敗（§4.3 の各段。署名も送出もしない、�
     expect(h.upstream.seen.payCalls).toBe(1);
   });
 
+  test("challenge の期限は署名の直前と送出の直前にも見る（FR-53）: 承認の期限の内側でも challenge が切れていれば destination_offer_expired（署名の前なら署名 0、送出の前なら署名 1・送出 0）。予約の記録が失敗すれば destination_message_record_unavailable", async () => {
+    const h = await harness();
+    const offer = (await h.rail.readChallenge(ROUTE))[0]!;
+    // pay-kit の challenge は 5 分で切れる。承認の期限は 10 分先。
+    h.hooks.afterReserve = () => { h.clock.now += 5 * 60_000 + 1; };
+    expect(await h.rail.pay(requestOf(h, offer))).toEqual({ outcome: "not_sent", reason: "destination_offer_expired" });
+    delete h.hooks.afterReserve;
+    h.clock.now = Date.now();
+    h.reservations.clear();
+    expect(h.signer.signCount()).toBe(0);
+    h.hooks.afterSign = () => { h.clock.now += 5 * 60_000 + 1; };
+    expect(await h.rail.pay(requestOf(h, offer))).toEqual({ outcome: "not_sent", reason: "destination_offer_expired" });
+    delete h.hooks.afterSign;
+    h.clock.now = Date.now();
+    h.reservations.clear();
+    expect(h.signer.signCount()).toBe(1);
+    expect(h.upstream.seen.payCalls).toBe(0);
+    expect(await h.rail.pay(requestOf(h, offer, { reserveMessage: async () => { throw new Error("journal down"); } }))).toEqual({ outcome: "not_sent", reason: "destination_message_record_unavailable" });
+    expect(h.signer.signCount()).toBe(1);
+  });
+
+  test("hook（createCredential）は検査済みの wire を、選んだ challenge にだけ、1 回だけ返す（§4.6。直接呼ぶ）", async () => {
+    const chosen = { used: false } as Parameters<typeof createCredentialHookOf>[0];
+    const hook = createCredentialHookOf(chosen);
+    const challenge = { id: "abc", realm: "r", method: "solana", intent: "charge", request: { amount: "1" } };
+    await expect(hook({ challenge })).rejects.toThrow(/before the wire exists/);
+    chosen.id = "abc";
+    chosen.wire = new Uint8Array([2, 0, 1]);
+    await expect(hook({ challenge: { ...challenge, id: "other" } })).rejects.toThrow(/different challenge/);
+    await expect(hook({ challenge: "x" })).rejects.toThrow(/different challenge/);
+    const credential = await hook({ challenge });
+    const decoded = Credential.deserialize(credential) as unknown as { challenge: { id: string }; payload: { type: string; transaction: string } };
+    expect(decoded.challenge.id).toBe("abc");
+    expect(decoded.payload).toEqual({ type: "transaction", transaction: Buffer.from([2, 0, 1]).toString("base64") });
+    await expect(hook({ challenge })).rejects.toThrow(/twice/);
+  });
+
+  test("複数の challenge を返す server: 候補は両方 offer になるが、pay は SDK が選んだ challenge と承認値を照合する（選び直さない）→ 承認が 2 つ目なら destination_offer_changed", async () => {
+    const h = await harness();
+    h.upstream.state.extraChallenge = "first";
+    const offers = await h.rail.readChallenge(ROUTE);
+    expect(offers.map((o) => o.amount).sort()).toEqual(["10000", "20000"]);
+    const real = offers.find((o) => o.amount === "10000")!;
+    // SDK は先頭（額 2 倍の写し）を選ぶ → 承認した 10000 の offer とは違う。
+    expect(await h.rail.pay(requestOf(h, real))).toEqual({ outcome: "not_sent", reason: "destination_offer_changed" });
+    expect(h.signer.signCount()).toBe(0);
+    // 写しが末尾なら SDK は本物を選び、本物の承認は通る（写しの承認は changed）。
+    h.upstream.state.extraChallenge = "last";
+    const copy = offers.find((o) => o.amount === "20000")!;
+    expect(await h.rail.pay(requestOf(h, copy))).toEqual({ outcome: "not_sent", reason: "destination_offer_changed" });
+    expect((await h.rail.pay(requestOf(h, real))).outcome).toBe("paid");
+  });
+
   test("読み直しで challenge が変わっていれば destination_offer_changed（同じ host の別の上流 = 額が違う）。期限切れの challenge は destination_offer_expired", async () => {
     const h = await harness();
     const offer = (await h.rail.readChallenge(ROUTE))[0]!;
@@ -412,8 +465,8 @@ describe("送出後の結果（要件 FR-53 の表。pull の列）", () => {
       h.upstream.state.pay = mode;
       const { result } = await quoteAndPay(h);
       expect(result, mode).toMatchObject({ outcome: "paid_no_data", reason });
-      expect((result as { receiptRef?: string }).receiptRef, mode).toBe(h.upstream.seen.receipts[0]!.length > 0 ? (result as { receiptRef: string }).receiptRef : "");
-      expect((result as { receiptRef: string }).receiptRef.length).toBeGreaterThan(10);
+      // 受領の参照は pay-kit が出した領収そのもの。
+      expect((result as { receiptRef?: string }).receiptRef, mode).toBe(h.upstream.seen.receipts[0]);
     }
   });
 
@@ -507,6 +560,12 @@ async function composed(h: Harness): Promise<{ core: RouterCore; inbound: StubIn
       approvalTtlMs: 60_000,
       routes: { [ROUTE]: { routeId: ROUTE, canonicalPath: `/v1/routes/${ROUTE}/resource`, rail: "mpp", source: { amount: "20000", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, network: "eip155:84532", payTo: "0x00000000000000000000000000000000000000b1" }, destination: { scheme: "solana/charge", network: SOL, asset: MINT, payTo: h.recipient } } },
       budget: { maxPurchases: 10, buckets: [{ network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", maxTotal: "100000", maxPerPurchase: "20000" }, { network: SOL, asset: MINT, maxTotal: "100000", maxPerPurchase: "20000" }] },
+      dynamic: {
+        enabled: true,
+        profiles: { [PROFILE_ID]: { profileId: PROFILE_ID, sourceRail: "x402", source: { network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, payTo: "0x00000000000000000000000000000000000000b1" }, rail: "mpp", destination: { scheme: "solana/charge", network: SOL, asset: MINT, decimals: 6 }, par: true, maxUpstreamAmount: "20000", fee: { flat: "1000", bps: 0, min: "1000" } } },
+        budget: { maxPurchases: 10, buckets: [{ network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", maxTotal: "100000", maxPerPurchase: "40000" }, { network: SOL, asset: MINT, maxTotal: "100000", maxPerPurchase: "40000" }] },
+        denyHosts: [],
+      },
     },
     x402: { upstreams: { [ROUTE]: UPSTREAM } },
   };
@@ -517,6 +576,7 @@ async function composed(h: Harness): Promise<{ core: RouterCore; inbound: StubIn
     ROUTER_PRINCIPAL_TOKENS: "judge:public",
     ROUTER_ADAPTER_MODE: "real",
     ROUTER_SUBETHA_FACILITATOR_URL: "https://subetha.other.test",
+    ROUTER_X402_INBOUND_FACILITATOR_URL: "https://legacy.facilitator.test",
     ROUTER_SOLANA_RPC_URL: `http://${RPC_HOST}`,
     ROUTER_CANONICAL_BASE_URL: "https://router.test",
     ROUTER_JOURNAL_PATH: path.join(dir, "journal.ndjson"),
@@ -533,7 +593,7 @@ async function composed(h: Harness): Promise<{ core: RouterCore; inbound: StubIn
   await rails.startup!();
   const log: string[] = [];
   const inbound = new StubInbound(log);
-  const core = await createRouterCore({ journalPath: config.journalPath, config: config.router, inbound, outbound: rails.outbound, note: () => {}, balanceOf: async (id, asset) => { log.push("balance"); return rails.balanceOf!(id, asset); } });
+  const core = await createRouterCore({ journalPath: config.journalPath, config: config.router, inbound, outbound: rails.outbound, note: () => {}, balanceOf: async (id, asset) => { log.push("balance"); return rails.balanceOf!(id, asset); }, dynamic: { ledgerDir: path.join(dir, "dynamic-quotes") } });
   opened.push(core);
   return { core, inbound, log };
 }
@@ -565,5 +625,23 @@ describe("合成: Solana 宛の MPP 送信（設計 §2.2、FR-54）", () => {
     expect(await core.purchase({ principalId: "judge", requestId: "req-3", quoteId: q3.quoteId, approval: q3.quoteId, credential: inbound.credentialFor(q3.source.offer) })).toMatchObject({ status: "awaiting_payment", code: "operator_funds_unavailable" });
     expect(h.signer.signCount()).toBe(1);
     expect(log.filter((e) => e === "verify")).toHaveLength(1);
+  });
+
+  test("動的プロファイルが core を通して delivered（quote_url → purchase）。動的の core でも残高の事前確認は受信の verify の前、不足 → operator_funds_unavailable", async () => {
+    const h = await harness({ routerBalance: "1000000" });
+    const { core, inbound, log } = await composed(h);
+    const quote = await core.quote({ principalId: "judge", requestId: "req-d1", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "judge" });
+    expect(quote.ok, JSON.stringify(quote)).toBe(true);
+    const q = quote as Extract<typeof quote, { ok: true }>;
+    const before = h.mark();
+    const purchase = await core.purchase({ principalId: "judge", requestId: "req-d1", quoteId: q.quoteId, approval: q.quoteId, credential: inbound.credentialFor(q.source.offer), ownerKey: q.ownerKey!, source: "judge" });
+    expect(purchase.status, JSON.stringify(purchase)).toBe("delivered");
+    expect(log).toEqual(["balance", "verify", "settle"]);
+    expect(h.since(before)[0]).toBe("getTokenAccountBalance");
+    expect(h.upstream.seen.paths).toEqual(["/v1/price?symbol=ETH"]);
+    h.rpc.state.atas = h.rpc.state.atas.map((a) => (a.address === h.routerAta ? { ...a, amount: "1" } : a));
+    const q2 = (await core.quote({ principalId: "judge", requestId: "req-d2", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "judge" })) as Extract<typeof quote, { ok: true }>;
+    expect(await core.purchase({ principalId: "judge", requestId: "req-d2", quoteId: q2.quoteId, approval: q2.quoteId, credential: inbound.credentialFor(q2.source.offer), ownerKey: q2.ownerKey!, source: "judge" })).toMatchObject({ status: "awaiting_payment", code: "operator_funds_unavailable" });
+    expect(h.signer.signCount()).toBe(1);
   });
 });

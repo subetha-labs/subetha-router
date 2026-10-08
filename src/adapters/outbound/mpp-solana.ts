@@ -307,6 +307,28 @@ function base58Of(bytes: Uint8Array): string {
   return getBase58Decoder().decode(bytes);
 }
 
+/** `pay` の中で hook に渡す状態: 選んだ challenge の id と、検査済みの wire。`used` で 1 回だけ。 */
+export interface ChosenCredential {
+  id?: string;
+  wire?: Uint8Array;
+  used: boolean;
+}
+
+/**
+ * `createCredential` の hook（§4.6）: **検査済みの wire を返すだけ**。渡された challenge が選んだもの（`chosen.id`）でなければ throw、wire がまだ無ければ throw、
+ * 2 回目は throw。SDK には署名器も鍵も渡さない（SR-M3）。純粋（試験は直接呼ぶ）。
+ */
+export function createCredentialHookOf(chosen: ChosenCredential): (args: { readonly challenge: unknown }) => Promise<string> {
+  return async ({ challenge }) => {
+    const id = isRecord(challenge) ? challenge["id"] : undefined;
+    if (chosen.used || chosen.wire === undefined || chosen.id === undefined || id !== chosen.id) {
+      throw new Error("mpp solana outbound: createCredential called for a different challenge, before the wire exists, or twice");
+    }
+    chosen.used = true;
+    return Credential.serialize({ challenge, payload: { type: "transaction", transaction: Buffer.from(chosen.wire).toString("base64") } } as never);
+  };
+}
+
 export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppSolanaOutbound {
   const now = options.now ?? Date.now;
   const unpaidTimeoutMs = options.unpaidTimeoutMs ?? MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS;
@@ -580,16 +602,8 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
 
       // 2. 読み直し: SDK が選んだ challenge の view が、terms と offer で承認値と完全一致すること。
       const ctx = { routeId, operation: "pay_challenge" };
-      const chosen: { id?: string; wire?: Uint8Array; used: boolean } = { used: false };
-      const client = clientOf(endpoint.transport, ctx, async ({ challenge }) => {
-        // §4.6: hook は検査済みの wire を返すだけ。渡された challenge が選んだものでなければ throw。1 回だけ。
-        const id = isRecord(challenge) ? challenge["id"] : undefined;
-        if (chosen.used || chosen.wire === undefined || chosen.id === undefined || id !== chosen.id) {
-          throw new Error("mpp solana outbound: createCredential called for a different challenge or twice");
-        }
-        chosen.used = true;
-        return Credential.serialize({ challenge, payload: { type: "transaction", transaction: Buffer.from(chosen.wire).toString("base64") } } as never);
-      });
+      const chosen: ChosenCredential = { used: false };
+      const client = clientOf(endpoint.transport, ctx, createCredentialHookOf(chosen));
       let prepared: PreparedChallenge;
       try {
         prepared = await prepare(client, endpoint.url);
@@ -647,8 +661,9 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
       if (reservation !== "reserved") return notSent("destination_message_record_unavailable");
       hooks.afterReserve?.();
 
-      // 9. 期限と blockhash の鮮度（署名の直前）。
+      // 9. 期限（承認の期限と **challenge の期限**。FR-53）と blockhash の鮮度（署名の直前）。
       if (!(now() < request.deadlineMs)) return notSent("destination_deadline");
+      if (view.expiresAt !== undefined && !(view.expiresAt > now())) return notSent("destination_offer_expired");
       if (now() - fetchedAt > fetchToSignMs) return notSent("destination_blockhash_stale");
 
       // 10. 署名（写しを渡し、写しを保つ）と検証。
@@ -685,6 +700,7 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
         return notSent("destination_payload_mismatch");
       }
       if (!(now() < request.deadlineMs)) return notSent("destination_deadline");
+      if (view.expiresAt !== undefined && !(view.expiresAt > now())) return notSent("destination_offer_expired");
       if (now() - fetchedAt > sendWithinMs) return notSent("destination_blockhash_stale");
       hooks.beforeSend?.();
 

@@ -29,7 +29,8 @@ export type MppSolanaUpstreamPayMode =
   | "non-json"
   | "too-large"
   | "truncated"
-  | "stall-after-headers";
+  | "stall-after-headers"
+  | "hold";
 
 export interface MppSolanaUpstreamState {
   pay: MppSolanaUpstreamPayMode;
@@ -37,6 +38,13 @@ export interface MppSolanaUpstreamState {
   challengeDelayMs: number;
   /** 402 ではなく 200 を返す（challenge が読めない形）。 */
   noChallenge: boolean;
+  /**
+   * 402 の `WWW-Authenticate` に **もう 1 つの challenge** を足す（pay-kit の challenge の写し: 額 2 倍、別の id。HMAC は検証しないので Router は候補として読める）。
+   * `first` = 足した方を先頭に（SDK はそれを選ぶ）、`last` = 末尾に。
+   */
+  extraChallenge: "none" | "first" | "last";
+  /** `pay: "hold"`: 支払い要求に **headers も出さずに** この時間待ってから普通に答える（Router の有料要求の期限の試験）。 */
+  holdMs: number;
 }
 
 export interface MppSolanaUpstreamSeen {
@@ -78,6 +86,16 @@ export interface MppSolanaUpstreamOptions {
   readonly tls?: TlsMaterial;
 }
 
+/** pay-kit の challenge（`Payment id="…", realm="…", …, request="<base64url>"`）の写しを、額 2 倍・別の id で作る。 */
+function doubledCopyOf(header: string): string {
+  const id = /id="([^"]+)"/.exec(header)?.[1] ?? "";
+  const request = /request="([^"]+)"/.exec(header)?.[1] ?? "";
+  const decoded = JSON.parse(Buffer.from(request, "base64url").toString("utf8")) as Record<string, unknown>;
+  const doubled = { ...decoded, amount: String(BigInt(String(decoded["amount"])) * 2n) };
+  const copy = header.replace(`id="${id}"`, `id="${id.slice(0, -2)}zz"`).replace(`request="${request}"`, `request="${Buffer.from(JSON.stringify(doubled), "utf8").toString("base64url")}"`);
+  return copy;
+}
+
 function rewriteReceipt(header: string, patch: (receipt: Record<string, unknown>) => Record<string, unknown>): string {
   const decoded = JSON.parse(Buffer.from(header, "base64url").toString("utf8")) as Record<string, unknown>;
   return Buffer.from(JSON.stringify(patch(decoded)), "utf8").toString("base64url");
@@ -98,7 +116,7 @@ export async function startMppSolanaUpstream(options: MppSolanaUpstreamOptions):
     { accept: ["mpp"], payTo: recipient } as never,
   );
   const handler = pay.fetch(gate, async () => Response.json({ ok: true, source: "mpp-solana-provider" }));
-  const state: MppSolanaUpstreamState = { pay: "ok", challengeDelayMs: 0, noChallenge: false };
+  const state: MppSolanaUpstreamState = { pay: "ok", challengeDelayMs: 0, noChallenge: false, extraChallenge: "none", holdMs: 0 };
   const seen: MppSolanaUpstreamSeen = { challengeCalls: 0, payCalls: 0, credentials: [], receipts: [], paths: [] };
 
   const handle = async (request: http.IncomingMessage, response: http.ServerResponse): Promise<void> => {
@@ -131,10 +149,16 @@ export async function startMppSolanaUpstream(options: MppSolanaUpstreamOptions):
       return;
     }
     const outHeaders = Object.fromEntries(out.headers.entries());
+    if (!paying && state.extraChallenge !== "none" && typeof outHeaders["www-authenticate"] === "string") {
+      const original = outHeaders["www-authenticate"];
+      const extra = doubledCopyOf(original);
+      outHeaders["www-authenticate"] = state.extraChallenge === "first" ? `${extra}, ${original}` : `${original}, ${extra}`;
+    }
     let status = out.status;
     let body = Buffer.from(await out.arrayBuffer());
     const receipt = out.headers.get("payment-receipt");
     if (paying && receipt !== null) seen.receipts.push(receipt);
+    if (paying && state.pay === "hold") await new Promise((resolve) => setTimeout(resolve, state.holdMs));
     if (paying && receipt !== null) {
       const mode = state.pay;
       const patch = (fn: (r: Record<string, unknown>) => Record<string, unknown>): void => {
