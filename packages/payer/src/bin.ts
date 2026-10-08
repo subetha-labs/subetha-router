@@ -6,6 +6,9 @@
  * - 各サブコマンドの実装は P-3〜P-5 で足す。P-1a では振り分けと拒否だけ。
  */
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
 const USAGE = [
   "usage: subetha-payer <command>",
   "  wallet new|address|balance   create or inspect the key (never prints secrets)",
@@ -41,7 +44,16 @@ export async function main(argv: readonly string[], execArgv: readonly string[] 
   }
 }
 
-const invokedDirectly = process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
-if (invokedDirectly) {
+/** 入口の判定: `import.meta.url` は realpath（symlink を解決した絶対 path）なので、`argv[1]` も realpath にしてから `pathToFileURL` で比べる（`#`・`%`・symlink・`..` を含む path でも壊れない）。 */
+function invokedAsEntry(argv1: string | undefined): boolean {
+  if (argv1 === undefined) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsEntry(process.argv[1])) {
   main(process.argv.slice(2)).then((code) => process.exit(code), () => process.exit(2));
 }

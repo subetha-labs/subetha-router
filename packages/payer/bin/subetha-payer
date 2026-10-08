@@ -2,4 +2,15 @@
 # subetha-payer launcher. `exec` replaces this shell with node, so no inspector-enabled parent process shares the terminal
 # (design docs/agent-payer-design.md §3.1). `--disable-sigusr1` closes the SIGUSR1 inspector channel that any same-user process could open.
 # dist/bin.js refuses to run without the flag, so `node dist/bin.js` cannot bypass this launcher.
-exec node --disable-sigusr1 "$(dirname "$0")/../dist/bin.js" "$@"
+# npm installs this file as a symlink (<prefix>/bin/subetha-payer -> <package>/bin/subetha-payer), so the symlink chain is
+# resolved first and dist/ is located relative to the real file.
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname "$self")/$link" ;;
+  esac
+done
+here="$(cd "$(dirname "$self")" && pwd)"
+exec node --disable-sigusr1 "$here/../dist/bin.js" "$@"
