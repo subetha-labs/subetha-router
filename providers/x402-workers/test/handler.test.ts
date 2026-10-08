@@ -218,6 +218,15 @@ describe("支払いつきの GET: 各段の失敗と成功（arc）", () => {
     const deepResponse = await handle(new Request(RESOURCE, { headers: { "payment-signature": btoa(deep) } }), runtime, { fetch: fake.fetch });
     expect(deepResponse.status).toBe(402);
     expect(await deepResponse.json()).toEqual({ error: "payment_invalid" });
+    // 上限の内側の、object の深い入れ子の accepted（一致の判定で落ちない → 402、データ源も呼ばない）。
+    let nested: unknown = "leaf";
+    for (let i = 0; i < 500; i += 1) nested = { n: nested };
+    const nestedAccepted = { ...accepted, extra: { ...accepted.extra, nested } };
+    const nestedHeader = encodePaymentSignatureHeader({ x402Version: 2, resource: { url: RESOURCE }, accepted: nestedAccepted, payload: { signature: "0x", authorization: { from: ARC_ADDRESS } } } as never);
+    expect(nestedHeader.length).toBeLessThan(MAX_PAYMENT_HEADER_CHARS);
+    const nestedResponse = await handle(new Request(RESOURCE, { headers: { "payment-signature": nestedHeader } }), runtime, { fetch: fake.fetch });
+    expect(nestedResponse.status).toBe(402);
+    expect(await nestedResponse.json()).toEqual({ error: "payment_invalid" });
     // 長すぎるヘッダ（中身が一致していても）は decode せずに 402。
     const padded = { x402Version: 2, resource: { url: RESOURCE }, accepted, payload: { signature: "0x", authorization: { from: ARC_ADDRESS }, pad: "p".repeat(MAX_PAYMENT_HEADER_CHARS) } };
     const longHeader = encodePaymentSignatureHeader(padded as never);
@@ -336,6 +345,29 @@ describe("支払いつきの GET: 各段の失敗と成功（arc）", () => {
     const r2 = await handle(new Request(RESOURCE), fresh, { fetch: cold.fetch, deadline: new RequestDeadline(Date.now, 0) });
     expect(r2.status).toBe(503);
     expect(facilitatorCalls(cold, "supported")).toHaveLength(0);
+  });
+
+  test("settle の成功を確かめた後に期限が過ぎていても 200（設計 §2.2 の段 4 の例外）。404/405 でも入口の timer を外す", async () => {
+    const fake = fakeFetch("arc");
+    let now = 1_000_000;
+    const runtime = arcRuntime(fake, () => now);
+    const { required } = await challenge(fake, runtime);
+    const original = fake.fetch;
+    const slowSettle = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const response = await original(input, init);
+      if (url === `${FACILITATOR}/settle`) now += 60_000; // settle の応答の後に時計が期限を越える
+      return response;
+    }) as typeof fetch;
+    const r = await handle(paidRequest(required.accepts[0]), runtime, { fetch: slowSettle, now: () => now });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("payment-response")).toBeTruthy();
+    expect(facilitatorCalls(fake, "settle")).toHaveLength(1);
+    // 404 の出口でも release される: 短い期限の timer が後で signal を切らない。
+    const entry = new RequestDeadline(Date.now, 30);
+    expect((await handle(new Request("https://provider-x402-arc.subethalabs.com/v1/other"), runtime, { fetch: fake.fetch, deadline: entry })).status).toBe(404);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(entry.signal.aborted).toBe(false);
   });
 
   test("期限: 残りが 12 秒未満なら settle を呼ばず 503 provider_busy（verify までは通る）", async () => {

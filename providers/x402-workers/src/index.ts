@@ -87,12 +87,13 @@ function facilitatorError(error: unknown): Response {
 }
 
 export async function handle(request: Request, runtime: Runtime, hooks: Hooks = {}): Promise<Response> {
-  const url = new URL(request.url);
-  if (url.pathname !== RESOURCE_PATH) return json(404, { error: "not_found" });
-  if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
-  if (url.search !== "") return json(404, { error: "not_found" });
   const deadline = hooks.deadline ?? new RequestDeadline(hooks.now ?? Date.now);
+  // 期限の timer はどの出口でも外す（404/405 も含む）。
   try {
+    const url = new URL(request.url);
+    if (url.pathname !== RESOURCE_PATH) return json(404, { error: "not_found" });
+    if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
+    if (url.search !== "") return json(404, { error: "not_found" });
     return await handleWithin(request, url, runtime, hooks, deadline);
   } finally {
     deadline.release();
@@ -177,7 +178,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   if (!receipt.ok) return json(502, { error: receipt.reason });
 
   // 4. 200 + PAYMENT-RESPONSE + 本文（1 で直列化した文字列そのもの）。settle の後は I/O も署名も無い（領収の検査と封筒の組み立てだけ）。
-  // ここで期限が過ぎていても 200 を返す: 資金は動いており、502 にすれば確かめられた成功を `unknown` に変えるだけ（設計 §2.2 の表の 1 行目）。
+  // ここで期限が過ぎていても 200 を返す: 資金は動いており、502 にすれば確かめられた成功を `unknown` に変えるだけ（設計 §2.2 の段 4 の例外）。
   return respond(200, bodyText, { "payment-response": receipt.header });
 }
 

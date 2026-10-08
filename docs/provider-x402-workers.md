@@ -54,7 +54,7 @@ settle に入る前に残りが **12 秒未満**なら settle を呼ばずに **
 | 1 | データを取る（Hyperliquid）。検証（§2.3 の形）と大きさ（64 KiB）までここで終える | 2 秒 | **502** `{ error: "data_unavailable" }`。facilitator は呼ばない（「払ったのにデータが無い」を作らない） |
 | 2 | `/verify`（自前の client。§3.2） | 4 秒 | `isValid: false` → **402**（本文 `{ error: "payment_invalid" }`。facilitator の文言は透過しない）。HTTP 不達・期限・形違い → **502** `{ error: "facilitator_unavailable" }`（資金は動いていないが、Provider からは断定できないので `unknown` に揃える。Router は `unknown` を保ち、買い直さない） |
 | 3 | `/settle` **1 回だけ**（§3.2 の guard。SDK の `settlePayment` は使わない） | min(20 秒, 残り) | 下の表 |
-| 4 | **200** + `PAYMENT-RESPONSE` + 本文（§2.3。1 で取った値を返すだけ。`content-length` と `content-type: application/json` を付け、本文は 1 回の `end` で送る。署名（Arc の売り手証明）と応答の本文の読み書きも要求の期限の内側） | — | 領収を受け取った後に本文の送出で接続が切れれば Router は `paid_no_data`（Provider からは防げない。Router は再送しない） |
+| 4 | **200** + `PAYMENT-RESPONSE` + 本文（§2.3。1 で取った値を返すだけ。`content-length` と `content-type: application/json` を付け、本文は 1 回の `end` で送る。署名（Arc の売り手証明）と応答の本文の読み書きも要求の期限の内側。**例外**: settle の成功を確かめた後に期限が過ぎていても 200 を返す（settle の後に残るのは領収の検査と封筒の組み立てだけで、I/O も署名も無い。ここで 502 にすれば確かめられた成功を `unknown` に変えるだけで、Router を守らない）） | — | 領収を受け取った後に本文の送出で接続が切れれば Router は `paid_no_data`（Provider からは防げない。Router は再送しない） |
 
 settle の結果の表（送出後なので、成功を確かめられたとき以外は **`unknown` を Router に伝える = 領収なしの 502**）:
 
