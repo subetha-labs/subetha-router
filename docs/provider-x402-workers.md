@@ -219,4 +219,7 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
   - Arc の accepts は §2.1 と完全一致（`payTo` は上の address、`extra: { name: "USDC", version: "2", assetTransferMethod: "eip3009" }`、`maxTimeoutSeconds: 30`）。2 回で同一（V-6・V-12: `extra` の鍵は固定、要求ごとの変化なし）。応答時間 0.63 秒・0.29 秒。
   - Solana の accepts は §2.1 のとおりで、`extra` は `{ feePayer: "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5" }` だけ（x402.org の実 `/supported` から。Memo・`recentBlockhash` 無し）。2 回で同一。応答時間 0.51 秒・0.34 秒。
   - 両方の accepts を Router の候補検査（`checkDynamicX402Offer` に表の Arc の宛先、`checkSvmOffer` に表の Solana の範囲）に手元で掛けて拒否なし（AC-P1 を実物で確認）。
-- 残り: AC-P3（実 facilitator への有料 probe。資金が動く。owner の承認）と AC-P4（G-3′ の V-13）。Router 側は `UPSTREAM_ARC` / `UPSTREAM_SOL` を入れる G-1′ の PR（この記録と同じ PR）から UG-A / UG-S へ。
+- G-1′〜G-3′（`docs/DEPLOY.md` §2c、2026-10-08）: Router 側に URL を固定し（PR #89）、無効のまま配備（G-2′、`b-f0c9f0e`）、受け入れ用の Router から **6 件の購入がすべて `delivered`**（Arc 3 件: 静的・動的 x402・動的 MPP。Solana 3 件: 静的 MPP・動的 x402・動的 MPP）。
+  **AC-P3 / AC-P4（V-13）はこれで満たした**: 実 facilitator（Circle、x402.org）への有料要求が 6 件とも HTTP 200、`PAYMENT-RESPONSE` は `{ success, transaction, network, payer }` で `payer` は Router の署名者、
+  Circle の settle は Arc の tx（`transferWithAuthorization`、受取 `0x719e…` に 10,000 × 3）、x402.org の settle は devnet の signature（finalized、受取 ATA に 10,000 × 3）。purchase 全体の所要は 2.6〜5.4 秒で、Router の有料要求 30 秒・Worker の 26 秒の内側。`settlement_pending` は出ていない。
+  本文は 6 件とも §2.3 の契約（`payment.network` は Arc / Solana の値）。
