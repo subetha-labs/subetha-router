@@ -254,6 +254,18 @@ const DYNAMIC_FEE_MARGIN_BPS = 20_000;
 const DYNAMIC_FEE_X402_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_FEE_MPP_OUT = { flat: "1000", bps: 0, min: "1000" } as const;
 const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
+/**
+ * 動的予算の 1 件の上限（`dynamic.budget.buckets[].maxPerPurchase`）。区分は (network, asset) で、1 件の予約は源（上流の上限 + 手数料）と
+ * 宛先（上流の上限）の区分ごとの**合算**で見る（`src/core/dynamic.ts` の `perPurchaseLimitOf`、要件 FR-43）。
+ * 両レグが別の区分なら片レグの最大 = 11,000（手数料が規則の額のとき。Tempo 宛の MPP は gas の cap が手数料を押し上げ得て、
+ * 上流 10,000 のとき cap > 10,000 は 20,000 を超えて `per_purchase_limit`）で、20,000 は余裕。**x402 Solana ↔ MPP Solana の組**（`dyn-solmpp-to-sol`・`dyn-sol-to-solmpp`。行列 I-4・O-10）だけは
+ * 両レグが同じ Solana USDC の区分に落ちるので、その区分の上限は両レグの合計 10,000 + 1,000 + 10,000 = 21,000。
+ * G-4″ の AC-18（2026-10-08）で、この 2 組の quote が `per_purchase_limit` で止まって見つかった（`docs/DEPLOY.md` §2d）。
+ */
+const DYNAMIC_MAX_PER_PURCHASE = "20000";
+const DYNAMIC_MAX_PER_PURCHASE_SOL = String(
+  2n * BigInt(DYNAMIC_MAX_UPSTREAM_AMOUNT) + (BigInt(DYNAMIC_FEE_X402_OUT.flat) > BigInt(DYNAMIC_FEE_MPP_OUT.flat) ? BigInt(DYNAMIC_FEE_X402_OUT.flat) : BigInt(DYNAMIC_FEE_MPP_OUT.flat)),
+);
 
 /**
  * MPP 送信のプロファイルを登録するか。**2026-10-06 に `true`**（G-4 の 2 回目、owner の決定「1 も 2 も進めましょう」）。
@@ -419,9 +431,12 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
    * その network が**受信か送信のどちらか**で有効なら出す（受信と送信は同じ区分に合算する。送信の設計 §6.3、FR-29、D-14）。
    * Solana USDC の区分は x402 と MPP の 4 つの向きが同じ 1 区分（`docs/mpp-solana-design.md` §6.3、FR-43）。
    */
-  const railBuckets = (maxPerPurchase: string, maxTotal: string): Record<string, unknown>[] => [
+  // Solana USDC の区分だけ別の上限を取れる（動的予算: 両レグが同じ区分に落ちる組がある。`DYNAMIC_MAX_PER_PURCHASE_SOL`）。
+  const railBuckets = (maxPerPurchase: string, maxTotal: string, solMaxPerPurchase: string = maxPerPurchase): Record<string, unknown>[] => [
     ...(arcReceiver === undefined && !arcOutbound ? [] : [{ network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, maxTotal, maxPerPurchase }]),
-    ...(solReceiver === undefined && !solOutbound && solMppReceiver === undefined && !solMppOutbound ? [] : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase }]),
+    ...(solReceiver === undefined && !solOutbound && solMppReceiver === undefined && !solMppOutbound
+      ? []
+      : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase: solMaxPerPurchase }]),
   ];
   const profiles = dynamicProfilesOf(env, receiver, mppInboundEnabled, rails);
   return {
@@ -619,9 +634,9 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
               budget: {
                 maxPurchases: Number(env["SUBETHA_DYNAMIC_MAX_PURCHASES"] ?? "1000"),
                 buckets: [
-                  { network: INBOUND.network, asset: INBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
-                  { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: "20000" },
-                  ...railBuckets("20000", env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000"),
+                  { network: INBOUND.network, asset: INBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE },
+                  { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE },
+                  ...railBuckets(DYNAMIC_MAX_PER_PURCHASE, env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", DYNAMIC_MAX_PER_PURCHASE_SOL),
                 ],
               },
               // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
