@@ -138,10 +138,10 @@ async function boot(cfg: RouterConfig = config()): Promise<{ baseUrl: string; cl
   return { baseUrl, client: (source, timeouts = {}) => createRouterClient({ baseUrl, principalId: "alice", token: "tok-alice", allowUnissuedQuotes: true, ...(source === undefined ? {} : { source }), ...timeouts }) };
 }
 
-async function raw(baseUrl: string, method: string, pathname: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; body: Record<string, unknown>; text: string }> {
+async function raw(baseUrl: string, method: string, pathname: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; body: Record<string, unknown>; text: string; retryAfter: string | null }> {
   const response = await fetch(`${baseUrl}${pathname}`, { method, headers: { authorization: "Bearer tok-alice", "x-router-principal": "alice", ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "manual" });
   const text = await response.text();
-  return { status: response.status, body: (text === "" ? {} : JSON.parse(text)) as Record<string, unknown>, text };
+  return { status: response.status, body: (text === "" ? {} : JSON.parse(text)) as Record<string, unknown>, text, retryAfter: response.headers.get("retry-after") };
 }
 
 async function filesText(): Promise<string> {
@@ -218,6 +218,16 @@ describe("HTTP: R2 の動的 quote", () => {
     expect([conflict.status, conflict.body["error"]]).toEqual([409, "request_id_conflict"]);
     const limited = await raw(baseUrl, "POST", "/v1/quotes", {}, { routeId: PROFILE_ID, requestId: "r2", upstream: { url: URL_A } });
     expect([limited.status, limited.body["error"], limited.body["reason"]]).toEqual([429, "rate_limited", "rate_source"]);
+    // H-1: 時間で解ける 429（rate_limited）だけ Retry-After: 60 を付ける。
+    expect(limited.retryAfter).toBe("60");
+  });
+
+  test("H-1: 時間で解けない 429（dynamic_capacity）には Retry-After を付けない", async () => {
+    const { baseUrl } = await boot(config({ limits: { maxOutstandingQuotes: 1 } }));
+    expect((await raw(baseUrl, "POST", "/v1/quotes", {}, { routeId: PROFILE_ID, requestId: "c1", upstream: { url: URL_A } })).status).toBe(200);
+    const full = await raw(baseUrl, "POST", "/v1/quotes", {}, { routeId: PROFILE_ID, requestId: "c2", upstream: { url: URL_A } });
+    expect([full.status, full.body["error"]]).toEqual([429, "dynamic_capacity"]);
+    expect(full.retryAfter).toBeNull();
   });
 
   test("x-router-source が門の鍵: 別の送信元なら通り、同じ送信元は数えられる", async () => {
@@ -320,7 +330,9 @@ describe("client", () => {
     expect(await execute(client())).toMatchObject({ outcome: "rejected", error: "unknown_quote", status: 404 });
     const result = await c.execute({ quote, requestId: "r1", approval: { approved: true, quoteId: quote.quoteId }, credential: credentialFor(quote.source.offer) });
     expect(result).toMatchObject({ outcome: "delivered", paymentId: quote.paymentId, snapshot: BODY });
-    expect(await c.status(quote.paymentId)).toMatchObject({ found: false, status: 404 });
+    // H-1: ownerKey 無し・違う ownerKey はどちらも 404 = not_found（無いか読めない。存在は漏らさない）。
+    expect(await c.status(quote.paymentId)).toMatchObject({ found: false, status: 404, reason: "not_found" });
+    expect(await c.status(quote.paymentId, `${quote.ownerKey!.slice(0, -1)}${quote.ownerKey!.endsWith("A") ? "B" : "A"}`)).toMatchObject({ found: false, status: 404, reason: "not_found" });
     const status = await c.status(quote.paymentId, quote.ownerKey);
     expect(status).toMatchObject({ found: true, projection: { status: "delivered", upstream: { url: URL_A }, dynamic: { promoted: true } } });
   });
@@ -405,7 +417,8 @@ describe("client", () => {
     const { client } = await boot(config({ limits: { quotesPerMinutePerSource: 1 } }));
     expect((await client("fwd:1.1.1.1").quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r1" })).ok).toBe(true);
     expect((await client("fwd:2.2.2.2").quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r2" })).ok).toBe(true);
-    expect(await client("fwd:1.1.1.1").quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r3" })).toMatchObject({ ok: false, error: "rate_limited", status: 429 });
+    // H-1: client は reason と Retry-After（60 秒）を落とさない。
+    expect(await client("fwd:1.1.1.1").quoteUrl({ profileId: PROFILE_ID, url: URL_A, requestId: "r3" })).toMatchObject({ ok: false, error: "rate_limited", status: 429, reason: "rate_source", retryAfterMs: 60_000 });
   });
 
   test("静的 quote の client の形は変わらない", async () => {

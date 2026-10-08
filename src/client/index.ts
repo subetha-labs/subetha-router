@@ -175,6 +175,43 @@ function projectionViewOf(body: unknown): ProjectionView | undefined {
 }
 
 /** 固定の理由コードだけを外に出す（サーバ由来の文字列も安全な短いコードに限る）。 */
+/** Router が返した固定の `reason`（形式に合うものだけ。自由文・例外文字列は通さない）。 */
+function reasonOf(body: unknown): { reason?: string } {
+  if (isRecord(body)) {
+    const reason = body["reason"];
+    if (typeof reason === "string" && /^[a-z_]{1,64}$/.test(reason)) {
+      return { reason };
+    }
+  }
+  return {};
+}
+
+/** `Retry-After` の上限（1 時間）。それより長い値は目安として意味が無いので丸める。 */
+const RETRY_AFTER_MAX_MS = 3_600_000;
+/** RFC 7231 の IMF-fixdate だけ（例 `Sun, 06 Nov 1994 08:49:37 GMT`）。`Date.parse` の寛容さに頼らない。 */
+const IMF_FIXDATE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
+/**
+ * `Retry-After`（delay-seconds か HTTP-date）を ms に。delay-seconds は 10 進の整数だけ（負・小数・指数・桁あふれは無し扱い）、
+ * HTTP-date は IMF-fixdate だけで、過去なら 0。どちらも上限 1 時間。読めなければ欄ごと無し。
+ */
+function retryAfterMsOf(header: string | null): { retryAfterMs?: number } {
+  if (header === null) return {};
+  const text = header.trim();
+  if (text === "") return {};
+  if (/^\d{1,10}$/.test(text)) {
+    const seconds = Number(text);
+    if (!Number.isSafeInteger(seconds)) return {};
+    return { retryAfterMs: Math.min(seconds * 1000, RETRY_AFTER_MAX_MS) };
+  }
+  if (!IMF_FIXDATE.test(text)) return {};
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) return {};
+  // `Date.parse` は存在しない暦日（31 Feb）を繰り上げて読むので、戻した文字列が元と一致するものだけ受ける（曜日の誤りも拒む）。
+  if (new Date(at).toUTCString() !== text) return {};
+  return { retryAfterMs: Math.min(Math.max(0, at - Date.now()), RETRY_AFTER_MAX_MS) };
+}
+
 function errorCodeOf(body: unknown, fallback: string): string {
   if (isRecord(body)) {
     const error = body["error"];
@@ -227,7 +264,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   async function call(
     path: string,
     init: { method: "GET" | "POST"; headers?: Record<string, string>; body?: string; timeoutMs?: number },
-  ): Promise<{ status: number; body: unknown; contentType: string; paymentId?: string }> {
+  ): Promise<{ status: number; body: unknown; contentType: string; paymentId?: string; retryAfterMs?: number }> {
     const response = await doFetch(new URL(path, origin), {
       method: init.method,
       headers: headers(init.headers ?? {}),
@@ -250,6 +287,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       body,
       contentType: response.headers.get("content-type") ?? "application/json",
       ...(paymentId === null || paymentId === "" ? {} : { paymentId }),
+      ...retryAfterMsOf(response.headers.get("retry-after")),
     };
   }
 
@@ -286,7 +324,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { ok: false, error: "transport_failed", status: 0 };
       }
       if (result.status !== 200) {
-        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status };
+        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status, ...reasonOf(result.body), ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) };
       }
       const parsed = quoteViewOf(result.body);
       if (parsed === undefined) {
@@ -315,7 +353,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { ok: false, error: "transport_failed", status: 0 };
       }
       if (result.status !== 200) {
-        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status };
+        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status, ...reasonOf(result.body), ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) };
       }
       const parsed = quoteViewOf(result.body);
       // 動的 quote の応答として `upstream`・`ownerKey` を持たないもの、頼んだ URL・プロファイルと違うものは受け入れない。
@@ -513,6 +551,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         error: errorCodeOf(result.body, `http_${result.status}`),
         status: result.status,
         paymentId,
+        ...reasonOf(result.body),
       };
     },
 
@@ -527,7 +566,10 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { found: false as const, status: 0, reason: "transport_failed" };
       }
       if (result.status !== 200) {
-        return { found: false as const, status: result.status };
+        // 404 = **無いか、読めない**（動的の `ownerKey` が無い・違うときも Router は存在を隠して 404 を返す。`src/http/app.ts`）。
+        // 401・403 は入口の認可（principal）の失敗。他は http_error。回復の表（payer）では `not_found` だけが「Router に無い」行を適用する。
+        const reason = result.status === 404 ? "not_found" : result.status === 401 || result.status === 403 ? "unauthorized" : "http_error";
+        return { found: false as const, status: result.status, reason };
       }
       const projection = projectionViewOf(result.body);
       if (projection === undefined) {

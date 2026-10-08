@@ -82,6 +82,9 @@ sent your transaction before it stopped). Neither `rejected` nor `unknown` prove
 again or retry on your own**; report the `paymentId`, the status and the signature from `source.txRef` when it is present, and stop.
 
 **Never**:
+- Retry a purchase on your own. `paid_data_unavailable`, `unknown` and `awaiting_payment` are **not** proof that nothing
+  was paid; a new purchase needs a **new quote and a new human approval**. `retryAfterMs` on `rate_limited` is a hint for
+  retrying the **quote** only
 - Build a `credential` by guessing (**stop and report** if you cannot sign)
 - Reuse an expired quote (take a new one and **ask for approval again**)
 - Change `requestId` between quote and purchase (that becomes a different purchase)

@@ -97,7 +97,11 @@ export interface QuoteView {
 
 export type QuoteResult =
   | { readonly ok: true; readonly quote: QuoteView }
-  | { readonly ok: false; readonly error: string; readonly status: number };
+  /**
+   * 失敗。`reason` は Router が返した固定コード（`^[a-z_]{1,64}$` に合うものだけ）、`retryAfterMs` は `Retry-After` ヘッダから
+   * （**quote の再試行の目安であって purchase の再試行の許可ではない**）。どちらも無ければ欄ごと無い（H-1、要件 FR-A25）。
+   */
+  | { readonly ok: false; readonly error: string; readonly status: number; readonly reason?: string; readonly retryAfterMs?: number };
 
 /**
  * 人間の明示承認の結果。**クライアントはこれを自分で作らない**（自動承認をしない）。
@@ -140,6 +144,8 @@ export type ExecutionResult =
       readonly error: string;
       readonly status: number;
       readonly paymentId?: string;
+      /** Router が返した固定コード（形式に合うものだけ）。 */
+      readonly reason?: string;
     }
   /** 承認が無い／拒否された。Router へ要求を出していない。 */
   | { readonly outcome: "not_approved"; readonly reason: string; readonly paymentId?: string }
@@ -168,10 +174,10 @@ export interface ProjectionView {
 export type StatusResult =
   | { readonly found: true; readonly projection: ProjectionView }
   /**
-   * 見つからない／受理しない。`reason` は固定コードのみ
-   * （`payment_id_mismatch` / `projection_malformed` / `transport_failed`）。
+   * 見つからない／受理しない。`reason` は固定コードのみ: `not_found`（404 = **無いか読めない**。動的の `ownerKey` が無い・違うときも Router は 404 を返す）/ `unauthorized`（401・403 = principal の認可）/
+   * `http_error`（他の status）/ `projection_malformed` / `payment_id_mismatch` / `transport_failed`（H-1 で常に付く）。
    */
-  | { readonly found: false; readonly status: number; readonly reason?: string };
+  | { readonly found: false; readonly status: number; readonly reason: string };
 
 export interface RouterClient {
   /** `dynamic` は Router に動的プロファイルの設定があるときだけ（`enabled` と一覧）。 */

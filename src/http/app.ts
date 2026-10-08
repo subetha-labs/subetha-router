@@ -39,14 +39,21 @@ function sendJson(response: http.ServerResponse, status: number, body: unknown, 
   response.end(text);
 }
 
+/**
+ * `Retry-After`（秒）を付けるのは**時間で解ける 429 = `rate_limited` だけ**（動的の門の窓は 60 秒。`src/core/dynamic-gate.ts`）。
+ * 予算の拒否（`per_purchase_limit`・`bucket_limit`・`bucket_not_allowed`・`purchase_count_limit`）も 429 だが 1 分では解けないので付けない（H-1、レビュー #1）。
+ * quote の再試行の目安で、purchase の再試行の許可ではない。
+ */
+const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
+
 function sendError(
   response: http.ServerResponse,
   status: number,
   error: string,
   extra: Record<string, unknown> = {},
-  headers = {},
+  headers: Record<string, string> = {},
 ): void {
-  sendJson(response, status, { error, ...extra }, headers);
+  sendJson(response, status, { error, ...extra }, status === 429 && error === "rate_limited" ? { "retry-after": String(RATE_LIMIT_RETRY_AFTER_SECONDS), ...headers } : headers);
 }
 
 async function readBody(request: http.IncomingMessage): Promise<string | undefined> {
