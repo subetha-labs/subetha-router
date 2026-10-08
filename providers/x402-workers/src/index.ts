@@ -81,8 +81,9 @@ async function paymentRequired(runtime: Runtime, canonical: string, error?: stri
 function facilitatorError(stage: "verify" | "settle", error: unknown): Response {
   if (error instanceof SettleCalledTwiceError) return json(502, { error: "internal" });
   const kind = error instanceof FacilitatorUnavailableError ? error.kind : "facilitator_unavailable";
-  // 運用者向けの固定文: 段と分類と例外の名前だけ（facilitator の文言・URL・鍵は出さない）。
-  console.error(`provider: ${stage} failed (${kind}${error instanceof FacilitatorUnavailableError ? `, status ${error.status ?? "none"}` : error instanceof Error ? `, ${error.name}` : ""})`);
+  // 運用者向けの固定文: 段・分類・原因の種別（許可した語だけ。例外の文言や名前は出さない）。
+  const cause = error instanceof DeadlineError ? "deadline" : error instanceof FacilitatorUnavailableError ? `status ${error.status ?? "none"}` : "other";
+  console.error(`provider: ${stage} failed (${kind}, ${cause})`);
   return json(502, { error: kind });
 }
 
@@ -115,7 +116,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
     await runtime.builder.ready(initStage.signal, () => stages("supported"));
   } catch (error) {
     // 運用者向けの固定文（分類だけ。facilitator の文言・URL は出さない）。
-    console.error(`provider: facilitator not ready (${error instanceof FacilitatorUnavailableError ? error.kind : error instanceof Error ? error.name : "unknown"})`);
+    console.error(`provider: facilitator not ready (${error instanceof FacilitatorUnavailableError ? error.kind : error instanceof DeadlineError ? "deadline" : "other"})`);
     return json(503, { error: "facilitator_unavailable" });
   } finally {
     initStage.dispose();

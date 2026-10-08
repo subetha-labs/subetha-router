@@ -16,4 +16,4 @@ runtime/
 
 # Cloudflare Workers の Provider（providers/x402-workers）: wrangler の作業領域と手元の secret
 providers/x402-workers/.wrangler/
-providers/x402-workers/.dev.vars
+providers/x402-workers/.dev.vars*

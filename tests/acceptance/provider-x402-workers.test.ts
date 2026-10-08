@@ -1,11 +1,13 @@
 /**
  * AC-P2（`docs/provider-x402-workers.md` §5）: **本物の Worker**（`providers/x402-workers` を `wrangler dev` = workerd で起動）を Router の fixture の
  * facilitator（`circle-facilitator`・`svm-facilitator`）に向け、Router 自身の送信 adapter（Arc: `createX402Outbound` の組み直しの署名器、
- * Solana: `createX402SvmOutbound`）で買う。成功が `paid`、settle の結果の表の各行が Router の `unknown`、facilitator の settle が **1 回**。
+ * Solana: `createX402SvmOutbound`）で買う。成功が `paid`、settle の結果の表の各行が **Worker の 502（固定の本文、領収なし）** と Router の `unknown`、
+ * facilitator の settle が **1 回**。
  *
  * **gate**: `PROVIDER_WORKER_AC=1` のときだけ走る（`providers/x402-workers/node_modules` の wrangler が要る。Linux の suite では skip）。
  * 外には出ない: fixture は全部 127.0.0.1。Worker（平文 http）と TLS の fixture の間は、この試験が立てる proxy が結ぶ:
- *   Router ──TLS(arc.provider.test)──▶ front ──http──▶ wrangler dev ──http──▶ proxy ──TLS(circle.test)──▶ Circle fixture
+ *   Router ──TLS(arc.provider.test)──▶ front ──http──▶ wrangler dev ──http──▶ proxy ──TLS──▶ Circle fixture
+ * wrangler 自身の外向きの通信（telemetry・error report・banner の npm の更新確認）は env で止める。
  * 鍵: Arc の売り手鍵は試験が乱数で作り、0600 の一時ファイル（`--env-file`）で渡して終わりに消す。何も出力しない。
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -24,7 +26,7 @@ import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
 import { createX402SvmOutbound, type X402SvmOutbound } from "../../src/adapters/outbound/x402-svm.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult } from "../../src/ports/outbound.js";
-import { startCircleFacilitator, type CircleFacilitator } from "../fixtures/circle-facilitator.js";
+import { startCircleFacilitator, type CircleFacilitator, type CircleSettleMode } from "../fixtures/circle-facilitator.js";
 import { dialTo, publicLookup } from "../fixtures/dynamic/dial.js";
 import { startSolanaRpc, type SolanaRpcFixture } from "../fixtures/solana-rpc.js";
 import { startSvmFacilitator, type SvmFacilitator } from "../fixtures/svm-facilitator.js";
@@ -49,10 +51,18 @@ const ROUTE_ARC = "md-arc-eth-snapshot";
 const ROUTE_SOL = "md-sol-eth-snapshot-mpp";
 const HYPERLIQUID = [{ universe: [{ name: "BTC" }, { name: "ETH" }] }, [{ markPx: "1", prevDayPx: "1", dayNtlVlm: "1" }, { markPx: "2572.5", prevDayPx: "2693.6", dayNtlVlm: "123456789.00" }]];
 const CONTRACT_KEYS = ["data", "dataSource", "fetchedAt", "market", "payment", "providerId"];
+const DECIMAL = /^-?\d+(?:\.\d+)?$/;
 
 interface Listener {
   readonly port: number;
   close(): Promise<void>;
+}
+
+/** front が見た Worker の応答（支払いつきの要求だけ）。 */
+interface WireResponse {
+  readonly status: number;
+  readonly headers: http.IncomingHttpHeaders;
+  readonly body: string;
 }
 
 async function freePort(): Promise<number> {
@@ -108,21 +118,31 @@ async function startHttpToTlsProxy(target: { port: number; host: string; ca: str
   return { ...listener, seen };
 }
 
-/** Router（TLS、`arc.provider.test` 等）→ wrangler dev（平文 http）。応答のヘッダを記録する（`content-length` の確認に）。 */
-async function startTlsFront(tls: TlsMaterial, workerPort: number): Promise<Listener & { readonly responses: http.IncomingHttpHeaders[] }> {
-  const responses: http.IncomingHttpHeaders[] = [];
+/** Router（TLS、`arc.provider.test` 等）→ wrangler dev（平文 http）。支払いつきの要求への Worker の応答（状態・ヘッダ・本文）を記録する。 */
+async function startTlsFront(tls: TlsMaterial, workerPort: number): Promise<Listener & { readonly paid: WireResponse[] }> {
+  const paid: WireResponse[] = [];
   const server = https.createServer({ key: tls.provider.key, cert: tls.provider.cert }, (request, response) => {
+    const isPaid = request.headers["payment-signature"] !== undefined;
+    // `accept-encoding` は渡さない: wrangler dev の proxy が本文を圧縮して返すと、記録した本文がそのままでは読めない（Worker 自身は圧縮しない）。
+    const { "accept-encoding": _acceptEncoding, ...forwarded } = request.headers;
     void readAll(request).then((body) => {
-      const upstream = http.request({ host: "127.0.0.1", port: workerPort, method: request.method, path: request.url, headers: request.headers }, (reply) => {
-        responses.push(reply.headers);
+      const upstream = http.request({ host: "127.0.0.1", port: workerPort, method: request.method, path: request.url, headers: forwarded }, (reply) => {
         response.writeHead(reply.statusCode ?? 502, reply.headers);
-        reply.pipe(response);
+        if (!isPaid) {
+          reply.pipe(response);
+          return;
+        }
+        // Router が先に去っていても（期限で切った）Worker の応答は最後まで読んで記録する。
+        const chunks: Buffer[] = [];
+        reply.on("data", (c: Buffer) => { chunks.push(c); if (!response.destroyed) response.write(c); });
+        reply.on("end", () => { paid.push({ status: reply.statusCode ?? 0, headers: reply.headers, body: Buffer.concat(chunks).toString("utf8") }); if (!response.destroyed) response.end(); });
       });
       upstream.on("error", () => response.destroy());
+      response.on("close", () => { /* client が去っても upstream は続ける（Worker の応答を記録するため） */ });
       upstream.end(body);
     });
   });
-  return { ...(await listen(server)), responses };
+  return { ...(await listen(server)), paid };
 }
 
 async function startHyperliquidStub(): Promise<Listener & { readonly calls: () => number }> {
@@ -138,12 +158,20 @@ async function startHyperliquidStub(): Promise<Listener & { readonly calls: () =
 
 interface Worker {
   readonly port: number;
+  /** 秘密を伏せた log（診断用）。 */
   readonly log: () => string;
+  /** **生の** log に文字列が含まれるか（生の log 自体は返さない）。 */
+  readonly rawIncludes: (needle: string) => boolean;
+  /** 生の log に、渡した秘密のどれかが含まれるか。 */
+  readonly rawIncludesSecret: () => boolean;
   stop(): Promise<void>;
 }
 
-/** `wrangler dev --env <env>` を自分の process group で起動し、`Ready on` を待つ。鍵は `--env-file` だけ（引数にも log にも出さない）。 */
-async function startWorker(env: "arc" | "sol", publicHost: string, vars: Record<string, string>, envFile: string | undefined, redact: string[]): Promise<Worker> {
+/**
+ * `wrangler dev --env <env>` を自分の process group で起動し、`Ready on` を待つ。鍵は `--env-file` だけ（引数にも log にも出さない）。
+ * `stop` は spawn の直後に `closers` へ登録する（起動に失敗しても process group を残さない）。
+ */
+async function startWorker(env: "arc" | "sol", publicHost: string, vars: Record<string, string>, envFile: string | undefined, secrets: string[], closers: Array<() => Promise<void>>): Promise<Worker> {
   const port = await freePort();
   const inspectorPort = await freePort();
   // `--local-upstream` + `--upstream-protocol https`: Worker が見る `request.url` の origin を本番と同じ形（https://<host>）にする。
@@ -151,28 +179,31 @@ async function startWorker(env: "arc" | "sol", publicHost: string, vars: Record<
   const args = ["dev", "--env", env, "--port", String(port), "--ip", "127.0.0.1", "--inspector-port", String(inspectorPort), "--local-upstream", publicHost, "--upstream-protocol", "https", "--show-interactive-dev-session=false", "--log-level", "log"];
   for (const [key, value] of Object.entries(vars)) args.push("--var", `${key}:${value}`);
   if (envFile !== undefined) args.push("--env-file", envFile);
-  const child: ChildProcess = spawn(WRANGLER, args, { cwd: PACKAGE_DIR, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "true" } });
-  let log = "";
-  const append = (chunk: Buffer): void => {
-    let text = chunk.toString("utf8");
-    for (const secret of redact) text = text.replaceAll(secret, "<redacted>");
-    log += text;
-  };
-  child.stdout?.on("data", append);
-  child.stderr?.on("data", append);
-  const started = Date.now();
-  while (!log.includes("Ready on")) {
-    if (child.exitCode !== null) throw new Error(`wrangler dev --env ${env} exited before ready:\n${log}`);
-    if (Date.now() - started > 90_000) throw new Error(`wrangler dev --env ${env} not ready in 90 s:\n${log}`);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
+  // wrangler 自身の外向きの通信を止める: telemetry、error report、banner（npm の更新確認はここから出る）。
+  const childEnv = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true" };
+  const child: ChildProcess = spawn(WRANGLER, args, { cwd: PACKAGE_DIR, detached: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
+  let raw = "";
+  let spawnError: Error | undefined;
+  child.on("error", (error) => { spawnError = error; });
+  child.stdout?.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
+  child.stderr?.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
   const stop = async (): Promise<void> => {
-    if (child.pid === undefined) return;
+    if (child.pid === undefined || child.exitCode !== null) return;
     try { process.kill(-child.pid, "SIGTERM"); } catch { /* 既に終わっている */ }
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     try { process.kill(-child.pid, "SIGKILL"); } catch { /* 既に終わっている */ }
   };
-  return { port, log: () => log, stop };
+  closers.push(stop);
+  // 伏せるのは**連結した**文字列に対して（chunk の境目で鍵が割れても伏せ漏れない）。
+  const redacted = (): string => secrets.reduce((text, secret) => text.replaceAll(secret, "<redacted>"), raw);
+  const started = Date.now();
+  while (!raw.includes("Ready on")) {
+    if (spawnError !== undefined) throw new Error(`wrangler dev --env ${env} could not be spawned: ${spawnError.message}`);
+    if (child.exitCode !== null) throw new Error(`wrangler dev --env ${env} exited before ready:\n${redacted()}`);
+    if (Date.now() - started > 90_000) throw new Error(`wrangler dev --env ${env} not ready in 90 s:\n${redacted()}`);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return { port, log: redacted, rawIncludes: (needle) => raw.includes(needle), rawIncludesSecret: () => secrets.some((secret) => raw.includes(secret)), stop };
 }
 
 const describeAc = ENABLED ? describe : describe.skip;
@@ -180,7 +211,7 @@ const describeAc = ENABLED ? describe : describe.skip;
 describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買う（fixture の facilitator）", () => {
   let TLS: TlsMaterial;
   const closers: Array<() => Promise<void>> = [];
-  let tmpDir: string;
+  let tmpDir: string | undefined;
   // Arc
   let circle: CircleFacilitator;
   let arcWorker: Worker;
@@ -188,6 +219,7 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
   let arcRail: OutboundRail;
   let arcPayer: `0x${string}`;
   let arcPayTo: `0x${string}`;
+  let arcProxy: Awaited<ReturnType<typeof startHttpToTlsProxy>>;
   // Solana
   let svmFac: SvmFacilitator;
   let rpc: SolanaRpcFixture;
@@ -195,9 +227,8 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
   let solFront: Awaited<ReturnType<typeof startTlsFront>>;
   let solRail: X402SvmOutbound;
   let solProviderOwner: string;
-  let hyperliquid: Awaited<ReturnType<typeof startHyperliquidStub>>;
-  let arcProxy: Awaited<ReturnType<typeof startHttpToTlsProxy>>;
   let solProxy: Awaited<ReturnType<typeof startHttpToTlsProxy>>;
+  let hyperliquid: Awaited<ReturnType<typeof startHyperliquidStub>>;
 
   beforeAll(async () => {
     if (!existsSync(WRANGLER)) throw new Error("providers/x402-workers/node_modules/.bin/wrangler is missing: run `npm install --legacy-peer-deps` in providers/x402-workers");
@@ -215,8 +246,7 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
     arcPayTo = privateKeyToAccount(sellerKey).address;
     const envFile = path.join(tmpDir, "arc.env");
     writeFileSync(envFile, `SELLER_PROOF_KEY=${sellerKey}\n`, { mode: 0o600 });
-    arcWorker = await startWorker("arc", ARC_HOST, { FACILITATOR_URL: `http://127.0.0.1:${arcProxy.port}`, PAY_TO: arcPayTo, DATA_URL: `http://127.0.0.1:${hyperliquid.port}/info` }, envFile, [sellerKey, sellerKey.slice(2)]);
-    closers.push(arcWorker.stop);
+    arcWorker = await startWorker("arc", ARC_HOST, { FACILITATOR_URL: `http://127.0.0.1:${arcProxy.port}`, PAY_TO: arcPayTo, DATA_URL: `http://127.0.0.1:${hyperliquid.port}/info` }, envFile, [sellerKey, sellerKey.slice(2)], closers);
     arcFront = await startTlsFront(TLS, arcWorker.port);
     closers.push(arcFront.close);
     const account = privateKeyToAccount(generatePrivateKey());
@@ -239,8 +269,7 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
     const providerAta = await ataOf(solProviderOwner);
     rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls: TLS, atas: [{ address: routerAta, owner: routerSigner.address, amount: "1000000" }, { address: providerAta, owner: solProviderOwner }] });
     closers.push(rpc.close);
-    solWorker = await startWorker("sol", SOL_HOST, { FACILITATOR_URL: `http://127.0.0.1:${solProxy.port}`, PAY_TO: solProviderOwner, DATA_URL: `http://127.0.0.1:${hyperliquid.port}/info` }, undefined, []);
-    closers.push(solWorker.stop);
+    solWorker = await startWorker("sol", SOL_HOST, { FACILITATOR_URL: `http://127.0.0.1:${solProxy.port}`, PAY_TO: solProviderOwner, DATA_URL: `http://127.0.0.1:${hyperliquid.port}/info` }, undefined, [], closers);
     solFront = await startTlsFront(TLS, solWorker.port);
     closers.push(solFront.close);
     const solDial = dialTo({ [SOL_HOST]: solFront.port, "rpc.provider.test": rpc.port });
@@ -261,9 +290,21 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
   }, 240_000);
 
   afterAll(async () => {
-    while (closers.length > 0) await closers.pop()!();
-    if (tmpDir !== undefined) rmSync(tmpDir, { recursive: true, force: true });
-    TLS?.cleanup();
+    // 1 つの closer が失敗しても残りを閉じ、鍵の一時ファイルは必ず消す。
+    const failures: unknown[] = [];
+    try {
+      while (closers.length > 0) {
+        try {
+          await closers.pop()!();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    } finally {
+      if (tmpDir !== undefined) rmSync(tmpDir, { recursive: true, force: true });
+      TLS?.cleanup();
+    }
+    if (failures.length > 0) throw new Error(`teardown: ${failures.length} closer(s) failed`);
   }, 60_000);
 
   let seq = 0;
@@ -296,34 +337,58 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
     return solRail.pay(requestOf(ROUTE_SOL, offers[0]!));
   }
 
+  /** 契約の本文（`docs/t5-design.md` §1.5 + `payment.network` の拡張）を入れ子まで検査する。 */
+  function expectContractBody(body: Record<string, unknown>, network: string): void {
+    expect(Object.keys(body).sort()).toEqual(CONTRACT_KEYS);
+    expect(body["providerId"]).toBe("market-data-a");
+    expect(body["market"]).toEqual({ kind: "perpetual", symbol: "ETH", quote: "USD" });
+    expect(body["dataSource"]).toEqual({ name: "hyperliquid", network: "hyperliquid-mainnet" });
+    expect(body["payment"]).toEqual({ protocol: "x402", network });
+    expect(body["fetchedAt"]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    const data = body["data"] as Record<string, unknown>;
+    expect(Object.keys(data).sort()).toEqual(["assetIndex", "change24h", "dayNtlVlm", "markPx", "prevDayPx"]);
+    expect(data).toMatchObject({ markPx: "2572.5", prevDayPx: "2693.6", dayNtlVlm: "123456789.00", assetIndex: 1 });
+    expect(data["change24h"]).toEqual({ absolute: "-121.1", percent: "-4.49" });
+    for (const v of [data["markPx"], data["prevDayPx"], data["dayNtlVlm"]]) expect(v).toMatch(DECIMAL);
+  }
+
+  /** Worker の失敗の応答（front の記録）: 502、固定の本文、領収なし、facilitator の文言なし。 */
+  function expectWorker502(wire: WireResponse, error: string, label: string): void {
+    expect(wire.status, label).toBe(502);
+    expect(JSON.parse(wire.body), label).toEqual({ error });
+    expect(wire.headers["payment-response"], label).toBeUndefined();
+    expect(wire.headers["content-type"], label).toBe("application/json");
+    expect(wire.body, label).not.toContain("SECRET_INTERNAL_DETAIL");
+  }
+
   describe("Arc（Circle の fixture。売り手証明を fixture が検証する）", () => {
-    test("402 は Router の候補を通り、購入は paid: 契約の本文、facilitator の verify 1・settle 1、売り手証明の失敗 0、Router は Provider のホストだけに出る", async () => {
+    test("402 は Router の候補を通り、購入は paid: 契約の本文、facilitator の verify 1・settle 1、売り手証明の失敗 0、領収の payer は Router の署名者", async () => {
       const offers = await arcRail.readChallenge(ROUTE_ARC);
       expect(offers[0]).toMatchObject({ scheme: "exact", network: ARC, asset: ARC_USDC, amount: "10000", payTo: arcPayTo, extra: { name: "USDC", version: "2", assetTransferMethod: "eip3009" } });
-      const before = { verify: circle.seen.verifyCalls, settle: circle.seen.settleCalls };
+      const before = { verify: circle.seen.verifyCalls, settle: circle.seen.settleCalls, paid: arcFront.paid.length };
       const result = await buyArc();
-      const diag = () => JSON.stringify({ result, verifyCalls: circle.seen.verifyCalls, settleCalls: circle.seen.settleCalls, proofFailures: circle.seen.proofFailures, proxySeen: arcProxy.seen, workerLog: arcWorker.log().split("\n").slice(-12) });
-      if (result.outcome !== "paid") process.stdout.write(`AC-P2 arc diag ${diag()}\n`);
+      if (result.outcome !== "paid") process.stdout.write(`AC-P2 arc diag ${JSON.stringify({ result, verifyCalls: circle.seen.verifyCalls, settleCalls: circle.seen.settleCalls, proofFailures: circle.seen.proofFailures, proxySeen: arcProxy.seen, workerLog: arcWorker.log().split("\n").slice(-12) })}\n`);
       expect(result).toMatchObject({ outcome: "paid", contentType: "application/json" });
-      const body = (result as { body: Record<string, unknown> }).body;
-      expect(Object.keys(body).sort()).toEqual(CONTRACT_KEYS);
-      expect(body).toMatchObject({ providerId: "market-data-a", payment: { protocol: "x402", network: ARC }, data: { markPx: "2572.5", change24h: { absolute: "-121.1", percent: "-4.49" }, assetIndex: 1 } });
+      expectContractBody((result as { body: Record<string, unknown> }).body, ARC);
       expect((result as { txRef?: string }).txRef).toMatch(/^0x[0-9a-f]{64}$/);
       expect(circle.seen.verifyCalls - before.verify).toBe(1);
       expect(circle.seen.settleCalls - before.settle).toBe(1);
       expect(circle.seen.proofFailures).toEqual([]);
       expect(circle.seen.lastPayload).toMatchObject({ payload: { authorization: { from: arcPayer } } });
-      // Worker の 200 の wire（front が見た応答ヘッダ）: content-type は固定。長さの表し方（content-length か chunked）は
-      // wrangler dev の proxy が決めるので記録だけ（本番の edge の挙動は AC-P3 で見る。Router は本文を上限つきで読むので依存しない）。
-      const paid = arcFront.responses.at(-1)!;
-      expect(paid["content-type"]).toBe("application/json");
-      expect(paid["cache-control"]).toBe("no-store");
-      expect(paid["payment-response"]).toBeDefined();
-      process.stdout.write(`AC-P2 arc 200 wire: content-length=${String(paid["content-length"])} transfer-encoding=${String(paid["transfer-encoding"])}\n`);
+      // Worker の 200 の wire（front が見た応答）: 200、content-type、no-store、PAYMENT-RESPONSE、本文は契約そのもの。
+      // 長さの表し方（content-length か chunked）は wrangler dev の proxy が決めるので記録だけ（本番の edge は AC-P3/AC-P4。Router は本文を上限つきで読む）。
+      expect(arcFront.paid.length - before.paid).toBe(1);
+      const wire = arcFront.paid.at(-1)!;
+      expect(wire.status).toBe(200);
+      expect(wire.headers["content-type"]).toBe("application/json");
+      expect(wire.headers["cache-control"]).toBe("no-store");
+      expect(wire.headers["payment-response"]).toBeDefined();
+      expectContractBody(JSON.parse(wire.body) as Record<string, unknown>, ARC);
+      process.stdout.write(`AC-P2 arc 200 wire: content-length=${String(wire.headers["content-length"])} transfer-encoding=${String(wire.headers["transfer-encoding"])}\n`);
     }, 60_000);
 
-    test("settle の結果の表の各行 → Router は unknown、settle は各 1 回（pending・失敗・403・500・形違い・切断・network 違い・64 KiB 超）", async () => {
-      const rows = [
+    test("settle の結果の表の各行 → Worker は 502（固定の本文、領収なし）、Router は unknown、settle は各 1 回（pending・失敗・403・500・形違い・切断・network 違い・別 payer・64 KiB 超）", async () => {
+      const rows: ReadonlyArray<readonly [CircleSettleMode, string]> = [
         ["pending", "settlement_pending"],
         ["reject", "settle_failed"],
         ["registration-required", "facilitator_registration_required"],
@@ -331,52 +396,101 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
         ["malformed", "facilitator_unavailable"],
         ["drop", "facilitator_unavailable"],
         ["bad-network", "receipt_malformed"],
+        ["wrong-payer", "receipt_malformed"],
         ["huge-chunked", "facilitator_unavailable"],
-      ] as const;
-      for (const [mode] of rows) {
-        circle.state.settle = mode;
-        const settles = circle.seen.settleCalls;
-        const result = await buyArc();
-        expect(result.outcome, mode).toBe("unknown");
-        expect(circle.seen.settleCalls - settles, mode).toBe(1);
+      ];
+      try {
+        for (const [mode, error] of rows) {
+          circle.state.settle = mode;
+          const settles = circle.seen.settleCalls;
+          const paid = arcFront.paid.length;
+          const result = await buyArc();
+          expect(result.outcome, mode).toBe("unknown");
+          expect(circle.seen.settleCalls - settles, mode).toBe(1);
+          expect(arcFront.paid.length - paid, mode).toBe(1);
+          expectWorker502(arcFront.paid.at(-1)!, error, mode);
+        }
+      } finally {
+        circle.state.settle = "ok";
       }
-      circle.state.settle = "ok";
       expect(circle.seen.proofFailures).toEqual([]);
     }, 120_000);
 
-    test("verify が不正 → Worker は 402 → Router は rejected（settle 0）", async () => {
+    test("settle の HTTP の期限（facilitator が 25 秒黙る）: Worker は段の上限（20 秒）で 502 facilitator_unavailable、settle 1 回。Router の静的 EVM 経路は 5 秒で unknown（§9 の 6: 本番の不整合、Router 側の follow-up）", async () => {
+      circle.state.settleDelayMs = 25_000;
+      const settles = circle.seen.settleCalls;
+      const paid = arcFront.paid.length;
+      const started = Date.now();
+      let result: PayResult;
+      try {
+        result = await buyArc();
+        const routerElapsed = Date.now() - started;
+        // Router の静的 EVM の x402 送信は有料要求に 5 秒の期限（`createX402Outbound` の `timeoutMs` の既定）: Worker の settle が続いていても unknown。
+        expect(result.outcome).toBe("unknown");
+        expect(routerElapsed).toBeGreaterThanOrEqual(4_500);
+        expect(routerElapsed).toBeLessThan(19_000);
+        // Worker 側: Router が去った後も要求は段の上限まで続き、20 秒で 502（front が記録する）。facilitator の settle は 1 回のまま。
+        while (arcFront.paid.length === paid && Date.now() - started < 30_000) await new Promise((resolve) => setTimeout(resolve, 250));
+      } finally {
+        circle.state.settleDelayMs = 0;
+      }
+      const workerElapsed = Date.now() - started;
+      expect(arcFront.paid.length - paid).toBe(1);
+      expect(workerElapsed).toBeGreaterThanOrEqual(19_000);
+      expect(workerElapsed).toBeLessThan(26_000);
+      expect(circle.seen.settleCalls - settles).toBe(1);
+      expectWorker502(arcFront.paid.at(-1)!, "facilitator_unavailable", "deadline");
+    }, 60_000);
+
+    test("verify が不正 → Worker は 402（固定の本文）→ Router は rejected（settle 0）", async () => {
       circle.state.verify = "invalid";
       const settles = circle.seen.settleCalls;
-      const result = await buyArc();
-      circle.state.verify = "ok";
+      const paid = arcFront.paid.length;
+      let result: PayResult;
+      try {
+        result = await buyArc();
+      } finally {
+        circle.state.verify = "ok";
+      }
       expect(result.outcome).toBe("rejected");
       expect(circle.seen.settleCalls - settles).toBe(0);
+      expect(arcFront.paid.length - paid).toBe(1);
+      const wire = arcFront.paid.at(-1)!;
+      expect(wire.status).toBe(402);
+      expect(JSON.parse(wire.body)).toEqual({ error: "payment_invalid" });
+      expect(wire.headers["payment-required"]).toBeDefined();
+      expect(wire.headers["payment-response"]).toBeUndefined();
+      expect(wire.body).not.toContain("SECRET_INTERNAL_DETAIL");
     }, 60_000);
   });
 
   describe("Solana（x402.org 相当の fixture: 本物の @x402/svm の verify、feePayer は fixture）", () => {
-    test("402 の feePayer は fixture の /supported から。購入は paid: 契約の本文、settle 1、領収の payer は Router の署名者", async () => {
+    test("402 の feePayer は fixture の /supported から（1 回）。購入は paid: 契約の本文、settle 1、領収の payer は Router の署名者", async () => {
       const offers = await solRail.readChallenge(ROUTE_SOL);
       expect(offers[0]).toMatchObject({ scheme: "exact", network: SOL, asset: MINT, amount: "10000", payTo: solProviderOwner, extra: { feePayer: svmFac.feePayer } });
-      const before = svmFac.seen.settleCalls;
+      const before = { settle: svmFac.seen.settleCalls, paid: solFront.paid.length };
       const result = await buySol();
       expect(result).toMatchObject({ outcome: "paid", contentType: "application/json" });
-      const body = (result as { body: Record<string, unknown> }).body;
-      expect(Object.keys(body).sort()).toEqual(CONTRACT_KEYS);
-      expect(body).toMatchObject({ providerId: "market-data-a", payment: { protocol: "x402", network: SOL }, data: { markPx: "2572.5" } });
-      expect(svmFac.seen.settleCalls - before).toBe(1);
+      expectContractBody((result as { body: Record<string, unknown> }).body, SOL);
+      expect(svmFac.seen.settleCalls - before.settle).toBe(1);
       expect(solProxy.seen.filter((s) => s === "GET /supported")).toHaveLength(1);
+      expect(solFront.paid.length - before.paid).toBe(1);
+      const wire = solFront.paid.at(-1)!;
+      expect(wire.status).toBe(200);
+      expect(wire.headers["payment-response"]).toBeDefined();
+      expectContractBody(JSON.parse(wire.body) as Record<string, unknown>, SOL);
     }, 60_000);
 
-    test("settle の行: confirm の timeout（pending）・切断・4xx → Router は unknown、settle は各 1 回", async () => {
-      const cases: Array<[string, () => void, () => void]> = [
-        ["pending", () => { svmFac.state.confirm = "timeout"; }, () => { svmFac.state.confirm = "ok"; }],
-        ["drop", () => { svmFac.state.dropSettle = true; }, () => { svmFac.state.dropSettle = false; }],
-        ["4xx", () => { svmFac.state.settleOverride = () => ({ status: 409, body: { error: "conflict" } }); }, () => { svmFac.state.settleOverride = undefined; }],
+    test("settle の行: confirm の timeout（pending）・切断・409 → Worker は 502（固定の本文、領収なし）、Router は unknown、settle は各 1 回", async () => {
+      const cases: ReadonlyArray<readonly [string, string, () => void, () => void]> = [
+        ["pending", "settlement_pending", () => { svmFac.state.confirm = "timeout"; }, () => { svmFac.state.confirm = "ok"; }],
+        ["drop", "facilitator_unavailable", () => { svmFac.state.dropSettle = true; }, () => { svmFac.state.dropSettle = false; }],
+        ["4xx", "facilitator_unavailable", () => { svmFac.state.settleOverride = () => ({ status: 409, body: { error: "conflict", detail: "SECRET_INTERNAL_DETAIL" } }); }, () => { svmFac.state.settleOverride = undefined; }],
       ];
-      for (const [label, arm, disarm] of cases) {
+      for (const [label, error, arm, disarm] of cases) {
         arm();
-        const before = svmFac.seen.settleCalls;
+        const settles = svmFac.seen.settleCalls;
+        const paid = solFront.paid.length;
         let result: PayResult;
         try {
           result = await buySol();
@@ -384,16 +498,20 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
           disarm();
         }
         expect(result.outcome, label).toBe("unknown");
-        expect(svmFac.seen.settleCalls - before, label).toBe(1);
+        expect(svmFac.seen.settleCalls - settles, label).toBe(1);
+        expect(solFront.paid.length - paid, label).toBe(1);
+        expectWorker502(solFront.paid.at(-1)!, error, label);
       }
     }, 120_000);
   });
 
-  test("記録: Worker の log に鍵・facilitator の URL が無い", () => {
+  test("記録: Worker の生の log に鍵・facilitator の文言・更新確認の案内が無い（生の文字列で見る。伏せた後ではない）", () => {
     for (const worker of [arcWorker, solWorker]) {
-      const log = worker.log();
-      expect(log).not.toMatch(/0x[0-9a-fA-F]{64}/);
-      expect(log).not.toContain("SECRET_INTERNAL_DETAIL");
+      expect(worker.rawIncludesSecret()).toBe(false);
+      expect(worker.rawIncludes("SECRET_INTERNAL_DETAIL")).toBe(false);
+      expect(worker.rawIncludes("newer version")).toBe(false);
+      expect(worker.rawIncludes("update available")).toBe(false);
+      expect(worker.rawIncludes("wrangler ")).toBe(false); // banner（更新確認を含む）が出ていない
     }
   });
 });

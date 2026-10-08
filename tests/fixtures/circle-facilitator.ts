@@ -35,7 +35,7 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
-export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "unknown" | "malformed" | "drop" | "huge" | "huge-chunked" | "exact-64k";
+export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "wrong-payer" | "unknown" | "malformed" | "drop" | "huge" | "huge-chunked" | "exact-64k";
 
 export interface CircleFacilitatorState {
   verify: "ok" | "invalid";
@@ -215,6 +215,10 @@ export async function startCircleFacilitator(tls: TlsMaterial, host = "circle.te
             return;
           case "bad-network":
             send(200, { success: true, transaction: tx, network: "eip155:5042", payer: PAYER });
+            return;
+          case "wrong-payer":
+            // 形は正しいが、payload の署名者と違う payer（Provider は同一性で拒む）。
+            send(200, { success: true, transaction: tx, network, payer: "0x00000000000000000000000000000000000000b0" });
             return;
           case "unknown":
             send(500, { error: "internal", message: "SECRET_INTERNAL_DETAIL" });
