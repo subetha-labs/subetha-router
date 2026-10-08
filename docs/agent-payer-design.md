@@ -62,7 +62,7 @@ CLI（`subetha-payer wallet|status|inspect|config|envelope`）は、daemon が�
 3. `process.env` から禁止の変数を削除し、helper（§3.5）には allowlist の env だけ渡す。検査の順序は **passphrase の入力より前**（TTY に触る前に禁止の flag で止まる）。
 4. 設定ディレクトリ（`$XDG_CONFIG_HOME/subetha-payer` 既定 `~/.config/subetha-payer`）: `realpath` が `$HOME` の中、owner が自分、mode `0700`、symlink でない。**中の各ファイル**（`keys.json`・`ledger.ndjson`・`install.seal`・`config.json`・`daemon.lock`・`daemon.sock`）も owner・mode（`0600`。socket は `0600`）・symlink でないことを検査し、違えば `startup_refused`。
 5. GUI の有無: `osascript -`（stdin に `tell application "System Events" to return 1`）が成功するか。失敗（SSH・GUI 無し）なら `startup_refused: no_confirmation_ui`（第 1 slice は envelope が無いので起動しない）。
-6. **lock（§3.7）を取る**（store に何も書く前）。取れなければ `daemon_already_running` で終了。
+6. **lock（§3.7）を取る**（store に何も書く前）。取れなければ §3.7 のとおり `daemon_already_running`（pid が生きている）か `daemon_lock_stale`（死んでいる。人間の `lock reclaim` を案内）で終了。
 7. TTY（`stdin.isTTY`）で passphrase と**合言葉**（FR-A13）を非 echo で読む。passphrase から `master` を導き（§3.3）、`verifier` と照合（違えば `bad_passphrase`。3 回で終了）。**この後**に install の tripwire（FR-A8 (b)）: `dist/` と `node_modules/` の全ファイルの sha256 の一覧を計算し、`install.seal`（`lek` で AES-GCM）と比べる。初回は保存（lock を持っているので書ける）。違えば `startup_refused: install_changed` と差分の**ファイル名だけ**を表示（鍵は復号しない）。
 8. 鍵ファイルを復号して秘密鍵を `Buffer` に置く。**正直な限界**: viem の `privateKeyToAccount` は 16 進の**文字列**を要求し、その文字列は V8 の heap に残る（zero fill できない）。daemon は署名ごとに `privateKeyToAccount` を呼んで閉包を使い捨て、`Buffer` の方は session の終わりに `fill(0)` する。文字列の残骸は「session 中は鍵がメモリにある」という要件の範囲内で、GC 後も物理メモリに残り得る（§3.1 末尾の残る経路）。
 9. socket（§3.6）を開き、台帳の末尾の整合（§3.4）と回復を 1 回実行し、`listening` を端末に表示。
@@ -246,6 +246,7 @@ result | unknown
 
 | # | 日付 | reviewer | 要旨 |
 |---|---|---|---|
+| D-3r | 2026-10-08 | `gpt-6-astra`（readback。第 3 版の修正後） | **APPROVE WITH CHANGES**（D-2r の 3 点は解消。残り 1 点: §3.1 の lock 失敗の文言を §3.7 の `daemon_lock_stale` と揃える。反映済み）。「人間だけが回収する」前提の中で第 1 slice の実装に進める |
 | D-2r | 2026-10-08 | `gpt-6-astra`（readback。第 3 版） | **REJECT**（残り: lock の自動回収は 3 者の交錯で他人の lock を上書きし得る・inode の検査は副作用と原子的でない、§2.1 の `bin` が `dist/bin.js` のまま、`src/sign` が全レールの `classifyOffer` を呼ぶ）。**同版で反映**: 自動回収を廃止（stale は起動せず、人間の `lock reclaim` だけが `unlink`）、`bin` を shell script に、`classifyEvmOffer` に |
 | D-1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **REJECT**（残り 4 点: inspector を開かれ得る親が TTY を共有する、stale lock の回収が原子的でない（A の新しい lock を B が rename し得る）・`install.seal` が lock の前、第 1 slice の vendor が `mppx`・Solana を import 時に引き込む、`osascript` の引数 `[]` と 3 行の解析の改行）。**第 3 版で反映**: bin を `exec` する shell script にして親を無くす、`link` + inode の照合 + 保持者の自己検査、lock → passphrase → seal の順序、EVM 分類の分離と遅延 import、`["-"]` と末尾の改行の扱い |
 | D-1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（10 点: 再実行の不変条件と親、`DYLD_*`・診断の flag、Linux の `/proc/<pid>/fd` は Yama で止まらない（第 1 版の U-A8 は誤り）、macOS の残る経路、承認の記録が offer から復元できない欄を含む・静的 quote に宛先が無い、回復の identity が hosted に無い欄を使っている、mutex を回復に掛ける・途切れた末尾・fsync 失敗・lock の競合、UI の契約（閾値・passphrase の検証・Linux の 2 段目・escape・応答の解析・env）、`Summary` の型は実行時の保証にならない・鍵の文字列の寿命・seal の検査の順序、requestId・短い参照・version・preview・`Retry-After`・schema の説明・`quote_url` の説明、試験は本番の状態機械と外部の観測で・counter の永続・公開物の検査、`src/**` の import を無視した「そのまま移す」・`x402-evm` は Arc を含む・§7 の Keychain の評価）。**第 2 版で反映**（冒頭の一覧） |
