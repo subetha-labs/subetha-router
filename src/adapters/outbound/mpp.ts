@@ -24,7 +24,7 @@ import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 import { createMppDynamicPath, type MppDynamicOptions } from "./mpp-dynamic.js";
 
 /** mppx の `_mppx_scope` は `GET <canonical URL>`（クエリ無し）で cross-resource replay を防ぐ。 */
-const SCOPE_META_KEY = "_mppx_scope";
+export const SCOPE_META_KEY = "_mppx_scope";
 
 export interface MppOutboundOptions {
   /** `routeId` → 上流 canonical URL（クエリ無しの GET 1 本）。 */
@@ -116,7 +116,7 @@ interface ChallengeView {
  * `PaymentRequest.serialize(meta)` で符号化し、challenge ID の HMAC にも含める）。
  * よって対称の公式 decoder `PaymentRequest.deserialize` で読む（自前の復号はしない）。
  */
-function metaOf(challenge: Record<string, unknown>): Record<string, unknown> | undefined {
+export function challengeMetaOf(challenge: Record<string, unknown>): Record<string, unknown> | undefined {
   const direct = Challenge.meta(challenge as unknown as Challenge.Challenge);
   if (isRecord(direct)) {
     return direct;
@@ -147,7 +147,7 @@ function viewOf(challenge: unknown): ChallengeView | undefined {
   ) {
     return undefined;
   }
-  const meta = metaOf(challenge);
+  const meta = challengeMetaOf(challenge);
   const scope = meta?.[SCOPE_META_KEY];
   const details = request["methodDetails"];
   const chainId = isRecord(details) ? details["chainId"] : undefined;
