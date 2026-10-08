@@ -30,6 +30,13 @@ The Router exposes **six routes** (the two outbound ones only while the operator
 | `md-x402-eth-snapshot-sol` | **Solana devnet USDC** (x402) | a provider that only accepts x402 |
 | `md-arc-eth-snapshot` | **Base Sepolia USDC** (x402) | a provider that only accepts **Arc testnet USDC** |
 | `md-sol-eth-snapshot-mpp` | **Tempo pathUSD** (MPP) | a provider that only accepts **Solana devnet USDC** |
+| `md-x402-eth-snapshot-solmpp` | **Solana devnet USDC** (**MPP**, `solana/charge`) | a provider that only accepts x402 |
+| `md-mpp-eth-snapshot-solmpp` | **Solana devnet USDC** (**MPP**, `solana/charge`) | a provider that only accepts MPP |
+| `md-solmpp-eth-snapshot` | **Base Sepolia USDC** (x402) | a provider that only accepts **Solana devnet USDC over MPP** |
+| `md-solmpp-eth-snapshot-mpp` | **Tempo pathUSD** (MPP) | a provider that only accepts **Solana devnet USDC over MPP** |
+
+The four `solmpp` routes exist in the code (2026-10-08) but are **switched off on the hosted Router** until the operator turns them on;
+see "MPP on Solana" below. **If they are missing from `subetha_router_list_routes`, they do not exist for you.**
 
 Outbound rails to providers that accept only **Arc** or **Solana** are switched on by the operator's constant (G-4′, 2026-10-08; the hosted Router carries it from the image swap recorded in
 `docs/DEPLOY.md` §2c) (`md-arc-eth-snapshot`: pay **Base Sepolia USDC**, reaches an Arc provider; `md-sol-eth-snapshot-mpp`: pay **Tempo pathUSD** over MPP, reaches a Solana provider;
@@ -63,11 +70,15 @@ Steps:
 | inbound rail | what `npm run sign` does |
 |---|---|
 | **x402** (`md-mpp-eth-snapshot`) | **Only signs.** No funds move yet; the facilitator broadcasts and pays gas |
-| **MPP** (`md-x402-eth-snapshot`) | **Sends the transfer right now.** You pay the fee, and **it cannot be undone** |
+| **MPP on Tempo** (`md-x402-eth-snapshot`) | **Sends the transfer right now.** You pay the fee, and **it cannot be undone** |
+| **MPP on Solana** (`md-*-solmpp`, when listed) | **Only signs** a fully-signed transaction. The Router broadcasts it at purchase; **your key pays the fee (devnet SOL)** |
 
 **On MPP, get human approval before running step 4.** Running it first would move money
-the person never agreed to. If step 5 then fails, **do not retry on your own** — report
-that the payment was already sent, and stop.
+the person never agreed to. **On Tempo**, if step 5 then fails, **do not retry on your own** — report
+that the payment was already sent, and stop. **On Solana over MPP** the wording is different, because the Router
+is the one that broadcasts: if step 5 fails or ends `unknown`, **the funds may already have moved** (the Router may have
+sent your transaction before it stopped). Neither `rejected` nor `unknown` proves that nothing was paid. **Do not sign
+again or retry on your own**; report the `paymentId`, the status and the signature from `source.txRef` when it is present, and stop.
 
 **Never**:
 - Build a `credential` by guessing (**stop and report** if you cannot sign)
@@ -104,6 +115,29 @@ again with one constant: **if they are missing from `subetha_router_list_routes`
   **Do not work around a refusal**; report it.
 - A Solana key: `npm run wallet:new:solana`. `npm run wallet:balance` shows Base Sepolia USDC only (not Arc USDC, not devnet USDC).
 - The MPP disclosure above is unchanged: only MPP moves funds at `sign`.
+
+### MPP on Solana (in the code since 2026-10-08, switched off on the hosted Router)
+
+The Router can also take **Solana devnet USDC over MPP** (`solana/charge`, routes `md-x402-eth-snapshot-solmpp` /
+`md-mpp-eth-snapshot-solmpp`, profiles `dyn-solmpp-to-*`) and pay a provider that accepts only that
+(`md-solmpp-eth-snapshot` / `md-solmpp-eth-snapshot-mpp`, profiles `dyn-*-to-solmpp`). The operator's constant switches each
+direction; **if a route or profile is missing from `subetha_router_list_routes`, it does not exist for you.** While they are listed:
+
+- The steps are the same as above and `npm run sign` **detects `solana/charge` from the offer**. It checks the challenge inside
+  the offer against the offer and the Router's table (amount, mint, recipient, Memo, devnet, decimals, token program, fee payer),
+  reads **one blockhash**, **fully signs** a transfer with your key as fee payer, and prints the credential. **Nothing is sent at
+  `sign`.** It refuses before touching your key if anything disagrees; **do not work around a refusal**, report it.
+- **Call purchase right away after `sign`**: the blockhash expires in about a minute. Take a new quote if you waited.
+- **You need devnet SOL** on the paying key for the transaction fee (the Router broadcasts your transaction and your key pays), plus
+  devnet USDC. `npm run wallet:new:solana` prints both faucets. `npm run wallet:balance` shows neither.
+- `sign` reads the blockhash from `SOLANA_RPC_URL` (default: public devnet) through the same guarded transport the Router uses:
+  no redirects, 64 KiB, 10 s, and **a loopback RPC is refused** unless `SOLANA_RPC_ALLOW_LOOPBACK=1` (only for a node you run yourself).
+- The quote's `subject.fundsMoveOnCredential` is `true` for these routes too. With `npm run sign` funds move **at purchase**, not at
+  `sign`; the flag stays `true` because another client could hand the Router an already-broadcast (`signature` type) credential, which
+  moves funds at the credential. Either way, **approve before `sign`** and treat a failed or `unknown` step 5 as "funds may have moved".
+- Paying a `solmpp` route or profile over Base Sepolia USDC or Tempo pathUSD is the same as any other x402 or Tempo payment for you;
+  the Router pays the provider over MPP on Solana with its own key. The dynamic `*-to-solmpp` quotes carry no `pricing.maxFee`
+  (the Router pays no chain fee on that leg).
 
 ### Dynamic upstream URLs (`subetha_router_quote_url`)
 
@@ -151,5 +185,6 @@ Without it, `npm run sign` is blocked at runtime as a funds-handling command.
 
 **What is allowed is producing a signature, not deciding to pay.** `sign` may be run only
 **after a human approves the quote**, which step 3 defines. On the x402 rail `sign` moves
-nothing — funds move at `purchase`. On the MPP rail funds move at `sign`
-(true when `subject.fundsMoveOnCredential` is true).
+nothing — funds move at `purchase`. On the MPP rail on Tempo funds move at `sign`
+(`subject.fundsMoveOnCredential` is true). On the MPP rail on Solana `sign` moves nothing and the
+Router broadcasts at `purchase`, but the flag is still true and the approval still comes before `sign`.

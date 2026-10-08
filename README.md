@@ -140,6 +140,17 @@ transaction itself (fixed shape: compute budget, SPL `TransferChecked`, memo), c
 signing so the same message is never signed twice (also across a crash and restart), verifies the signature and the wire before the single send, and keeps a per-purchase balance
 pre-check; all of this is covered by fixture tests including child-process SIGKILL interruption tests, and by two independent signing-boundary reviews.
 
+**MPP on Solana, both directions, is in the code since 2026-10-08 and switched off on the hosted Router** (`RAILS_ACTIVATION.solanaMpp`,
+same one-constant switch, per direction; design `docs/mpp-solana-design.md`, rollout `docs/DEPLOY.md` §2d). Inbound: the caller pays
+**Solana devnet USDC over MPP** (`solana/charge`); the Router issues the challenge itself, verifies the fully-signed transaction the caller
+hands it (structure, amount, Memo, signature; no chain read), broadcasts it once at purchase and follows the confirmation
+(`md-x402-eth-snapshot-solmpp`, `md-mpp-eth-snapshot-solmpp`, `dyn-solmpp-to-*`). Outbound: the Router pays a provider that accepts only
+that (`md-solmpp-eth-snapshot`, `md-solmpp-eth-snapshot-mpp`, `dyn-*-to-solmpp`) with its own Solana key, rebuilding the transfer from the
+approved values, reserving the message hash before signing and verifying the provider's receipt against the chain; the provider's fee payer
+broadcasts, so the Router pays no chain fee on that leg. Covered by fixture tests (real `@solana/pay-kit` client and server in the fixtures,
+in-process and child-process interruption tests) and by independent reviews per task; **no testnet purchase has been made yet** (G-3″), and the
+operator's Solana MPP provider is not deployed (`UPSTREAM_SOL_MPP` is empty).
+
 What is verified for them: fixture tests of the whole path (in-process, no chain), **one live `/verify` each** against Circle and
 x402.org with disposable keys, and the **G-3 acceptance purchases of 2026-10-07** with disposable payers in the production environment
 (Arc static and dynamic → Tempo: delivered; Solana static and dynamic → Base: delivered with finalized signatures; records in
@@ -162,11 +173,18 @@ Because of that, **the meaning of `npm run sign` changes with the rail**:
 | x402 (`md-mpp-eth-snapshot`) | **Signs only.** No funds move yet |
 | MPP (`md-x402-eth-snapshot`) | **Sends funds on the spot.** Get approval **before this** |
 | x402 on Arc or Solana (when enabled) | **Signs only.** On Solana the facilitator's fee payer submits and pays the fee; your key never pays SOL |
+| MPP on Solana (`md-*-solmpp`, when enabled) | **Signs only** (a fully-signed transaction). The Router broadcasts it at purchase; **your key pays the fee, so you need devnet SOL**. Call purchase right away: the blockhash lives about a minute |
+
+A defect found while adding that row: since 2026-10-07 the sign tool's common nonce check accepted only the `0x` hex form, which is
+what the x402 adapters issue, while both MPP adapters (Tempo and Solana) use the mppx challenge id (base64url). `npm run sign` therefore
+refused every Tempo MPP offer with "no well-formed challengeNonce". Fixed on 2026-10-08 (M6) with a regression test that signs a real
+adapter's offer.
 
 **Not verified yet**:
 
 - **Real settlement of the SubEtha inbound leg** (still the synthetic facilitator). -> **AC-4 is not met**
 - Same-rail: x402 -> x402 is covered by the Solana -> Base acceptance purchases (G-3, 2026-10-07); **MPP -> MPP is not verified**
+- **MPP on Solana (both directions): fixture tests only.** No testnet purchase, no provider deployed, switched off on the hosted Router
 - **Arc and Solana inbound: only the four acceptance cases** (static and dynamic on each rail, testnets, 2026-10-07; six attempts in
   total, five delivered and one `unknown` whose payment settled on chain without delivery, which led to the SVM follow-up in
   `docs/DEPLOY.md` §2c); no sustained operation yet, and the hosted entry does not forward the child Router's stderr (§2c says what to look at instead)

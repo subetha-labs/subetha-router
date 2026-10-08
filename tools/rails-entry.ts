@@ -16,28 +16,36 @@ import { createRealSvmCapability } from "./real-svm-capability.js";
 import { INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, RAIL_UPSTREAMS, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
-/** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out"` の部分集合。空 = すべて無効）。 */
+/** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out"` の部分集合。空 = すべて無効）。 */
 export const RAILS_ACTIVATION_ENV = "SUBETHA_RAILS_ACTIVATION";
 /** Arc の Provider の受取先（送信が有効で静的 route を出すときだけ。D-10）。 */
 export const ARC_PROVIDER_ENV = "SUBETHA_ARC_PROVIDER_PAYTO";
 /** Solana の Provider の受取先（owner の公開鍵。送信が有効で静的 route を出すときだけ。D-10）。 */
 export const SOLANA_PROVIDER_ENV = "SUBETHA_SOLANA_PROVIDER_PAYTO";
-/** Solana の送信の鍵（ed25519 の seed。`wallet:new:solana`）。`solana.outbound` のときだけ読む。 */
+/** Provider D（Solana の MPP）の受取 owner（公開鍵。`solanaMpp.outbound` で、Provider D の URL が定数に入ったときだけ読む。`docs/mpp-solana-design.md` §6.2）。 */
+export const SOLANA_MPP_PROVIDER_ENV = "SUBETHA_SOLANA_MPP_PROVIDER_PAYTO";
+/** Solana の送信の鍵（ed25519 の seed。`wallet:new:solana`）。`solana.outbound ∨ solanaMpp.outbound` のときだけ読む（同じ鍵・同じ能力 1 つ）。 */
 export const SOLANA_OUTBOUND_KEY_ENV = "SUBETHA_OUTBOUND_SOLANA_KEY";
-/** Solana の受取 owner の address（鍵はホストに置かない。ATA は運用者が作る）。 */
+/** Solana の受取 owner の address（鍵はホストに置かない。ATA は運用者が作る）。x402 の受信と MPP の受信で同じ値（`solana.inbound ∨ solanaMpp.inbound` で読む）。 */
 export const SOLANA_RECEIVER_ENV = "SUBETHA_SOLANA_RECEIVER";
 /** Solana の JSON-RPC（起動時の ATA の検査だけ）。無ければ公開 devnet の既定。URL は鍵を含み得るのでログに出さない。 */
 export const SOLANA_RPC_ENV = "SUBETHA_SOLANA_RPC_URL";
 
-const RAIL_NAMES = ["arc", "solana"] as const;
+/** レールの名前と token の語幹（`solanaMpp` の token は `solana-mpp-in`／`solana-mpp-out`。`docs/mpp-solana-design.md` §6.1）。 */
+const RAIL_NAMES = [
+  ["arc", "arc"],
+  ["solana", "solana"],
+  ["solanaMpp", "solana-mpp"],
+] as const satisfies readonly (readonly [keyof RailsActivation, string])[];
 /** 内部 env の token（方向別。送信の設計 §6.1）。旧い `arc`・`solana` は受け付けない。 */
-const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out"] as const;
+const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out"] as const;
+const ACTIVATION_TOKENS_TEXT = ACTIVATION_TOKENS.join(",");
 
 export function activationToEnv(activation: RailsActivation): string {
   const tokens: string[] = [];
-  for (const rail of RAIL_NAMES) {
-    if (activation[rail].inbound) tokens.push(`${rail}-in`);
-    if (activation[rail].outbound) tokens.push(`${rail}-out`);
+  for (const [rail, stem] of RAIL_NAMES) {
+    if (activation[rail].inbound) tokens.push(`${stem}-in`);
+    if (activation[rail].outbound) tokens.push(`${stem}-out`);
   }
   return tokens.join(",");
 }
@@ -49,7 +57,7 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
     for (const token of value.split(",")) {
       const name = token.trim();
       if (!(ACTIVATION_TOKENS as readonly string[]).includes(name) || seen.has(name)) {
-        throw new Error(`${RAILS_ACTIVATION_ENV} must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out" without repeats`);
+        throw new Error(`${RAILS_ACTIVATION_ENV} must be a comma-separated subset of "${ACTIVATION_TOKENS_TEXT}" without repeats`);
       }
       seen.add(name);
     }
@@ -57,7 +65,21 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
   return {
     arc: { inbound: seen.has("arc-in"), outbound: seen.has("arc-out") },
     solana: { inbound: seen.has("solana-in"), outbound: seen.has("solana-out") },
+    solanaMpp: { inbound: seen.has("solana-mpp-in"), outbound: seen.has("solana-mpp-out") },
   };
+}
+
+/** Solana の受取 owner が要るか（x402 の受信か MPP の受信。設計 §6.2）。 */
+function needsSolanaReceiver(activation: RailsActivation): boolean {
+  return activation.solana.inbound || activation.solanaMpp.inbound;
+}
+/** Solana の送信の鍵が要るか（x402 の送信か MPP の送信。同じ鍵・同じ能力 1 つ。設計 §6.2）。 */
+export function needsSolanaOutboundKey(activation: RailsActivation): boolean {
+  return activation.solana.outbound || activation.solanaMpp.outbound;
+}
+/** Solana の RPC が要るか（Solana のどの方向でも）。 */
+function usesSolana(activation: RailsActivation): boolean {
+  return needsSolanaReceiver(activation) || needsSolanaOutboundKey(activation);
 }
 
 /**
@@ -71,7 +93,8 @@ export function railsReceiversOf(activation: RailsActivation, env: Readonly<Reco
     // 鍵の形の検査と address の導出は能力の作成と同じ関数（違う鍵を見ない）。
     receivers.arc = createRealSellerProofCapability(INBOUND_ARC.network, env).address;
   }
-  if (activation.solana.inbound) {
+  // Solana の受取 owner は x402 の受信と MPP の受信で同じ値（どちらかが有効なら読む。設定生成の述語は別々: `receiverOf` と `solanaMppReceiverOf`）。
+  if (needsSolanaReceiver(activation)) {
     const owner = env[SOLANA_RECEIVER_ENV];
     if (owner === undefined || owner === "") {
       throw new Error(`${SOLANA_RECEIVER_ENV} is required when the solana rail is activated`);
@@ -86,7 +109,7 @@ export function railsReceiversOf(activation: RailsActivation, env: Readonly<Reco
  * URL が空（Provider が立っていない。今の Arc）なら env に触れない。無ければ欄ごと無し: 有無の判定は設定生成（`providerOf`）が行う。
  */
 export function railsProvidersOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, upstreams: RailUpstreams = RAIL_UPSTREAMS): RailProviders {
-  const providers: { arc?: string; solana?: string } = {};
+  const providers: { arc?: string; solana?: string; solanaMpp?: string } = {};
   if (activation.arc.outbound && upstreams.arc !== "") {
     const payTo = env[ARC_PROVIDER_ENV];
     if (payTo !== undefined && payTo !== "") providers.arc = payTo;
@@ -94,6 +117,11 @@ export function railsProvidersOf(activation: RailsActivation, env: Readonly<Reco
   if (activation.solana.outbound && upstreams.solana !== "") {
     const payTo = env[SOLANA_PROVIDER_ENV];
     if (payTo !== undefined && payTo !== "") providers.solana = payTo;
+  }
+  // Provider D（Solana の MPP）: 送信が有効で URL が定数に入ったときだけ（Provider D が立つまで URL は空 → 読まない）。
+  if (activation.solanaMpp.outbound && upstreams.solanaMpp !== "") {
+    const payTo = env[SOLANA_MPP_PROVIDER_ENV];
+    if (payTo !== undefined && payTo !== "") providers.solanaMpp = payTo;
   }
   return providers;
 }
@@ -117,7 +145,7 @@ export function railsCapabilitiesOf(activation: RailsActivation, env: Readonly<R
   return {
     // 売り手証明は Arc の**受信**だけ。Solana の RPC は受信か送信のどちらかで要る（送信の設計 §6.2）。
     ...(activation.arc.inbound ? { sellerProofs: { [INBOUND_ARC.network]: createRealSellerProofCapability(INBOUND_ARC.network, env, now) } } : {}),
-    ...(activation.solana.inbound || activation.solana.outbound ? { dependencyUrls: [solanaRpcUrlOf(env)] } : {}),
+    ...(usesSolana(activation) ? { dependencyUrls: [solanaRpcUrlOf(env)] } : {}),
   };
 }
 
@@ -129,7 +157,7 @@ export class ProcessEntryError extends Error {
       code === "outbound_keys"
         ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required"
         : code === "solana_key"
-          ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail is activated"
+          ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail (x402 or MPP) is activated"
           : "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)",
     );
     this.name = "ProcessEntryError";
@@ -162,9 +190,9 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
     throw new ProcessEntryError("outbound_keys");
   }
   const evm = evmKey === undefined || evmKey === "" ? undefined : createRealEvmCapability(evmKey);
-  // Solana の送信（送信の設計 §6.2、D-11）: 専用の ed25519 の鍵を **`solana.outbound` のときだけ**読む。無い・形が違えば起動しない（値は出さない）。
+  // Solana の送信（送信の設計 §6.2、D-11。MPP の送信も同じ鍵・同じ能力: `docs/mpp-solana-design.md` §6.2）: 専用の ed25519 の鍵を **`solana.outbound ∨ solanaMpp.outbound` のときだけ**読む。無い・形が違えば起動しない（値は出さない）。
   let svm: ReturnType<typeof createRealSvmCapability> | undefined;
-  if (activation.solana.outbound) {
+  if (needsSolanaOutboundKey(activation)) {
     const solKey = env[SOLANA_OUTBOUND_KEY_ENV];
     if (solKey === undefined || solKey === "") throw new ProcessEntryError("solana_key");
     try {
@@ -195,15 +223,15 @@ export function railsChildEnvOf(activation: RailsActivation, env: Readonly<Recor
     const key = env[ARC_RECEIVER_KEY_ENV];
     if (key !== undefined && key !== "") out[ARC_RECEIVER_KEY_ENV] = key;
   }
-  if (activation.solana.inbound || activation.solana.outbound) {
+  if (usesSolana(activation)) {
     const rpc = env[SOLANA_RPC_ENV];
     if (rpc !== undefined && rpc !== "") {
       out[SOLANA_RPC_ENV] = rpc;
       out["ROUTER_SOLANA_RPC_URL"] = rpc;
     }
   }
-  // Solana の送信の鍵は `solana.outbound` のときだけ読んで渡す（無効なら参照もしない）。
-  if (activation.solana.outbound) {
+  // Solana の送信の鍵は `solana.outbound ∨ solanaMpp.outbound` のときだけ読んで渡す（無効なら参照もしない）。
+  if (needsSolanaOutboundKey(activation)) {
     const key = env[SOLANA_OUTBOUND_KEY_ENV];
     if (key !== undefined && key !== "") out[SOLANA_OUTBOUND_KEY_ENV] = key;
   }

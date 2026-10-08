@@ -13,6 +13,7 @@
  * | `exact` ＋ `eip155:` | x402 / EVM（Base Sepolia・Arc testnet） | **署名するだけ**。送信と gas は facilitator 負担 |
  * | `exact` ＋ `solana:` | x402 / Solana devnet | **部分署名するだけ**。送信と手数料は facilitator の fee payer |
  * | `tempo/charge` | MPP / Tempo | **この場でチェーンに送金する**。手数料も自分持ち |
+ * | `solana/charge` | MPP / Solana devnet | **全署名するだけ**。送出は Router（purchase）。手数料（SOL）は自分持ち。blockhash の寿命の中で purchase を呼ぶ |
  *
  * **MPP は署名ではなく送金**である点に注意。このコマンドを実行した時点で
  * **資金が動き、失敗しても戻らない**。だから実行前に必ず人間の承認を取ること。
@@ -27,7 +28,9 @@ import { readFileSync } from "node:fs";
 
 import { createMppPayer } from "./mpp-payer.js";
 import { runSign } from "./sign-run.js";
+import { createSvmMppPayer } from "./svm-mpp-payer.js";
 import { createSvmPayer } from "./svm-payer.js";
+import { SVM_RPC_ALLOW_LOOPBACK_ENV } from "./svm-rpc.js";
 import { createX402Payer } from "./x402-payer.js";
 
 function envValue(name: string): string | undefined {
@@ -68,14 +71,18 @@ try {
 }
 
 const solanaRpcUrl = envValue("SOLANA_RPC_URL");
+// loopback の Solana RPC は既定で拒む（Router と同じ transport の方針）。手元の node・fixture に向けるときだけ `SOLANA_RPC_ALLOW_LOOPBACK=1`。
+const solanaRpcAllowLoopback = envValue(SVM_RPC_ALLOW_LOOPBACK_ENV) === "1";
 const outcome = await runSign(quote, {
   nowMs: Date.now,
   readEvmKey: () => requireKey("SUBETHA_PAYER_PRIVATE_KEY", "npm run wallet:new"),
   readSolanaKey: () => requireKey("SOLANA_PAYER_PRIVATE_KEY", "npm run wallet:new:solana"),
   ...(solanaRpcUrl === undefined ? {} : { solanaRpcUrl }),
+  ...(solanaRpcAllowLoopback ? { solanaRpcAllowLoopback } : {}),
   mppPayer: (key, scope) => createMppPayer(key, scope),
   evmPayer: (key) => createX402Payer(key),
   svmPayer: (key, options) => createSvmPayer(key, options),
+  svmMppPayer: (key, options) => createSvmMppPayer(key, options),
   stderr: (text) => process.stderr.write(text),
 });
 if (!outcome.ok) {

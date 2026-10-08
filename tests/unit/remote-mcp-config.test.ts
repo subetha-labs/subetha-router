@@ -13,6 +13,7 @@ import { ConfigError, KNOWN_NETWORKS, loadRuntimeConfig, parseRouterConfig, type
 import { routeListBody } from "../../src/http/projection.js";
 import {
   dynamicProfilesOf,
+  INBOUND,
   INBOUND_ARC,
   INBOUND_SOL,
   RAILS_ACTIVATION,
@@ -28,7 +29,12 @@ import {
   RAIL_UPSTREAMS,
   railActive,
   ROUTE_SOL_OUT,
+  ROUTE_SOLMPP_OUT,
+  ROUTE_SOLMPP_OUT_MPP,
+  ROUTE_SOLMPP_TO_MPP,
+  ROUTE_SOLMPP_TO_X402,
   UPSTREAM_SOL,
+  UPSTREAM_SOL_MPP,
   routerConfigOf,
   UPSTREAM,
   UPSTREAM_ARC,
@@ -39,7 +45,7 @@ import {
 const RECEIVER = "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405";
 const ARC_RECEIVER = "0xAF42CFfe4B35A05098613d962aF43CDc43fBb4Ea";
 const SOL_OWNER = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
-const BOTH: RailsOptions = { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: true, outbound: false } }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } };
+const BOTH: RailsOptions = { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -83,10 +89,10 @@ function bucketsOf(router: RouterConfig): { static: string[]; dynamic: string[] 
 
 describe("公開の process の既定: Arc・Solana はどちらも無効", () => {
   test("既定の生成（RAILS_DISABLED = RAILS_NONE）は既存の 2 経路・2 プロファイルだけ。公開の定数 RAILS_ACTIVATION は受信（G-4）も送信（G-4′）も両方 true（凍結）", () => {
-    expect(RAILS_NONE).toEqual({ arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false } });
+    expect(RAILS_NONE).toEqual({ arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_NONE)).toBe(true);
     expect(RAILS_DISABLED.activation).toBe(RAILS_NONE);
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
     const document = routerConfigOf({}, RECEIVER, true);
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true, RAILS_DISABLED));
@@ -175,8 +181,8 @@ describe("有効にしたときだけ出る（設計 §8・D-6・D-7）", () => 
   });
 
   test.each([
-    ["Arc だけ", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER } }, [ROUTE_ARC], ["dyn-arc-to-mpp", "dyn-arc-to-x402"], INBOUND_ARC.network, INBOUND_SOL.network],
-    ["Solana だけ", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false } }, receivers: { solana: SOL_OWNER } }, [ROUTE_SOL], ["dyn-sol-to-mpp", "dyn-sol-to-x402"], INBOUND_SOL.network, INBOUND_ARC.network],
+    ["Arc だけ", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER } }, [ROUTE_ARC], ["dyn-arc-to-mpp", "dyn-arc-to-x402"], INBOUND_ARC.network, INBOUND_SOL.network],
+    ["Solana だけ", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { solana: SOL_OWNER } }, [ROUTE_SOL], ["dyn-sol-to-mpp", "dyn-sol-to-x402"], INBOUND_SOL.network, INBOUND_ARC.network],
   ] as const)("%s を有効にすると、そのレールの分だけ出る", (_name, rails, routes, profiles, present, absent) => {
     const document = routerConfigOf({}, RECEIVER, true, rails);
     const loaded = loadAsProduction(document);
@@ -206,12 +212,12 @@ describe("有効にしたときだけ出る（設計 §8・D-6・D-7）", () => 
 
 describe("受取先と秘密", () => {
   test.each([
-    ["Arc の受取先が無い", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: {} }, /arc rail is activated but its receiver address is missing or malformed/],
-    ["Arc の受取先の形が違う", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: "0x1234" } }, /arc rail is activated/],
-    ["Arc に Solana の address", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: SOL_OWNER } }, /arc rail is activated/],
-    ["Solana の受取先が無い", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false } }, receivers: { arc: ARC_RECEIVER } }, /solana rail is activated but its receiver address is missing or malformed/],
-    ["Solana に EVM の address", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false } }, receivers: { solana: ARC_RECEIVER } }, /solana rail is activated/],
-    ["Solana の address に base58 でない文字", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false } }, receivers: { solana: `${SOL_OWNER.slice(0, -1)}0` } }, /solana rail is activated/],
+    ["Arc の受取先が無い", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: {} }, /arc rail is activated but its receiver address is missing or malformed/],
+    ["Arc の受取先の形が違う", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: "0x1234" } }, /arc rail is activated/],
+    ["Arc に Solana の address", { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: SOL_OWNER } }, /arc rail is activated/],
+    ["Solana の受取先が無い", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER } }, /solana rail is activated but its receiver address is missing or malformed/],
+    ["Solana に EVM の address", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { solana: ARC_RECEIVER } }, /solana rail is activated/],
+    ["Solana の address に base58 でない文字", { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { solana: `${SOL_OWNER.slice(0, -1)}0` } }, /solana rail is activated/],
   ] as const)("%s → 生成しない（値はメッセージに出ない）", (_name, rails, pattern) => {
     let caught: unknown;
     try {
@@ -244,13 +250,13 @@ describe("受取先と秘密", () => {
 describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
   // Provider の受取先は受取鍵の address と別の値にする（文書に受取鍵が出ないことを文字列で見るため）。
   const ARC_PROVIDER = "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1";
-  const OUT_ONLY: RailsOptions = { activation: { arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false } }, receivers: {}, providers: { arc: ARC_PROVIDER } };
+  const OUT_ONLY: RailsOptions = { activation: { arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { arc: ARC_PROVIDER } };
 
   test("公開の定数は受信 true・送信 true（Arc・Solana とも。G-4′ 2026-10-08）。railActive は方向のどれかで決まる", () => {
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_ACTIVATION) && Object.isFrozen(RAILS_ACTIVATION.arc)).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
-    expect(railActive({ arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false } })).toBe(true);
+    expect(railActive({ arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } })).toBe(true);
   });
 
   test("公開の設定（定数、G-4′ の後）: 受信 4 本 + 送信 2 本の route と 10 本のプロファイル。O-5・O-6（Arc ↔ Solana）は無い（D-12・D-16）。送信の受取先が無ければ起動しない", () => {
@@ -285,7 +291,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
 
   test("静的 route md-arc-eth-snapshot は Provider の URL（定数）と受取先（env）がそろったときだけ。定数は配備した Provider の URL（G-1′、2026-10-08）", () => {
     expect(UPSTREAM_ARC).toBe("https://provider-x402-arc.subethalabs.com/v1/eth/snapshot");
-    expect(RAIL_UPSTREAMS).toEqual({ arc: UPSTREAM_ARC, solana: "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot" });
+    expect(RAIL_UPSTREAMS).toEqual({ arc: UPSTREAM_ARC, solana: "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot", solanaMpp: "" });
     // 本番の定数 + 受取先 → route が出て、上流はその URL。
     const document = routerConfigOf({}, RECEIVER, true, OUT_ONLY);
     expect(routerOf(document).routes[ROUTE_ARC_OUT]).toBeDefined();
@@ -293,7 +299,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
     // URL があるのに受取先が無ければ起動しない（固定文。値は出ない）。
     expect(() => routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, providers: {} })).toThrow();
     // URL が空なら（試験の差し替え）受取先があっても出ないし、受取先が無くても起動する。
-    const empty = { arc: "", solana: "" };
+    const empty = { arc: "", solana: "", solanaMpp: "" };
     const withoutUrl = routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, upstreams: empty });
     expect(routerOf(withoutUrl).routes[ROUTE_ARC_OUT]).toBeUndefined();
     expect(Object.keys((withoutUrl["x402"] as { upstreams: Record<string, string> }).upstreams)).not.toContain(ROUTE_ARC_OUT);
@@ -302,7 +308,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
 
   test("Provider の URL が入ると静的 route md-arc-eth-snapshot が出る: Base USDC 10,000 を Router の受取先に払い、Arc USDC で Provider の受取先に届く。上流はその URL。本番の読み込みを通る", () => {
     const ARC_UPSTREAM = "https://provider-arc.test/v1/eth/snapshot";
-    const withUrl: RailsOptions = { ...OUT_ONLY, upstreams: { arc: ARC_UPSTREAM, solana: "" } };
+    const withUrl: RailsOptions = { ...OUT_ONLY, upstreams: { arc: ARC_UPSTREAM, solana: "", solanaMpp: "" } };
     const document = routerConfigOf({}, RECEIVER, true, withUrl);
     const config = loadAsProduction(document);
     const route = config.router.routes[ROUTE_ARC_OUT];
@@ -325,7 +331,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
     const buckets = bucketsOf(config.router);
     expect(buckets.static.filter((b) => b.startsWith(OUTBOUND_ARC.network))).toHaveLength(1);
     // 送信が無効なら URL があっても出ない（受取先も読まない）。
-    const off: RailsOptions = { activation: RAILS_NONE, receivers: {}, providers: {}, upstreams: { arc: ARC_UPSTREAM, solana: "" } };
+    const off: RailsOptions = { activation: RAILS_NONE, receivers: {}, providers: {}, upstreams: { arc: ARC_UPSTREAM, solana: "", solanaMpp: "" } };
     expect(routerOf(routerConfigOf({}, RECEIVER, true, off)).routes[ROUTE_ARC_OUT]).toBeUndefined();
   });
 
@@ -333,7 +339,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
     const ARC_UPSTREAM = "https://provider-arc.test/v1/eth/snapshot";
     const message = /arc outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed/;
     for (const providers of [{}, { arc: "" }, { arc: "not-an-address" }, { arc: ARC_PROVIDER.slice(0, 41) }, { arc: SOL_OWNER }]) {
-      const rails: RailsOptions = { ...OUT_ONLY, providers, upstreams: { arc: ARC_UPSTREAM, solana: "" } };
+      const rails: RailsOptions = { ...OUT_ONLY, providers, upstreams: { arc: ARC_UPSTREAM, solana: "", solanaMpp: "" } };
       let caught: unknown;
       try {
         routerConfigOf({}, RECEIVER, true, rails);
@@ -348,7 +354,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
   });
 
   test("受信と送信が両方有効: 受信の route・プロファイルと送信のプロファイルが共存し、Arc USDC の区分は 1 つ（合算）", () => {
-    const both: RailsOptions = { activation: { arc: { inbound: true, outbound: true }, solana: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER }, providers: { arc: ARC_PROVIDER } };
+    const both: RailsOptions = { activation: { arc: { inbound: true, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER }, providers: { arc: ARC_PROVIDER } };
     const router = loadAsProduction(routerConfigOf({}, RECEIVER, true, both)).router;
     // 静的 route md-arc-eth-snapshot は URL（定数）と受取先がそろったので出る（G-1′）。
     expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC, ROUTE_ARC_OUT].sort());
@@ -361,7 +367,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
 
 describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12・D-14・D-16。タスク U9）", () => {
   const SOL_PROVIDER = "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d";
-  const SOL_OUT: RailsOptions = { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: { solana: SOL_PROVIDER } };
+  const SOL_OUT: RailsOptions = { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { solana: SOL_PROVIDER } };
   const SOL_URL = "https://provider-sol.test/v1/eth/snapshot";
 
   test("公開の定数は solana.outbound true（G-4′）。URL の定数は配備した Provider（G-1′）。公開の ID は route 6・プロファイル 10 で重複なし", () => {
@@ -387,7 +393,7 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
     expect(router.dynamic!.profiles["dyn-mpp-to-sol"]).toMatchObject({ sourceRail: "mpp", rail: "x402", source: { network: "eip155:42431", payTo: RECEIVER }, destination: { network: OUTBOUND_SOL.network } });
     expect(router.routes[ROUTE_SOL]).toBeUndefined();
     expect(router.routes[ROUTE_SOL_OUT]).toBeDefined(); // MPP 受信 ∧ URL（定数。G-1′）∧ 受取先
-    expect(routerOf(routerConfigOf({}, RECEIVER, true, { ...SOL_OUT, upstreams: { arc: "", solana: "" } })).routes[ROUTE_SOL_OUT]).toBeUndefined(); // URL が空なら出ない
+    expect(routerOf(routerConfigOf({}, RECEIVER, true, { ...SOL_OUT, upstreams: { arc: "", solana: "", solanaMpp: "" } })).routes[ROUTE_SOL_OUT]).toBeUndefined(); // URL が空なら出ない
     expect(JSON.stringify(document)).not.toContain(SOL_OWNER);
     const buckets = bucketsOf(router);
     expect(buckets.static.some((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|10000|`))).toBe(true);
@@ -396,7 +402,7 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
   });
 
   test("静的 route md-sol-eth-snapshot-mpp は MPP 受信 ∧ URL ∧ 受取先（base58 32 バイト）がそろったときだけ: Tempo pathUSD 10,000 を Router の受取先に払い、Solana USDC で Provider の owner に届く。本番の読み込みを通る", () => {
-    const withUrl: RailsOptions = { ...SOL_OUT, upstreams: { arc: "", solana: SOL_URL } };
+    const withUrl: RailsOptions = { ...SOL_OUT, upstreams: { arc: "", solana: SOL_URL, solanaMpp: "" } };
     const config = loadAsProduction(routerConfigOf({}, RECEIVER, true, withUrl));
     expect(config.router.routes[ROUTE_SOL_OUT]).toMatchObject({
       routeId: ROUTE_SOL_OUT,
@@ -414,16 +420,206 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
       expect(() => routerConfigOf({}, RECEIVER, true, { ...withUrl, providers }), JSON.stringify(providers)).toThrow(/solana outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed/);
     }
     // 送信が無効なら出ない。
-    expect(routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_NONE, receivers: {}, providers: { solana: SOL_PROVIDER }, upstreams: { arc: "", solana: SOL_URL } })).routes[ROUTE_SOL_OUT]).toBeUndefined();
+    expect(routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_NONE, receivers: {}, providers: { solana: SOL_PROVIDER }, upstreams: { arc: "", solana: SOL_URL, solanaMpp: "" } })).routes[ROUTE_SOL_OUT]).toBeUndefined();
   });
 
   test("受信と送信が両方有効（Solana）: 受信の route・プロファイルと送信のプロファイルが共存し、Solana USDC の区分は 1 つ（合算）。4 本の送信が同時に出ても公開 ID は 6 + 6", () => {
     // URL の定数が入ったので（G-1′）、送信が有効なら両レールの受取先が要る。
-    const both: RailsOptions = { activation: { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true } }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: SOL_PROVIDER } };
+    const both: RailsOptions = { activation: { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: SOL_PROVIDER } };
     const router = loadAsProduction(routerConfigOf({}, RECEIVER, true, both)).router;
     expect(listedIds(router).profiles).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol"]);
     const buckets = bucketsOf(router);
     expect(buckets.static.filter((b) => b.startsWith(OUTBOUND_SOL.network))).toHaveLength(1);
     expect(buckets.dynamic.filter((b) => b.startsWith(OUTBOUND_SOL.network))).toHaveLength(1);
+  });
+});
+
+/** Solana の MPP（受信・送信）の生成（`docs/mpp-solana-design.md` §6.1・§6.3、FR-40・FR-42・FR-43。タスク M6）。 */
+describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）", () => {
+  const SOL_PROVIDER = "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d";
+  const SOL_MPP_PROVIDER = "4LrBc1whdzuLzk7qgo6y5JEgHtyhgNoPpzPpHebaJ5oM";
+  const ARC_PROVIDER = "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1";
+  const OFF = { inbound: false, outbound: false };
+  const IN = { inbound: true, outbound: false };
+  const OUT = { inbound: false, outbound: true };
+  const SOL_MPP_URL = "https://provider-solmpp.test/v1/eth/snapshot";
+  const SOLMPP_DEST = { scheme: "solana/charge", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: 6, tokenProgram: OUTBOUND_SOL.tokenProgram };
+
+  test("公開の定数: solanaMpp は両方 false（M6。G-4″ まで無効）、UPSTREAM_SOL_MPP は空（Provider D まで）。railActive は solanaMpp だけでも true。公開の設定は今までどおり route 6・プロファイル 10", () => {
+    expect(RAILS_ACTIVATION.solanaMpp).toEqual(OFF);
+    expect(Object.isFrozen(RAILS_ACTIVATION.solanaMpp)).toBe(true);
+    expect(RAILS_NONE.solanaMpp).toEqual(OFF);
+    expect(UPSTREAM_SOL_MPP).toBe("");
+    expect(RAIL_UPSTREAMS.solanaMpp).toBe("");
+    expect(railActive({ arc: OFF, solana: OFF, solanaMpp: IN })).toBe(true);
+    expect(railActive({ arc: OFF, solana: OFF, solanaMpp: OUT })).toBe(true);
+    expect(railActive(RAILS_NONE)).toBe(false);
+    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER } }));
+    const ids = listedIds(router);
+    expect(ids.routes).toHaveLength(6);
+    expect(ids.profiles).toHaveLength(10);
+    expect(JSON.stringify(router)).not.toContain("solmpp");
+    expect(JSON.stringify(router)).not.toContain("solana/charge");
+  });
+
+  test("solanaMpp.inbound だけ: 静的 md-x402-eth-snapshot-solmpp・md-mpp-eth-snapshot-solmpp（source は solana の受取 owner、sourceRail mpp）、動的 dyn-solmpp-to-x402・dyn-solmpp-to-mpp。x402 の Solana 受信（md-x402-eth-snapshot-sol・dyn-sol-to-*・facilitator）は出ない。Solana USDC の区分が出る。本番の読み込みを通る", () => {
+    const rails: RailsOptions = { activation: { arc: OFF, solana: OFF, solanaMpp: IN }, receivers: { solana: SOL_OWNER } };
+    const document = routerConfigOf({}, RECEIVER, true, rails);
+    const loaded = loadAsProduction(document);
+    const router = loaded.router;
+    expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_SOLMPP_TO_MPP, ROUTE_SOLMPP_TO_X402].sort());
+    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-mpp-to-x402", "dyn-solmpp-to-mpp", "dyn-solmpp-to-x402", "dyn-x402-to-mpp"]);
+    expect(ROUTE_SOLMPP_TO_X402).toBe("md-x402-eth-snapshot-solmpp");
+    expect(ROUTE_SOLMPP_TO_MPP).toBe("md-mpp-eth-snapshot-solmpp");
+    expect(router.routes[ROUTE_SOLMPP_TO_X402]).toMatchObject({
+      rail: "x402",
+      sourceRail: "mpp",
+      canonicalPath: "/v1/routes/md-x402-eth-snapshot-solmpp/resource",
+      source: { amount: "10000", asset: INBOUND_SOL.asset, decimals: 6, network: INBOUND_SOL.network, payTo: SOL_OWNER },
+      destination: { scheme: "exact", network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1" },
+    });
+    expect(router.routes[ROUTE_SOLMPP_TO_MPP]).toMatchObject({
+      rail: "mpp",
+      sourceRail: "mpp",
+      canonicalPath: "/v1/routes/md-mpp-eth-snapshot-solmpp/resource",
+      source: { amount: "10000", asset: INBOUND_SOL.asset, decimals: 6, network: INBOUND_SOL.network, payTo: SOL_OWNER },
+      destination: { scheme: "tempo/charge", network: "eip155:42431", asset: "0x20c0000000000000000000000000000000000000", payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1" },
+    });
+    expect(router.dynamic!.profiles["dyn-solmpp-to-x402"]).toMatchObject({ sourceRail: "mpp", rail: "x402", par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" }, source: { network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, decimals: 6, payTo: SOL_OWNER }, destination: { scheme: "exact", network: "eip155:84532", tokenDomain: { name: "USDC", version: "2" } } });
+    expect(router.dynamic!.profiles["dyn-solmpp-to-mpp"]).toMatchObject({ sourceRail: "mpp", rail: "mpp", source: { network: INBOUND_SOL.network, payTo: SOL_OWNER }, destination: { scheme: "tempo/charge", feeAsset: "0x20c0000000000000000000000000000000000000", maxFee: "50000", feeMargin: 20_000 } });
+    // x402 の Solana 受信は出ない（受取 owner があるだけでは出ない: 述語が別）。
+    expect(router.routes[ROUTE_SOL]).toBeUndefined();
+    expect(router.dynamic!.profiles["dyn-sol-to-x402"]).toBeUndefined();
+    expect(router.dynamic!.profiles["dyn-sol-to-mpp"]).toBeUndefined();
+    expect(loaded.real?.x402InboundFacilitators).toBeUndefined();
+    // 上流: 受信 2 本は Provider A・B の URL。
+    expect(loaded.real?.upstreams[ROUTE_SOLMPP_TO_X402]).toBe(UPSTREAM_X402);
+    expect(loaded.real?.upstreams[ROUTE_SOLMPP_TO_MPP]).toBe(UPSTREAM);
+    // Solana USDC の区分（静的 10,000・動的 20,000）が 1 つずつ。
+    const buckets = bucketsOf(router);
+    expect(buckets.static.filter((b) => b.startsWith(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|10000|`))).toHaveLength(1);
+    expect(buckets.dynamic.filter((b) => b.startsWith(`${INBOUND_SOL.network}|${INBOUND_SOL.asset}|20000|`))).toHaveLength(1);
+    expect(buckets.static.some((b) => b.startsWith(INBOUND_ARC.network))).toBe(false);
+    // 公開の一覧に出る。
+    expect(listedIds(router).routes).toContain(ROUTE_SOLMPP_TO_X402);
+    expect(listedIds(router).routes).toContain(ROUTE_SOLMPP_TO_MPP);
+    // 受取 owner が無い・形が悪ければ起動しない（固定文。値は出ない）。
+    for (const receivers of [{}, { solana: "" }, { solana: RECEIVER }, { solana: "1".repeat(33) }]) {
+      expect(() => routerConfigOf({}, RECEIVER, true, { ...rails, receivers }), JSON.stringify(receivers)).toThrow(/solana mpp rail is activated but its receiver address is missing or malformed/);
+    }
+    // MPP 受信（Tempo）の秘密が無い構成: Tempo 宛の静的 route は出るが（Provider B は Tempo の送信）、動的の Tempo 宛は MPP_OUTBOUND_PROFILE_ENABLED だけで決まる。
+    const noTempo = routerOf(routerConfigOf({}, RECEIVER, false, rails));
+    expect(Object.keys(noTempo.routes).sort()).toEqual([ROUTE, ROUTE_SOLMPP_TO_MPP, ROUTE_SOLMPP_TO_X402].sort());
+    expect(Object.keys(noTempo.dynamic!.profiles).sort()).toEqual(["dyn-solmpp-to-mpp", "dyn-solmpp-to-x402", "dyn-x402-to-mpp"]);
+  });
+
+  test("solanaMpp.inbound と Arc・Solana の送信: dyn-solmpp-to-arc は arc.outbound、dyn-solmpp-to-sol は solana.outbound のときだけ", () => {
+    const base: RailsOptions = { activation: { arc: OFF, solana: OFF, solanaMpp: IN }, receivers: { solana: SOL_OWNER }, upstreams: { arc: "", solana: "", solanaMpp: "" } };
+    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, true, base)).dynamic!.profiles)).not.toContain("dyn-solmpp-to-arc");
+    const withArc = routerOf(routerConfigOf({}, RECEIVER, true, { ...base, activation: { arc: OUT, solana: OFF, solanaMpp: IN } }));
+    expect(withArc.dynamic!.profiles["dyn-solmpp-to-arc"]).toMatchObject({ sourceRail: "mpp", rail: "x402", source: { network: INBOUND_SOL.network, payTo: SOL_OWNER }, destination: { scheme: "exact", network: OUTBOUND_ARC.network, asset: OUTBOUND_ARC.asset, tokenDomain: { name: "USDC", version: "2" } } });
+    expect(withArc.dynamic!.profiles["dyn-solmpp-to-sol"]).toBeUndefined();
+    const withSol = routerOf(routerConfigOf({}, RECEIVER, true, { ...base, activation: { arc: OFF, solana: OUT, solanaMpp: IN } }));
+    expect(withSol.dynamic!.profiles["dyn-solmpp-to-sol"]).toMatchObject({ sourceRail: "mpp", rail: "x402", source: { network: INBOUND_SOL.network, payTo: SOL_OWNER }, destination: { scheme: "exact", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, tokenProgram: OUTBOUND_SOL.tokenProgram } });
+    expect(withSol.dynamic!.profiles["dyn-solmpp-to-arc"]).toBeUndefined();
+    // 同じ Solana USDC の区分は 1 つ（受信の MPP と送信の x402 が合算）。
+    expect(bucketsOf(withSol).static.filter((b) => b.startsWith(INBOUND_SOL.network))).toHaveLength(1);
+    expect(bucketsOf(withSol).dynamic.filter((b) => b.startsWith(INBOUND_SOL.network))).toHaveLength(1);
+  });
+
+  test("solanaMpp.outbound だけ: dyn-x402-to-solmpp と（MPP 受信があれば）dyn-mpp-to-solmpp。宛先は solana/charge・表の mint・桁・token program、feeAsset・maxFee・feeMargin は無い。手数料は MPP 送信の規則。静的 route は URL が空（定数）なので出ず、受取 owner は読まれない。Solana USDC の区分が出る", () => {
+    const rails: RailsOptions = { activation: { arc: OFF, solana: OFF, solanaMpp: OUT }, receivers: {}, providers: { solanaMpp: SOL_MPP_PROVIDER } };
+    const document = routerConfigOf({}, RECEIVER, true, rails);
+    const router = loadAsProduction(document).router;
+    expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN].sort());
+    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-x402-to-mpp", "dyn-x402-to-solmpp"]);
+    const toSolMpp = router.dynamic!.profiles["dyn-x402-to-solmpp"]!;
+    expect(toSolMpp).toMatchObject({ sourceRail: "x402", rail: "mpp", par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" }, source: { network: "eip155:84532", asset: INBOUND.asset, decimals: 6, payTo: RECEIVER }, destination: SOLMPP_DEST });
+    expect(toSolMpp.destination.feeAsset).toBeUndefined();
+    expect(toSolMpp.destination.maxFee).toBeUndefined();
+    expect(toSolMpp.destination.feeMargin).toBeUndefined();
+    expect(toSolMpp.destination.tokenDomain).toBeUndefined();
+    expect(router.dynamic!.profiles["dyn-mpp-to-solmpp"]).toMatchObject({ sourceRail: "mpp", rail: "mpp", source: { network: "eip155:42431", payTo: RECEIVER }, destination: SOLMPP_DEST });
+    expect(JSON.stringify(document)).not.toContain(SOL_OWNER);
+    expect(JSON.stringify(document)).not.toContain(SOL_MPP_PROVIDER); // URL が空なので Provider D の受取 owner は設定に入らない
+    const buckets = bucketsOf(router);
+    expect(buckets.static.filter((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|10000|`))).toHaveLength(1);
+    expect(buckets.dynamic.filter((b) => b.startsWith(`${OUTBOUND_SOL.network}|${OUTBOUND_SOL.asset}|20000|`))).toHaveLength(1);
+    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, false, rails)).dynamic!.profiles).sort()).toEqual(["dyn-x402-to-mpp", "dyn-x402-to-solmpp"]);
+    // Arc・Solana の x402 受信があれば dyn-arc-to-solmpp・dyn-sol-to-solmpp も（source はそのレールの受取先）。
+    const withInbound = routerOf(routerConfigOf({}, RECEIVER, true, { ...rails, activation: { arc: IN, solana: IN, solanaMpp: OUT }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } }));
+    expect(withInbound.dynamic!.profiles["dyn-arc-to-solmpp"]).toMatchObject({ sourceRail: "x402", rail: "mpp", source: { network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, payTo: ARC_RECEIVER }, destination: SOLMPP_DEST });
+    expect(withInbound.dynamic!.profiles["dyn-sol-to-solmpp"]).toMatchObject({ sourceRail: "x402", rail: "mpp", source: { network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, payTo: SOL_OWNER }, destination: SOLMPP_DEST });
+    expect(bucketsOf(withInbound).static.filter((b) => b.startsWith(INBOUND_SOL.network))).toHaveLength(1);
+  });
+
+  test("静的 route md-solmpp-eth-snapshot（Base x402 → Provider D）と md-solmpp-eth-snapshot-mpp（Tempo MPP → Provider D。MPP 受信があるとき）は URL ∧ 受取 owner（base58 32 バイト）がそろったときだけ。上流は Provider D の URL。本番の読み込みを通る", () => {
+    const withUrl: RailsOptions = { activation: { arc: OFF, solana: OFF, solanaMpp: OUT }, receivers: {}, providers: { solanaMpp: SOL_MPP_PROVIDER }, upstreams: { arc: "", solana: "", solanaMpp: SOL_MPP_URL } };
+    const config = loadAsProduction(routerConfigOf({}, RECEIVER, true, withUrl));
+    expect(ROUTE_SOLMPP_OUT).toBe("md-solmpp-eth-snapshot");
+    expect(ROUTE_SOLMPP_OUT_MPP).toBe("md-solmpp-eth-snapshot-mpp");
+    expect(config.router.routes[ROUTE_SOLMPP_OUT]).toMatchObject({
+      routeId: ROUTE_SOLMPP_OUT,
+      canonicalPath: "/v1/routes/md-solmpp-eth-snapshot/resource",
+      rail: "mpp",
+      sourceRail: "x402",
+      source: { amount: "10000", network: "eip155:84532", asset: INBOUND.asset, decimals: 6, payTo: RECEIVER },
+      destination: { scheme: "solana/charge", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, payTo: SOL_MPP_PROVIDER },
+    });
+    expect(config.router.routes[ROUTE_SOLMPP_OUT_MPP]).toMatchObject({
+      routeId: ROUTE_SOLMPP_OUT_MPP,
+      canonicalPath: "/v1/routes/md-solmpp-eth-snapshot-mpp/resource",
+      rail: "mpp",
+      sourceRail: "mpp",
+      source: { amount: "10000", network: "eip155:42431", asset: "0x20c0000000000000000000000000000000000000", decimals: 6, payTo: RECEIVER },
+      destination: { scheme: "solana/charge", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, payTo: SOL_MPP_PROVIDER },
+    });
+    expect(config.real?.upstreams[ROUTE_SOLMPP_OUT]).toBe(SOL_MPP_URL);
+    expect(config.real?.upstreams[ROUTE_SOLMPP_OUT_MPP]).toBe(SOL_MPP_URL);
+    expect(listedIds(config.router).routes).toEqual(expect.arrayContaining([ROUTE_SOLMPP_OUT, ROUTE_SOLMPP_OUT_MPP]));
+    // MPP 受信が無ければ Tempo → Provider D は出ない（源が無い）。Base → Provider D は出る。
+    const noTempo = routerOf(routerConfigOf({}, RECEIVER, false, withUrl));
+    expect(noTempo.routes[ROUTE_SOLMPP_OUT]).toBeDefined();
+    expect(noTempo.routes[ROUTE_SOLMPP_OUT_MPP]).toBeUndefined();
+    expect(Object.keys(routerConfigOf({}, RECEIVER, false, withUrl)["x402"] as Record<string, unknown>)).toEqual(["upstreams"]);
+    expect(((routerConfigOf({}, RECEIVER, false, withUrl)["x402"] as { upstreams: Record<string, string> }).upstreams)[ROUTE_SOLMPP_OUT_MPP]).toBeUndefined();
+    // URL があるのに受取 owner が無い・形が悪い（0x、33 個の 1）なら起動しない（固定文）。
+    for (const providers of [{}, { solanaMpp: "" }, { solanaMpp: RECEIVER }, { solanaMpp: "1".repeat(33) }, { solana: SOL_PROVIDER }]) {
+      expect(() => routerConfigOf({}, RECEIVER, true, { ...withUrl, providers }), JSON.stringify(providers)).toThrow(/solana mpp outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed/);
+    }
+    // 送信が無効なら URL と受取 owner があっても出ない。
+    expect(routerOf(routerConfigOf({}, RECEIVER, true, { ...withUrl, activation: RAILS_NONE })).routes[ROUTE_SOLMPP_OUT]).toBeUndefined();
+    // x402 の Solana 送信（solana.outbound）の受取先は別の欄（Provider D の受取 owner で x402 の静的 route は出ない）。
+    const x402Sol = routerOf(routerConfigOf({}, RECEIVER, true, { ...withUrl, activation: { arc: OFF, solana: OUT, solanaMpp: OFF }, upstreams: { arc: "", solana: "", solanaMpp: SOL_MPP_URL } }));
+    expect(x402Sol.routes[ROUTE_SOLMPP_OUT]).toBeUndefined();
+    expect(x402Sol.routes[ROUTE_SOL_OUT]).toBeUndefined();
+  });
+
+  test("4 方向すべて有効（x402 と MPP の Solana、Arc も）: 公開 ID は route 6 + 4、プロファイル 10 + 8 で重複なし。Solana USDC の区分は 1 つ（4 つの向きが合算）。Provider D の URL が空なら静的の送信 2 本は無い", () => {
+    const all: RailsOptions = {
+      activation: { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } },
+      receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER },
+      providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER },
+      upstreams: { arc: UPSTREAM_ARC, solana: UPSTREAM_SOL, solanaMpp: SOL_MPP_URL },
+    };
+    const router = loadAsProduction(routerConfigOf({}, RECEIVER, true, all)).router;
+    const ids = listedIds(router);
+    expect(ids.routes).toEqual(["md-arc-eth-snapshot", "md-mpp-eth-snapshot", "md-mpp-eth-snapshot-arc", "md-mpp-eth-snapshot-solmpp", "md-sol-eth-snapshot-mpp", "md-solmpp-eth-snapshot", "md-solmpp-eth-snapshot-mpp", "md-x402-eth-snapshot", "md-x402-eth-snapshot-sol", "md-x402-eth-snapshot-solmpp"]);
+    expect(ids.profiles).toEqual([
+      "dyn-arc-to-mpp", "dyn-arc-to-solmpp", "dyn-arc-to-x402",
+      "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402",
+      "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402",
+      "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402",
+      "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp",
+    ]);
+    expect(new Set([...ids.routes, ...ids.profiles]).size).toBe(ids.routes.length + ids.profiles.length);
+    const buckets = bucketsOf(router);
+    expect(buckets.static.filter((b) => b.startsWith(OUTBOUND_SOL.network))).toHaveLength(1);
+    expect(buckets.dynamic.filter((b) => b.startsWith(OUTBOUND_SOL.network))).toHaveLength(1);
+    // 公開の定数の URL（Provider D まで空）では静的の送信 2 本は出ない（受取 owner も読まれない）。
+    const production = routerOf(routerConfigOf({}, RECEIVER, true, { ...all, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER }, upstreams: RAIL_UPSTREAMS }));
+    expect(Object.keys(production.routes)).toHaveLength(8);
+    expect(production.routes[ROUTE_SOLMPP_OUT]).toBeUndefined();
+    expect(Object.keys(production.dynamic!.profiles)).toHaveLength(18);
   });
 });

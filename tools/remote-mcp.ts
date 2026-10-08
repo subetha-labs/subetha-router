@@ -104,6 +104,13 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
    */
   const mppInboundSecret = env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
   /**
+   * Solana の MPP 受信（`docs/mpp-solana-design.md` §6.2）は Tempo と同じ HMAC の秘密を使う。**Tempo の MPP 受信が無効でも要る**ので、
+   * `solanaMpp.inbound` で秘密が無ければ計画を作らない（子の Router が `ROUTER_MPP_INBOUND_SECRET is required` で止まるより前に、固定文で止める）。
+   */
+  if (options.activation.solanaMpp.inbound && mppInboundSecret === "") {
+    throw new HostPlanError("env");
+  }
+  /**
    * x402 送信の鍵。**既定は送信レグの鍵を流用**する（同じ運営ウォレットが両レグを払う
    * 構成が普通で、env を 2 本に増やす理由がない）。別ウォレットにしたいときだけ上書きする。
    * どちらにせよ **Base Sepolia USDC の残高が要る**。
@@ -145,7 +152,8 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ...(env["SUBETHA_TEMPO_RPC_URL"] === undefined || env["SUBETHA_TEMPO_RPC_URL"] === ""
         ? {}
         : { SUBETHA_TEMPO_RPC_URL: env["SUBETHA_TEMPO_RPC_URL"], ROUTER_MPP_INBOUND_RPC_URL: env["SUBETHA_TEMPO_RPC_URL"] }),
-      ...(mppInboundEnabled
+      // MPP 受信の秘密: Tempo の MPP 受信か Solana の MPP 受信があるとき（設計 §6.2。上の検査で `solanaMpp.inbound` なら秘密は空でない）。
+      ...(mppInboundEnabled || options.activation.solanaMpp.inbound
         ? {
             ROUTER_MPP_INBOUND_SECRET: mppInboundSecret,
             ROUTER_MPP_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",

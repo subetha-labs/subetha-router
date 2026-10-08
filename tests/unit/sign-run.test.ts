@@ -3,6 +3,7 @@
  * 拒む offer では鍵を読まず payer を呼ばない／Base Sepolia 10,000・11,000 と Arc は EVM の signer に表の chainId で届く／
  * MPP は開示を書いてから送金し、封筒を保つ／Solana は svm payer に表の値で届く。
  */
+import { Challenge } from "mppx";
 import { describe, expect, test } from "vitest";
 
 import { runSign, type SignDeps } from "../../tools/sign-run.js";
@@ -27,8 +28,10 @@ function evm(overrides: Record<string, unknown> = {}, extra: Record<string, unkn
 function svm(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { scheme: "exact", network: SOL, asset: MINT, amount: "10000", payTo: OWNER, maxTimeoutSeconds: 40, extra: { feePayer: OWNER, memo: NONCE, challengeNonce: NONCE, expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: false, ...extra } };
 }
+const TEMPO_CHALLENGE = (request: Record<string, unknown> = {}): string =>
+  Challenge.serialize(Challenge.from({ id: NONCE, realm: "r", method: "tempo", intent: "charge", expires: new Date((EXPIRES - 1) * 1000).toISOString(), request: { amount: "10000", currency: PATHUSD, recipient: RECEIVER, methodDetails: { chainId: 42431 }, ...request } } as never) as never);
 function mpp(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: 'Payment id="x", realm="r"', expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true, ...extra } };
+  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: TEMPO_CHALLENGE(), expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true, ...extra } };
 }
 
 interface Trace {
@@ -61,6 +64,13 @@ function depsOf(trace: Trace): SignDeps {
       async credentialFor(_offer, scope) {
         trace.calls.push(`svm:sign:${scope.mint}:${scope.decimals}:${scope.tokenProgram}:${options.rpcUrl ?? "default"}`);
         return "svm-credential";
+      },
+    }),
+    svmMppPayer: async (_key, options) => ({
+      address: "SVMMPP",
+      async credentialFor(_offer, scope) {
+        trace.calls.push(`svm-mpp:sign:${scope.mint}:${scope.decimals}:${scope.tokenProgram}:${options.rpcUrl ?? "default"}`);
+        return "Payment svm-mpp-wire";
       },
     }),
     stderr: (text) => trace.stderr.push(text),
@@ -102,6 +112,7 @@ describe("runSign", () => {
   test("拒む offer では鍵を読まず、payer を呼ばない（MPP の challenge 無し・nonce 無し・失効・上限超・表に無い network・SVM の桁の矛盾）", async () => {
     const refused: [string, Record<string, unknown>, RegExp][] = [
       ["MPP の challenge 無し", mpp({ challenge: undefined }), /does not carry the mppx challenge/],
+      ["MPP の challenge の額が封筒と違う（SDK は中身から送金を組む）", mpp({ challenge: TEMPO_CHALLENGE({ amount: "20000" }) }), /challenge amount differs/],
       ["MPP の nonce 無し", mpp({ challengeNonce: undefined }), /challengeNonce/],
       ["EVM の失効", evm({}, { expiresAt: 1 }), /expired/],
       ["上限超", evm({ amount: "20001" }), /exceeds the cap/],
@@ -117,6 +128,62 @@ describe("runSign", () => {
       expect((outcome as { reason: string }).reason, name).toMatch(pattern);
       expect(trace.keyReads, name).toEqual([]);
       expect(trace.calls, name).toEqual([]);
+    }
+  });
+});
+
+/** MPP の Solana（`solana/charge`。`docs/mpp-solana-design.md` §7、FR-49。タスク M6）。 */
+describe("runSign: MPP の Solana", () => {
+  const EXTERNAL_ID = "7Xr3bZk9QmWv2aLpN4cE8t";
+  /** mppx が生成する形の id（32 バイトの base64url）。 */
+  const MPP_ID = "aaO_d6Wls64vx4QLbwbzSvgJrMyyp-wf7WsbSKufusE";
+  function solmpp(extra: Record<string, unknown> = {}, request: Record<string, unknown> = {}): Record<string, unknown> {
+    const challenge = Challenge.serialize(
+      Challenge.from({
+        id: MPP_ID,
+        realm: "router-test",
+        method: "solana",
+        intent: "charge",
+        expires: new Date((EXPIRES - 1) * 1000).toISOString(),
+        request: { amount: "10000", currency: MINT, recipient: OWNER, externalId: EXTERNAL_ID, methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: false }, ...request },
+      } as never) as never,
+    );
+    return { scheme: "solana/charge", network: SOL, asset: MINT, amount: "10000", payTo: OWNER, maxTimeoutSeconds: 600, extra: { challengeNonce: MPP_ID, expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true, challenge, externalId: EXTERNAL_ID, decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", ...extra } };
+  }
+
+  test("Solana の鍵だけ読み、svm-mpp payer に表の mint・桁・token program と RPC の URL で届く。封筒は MPP と同じ形（payload.credential = wire）。stderr は「署名だけ・送出は Router・blockhash・devnet SOL」の開示", async () => {
+    const trace: Trace = { keyReads: [], calls: [], stderr: [] };
+    const offer = solmpp();
+    const outcome = await runSign(quoteOf(offer), { ...depsOf(trace), solanaRpcUrl: "http://127.0.0.1:1" });
+    expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+    expect((outcome as { dispatch: { kind: string } }).dispatch.kind).toBe("mpp-svm");
+    expect(trace.keyReads).toEqual(["solana"]);
+    expect(trace.calls).toEqual([`svm-mpp:sign:${MINT}:6:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA:http://127.0.0.1:1`]);
+    const envelope = JSON.parse(Buffer.from((outcome as { stdout: string }).stdout.trim(), "base64").toString("utf8")) as Record<string, unknown>;
+    expect(envelope).toEqual({ x402Version: 2, accepted: offer, payload: { challengeNonce: MPP_ID, credential: "Payment svm-mpp-wire" } });
+    expect(trace.stderr[0]).toBe("MPP Solana: signed only, nothing was sent. Funds move when the Router broadcasts at purchase. Call purchase right away (the blockhash expires in about a minute). You need devnet SOL for the fee.\n");
+    expect(trace.stderr[1]).toBe("signed by SVMMPP on Solana (your key is never sent; the Router broadcasts)\n");
+    // Tempo の MPP の文（「この場で送金」）は出ない。
+    expect(trace.stderr.join("")).not.toContain("cannot be undone");
+    expect(trace.stderr.join("")).not.toContain("about to send");
+  });
+
+  test("拒む offer（challenge の中身が offer と違う・challenge 無し・expired）では鍵を読まず、payer を呼ばない", async () => {
+    const refused: [string, Record<string, unknown>, RegExp][] = [
+      ["challenge 無し", solmpp({ challenge: undefined }), /does not carry the mppx challenge/],
+      ["challenge の額が違う", solmpp({}, { amount: "9999" }), /challenge amount differs/],
+      ["challenge の feePayer が true", solmpp({}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: true } }), /feePayer must be false/],
+      ["失効", solmpp({ expiresAt: 1 }), /expired/],
+      ["externalId 無し", solmpp({ externalId: undefined }), /no usable externalId/],
+    ];
+    for (const [name, offer, pattern] of refused) {
+      const trace: Trace = { keyReads: [], calls: [], stderr: [] };
+      const outcome = await runSign(quoteOf(offer), depsOf(trace));
+      expect(outcome.ok, name).toBe(false);
+      expect((outcome as { reason: string }).reason, name).toMatch(pattern);
+      expect(trace.keyReads, name).toEqual([]);
+      expect(trace.calls, name).toEqual([]);
+      expect(trace.stderr, name).toEqual([]);
     }
   });
 });

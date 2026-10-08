@@ -93,6 +93,12 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 - **成果物**: 上の変更、`tests/unit/remote-mcp-config.test.ts`・`rails-entry.test.ts`（有効化の組み合わせの表）、`tests/wire/rails-process-entry.test.ts`（token・env・静的 route の起動時の検査）、`tests/wire/mpp-solana-cli.test.ts`（道具 → Router の受信 → `settled`。RPC は `getLatestBlockhash` 1 回・`sendTransaction` 0 回、拒否の各行、鍵を出さない）
 - **完了条件（unit・wire。Linux）**: 上記。**最後の横断確認**（§3 の M6 の 3 行）: 設計 §8.2 の表の全行が存在して Linux で緑、§8.3 の gate 以外の条件（既存 suite・変異の表・SR-M の 2 回のレビューの記録）、SR-M1 の全体（両 adapter と道具の RPC の method・回数・transport・64 KiB・10 秒・`maxRetries: 0`）。`RAILS_ACTIVATION.solanaMpp` は両方 `false`。有効化の各組で出る route／プロファイルと子の env が表どおり（`solana.outbound` も `solanaMpp.outbound` も無効なら鍵を渡さない、片方だけなら渡す）。受取 owner があるだけで x402 の route が出ない
 - **sabotage**: `sendTransaction` を道具に足す → 回数の試験が落ちる／`solanaMppReceiverOf` を `receiverOf` に戻す → x402 の route が出て試験が落ちる／鍵の転送の条件を `solana.outbound` だけに → 試験が落ちる
+- **記録（2026-10-08）**: 実装は上の範囲のとおり（`tools/svm-mpp-payer.ts` の `checkSvmMppChallenge` を `classifyOffer` と payer が共有。`hostPlanOf` は `solanaMpp.inbound` で秘密が無ければ固定文で止まる）。
+  **見つけた既存の欠陥**: `classifyOffer` の共通の nonce の検査（T5）は `0x` の hex だけを通し、MPP の adapter（Tempo・Solana）が出す nonce は mppx の challenge の id（base64url）なので、
+  **T5 から M6 まで `npm run sign` は Tempo の MPP の offer を拒んでいた**。M6 で MPP の 2 レールに mppx の id の形を許し、実 adapter の offer の回帰試験を置いた（設計 §13）。
+  **レビュー 1 で見つかった既存の穴**: Tempo の `npm run sign` は封筒の offer だけを見て払っていた（mppx の client は challenge の中身から送金を組む）→ `checkTempoChallenge` を振り分けと payer の両方に。
+  道具の RPC は素の `fetch` で上限が無かった → `tools/svm-rpc.ts`（Router と同じ guarded transport、loopback の拒否、10 秒、64 KiB）を x402・MPP の両 payer で。
+  設計からの逸脱（M3-b〜M6）は設計 §13 に集約
 
 ### MG — gate（要件 §8、AC-17・AC-18。owner の作業と並行）
 
@@ -135,6 +141,8 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `e87b9ce`） | **REJECT**（8 項目: §3 の主担当の一意性、M4-a の依存、fixture の準備の完了条件、FR-53／FR-54／中断の期待値、sabotage の観測点、G-3″ の資金と接続は両レグ、再配備の規則、§0 の変更の一覧）。第 2 版で反映 |
 | 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `ebe7c54`） | **REJECT**（残り 5: §3 の §3.1・§4.1・§8.2・§8.3 と SR-M1 の単一の主担当、§1 の並行の文、M5 の停止点ごとの回数・再提示・署名後の衝突、bind の sabotage の観測点、§0 の資金の文）。第 3 版で反映 |
 | 2r | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `011d45e`） | **APPROVE WITH CHANGES**（1 点: 横断の確認と SR-M1 の主担当は M5 ではなく最後の M6 に。反映済み）。他の 4 点は解消 |
+| M6-1 | 2026-10-08 | `gpt-6-astra`（read-only。M6 の実装 `4ce93cd`） | **REJECT**（P1 3 点: 道具の RPC の口が素の `fetch`（transport・loopback・64 KiB 無し）、Provider D の案内が `feePayer: false`（Router は `true` を要求）、Tempo の `npm run sign` が封筒の offer だけを見て払う（SDK は challenge の中身から送金を組む）。P2 2 点: `methodDetails` の `feePayerKey`／`recentBlockhash`、回帰試験の記述）。`ec39d35`・`b76bd15` で反映 |
+| M6-1r | 2026-10-08 | `gpt-6-astra`（readback。`b76bd15`） | **APPROVE WITH CHANGES**（P1 3 点・P2 2 点は解消。残り P2 1 点: Tempo の `splits` は `methodDetails` の下も拒む）。`89975f5` で反映（Solana の MPP の検査も同じ置き場を拒む） |
 
 ## 5. 本書で決めていないこと
 

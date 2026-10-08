@@ -322,6 +322,53 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。**journal では追跡で確定した settle と facilitator が直接成功を返した settle を
 区別できない**（どちらも `source_settled`）ので、hosted の Router で追跡が働いた回数は分からない。数えられるのは、受け入れ用の起動のように stderr が読める起動だけ）。
 
+### 2d. Solana の MPP（Solana devnet USDC を **MPP** で受ける・払う）— **コードは入っているが本番では無効**（M6、2026-10-08。有効化は G-4″）
+
+呼び出し側が **Solana devnet の USDC を MPP（`solana/charge`、pull）** で払って既存の Provider A（x402）・B（MPP）に届く**受信**と、Router が **Provider D**
+（運用者の pay-kit の server、`solana/charge`、pull、**`feePayer: true`** = Provider の fee payer が共同署名して送出する）に Solana devnet の USDC を MPP で払う**送信**（要件 `mpp-solana-requirements.md`、設計 `mpp-solana-design.md`、
+タスク `mpp-solana-tasks.md`）。x402 の Solana（§2c）とは別のレールで、**同じ受取 owner・同じ送信鍵・同じ RPC・同じ Solana USDC の予算の区分**を共有する。
+
+**有効・無効は §2c と同じ 1 つの定数**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION.solanaMpp = { inbound, outbound }`（M6 の配備では両方 `false`。内部の token は
+`solana-mpp-in`・`solana-mpp-out`。受け入れ用の起動は `--rails solana-mpp-in,solana-mpp-out` で選ぶ）。有効にすると入口が登録するもの:
+
+| 向き | 静的 route | 動的プロファイル | 条件 |
+|---|---|---|---|
+| 受信（`solanaMpp.inbound`） | `md-x402-eth-snapshot-solmpp`（Solana USDC/MPP 10,000 → Provider A/x402）、`md-mpp-eth-snapshot-solmpp`（→ Provider B/MPP） | `dyn-solmpp-to-x402`・`dyn-solmpp-to-mpp`、Arc／Solana の送信が有効なら `dyn-solmpp-to-arc`・`dyn-solmpp-to-sol` | `SUBETHA_MPP_INBOUND_SECRET` が**必須**（Tempo の MPP 受信と同じ HMAC の秘密。無ければ入口が固定文で止まる） |
+| 送信（`solanaMpp.outbound`） | `md-solmpp-eth-snapshot`（Base USDC/x402 → Provider D）、`md-solmpp-eth-snapshot-mpp`（Tempo pathUSD/MPP → Provider D。MPP 受信があるとき） | `dyn-x402-to-solmpp`・`dyn-mpp-to-solmpp`、Arc／Solana の受信が有効なら `dyn-arc-to-solmpp`・`dyn-sol-to-solmpp`（宛先は `solana/charge`。`feeAsset`・`maxFee` は無い: Router はこの送信にチェーン手数料を払わない） | 静的 2 本は **定数 `UPSTREAM_SOL_MPP`（Provider D の URL。D が立つまで空）と env `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`** がそろったときだけ。動的は URL に関係なく出る |
+
+**env**（新しいのは Provider D の受取 owner だけ。他は §2c と同じ名前・同じ値）:
+
+| env | いつ要るか |
+|---|---|
+| `SUBETHA_MPP_INBOUND_SECRET`（既存） | Tempo の MPP 受信 **または** `solana-mpp-in`。子には `ROUTER_MPP_INBOUND_SECRET` として渡る |
+| `SUBETHA_SOLANA_RECEIVER`（既存） | `solana-in` **または** `solana-mpp-in`（同じ受取 owner。ATA は運用者が作る。Router は起動時に ATA を 1 回確かめ、無ければ起動しない） |
+| `SUBETHA_OUTBOUND_SOLANA_KEY`（既存） | `solana-out` **または** `solana-mpp-out`（同じ鍵・同じ能力 1 つ。どちらも無効なら読まない・渡さない）。MPP の送信では Router の鍵は転送に署名するだけで **SOL は要らない**（送出と手数料は Provider D の fee payer）。USDC の残高は要る |
+| `SUBETHA_SOLANA_RPC_URL`（既存） | Solana のどの向きでも（起動時の ATA の検査、受信の `transaction` 型の送出と追跡、`signature` 型の読み取り、送信の blockhash・残高・receipt の照合） |
+| `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`（**新**） | `solana-mpp-out` ∧ `UPSTREAM_SOL_MPP` ≠ ""（Provider D の受取 owner の公開鍵。D の URL が定数に入るまで読まれない） |
+
+**gate（要件 §8。AC-17・AC-18。owner の作業と並行）**:
+
+1. **G-1″（owner）**: Provider D を devnet で立てる（pay-kit の server。`solana/charge`、**`feePayer: true`**（Provider の fee payer が送出する pull。Router は `feePayer: false` の challenge を `mode` で拒む: 設計 §4.2 の 6）。`externalId` の有無は任意——Router は無くても払う。
+   受取 owner の ATA は運用者が作る。置き場は Node か Workers。D-26）。URL を定数 `UPSTREAM_SOL_MPP` に入れ、受取 owner を `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO` に。
+   Router の送信鍵（`SUBETHA_OUTBOUND_SOLANA_KEY` の address）の ATA に devnet USDC（Router は起動時に自分の ATA も確かめる）
+2. **G-2″（配備。無効のまま）**: M6 を含むイメージに入れ替える（§2c と同じ `deploy/swap-image.sh`。rollback の container を 1 つ保つ）。確かめるのは「公開の一覧が従来の route 6・プロファイル 10 のまま」、
+   子プロセスの env に `solana-mpp-*` の語が無いこと、`subetha-egress check` 合格。Solana の MPP の起動時の検査は無効なので動かない
+3. **G-3″（受け入れ。testnet の資金のみ。公開の Router を止めて受け入れ用の起動で。§2c の手順と同じ）**: `--rails solana-mpp-in,solana-mpp-out`（Provider D が無ければ `solana-mpp-in` だけ）。
+   受信: 使い捨ての payer（**devnet USDC と devnet SOL**。`npm run wallet:new:solana` の案内）で静的 `md-x402-eth-snapshot-solmpp` と動的 `dyn-solmpp-to-x402` を各 1 件、
+   `npm run sign`（署名だけ。送出は Router の purchase）→ `delivered`。証拠: journal の `source_settled` の `txRef`（= payer の transaction の署名）が devnet で confirmed／finalized、
+   受取 owner の ATA の残高の増分、`sendTransaction` が 1 回（受け入れ用の起動では Router の stderr が読めるので診断行も見る）。
+   送信: 静的 `md-solmpp-eth-snapshot` と動的 `dyn-x402-to-solmpp` を各 1 件 → `delivered`。証拠: receipt の署名が devnet で confirmed、Provider D の ATA の残高の増分、
+   `proof.upstreamReceipt: "claimed"`。**U-13**: Provider D の確定待ち（pay-kit の server の 30 秒）の実測を記録し、45 秒（`MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS`）で足りなければ定数を変える
+4. **G-4″（owner の判断）**: `RAILS_ACTIVATION.solanaMpp` を方向別に `true` にして（片方だけでもよい）イメージを作り直し、`swap-image.sh` で入れ替える。
+   公開 MCP の一覧で route +4（送信の静的 2 本は Provider D の URL と受取 owner があるとき）・プロファイル +8 を確かめ、各 1 回 quote を取る（支払わない）。
+   `subject` の `fundsMoveOnCredential` は受信の MPP Solana でも `true`（別の client が `signature` 型を出せば credential の時点で動く。CLAUDE.md の開示のとおり）
+
+**rollback**: 定数を `false` に戻してイメージを作り直す（§2c と同じ。env は残してよい——無効なら読まれない）。
+
+**有効にした後に見るもの**（§2c の注と同じく、hosted の入口は Router の process の stderr を転送しない）: 受信の `transaction` 型で Router が送出した後に確定を観測できなかった purchase は
+journal に `unknown`（`source_settle_unknown`）、**verify の後**に期限・予算で止まった `signature` 型（資金は動いている）は `unknown`（`source_paid_unsettled`）で残る。
+どちらも Router は再送しない。呼び出し側には「`rejected` も `unknown` も未送金の証明ではない」と案内してある（CLAUDE.md）。診断（`solana mpp diagnostic …`）は受け入れ用の起動でだけ読める。
+
 ### journal を残す（`-v` は必須）
 
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
