@@ -37,6 +37,9 @@ describe("dependency direction", () => {
   it("src/ と tools/ に @x402/svm は現れない（import のどの形でも）", () => {
     expect(offendersOf(["src", "tools"], /@x402\/svm/)).toEqual([]);
   });
+  it("src/ と tools/ に @solana/pay-kit は現れない（fixture と試験だけ。mpp-solana 要件 SR-M6）", () => {
+    expect(offendersOf(["src", "tools"], /@solana\/pay-kit/)).toEqual([]);
+  });
 
   it("src/ は @solana/kit の RPC client・transport・subscription を作らず、下位の rpc package を import しない", () => {
     const names = /\b(createSolanaRpc|createSolanaRpcFromTransport|createSolanaRpcSubscriptions|createSolanaRpcSubscriptionsFromTransport|createRpc|createRpcSubscriptions|createDefaultRpcTransport|createDefaultRpcSubscriptionsTransport|createHttpTransport|createHttpTransportForSolanaRpc|createWebSocketTransport|sendAndConfirmTransactionFactory|sendTransactionWithoutConfirmingFactory)\b/;

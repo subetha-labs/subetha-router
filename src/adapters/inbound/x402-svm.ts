@@ -148,8 +148,8 @@ function isAllZero(bytes: Uint8Array): boolean {
   return true;
 }
 
-/** compiled の命令を parse できる `Instruction` に写す（口座は静的な表から）。 */
-function instructionOf(compiled: { readonly staticAccounts: readonly Address[] }, ix: { readonly programAddressIndex: number; readonly accountIndices?: readonly number[]; readonly data?: ArrayLike<number> }): Instruction | undefined {
+/** compiled の命令を parse できる `Instruction` に写す（口座は静的な表から）。MPP Solana の検査も使う。 */
+export function instructionOf(compiled: { readonly staticAccounts: readonly Address[] }, ix: { readonly programAddressIndex: number; readonly accountIndices?: readonly number[]; readonly data?: ArrayLike<number> }): Instruction | undefined {
   const programAddress = compiled.staticAccounts[ix.programAddressIndex];
   if (programAddress === undefined) return undefined;
   const accounts: { address: Address; role: 0 }[] = [];
