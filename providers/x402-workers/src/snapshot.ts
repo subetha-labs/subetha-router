@@ -67,15 +67,20 @@ function formatScaled(value: bigint, scale: number): string {
   return `${negative ? "-" : ""}${whole}${scale === 0 ? "" : `.${frac}`}`;
 }
 
-/** `a − b` を **`a`（markPx）の桁**で（引き算は両方の桁の大きい方で正確に行い、結果を `a` の桁へ 0 方向に切り詰める）。 */
+/** `a − b` を**正確に**（両方の桁の大きい方で）。 */
 export function subtractDecimal(a: string, b: string): string {
   const scale = Math.max(scaleOf(a), scaleOf(b));
-  const diff = scaledOf(a, scale) - scaledOf(b, scale);
-  const target = scaleOf(a);
-  const drop = scale - target;
-  const pow = 10n ** BigInt(drop);
-  const truncated = diff < 0n ? -((-diff) / pow) : diff / pow;
-  return formatScaled(truncated, target);
+  return formatScaled(scaledOf(a, scale) - scaledOf(b, scale), scale);
+}
+
+/** 10 進文字列を `scale` 桁へ 0 方向に切り詰める（桁が足りなければ 0 を補う）。`-0.0` は `0.0`。 */
+export function truncateToScale(value: string, scale: number): string {
+  const own = scaleOf(value);
+  if (own <= scale) return formatScaled(scaledOf(value, scale), scale);
+  const exact = scaledOf(value, own);
+  const pow = 10n ** BigInt(own - scale);
+  const truncated = exact < 0n ? -((-exact) / pow) : exact / pow;
+  return formatScaled(truncated, scale);
 }
 
 /** `absolute / prev × 100` を小数 2 桁（**最後に 1 度だけ** 0 方向に切り詰め: 49.72 / 2950.40 → 1.68）。`prev` が 0 なら失敗。入力の桁は保つ。 */
@@ -109,8 +114,10 @@ export function snapshotOf(json: unknown, paymentNetwork: string, now: () => num
   if (typeof markPx !== "string" || !isPositiveDecimal(markPx)) throw new DataUnavailableError();
   if (typeof prevDayPx !== "string" || !isPositiveDecimal(prevDayPx)) throw new DataUnavailableError();
   if (typeof dayNtlVlm !== "string" || !isNonNegativeDecimal(dayNtlVlm)) throw new DataUnavailableError();
-  const absolute = subtractDecimal(markPx, prevDayPx);
-  const percent = percentOf(absolute, prevDayPx);
+  // 差は正確に取り、本文の `absolute` は markPx の桁へ切り詰める。percent は**切り詰める前の差**から（最後に 1 度だけ丸める）。
+  const exactDifference = subtractDecimal(markPx, prevDayPx);
+  const absolute = truncateToScale(exactDifference, scaleOf(markPx));
+  const percent = percentOf(exactDifference, prevDayPx);
   const fetchedAt = new Date(now()).toISOString();
   return {
     providerId: "market-data-a",
@@ -134,7 +141,7 @@ export function serializeSnapshot(snapshot: Snapshot): { readonly text: string; 
 async function readBounded(response: Response, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
   const declared = response.headers.get("content-length");
   if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
-    await response.body?.cancel().catch(() => {});
+    void response.body?.cancel().catch(() => {});
     throw new DataUnavailableError();
   }
   if (response.body === null) throw new DataUnavailableError();
@@ -151,7 +158,8 @@ async function readBounded(response: Response, maxBytes: number, signal: AbortSi
       chunks.push(value);
     }
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    // cancel は待たない（相手が応じなくても戻る）。
+    void reader.cancel().catch(() => {});
     throw error;
   }
   const bytes = new Uint8Array(total);
@@ -179,7 +187,7 @@ export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, sig
     throw new DataUnavailableError();
   }
   if (response.status !== 200) {
-    await response.body?.cancel().catch(() => {});
+    void response.body?.cancel().catch(() => {});
     throw new DataUnavailableError();
   }
   const bytes = await readBounded(response, MAX_DATA_BYTES, signal);

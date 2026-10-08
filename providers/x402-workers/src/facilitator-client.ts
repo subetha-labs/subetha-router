@@ -1,13 +1,13 @@
 /**
  * facilitator への自前の client（`docs/provider-x402-workers.md` §3.2）。SDK の `HTTPFacilitatorClient` は本文を見ずに認証ヘッダを作り、
  * 既定 90 秒で redirect を追うので使わない。ここでは本文を **1 度だけ**直列化し（Circle ならその文字列に売り手証明を束縛し）、
- * **呼び出しごとに受けた signal** で署名・送出・本文の読取を止め、本文は **byte で**上限まで読む。settle は **要求ごとに 1 回**（2 度目は throw）。
+ * **呼び出しごとに受けた段**（signal と時計）で署名・送出・本文の読取を止め、本文は **byte で**上限まで読む。settle は **要求ごとに 1 回**（2 度目は throw）。
  */
 import type { FacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse } from "@x402/core/types";
 import { getBase58Encoder } from "@solana/kit";
 
-import { DeadlineError, withSignal } from "./deadline.js";
+import { DeadlineError, withSignal, type Stage } from "./deadline.js";
 import { sellerProofFor, type SellerProofSigner } from "./seller-proof.js";
 
 export const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -34,8 +34,8 @@ export interface FacilitatorClientOptions {
   /** Circle のときだけ（売り手証明）。 */
   readonly signer?: SellerProofSigner;
   readonly fetch?: typeof fetch;
-  /** 呼び出しごとの signal を返す（段の予算。要求全体の abort を含む）。 */
-  readonly signalFor: (stage: "verify" | "settle" | "supported") => AbortSignal;
+  /** 呼び出しごとの段を返す（signal は段の予算と要求全体の abort。`expired` は時計で見た経過。終わりに `dispose`）。 */
+  readonly stageFor: (stage: "verify" | "settle" | "supported") => Stage;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,7 +46,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export async function readBoundedJson(response: Response, maxBytes: number, signal: AbortSignal): Promise<unknown> {
   const declared = response.headers.get("content-length");
   if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
-    await response.body?.cancel().catch(() => {});
+    void response.body?.cancel().catch(() => {});
     return undefined;
   }
   if (response.body === null) return undefined;
@@ -60,13 +60,14 @@ export async function readBoundedJson(response: Response, maxBytes: number, sign
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel().catch(() => {});
+        void reader.cancel().catch(() => {});
         return undefined;
       }
       chunks.push(value);
     }
   } catch (error) {
-    await reader.cancel().catch(() => {});
+    // cancel は待たない（相手が応じなくても戻る）。
+    void reader.cancel().catch(() => {});
     throw error;
   }
   const bytes = new Uint8Array(total);
@@ -108,14 +109,14 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
   readonly #url: string;
   readonly #signer: SellerProofSigner | undefined;
   readonly #fetch: typeof fetch;
-  readonly #signalFor: FacilitatorClientOptions["signalFor"];
+  readonly #stageFor: FacilitatorClientOptions["stageFor"];
   #settleCalls = 0;
 
   constructor(options: FacilitatorClientOptions) {
     this.#url = options.url.replace(/\/$/, "");
     this.#signer = options.signer;
     this.#fetch = options.fetch ?? fetch;
-    this.#signalFor = options.signalFor;
+    this.#stageFor = options.stageFor;
   }
 
   get settleCalls(): number {
@@ -123,28 +124,34 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
   }
 
   async #post(purpose: "verify" | "settle", paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements): Promise<{ status: number; json: unknown }> {
-    const signal = this.#signalFor(purpose);
-    if (signal.aborted) throw new DeadlineError();
-    // 1 度だけ直列化し、証明も送信もこの文字列に束縛する。署名も signal の内側（遅い署名の後に送らない）。
-    const requestText = JSON.stringify({ x402Version: paymentPayload.x402Version, paymentPayload, paymentRequirements });
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.#signer !== undefined) headers["facilitator-seller-proof"] = await withSignal(signal, sellerProofFor(this.#signer, purpose, requestText));
-    if (signal.aborted) throw new DeadlineError();
-    let response: Response;
+    const stage = this.#stageFor(purpose);
     try {
-      response = await this.#fetch(`${this.#url}/${purpose}`, { method: "POST", headers, body: requestText, redirect: "error", signal });
-    } catch (error) {
-      if (signal.aborted) throw new DeadlineError();
-      throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
+      const { signal } = stage;
+      if (stage.expired()) throw new DeadlineError();
+      // 1 度だけ直列化し、証明も送信もこの文字列に束縛する。署名も signal の内側（遅い署名の後に送らない）。
+      const requestText = JSON.stringify({ x402Version: paymentPayload.x402Version, paymentPayload, paymentRequirements });
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (this.#signer !== undefined) headers["facilitator-seller-proof"] = await withSignal(signal, sellerProofFor(this.#signer, purpose, requestText));
+      // 送出の直前: signal だけでなく時計でも見る（timer の配達が遅れていても、過ぎていれば送らない）。
+      if (stage.expired()) throw new DeadlineError();
+      let response: Response;
+      try {
+        response = await this.#fetch(`${this.#url}/${purpose}`, { method: "POST", headers, body: requestText, redirect: "error", signal });
+      } catch {
+        if (signal.aborted) throw new DeadlineError();
+        throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
+      }
+      let json: unknown;
+      try {
+        json = await readBoundedJson(response, MAX_RESPONSE_BYTES, signal);
+      } catch (error) {
+        if (error instanceof DeadlineError) throw error;
+        json = undefined;
+      }
+      return { status: response.status, json };
+    } finally {
+      stage.dispose();
     }
-    let json: unknown;
-    try {
-      json = await readBoundedJson(response, MAX_RESPONSE_BYTES, signal);
-    } catch (error) {
-      if (error instanceof DeadlineError) throw error;
-      json = undefined;
-    }
-    return { status: response.status, json };
   }
 
   /** `isValid` の boolean を返す。HTTP の不達・期限・形違いは例外（`FacilitatorUnavailableError`／`DeadlineError`）。 */
@@ -167,17 +174,22 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
   }
 
   async getSupported(): Promise<SupportedResponse> {
-    const signal = this.#signalFor("supported");
-    if (signal.aborted) throw new DeadlineError();
-    let response: Response;
+    const stage = this.#stageFor("supported");
     try {
-      response = await this.#fetch(`${this.#url}/supported`, { method: "GET", redirect: "error", signal });
-    } catch {
-      if (signal.aborted) throw new DeadlineError();
-      throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
+      const { signal } = stage;
+      if (stage.expired()) throw new DeadlineError();
+      let response: Response;
+      try {
+        response = await this.#fetch(`${this.#url}/supported`, { method: "GET", redirect: "error", signal });
+      } catch {
+        if (signal.aborted) throw new DeadlineError();
+        throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
+      }
+      const json = await readBoundedJson(response, MAX_RESPONSE_BYTES, signal);
+      if (response.status !== 200 || !isRecord(json) || !Array.isArray(json["kinds"])) throw new FacilitatorUnavailableError("facilitator_unavailable", response.status);
+      return json as unknown as SupportedResponse;
+    } finally {
+      stage.dispose();
     }
-    const json = await readBoundedJson(response, MAX_RESPONSE_BYTES, signal);
-    if (response.status !== 200 || !isRecord(json) || !Array.isArray(json["kinds"])) throw new FacilitatorUnavailableError("facilitator_unavailable", response.status);
-    return json as unknown as SupportedResponse;
   }
 }

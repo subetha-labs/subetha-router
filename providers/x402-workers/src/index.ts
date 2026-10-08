@@ -9,7 +9,7 @@ import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { configOf, isEvmKey, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
-import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS } from "./deadline.js";
+import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS, type Stage } from "./deadline.js";
 import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
 import { createRequirementsBuilder, type RequirementsBuilder } from "./requirements.js";
@@ -17,6 +17,8 @@ import type { SellerProofSigner } from "./seller-proof.js";
 import { DataUnavailableError, fetchSnapshot, serializeSnapshot } from "./snapshot.js";
 
 const ENCODER = new TextEncoder();
+/** `PAYMENT-SIGNATURE` の長さの上限（Workers のヘッダの上限の内側。正しい payload は数 KiB）。 */
+export const MAX_PAYMENT_HEADER_CHARS = 16 * 1024;
 
 /** 固定文の応答。`content-length` を明示し、本文は 1 つの文字列。 */
 function respond(status: number, text: string, headers: Record<string, string> = {}): Response {
@@ -38,13 +40,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface Runtime {
   readonly config: ProviderConfig;
   readonly builder: RequirementsBuilder;
-  readonly facilitatorFor: (fetchImpl: typeof fetch, signalFor: FacilitatorClientOptions["signalFor"]) => BoundedFacilitatorClient;
+  readonly facilitatorFor: (fetchImpl: typeof fetch, stageFor: FacilitatorClientOptions["stageFor"]) => BoundedFacilitatorClient;
 }
 
 export interface Hooks {
   /** 試験の差し替え（facilitator・データ源への fetch）。 */
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
+  /** 入口で作った期限（Workers の入口は runtime を組む前に作る）。無ければ `handle` が作る。 */
+  readonly deadline?: RequestDeadline;
 }
 
 export function runtimeOf(env: ProviderEnv, hooks: Hooks = {}): Runtime {
@@ -65,8 +69,8 @@ export function runtimeOf(env: ProviderEnv, hooks: Hooks = {}): Runtime {
     };
   }
   const defaultFetch = hooks.fetch ?? fetch;
-  const facilitatorFor: Runtime["facilitatorFor"] = (f, signalFor) => new BoundedFacilitatorClient({ url: config.facilitatorUrl, ...(signer === undefined ? {} : { signer }), fetch: f, signalFor });
-  const builder = createRequirementsBuilder(config, (signalFor) => facilitatorFor(defaultFetch, signalFor));
+  const facilitatorFor: Runtime["facilitatorFor"] = (f, stageFor) => new BoundedFacilitatorClient({ url: config.facilitatorUrl, ...(signer === undefined ? {} : { signer }), fetch: f, stageFor });
+  const builder = createRequirementsBuilder(config, (stageFor) => facilitatorFor(defaultFetch, stageFor));
   return { config, builder, facilitatorFor };
 }
 
@@ -87,7 +91,7 @@ export async function handle(request: Request, runtime: Runtime, hooks: Hooks = 
   if (url.pathname !== RESOURCE_PATH) return json(404, { error: "not_found" });
   if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
   if (url.search !== "") return json(404, { error: "not_found" });
-  const deadline = new RequestDeadline(hooks.now ?? Date.now);
+  const deadline = hooks.deadline ?? new RequestDeadline(hooks.now ?? Date.now);
   try {
     return await handleWithin(request, url, runtime, hooks, deadline);
   } finally {
@@ -95,19 +99,28 @@ export async function handle(request: Request, runtime: Runtime, hooks: Hooks = 
   }
 }
 
+function stageFor(deadline: RequestDeadline): (stage: "verify" | "settle" | "supported") => Stage {
+  return (stage) => deadline.stage(stage === "verify" ? VERIFY_TIMEOUT_MS : stage === "settle" ? SETTLE_TIMEOUT_MS : INIT_TIMEOUT_MS);
+}
+
 async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks: Hooks, deadline: RequestDeadline): Promise<Response> {
   const canonical = `${url.origin}${RESOURCE_PATH}`;
   const fetchImpl = hooks.fetch ?? fetch;
 
   // isolate の最初の要求: facilitator の `/supported`（上限 5 秒、要求の期限の内側。並行は 1 本）。
+  const stages = stageFor(deadline);
+  const initStage = stages("supported");
   try {
-    await runtime.builder.ready(deadline.stageSignal(INIT_TIMEOUT_MS));
+    await runtime.builder.ready(initStage.signal, () => stages("supported"));
   } catch {
     return json(503, { error: "facilitator_unavailable" });
+  } finally {
+    initStage.dispose();
   }
 
   const header = request.headers.get("payment-signature");
   if (header === null || header === "") return paymentRequired(runtime, canonical);
+  if (header.length > MAX_PAYMENT_HEADER_CHARS) return paymentRequired(runtime, canonical, "payment_invalid");
 
   // 0. decode、形の検査、`accepted` の完全一致（どれも固定の 402。facilitator もデータ源も呼ばない）。
   let decoded: unknown;
@@ -120,21 +133,30 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
     return paymentRequired(runtime, canonical, "payment_invalid");
   }
   const payload = decoded as unknown as PaymentPayload;
-  const requirements = await runtime.builder.match(payload);
+  // `accepted` の一致（深すぎる入れ子は一致しない。ここで例外が出ても固定の 402）。
+  let requirements: Awaited<ReturnType<RequirementsBuilder["match"]>>;
+  try {
+    requirements = await runtime.builder.match(payload);
+  } catch {
+    requirements = undefined;
+  }
   if (requirements === undefined) return paymentRequired(runtime, canonical, "no_matching_requirements");
 
   // 1. データ（支払いの前。取れない・形が違う・直列化して 64 KiB を超える → facilitator を呼ばない）。
   let bodyText: string;
+  const dataStage = deadline.stage(DATA_TIMEOUT_MS);
   try {
-    const snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, deadline.stageSignal(DATA_TIMEOUT_MS), fetchImpl, hooks.now);
+    const snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, dataStage.signal, fetchImpl, hooks.now);
     bodyText = serializeSnapshot(snapshot).text;
   } catch (error) {
     if (!(error instanceof DataUnavailableError) && !(error instanceof DeadlineError)) console.error("provider: data stage failed");
     return json(502, { error: "data_unavailable" });
+  } finally {
+    dataStage.dispose();
   }
 
-  // 2. verify（段の signal の内側で署名・送出・読取）。
-  const facilitator = runtime.facilitatorFor(fetchImpl, (stage) => deadline.stageSignal(stage === "verify" ? VERIFY_TIMEOUT_MS : stage === "settle" ? SETTLE_TIMEOUT_MS : INIT_TIMEOUT_MS));
+  // 2. verify（段の内側で署名・送出・読取。送出の直前に時計でも経過を見る: client）。
+  const facilitator = runtime.facilitatorFor(fetchImpl, stages);
   let verified: { isValid: boolean };
   try {
     verified = await facilitator.verify(payload, requirements);
@@ -154,7 +176,8 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   const receipt = checkReceipt(runtime.config.network, runtime.config.table.network, payload, settled);
   if (!receipt.ok) return json(502, { error: receipt.reason });
 
-  // 4. 200 + PAYMENT-RESPONSE + 本文（1 で直列化した文字列そのもの）。
+  // 4. 200 + PAYMENT-RESPONSE + 本文（1 で直列化した文字列そのもの）。settle の後は I/O も署名も無い（領収の検査と封筒の組み立てだけ）。
+  // ここで期限が過ぎていても 200 を返す: 資金は動いており、502 にすれば確かめられた成功を `unknown` に変えるだけ（設計 §2.2 の表の 1 行目）。
   return respond(200, bodyText, { "payment-response": receipt.header });
 }
 
@@ -163,6 +186,8 @@ let cached: Runtime | undefined;
 let cachedError: string | undefined;
 export default {
   async fetch(request: Request, env: ProviderEnv): Promise<Response> {
+    // 期限は入口で（isolate の最初の要求では runtime の構築も期限の内側）。
+    const deadline = new RequestDeadline();
     if (cached === undefined && cachedError === undefined) {
       try {
         cached = runtimeOf(env);
@@ -170,7 +195,10 @@ export default {
         cachedError = "misconfigured";
       }
     }
-    if (cached === undefined) return json(500, { error: cachedError ?? "misconfigured" });
-    return handle(request, cached);
+    if (cached === undefined) {
+      deadline.release();
+      return json(500, { error: cachedError ?? "misconfigured" });
+    }
+    return handle(request, cached, { deadline });
   },
 };

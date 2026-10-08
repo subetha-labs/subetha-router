@@ -7,7 +7,8 @@ import { describe, expect, test } from "vitest";
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader, encodePaymentSignatureHeader } from "@x402/core/http";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
-import { handle, runtimeOf } from "../src/index.js";
+import { RequestDeadline } from "../src/deadline.js";
+import { handle, MAX_PAYMENT_HEADER_CHARS, runtimeOf } from "../src/index.js";
 import { decodeProof, recoverProof, SOL_FEE_PAYER, SOL_SIGNATURE, solanaTransaction } from "./helpers.js";
 
 const ARC_KEY = generatePrivateKey();
@@ -212,6 +213,17 @@ describe("支払いつきの GET: 各段の失敗と成功（arc）", () => {
       expect(bad.status, header).toBe(402);
       expect(await bad.json()).toEqual({ error: "payment_invalid" });
     }
+    // 深い入れ子の accepted（JSON.parse は通る）も固定の 402（再帰で落ちない）。
+    const deep = `{"x402Version":2,"accepted":${"[".repeat(50_000)}1${"]".repeat(50_000)},"payload":{}}`;
+    const deepResponse = await handle(new Request(RESOURCE, { headers: { "payment-signature": btoa(deep) } }), runtime, { fetch: fake.fetch });
+    expect(deepResponse.status).toBe(402);
+    expect(await deepResponse.json()).toEqual({ error: "payment_invalid" });
+    // 長すぎるヘッダ（中身が一致していても）は decode せずに 402。
+    const padded = { x402Version: 2, resource: { url: RESOURCE }, accepted, payload: { signature: "0x", authorization: { from: ARC_ADDRESS }, pad: "p".repeat(MAX_PAYMENT_HEADER_CHARS) } };
+    const longHeader = encodePaymentSignatureHeader(padded as never);
+    expect(longHeader.length).toBeGreaterThan(MAX_PAYMENT_HEADER_CHARS);
+    const long = await handle(new Request(RESOURCE, { headers: { "payment-signature": longHeader } }), runtime, { fetch: fake.fetch });
+    expect(long.status).toBe(402);
     expect(facilitatorCalls(fake, "verify")).toHaveLength(0);
     expect(fake.calls.filter((c) => c.url === DATA)).toHaveLength(0);
   });
@@ -307,6 +319,23 @@ describe("支払いつきの GET: 各段の失敗と成功（arc）", () => {
     const envelope = decodeProof(settle.headers["facilitator-seller-proof"]!);
     expect(await recoverProof(envelope, "settle", settle.body!)).toBe(ARC_ADDRESS.toLowerCase());
     expect(settle.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("入口で作った期限を渡せる: 既に過ぎていれば cold start も data も始めない（503。facilitator 0 回）", async () => {
+    const fake = fakeFetch("arc");
+    const runtime = arcRuntime(fake);
+    const { required } = await challenge(fake, runtime);
+    const spent = new RequestDeadline(Date.now, 0);
+    const r = await handle(paidRequest(required.accepts[0]), runtime, { fetch: fake.fetch, deadline: spent });
+    expect(r.status).toBe(502); // 初期化済みなので 402/503 ではなく data の段で期限 → data_unavailable
+    expect(await r.json()).toEqual({ error: "data_unavailable" });
+    expect(fake.calls.filter((c) => c.url === DATA)).toHaveLength(0);
+    expect(facilitatorCalls(fake, "verify")).toHaveLength(0);
+    const cold = fakeFetch("arc");
+    const fresh = arcRuntime(cold);
+    const r2 = await handle(new Request(RESOURCE), fresh, { fetch: cold.fetch, deadline: new RequestDeadline(Date.now, 0) });
+    expect(r2.status).toBe(503);
+    expect(facilitatorCalls(cold, "supported")).toHaveLength(0);
   });
 
   test("期限: 残りが 12 秒未満なら settle を呼ばず 503 provider_busy（verify までは通る）", async () => {

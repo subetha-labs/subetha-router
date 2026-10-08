@@ -17,6 +17,13 @@ export class DeadlineError extends Error {
   }
 }
 
+export interface Stage {
+  readonly signal: AbortSignal;
+  /** signal が切れた、段の終わりを時計が過ぎた、要求の期限を過ぎた、のどれか。送出の直前に見る。 */
+  readonly expired: () => boolean;
+  readonly dispose: () => void;
+}
+
 export class RequestDeadline {
   readonly #endsAt: number;
   readonly #now: () => number;
@@ -48,11 +55,31 @@ export class RequestDeadline {
     return Math.max(0, Math.min(stageMaxMs, this.remainingMs()));
   }
 
-  /** 段の signal: 要求全体の abort と、段の予算の timeout のどちらか早い方。予算 0 なら即 abort。 */
-  stageSignal(stageMaxMs: number): AbortSignal {
+  /**
+   * 段: 要求全体の abort と段の予算のどちらか早い方で切れる signal、**時計で見た経過**（timer の配達が遅れても送出しない）、
+   * 段の終わりに timer を外す `dispose`。予算 0 なら最初から切れている。
+   */
+  stage(stageMaxMs: number): Stage {
     const budget = this.budgetFor(stageMaxMs);
-    if (budget <= 0) return AbortSignal.abort(new DeadlineError());
-    return AbortSignal.any([this.#controller.signal, AbortSignal.timeout(budget)]);
+    const endsAt = this.#now() + budget;
+    const controller = new AbortController();
+    const onRequestAbort = (): void => controller.abort(new DeadlineError());
+    if (budget <= 0) controller.abort(new DeadlineError());
+    else this.#controller.signal.addEventListener("abort", onRequestAbort, { once: true });
+    const timer = budget <= 0 ? undefined : setTimeout(() => controller.abort(new DeadlineError()), budget);
+    return {
+      signal: controller.signal,
+      expired: () => controller.signal.aborted || this.#now() >= endsAt || this.expired(),
+      dispose: () => {
+        if (timer !== undefined) clearTimeout(timer);
+        this.#controller.signal.removeEventListener("abort", onRequestAbort);
+      },
+    };
+  }
+
+  /** `stage()` の signal だけ（timer は段の予算で自然に切れる。試験と短い段に）。 */
+  stageSignal(stageMaxMs: number): AbortSignal {
+    return this.stage(stageMaxMs).signal;
   }
 
   canSettle(): boolean {
@@ -67,7 +94,10 @@ export class RequestDeadline {
 
 /** signal つきの await: signal が切れたら reject し、仕事の結果を捨てる（仕事そのものの中断は signal を受けた側が行う）。 */
 export function withSignal<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DeadlineError());
+  if (signal.aborted) {
+    work.catch(() => {}); // 捨てる仕事の失敗を unhandled にしない
+    return Promise.reject(new DeadlineError());
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(new DeadlineError());
     signal.addEventListener("abort", onAbort, { once: true });

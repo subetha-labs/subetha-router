@@ -6,16 +6,22 @@ import { describe, expect, test } from "vitest";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { configOf, isBase58PublicKey, TABLE } from "../src/config.js";
-import { DeadlineError, MIN_REMAINING_BEFORE_SETTLE_MS, RequestDeadline, withSignal } from "../src/deadline.js";
+import { DeadlineError, MIN_REMAINING_BEFORE_SETTLE_MS, RequestDeadline, withSignal, type Stage } from "../src/deadline.js";
 import { BoundedFacilitatorClient, readBoundedJson, SettleCalledTwiceError, supportedKindOf } from "../src/facilitator-client.js";
 import { checkReceipt, payerOfPayload } from "../src/receipt.js";
 import { sellerProofFor, type SellerRequestTypedData } from "../src/seller-proof.js";
-import { DataUnavailableError, MAX_SNAPSHOT_BYTES, percentOf, serializeSnapshot, snapshotOf, subtractDecimal } from "../src/snapshot.js";
+import { MAX_ACCEPTED_DEPTH, stableJson, TooDeepError } from "../src/requirements.js";
+import { DataUnavailableError, MAX_SNAPSHOT_BYTES, percentOf, serializeSnapshot, snapshotOf, subtractDecimal, truncateToScale } from "../src/snapshot.js";
 import { decodeProof, EXPECTED_PROOF, fromBase64, recoverProof, SOL_FEE_PAYER, SOL_SIGNATURE, solanaTransaction } from "./helpers.js";
 
 const ARC_KEY = generatePrivateKey();
 const ARC_ADDRESS = privateKeyToAccount(ARC_KEY).address;
 const SOL_OWNER = "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d";
+
+/** signal だけの段（時計の経過は signal と同じ）。 */
+function stageOf(signal: AbortSignal): Stage {
+  return { signal, expired: () => signal.aborted, dispose: () => {} };
+}
 
 describe("config", () => {
   test("arc: 表の固定値、payTo の形、鍵が要る。solana: 鍵があれば拒む。config に鍵が無い。文言に値が出ない", () => {
@@ -113,12 +119,18 @@ describe("snapshot（契約の形と制約）", () => {
     expect(snapshotOf(hl({ markPx: "1", prevDayPx: "1", dayNtlVlm: "0" }), "x").data.dayNtlVlm).toBe("0");
   });
 
-  test("10 進の算術は文字列のまま: absolute は markPx の桁、percent は最後に 1 度だけ 0 方向に切り詰め", () => {
+  test("10 進の算術は文字列のまま: 差は正確、absolute は markPx の桁へ切り詰め、percent は最後に 1 度だけ 0 方向に切り詰め", () => {
     expect(subtractDecimal("2572.5", "2693.6")).toBe("-121.1");
     expect(subtractDecimal("3000.12", "2950.40")).toBe("49.72");
     expect(subtractDecimal("100.0", "0.5")).toBe("99.5");
-    expect(subtractDecimal("100", "0.5")).toBe("99"); // markPx の桁（0）へ切り詰め
+    expect(subtractDecimal("100", "0.5")).toBe("99.5"); // 差は正確（桁の大きい方）
+    expect(subtractDecimal("100", "99.9")).toBe("0.1");
     expect(subtractDecimal("0.000000029", "0.000000019")).toBe("0.000000010");
+    expect(truncateToScale("99.5", 0)).toBe("99");
+    expect(truncateToScale("-0.1", 0)).toBe("0"); // "-0" にしない
+    expect(truncateToScale("-121.16", 1)).toBe("-121.1");
+    expect(truncateToScale("5", 2)).toBe("5.00");
+    expect(truncateToScale("0.1", 1)).toBe("0.1");
     expect(percentOf("49.72", "2950.40")).toBe("1.68"); // 1.685… → 切り詰め（記録済みの fixture と同じ）
     expect(percentOf("-121.1", "2693.6")).toBe("-4.49"); // −4.4958… → 0 方向
     expect(percentOf("0.000000010", "0.000000019")).toBe("52.63"); // レビューの例（operand を先に丸めない）
@@ -128,6 +140,15 @@ describe("snapshot（契約の形と制約）", () => {
     expect(percentOf("5", "2.5")).toBe("200.00");
     expect(() => percentOf("1", "0")).toThrow(DataUnavailableError);
     expect(() => percentOf("1", "0.00")).toThrow(DataUnavailableError);
+  });
+
+  test("桁が違う入力: absolute は markPx の桁、percent は切り詰める前の差から（100 / 99.9 → 0 と 0.10）", () => {
+    const mixed = snapshotOf(hl({ markPx: "100", prevDayPx: "99.9", dayNtlVlm: "1" }), "x");
+    expect(mixed.data.change24h).toEqual({ absolute: "0", percent: "0.10" });
+    const down = snapshotOf(hl({ markPx: "2572", prevDayPx: "2693.6", dayNtlVlm: "1" }), "x");
+    expect(down.data.change24h).toEqual({ absolute: "-121", percent: "-4.51" }); // −121.6 / 2693.6 = −4.514…
+    const finer = snapshotOf(hl({ markPx: "0.000000029", prevDayPx: "0.00000002", dayNtlVlm: "1" }), "x");
+    expect(finer.data.change24h).toEqual({ absolute: "0.000000009", percent: "45.00" });
   });
 
   test("直列化した本文が 64 KiB を超えれば data_unavailable（verify の前）", () => {
@@ -209,6 +230,30 @@ describe("期限（要求ごとに 1 つ。段の signal）", () => {
     d2.release();
   });
 
+  test("段: 時計で見た経過は timer と独立（timer の配達が遅れていても expired）。dispose で timer を外す。要求の abort は段に伝わる", async () => {
+    let now = 1_000_000;
+    const d = new RequestDeadline(() => now, 26_000);
+    const stage = d.stage(4_000);
+    expect(stage.expired()).toBe(false);
+    now += 4_000; // 実時間は進んでいない: timer は配達されていないが、時計では段の終わり
+    expect(stage.signal.aborted).toBe(false);
+    expect(stage.expired()).toBe(true);
+    stage.dispose();
+    d.release();
+    const real = new RequestDeadline(Date.now, 10_000);
+    const short = real.stage(30);
+    short.dispose();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(short.signal.aborted).toBe(false); // dispose の後は切れない（timer を外した）
+    const whole = new RequestDeadline(Date.now, 40);
+    const inner = whole.stage(5_000);
+    await new Promise((r) => setTimeout(r, 90));
+    expect(inner.signal.aborted).toBe(true); // 要求全体の期限で段も切れる
+    expect(inner.expired()).toBe(true);
+    inner.dispose();
+    whole.release();
+  });
+
   test("withSignal: 切れていれば即 reject、途中で切れれば reject、値は signal が生きているときだけ", async () => {
     await expect(withSignal(AbortSignal.timeout(1_000), Promise.resolve("ok"))).resolves.toBe("ok");
     await expect(withSignal(AbortSignal.abort(), Promise.resolve("never"))).rejects.toThrow(DeadlineError);
@@ -226,7 +271,7 @@ describe("facilitator client（自前）", () => {
 
   test("settle は 1 回だけ: 2 回目は送らずに SettleCalledTwiceError", async () => {
     let posts = 0;
-    const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", signalFor: () => AbortSignal.timeout(1_000), fetch: (async () => { posts += 1; return jsonResponse(200, { success: true, transaction: `0x${"ab".repeat(32)}`, network: "eip155:5042002" }); }) as typeof fetch });
+    const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", stageFor: () => stageOf(AbortSignal.timeout(1_000)), fetch: (async () => { posts += 1; return jsonResponse(200, { success: true, transaction: `0x${"ab".repeat(32)}`, network: "eip155:5042002" }); }) as typeof fetch });
     await client.settle(payload, requirements);
     await expect(client.settle(payload, requirements)).rejects.toThrow(SettleCalledTwiceError);
     expect(posts).toBe(1);
@@ -237,7 +282,7 @@ describe("facilitator client（自前）", () => {
     let posts = 0;
     let signings = 0;
     const slowSigner = { network: "eip155:5042002", chainId: 5042002, address: ARC_ADDRESS, signTypedData: () => { signings += 1; return new Promise<`0x${string}`>((r) => setTimeout(() => r(`0x${"11".repeat(65)}`), 300)); } };
-    const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", signer: slowSigner, signalFor: () => AbortSignal.timeout(50), fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch });
+    const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", signer: slowSigner, stageFor: () => stageOf(AbortSignal.timeout(50)), fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch });
     const started = Date.now();
     await expect(client.verify(payload, requirements)).rejects.toThrow(DeadlineError);
     // signal が切れた時点で reject する（署名の完了 300 ms を待たない）。
@@ -245,16 +290,44 @@ describe("facilitator client（自前）", () => {
     await new Promise((r) => setTimeout(r, 350));
     expect(posts).toBe(0);
     expect(signings).toBe(1);
-    const dead = new BoundedFacilitatorClient({ url: "https://f.test/x402", signer: slowSigner, signalFor: () => AbortSignal.abort(), fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch });
+    const dead = new BoundedFacilitatorClient({ url: "https://f.test/x402", signer: slowSigner, stageFor: () => stageOf(AbortSignal.abort()), fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch });
     await expect(dead.settle(payload, requirements)).rejects.toThrow(DeadlineError);
     expect(signings).toBe(1);
+    expect(posts).toBe(0);
+  });
+
+  test("送出の直前に段の時計を見る: signal が生きていても expired なら送らない。段は終わりに dispose される", async () => {
+    let posts = 0;
+    let disposed = 0;
+    const controller = new AbortController();
+    const client = new BoundedFacilitatorClient({
+      url: "https://f.test/x402",
+      stageFor: () => ({ signal: controller.signal, expired: () => true, dispose: () => { disposed += 1; } }),
+      fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch,
+    });
+    await expect(client.verify(payload, requirements)).rejects.toThrow(DeadlineError);
+    expect(posts).toBe(0);
+    expect(disposed).toBe(1);
+    await expect(client.getSupported()).rejects.toThrow(DeadlineError);
+    expect(posts).toBe(0);
+    expect(disposed).toBe(2);
+    // 署名の後に時計が過ぎた場合も送らない。
+    let calls = 0;
+    const lateClock = new BoundedFacilitatorClient({
+      url: "https://f.test/x402",
+      signer: { network: "eip155:5042002", chainId: 5042002, address: ARC_ADDRESS, signTypedData: async () => { calls += 1; return `0x${"11".repeat(65)}`; } },
+      stageFor: () => ({ signal: controller.signal, expired: () => calls > 0, dispose: () => {} }),
+      fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch,
+    });
+    await expect(lateClock.verify(payload, requirements)).rejects.toThrow(DeadlineError);
+    expect(calls).toBe(1);
     expect(posts).toBe(0);
   });
 
   test("fetch に段の signal を渡し、切れれば DeadlineError（facilitator_unavailable にしない）", async () => {
     const client = new BoundedFacilitatorClient({
       url: "https://f.test/x402",
-      signalFor: () => AbortSignal.timeout(50),
+      stageFor: () => stageOf(AbortSignal.timeout(50)),
       fetch: ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))))) as typeof fetch,
     });
     await expect(client.verify(payload, requirements)).rejects.toThrow(DeadlineError);
@@ -273,7 +346,7 @@ describe("facilitator client（自前）", () => {
       cancel() { cancelled += 1; },
     }), { status: 200 });
     expect(await readBoundedJson(streamed(), 64 * 1024, AbortSignal.timeout(1_000))).toBeUndefined();
-    const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", signalFor: () => AbortSignal.timeout(1_000), fetch: (async () => streamed()) as typeof fetch });
+    const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", stageFor: () => stageOf(AbortSignal.timeout(1_000)), fetch: (async () => streamed()) as typeof fetch });
     await expect(client.verify(payload, requirements)).rejects.toThrow(/facilitator_unavailable/);
     // 途中で止まる本文: signal が切れたら reader を cancel し、DeadlineError。
     let stalledCancelled = 0;
@@ -293,5 +366,19 @@ describe("facilitator client（自前）", () => {
     expect(supportedKindOf({ kinds: [{ x402Version: 2, scheme: "exact", network: sol }] }, sol)).toBeUndefined();
     expect(supportedKindOf({ kinds: [{ x402Version: 2, scheme: "exact", network: sol, extra: { feePayer: "1".repeat(44) } }] }, sol)).toBeUndefined();
     expect(supportedKindOf("nope", sol)).toBeUndefined();
+  });
+});
+
+describe("accepted の直列化", () => {
+  test("鍵は昇順、深さは上限まで（深い入れ子は TooDeepError。再帰で落ちない）", () => {
+    expect(stableJson({ b: 1, a: [{ d: 2, c: "x" }] })).toBe('{"a":[{"c":"x","d":2}],"b":1}');
+    let nested: unknown = "leaf";
+    for (let i = 0; i < MAX_ACCEPTED_DEPTH + 1; i += 1) nested = { k: nested };
+    expect(() => stableJson(nested)).toThrow(TooDeepError);
+    let deep: unknown = "leaf";
+    for (let i = 0; i < 100_000; i += 1) deep = [deep];
+    expect(() => stableJson(deep)).toThrow(TooDeepError);
+    const ok = { scheme: "exact", extra: { feePayer: "x" } };
+    expect(() => stableJson(ok)).not.toThrow();
   });
 });
