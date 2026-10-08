@@ -195,7 +195,7 @@ U2 の後は U3 と U6-a が並行できる（writer は 1 つなので、実際
 |---|---|---|
 | G-2⁗ | U10 を含むイメージを `pairs` 両方 `false` のまま入れ替え（`deploy/swap-image.sh`）。公開の一覧は route 10・プロファイル 18 のまま | owner の確認（配備） |
 | G-3⁗ | 受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`。公開の Router は止める）で O-5・O-6 を各 1 件 `delivered`。記録は AC-13／AC-14 と同じ（payer は使い捨て: Arc `0xfCea…`、Solana `HTaz…`） | owner の確認（公開の停止・支払い） |
-| G-4⁗ | `pairs` 両方 `true` の PR と入れ替え。一覧 20 本、各 1 回の quote、hosted で各 1 件の実購入（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20） | owner の確認 |
+| G-4⁗ | `pairs` 両方 `true` の PR と入れ替え。**同じ PR で、`RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に変え、`pairs` を `false` にした固定の構成で 18 本を見る試験を残す**（`remote-mcp-config.test.ts`・`rails-entry.test.ts`）。一覧 20 本、各 1 回の quote、hosted で各 1 件の実購入（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20） | owner の確認 |
 
 ## 3. 要件・設計との対応（主担当と補助）
 
@@ -212,6 +212,7 @@ U2 の後は U3 と U6-a が並行できる（writer は 1 つなので、実際
 | SR-3 | U4（Arc）、U7・U8-b（SVM） | — |
 | SR-5、D-10、AC-11・AC-13・AC-14 | UG-A（Arc）・UG-S（Solana） | — |
 | D-12・D-16・D-17 | U5・U9（公開 ID が 6 本だけ） | 将来の追加は別の gate |
+| D-17（決定 2026-10-09）、FR-39〜FR-43、AC-19 | U10 | UG-P（AC-20・AC-21） |
 | AC-8 | U4 | U8-a（Arc の統合）、UG-A G-3′ |
 | AC-9・AC-10 | U7 | U8-a・U8-b |
 | AC-12 | 各タスクの sabotage（U2・U3・U4・U6-a・U6-b・U7・U8-a・U8-b） | 能力の束縛 U4・U8-a、表 U1、予算 U8-a、領収 U3、運用者の集合 U3・U4・U7 |

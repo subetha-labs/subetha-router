@@ -333,7 +333,7 @@ export const railActive = (a: RailsActivation): boolean => Object.values(a).some
 | 動的 | `dyn-x402-to-sol`・`dyn-mpp-to-sol` | Base x402／Tempo MPP | Solana x402（`decimals` 6、`tokenProgram` 表） | 呼び出し側 | `solana.outbound`（同上） |
 
 - 定数 `OUTBOUND_ARC = { network, asset: 0x3600…, decimals: 6 }`、`OUTBOUND_SOL = { network, asset: 4zMMC9…, decimals: 6, tokenProgram }`（`payTo` は env）。`UPSTREAM_ARC`／`UPSTREAM_SOL` は Provider が立つまで空文字
-- **公開する行列はこの 6 本で固定**（D-12）。O-5・O-6（Arc ↔ Solana）は生成しない。足すときは要件 D-17（par の宣言、AC-13／AC-14 と同じ購入、G-3′・G-4′）
+- **公開する行列はこの 6 本で固定**（D-12）。O-5・O-6（Arc ↔ Solana）は生成しない。足すときは要件 D-17（par の宣言、AC-13／AC-14 と同じ購入、G-3′・G-4′）。**→ 2026-10-09 に D-17 が決まり、O-5・O-6 は §13 のとおり動的プロファイルで生成する（この行は UG-A／UG-S 当時の範囲）**
 - 予算の区分: `railBuckets`（`:217-220`）は **その network が受信か送信のどちらかで有効**なら Arc USDC・Solana USDC の区分を出す（今は受取先の有無 = 受信）。静的・動的とも。上限は D-14（既存と同じ桁）
 - `x402.upstreams` に新しい静的 route の URL。MPP 受信の route／プロファイルは `SUBETHA_MPP_INBOUND_SECRET` があるときだけ（既存の規則）
 
@@ -470,9 +470,9 @@ if (pairSolToArc && (solReceiver === undefined || !arcOutbound)) throw new Error
 
 | 場所 | 足すもの |
 |---|---|
-| `tests/unit/remote-mcp-config.test.ts` | 公開の定数の形（`pairs`）、`pairs` 両方 `true` の生成で 20 本（ID の全列挙）、`false` で 18 本、組 `true` でレールの方向が無い 4 通り → 固定文、guard row が 20 本を回る（既存の `test.each` が `dynamicProfilesOf` の出力を回るなら `pairs` を `true` にした構成を渡す） |
-| `tests/unit/rails-entry.test.ts` | token の往復（8 語）、全部 `true` の `hostPlanOf` で 20 本と子の env の 8 語、`pairs` だけ `true` で `hostPlanOf` が固定文で止まる |
-| `tests/wire/multirail-integration.test.ts` | 送信の行列に O-5（`dyn-arc-to-sol`: 受信 Arc=Circle、送信 Solana）・O-6（`dyn-sol-to-arc`: 受信 Solana=x402.org、送信 Arc）。期待: Circle／svm の verify・settle、Provider の支払い 1、Solana の署名 1（O-5）、接続先の集合 |
+| `tests/unit/remote-mcp-config.test.ts` | 公開の定数の形（`pairs`）、`pairs` 両方 `true` の生成で 20 本（ID の全列挙）、**片方だけ `true` で 19 本（足されるのはその 1 本だけ。方向が結合していないこと）**、両方 `false` で 18 本、組 `true` でレールの方向が無い 4 通り → 固定文、guard row が **`pairs` 両方 `true` の構成で 20 本**を回る（既存の guard row は独自の activation を持つので、その構成に `pairs` を足す） |
+| `tests/unit/rails-entry.test.ts` | token の往復（8 語。片方だけの 2 状態も）、新しい語の重複・未知の語の拒否、全部 `true` の `hostPlanOf` で 20 本と子の env の 8 語、`pairs` だけ `true` で `hostPlanOf` が固定文で止まる。**G-2⁗ の PR では公開の定数は `pairs` 両方 `false` なので、`RAILS_ACTIVATION` を直接読む既存の試験（18 本・6 語）はそのまま通る。G-4⁗ の PR で、それらの期待を 20 本・8 語に変え、`pairs` を `false` にした固定の構成で 18 本を見る試験を残す** |
+| `tests/wire/multirail-integration.test.ts` | 送信の行列に O-5（`dyn-arc-to-sol`: 受信 Arc=Circle、送信 Solana）・O-6（`dyn-sol-to-arc`: 受信 Solana=x402.org、送信 Arc）。期待: Circle／svm の verify・settle、Provider の支払い 1、Router の Solana 送信鍵の署名は O-5 が 1・O-6 が 0（O-6 の呼び出し側の credential の署名は別の観測）、接続先の集合 |
 | `tests/wire/rails-process-entry.test.ts` | 受け入れ用の起動で `--rails … ,arc-to-sol,sol-to-arc` を渡すと設定に 2 本が入る（既存の「起動は probe で止まる」形） |
 
 ### 13.4 変更するファイル

@@ -306,7 +306,7 @@ G-1′（鍵と資金: D-11、V-9）→ G-2′（無効のまま配備）→ G-3
 
 ### 11.3 受け入れ条件
 
-- **AC-19（offline）**: 統合の行列（`tests/wire/multirail-integration.test.ts` の送信の行列）に O-5・O-6 の行を足し、どちらも `delivered`（受信は Circle／x402.org の fixture で verify 1・settle 1、送信は該当の Provider の fixture に 1 回、Solana は署名 1 回）。
+- **AC-19（offline）**: 統合の行列（`tests/wire/multirail-integration.test.ts` の送信の行列）に O-5・O-6 の行を足し、どちらも `delivered`（受信は Circle／x402.org の fixture で verify 1・settle 1、送信は該当の Provider の fixture に 1 回、Router の Solana 送信鍵の署名は O-5 が 1・O-6 が 0）。
   設定生成の単体試験: 公開の定数（`pairs` 両方 `true` のとき）で一覧が **route 10・プロファイル 20**、`pairs` が `false` なら 18 のまま、組が `true` でレールの方向が無ければ固定文で止まる、
   20 プロファイルすべてで上限額の quote の予約が区分に収まる（既存の guard row に 2 組が入る）、token の往復（`activationToEnv`／`activationFromEnv`）に 2 語が入る。sabotage: 生成の条件からレールの方向を外す → 試験が落ちる。
 - **AC-20（受け入れの購入）**: 受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`。公開の Router は止める）で O-5・O-6 を各 1 件 `delivered`。記録は AC-13／AC-14 と同じ（両レグの tx と確定、受取先・額、Provider の応答、client の結果、再読取）。
