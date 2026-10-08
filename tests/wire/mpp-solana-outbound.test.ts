@@ -393,8 +393,9 @@ describe("送出前の失敗（§4.3 の各段。署名も送出もしない、�
     const chosen = { used: false } as Parameters<typeof createCredentialHookOf>[0];
     const hook = createCredentialHookOf(chosen);
     const challenge = { id: "abc", realm: "r", method: "solana", intent: "charge", request: { amount: "1" } };
-    await expect(hook({ challenge })).rejects.toThrow(/before the wire exists/);
+    // id は選んであるが wire がまだ無い（= 検査の前に SDK が hook を呼んだ形）。
     chosen.id = "abc";
+    await expect(hook({ challenge })).rejects.toThrow(/before the wire exists/);
     chosen.wire = new Uint8Array([2, 0, 1]);
     await expect(hook({ challenge: { ...challenge, id: "other" } })).rejects.toThrow(/different challenge/);
     await expect(hook({ challenge: "x" })).rejects.toThrow(/different challenge/);

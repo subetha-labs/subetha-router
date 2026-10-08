@@ -45,6 +45,8 @@ async function harness(): Promise<{ rail: MppSolanaOutbound; signer: SvmSignerFi
   closers.push(rpc.close);
   const payKitRpc = await startSolanaRpc({ mint: MINT, decimals: 6, shareStateWith: rpc });
   closers.push(payKitRpc.close);
+  // 既定は 1 回目で confirmed（hold の試験は pay-kit の確定待ちを含めない: 測るのは Router の期限だけ）。
+  rpc.state.signatureStatuses = ["confirmed"];
   const upstream = await startMppSolanaUpstream({ rpcUrl: payKitRpc.url, feePayer: true, recipient, tls: TLS });
   closers.push(upstream.close);
   const dial = dialTo({ [PROVIDER_HOST]: upstream.port, [RPC_HOST]: rpc.port });
