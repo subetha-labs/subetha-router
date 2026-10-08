@@ -8,7 +8,7 @@ import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from "@x402
 import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { configOf, isEvmKey, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
+import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
 import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS, type Stage } from "./deadline.js";
 import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
@@ -16,9 +16,8 @@ import { createRequirementsBuilder, type RequirementsBuilder } from "./requireme
 import type { SellerProofSigner } from "./seller-proof.js";
 import { DataUnavailableError, fetchSnapshot, serializeSnapshot } from "./snapshot.js";
 
+// この module の export は handler と関数だけ（workerd は entry の export に値があると起動しない: AC-P2 で判明）。定数は config.ts。
 const ENCODER = new TextEncoder();
-/** `PAYMENT-SIGNATURE` の長さの上限（Workers のヘッダの上限の内側。正しい payload は数 KiB）。 */
-export const MAX_PAYMENT_HEADER_CHARS = 16 * 1024;
 
 /** 固定文の応答。`content-length` を明示し、本文は 1 つの文字列。 */
 function respond(status: number, text: string, headers: Record<string, string> = {}): Response {
@@ -79,10 +78,12 @@ async function paymentRequired(runtime: Runtime, canonical: string, error?: stri
   return json(402, error === undefined ? {} : { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(required) });
 }
 
-function facilitatorError(error: unknown): Response {
+function facilitatorError(stage: "verify" | "settle", error: unknown): Response {
   if (error instanceof SettleCalledTwiceError) return json(502, { error: "internal" });
   const kind = error instanceof FacilitatorUnavailableError ? error.kind : "facilitator_unavailable";
-  if (kind === "facilitator_registration_required") console.error("provider: facilitator registration required");
+  // 運用者向けの固定文: 段・分類・原因の種別（許可した語だけ。例外の文言や名前は出さない）。
+  const cause = error instanceof DeadlineError ? "deadline" : error instanceof FacilitatorUnavailableError ? `status ${error.status ?? "none"}` : "other";
+  console.error(`provider: ${stage} failed (${kind}, ${cause})`);
   return json(502, { error: kind });
 }
 
@@ -113,7 +114,9 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   const initStage = stages("supported");
   try {
     await runtime.builder.ready(initStage.signal, () => stages("supported"));
-  } catch {
+  } catch (error) {
+    // 運用者向けの固定文（分類だけ。facilitator の文言・URL は出さない）。
+    console.error(`provider: facilitator not ready (${error instanceof FacilitatorUnavailableError ? error.kind : error instanceof DeadlineError ? "deadline" : "other"})`);
     return json(503, { error: "facilitator_unavailable" });
   } finally {
     initStage.dispose();
@@ -162,7 +165,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   try {
     verified = await facilitator.verify(payload, requirements);
   } catch (error) {
-    return facilitatorError(error);
+    return facilitatorError("verify", error);
   }
   if (!verified.isValid) return paymentRequired(runtime, canonical, "payment_invalid");
 
@@ -172,7 +175,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   try {
     settled = await facilitator.settle(payload, requirements);
   } catch (error) {
-    return facilitatorError(error);
+    return facilitatorError("settle", error);
   }
   const receipt = checkReceipt(runtime.config.network, runtime.config.table.network, payload, settled);
   if (!receipt.ok) return json(502, { error: receipt.reason });

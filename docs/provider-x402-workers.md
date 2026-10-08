@@ -138,7 +138,7 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 ### 3.2 自前の facilitator client
 
 - 1 つのクラスを両方で使う。`verify`／`settle` は `JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements })` を **1 度だけ**作り、Circle のときはその文字列の keccak256 を `bodyHash` にして `SellerRequest` に署名し `Facilitator-Seller-Proof` を付ける。同じ文字列を body に送る。
-- `redirect: "error"`、期限 verify **4 秒**・settle **min(20 秒, 要求の残り)**・supported **5 秒**。応答の本文は 64 KiB まで。HTTP の状態と本文の形を見て §2.2 の表に写す。facilitator の文言は client の外に出さない（固定の分類だけ）。
+- `redirect: "manual"`（Workers の fetch に `error` は無い。3xx は状態コードの検査で失敗になる = 追わない）、期限 verify **4 秒**・settle **min(20 秒, 要求の残り)**・supported **5 秒**。応答の本文は 64 KiB まで。HTTP の状態と本文の形を見て §2.2 の表に写す。facilitator の文言は client の外に出さない（固定の分類だけ）。
 - **settle の guard**: 要求ごとの client の object が `settle` の呼び出しを数え、2 度目は throw（試験で確かめる。SDK を通さないので再試行は起きないが、二重の防御）。
 - `getSupported` は GET（上限 **5 秒**）。SDK の `x402ResourceServer` に渡すのはこの client（`initialize()` が `/supported` を読む）。isolate ごとに 1 度 `initialize()`（要求ごとの期限の内側で。失敗したら次の要求でやり直す。402 を出せない間は 503 固定文、支払いは受けない）。
 
@@ -191,3 +191,20 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（高 3: SDK の settle の再試行、settle 失敗を 402 にする誤り、本文が記録済みの契約と違う；中 3: 期限の不整合、鍵の作り方と配備、V-13 のラベル）。第 2 版で反映 |
 | 2 | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **REJECT**（解決: 再試行、V-13。残り: `payer` の同一性と本文の受領、契約は拡張であること・数値の制約、cold start を含む 1 つの期限、Solana の seed の出力、`unknown` の後の文言）。第 3 版で反映 |
 | 3 | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `cbe704c`） | **APPROVE WITH CHANGES**（文言 3 点: verify の失敗・403 の行に残っていた「新しい購入で再試行できる」の根拠を削除、`delivered` は本文まで受け取れたときと明記、署名と本文の読み書きも期限の内側と明記）。同じ版で反映（小さな訂正なので再レビューはしない） |
+
+## 9. 実装と AC-P2 の記録（2026-10-08）
+
+- 実装: `providers/x402-workers/`（PR #86。独立レビュー `gpt-6-astra`: REJECT（7 点）→ readback REJECT（3 点が部分的）→ readback APPROVE WITH CHANGES（3 点）→ 範囲を絞った readback APPROVE。unit と handler の試験 33、変異 27 を全部検出）。
+- AC-P2 の試験: `tests/acceptance/provider-x402-workers.test.ts`（**`PROVIDER_WORKER_AC=1` のときだけ**走る。`providers/x402-workers/node_modules` の wrangler が要るので、Linux の suite では skip）。
+  本物の Worker を `wrangler dev --env arc` / `--env sol`（workerd）で起動し、Router の fixture の facilitator（`circle-facilitator`・`svm-facilitator`）に向け、Router 自身の送信 adapter（Arc: `createX402Outbound` の組み直しの署名器、Solana: `createX402SvmOutbound` + RPC の fixture）で買う。Worker（平文 http）と TLS の fixture の間は試験が立てる loopback の proxy（Worker → facilitator は http→TLS、Router → Worker は `arc.provider.test` / `sol.provider.test` の TLS front）。Arc の売り手鍵は試験が乱数で作り、0600 の一時ファイル（`--env-file`）で渡して消す。
+  実行: `PROVIDER_WORKER_AC=1 npx vitest run tests/acceptance/provider-x402-workers.test.ts`
+  外に出ない根拠: Router の dial は表に無いホストを拒む fixture、proxy と front は 127.0.0.1 へだけ接続、wrangler の telemetry・error report・banner（通常の経路の npm の更新確認）は env で止め、警告・エラーの経路に残る更新確認のために npm の registry を閉じた loopback のポートに向ける（`npm_registry`: wrangler の update-check は `rc("npm")` で読み、`rc` は接頭辞 `npm_` を外した名前を鍵にするので `npm_config_registry` では効かない）。試験は生の log に banner・更新の案内が無いことも見る。
+- 結果（macOS、wrangler 4.148.0、workerd）: **7 件 pass**。Arc: 402 が Router の候補を通り、購入は `paid`（契約の本文を入れ子まで検査、facilitator の verify 1・settle 1、売り手証明の失敗 0、領収の `payer` = Router の署名者、Worker の 200 の wire は `content-type`・`no-store`・`PAYMENT-RESPONSE` つき）。settle の表の 9 行（pending・失敗・403・500・形違い・切断・network 違い・別 payer・64 KiB 超の chunked）→ **Worker は 502 の固定の本文で領収なし**、Router は `unknown`、settle は各 1 回。facilitator が 25 秒黙る → Worker は 20 秒で 502（settle 1 回）。verify が不正 → Worker 402（固定の本文）→ Router `rejected`（settle 0）。Solana: `/supported` の feePayer で 402（読取 1 回）、購入は `paid`、confirm の timeout（pending）・切断・409 → Worker 502・Router `unknown`、settle は各 1 回。Worker の生の log に鍵・facilitator の文言・wrangler の banner（更新確認）は無い。
+- **workerd で初めて分かったこと（Node の試験では出ない。実装に反映済み）**:
+  1. entry module（`src/index.ts`）の export に handler と関数以外の値があると workerd が起動しない（定数は `config.ts` へ）。
+  2. global の `fetch` を instance に持たせて `this.#fetch(...)` と呼ぶと `Illegal invocation`（`this` を付けずに呼ぶ）。
+  3. Workers の fetch に `redirect: "error"` は無い（`manual` にし、3xx は状態コードで失敗）。
+  4. Router は 402 の `resource.url` を canonical URL と**完全一致**で束縛する。Worker は `request.url` の origin から組むので、手元の `wrangler dev` では `--local-upstream <公開ホスト> --upstream-protocol https` が要る（本番は custom domain で `https://provider-x402-<arc|sol>.subethalabs.com` になる。Router は設定した canonical URL と違う `resource.url` を拒むので、`workers.dev` の host で開いた 402 は **設定が custom domain のときは**候補にならない。`workers.dev` そのものを Router が禁じているのではなく、設定した URL と一致しないだけ）。
+  5. `wrangler dev` の proxy は、client が `accept-encoding` を送ると本文を圧縮して `transfer-encoding: chunked` で中継し、Worker が付けた `content-length` は wire から消える。`accept-encoding` 無しなら Worker の `content-length`（395 バイト）がそのまま wire に出る。Router は本文を上限つきで読むので、どちらでも依存しない。試験は Worker への hop で `accept-encoding` を渡さない（圧縮された応答の経路はこの試験の範囲外。本番の edge の圧縮の挙動は AC-P3/AC-P4 で見る）。
+  6. **Router 側の不整合（AC-P2 の期限の行で判明。Router の follow-up が UG-A の前に要る）**: §1 の「Router の送信（x402）の有料要求の期限は 30 秒」は動的経路（`x402-dynamic.ts` の `paidTimeoutMs`）と Solana（`x402-svm.ts`）には正しいが、**静的 EVM 経路**（`createX402Outbound`、Base と Arc の静的 route）は `timeoutMs` 1 つ（既定 **5 秒**）を 402 の読取にも有料要求にも使う（`src/adapters/outbound/x402.ts`）。本番の合成（`src/main.ts`）は値を渡さない。Worker の warm の経路は data 2 + verify 4 + settle ≤ 20 秒なので、Circle の settle が 5 秒を超えると Router は `unknown` を記録し、Worker はそのまま settle を続ける（資金が動きうる。期限は settle の成否を決めない）。試験はこの挙動をそのまま記録している（Router 5 秒で `unknown`、Worker 20 秒で 502、settle 1 回）。推奨: 静的 EVM 経路に `paidTimeoutMs`（既定 30 秒、402 の読取は 5 秒のまま）を足して動的・Solana と揃える（Router の小さな PR。owner の判断）。
+- fixture の変更: `tests/fixtures/circle-facilitator.ts` の領収の `payer` を payload の `authorization.from`（本物の Circle と同じ）にし、`wrong-payer`（形は正しいが署名者と違う payer）の行を足した（受信の試験は値を見ない）。

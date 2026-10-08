@@ -35,7 +35,7 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
-export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "unknown" | "malformed" | "drop" | "huge" | "huge-chunked" | "exact-64k";
+export type CircleSettleMode = "ok" | "minimal" | "reject" | "pending" | "registration-required" | "conflict" | "bad-tx" | "no-tx" | "bad-network" | "wrong-payer" | "unknown" | "malformed" | "drop" | "huge" | "huge-chunked" | "exact-64k";
 
 export interface CircleFacilitatorState {
   verify: "ok" | "invalid";
@@ -127,7 +127,13 @@ export async function startCircleFacilitator(tls: TlsMaterial, host = "circle.te
   const state: CircleFacilitatorState = { verify: "ok", settle: "ok", settleDelayMs: 0, rejectProofs: false, redirectTo: undefined };
   const seen: CircleSeen = { connections: 0, verifyCalls: 0, settleCalls: 0, proofFailures: [], lastRequirements: undefined, lastPayload: undefined, lastRawBody: undefined, lastProof: undefined };
   const usedNonces = new Set<string>();
-  const PAYER = "0x0000000000000000000000000000000000000501";
+  const FIXED_PAYER = "0x0000000000000000000000000000000000000501";
+  const payerOf = (payload: unknown): string | undefined => {
+    const inner = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>)["payload"] : undefined;
+    const authorization = typeof inner === "object" && inner !== null ? (inner as Record<string, unknown>)["authorization"] : undefined;
+    const from = typeof authorization === "object" && authorization !== null ? (authorization as Record<string, unknown>)["from"] : undefined;
+    return typeof from === "string" && /^0x[0-9a-fA-F]{40}$/.test(from) ? from : undefined;
+  };
 
   const server = https.createServer({ key: tls.provider.key, cert: tls.provider.cert }, (request, response) => {
     const send = (status: number, body: unknown, headers: Record<string, string> = {}): void => {
@@ -156,6 +162,8 @@ export async function startCircleFacilitator(tls: TlsMaterial, host = "circle.te
         const requirements = body["paymentRequirements"] as Record<string, unknown> | undefined;
         seen.lastRequirements = requirements;
         seen.lastPayload = body["paymentPayload"];
+        // 領収の `payer` は payload の `authorization.from`（本物の Circle と同じ）。読めなければ固定値（受信の試験は値を見ない）。
+        const PAYER = payerOf(body["paymentPayload"]) ?? FIXED_PAYER;
         if (purpose === "verify") seen.verifyCalls += 1;
         else seen.settleCalls += 1;
         if (state.redirectTo !== undefined) {
@@ -207,6 +215,10 @@ export async function startCircleFacilitator(tls: TlsMaterial, host = "circle.te
             return;
           case "bad-network":
             send(200, { success: true, transaction: tx, network: "eip155:5042", payer: PAYER });
+            return;
+          case "wrong-payer":
+            // 形は正しいが、payload の署名者と違う payer（Provider は同一性で拒む）。
+            send(200, { success: true, transaction: tx, network, payer: "0x00000000000000000000000000000000000000b0" });
             return;
           case "unknown":
             send(500, { error: "internal", message: "SECRET_INTERNAL_DETAIL" });

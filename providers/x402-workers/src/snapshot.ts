@@ -171,15 +171,16 @@ async function readBounded(response: Response, maxBytes: number, signal: AbortSi
   return bytes;
 }
 
-export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, signal: AbortSignal, doFetch: typeof fetch = fetch, now: () => number = Date.now): Promise<Snapshot> {
+export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, signal: AbortSignal, doFetch: typeof fetch | undefined = undefined, now: () => number = Date.now): Promise<Snapshot> {
   if (signal.aborted) throw new DeadlineError();
   let response: Response;
   try {
-    response = await doFetch(dataUrl, {
+    // global の fetch は `this` を付けずに呼ぶ（workerd）。
+    response = await (doFetch === undefined ? fetch : doFetch)(dataUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-      redirect: "error",
+      redirect: "manual",
       signal,
     });
   } catch {

@@ -45,6 +45,8 @@ export const RESOURCE_PATH = "/v1/eth/snapshot";
 export const DESCRIPTION = "ETH perpetual snapshot (Hyperliquid mark price, 24h change)";
 /** wire の窓（Circle の窓と同じ 30 秒。設計 §2.1）。 */
 export const MAX_TIMEOUT_SECONDS = 30;
+/** `PAYMENT-SIGNATURE` の長さの上限（Workers のヘッダの上限の内側。正しい payload は数 KiB）。 */
+export const MAX_PAYMENT_HEADER_CHARS = 16 * 1024;
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const EVM_KEY = /^0x[0-9a-fA-F]{64}$/;

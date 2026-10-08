@@ -1,6 +1,6 @@
 /**
  * facilitator への自前の client（`docs/provider-x402-workers.md` §3.2）。SDK の `HTTPFacilitatorClient` は本文を見ずに認証ヘッダを作り、
- * 既定 90 秒で redirect を追うので使わない。ここでは本文を **1 度だけ**直列化し（Circle ならその文字列に売り手証明を束縛し）、
+ * 既定 90 秒で redirect を追うので使わない。redirect は追わない（`manual`: Workers の fetch に `error` は無い。3xx は状態コードの検査で失敗になる）。ここでは本文を **1 度だけ**直列化し（Circle ならその文字列に売り手証明を束縛し）、
  * **呼び出しごとに受けた段**（signal と時計）で署名・送出・本文の読取を止め、本文は **byte で**上限まで読む。settle は **要求ごとに 1 回**（2 度目は throw）。
  */
 import type { FacilitatorClient } from "@x402/core/server";
@@ -115,7 +115,9 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
   constructor(options: FacilitatorClientOptions) {
     this.#url = options.url.replace(/\/$/, "");
     this.#signer = options.signer;
-    this.#fetch = options.fetch ?? fetch;
+    // global の fetch は `this` を付けずに呼ぶ（workerd は `this` が client だと "Illegal invocation" で落とす: AC-P2 で判明）。
+    const doFetch = options.fetch;
+    this.#fetch = doFetch === undefined ? (input, init) => fetch(input, init) : (input, init) => doFetch(input, init);
     this.#stageFor = options.stageFor;
   }
 
@@ -136,7 +138,7 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
       if (stage.expired()) throw new DeadlineError();
       let response: Response;
       try {
-        response = await this.#fetch(`${this.#url}/${purpose}`, { method: "POST", headers, body: requestText, redirect: "error", signal });
+        response = await this.#fetch(`${this.#url}/${purpose}`, { method: "POST", headers, body: requestText, redirect: "manual", signal });
       } catch {
         if (signal.aborted) throw new DeadlineError();
         throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
@@ -180,7 +182,7 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
       if (stage.expired()) throw new DeadlineError();
       let response: Response;
       try {
-        response = await this.#fetch(`${this.#url}/supported`, { method: "GET", redirect: "error", signal });
+        response = await this.#fetch(`${this.#url}/supported`, { method: "GET", redirect: "manual", signal });
       } catch {
         if (signal.aborted) throw new DeadlineError();
         throw new FacilitatorUnavailableError("facilitator_unavailable", undefined);
