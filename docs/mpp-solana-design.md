@@ -1,4 +1,4 @@
-# 設計: Solana の MPP（`method="solana"`、`intent="charge"`）を受信・送信の両方で（S-5・S-6。第 2 版、2026-10-08）
+# 設計: Solana の MPP（`method="solana"`、`intent="charge"`）を受信・送信の両方で（S-5・S-6。第 3 版、2026-10-08）
 
 > 要件は `docs/mpp-solana-requirements.md`（第 6 版。D-18〜D-30 は owner が採用）。先行の設計 `docs/multirail-outbound-design.md`（S-3・S-4）と同じ章立て。
 > 行番号は `main` の `29d522c`。本書は**何をどこに作るか**を決める。タスクは別紙。
@@ -6,6 +6,8 @@
 > 第 2 版（独立レビュー #1、§12）: SDK の server hook は `validate` + 投げる `broadcast`（`verify` ではない）で `Validation` の全欄を返す、HMAC の検査は `mppx.validateCredential` を**明示的に**呼ぶ、構造の検査は preflight ではなく **verify**（`verify_failed` を journal に残す。compute budget は各高々 1 つ）、
 > 追跡の予算は SR-M1 のまま（follow-up の開始から 30 秒・15 回）、`blockTime` の窓は FR-47 のまま、store の bind は `createRouterCore` の callback、受信の `startup()` の登録、送信は SDK が選んだ `prepared.challenge` を承認値と照合し**hook が返した credential を復号して再検査**、送出の直前に blockhash の経過時間、`challengeId` は必須、
 > `assertDynamicMppCapability` にも絞ったプロファイル、purchase の cap の検査は残して見積りだけ飛ばす、受取 owner の述語を x402 と MPP で分ける、`z` は `mppx` の export、pay-kit の `mppx` は `overrides` で 0.13.x に固定。
+>
+> 第 3 版（readback #1、§12）: `source_settled` の追記の失敗は core が捕まえて `unknown`（`source_settle_unknown`）を返す（§2.3。FR-48 の表のとおり。静的・動的）、§3.5 の verify は型別に署名者を得てから ATA を導く、§3.6 の preflight の行に `signature` 型の既払を明記、§5.2 の helper の回数の上限、simulate の応答は JSON-RPC の `result` の中。
 > 本書の中で「x402 SVM 送信」は `src/adapters/outbound/x402-svm.ts`、「x402 SVM 受信」は `src/adapters/inbound/x402-svm.ts`、「Tempo 受信」は `src/adapters/inbound/mpp.ts`、「Tempo 送信」は `src/adapters/outbound/mpp.ts`。
 
 ## 0. 一枚で
@@ -77,7 +79,7 @@
 
 - `IntentStore` に **`settledSourceTxRefs: ReadonlySet<string>`** を足す: replay（`load` `:378-385`）で `source_settled` の行（`:275-279`）の `txRef` を集め、`append` でも足す（Set は reducer の中で更新。`txRef` が空の行は入れない）。永続化は journal そのもの（別の行を書かない。FR-47）
 - store は `createRouterCore` の中で load される（`orchestrator.ts:333`）し、core の API は store を見せない（`:940-970`）。**`RouterCoreOptions.onStoreLoaded?: (view: { settledSourceTxRefs: ReadonlySet<string> }) => void`** を足し、`IntentStore.load` の直後（budget の load の前）に 1 回呼ぶ。`composeRails` は受信 adapter に **`consumed` の holder**（`has(txRef)`。bind 前に呼ばれたら throw）を渡し、戻り値に `bindConsumed(view)` を足す。`startRouter`（`main.ts:923-`）は `createRouterCore({ ..., onStoreLoaded: rails.bindConsumed })` と渡す。quote／purchase は core の生成の後にしか呼べないので、bind は必ず先に終わる
-- 使う場所: §3.5 の settle の (1)。core の `source_settled` の追記は今までどおり settle の後（`orchestrator.ts:739`、`dynamic.ts:615`）。**追記が失敗したときの挙動は既存のまま**: 例外が purchase から escape し（journal はその後使えない）、journal には `source_pending` が残り、再起動で `interrupted_at_restart` = `unknown`（`store.ts:395-407`）。要件 FR-48 の「記録に失敗 → `unknown`」は**この経路で**満たす（adapter が `unknown` を返す場面ではない）
+- 使う場所: §3.5 の settle の (1)。core の `source_settled` の追記は今までどおり settle の後（`orchestrator.ts:739`、`dynamic.ts:615`）。**追記の失敗（core の小さな変更。静的・動的の両方）**: 今は例外が purchase から escape する。FR-48 の表（記録に失敗 → `unknown`、`source_settle_unknown`）に合わせ、`source_settled` の `store.append` を try/catch で包み、失敗したら **別の行を書こうとせず**（journal はその後使えない `journal.ts:264`）`{ status: "unknown", terminalReason: "source_settle_unknown" }` を返す。memory の intent は `source_pending` のまま（reducer は journal の書込の後に走る）で、同じ intent の再提示は `currentOutcome` の `source_pending` の写像（`unknown`）、再起動では `interrupted_at_restart` = `unknown`（`store.ts:395-407`）。**送信は始めない**（受信は chain 上で settle 済みなので `paid_undelivered` 相当だが、記録が無いので `unknown`）。他の append の失敗は変えない（この 1 点だけ）。試験: journal の append を失敗させる fixture（§8.2）
 - 受信 adapter の **`startup()` は `composeRails` の `startupChecks` に登録**する（x402 SVM 受信の holder と同じ場所。`:590`・`:647`。送信の `svmStartups` より前）
 - 原子性: `has` の検査と `source_settled` の追記は別の時点だが、**別の intent は認証済みの一意な `externalId`（Memo）で verify が先に落ち、同じ intent は core の lock（`withKey("purchase…")`）で直列**なので、同じ署名が 2 つの intent で `settled` になる経路は無い。消費済みの検査は再起動後の防御の層。両方を試験で残す（§8.2）
 
@@ -141,9 +143,9 @@ Tempo 受信の 5 点（`mpp.ts:286-313`）をそのまま: `payload.challengeNo
 
 ### 3.5 verify と settle（FR-47）
 
-- **verify（両型。順序は固定）**: (1) **`await mppx.validateCredential(wire, { scope: offer.extra.routeBinding })`**（HMAC・期限・scope・method。Tempo が `mpp.ts:330` で呼ぶのと同じ。失敗 → `isValid: false`。RPC は使わない）。SDK が返した `challenge.id` が offer の nonce と一致。(2) `signerAta` を導く。(3) 型ごと:
-  - `transaction` 型: §3.3 を掛ける（RPC 無し）。`isValid: 検査の結果`
-  - `signature` 型: `getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" })` を 1 回（`svmFetchJson`、10 秒、64 KiB）。`result === null` → `isValid: false`。`result.transaction[0]` の base64 を §3.3 に掛け、`signature` が credential の署名と一致、`meta.err === null`、`slot` が正の整数、**`blockTime` が整数で `expiresAt − maxTimeoutSeconds ≤ blockTime ≤ expiresAt`**（= challenge の発行〜期限。`null` は不正。FR-47）。RPC の失敗・形違い・上限超え → throw（core が `source_verify_unavailable`）。検査の不一致 → `isValid: false`（`verify_failed`）
+- **verify（両型。順序は固定）**: (1) **`await mppx.validateCredential(wire, { scope: offer.extra.routeBinding })`**（HMAC・期限・scope・method。Tempo が `mpp.ts:330` で呼ぶのと同じ。失敗 → `isValid: false`。RPC は使わない）。SDK が返した `challenge.id` が offer の nonce と一致。(2) 型ごとに **transaction の bytes を得て**（`transaction` 型は credential から、`signature` 型は下の `getTransaction` から）、decode して `staticAccounts[0]`（署名者）を読み、**`signerAta` を導いてから** §3.3 を掛ける:
+  - `transaction` 型: RPC 無し。`isValid: 検査の結果`
+  - `signature` 型: `getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" })` を 1 回（`svmFetchJson`、10 秒、64 KiB）。`result === null` → `isValid: false`。`result.transaction[0]` の base64 から署名者と `signerAta` を得て §3.3 に掛け、`signature` が credential の署名と一致、`meta.err === null`、`slot` が正の整数、**`blockTime` が整数で `expiresAt − maxTimeoutSeconds ≤ blockTime ≤ expiresAt`**（= challenge の発行〜期限。`null` は不正。FR-47）。RPC の失敗・形違い・上限超え → throw（core が `source_verify_unavailable`）。検査の不一致 → `isValid: false`（`verify_failed`）
 - **settle、`transaction` 型**（**全体の期限 `settleDeadlineMs` 50 秒**。各 RPC の期限は `min(10 秒, 残り)`）:
   1. `consumed.has(signature)` → `rejected`（`source_rejected`）
   2. `sendTransaction([base64, { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 0 }])` を 1 回
@@ -156,7 +158,7 @@ Tempo 受信の 5 点（`mpp.ts:286-313`）をそのまま: `payload.challengeNo
 
 | 段 | 型 | 事象 | 結果 |
 |---|---|---|---|
-| preflight | 両方 | 5 点・`type`・形 | `rejected`（`nonce_mismatch`／`credential_mismatch`／`offer_expired`／`offer_mismatch`／`route_binding_mismatch`。journal に残らない。Router は送出していない） |
+| preflight | 両方 | 5 点・`type`・形 | `rejected`（`nonce_mismatch`／`credential_mismatch`／`offer_expired`／`offer_mismatch`／`route_binding_mismatch`。journal に残らない。`transaction` 型: Router は送出していない。`signature` 型: **payer は送金済み**で返金は無い = FR-48） |
 | verify | 両方 | HMAC・期限・scope（`validateCredential`） | `verify_failed` |
 | verify | `transaction` | §3.3 | `verify_failed` |
 | verify | `signature` | RPC 不達・形違い・上限 | `source_verify_unavailable` |
@@ -255,7 +257,7 @@ Router が署名するのは **自分で組み・builder と独立に検査し�
 
 ### 5.2 追跡の helper（`src/adapters/inbound/svm-follow-up.ts`）
 
-x402 SVM 受信の `followSignature`（`x402-svm.ts:420-460`）を関数に出す: `followSvmSignature({ rpc, signature, routeId, deadlineAt, intervalMs, clock, sleep, errTerminalAt: "any" | "confirmed", searchTransactionHistory: boolean, onDiagnostic })`。x402 受信は `errTerminalAt: "any"`・`searchTransactionHistory: true`（今の `svmSignatureStatusOf` の読み方のまま。既存の試験 `svm-settle-followup.test.ts` が変わらない）。MPP Solana は `errTerminalAt: "confirmed"`（`processed` + `err` は続行）。
+x402 SVM 受信の `followSignature`（`x402-svm.ts:420-460`）を関数に出す: `followSvmSignature({ rpc, signature, routeId, deadlineAt, intervalMs, clock, sleep, errTerminalAt: "any" | "confirmed", searchTransactionHistory: boolean, onDiagnostic })`。x402 受信は `errTerminalAt: "any"`・`searchTransactionHistory: true`（今の `svmSignatureStatusOf` の読み方のまま。既存の試験 `svm-settle-followup.test.ts` が変わらない）。MPP Solana は `errTerminalAt: "confirmed"`（`processed` + `err` は続行）。**回数の上限 `maxPolls`**（MPP Solana は 15。x402 受信は渡さない = 今のまま期限だけ）: loop の各周で `polls += 1` し、`polls > maxPolls` なら期限と同じ扱い（`unknown`）。要求の期限は `svmFollowUpRequestTimeoutOf(残り)` のまま。
 
 ## 6. 本番の入口（FR-40・FR-42・FR-55・FR-56）
 
@@ -309,7 +311,7 @@ x402 SVM 受信の `followSignature`（`x402-svm.ts:420-460`）を関数に出�
 
 - **Provider D の fixture** `tests/fixtures/mpp-solana-upstream.ts`（新。Node の http。**本物の `@solana/pay-kit` の server** `createPayKit({ network: "devnet", rpcUrl: <RPC fixture>, accept: ["mpp"], operator: { signer: fee payer の fixture 鍵, feePayer: true, recipient }, mpp: { challengeBindingSecret } })` + `pay.fetch(usd(...), handler)` を `Request`／`Response` に包む）。引数: `--external-id on|off`、`--fee-payer true|false`（`false` は候補外の試験）、`--pay ok|no-receipt|wrong-reference|500|slow:<ms>`（`slow` は RPC fixture の `getSignatureStatuses` の列で確定を遅らせる = 確定待ち 30 秒の再現）、`--after-headers`、`/calls`。受けた credential の `type`・tx の bytes・回数を `seen` に
 - **payer の fixture** `tests/fixtures/mpp-solana-payer.ts`（新。**本物の pay-kit の client** `createPayKitClient({ signer, rpcUrl: <RPC fixture>, network: "devnet", accept: ["mpp"] })`。`broadcast` の有無で `transaction`／`signature` 型。credential の wire を Router の封筒に入れる）と、Router の道具 `tools/svm-mpp-payer.ts` を使う payer（AC-19）
-- **Solana RPC の fixture** `tests/fixtures/solana-rpc.ts` に足す: `sendTransaction`（受けた tx を decode して署名を返す。`state.sendReply: "ok" | "rpc-error" | "already-processed" | "no-response"`）、`simulateTransaction`（pay-kit の server が呼ぶ。`ok`）、`getTransaction`（`state.transactions`: 署名 → `{ base64 の tx, meta: { err }, slot, blockTime }`。`encoding: "base64"` と **`jsonParsed`**（pay-kit の `verifyOnChain` `index.js:836-918` と allowlist `:1004-1049` が読む: **全命令の `programId`・`program`**（compute budget を含む）、`transferChecked` の `info{ destination, mint, tokenAmount.amount }`、memo の `parsed`。fixture は受けた tx を decode して組む）、`simulateTransaction` は **`{ value: { err: null, logs: [] } }` の形**（`:1124-1148`）、`getSignatureStatuses` は既存の列（`searchTransactionHistory` を記録）
+- **Solana RPC の fixture** `tests/fixtures/solana-rpc.ts` に足す: `sendTransaction`（受けた tx を decode して署名を返す。`state.sendReply: "ok" | "rpc-error" | "already-processed" | "no-response"`）、`simulateTransaction`（pay-kit の server が呼ぶ。`ok`）、`getTransaction`（`state.transactions`: 署名 → `{ base64 の tx, meta: { err }, slot, blockTime }`。`encoding: "base64"` と **`jsonParsed`**（pay-kit の `verifyOnChain` `index.js:836-918` と allowlist `:1004-1049` が読む: **全命令の `programId`・`program`**（compute budget を含む）、`transferChecked` の `info{ destination, mint, tokenAmount.amount }`、memo の `parsed`。fixture は受けた tx を decode して組む）、`simulateTransaction` は JSON-RPC の **`result` に `{ context: { slot }, value: { err: null, logs: [] } }`**（pay-kit は `data.result.value.err` を見る `:1124-1148`）、`getSignatureStatuses` は既存の列（`searchTransactionHistory` を記録）
 - **fee payer の fixture 鍵**: `tests/fixtures/svm-signer-fixture.ts` と同じ seed 生成。pay-kit の `operator.signer` は `@solana/kit` の signer
 - **mppx の二重化の確認**: `npm ls mppx` で Router の 0.11.0 と pay-kit 配下の 0.13.x が別に解決されること（SR-M6）。fixture は `@solana/pay-kit` だけを import し、`mppx` は Router のものを使う
 
@@ -372,3 +374,4 @@ x402 SVM 受信の `followSignature`（`x402-svm.ts:420-460`）を関数に出�
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `23a1481`） | **REJECT**（10 項目: server hook は `validate` + `broadcast`、`validateCredential` の明示の呼び出し、構造の検査は verify に（compute budget は各高々 1 つ）、追跡の予算と `blockTime` の窓、store の bind と受信の `startup`、SDK の `prepared.challenge` の照合と hook の出力の再検査、`assertDynamicMppCapability` と purchase の cap の検査、受取 owner の述語、試験の追加と fixture の `jsonParsed`、`z` と `mppx` の解決）。第 2 版で反映 |
+| 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `c5eb989`） | **REJECT**（残り 1: `source_settled` の追記の失敗は FR-48 の `unknown` 応答と一致しない → core の try/catch を設計に。新しい不整合 3: `signature` 型の署名者の取得順、§3.6 の preflight の既払、helper の回数の上限、simulate の `result`）。第 3 版で反映 |
