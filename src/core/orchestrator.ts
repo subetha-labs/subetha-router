@@ -713,7 +713,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     /**
      * 予約の追記（journal への待ち）の後、settle を呼ぶ**直前**にもう一度期限を見る。予約の追記が長く止まった purchase を期限の後に
      * settle へ進めない（受信 adapter は verify の証拠を offer の期限 + 猶予まで保持する: `docs/mpp-solana-design.md` §3.5。settle が期限の前にしか
-     * 呼ばれないことが、その保持の根拠）。予約は戻さない（通算で回復しない。期限切れで終わる試行にも枠を使わせない規則と同じ側に倒す）。
+     * 呼ばれないことが、その保持の根拠）。予約は戻さない（通算で回復しない: ここで止まる試行は予約を使い切ったまま終わる。保守的な側）。
      */
     const settleAtMs = now();
     if (settleAtMs >= intent.approvalDeadlineMs || settleAtMs >= intent.source.offer.extra.expiresAt * 1000) {

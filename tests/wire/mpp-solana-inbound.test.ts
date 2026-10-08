@@ -832,7 +832,8 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     await c.rails.startup!();
     let clock = Date.now();
     let advance = false;
-    // verify の中で時計を「期限の 1 ms 前」に置き、以後は読むたびに 1 ms 進める: settle 前の 1 回目の再検査は通り、追記の後の 2 回目で期限を過ぎる。
+    // verify の中で時計を「期限の 2 ms 前」に置く。予約（静的）／source_pending（動的）の行が journal に現れた後の読みは期限ちょうど:
+    // settle 前の 1 回目の再検査は通り、追記の後の 2 回目で止まる。
     // 期限 = min(承認の期限, offer の期限)（core の `approvalDeadlineMs`）。quote の応答から取る。
     let deadlineMs = 0;
     /** 時計が期限を過ぎる合図: journal にこの行（event:paymentId）が現れたら（= 予約／昇格の追記の後）。それまでは期限の 2 ms 前。 */
