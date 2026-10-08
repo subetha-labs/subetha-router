@@ -1,0 +1,23 @@
+# Arc・Solana の Provider（x402 v2 `exact` の資源サーバ。`docs/provider-x402-workers.md`）。
+# 1 つのソースを環境で切り替える: `wrangler deploy --env arc` / `--env sol`。secret は `wrangler secret put SELLER_PROOF_KEY --env arc`（Arc だけ）。
+# `PAY_TO` は配備前に埋める（Arc: scripts/keygen.mjs が出す address、Solana: scripts/keygen-solana.mjs が出す公開鍵）。
+name = "provider-x402"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[env.arc]
+name = "provider-x402-arc"
+routes = [{ pattern = "provider-x402-arc.subethalabs.com", custom_domain = true }]
+[env.arc.vars]
+PROVIDER_NETWORK = "arc"
+PAY_TO = ""
+FACILITATOR_URL = "https://api.circle.com/v1/facilitator/x402"
+
+[env.sol]
+name = "provider-x402-sol"
+routes = [{ pattern = "provider-x402-sol.subethalabs.com", custom_domain = true }]
+[env.sol.vars]
+PROVIDER_NETWORK = "solana"
+PAY_TO = ""
+FACILITATOR_URL = "https://www.x402.org/facilitator"

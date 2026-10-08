@@ -1,0 +1,31 @@
+{
+  "name": "subetha-provider-x402-workers",
+  "private": true,
+  "version": "0.1.0",
+  "description": "x402 v2 exact resource server for Arc testnet USDC (Circle facilitator) and Solana devnet USDC (x402.org facilitator), one Worker source, two wrangler environments",
+  "type": "module",
+  "scripts": {
+    "types": "tsc --noEmit",
+    "test": "vitest run",
+    "dev:arc": "wrangler dev --env arc",
+    "dev:sol": "wrangler dev --env sol",
+    "deploy:arc": "wrangler deploy --env arc",
+    "deploy:sol": "wrangler deploy --env sol",
+    "keygen:arc": "node scripts/keygen.mjs",
+    "keygen:solana": "node scripts/keygen-solana.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.1",
+    "@solana/kit": "8.4.0",
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
+    "@x402/svm": "2.28.0",
+    "viem": "2.54.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251001.0",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1",
+    "wrangler": "^4.40.0"
+  }
+}
