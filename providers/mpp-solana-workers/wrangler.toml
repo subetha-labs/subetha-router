@@ -1,0 +1,12 @@
+# Provider D: MPP `solana/charge`（pull）の資源サーバ（`docs/provider-mpp-solana-workers.md`）。pay-kit の server を 1 つの Worker で包む。
+# secret は `scripts/keygen-fee-payer.mjs`（FEE_PAYER_KEY）・`scripts/secret-new.mjs`（MPP_SECRET）が wrangler の stdin に直接入れる。
+# `PAY_TO`（受取 owner の公開鍵。鍵は owner の file にだけ）と `FEE_PAYER_PUBKEY`（fee payer の公開鍵。secret の seed から導いた値と起動ごとに照合）は配備前に owner が埋める。
+name = "provider-mpp-sol"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+routes = [{ pattern = "provider-mpp-sol.subethalabs.com", custom_domain = true }]
+
+[vars]
+PAY_TO = ""
+FEE_PAYER_PUBKEY = ""
