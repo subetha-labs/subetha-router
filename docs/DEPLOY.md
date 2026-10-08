@@ -322,7 +322,7 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。**journal では追跡で確定した settle と facilitator が直接成功を返した settle を
 区別できない**（どちらも `source_settled`）ので、hosted の Router で追跡が働いた回数は分からない。数えられるのは、受け入れ用の起動のように stderr が読める起動だけ）。
 
-### 2d. Solana の MPP（Solana devnet USDC を **MPP** で受ける・払う）— **コードは入っているが本番では無効**（M6、2026-10-08。有効化は G-4″）
+### 2d. Solana の MPP（Solana devnet USDC を **MPP** で受ける・払う）— **本番で両方向が有効（2026-10-08 15:42Z の G-4″ から。`b-3606fb6` で AC-18 を満たした。下の記録）**
 
 呼び出し側が **Solana devnet の USDC を MPP（`solana/charge`、pull）** で払って既存の Provider A（x402）・B（MPP）に届く**受信**と、Router が **Provider D**
 （運用者の pay-kit の server、`solana/charge`、pull、**`feePayer: true`** = Provider の fee payer が共同署名して送出する）に Solana devnet の USDC を MPP で払う**送信**（要件 `mpp-solana-requirements.md`、設計 `mpp-solana-design.md`、
