@@ -272,7 +272,8 @@ Solana の送信鍵も 2 つの受取先も子には渡っていない**（`/pro
 **G-3′ の記録（2026-10-08 04:35–04:42Z。両レール。owner の決定「進めて良いです」、MPP の 3 件も明示の承認）**: 公開の Router を止め（04:35:01Z。直前の journal に進行中の購入なし）、
 同じイメージ `b-f0c9f0e`・同じ env から受け入れ用を `--rails arc-in,arc-out,solana-in,solana-out` で単独起動した。**4 レールの起動時の検査（x402.org の `/supported`、受信・送信の両方の devnet の ATA、Tempo の probe）は本番 env で通った**。
 egress check 合格。一覧は route 6・プロファイル 10。手元からは ssh トンネルで MCP に接続し、quote → credential → purchase → status を 1 件ずつ（driver は私的な script。payer は使い捨て: Base USDC `0xEd5F…`、Tempo pathUSD `0xfCea…`）。
-結果（6 本すべて **delivered**。Provider は owner が配備した Worker）:
+結果（6 本すべて **delivered**。Provider は owner が配備した Worker。**証拠の出所**: 結果・額・txRef・所要・`PAYMENT-RESPONSE` の中身・本文の鍵は purchase と status の応答の記録（`.claude_workflow/local/g3p-*.json`）、
+block・slot・finalized・転送の内容・残高は私が explorer / RPC を読取で見た値、起動時の検査・egress・停止時間はホスト側のログ。受信は Base Sepolia（`eip155:84532`）と Tempo Moderato（`eip155:42431`）。）:
 
 | # | 経路 | payer | 受信の tx | Router → Provider の tx | purchase の所要 |
 |---|---|---|---|---|---|
@@ -283,10 +284,11 @@ egress check 合格。一覧は route 6・プロファイル 10。手元から�
 | 5 | `dyn-x402-to-sol` + Solana Worker の URL（O-3 動的） | Base USDC 11,000 | Base `0x993e35d5…` | Solana `42zkNQgS…`（finalized、slot 508699324） | 3.2 s |
 | 6 | `dyn-mpp-to-sol` + Solana Worker の URL（O-4 動的） | pathUSD 11,000（MPP） | Tempo `0x1062f29b…`（block 38661141） | Solana `2pi7iKfw…`（finalized、slot 508699347） | 2.6 s |
 
-- 本文は 6 件とも記録済みの Provider A の契約の鍵（`providerId`・`market`・`dataSource`・`payment`・`fetchedAt`・`data`）で、`payment.network` は Arc / Solana の値。`proof` は `upstreamReceipt: claimed`、`onChainFinality: not_checked`。
-- **V-13**（Provider の有料応答）: 6 件とも HTTP 200 で `PAYMENT-RESPONSE` は `{ success: true, transaction, network, payer }`（`payer` は Router の送信鍵: Arc `0x5d78…`、Solana `CLtW…`）。Router の purchase 全体の所要は 2.6〜5.4 秒（Provider の settle を含む）。`settlement_pending` は出ていない。
+- 本文は 6 件とも記録済みの Provider A の契約の鍵（`providerId`・`market`・`dataSource`・`payment`・`fetchedAt`・`data`）で、`payment.network` は Arc / Solana の値。動的の 4 件の `proof` は `upstreamReceipt: claimed`、`onChainFinality: not_checked`（静的の応答には `proof` の欄が無い）。
+- **V-13**（Provider の有料応答）: 6 件とも Provider の応答は成功（Router が `paid` にした = 200 と領収。Router は生の HTTP 状態を記録しない）で、`PAYMENT-RESPONSE` は `{ success: true, transaction, network, payer }`（`payer` は Router の送信鍵: Arc `0x5d78…`、Solana `CLtW…`）。
+  Router の purchase 全体（受信の settle から配達まで。Provider の verify・settle を含む端から端の値で、Worker の settle 単体の計測ではない）の所要は 2.6〜5.4 秒。pending の結果は観測していない。
 - 残高の増分: Arc の受取 `0x719e…` 0 → 0.03 USDC（3 件 × 0.01）、Solana の受取 ATA `Hnus…` 0 → 0.03 USDC、Router の Solana 送信 ATA 20 → 19.97。
-- **1 回目の失敗 2 件（どちらも製品の不具合ではない）**: (a) #1 の最初の試みは x402.org の `/settle` が拒み `source_rejected`（資金は動かず、chain にも転送なし。同じ payer・同じ offer で `/verify` は `isValid: true`。再試行で delivered。一過性と見る）。
+- **1 回目の失敗 2 件**: (a) #1 の最初の試みは `source_rejected`（受信の settle の段。journal は `source_pending` → `budget_reserved` → `source_failed`。payer の Base Sepolia に転送は無く、同じ payer・同じ offer で x402.org の `/verify` を私が直接呼ぶと `isValid: true`）。原因は特定できていない（Router は facilitator の応答本文を記録しない）。新しい quote での再試行は delivered。
   (b) #3 の最初の試みは **私の driver が MPP の credential を Router の封筒（`sign-run.ts` の形）に入れずに送った**ため Router が `invalid_payment_header`（400）で拒んだ。MPP は署名の時点で送金するので、
   payer の 0.011 pathUSD は Router の受取先 `0x9b10…` に移り（Tempo `0xd94e667c…`、block 38660842）、購入は成立していない（運用者の受取先に入ったので運用者の損失ではない。quote の `ownerKey` を driver が保存していなかったので同じ quote への出し直しはできなかった）。driver を直して新しい quote で成功。
 - 終了: 04:42:01Z 受け入れを stop（exit 1 = SIGTERM、残プロセス無し）→ 公開を start → `/healthz` 200 → egress check 合格 → caddy start → 公開 `/healthz` 200 → 受け入れコンテナを rm。**公開の停止は約 7 分**。ホスト側ログは `~/g3p-acceptance-host.log`、受け入れの journal は `/var/lib/subetha-router/acceptance/journal.ndjson`。
