@@ -263,7 +263,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
     const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
     const router = routerOf(document);
     expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC, ROUTE_SOL, ROUTE_ARC_OUT, ROUTE_SOL_OUT, ROUTE_SOLMPP_TO_X402, ROUTE_SOLMPP_TO_MPP, ROUTE_SOLMPP_OUT, ROUTE_SOLMPP_OUT_MPP].sort());
-    expect(Object.keys(router.dynamic!.profiles)).toHaveLength(18);
+    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-solmpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402", "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp"]);
     expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol"|dyn-sol-to-arc/);
     // URL（定数）があるのに受取先が無ければ起動しない（固定文）。Provider D の受取 owner が欠けても同じ。
     expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } })).toThrow();

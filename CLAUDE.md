@@ -20,7 +20,7 @@ Each phase: minimal artifact, independent review, parent readback. No repeated w
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.
 **The Router never holds your key**, so the signature is produced here.
 
-The Router exposes **six routes** (the two outbound ones only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
+The Router exposes **ten routes** (each rail only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
 
 | routeId | you pay with | reaches |
 |---|---|---|
@@ -50,8 +50,9 @@ Steps:
 2. Call `subetha_router_quote`. **Use a fresh `requestId` for each purchase**
    (e.g. purpose + timestamp). **Within one purchase, use the same value for quote and purchase**
 3. **Ask the human to approve.** Show the returned `subject`: amount, `decimals`,
-   recipient, deadline. **If paying over MPP, also say that running the next step sends
-   the funds immediately and cannot be undone** (see below)
+   recipient, deadline. **If paying over MPP on Tempo, also say that running the next step sends
+   the funds immediately and cannot be undone.** If paying over MPP on Solana, say that the next step
+   only signs and that the Router broadcasts at purchase, where the funds move (see below)
 4. Once approved, pass the `quote` field through unchanged:
 
    ```sh
