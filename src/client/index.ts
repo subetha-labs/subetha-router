@@ -207,6 +207,8 @@ function retryAfterMsOf(header: string | null): { retryAfterMs?: number } {
   if (!IMF_FIXDATE.test(text)) return {};
   const at = Date.parse(text);
   if (!Number.isFinite(at)) return {};
+  // `Date.parse` は存在しない暦日（31 Feb）を繰り上げて読むので、戻した文字列が元と一致するものだけ受ける（曜日の誤りも拒む）。
+  if (new Date(at).toUTCString() !== text) return {};
   return { retryAfterMs: Math.min(Math.max(0, at - Date.now()), RETRY_AFTER_MAX_MS) };
 }
 
