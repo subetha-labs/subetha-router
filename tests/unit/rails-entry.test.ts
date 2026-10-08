@@ -91,7 +91,7 @@ function capabilitiesOf(activation: RailsActivation, env: Record<string, string>
 describe("有効化の値（ホスト → process の内部 env）", () => {
   test("往復: 定数（どちらも無効）は空文字、arc・solana・両方はその語。知らない語・重複・空の語は起動しない", () => {
     expect(activationToEnv(NONE)).toBe("");
-    expect(activationToEnv(RAILS_ACTIVATION)).toBe("arc-in,solana-in");
+    expect(activationToEnv(RAILS_ACTIVATION)).toBe("arc-in,arc-out,solana-in,solana-out");
     expect(activationFromEnv("")).toEqual(NONE);
     expect(activationFromEnv(undefined)).toEqual(NONE);
     for (const activation of [{ arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, { arc: { inbound: false, outbound: false }, solana: { inbound: true, outbound: false } }, BOTH]) {
@@ -321,20 +321,21 @@ describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入
     expect(acceptanceRest).toEqual(publicRest);
   });
 
-  test("公開の入口（定数 RAILS_ACTIVATION = 両方 true、G-4）: 設定に Arc・Solana の route とプロファイルが出て、子の env に有効化 \"arc,solana\" と Arc の鍵が渡る。受取の env はどちらが欠けても計画は作れない。親の env の有効化の指定は無視される", () => {
+  test("公開の入口（定数 RAILS_ACTIVATION = 受信・送信とも両方 true、G-4′）: 設定に Arc・Solana の受信と送信の route とプロファイルが出て、子の env に有効化の 4 語と Arc の鍵が渡る。受取の env はどちらが欠けても計画は作れない。親の env の有効化の指定は無視される", () => {
     expect(RAILS_NONE).toEqual(NONE);
     const key = generatePrivateKey();
     const options: HostOptions = { activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) };
-    const fullEnv = { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key, [SOLANA_RECEIVER_ENV]: SOL_OWNER };
+    // 送信が有効なので、Provider の受取先と Solana の送信鍵も要る（G-1′〜G-2′ でホストの env に置いた値の形）。
+    const fullEnv = { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key, [SOLANA_RECEIVER_ENV]: SOL_OWNER, [ARC_PROVIDER_ENV]: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", [SOLANA_PROVIDER_ENV]: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", [SOLANA_OUTBOUND_KEY_ENV]: getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32))) };
     const plan = hostPlanOf(options, fullEnv);
     const config = loadAsProduction(plan.config);
-    expect(Object.keys(config.router.routes).sort()).toEqual(["md-mpp-eth-snapshot", "md-mpp-eth-snapshot-arc", "md-x402-eth-snapshot", "md-x402-eth-snapshot-sol"]);
-    expect(Object.keys(config.router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-x402", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-x402", "dyn-x402-to-mpp"]);
+    expect(Object.keys(config.router.routes).sort()).toEqual(["md-arc-eth-snapshot", "md-mpp-eth-snapshot", "md-mpp-eth-snapshot-arc", "md-sol-eth-snapshot-mpp", "md-x402-eth-snapshot", "md-x402-eth-snapshot-sol"]);
+    expect(Object.keys(config.router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol"]);
     expect(config.router.routes[ROUTE_ARC]?.source.payTo).toBe(privateKeyToAccount(key).address);
     expect(config.router.routes[ROUTE_SOL]?.source.payTo).toBe(SOL_OWNER);
     expect(config.router.dynamic!.profiles["dyn-arc-to-x402"]?.source.payTo).toBe(privateKeyToAccount(key).address);
     expect(config.router.dynamic!.profiles["dyn-sol-to-mpp"]?.source.payTo).toBe(SOL_OWNER);
-    expect(plan.childEnv).toMatchObject({ [RAILS_ACTIVATION_ENV]: "arc-in,solana-in", [ARC_RECEIVER_KEY_ENV]: key });
+    expect(plan.childEnv).toMatchObject({ [RAILS_ACTIVATION_ENV]: "arc-in,arc-out,solana-in,solana-out", [ARC_RECEIVER_KEY_ENV]: key });
     // 受取の env はどちらが欠けても止まる（片方ずつ）。
     const { [SOLANA_RECEIVER_ENV]: _s, ...noSolana } = fullEnv;
     const { [ARC_RECEIVER_KEY_ENV]: _a, ...noArc } = fullEnv;
@@ -346,7 +347,7 @@ describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入
     }
     // 親の env に有効化の指定があっても、定数が決める（無効化も変更もできない）。
     const conflicting = hostPlanOf(options, { ...fullEnv, [RAILS_ACTIVATION_ENV]: "", ARC_PROFILES_ENABLED: "false" });
-    expect(conflicting.childEnv[RAILS_ACTIVATION_ENV]).toBe("arc-in,solana-in");
+    expect(conflicting.childEnv[RAILS_ACTIVATION_ENV]).toBe("arc-in,arc-out,solana-in,solana-out");
     expect(conflicting.config).toEqual(plan.config);
   });
 
@@ -426,8 +427,8 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）の選択�
     expect(options).toMatchObject({ activation: BOTH, bind: "127.0.0.1", port: 0 });
     expect(options.journalPath).toBe(path.resolve("runtime", "acceptance", "journal.ndjson"));
     expect(options.journalPath).not.toBe(path.resolve(publicJournalPathOf({})));
-    // 公開の定数は G-4 で両方 true（受け入れ用の起動はそれを読まず、--rails で決める。既定の無効は RAILS_NONE）。
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: false }, solana: { inbound: true, outbound: false } });
+    // 公開の定数は受信（G-4）も送信（G-4′）も両方 true（受け入れ用の起動はそれを読まず、--rails で決める。既定の無効は RAILS_NONE）。
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
   });
 

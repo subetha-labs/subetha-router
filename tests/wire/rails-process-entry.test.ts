@@ -233,7 +233,7 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     // 別の journal: 受け入れ用のディレクトリが作られ、公開の journal には触れていない。
     expect(readdirSync(path.join(dir, "acceptance"))).toBeDefined();
     // 受け入れ用の起動は公開の定数を書き換えない（ソースの上の値は G-4 の両方 true のまま）。
-    // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信は両方 false（G-4′ まで）。
-    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{ arc: Object\.freeze\(\{ inbound: true, outbound: false \}\), solana: Object\.freeze\(\{ inbound: true, outbound: false \}\) \}\)/);
+    // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信も両方 true（G-4′、2026-10-08）。
+    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{ arc: Object\.freeze\(\{ inbound: true, outbound: true \}\), solana: Object\.freeze\(\{ inbound: true, outbound: true \}\) \}\)/);
   }, 40_000);
 });
