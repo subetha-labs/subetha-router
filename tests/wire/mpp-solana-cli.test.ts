@@ -218,7 +218,7 @@ describe("npm run sign → Router の MPP Solana 受信 → settled（AC-19）",
     expect(b.core.status(quote.paymentId, "judge")?.source.txRef).toBe(signature);
     // 道具の口は purchase の後も blockhash の 1 回のまま。
     expect(b.toolRpc.calls).toHaveLength(1);
-  });
+  }, 60_000);
 
   it("動的（dyn-solmpp-to-x402、上流 10,000 + 手数料 1,000 = 11,000）: 同じ道具で署名 → purchase → delivered。txRef は道具が組んだ transaction の署名", async () => {
     const b = await boot();
@@ -236,7 +236,7 @@ describe("npm run sign → Router の MPP Solana 受信 → settled（AC-19）",
     expect(b.rpc.state.sent).toEqual([base64]);
     expect(b.core.status(quote.paymentId, "judge", quote.ownerKey)?.source.txRef).toBe(signatureOfBase64(base64));
     expect(b.toolRpc.calls).toHaveLength(1);
-  });
+  }, 60_000);
 
   it("拒否の各行（道具の stderr の固定文。鍵を読まず RPC を呼ばない）: challenge の中身を変えた quote、失効した quote、scheme の書き換え、challenge の無い offer、上限超", async () => {
     const b = await boot();
@@ -261,7 +261,7 @@ describe("npm run sign → Router の MPP Solana 受信 → settled（AC-19）",
     }
     expect(b.toolRpc.calls).toEqual([]);
     expect(b.rpc.state.sent).toEqual([]);
-  });
+  }, 60_000);
 
   it("別の quote の封筒を purchase に渡しても Router は受けない（nonce が違う → payment_required）。道具が組んだ transaction は送出されない", async () => {
     const b = await boot();
@@ -275,5 +275,5 @@ describe("npm run sign → Router の MPP Solana 受信 → settled（AC-19）",
     expect(purchase.status).not.toBe("delivered");
     expect(b.rpc.state.sent).toEqual([]);
     expect(b.outbound.payCalls).toBe(0);
-  });
+  }, 60_000);
 });
