@@ -59,7 +59,7 @@ function providerServer() {
   return Mppx.create({ secretKey: SECRET, realm: "provider-test", methods: [Method.toServer(charge, hooks as never), Method.toServer(other, hooks as never)] });
 }
 
-type Patch = { request?: Record<string, unknown>; details?: Record<string, unknown>; dropDetails?: string[]; dropRequest?: string[]; expiresInMs?: number | null; scope?: string; intent?: string };
+type Patch = { request?: Record<string, unknown>; details?: Record<string, unknown>; dropDetails?: string[]; dropRequest?: string[]; expiresInMs?: number | null; scope?: string | null; intent?: string };
 
 /** 基準の challenge（pull: `feePayer: true` + `feePayerKey`）に patch を当てて発行し、wire を通した challenge を返す。 */
 async function issue(patch: Patch = {}): Promise<Record<string, unknown>> {
@@ -69,7 +69,7 @@ async function issue(patch: Patch = {}): Promise<Record<string, unknown>> {
   for (const key of patch.dropRequest ?? []) delete request[key];
   const expires = patch.expiresInMs === null ? {} : { expires: new Date(Date.now() + (patch.expiresInMs ?? 60_000)).toISOString() };
   const intents = (server.challenge as unknown as Record<string, Record<string, (args: unknown) => Promise<unknown>>>)["solana"]!;
-  const challenge = await intents[patch.intent ?? "charge"]!({ ...request, ...expires, scope: patch.scope ?? SCOPE });
+  const challenge = await intents[patch.intent ?? "charge"]!({ ...request, ...expires, ...(patch.scope === null ? {} : { scope: patch.scope ?? SCOPE }) });
   return Challenge.deserialize(Challenge.serialize(challenge as never)) as unknown as Record<string, unknown>;
 }
 
@@ -104,8 +104,12 @@ describe("MPP Solana 送信: challenge の view と候補の検査（§4.2 の 9
     expect(await rejectionOf({ expiresInMs: null })).toBeUndefined();
   });
 
-  test("1: method・intent・scope", async () => {
+  test("1: method・intent・scope（scope は無ければ通す = pay-kit の server の形。あれば一致）", async () => {
     expect(await rejectionOf({ intent: "other" })).toBe("method");
+    const noScope = mppSolanaViewOf(await issue({ scope: null }))!;
+    expect(noScope.scope).toBeUndefined();
+    expect(checkMppSolanaChallenge(noScope, SCOPE, policy, [operator], Date.now())).toBeUndefined();
+    expect(mppSolanaOfferOf(noScope, policy).extra).not.toHaveProperty("scope");
     expect(await rejectionOf({ scope: "GET https://provider.test/v1/other" })).toBe("scope");
     expect(await rejectionOf({ scope: `POST ${URL_A}` })).toBe("scope");
     const view = mppSolanaViewOf(await issue())!;
@@ -209,7 +213,8 @@ describe("MPP Solana 送信: challenge の view と候補の検査（§4.2 の 9
     expect(mppSolanaViewOf({ ...challenge, id: "" })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, realm: 1 })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, request: "x" })).toBeUndefined();
-    expect(mppSolanaViewOf({ ...challenge, opaque: "" })).toBeUndefined();
+    // opaque が無い・空（scope 無し）は読める（pay-kit の形）。
+    expect(mppSolanaViewOf({ ...challenge, opaque: "" })?.scope).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, request: { ...(challenge["request"] as object), amount: 1 } })).toBeUndefined();
   });
 });
@@ -231,7 +236,10 @@ describe("MPP Solana 送信: terms・offer・client 側の method", () => {
     expect(mppSolanaOfferOf(mppSolanaViewOf(await issue())!, policy).extra).not.toHaveProperty("externalId");
     expect(mppSolanaViewOf(await issue({ request: { amount: "10001" } }))!.terms).not.toBe(a.terms);
     expect(mppSolanaViewOf(await issue({ request: { externalId: "order-8" } }))!.terms).not.toBe(a.terms);
-    expect(mppSolanaViewOf(await issue({ scope: "GET https://provider.test/v1/other" }))!.terms).not.toBe(a.terms);
+    // scope は terms に入る（meta 経由）: 同じ request で scope だけ違う・無い challenge の terms は違う。
+    const sameRequest = mppSolanaViewOf(await issue({ request: { externalId: "order-7" }, scope: "GET https://provider.test/v1/other" }))!;
+    expect(sameRequest.terms).not.toBe(a.terms);
+    expect(mppSolanaViewOf(await issue({ request: { externalId: "order-7" }, scope: null }))!.terms).not.toBe(a.terms);
   });
 
   test("client 側の method: 0.11.0 の client の preparePayment が選んだ challenge は wire と同じ（未知の鍵も残る = 検査が見える）。hook は選んだ challenge を受け取り、返した文字列がそのまま credential", async () => {

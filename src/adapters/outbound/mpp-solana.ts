@@ -8,6 +8,11 @@
  * （未知の鍵も `prepared.challenge.request` にそのまま残る。`client/Mppx.js:71-130`）。よって view は SDK が選んだ challenge から
  * 取ってよく、§4.2 の 2 行目（未知の鍵は候補外）は view の生の `request` を見て判定できる。schema は受信と同じ `mppSolanaChargeMethod`
  * （`externalId` 必須の形）だが、client 側では parse されないので `externalId` の無い Provider の challenge も読める。
+ *
+ * 事実（同日、pay-kit 0.13.1 の server を実測。`tests/unit/mpp-solana-fixtures.test.ts` の U-10 の送信の向き）: pay-kit の server の challenge には
+ * `opaque`（server metadata）が**無い** = mppx の route scope `_mppx_scope` を持たない（pay-kit は mppx に scope を渡さない）。よって §4.2 の 1 行目の
+ * scope は **あれば一致を要求し、無ければ通す**（Tempo の `viewOf` は scope 必須。ここが違う）。URL への束縛は、Router が guarded transport で
+ * 取りに行った URL の 402 だけを読む（`terms` には meta を入れるので、scope のある Provider では承認値に含まれる）ことによる。
  */
 import { ASSOCIATED_TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS } from "@solana-program/compute-budget";
@@ -38,8 +43,8 @@ export interface MppSolanaChallengeView {
   readonly realm: string;
   readonly method: string;
   readonly intent: string;
-  /** server metadata の `_mppx_scope`（`"GET <canonical url>"`）。 */
-  readonly scope: string;
+  /** server metadata の `_mppx_scope`（`"GET <canonical url>"`）。pay-kit の server は持たない → `undefined`。 */
+  readonly scope: string | undefined;
   /** 生の `request`（鍵の検査に使う。値の検査は `checkMppSolanaChallenge`）。 */
   readonly request: Readonly<Record<string, unknown>>;
   readonly amount: string;
@@ -56,9 +61,10 @@ export function mppSolanaViewOf(challenge: unknown): MppSolanaChallengeView | un
   const { id, realm, method, intent, request, expires } = challenge;
   if (typeof id !== "string" || id === "" || typeof realm !== "string" || typeof method !== "string" || typeof intent !== "string" || !isRecord(request)) return undefined;
   const meta = challengeMetaOf(challenge);
-  const scope = meta?.[SCOPE_META_KEY];
+  const rawScope = meta?.[SCOPE_META_KEY];
+  const scope = typeof rawScope === "string" ? rawScope : undefined;
   const { amount, currency, recipient } = request;
-  if (typeof scope !== "string" || typeof amount !== "string" || typeof currency !== "string" || typeof recipient !== "string") return undefined;
+  if (typeof amount !== "string" || typeof currency !== "string" || typeof recipient !== "string") return undefined;
   let expiresAt: number | undefined;
   if (expires !== undefined) {
     // `expires` があるのに読めない → 期限不明として `expired` に倒す（検査の 9 行目）。NaN で表す。
@@ -112,7 +118,7 @@ export function checkMppSolanaChallenge(view: MppSolanaChallengeView, expectedSc
   const operators = operatorAddresses instanceof Set ? operatorAddresses : new Set(operatorAddresses);
   // 1
   if (view.method !== MPP_SOLANA_METHOD || view.intent !== MPP_SOLANA_INTENT) return "method";
-  if (view.scope !== expectedScope) return "scope";
+  if (view.scope !== undefined && view.scope !== expectedScope) return "scope";
   // 2
   for (const key of Object.keys(view.request)) if (!REQUEST_KEYS.has(key)) return "unknown_field";
   const details = view.request["methodDetails"];
@@ -168,7 +174,7 @@ export function mppSolanaOfferOf(view: MppSolanaChallengeView, policy: Pick<MppS
     payTo: view.recipient,
     extra: {
       realm: view.realm,
-      scope: view.scope,
+      ...(view.scope === undefined ? {} : { scope: view.scope }),
       terms: view.terms,
       feePayerKey: typeof feePayerKey === "string" ? feePayerKey : "",
       decimals: policy.decimals,

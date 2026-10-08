@@ -30,6 +30,7 @@ import {
   MPP_SOLANA_SCHEME,
   type MppSolanaPolicy,
 } from "../../src/adapters/inbound/mpp-solana.js";
+import { checkMppSolanaChallenge, checkMppSolanaChallengeAtas, mppSolanaOfferOf, mppSolanaViewOf } from "../../src/adapters/outbound/mpp-solana.js";
 import type { InboundOffer } from "../../src/ports/inbound.js";
 import { createMppSolanaTestPayer, transactionOfWire, type MppSolanaTestPayer } from "../fixtures/mpp-solana-payer.js";
 import { startSolanaRpc, type SolanaRpcFixture } from "../fixtures/solana-rpc.js";
@@ -264,6 +265,19 @@ describe("RPC の fixture は pay-kit の server の verify を満たす（M4-b 
       expect(first.status).toBe(402);
       const prepared = await client.preparePayment(first, { request: init });
       expect(prepared.challenge).toMatchObject({ method: "solana", intent: "charge" });
+      // M4-a の候補の検査（設計 §4.2）は、本物の pay-kit の server の challenge（feePayer: true）をそのまま通す（Router = payer の鍵・ATA が policy）。
+      const view = mppSolanaViewOf(prepared.challenge);
+      expect(view).toBeDefined();
+      const outboundPolicy = { network: SOL, mint: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM, routerAddress: String(payerKey.address), routerAta: payerAta };
+      expect(checkMppSolanaChallenge(view!, `GET ${d.base}/paid`, outboundPolicy, [], Date.now())).toBeUndefined();
+      expect(checkMppSolanaChallengeAtas(view!, outboundPolicy, await ataOf(owner))).toBeUndefined();
+      expect(mppSolanaOfferOf(view!, outboundPolicy)).toMatchObject({ scheme: "solana/charge", network: SOL, asset: MINT, payTo: owner });
+      // 事実: pay-kit の server の challenge は opaque（server metadata）を持たず、mppx の route scope が無い → view の scope は undefined で、検査は scope を要求しない。
+      expect(prepared.challenge).not.toHaveProperty("opaque");
+      expect(view!.scope).toBeUndefined();
+      expect(checkMppSolanaChallenge(view!, `GET ${d.base}/other`, outboundPolicy, [], Date.now())).toBeUndefined();
+      // 受取人が運用者なら候補外（Router が自分に払う形）。
+      expect(checkMppSolanaChallenge(view!, `GET ${d.base}/paid`, outboundPolicy, [owner], Date.now())).toBe("pay_to");
       const credential = await prepared.createCredential();
       expect(seen).toBeDefined();
       const sentBefore = rpc.state.sent.length;
