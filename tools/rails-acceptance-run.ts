@@ -3,7 +3,8 @@
  *
  * 公開の入口（`tools/remote-mcp.ts`）と**同じ設定生成・同じ Router の process・同じ入口の関数**（`startHost`）を、
  * 多レールの有効化を `true` にして起動する。違いはそれだけ:
- * - 有効化: `--rails arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out` の部分集合（既定は x402 の受信の両方 `arc-in,solana-in`）。公開の入口の定数 `RAILS_ACTIVATION` には触らない
+ * - 有効化: `--rails arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc` の部分集合（既定は x402 の受信の両方 `arc-in,solana-in`。
+ *   `arc-to-sol`・`sol-to-arc` は Arc x402 ↔ Solana x402 の動的プロファイルの組で、必要なレールの方向と一緒に指定する。送信の設計 §13）。公開の入口の定数 `RAILS_ACTIVATION` には触らない
  *   （凍結されている。G-4 の後は公開も受信は両方 true、送信は両方 false）
  * - bind: `127.0.0.1`（公開しない。必要なら ssh のトンネルで）、port は `SUBETHA_ACCEPTANCE_PORT`（既定 0 = 使い捨て）
  * - journal: `SUBETHA_ACCEPTANCE_JOURNAL_PATH`（既定 `runtime/acceptance/journal.ndjson`）。公開の journal と同じパスは拒む
@@ -93,7 +94,7 @@ export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefi
   // 既定は x402 の受信の両方（公開の定数と同じ形）。送信・Solana の MPP の受け入れは `--rails arc-in,arc-out,solana-in,solana-mpp-in` のように語を足す（送信の設計 §6.1、`docs/mpp-solana-design.md` §6.1）。
   const activation: RailsActivation = activationFromEnv(argOf(argv, "rails") ?? "arc-in,solana-in");
   if (!railActive(activation)) {
-    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out, solana-mpp-in, solana-mpp-out");
+    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out, solana-mpp-in, solana-mpp-out (arc-to-sol / sol-to-arc only add the pair profiles)");
   }
   const journalPath = path.resolve(env[ACCEPTANCE_JOURNAL_ENV] ?? path.join(path.resolve("runtime"), "acceptance", "journal.ndjson"));
   if (sameJournal(journalPath, publicJournalPathOf(env))) {

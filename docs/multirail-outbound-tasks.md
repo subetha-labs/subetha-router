@@ -183,6 +183,20 @@ U2 の後は U3 と U6-a が並行できる（writer は 1 つなので、実際
 | G-3′ | 受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out`。公開の Router は止める）で O-4 静的・O-3 動的・O-4 動的を各 1 件。記録は設計 §7.3（署名の finalized、Provider の ATA の増分、Provider の応答、client の結果、再読取、V-13）。U-8（取得〜署名の実測） | owner の確認（公開の停止） |
 | G-4′ | `solana.outbound: true` の PR と入れ替え。AC-11: 一覧に 3 本が出て、各組 1 回の quote の `subject`・`disclosures` が設定どおり。DEPLOY §2c に記録 | owner の確認 |
 
+### U10 — O-5・O-6 を動的プロファイルで（要件 §11、設計 §13。2026-10-09、D-17 の決定の後）
+
+- **範囲**: `tools/remote-mcp-config.ts`（`pairs` の型と定数（両方 `false`）、`dyn-arc-to-sol`・`dyn-sol-to-arc` の生成と固定文）、`tools/rails-entry.ts`（token `arc-to-sol`・`sol-to-arc` の往復）、`tools/rails-acceptance-run.ts`（usage）、設計 §13.3 の試験 4 本、`docs/DEPLOY.md` §2c の段（G-2⁗〜G-4⁗）
+- **完了条件**: 要件 AC-19 のすべて（20 本の全列挙、18 本のまま、固定文 4 通り、guard row 20 本、token 8 語、行列 O-5・O-6 delivered、process の受け入れの起動で 2 本）。`src/` に差分が無い。公開の定数は `pairs` 両方 `false`（一覧は 18 のまま）
+- **sabotage**: 生成の条件から `solOutbound`（または `arcOutbound`）を外す → 固定文の試験が落ちる／token を 1 語だけ足す → 往復の試験が落ちる／行列の O-5 の送信先を Arc に変える → Provider の支払いの期待が落ちる
+
+### UG-P — O-5・O-6 の gate（要件 §11.4。owner の確認。§0 の直列化の規則）
+
+| 段 | 内容 | 条件 |
+|---|---|---|
+| G-2⁗ | U10 を含むイメージを `pairs` 両方 `false` のまま入れ替え（`deploy/swap-image.sh`）。公開の一覧は route 10・プロファイル 18 のまま | owner の確認（配備） |
+| G-3⁗ | 受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`。公開の Router は止める）で O-5・O-6 を各 1 件 `delivered`。記録は AC-13／AC-14 と同じ（payer は使い捨て: Arc `0xfCea…`、Solana `HTaz…`） | owner の確認（公開の停止・支払い） |
+| G-4⁗ | `pairs` 両方 `true` の PR と入れ替え。**同じ PR で、`RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に変え、`pairs` を `false` にした固定の構成で 18 本を見る試験を残す**（`remote-mcp-config.test.ts`・`rails-entry.test.ts`）。一覧 20 本、各 1 回の quote、hosted で各 1 件の実購入（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20） | owner の確認 |
+
 ## 3. 要件・設計との対応（主担当と補助）
 
 | 対象 | 主担当 | 補助（別の層の試験） |
@@ -198,6 +212,7 @@ U2 の後は U3 と U6-a が並行できる（writer は 1 つなので、実際
 | SR-3 | U4（Arc）、U7・U8-b（SVM） | — |
 | SR-5、D-10、AC-11・AC-13・AC-14 | UG-A（Arc）・UG-S（Solana） | — |
 | D-12・D-16・D-17 | U5・U9（公開 ID が 6 本だけ） | 将来の追加は別の gate |
+| D-17（決定 2026-10-09）、FR-39〜FR-43、AC-19 | U10 | UG-P（AC-20・AC-21） |
 | AC-8 | U4 | U8-a（Arc の統合）、UG-A G-3′ |
 | AC-9・AC-10 | U7 | U8-a・U8-b |
 | AC-12 | 各タスクの sabotage（U2・U3・U4・U6-a・U6-b・U7・U8-a・U8-b） | 能力の束縛 U4・U8-a、表 U1、予算 U8-a、領収 U3、運用者の集合 U3・U4・U7 |
@@ -212,4 +227,4 @@ U2 の後は U3 と U6-a が並行できる（writer は 1 つなので、実際
 
 - Provider の URL・受取先（D-10。owner）。`extra.assetTransferMethod` の扱い（V-6 の結果。UG-A）
 - 取得〜署名の上限の値（設計 U-8。G-3′ の実測）
-- O-5・O-6（Arc ↔ Solana）を足すか（D-17。別の gate）
+- ~~O-5・O-6（Arc ↔ Solana）を足すか（D-17。別の gate）~~ → 2026-10-09 に決定（U10・UG-P）
