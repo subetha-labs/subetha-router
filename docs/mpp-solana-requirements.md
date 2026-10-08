@@ -1,4 +1,4 @@
-# 要件: Solana の MPP（`method="solana"`、`intent="charge"`）を受信・送信の両方で（S-5・S-6。第 4 版、2026-10-08）
+# 要件: Solana の MPP（`method="solana"`、`intent="charge"`）を受信・送信の両方で（S-5・S-6。第 5 版、2026-10-08）
 
 > `multirail-requirements.md`（受信 S-1・S-2）・`multirail-outbound-requirements.md`（送信 S-3・S-4）の別紙。Arc・Solana の **x402** は受信（G-4、2026-10-07）も送信（G-4′、2026-10-08）も公開済み。
 > 本書は owner の指示「**Solana の MPP にも Router で inbound・outbound どちらも対応したい**」（2026-10-08）を要件に起こしたもの。設計・タスクは別紙。
@@ -14,6 +14,8 @@
 >
 > 第 4 版（独立レビュー #3、§11）: 手数料の cap からの除外は設定・動的 core・purchase／store の**明示の例外**として要求（FR-44。今の code は MPP の宛先に `feeAsset`・`maxFee` を必須にし、MPP の全プロファイルで見積もる）、priority fee の単位（FR-44）、compute price の上限（FR-47）、
 > push の確定は `sendTransaction` の成功では分からない（FR-53・SR-M1）、同じ intent への再提示は既存の終端の読み返し（AC-20）、AC-17 を行列に合わせる、v2 の要約の `SR` の参照。
+>
+> 第 5 版（独立レビュー #4、§11）: 別の intent への同じ署名の再提示は、消費の行の有無に関わらず**拒む**（challenge の束縛 = preflight と Memo の検査が先に効く。AC-20）。`feeMargin` は今の code では省略時に既定値が入る（FR-44 の事実の訂正）。
 >
 > 第 2 版（独立レビュー #1、§11）: SOL の手数料の方針と予算（FR-44・FR-51・FR-54）、既存の SVM 検査は「そのまま」ではなく primitives の再利用と mode 別の検査（FR-47・FR-52）、mode 別の完全な結果の表（FR-48・FR-53）、
 > 承認値への束縛と永続の replay（FR-46・FR-47・FR-50・FR-52、SR-M2）、pull の領収の対応づけ（FR-53）、blockhash・RPC・ATA・fee payer の規則（FR-45・FR-47・FR-52・FR-54、SR-M1）、payer の鍵の名前は既存の `SOLANA_PAYER_PRIVATE_KEY`（FR-49）、
@@ -63,7 +65,7 @@
 - FR-42 **ID と開示**: route／プロファイル ID は既存の名前空間（例: 受信の静的 `md-x402-eth-snapshot-solmpp`・`md-mpp-eth-snapshot-solmpp`、送信の静的 `md-solmpp-eth-snapshot`、動的 `dyn-solmpp-to-x402` / `dyn-solmpp-to-mpp` / `dyn-x402-to-solmpp` / `dyn-mpp-to-solmpp`。確定は設計）。`subject` の `fundsMoveOnCredential` は受信 MPP Solana で `true`（Tempo と同じ開示: credential を作る時点で payer が送金し、Router が後で拒んでも返金されない）。
 - FR-43 **予算**: Solana devnet USDC の区分は既存の `(network, asset)` に**合算**（受信 x402 Solana・送信 x402 Solana・本書の受信・送信の 4 つが同じ区分。D-14）。**x402 Solana ↔ MPP Solana の組は両レグが同じ区分を使う**ので、1 件の上限と通算の両方が両レグ分で効くことを試験する（AC-15）。
 - FR-44 **手数料の方針（pull・push の両方）**:
-  - **価格づけ（明示の例外）**: 今の code は **MPP の宛先に `feeAsset`・`maxFee`（と `feeMargin`）を必須**にし（`src/config.ts:778-779`）、**MPP の全プロファイルで quote ごとに gas を見積もって cap を決める**（`src/core/dynamic.ts:339-345`。`maxFee` が無ければ失敗）。これは Tempo（EVM の gas）の規則なので、**宛先が `solana:` の MPP プロファイルを明示の例外**にする: (a) 設定は `feeAsset`・`maxFee`・`feeMargin` を**持たないことを要求**（あれば `ConfigError`）、(b) 動的 core はこの宛先では `estimateFor` を呼ばず cap を持たない quote を作る（`pricing` に `maxFee`・`estimate` を出さず、`fee_too_high` は起きない）、(c) purchase／store／replay は cap の無い MPP の quote をこの宛先に限って受ける（Tempo の quote に cap が無ければ従来どおり拒む）。手数料は規則の手数料（flat/bps/min）だけ。この例外は設定の生成・読み込み・core・store のそれぞれで試験する（AC-16）。
+  - **価格づけ（明示の例外）**: 今の code は **MPP の宛先に `feeAsset`・`maxFee` を必須**にし（`feeMargin` は省略時に既定値。`src/config.ts:778-786`）、**MPP の全プロファイルで quote ごとに gas を見積もって cap を決める**（`src/core/dynamic.ts:339-345`。`maxFee` が無ければ失敗）。これは Tempo（EVM の gas）の規則なので、**宛先が `solana:` の MPP プロファイルを明示の例外**にする: (a) 設定は `feeAsset`・`maxFee`・`feeMargin` を**持たないことを要求**（あれば `ConfigError`）、(b) 動的 core はこの宛先では `estimateFor` を呼ばず cap を持たない quote を作る（`pricing` に `maxFee`・`estimate` を出さず、`fee_too_high` は起きない）、(c) purchase／store／replay は cap の無い MPP の quote をこの宛先に限って受ける（Tempo の quote に cap が無ければ従来どおり拒む）。手数料は規則の手数料（flat/bps/min）だけ。この例外は設定の生成・読み込み・core・store のそれぞれで試験する（AC-16）。
   - **pull**: Router は手数料を払わない（fee payer は相手）。SOL の勘定は無い。
   - **push**（D-23 の第 2 段）: 手数料の資産は SOL（lamports）で、USDC の予算とは**別の勘定**（lamports と USDC の base units を比べない・合算しない）。1 購入の上限は**定数** = base fee 5,000 lamports × 署名数 + `ceil(priority price [micro-lamports/CU] × compute limit [CU] / 1,000,000)` lamports（`SetComputeUnitPrice`・`SetComputeUnitLimit` は固定値）。**journal に lamports の区分を持ち**、署名の前に 1 購入分を**原子的に予約**し、通算の上限（定数）を超えれば `not_sent`（`budget_exhausted`）。Router の送信鍵の SOL 残高を purchase ごとに 1 回読み（`getBalance`）、「予約済み + 上限」未満なら受信の verify の前に `operator_funds_unavailable`。手数料は運用者が負担し quote の額に転嫁しない。
 
@@ -130,7 +132,7 @@
 - AC-17（結合、手元。資金が動く。§8 の承認の後）: pay-kit の server を **devnet** で動かす Provider（Provider D。owner が配備。D-26）に対し、受け入れ用の起動で §7 の行列から **受信 S-5 は I-1 の静的と動的、I-3 か I-4 の動的を各 1 件**、**送信 S-6 は O-7 の静的と動的、O-9 か O-10 の動的を各 1 件**（push は D-23 の第 2 段のときだけ）を `delivered`。証拠は先行の G-3 と同じ: 受信・送信の両方の transaction（署名・slot・**`finalized` まで確認**・転送の内容）、宛先 ATA の増分、Provider の応答の本文、client が受け取った結果、**保存した結果を開き直したもの**（`status` の再読取。受け入れ用の Router の再起動の後も同じ結果）。
 - AC-18（公開、G-4″）: 公開 MCP の一覧に新しい route／プロファイルが出て、各組 1 回の quote（支払わない）。
 - AC-19（agent の手順）: `npm run sign` が MPP Solana の offer で `SOLANA_PAYER_PRIVATE_KEY` から credential を作れる（devnet SOL あり）、署名前の拒否（network・資産・期限・額・`feePayer: true`）、送出の応答を失った後の再実行で**送らずに同じ署名**を出す、鍵を出さない。
-- AC-20（中断）: 受信は `source_settled` の行の前後、送信は予約の後・署名の後・送出の前で SIGKILL → 再起動で表どおり（受信: 行の前なら `unknown`（`interrupted_at_restart`）、行の後なら既存どおり **`paid_undelivered`**（送信は再開しない）、**同じ intent**（同じ `paymentId`・`requestId`）への再提示は既存どおりその intent の現在の終端を返す（`src/core/orchestrator.ts:520`、新しい購入を始めない）。**別の intent** で同じ署名を出せば、行が有るときは `rejected`（消費済み）、行が無いとき（crash が行の前）は消費の記録が無いので verify を通り得る = payer の transfer は 1 件なので二重払いではなく、どちらか 1 つの intent だけが `source_settled` の行を書ける（journal の append の順序）。送信: `unknown`、再送信 0、同じ message は `collision`）。
+- AC-20（中断）: 受信は `source_settled` の行の前後、送信は予約の後・署名の後・送出の前で SIGKILL → 再起動で表どおり（受信: 行の前なら `unknown`（`interrupted_at_restart`）、行の後なら既存どおり **`paid_undelivered`**（送信は再開しない）、**同じ intent**（同じ `paymentId`・`requestId`）への再提示は既存どおりその intent の現在の終端を返す（`src/core/orchestrator.ts:520`、新しい購入を始めない）。**別の intent** で同じ署名を出せば、消費の行の有無に**関わらず** `rejected`: 古い credential は新しい intent の preflight（nonce・accepted・wire の中の challenge id）で落ち、新しい challenge に古い署名を包み直しても transaction の Memo（古い challenge の id）が verify の Memo 検査で落ちる（`verify_failed`）。行が有れば settle の消費済み検査でも落ちる。つまり 1 つの payer の transfer は、それを発行した intent にしか使えない。送信: `unknown`、再送信 0、同じ message は `collision`）。
 - AC-21（sabotage と独立レビュー）: 先行文書と同じく、各 PR に変異の表と Codex のレビュー。SR-3 と同じ署名の境界の独立レビューを **2 回**（送信の adapter の PR と、統合の PR で実ソース全体）。
 
 ## 7. 行列（追加分。同レール同チェーン MPP Solana → MPP Solana は範囲外）
@@ -176,6 +178,7 @@
 
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
+| 4 | 2026-10-08 | `gpt-6-astra`（readback。第 4 版 `f1cb76d`） | **REJECT**（1 点: 別 intent への再提示は消費の行が無くても束縛で拒まれる。訂正 1 点: `feeMargin` の既定値）。第 5 版で反映 |
 | 3 | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `58d0c78`） | **REJECT**（残り: 手数料の cap からの除外は明示の例外に、priority fee の単位、compute price の上限、push の確定は送出の成功では分からない、同じ intent の再提示、AC-17 を行列に、v2 要約の `SR`）。第 4 版で反映 |
 | 2 | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `b724c89`） | **REJECT**（残り: 手数料を両 mode で core の価格づけから外す、署名の検証と compute budget、`verify_failed`、送信の表の 3 行、埋め込み challenge の HMAC と `source_settled` との原子性、pull の成功の証拠、FR-35 の除外、polling と再試行、記録の排他・永続、O-9 の分離と AC の整合、FR-25・SR の番号・secret の transport）。第 3 版で反映 |
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `ce01a28`） | **REJECT**（8 項目: SOL の手数料の方針と予算、SVM 検査の再利用の範囲、mode 別の結果の表と層の分離、承認値への束縛と永続の replay、pull の領収の対応づけ、blockhash・RPC・ATA・fee payer の規則、payer の鍵名と道具の要件、行列と gate の明示。加えて先行文書の読み替え・番号・`SR` の慣例・env の表現の訂正、外部の事実は未確認と明示）。第 2 版で反映 |
