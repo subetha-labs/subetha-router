@@ -182,8 +182,10 @@ async function startWorker(env: "arc" | "sol", publicHost: string, vars: Record<
   if (envFile !== undefined) args.push("--env-file", envFile);
   // wrangler 自身の外向きの通信を止める: telemetry、error report、banner（通常の経路の npm の更新確認はここから出る）。
   // 警告・エラーの経路に残る更新確認（設定の未知の欄、compatibility date の fallback、起動の失敗）も外に出ないように、
-  // npm の registry を**閉じた loopback のポート**に向ける（wrangler の update-check は `rc("npm")` 経由で `npm_config_registry` を読む）。
-  const childEnv = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true", npm_config_registry: `http://127.0.0.1:${deadPort}/` };
+  // npm の registry を**閉じた loopback のポート**に向ける。wrangler の update-check は `registry-url` → `rc("npm")` で registry を引き、
+  // `rc` は接頭辞 `npm_` を外した名前を鍵にする（`npm_registry` → `registry`。`npm_config_registry` は `config_registry` になって効かない）。
+  // env は `.npmrc` より優先される。
+  const childEnv = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true", npm_registry: `http://127.0.0.1:${deadPort}/` };
   const child: ChildProcess = spawn(WRANGLER, args, { cwd: PACKAGE_DIR, detached: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
   let raw = "";
   let spawnError: Error | undefined;
