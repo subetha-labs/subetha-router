@@ -462,7 +462,7 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     expect(again.text).toBe("{}");
     expect(h.rpc.state.sent).toHaveLength(sentBefore);
     // 2 instance（isolate の模擬）: 同じ env から runtime をもう 1 つ（別の pay-kit = 別の replay store）。**同じ credential**を両方に同時に出す
-    // （Router は本来 1 回しか出さない。fixture の blockhash は固定なので新しい購入は同じ取引になり、本物の chain と同じく「同じ取引は 1 回」の性質で観測する）。
+    // （Router は本来 1 回しか出さない。同じ取引の再送は本物の chain と同じく「同じ署名は 1 件」で観測する）。
     const second = await runtimeOf(h.env);
     const seen2: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
     const provider2 = await serveProvider(second, seen2);
