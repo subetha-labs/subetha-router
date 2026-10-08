@@ -4,8 +4,10 @@
  * Hyperliquid は stub。成功が `paid`、送出の失敗は Worker の 402（領収なし）と Router の `unknown`、送出の後に Router が去っても Worker は続行して資金が動く。
  *
  * **gate**: `PROVIDER_WORKER_AC=1` のときだけ走る（`providers/mpp-solana-workers/node_modules` の wrangler が要る。Linux の suite では skip）。
- * 外には出ない: fixture は全部 127.0.0.1。Router（TLS、`provider.test`）→ front → wrangler dev（平文 http）。wrangler 自身の外向きの通信は env で止め、
- * npm の registry を閉じた loopback に向ける。鍵・秘密は 0600 の一時ファイル（`--env-file`）で渡して終わりに消す。生の log に鍵・秘密が出ないことを見る。
+ * 外には出ない: fixture は全部 127.0.0.1。Router（TLS、`provider.test`）→ front → wrangler dev（平文 http）→（pay-kit の RPC は）試験の proxy → RPC の fixture。
+ * wrangler 自身の外向きの通信は env で止め（telemetry・error report・banner、Miniflare の `cf.json` の取得 = `CLOUDFLARE_CF_FETCH_ENABLED=false`）、npm の registry を
+ * 閉じた loopback に向け、子の env は親の env を継がない（Cloudflare の資格情報・設定を渡さない）。鍵・秘密は 0600 の一時ファイル（`--env-file`）で渡して終わりに消す。
+ * 生の log に鍵・秘密が出ないことを見る。実時間の行（確定待ちの 30 秒、RPC が 45 秒超黙る）を含むので全体で 2〜3 分かかる。
  *
  *   PROVIDER_WORKER_AC=1 npx vitest run tests/acceptance/provider-mpp-solana-workers.test.ts
  */
@@ -44,7 +46,7 @@ const HYPERLIQUID = [{ universe: [{ name: "BTC" }, { name: "ETH" }] }, [{ markPx
 const CONTRACT_KEYS = ["data", "dataSource", "fetchedAt", "market", "payment", "providerId"];
 const SECRET = "provider-d-ac-pd2-secret-0123456789abcdef0123456789";
 /** fixture の blockhash（Router の取引ごとに別の値にする: 同じ blockhash だと同じ取引になり、予約と replay で 2 件目が進まない）。 */
-const BLOCKHASHES = Array.from({ length: 6 }, () => getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32))));
+const BLOCKHASHES = Array.from({ length: 8 }, () => getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32))));
 
 interface Listener {
   readonly port: number;
@@ -122,6 +124,32 @@ async function startHyperliquidStub(): Promise<Listener & { readonly calls: () =
   return { ...(await listen(server)), calls: () => calls };
 }
 
+/** Worker の pay-kit → RPC の fixture の間の proxy。`stall` のとき `sendTransaction` を**答えずに**抱える（RPC が黙る行）。`release()` で抱えた接続を切る。 */
+async function startRpcProxy(targetPort: number): Promise<Listener & { readonly state: { stall: boolean }; readonly stalled: () => number; release(): void }> {
+  const state = { stall: false };
+  let stalled = 0;
+  const held: http.ServerResponse[] = [];
+  const server = http.createServer((request, response) => {
+    void readAll(request).then((body) => {
+      let method = "";
+      try { method = String((JSON.parse(body.toString("utf8")) as { method?: unknown }).method ?? ""); } catch { /* 形は fixture が見る */ }
+      if (state.stall && method === "sendTransaction") {
+        stalled += 1;
+        held.push(response);
+        return;
+      }
+      const upstream = http.request({ host: "127.0.0.1", port: targetPort, method: request.method, path: request.url, headers: { ...request.headers, host: `127.0.0.1:${targetPort}` } }, (reply) => {
+        response.writeHead(reply.statusCode ?? 502, reply.headers);
+        reply.pipe(response);
+      });
+      upstream.on("error", () => response.destroy());
+      upstream.end(body);
+    });
+  });
+  const listener = await listen(server);
+  return { ...listener, state, stalled: () => stalled, release: () => { while (held.length > 0) held.pop()!.destroy(); } };
+}
+
 interface Worker {
   readonly port: number;
   readonly log: () => string;
@@ -136,7 +164,13 @@ async function startWorker(publicHost: string, vars: Record<string, string>, env
   const deadPort = await freePort();
   const args = ["dev", "--port", String(port), "--ip", "127.0.0.1", "--inspector-port", String(inspectorPort), "--local-upstream", publicHost, "--upstream-protocol", "https", "--show-interactive-dev-session=false", "--env-file", envFile];
   for (const [key, value] of Object.entries(vars)) args.push("--var", `${key}:${value}`);
-  const childEnv = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true", npm_registry: `http://127.0.0.1:${deadPort}/` };
+  // 親の env は継がない（Cloudflare の資格情報・設定を子に渡さない）。wrangler が要るのは PATH・HOME・TMPDIR だけ。
+  const inherited: Record<string, string> = {};
+  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]) {
+    const value = process.env[key];
+    if (value !== undefined) inherited[key] = value;
+  }
+  const childEnv = { ...inherited, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true", CLOUDFLARE_CF_FETCH_ENABLED: "false", npm_registry: `http://127.0.0.1:${deadPort}/` };
   const child: ChildProcess = spawn(WRANGLER, args, { cwd: PACKAGE_DIR, detached: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
   let raw = "";
   let spawnError: Error | undefined;
@@ -169,6 +203,7 @@ describeAc("AC-PD2: wrangler dev の Provider D を Router の MPP Solana 送信
   let tmpDir: string | undefined;
   let rpcs: SolanaRpcFixture[];
   let payKitRpc: SolanaRpcFixture;
+  let rpcProxy: Awaited<ReturnType<typeof startRpcProxy>>;
   let worker: Worker;
   let front: Awaited<ReturnType<typeof startTlsFront>>;
   let hyperliquid: Awaited<ReturnType<typeof startHyperliquidStub>>;
@@ -230,10 +265,12 @@ describeAc("AC-PD2: wrangler dev の Provider D を Router の MPP Solana 送信
     }
     payKitRpc = await startSolanaRpc({ mint: MINT, decimals: 6, shareStateWith: first });
     closers.push(payKitRpc.close);
+    rpcProxy = await startRpcProxy(payKitRpc.port);
+    closers.push(rpcProxy.close);
     first.state.signatureStatuses = ["confirmed"];
     const envFile = path.join(tmpDir, "provider-d.env");
     writeFileSync(envFile, `FEE_PAYER_KEY=${feeSeedText}\nMPP_SECRET=${SECRET}\n`, { mode: 0o600 });
-    worker = await startWorker(PROVIDER_HOST, { PAY_TO: recipient, FEE_PAYER_PUBKEY: feePayerPubkey, SOLANA_RPC_URL: payKitRpc.url, DATA_URL: `http://127.0.0.1:${hyperliquid.port}/info` }, envFile, [feeSeedText, SECRET], closers);
+    worker = await startWorker(PROVIDER_HOST, { PAY_TO: recipient, FEE_PAYER_PUBKEY: feePayerPubkey, SOLANA_RPC_URL: `http://127.0.0.1:${rpcProxy.port}`, DATA_URL: `http://127.0.0.1:${hyperliquid.port}/info` }, envFile, [feeSeedText, SECRET], closers);
     front = await startTlsFront(TLS, worker.port);
     closers.push(front.close);
     routes = { [PROVIDER_HOST]: front.port, [RPC_HOST]: rpcs[0]!.port };
@@ -346,6 +383,57 @@ describeAc("AC-PD2: wrangler dev の Provider D を Router の MPP Solana 送信
       rpcs[0]!.state.signatureStatuses = ["confirmed"];
     }
   }, 120_000);
+
+  test("確定待ちの timeout（workerd の中の pay-kit、実時間 30 秒）: getSignatureStatuses が null のまま → Worker 402（領収なし）→ Router unknown（45 秒の内側）。送出 1 回", async () => {
+    routes[RPC_HOST] = rpcs[6]!.port;
+    rpcs[0]!.state.signatureStatuses = ["null"];
+    const sentBefore = rpcs[0]!.state.sent.length;
+    const paidBefore = front.paid.length;
+    try {
+      const started = Date.now();
+      const result = await buy(rail);
+      const elapsed = Date.now() - started;
+      expect(result).toMatchObject({ outcome: "unknown", reason: "destination_pay_unknown" });
+      expect(elapsed).toBeGreaterThanOrEqual(29_000);
+      expect(elapsed).toBeLessThan(45_000);
+      expect(rpcs[0]!.state.sent).toHaveLength(sentBefore + 1);
+      expect(front.paid).toHaveLength(paidBefore + 1);
+      const last = front.paid[front.paid.length - 1]!;
+      expect(last.status).toBe(402);
+      expect(last.body).toBe("{}");
+      expect(last.headers["payment-receipt"]).toBeUndefined();
+    } finally {
+      rpcs[0]!.state.signatureStatuses = ["confirmed"];
+    }
+  }, 120_000);
+
+  test("RPC が 45 秒を超えて黙る（sendTransaction を proxy が抱える）: Router は 45 秒で unknown、chain への送出は 0、Worker の送出の試みは 1 回", async () => {
+    routes[RPC_HOST] = rpcs[7]!.port;
+    rpcProxy.state.stall = true;
+    const sentBefore = rpcs[0]!.state.sent.length;
+    const paidBefore = front.paid.length;
+    try {
+      const started = Date.now();
+      const result = await buy(rail);
+      const elapsed = Date.now() - started;
+      expect(result).toMatchObject({ outcome: "unknown", reason: "destination_pay_unknown" });
+      expect(elapsed).toBeGreaterThanOrEqual(44_000);
+      expect(elapsed).toBeLessThan(60_000);
+      expect(rpcs[0]!.state.sent).toHaveLength(sentBefore);
+      expect(rpcProxy.stalled()).toBe(1);
+      // front はまだ Worker の応答を見ていない（Worker は RPC を待っている）。
+      expect(front.paid).toHaveLength(paidBefore);
+    } finally {
+      rpcProxy.state.stall = false;
+      rpcProxy.release();
+    }
+    // 抱えた接続を切ると pay-kit の fetch が失敗し、Worker は 402（領収なし）で終わる。送出は増えない。
+    const started = Date.now();
+    while (front.paid.length === paidBefore && Date.now() - started < 30_000) await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(front.paid).toHaveLength(paidBefore + 1);
+    expect(front.paid[front.paid.length - 1]!.status).toBe(402);
+    expect(rpcs[0]!.state.sent).toHaveLength(sentBefore);
+  }, 150_000);
 
   test("生の log に fee payer の seed と MPP_SECRET は出ない", () => {
     expect(worker.rawIncludesSecret()).toBe(false);

@@ -3,7 +3,7 @@
  * `--dry-run` は wrangler を呼ばない、受取 owner の seed はリポジトリの外の file にだけ（既存は上書きしない、中は拒む）。wrangler は呼ばない（dry-run と file の経路だけ）。
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -78,6 +78,13 @@ describe("Provider D の script", () => {
       expect(refused.code, inside).toBe(1);
       expect(refused.stderr, inside).toMatch(/inside the repository/);
     }
+    // symlink でリポジトリの中を指すディレクトリ（字面は外）も拒む（実在する祖先を実パスに直す）。
+    const link = path.join(dir, "link-into-repo");
+    symlinkSync(PACKAGE_DIR, link);
+    const viaLink = await run("keygen-recipient.mjs", [path.join(link, "deeper", "x.seed")]);
+    expect(viaLink.code).toBe(1);
+    expect(viaLink.stderr).toMatch(/inside the repository/);
+    expect(existsSync(path.join(PACKAGE_DIR, "deeper"))).toBe(false);
     const usage = await run("keygen-recipient.mjs", []);
     expect(usage.code).toBe(2);
   });

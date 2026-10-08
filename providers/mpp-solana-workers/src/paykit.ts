@@ -25,8 +25,13 @@ export async function createPayKitRuntime(env: ProviderEnv, config: ProviderConf
   const key = env.FEE_PAYER_KEY;
   if (typeof key !== "string" || key === "") throw new Error("FEE_PAYER_KEY is required");
   const seed = seedFromKey(key);
-  const kitSigner = await createKeyPairSignerFromPrivateKeyBytes(seed);
-  seed.fill(0);
+  let kitSigner: Awaited<ReturnType<typeof createKeyPairSignerFromPrivateKeyBytes>>;
+  try {
+    kitSigner = await createKeyPairSignerFromPrivateKeyBytes(seed);
+  } finally {
+    // 復号した seed は必ず消す（import に失敗しても）。env の文字列そのものは消せない（immutable）。
+    seed.fill(0);
+  }
   if (String(kitSigner.address) !== config.feePayerPubkey) throw new Error("FEE_PAYER_PUBKEY does not match the public key of FEE_PAYER_KEY");
   const secret = env.MPP_SECRET;
   if (typeof secret !== "string" || ENCODER.encode(secret).byteLength < MIN_SECRET_BYTES) throw new Error("MPP_SECRET must be at least 32 bytes");

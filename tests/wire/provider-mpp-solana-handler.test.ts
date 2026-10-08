@@ -63,7 +63,7 @@ interface Listener {
 
 /** Hyperliquid の差し替え（`state.mode` で応答を変える）。 */
 interface DataServer extends Listener {
-  state: { mode: "ok" | "error" | "bad-shape" | "stall" };
+  state: { mode: "ok" | "error" | "bad-shape" | "stall" | "huge" };
   calls: number;
 }
 
@@ -78,7 +78,7 @@ async function startData(): Promise<DataServer> {
       response.end("{}");
       return;
     }
-    const body = JSON.stringify(state.mode === "bad-shape" ? { nope: true } : HYPERLIQUID);
+    const body = state.mode === "huge" ? JSON.stringify([{ universe: [{ name: "ETH" }], pad: "x".repeat(300 * 1024) }, [{ markPx: "1", prevDayPx: "1", dayNtlVlm: "1" }]]) : JSON.stringify(state.mode === "bad-shape" ? { nope: true } : HYPERLIQUID);
     response.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
     response.end(body);
     void request;
@@ -92,6 +92,7 @@ interface Seen {
   paths: string[];
   authorizations: string[];
   statuses: number[];
+  contentLengthMismatches: string[];
 }
 
 /** Provider D の handler を TLS の loopback で公開する（`provider.test` の証明書。Router の transport は dial の表で届く）。 */
@@ -110,8 +111,9 @@ async function serveProvider(runtime: Runtime, seen: Seen): Promise<Listener> {
       seen.statuses.push(out.status);
       const body = Buffer.from(await out.arrayBuffer());
       const outHeaders = Object.fromEntries(out.headers.entries());
-      delete outHeaders["content-length"];
-      response.writeHead(out.status, { ...outHeaders, "content-length": String(body.length) });
+      // Worker の content-length をそのまま wire に（付け直さない: 欠け・不一致は wire で見える）。
+      if (outHeaders["content-length"] !== String(body.length)) seen.contentLengthMismatches.push(`${out.status}:${outHeaders["content-length"] ?? "missing"}:${body.length}`);
+      response.writeHead(out.status, outHeaders);
       response.end(body);
     })();
   });
@@ -155,7 +157,7 @@ async function harness(options: { operatorsIncludeFeePayer?: boolean } = {}): Pr
   closers.push(data.close);
   const env: Record<string, string> = { PAY_TO: recipient, FEE_PAYER_PUBKEY: feePayer.publicKey, FEE_PAYER_KEY: feePayer.seed, MPP_SECRET: SECRET, SOLANA_RPC_URL: payKitRpc.url, DATA_URL: data.url };
   const runtime = await runtimeOf(env);
-  const seen: Seen = { paths: [], authorizations: [], statuses: [] };
+  const seen: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
   const provider = await serveProvider(runtime, seen);
   closers.push(provider.close);
   const routes: Record<string, number> = { [PROVIDER_HOST]: provider.port, [RPC_HOST]: rpc.port };
@@ -257,7 +259,11 @@ describe("Provider D: 402（§2.1）と Router の候補の検査", () => {
       expect(got.text, `${method} ${path}`).toBe('{"error":"not_found"}');
       expect(got.headers.get("cache-control")).toBe("no-store");
     }
+    const head = await direct(h, "/v1/eth/snapshot", { method: "HEAD" });
+    expect(head.status).toBe(404);
+    expect(head.headers.get("content-length")).toBe(String(Buffer.byteLength('{"error":"not_found"}')));
     expect(h.data.calls).toBe(0);
+    expect(h.seen.contentLengthMismatches).toEqual([]);
   });
 });
 
@@ -280,6 +286,7 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     expect(h.data.calls).toBe(1);
     // Router 側: 領収の reference を getTransaction で読み直した。
     expect(h.since(0)).toContain("getTransaction");
+    expect(h.seen.contentLengthMismatches).toEqual([]);
   });
 
   test("Authorization の判定は大文字小文字を区別しない（payment／PAYMENT／Payment は支払いつきの枝 = データ源が呼ばれ、pay-kit が 402 `{}` で拒む）。Bearer は未払いの枝（accepts の本文）で、pay-kit に Authorization は渡らない", async () => {
@@ -299,6 +306,20 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     expect(bearer.status).toBe(402);
     expect((JSON.parse(bearer.text) as { accepts: unknown[] }).accepts.length).toBeGreaterThan(0);
     expect(h.rpc.state.sent).toEqual([]);
+    expect(h.seen.contentLengthMismatches).toEqual([]);
+    // handler が未払いの枝で pay-kit に渡す要求（stub で観測）: Authorization は無く、paid は呼ばれない。
+    const observed: Array<string | null> = [];
+    const stub: Runtime = {
+      config: h.runtime.config,
+      paykit: {
+        feePayer: h.runtime.paykit.feePayer,
+        challenge: async (request) => { observed.push(request.headers.get("authorization")); return new Response("{}", { status: 402, headers: { "www-authenticate": "Payment x" } }); },
+        paid: async () => { throw new Error("paid must not be called on the unpaid branch"); },
+      },
+    };
+    const viaStub = await handle(new Request(UPSTREAM, { headers: { authorization: "Bearer x", accept: "application/json" } }), stub);
+    expect(viaStub.status).toBe(402);
+    expect(observed).toEqual([null]);
     // 純粋関数の形。
     expect(isPaymentAuthorization("payment x")).toBe(true);
     expect(isPaymentAuthorization("PAYMENT x")).toBe(true);
@@ -313,7 +334,7 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
   test("段 1 の失敗（データ源が 500・形違い・応答しない）→ 502 data_unavailable、pay-kit は呼ばれない（RPC に要求 0、送出 0）", async () => {
     const h = await harness();
     const mark = h.payKitRpc.calls.length;
-    for (const mode of ["error", "bad-shape", "stall"] as const) {
+    for (const mode of ["error", "bad-shape", "stall", "huge"] as const) {
       h.data.state.mode = mode;
       const got = await direct(h, "/v1/eth/snapshot", { headers: { authorization: "Payment not-a-credential" } });
       expect(got.status, mode).toBe(502);
@@ -323,6 +344,47 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     expect(h.payKitRpc.calls.length).toBe(mark);
     expect(h.rpc.state.sent).toEqual([]);
   }, 20_000);
+
+  test("pay-kit から例外が escape・200 でも 402 でもない状態・領収の無い 200 → 502 の固定文（stub。領収は付けない、本文は固定）", async () => {
+    const h = await harness();
+    const stubWith = (paid: Runtime["paykit"]["paid"]): Runtime => ({ config: h.runtime.config, paykit: { feePayer: h.runtime.paykit.feePayer, challenge: h.runtime.paykit.challenge, paid } });
+    const request = () => new Request(UPSTREAM, { headers: { authorization: "Payment x" } });
+    const threw = await handle(request(), stubWith(async () => { throw new Error("boom with http://secret.rpc/KEY"); }));
+    expect(threw.status).toBe(502);
+    expect(await threw.text()).toBe('{"error":"payment_failed"}');
+    expect(threw.headers.get("cache-control")).toBe("no-store");
+    const five = await handle(request(), stubWith(async () => new Response("mppx says: nope", { status: 500 })));
+    expect(five.status).toBe(502);
+    expect(await five.text()).toBe('{"error":"payment_failed"}');
+    const noReceipt = await handle(request(), stubWith(async (_r, body) => new Response(body, { status: 200, headers: { "content-type": "application/json" } })));
+    expect(noReceipt.status).toBe(502);
+    expect(await noReceipt.text()).toBe('{"error":"receipt_missing"}');
+    expect(noReceipt.headers.get("payment-receipt")).toBeNull();
+    // 402 の本文は置き換える（mppx の文言を透過しない）。
+    const fourOTwo = await handle(request(), stubWith(async () => new Response('{"error":"mppx internal detail"}', { status: 402, headers: { "www-authenticate": "Payment y" } })));
+    expect(fourOTwo.status).toBe(402);
+    expect(await fourOTwo.text()).toBe("{}");
+    expect(fourOTwo.headers.get("www-authenticate")).toBe("Payment y");
+    expect(fourOTwo.headers.get("content-length")).toBe("2");
+    expect(h.data.calls).toBe(4);
+  });
+
+  test("別の Provider（別の秘密・別の受取 owner）向けの credential は 402（pay-kit の HMAC の検証）、送出 0", async () => {
+    const h = await harness();
+    const offers = await h.rail.readChallenge(ROUTE);
+    expect((await h.rail.pay(requestOf(h, offers[0]!))).outcome).toBe("paid");
+    const credential = h.seen.authorizations[0]!;
+    const other = await runtimeOf({ ...h.env, PAY_TO: newSeed().publicKey, MPP_SECRET: "another-provider-secret-0123456789abcdef0123" });
+    const seenOther: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
+    const providerOther = await serveProvider(other, seenOther);
+    closers.push(providerOther.close);
+    const sentBefore = h.rpc.state.sent.length;
+    const got = await direct({ ...h, provider: providerOther }, "/v1/eth/snapshot", { headers: { authorization: credential } });
+    expect(got.status).toBe(402);
+    expect(got.text).toBe("{}");
+    expect(got.headers.get("payment-receipt")).toBeNull();
+    expect(h.rpc.state.sent).toHaveLength(sentBefore);
+  });
 
   test("送出が RPC の error → pay-kit の 402（本文 `{}`、領収なし）→ Router は unknown（destination_pay_unknown）。送出の試みは 1 回", async () => {
     const h = await harness();
@@ -348,7 +410,7 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     // 2 instance（isolate の模擬）: 同じ env から runtime をもう 1 つ（別の pay-kit = 別の replay store）。**同じ credential**を両方に同時に出す
     // （Router は本来 1 回しか出さない。fixture の blockhash は固定なので新しい購入は同じ取引になり、本物の chain と同じく「同じ取引は 1 回」の性質で観測する）。
     const second = await runtimeOf(h.env);
-    const seen2: Seen = { paths: [], authorizations: [], statuses: [] };
+    const seen2: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
     const provider2 = await serveProvider(second, seen2);
     closers.push(provider2.close);
     const chainBefore = Object.keys(h.rpc.state.transactions).length;
@@ -363,6 +425,20 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     // 資金は 1 回: 2 つ目は同じ取引を送出し直すが（送出の要求は +1）、chain の取引は増えない（同じ署名）。
     expect(Object.keys(h.rpc.state.transactions).length).toBe(chainBefore);
     expect(h.rpc.state.sent).toHaveLength(sentBefore + 1);
+    // **どちらも未消費**の 2 つの store（fresh な instance C・D）に同時に出す: 両方が 200 を返し得る = 本文は 2 回、資金は 1 回。
+    const [c, d] = await Promise.all([runtimeOf(h.env), runtimeOf(h.env)]);
+    const seenC: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
+    const seenD: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
+    const providerC = await serveProvider(c, seenC);
+    const providerD = await serveProvider(d, seenD);
+    closers.push(providerC.close, providerD.close);
+    const [rc, rd] = await Promise.all([
+      direct({ ...h, provider: providerC }, "/v1/eth/snapshot", { headers: { authorization: credential } }),
+      direct({ ...h, provider: providerD }, "/v1/eth/snapshot", { headers: { authorization: credential } }),
+    ]);
+    expect([rc.status, rd.status].filter((status) => status === 200).length).toBeGreaterThanOrEqual(1);
+    expect([rc.status, rd.status].every((status) => status === 200 || status === 402)).toBe(true);
+    expect(Object.keys(h.rpc.state.transactions).length).toBe(chainBefore);
   });
 
   test("Workers の入口: env の失敗は 500 misconfigured（値は出ない）、正しい env なら 402 を返す", async () => {

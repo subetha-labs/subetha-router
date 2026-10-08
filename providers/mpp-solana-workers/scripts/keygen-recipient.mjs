@@ -7,8 +7,8 @@
  *   node scripts/keygen-recipient.mjs <path-to-seed-file-outside-the-repository>
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { ed25519 } from "@noble/curves/ed25519";
 import { getAddressDecoder, getBase58Decoder } from "@solana/kit";
 
@@ -17,9 +17,21 @@ if (target === undefined || target === "") {
   process.stderr.write("usage: node scripts/keygen-recipient.mjs <path-to-seed-file-outside-the-repository>\n");
   process.exit(2);
 }
-const resolved = resolve(target);
-// このパッケージは <repo>/providers/mpp-solana-workers にある: リポジトリの根の下は拒む。
-const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+/** 実在する最も近い祖先を実パスに直してから残りを足す（symlink でリポジトリの中を指すパスを見抜く）。 */
+function canonical(path) {
+  const parts = [];
+  let current = resolve(path);
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    parts.unshift(current.slice(parent.length + 1));
+    current = parent;
+  }
+  return join(realpathSync(current), ...parts);
+}
+const resolved = canonical(target);
+// このパッケージは <repo>/providers/mpp-solana-workers にある: リポジトリの根の下は拒む（根も実パスで）。
+const repoRoot = realpathSync(resolve(import.meta.dirname, "..", "..", ".."));
 if (resolved === repoRoot || resolved.startsWith(`${repoRoot}${sep}`)) {
   process.stderr.write("refusing to write the seed inside the repository\n");
   process.exit(1);

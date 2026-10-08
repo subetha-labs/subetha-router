@@ -61,7 +61,9 @@ export interface ProviderEnv {
   readonly DATA_URL?: string;
 }
 
-/** 秘密を含まない設定。 */
+/**
+ * 鍵・HMAC の秘密を含まない設定。`rpcUrl` は owner の RPC の URL で、鍵を path に埋めた形があり得る: log には出さない（`log.ts` の伏せ字）、応答にも出さない。
+ */
 export interface ProviderConfig {
   readonly payTo: string;
   readonly feePayerPubkey: string;
