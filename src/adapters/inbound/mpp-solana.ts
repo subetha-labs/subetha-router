@@ -349,6 +349,12 @@ export interface MppSolanaInboundOptions {
   readonly onDiagnostic?: (code: string) => void;
   /** 時刻（ms。verify の証拠の保持の期限の掃除に）。既定 `Date.now`。 */
   readonly now?: () => number;
+  /** 試験だけ（中断の停止点。`docs/mpp-solana-tasks.md` M5）: `transaction` 型の送出の前・後、両型の settled を返す直前。 */
+  readonly hooksForTest?: {
+    beforeSend?(): void;
+    afterSend?(): void;
+    beforeSettled?(): void;
+  };
 }
 
 export type MppSolanaInbound = InboundRail & { startup(): Promise<void> };
@@ -410,6 +416,7 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
   const followUp = { ...MPP_SOLANA_FOLLOW_UP_DEFAULTS, ...options.followUp };
   const rpcTimeoutMs = options.rpcTimeoutMs ?? MPP_SOLANA_RPC_TIMEOUT_MS;
   const rpc = options.rpc;
+  const hooks = options.hooksForTest ?? {};
 
   /**
    * verify が通った credential の証拠（offer の nonce と wire の hash に束縛）。settle はこれを使い、**検査をやり直さない**
@@ -560,12 +567,14 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
     const base64 = Buffer.from(bytes).toString("base64");
     let sent: Record<string, unknown> | undefined;
     let sendFailed = false;
+    hooks.beforeSend?.();
     try {
       sent = await rpcCall("sendTransaction", [base64, { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 0 }], routeId, "mpp_solana_send", Math.min(rpcTimeoutMs, remaining()));
     } catch (error) {
       rpc.transport.report(error, { routeId, operation: "mpp_solana_send" });
       sendFailed = true;
     }
+    hooks.afterSend?.();
     const followed = async (): Promise<SettleResult> => {
       const start = clock();
       const result = await followSvmSignature({
@@ -582,7 +591,10 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
         searchTransactionHistory: true,
         maxPolls: followUp.maxPolls,
       });
-      if (result === "settled") return { outcome: "settled", txRef: signature };
+      if (result === "settled") {
+        hooks.beforeSettled?.();
+        return { outcome: "settled", txRef: signature };
+      }
       if (result === "failed") {
         options.onDiagnostic?.("mpp_solana_tx_failed_on_chain");
         return { outcome: "rejected", reason: "source_rejected" };
@@ -600,7 +612,10 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
       } catch (error) {
         rpc.transport.report(error, { routeId, operation: "mpp_solana_send_recovery" });
       }
-      if (status === "settled") return { outcome: "settled", txRef: signature };
+      if (status === "settled") {
+        hooks.beforeSettled?.();
+        return { outcome: "settled", txRef: signature };
+      }
       if (status === "failed") {
         options.onDiagnostic?.("mpp_solana_tx_failed_on_chain");
         return { outcome: "rejected", reason: "source_rejected" };
@@ -687,6 +702,7 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
         held = { kind: checked.kind, check: checked.check, bytes: checked.bytes };
       }
       if (held.kind === "signature") {
+        hooks.beforeSettled?.();
         return { outcome: "settled", txRef: held.check.signature };
       }
       return settleTransaction(held.bytes, held.check.signature, routeId);

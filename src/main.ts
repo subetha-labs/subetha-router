@@ -18,7 +18,7 @@ import { createMppInbound } from "./adapters/inbound/mpp.js";
 import { createX402Inbound, type X402FacilitatorKind } from "./adapters/inbound/x402.js";
 import { createX402SvmInbound, type SvmInboundPolicy } from "./adapters/inbound/x402-svm.js";
 import { resolveSvmInboundPolicy } from "./adapters/inbound/x402-svm-startup.js";
-import { ConsumedSignaturesHolder, createMppSolanaInbound, type MppSolanaInbound } from "./adapters/inbound/mpp-solana.js";
+import { ConsumedSignaturesHolder, createMppSolanaInbound, type MppSolanaInbound, type MppSolanaInboundOptions } from "./adapters/inbound/mpp-solana.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
@@ -110,6 +110,8 @@ export interface RouterCapabilities {
    * 本番の入口は渡さない。adapter の検査の順序は変わらない（hook は検査の後の停止点）。
    */
   readonly svmOutboundHooksForTest?: X402SvmOutboundOptions["hooksForTest"];
+  /** 試験だけ: MPP Solana 受信の停止点（`docs/mpp-solana-tasks.md` M5 の中断）。 */
+  readonly mppSolanaInboundHooksForTest?: MppSolanaInboundOptions["hooksForTest"];
   /**
    * 能力が接続する依存先（送信 MPP の RPC など）の URL。動的上流 URL の**拒否ホスト**に入れる（設計 §7.4）。
    * 起動時の確認で、MPP 能力の client の RPC ホストがここに含まれていなければ起動を止める。
@@ -809,6 +811,7 @@ export function composeRails(
           rpc: { url: solanaRpcUrl!, transport: svmRpcTransportOf(staticHooks, inboundLoopback, report) },
           consumed: consumedSignatures,
           onDiagnostic: (code) => note(`router: solana mpp diagnostic ${code} (${at})`),
+          ...(capabilities.mppSolanaInboundHooksForTest === undefined ? {} : { hooksForTest: capabilities.mppSolanaInboundHooksForTest }),
         });
         solanaMppRails.set(key, created);
         startupChecks.push(() => created.startup());

@@ -37,6 +37,9 @@ import { startSolanaRpc, type SolanaRpcFixture } from "../fixtures/solana-rpc.js
 import { startSvmFacilitator, type SvmFacilitator } from "../fixtures/svm-facilitator.js";
 import { createSvmTestPayer, type SvmPayerBuildOptions } from "../fixtures/svm-payer.js";
 import { startSvmUpstream, type SvmUpstream } from "../fixtures/svm-upstream.js";
+import { createMppSolanaTestPayer } from "../fixtures/mpp-solana-payer.js";
+import { startMppSolanaUpstream, type MppSolanaUpstream } from "../fixtures/mpp-solana-upstream.js";
+import type { InboundOffer } from "../../src/ports/inbound.js";
 import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
 
 vi.setConfig({ testTimeout: 60_000 });
@@ -56,7 +59,7 @@ const PATHUSD = MPP_FIXTURE_CURRENCY;
 const BASE_RECEIVER = "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405";
 
 /** TLS の fixture の名前（`provider.test` 系は provider の証明書、`other.test` 系は other の証明書）。 */
-const HOSTS = { x402: "provider.test", mpp: "mpp.provider.test", circle: "facilitator.provider.test", svm: "static.provider.test", solRpc: "rpc.provider.test", legacy: "facilitator.other.test", tempoRpc: "rpc.other.test", arcProvider: "arc.provider.test", solProvider: "sol.provider.test" } as const;
+const HOSTS = { x402: "provider.test", mpp: "mpp.provider.test", circle: "facilitator.provider.test", svm: "static.provider.test", solRpc: "rpc.provider.test", legacy: "facilitator.other.test", tempoRpc: "rpc.other.test", arcProvider: "arc.provider.test", solProvider: "sol.provider.test" , solMppProvider: "solmpp.provider.test" } as const;
 const ARC_PROVIDER = "0xAF42CFfe4B35A05098613d962aF43CDc43fBb4Ea";
 const ARC_URL = `https://${HOSTS.arcProvider}/v1/price?symbol=ETH`;
 const SOL_URL = `https://${HOSTS.solProvider}/v1/price?symbol=ETH`;
@@ -66,9 +69,12 @@ const X402_URL = `https://${HOSTS.x402}/v1/price?symbol=ETH`;
 const MPP_URL = `https://${HOSTS.mpp}/v1/price`;
 const STATIC_X402_URL = `https://${HOSTS.x402}/v1/static`;
 const STATIC_MPP_URL = `https://${HOSTS.mpp}/v1/static`;
+/** MPP Solana の Provider D（pay-kit の server の fixture）。 */
+const SOLMPP_URL = `https://${HOSTS.solMppProvider}/v1/price?symbol=ETH`;
+const STATIC_SOLMPP_URL = `https://${HOSTS.solMppProvider}/v1/static`;
 
-const ROUTES = { arcX402: "arc-x402", arcMpp: "arc-mpp", solX402: "sol-x402", solMpp: "sol-mpp", base: "base", baseArc: "base-arc", tempoSol: "tempo-sol" } as const;
-const PROFILES = { arcX402: "dyn-arc-to-x402", arcMpp: "dyn-arc-to-mpp", solX402: "dyn-sol-to-x402", solMpp: "dyn-sol-to-mpp", baseMpp: "dyn-x402-to-mpp", tempoX402: "dyn-mpp-to-x402", x402Arc: "dyn-x402-to-arc", mppArc: "dyn-mpp-to-arc", x402Sol: "dyn-x402-to-sol", mppSol: "dyn-mpp-to-sol" } as const;
+const ROUTES = { arcX402: "arc-x402", arcMpp: "arc-mpp", solX402: "sol-x402", solMpp: "sol-mpp", base: "base", baseArc: "base-arc", tempoSol: "tempo-sol" , solmppX402: "solmpp-x402", solmppMpp: "solmpp-mpp", baseSolmpp: "base-solmpp", tempoSolmpp: "tempo-solmpp" } as const;
+const PROFILES = { arcX402: "dyn-arc-to-x402", arcMpp: "dyn-arc-to-mpp", solX402: "dyn-sol-to-x402", solMpp: "dyn-sol-to-mpp", baseMpp: "dyn-x402-to-mpp", tempoX402: "dyn-mpp-to-x402", x402Arc: "dyn-x402-to-arc", mppArc: "dyn-mpp-to-arc", x402Sol: "dyn-x402-to-sol", mppSol: "dyn-mpp-to-sol" , solmppX402: "dyn-solmpp-to-x402", solmppMpp: "dyn-solmpp-to-mpp", solmppArc: "dyn-solmpp-to-arc", solmppSol: "dyn-solmpp-to-sol", x402Solmpp: "dyn-x402-to-solmpp", mppSolmpp: "dyn-mpp-to-solmpp", arcSolmpp: "dyn-arc-to-solmpp", solSolmpp: "dyn-sol-to-solmpp" } as const;
 
 let TLS: TlsMaterial;
 let owner: string;
@@ -80,6 +86,9 @@ let solSigner: ReturnType<typeof createRealSvmCapability>;
 let solRouterAta: string;
 let solProvider: string;
 let solProviderAta: string;
+/** MPP Solana の Provider D の受取 owner と ATA。 */
+let solMppProviderOwner: string;
+let solMppProviderAta: string;
 async function ataOf(ownerAddress: string): Promise<string> {
   return String((await findAssociatedTokenPda({ mint: address(MINT), owner: address(ownerAddress), tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
 }
@@ -94,6 +103,8 @@ beforeAll(async () => {
   solRouterAta = await ataOf(solSigner.address);
   solProvider = String((await generateKeyPairSigner()).address);
   solProviderAta = await ataOf(solProvider);
+  solMppProviderOwner = String((await generateKeyPairSigner()).address);
+  solMppProviderAta = await ataOf(solMppProviderOwner);
 });
 afterAll(() => TLS.cleanup());
 
@@ -105,6 +116,9 @@ interface Fixtures {
   readonly circle: CircleFacilitator;
   svm: SvmFacilitator;
   readonly solRpc: SolanaRpcFixture;
+  /** pay-kit（payer の client と Provider D の server）が使う RPC の口（平文 http。chain の state は `solRpc` と共有、要求は別に数える）。 */
+  readonly solRpcPlain: SolanaRpcFixture;
+  readonly solMppProvider: MppSolanaUpstream;
   readonly legacy: VerifyingFacilitator;
   readonly tempoRpc: TempoRpc;
   readonly ports: Map<string, number>;
@@ -149,8 +163,13 @@ async function startFixtures(): Promise<Fixtures> {
   const svm = await startSvmFacilitator(TLS, SOL, undefined, HOSTS.svm);
   closers.push(svm.close);
   // Router の ATA（送信元。残高 1,000,000）・受信の受取 ATA・Solana の Provider の ATA。
-  const solRpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls: TLS, atas: [{ address: ata, owner }, { address: solRouterAta, owner: solSigner.address, amount: "1000000" }, { address: solProviderAta, owner: solProvider }] });
+  const solRpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls: TLS, atas: [{ address: ata, owner }, { address: solRouterAta, owner: solSigner.address, amount: "1000000" }, { address: solProviderAta, owner: solProvider }, { address: solMppProviderAta, owner: solMppProviderOwner }] });
   closers.push(solRpc.close);
+  const solRpcPlain = await startSolanaRpc({ mint: MINT, decimals: 6, shareStateWith: solRpc });
+  closers.push(solRpcPlain.close);
+  // Provider D（MPP Solana。本物の pay-kit の server、pull、externalId あり）。
+  const solMppProvider = await startMppSolanaUpstream({ rpcUrl: solRpcPlain.url, feePayer: true, recipient: solMppProviderOwner, tls: TLS, externalId: "order-m5" });
+  closers.push(solMppProvider.close);
   // 名前は provider.test の証明書の SAN（arc.・sol. を fixture に足した。other.test は拒否ホストの接尾辞に当たる）。
   const arcProvider = await startX402Upstream(TLS, HOSTS.arcProvider);
   closers.push(arcProvider.close);
@@ -171,8 +190,9 @@ async function startFixtures(): Promise<Fixtures> {
     [HOSTS.tempoRpc, tempoRpc.port],
     [HOSTS.arcProvider, arcProvider.port],
     [HOSTS.solProvider, solProviderUpstream.port],
+    [HOSTS.solMppProvider, solMppProvider.port],
   ]);
-  return { x402, arcProvider, solProvider: solProviderUpstream, mpp, circle, svm, solRpc, legacy, tempoRpc, ports, dialed: [] };
+  return { x402, arcProvider, solProvider: solProviderUpstream, mpp, circle, svm, solRpc, solRpcPlain, solMppProvider, legacy, tempoRpc, ports, dialed: [] };
 }
 
 function hooksOf(fixtures: Fixtures): DynamicTransportHooks {
@@ -214,11 +234,11 @@ interface RouterOptions {
   readonly oldMaxPerPurchase?: string;
 }
 
-function staticRoute(routeId: string, source: { network: string; asset: string; payTo: string; rail?: "x402" | "mpp" }, destination: "x402" | "mpp" | "arc" | "sol"): Record<string, unknown> {
+function staticRoute(routeId: string, source: { network: string; asset: string; payTo: string; rail?: "x402" | "mpp" }, destination: "x402" | "mpp" | "arc" | "sol" | "solmpp"): Record<string, unknown> {
   return {
     routeId,
     canonicalPath: `/v1/routes/${routeId}/resource`,
-    rail: destination === "mpp" ? "mpp" : "x402",
+    rail: destination === "mpp" || destination === "solmpp" ? "mpp" : "x402",
     sourceRail: source.rail ?? "x402",
     source: { amount: "10000", asset: source.asset, decimals: 6, network: source.network, payTo: source.payTo },
     destination:
@@ -228,16 +248,18 @@ function staticRoute(routeId: string, source: { network: string; asset: string; 
           ? { scheme: "exact", network: ARC, asset: ARC_USDC, payTo: ARC_PROVIDER }
           : destination === "sol"
             ? { scheme: "exact", network: SOL, asset: MINT, payTo: solProvider }
-            : { scheme: "tempo/charge", network: TEMPO, asset: PATHUSD, payTo: MPP_FIXTURE_RECIPIENT },
+            : destination === "solmpp"
+              ? { scheme: "solana/charge", network: SOL, asset: MINT, payTo: solMppProviderOwner }
+              : { scheme: "tempo/charge", network: TEMPO, asset: PATHUSD, payTo: MPP_FIXTURE_RECIPIENT },
   };
 }
 
-function profile(profileId: string, source: { rail: "x402" | "mpp"; network: string; asset: string; payTo: string }, destination: "x402" | "mpp" | "arc" | "sol"): Record<string, unknown> {
+function profile(profileId: string, source: { rail: "x402" | "mpp"; network: string; asset: string; payTo: string }, destination: "x402" | "mpp" | "arc" | "sol" | "solmpp"): Record<string, unknown> {
   return {
     profileId,
     sourceRail: source.rail,
     source: { network: source.network, asset: source.asset, decimals: 6, payTo: source.payTo },
-    rail: destination === "mpp" ? "mpp" : "x402",
+    rail: destination === "mpp" || destination === "solmpp" ? "mpp" : "x402",
     destination:
       destination === "x402"
         ? { scheme: "exact", network: BASE, asset: USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" } }
@@ -245,7 +267,9 @@ function profile(profileId: string, source: { rail: "x402" | "mpp"; network: str
           ? { scheme: "exact", network: ARC, asset: ARC_USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" } }
           : destination === "sol"
             ? { scheme: "exact", network: SOL, asset: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM_ADDRESS }
-            : { scheme: "tempo/charge", network: TEMPO, asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "5000", feeMargin: 20_000 },
+            : destination === "solmpp"
+              ? { scheme: "solana/charge", network: SOL, asset: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM_ADDRESS }
+              : { scheme: "tempo/charge", network: TEMPO, asset: PATHUSD, decimals: 6, feeAsset: PATHUSD, maxFee: "5000", feeMargin: 20_000 },
     par: true,
     maxUpstreamAmount: "10000",
     fee: { flat: "1000", bps: 0, min: "1000" },
@@ -261,6 +285,8 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
   const sol = { network: SOL, asset: MINT, payTo: owner };
   const base = { network: BASE, asset: options.baseSourceAsset ?? USDC, payTo: BASE_RECEIVER };
   const tempo = { network: TEMPO, asset: PATHUSD, payTo: BASE_RECEIVER, rail: "mpp" as const };
+  /** 受信 MPP Solana（受取 owner は x402 Solana 受信と同じ）。 */
+  const solMpp = { network: SOL, asset: MINT, payTo: owner, rail: "mpp" as const };
   const routes = [
     ...(legacy
       ? []
@@ -272,11 +298,17 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
           // 送信（D-12）: 静的 O-1 Base → Arc、O-4 Tempo → Solana。
           staticRoute(ROUTES.baseArc, base, "arc"),
           staticRoute(ROUTES.tempoSol, tempo, "sol"),
+          // MPP Solana（行列 §7）: 静的 I-1・I-2（受信 MPP Solana）、O-7・O-8（送信 MPP Solana）。
+          staticRoute(ROUTES.solmppX402, solMpp, "x402"),
+          staticRoute(ROUTES.solmppMpp, solMpp, "mpp"),
+          staticRoute(ROUTES.baseSolmpp, base, "solmpp"),
+          staticRoute(ROUTES.tempoSolmpp, tempo, "solmpp"),
         ]),
     staticRoute(ROUTES.base, base, "x402"),
   ];
   const upstreamOf = (route: Record<string, unknown>): string => {
     const destination = route["destination"] as { network: string };
+    if (route["rail"] === "mpp" && destination.network === SOL) return STATIC_SOLMPP_URL;
     if (route["rail"] === "mpp") return STATIC_MPP_URL;
     if (destination.network === ARC) return STATIC_ARC_URL;
     if (destination.network === SOL) return STATIC_SOL_URL;
@@ -307,6 +339,15 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
           [PROFILES.mppArc]: profile(PROFILES.mppArc, { ...tempo }, "arc"),
           [PROFILES.x402Sol]: { ...profile(PROFILES.x402Sol, { rail: "x402", ...base, asset: USDC }, "sol"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
           [PROFILES.mppSol]: { ...profile(PROFILES.mppSol, { ...tempo }, "sol"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
+          // MPP Solana（行列 §7）: 動的 I-1〜I-4（受信 MPP Solana）、O-7〜O-10（送信 MPP Solana）。
+          [PROFILES.solmppX402]: profile(PROFILES.solmppX402, { ...solMpp }, "x402"),
+          [PROFILES.solmppMpp]: profile(PROFILES.solmppMpp, { ...solMpp }, "mpp"),
+          [PROFILES.solmppArc]: profile(PROFILES.solmppArc, { ...solMpp }, "arc"),
+          [PROFILES.solmppSol]: { ...profile(PROFILES.solmppSol, { ...solMpp }, "sol"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
+          [PROFILES.x402Solmpp]: profile(PROFILES.x402Solmpp, { rail: "x402", ...base, asset: USDC }, "solmpp"),
+          [PROFILES.mppSolmpp]: profile(PROFILES.mppSolmpp, { ...tempo }, "solmpp"),
+          [PROFILES.arcSolmpp]: profile(PROFILES.arcSolmpp, { rail: "x402", ...arc, asset: ARC_USDC }, "solmpp"),
+          [PROFILES.solSolmpp]: { ...profile(PROFILES.solSolmpp, { rail: "x402", ...sol }, "solmpp"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
         }),
     [PROFILES.baseMpp]: profile(PROFILES.baseMpp, { rail: "x402", ...base, asset: USDC }, "mpp"),
     [PROFILES.tempoX402]: profile(PROFILES.tempoX402, { rail: "mpp", network: TEMPO, asset: PATHUSD, payTo: BASE_RECEIVER }, "x402"),
@@ -382,6 +423,8 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
     outbound: rails.outbound,
     note: (message) => notes.push(message),
     dynamic: { ledgerDir: path.join(dir, "dynamic-quotes"), ...dynamicCoreOptionsOf(rails.dynamic!, capabilities, config) },
+    // 本番の `startRouter` と同じ: journal の消費済み署名を MPP Solana 受信に見せる（`docs/mpp-solana-design.md` §2.3）。
+    onStoreLoaded: rails.bindConsumed,
   });
   const server = await startHttpServer({ core, config: config.router, canonicalBaseUrl: "https://router.test", principals: config.principals, host: "127.0.0.1", port: 0 });
   const baseUrl = `http://127.0.0.1:${server.port}`;
@@ -440,8 +483,17 @@ async function svmCredential(quote: QuoteView, options: SvmPayerBuildOptions = {
 }
 
 /** 呼び出し側: quote の source の network に応じた credential（EVM は署名だけ、Solana は部分署名だけ、MPP は fixture の RPC に実際に送金）。 */
-async function credentialFor(fixtures: Fixtures, quote: QuoteView): Promise<string> {
+async function credentialFor(fixtures: Fixtures, quote: QuoteView, solMppMode: "transaction" | "signature" = "transaction"): Promise<string> {
   const offer = offerOf(quote);
+  if (offer.network === SOL && (offer as unknown as { scheme: string }).scheme === "solana/charge") {
+    // 受信 MPP Solana: 本物の pay-kit の client（`transaction` 型 = Router が送出 / `signature` 型 = payer が fixture の RPC に送出済み）。
+    const payer = await createMppSolanaTestPayer({ rpcUrl: fixtures.solRpcPlain.url });
+    try {
+      return encode(await payer.credentialFor(offer as unknown as InboundOffer, solMppMode));
+    } finally {
+      await payer.close();
+    }
+  }
   if (offer.network === ARC) return createX402Payer(generatePrivateKey()).credentialFor(offer as never, 5042002);
   if (offer.network === BASE) return createX402Payer(generatePrivateKey()).credentialFor(offer as never, 84532);
   if (offer.network === SOL) return svmCredential(quote);
@@ -457,9 +509,12 @@ async function staticQuote(router: Router, routeId: string, requestId: string): 
 }
 
 async function dynamicQuote(router: Router, profileId: string, requestId: string): Promise<QuoteView> {
-  const url = profileId.endsWith("-to-mpp") ? MPP_URL : profileId.endsWith("-to-arc") ? ARC_URL : profileId.endsWith("-to-sol") ? SOL_URL : X402_URL;
+  const url = profileId.endsWith("-to-solmpp") ? SOLMPP_URL : profileId.endsWith("-to-mpp") ? MPP_URL : profileId.endsWith("-to-arc") ? ARC_URL : profileId.endsWith("-to-sol") ? SOL_URL : X402_URL;
   const result = await router.client().quoteUrl({ profileId, url, requestId });
-  if (!result.ok) throw new Error(`quote failed: ${result.error}`);
+  if (!result.ok) {
+    const direct = await router.core.quote({ principalId: "judge", requestId: `${requestId}-dbg`, routeId: profileId, upstream: { url }, source: "judge" });
+    throw new Error(`quote failed: ${result.error} core=${JSON.stringify(direct)}`);
+  }
   return result.quote;
 }
 
@@ -538,9 +593,10 @@ describe("本番と同じ構成で、Arc と Solana から x402 と MPP の上�
     expect(calls.circle).toEqual(source === "arc" ? { verify: 1, settle: 1 } : { verify: 0, settle: 0 });
     expect(calls.svm).toEqual(source === "sol" ? { verify: 1, settle: 1, supported: 1 } : { verify: 0, settle: 0, supported: 1 });
     expect(calls.legacy).toEqual({ verify: 0, settle: 0 });
-    // 受信の settle の後の追跡は無い（fixture の confirm は ok）: 起動時の分を除いて RPC 0。起動時は受信の ATA 1 ＋ 送信の静的の宛先 ATA（tempo-sol）1。
+    // 受信の settle の後の追跡は無い（fixture の confirm は ok）: 起動時の分を除いて RPC 0。起動時は x402 受信の ATA 1 ＋ 送信の静的の宛先 ATA（tempo-sol）1 ＋
+    // MPP Solana 受信の ATA 1 ＋ MPP Solana 送信の静的の宛先 ATA（base-solmpp・tempo-solmpp）2 = 5。
     expect(solRpcCallsSince(fixtures, router)).toBe(0);
-    expect(router.rpcCallsAtStart).toBe(2);
+    expect(router.rpcCallsAtStart).toBe(5);
     if (source === "arc") expect(fixtures.circle.seen.proofFailures).toEqual([]);
     expect(outboundCalls(fixtures)).toEqual(destination === "x402" ? { x402Payments: 1, mppSends: 0, mppCredentials: 0 } : { x402Payments: 0, mppSends: 1, mppCredentials: 1 });
     expect(providerPayments(fixtures)).toEqual({ arcPayments: 0, solPayments: 0 });
@@ -551,6 +607,100 @@ describe("本番と同じ構成で、Arc と Solana から x402 と MPP の上�
     const status = await router.client().status(quote.paymentId, quote.ownerKey);
     expect(status).toMatchObject({ found: true, projection: { status: "delivered" } });
     expect(journalEventsOf(router, quote.paymentId).at(-1)).toBe("delivered");
+  });
+});
+
+/* ------------------------------------------------------------------ MPP Solana（行列 §7、タスク M5） */
+
+describe("MPP Solana の行列（要件 §7）: 受信 MPP Solana（I-1〜I-4）と送信 MPP Solana（O-7〜O-10）が本番と同じ構成で delivered", () => {
+  type Source = "solmpp" | "base" | "tempo" | "arc" | "sol";
+  type Destination = "x402" | "mpp" | "arc" | "sol" | "solmpp";
+  const matrix: [string, "static" | "dynamic", string, Source, Destination, "transaction" | "signature"][] = [
+    ["I-1 MPP Solana → x402 Base（静的・transaction 型）", "static", ROUTES.solmppX402, "solmpp", "x402", "transaction"],
+    ["I-2 MPP Solana → MPP Tempo（静的・signature 型）", "static", ROUTES.solmppMpp, "solmpp", "mpp", "signature"],
+    ["O-7 x402 Base → MPP Solana（静的）", "static", ROUTES.baseSolmpp, "base", "solmpp", "transaction"],
+    ["O-8 MPP Tempo → MPP Solana（静的）", "static", ROUTES.tempoSolmpp, "tempo", "solmpp", "transaction"],
+    ["I-1 MPP Solana → x402 Base（動的・signature 型）", "dynamic", PROFILES.solmppX402, "solmpp", "x402", "signature"],
+    ["I-2 MPP Solana → MPP Tempo（動的・transaction 型）", "dynamic", PROFILES.solmppMpp, "solmpp", "mpp", "transaction"],
+    ["I-3 MPP Solana → x402 Arc（動的）", "dynamic", PROFILES.solmppArc, "solmpp", "arc", "transaction"],
+    ["I-4 MPP Solana → x402 Solana（動的。同じ USDC の区分を両レグで）", "dynamic", PROFILES.solmppSol, "solmpp", "sol", "transaction"],
+    ["O-7 x402 Base → MPP Solana（動的）", "dynamic", PROFILES.x402Solmpp, "base", "solmpp", "transaction"],
+    ["O-8 MPP Tempo → MPP Solana（動的）", "dynamic", PROFILES.mppSolmpp, "tempo", "solmpp", "transaction"],
+    ["O-9 x402 Arc → MPP Solana（動的）", "dynamic", PROFILES.arcSolmpp, "arc", "solmpp", "transaction"],
+    ["O-10 x402 Solana → MPP Solana（動的。同じ USDC の区分を両レグで）", "dynamic", PROFILES.solSolmpp, "sol", "solmpp", "transaction"],
+  ];
+  test.each(matrix)("%s: delivered。受信は該当のレールだけ、送信は 1 回（MPP Solana は pay-kit の server の本物の検証と共同署名）", async (_name, kind, id, source, destination, mode) => {
+    const fixtures = await startFixtures();
+    // 受信 MPP Solana（transaction 型）の追跡と pay-kit の server の確定待ち: 1 回目の status で confirmed。
+    fixtures.solRpc.state.signatureStatuses = ["confirmed"];
+    // I-4・O-10 は同じ区分に源（上流 10,000 + 手数料 1,000）と宛先 10,000 が落ちる = 21,000。1 件の上限をそれに合わせる（通算の試験は下）。
+    const router = await startRouter(fixtures, { solMaxPerPurchase: "21000" });
+    const quote = kind === "static" ? await staticQuote(router, id, "m1") : await dynamicQuote(router, id, "m1");
+    const offer = offerOf(quote);
+    const expectedSourceNetwork = { solmpp: SOL, base: BASE, tempo: TEMPO, arc: ARC, sol: SOL }[source];
+    expect(offer.network).toBe(expectedSourceNetwork);
+    if (source === "solmpp") {
+      expect((offer as unknown as { scheme: string }).scheme).toBe("solana/charge");
+      expect(offer.payTo).toBe(owner);
+      expect(offer.extra["fundsMoveOnCredential"]).toBe(true);
+      expect(typeof offer.extra["externalId"]).toBe("string");
+    }
+    if (destination === "solmpp") expect(quote.destination).toMatchObject({ network: SOL, asset: MINT });
+    const sentBefore = fixtures.solRpc.state.sent.length;
+    const result = await purchase(router, quote, await credentialFor(fixtures, quote, mode), "m1");
+    const expectedBody = destination === "x402" ? { price: 1 } : destination === "arc" ? { price: 2 } : destination === "solmpp" ? { ok: true, source: "mpp-solana-provider" } : destination === "sol" ? { ok: true, source: "svm-provider" } : { ok: true };
+    expect(result, JSON.stringify(result)).toMatchObject({ outcome: "delivered", snapshot: expectedBody });
+    // 受信: MPP Solana は facilitator を使わない（RPC だけ）。chain（fixture）に乗る取引: 受信 1 件（transaction 型は Router の送出、signature 型は payer の送出済み）+ 送信 MPP Solana なら pay-kit の共同署名 1 件。
+    const calls = inboundCalls(fixtures);
+    if (source === "solmpp") {
+      // SVM の facilitator の verify は x402 Solana の **Provider** が送信の検証に使う（I-4）。受信では使わない。
+      expect(calls.svm.verify).toBe(destination === "sol" ? 1 : 0);
+      expect(calls.circle.verify).toBe(0);
+      expect(calls.legacy.verify).toBe(0);
+    }
+    expect(fixtures.solRpc.state.sent.length).toBe(sentBefore + (source === "solmpp" ? 1 : 0) + (destination === "solmpp" ? 1 : 0));
+    // 送信: MPP Solana の Provider D は有料要求 1 件を受け、領収を出した。
+    expect(fixtures.solMppProvider.seen.payCalls).toBe(destination === "solmpp" ? 1 : 0);
+    expect(fixtures.solMppProvider.seen.receipts).toHaveLength(destination === "solmpp" ? 1 : 0);
+    // 結果の保存と再読取（動的は ownerKey つき）。
+    const status = await router.client().status(quote.paymentId, quote.ownerKey);
+    expect(status).toMatchObject({ found: true, projection: { status: "delivered" } });
+    const signature = expect.stringMatching(/^[1-9A-HJ-NP-Za-km-z]{64,88}$/);
+    if (destination === "solmpp") expect(status).toMatchObject({ projection: { destination: { txRef: signature } } });
+    if (source === "solmpp") expect(status).toMatchObject({ projection: { source: { txRef: signature } } });
+    expect(journalEventsOf(router, quote.paymentId).at(-1)).toBe("delivered");
+    // 接続先: 受信 MPP Solana は Solana RPC だけ、送信 MPP Solana は Provider D と Solana RPC。
+    if (source === "solmpp") expect(fixtures.dialed).toContain(HOSTS.solRpc);
+    if (destination === "solmpp") expect(fixtures.dialed).toContain(HOSTS.solMppProvider);
+    if (source === "solmpp" && destination === "x402") expect(new Set(fixtures.dialed)).toEqual(new Set([HOSTS.solRpc, HOSTS.x402]));
+    if (source === "base" && destination === "solmpp") expect(new Set(fixtures.dialed)).toEqual(new Set([HOSTS.legacy, HOSTS.solMppProvider, HOSTS.solRpc]));
+  });
+
+  test("I-4・O-10: 同じ USDC（Solana）の区分を両レグで使う → 1 件の上限は両レグの合計（源 11,000 + 宛先 10,000 = 21,000: 20,999 で止まり、21,000 ちょうどで届く）、通算も両レグ分（上限 21,000 は 1 件で尽きる）", async () => {
+    const fixtures = await startFixtures();
+    fixtures.solRpc.state.signatureStatuses = ["confirmed"];
+    // 通算: 動的の Solana の区分 21,000 = I-4 の源 11,000（上流 10,000 + 手数料 1,000）+ 宛先 10,000。1 件で使い切る。
+    let router = await startRouter(fixtures, { dynamicMaxTotal: { sol: "21000" }, solMaxPerPurchase: "21000" });
+    const q1 = await dynamicQuote(router, PROFILES.solmppSol, "b1");
+    expect(await purchase(router, q1, await credentialFor(fixtures, q1), "b1")).toMatchObject({ outcome: "delivered" });
+    const q2 = await dynamicQuote(router, PROFILES.solSolmpp, "b2");
+    expect(await purchase(router, q2, await credentialFor(fixtures, q2), "b2")).toMatchObject({ outcome: "rejected", error: "bucket_limit" });
+    expect(fixtures.solMppProvider.seen.payCalls).toBe(0);
+    await router.close();
+    closers.splice(closers.indexOf(router.close), 1);
+    // 1 件の上限: 20,999 では両レグの合計 21,000 が超える（O-10 も I-4 も）。動的は quote の段で見る（dynamic.ts の per_purchase_limit）。
+    router = await startRouter(fixtures, { solMaxPerPurchase: "20999" });
+    expect(await router.client().quoteUrl({ profileId: PROFILES.solSolmpp, url: SOLMPP_URL, requestId: "b3" })).toMatchObject({ ok: false });
+    expect(await router.core.quote({ principalId: "judge", requestId: "b3-core", routeId: PROFILES.solSolmpp, upstream: { url: SOLMPP_URL }, source: "judge" })).toMatchObject({ ok: false, code: "quote_failed", reason: "per_purchase_limit" });
+    expect(await router.core.quote({ principalId: "judge", requestId: "b4-core", routeId: PROFILES.solmppSol, upstream: { url: SOL_URL }, source: "judge" })).toMatchObject({ ok: false, code: "quote_failed", reason: "per_purchase_limit" });
+    expect(fixtures.solMppProvider.seen.payCalls).toBe(0);
+    await router.close();
+    closers.splice(closers.indexOf(router.close), 1);
+    // 境界: 21,000 ちょうどは届く。
+    router = await startRouter(fixtures, { solMaxPerPurchase: "21000" });
+    const q5 = await dynamicQuote(router, PROFILES.solSolmpp, "b5");
+    expect(await purchase(router, q5, await credentialFor(fixtures, q5), "b5")).toMatchObject({ outcome: "delivered" });
+    expect(fixtures.solMppProvider.seen.payCalls).toBe(1);
   });
 });
 
@@ -955,7 +1105,7 @@ describe("T11: Solana の settle が settlement_pending（署名つき）でも�
     const polls = fixtures.solRpc.calls.filter((c) => c.method === "getSignatureStatuses");
     expect(polls).toHaveLength(2);
     // 起動時の RPC（受信の ATA 1・送信の静的の宛先 ATA 1）の後は追跡の 2 回だけ。
-    expect(router.rpcCallsAtStart).toBe(2);
+    expect(router.rpcCallsAtStart).toBe(5); // 起動時の ATA の読み（x402 受信 1・tempo-sol 1・MPP Solana 受信 1・base-solmpp/tempo-solmpp 2）
     expect(fixtures.solRpc.calls.slice(router.rpcCallsAtStart).map((c) => c.method)).toEqual(["getSignatureStatuses", "getSignatureStatuses"]);
     expect(fixtures.dialed.slice(dialedBefore)).toContain(HOSTS.solRpc);
     expect(router.notes.filter((n) => n.includes("svm_settle_followed_up"))).toEqual([`router: facilitator diagnostic svm_settle_followed_up (${kind === "static" ? `routes.${id}` : `dynamic.profiles.${id}`})`]);
