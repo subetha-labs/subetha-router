@@ -270,6 +270,7 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "source_rejected",
   "source_settle_unknown",
   "source_verify_unavailable",
+  "source_paid_unsettled",
   "destination_rejected",
   "destination_pay_unknown",
   "paid_data_unavailable",
@@ -641,7 +642,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
     await store.append(intent.paymentId, "source_pending", {});
 
-    let verified: { isValid: boolean };
+    let verified: { isValid: boolean; fundsMoved?: boolean };
     try {
       verified = await options.inbound.verify(intent.source.offer, credential, { routeId: intent.routeId });
     } catch {
@@ -664,12 +665,23 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "verify_failed" };
     }
 
+    /**
+     * verify が通った credential の資金が**既に動いている**か（adapter の `fundsMoved`、無ければ offer の `fundsMoveOnCredential`）。
+     * 動いているなら、ここから settle までの失敗（期限・予約）を `not_sent` = 未払いの公言にしない: 耐久的な `unknown`（`source_paid_unsettled`）。
+     */
+    const fundsMoved = verified.fundsMoved ?? intent.source.offer.extra["fundsMoveOnCredential"] === true;
+    const paidButUnsettled = async (): Promise<PurchaseOutcome> => {
+      await store.append(intent.paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled" });
+      return { paymentId: intent.paymentId, status: "unknown", terminalReason: "source_paid_unsettled" };
+    };
+
     // verify 中に時間が経っていても止められるよう、settle 直前に期限を再検査する。
     const beforeSettleMs = now();
     if (
       beforeSettleMs >= intent.approvalDeadlineMs ||
       beforeSettleMs >= intent.source.offer.extra.expiresAt * 1000
     ) {
+      if (fundsMoved) return paidButUnsettled();
       await store.append(intent.paymentId, "source_failed", {
         outcome: "not_sent",
         reason: "approval_expired",
@@ -704,6 +716,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       },
     });
     if (!reservation.ok) {
+      if (fundsMoved) return paidButUnsettled();
       await store.append(intent.paymentId, "source_failed", {
         outcome: "not_sent",
         reason: reservation.reason,
@@ -717,6 +730,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
      */
     const settleAtMs = now();
     if (settleAtMs >= intent.approvalDeadlineMs || settleAtMs >= intent.source.offer.extra.expiresAt * 1000) {
+      if (fundsMoved) return paidButUnsettled();
       await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired" });
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "approval_expired" };
     }

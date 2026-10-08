@@ -555,7 +555,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         }
       }
     }
-    let verified: { isValid: boolean };
+    let verified: { isValid: boolean; fundsMoved?: boolean };
     try {
       verified = await inbound.verify(intent.source.offer, credential, { routeId: intent.routeId });
     } catch {
@@ -609,6 +609,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     // 昇格と `source_pending` の追記（journal への待ち）の後、settle を呼ぶ直前にもう一度期限を見る（静的と同じ。受信 adapter の証拠の保持の根拠）。
     const settleAtMs = now();
     if (settleAtMs >= intent.approvalDeadlineMs || settleAtMs >= current.source.offer.extra.expiresAt * 1000) {
+      // 資金が既に動いた credential（adapter の `fundsMoved`、無ければ offer の `fundsMoveOnCredential`）は `not_sent` にしない: 耐久的な `unknown`。
+      const fundsMoved = verified.fundsMoved ?? current.source.offer.extra["fundsMoveOnCredential"] === true;
+      if (fundsMoved) {
+        await store.append(paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled" });
+        return { paymentId, status: "unknown", terminalReason: "source_paid_unsettled" };
+      }
       await store.append(paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired" });
       return awaiting("approval_expired");
     }

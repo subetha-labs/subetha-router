@@ -65,6 +65,8 @@ class SyntheticInbound implements InboundRail {
 
   /** 並行 quote が同じ nonce を受け取る状況を作るための固定値。 */
   fixedNonce?: string;
+  /** offer の `extra` に足す欄（例: `fundsMoveOnCredential: true` = credential の時点で資金が動く push 形の受信）。 */
+  extraPatch: Record<string, unknown> = {};
   /** 設定と食い違う offer を発行する adapter を再現する。 */
   offerOverride?: Partial<{
     amount: string;
@@ -101,6 +103,7 @@ class SyntheticInbound implements InboundRail {
         challengeNonce: `0xnonce${this.#issued}`,
         expiresAt: Math.floor(request.nowMs / 1000) + 60,
         routeBinding: this.offerOverride?.routeBinding ?? request.routeBinding,
+        ...this.extraPatch,
       },
     };
   }
@@ -398,6 +401,34 @@ test("preflight の理由は固定コードに正規化され、秘密を出さ�
   expect(await readFile(journalPath, "utf8")).not.toContain("s3cret");
   expect(inbound.verifyCalls).toBe(0);
   expect(inbound.settleCalls).toBe(0);
+});
+
+test("verify 中に承認期限を過ぎ、offer が fundsMoveOnCredential: true（push 形。adapter は fundsMoved を返さない）なら、not_sent ではなく耐久的な unknown（source_paid_unsettled）。settle は呼ばない", async () => {
+  let clock = 1_700_000_000_000;
+  const config: RouterConfig = { ...baseConfig(), approvalTtlMs: 30_000 };
+  const core = await createRouterCore({ journalPath, config, inbound, outbound, now: () => clock, nextPaymentId: () => "pay-1" });
+  opened.push(core);
+  inbound.extraPatch = { fundsMoveOnCredential: true };
+  try {
+    const quote = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+    expect(quote.ok).toBe(true);
+    if (!quote.ok) return;
+    expect(quote.source.offer.extra["fundsMoveOnCredential"]).toBe(true);
+    inbound.verifyImpl = async () => {
+      clock = quote.approval.deadlineMs;
+      return { isValid: true };
+    };
+    const result = await core.purchase(purchaseArgs(quote));
+    expect(result).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    expect(inbound.settleCalls).toBe(0);
+    expect(outbound.payCalls).toBe(0);
+    expect(core.status(quote.paymentId, "alice")).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    // 再提示も同じ終端（settle は呼ばれない）。
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    expect(inbound.settleCalls).toBe(0);
+  } finally {
+    inbound.extraPatch = {};
+  }
 });
 
 test("verify 中に承認期限を過ぎたら settle せず、未送信の終端として保存する", async () => {

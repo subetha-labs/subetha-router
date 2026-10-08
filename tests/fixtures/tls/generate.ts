@@ -32,7 +32,7 @@ export function generateTestTls(): TlsMaterial {
     for (const name of ["provider.test", "other.test"]) {
       openssl(dir, ["req", ...ec, "-keyout", `${name}.key`, "-out", `${name}.csr`, "-subj", `/CN=${name}`]);
       // 統合試験（T14）は 1 つの Router から複数の fixture（上流 2 つ・facilitator・RPC）へ出るので、両方の証明書に補助の名前も入れる。
-      writeFileSync(path.join(dir, `${name}.ext`), `subjectAltName=DNS:${name},DNS:mpp.${name},DNS:facilitator.${name},DNS:rpc.${name},DNS:static.${name},DNS:arc.${name},DNS:sol.${name}\nbasicConstraints=CA:FALSE\n`);
+      writeFileSync(path.join(dir, `${name}.ext`), `subjectAltName=DNS:${name},DNS:mpp.${name},DNS:facilitator.${name},DNS:rpc.${name},DNS:static.${name},DNS:arc.${name},DNS:sol.${name},DNS:solmpp.${name}\nbasicConstraints=CA:FALSE\n`);
       openssl(dir, ["x509", "-req", "-in", `${name}.csr`, "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", `${name}.pem`, "-days", "2", "-extfile", `${name}.ext`]);
     }
     openssl(dir, ["req", "-x509", ...ec, "-keyout", "untrusted.key", "-out", "untrusted.pem", "-days", "2", "-subj", "/CN=provider.test", "-addext", "subjectAltName=DNS:provider.test"]);

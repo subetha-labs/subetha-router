@@ -282,6 +282,42 @@ export type MppSolanaOutbound = OutboundRail & {
 export const MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS = 10_000;
 export const MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS = 45_000;
 export const MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS = 10_000;
+/**
+ * 動的の quote で確かめた宛先 ATA の存在の証拠（SR-M1: purchase の中の 402 の読み直しで存在を読み直さない。送る直前の再確認は別途、必ず読む）。
+ * 保持は **その ATA を宛先にした quote のうち最も遅い寿命**に合わせる: quote のたびに、その challenge の `expires`（無ければ 1 時間）+ 猶予 1 時間まで
+ * **延ばす**（当たりでも延ばす）。quote は challenge の期限を超えて購入できない（§4.3 の 2 で `destination_offer_expired`）ので、どの quote の
+ * 購入の中の読み直しも証拠の中にある。**数では捨てない**（有効な quote の証拠を押し出さない。期限の過ぎた証拠だけ掃く。数は宛先 ATA の数で有界）。
+ */
+export const MPP_SOLANA_ATA_EVIDENCE_GRACE_MS = 3_600_000;
+
+/** 宛先 ATA の存在の証拠（ATA → 保持の期限 = その ATA を宛先にした quote の最も遅い寿命）。純粋（試験は時計を差し替えて直接呼ぶ）。 */
+export interface AtaEvidence {
+  /** 証拠があれば `true` にして、この quote の寿命（`keepUntil`）まで延ばす。 */
+  has(ata: string, keepUntil: number): boolean;
+  /** 読んで存在した ATA を覚える（期限の過ぎた証拠はここで掃く。数では捨てない）。 */
+  add(ata: string, keepUntil: number): void;
+  readonly size: number;
+}
+
+export function createAtaEvidence(now: () => number): AtaEvidence {
+  const known = new Map<string, number>();
+  return {
+    has(ata, keepUntil) {
+      const until = known.get(ata);
+      if (until === undefined || until <= now()) return false;
+      if (keepUntil > until) known.set(ata, keepUntil);
+      return true;
+    },
+    add(ata, keepUntil) {
+      const nowMs = now();
+      for (const [k, v] of known) if (v <= nowMs) known.delete(k);
+      known.set(ata, Math.max(keepUntil, known.get(ata) ?? 0));
+    },
+    get size() {
+      return known.size;
+    },
+  };
+}
 
 class MppSolanaChallengeError extends Error {
   constructor(readonly reason: "url" | "status" | "unreadable") {
@@ -385,6 +421,16 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
     staticScheme: MPP_SOLANA_SCHEME,
   });
   const { ready, ataOf, rpcResult, ataExists, blockhashOf } = common;
+  /** quote で読んだ宛先 ATA の存在の証拠。`readChallenge` だけが使う（`pay` の 3 は常に読む）。 */
+  const ataEvidence = createAtaEvidence(now);
+  async function ataExistsForQuote(ata: string, owner: string, operation: string, routeId: string, challengeExpiresAt: number | undefined): Promise<boolean> {
+    const keepUntil = (challengeExpiresAt ?? now() + MPP_SOLANA_ATA_EVIDENCE_GRACE_MS) + MPP_SOLANA_ATA_EVIDENCE_GRACE_MS;
+    // 当たりなら、この quote の寿命まで延びる（前の quote の証拠が先に切れても、この quote の購入は証拠の中）。
+    if (ataEvidence.has(ata, keepUntil)) return true;
+    const exists = await ataExists(ata, owner, operation, routeId);
+    if (exists) ataEvidence.add(ata, keepUntil);
+    return exists;
+  }
 
   function policyOf(routeId: string): MppSolanaOutboundPolicy {
     const routerAta = ready();
@@ -474,7 +520,7 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
       return undefined;
     }
     if (checkMppSolanaChallengeAtas(view, policy, ata) !== undefined) return undefined;
-    if (checkExistence && !(await ataExists(ata, offer.payTo, operation, routeId))) return undefined;
+    if (checkExistence && !(await ataExistsForQuote(ata, offer.payTo, operation, routeId, view.expiresAt))) return undefined;
     return ata;
   }
 

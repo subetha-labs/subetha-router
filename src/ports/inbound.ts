@@ -52,7 +52,12 @@ export interface InboundRail {
    * この関数を持たない adapter では有料ライフサイクルを開始しない（fail closed）。
    */
   preflight(offer: InboundOffer, credential: PaymentCredential, nowMs: number): PreflightResult;
-  verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }>;
+  /**
+   * `fundsMoved`（任意）: この credential の資金が**既に動いた**と adapter が知っているか（MPP Solana の `signature` 型 = payer が送出済み）。
+   * 無ければ core は offer の `extra.fundsMoveOnCredential` で判断する。verify の後に settle へ進めない失敗（期限・予約）は、資金が動いた
+   * credential では `not_sent`（未払いの公言）にせず `unknown` に写す。
+   */
+  verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean; fundsMoved?: boolean }>;
   settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult>;
 }
 

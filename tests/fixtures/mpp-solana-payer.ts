@@ -13,6 +13,7 @@ import http from "node:http";
 
 import { Signer } from "@solana/pay-kit";
 import { createPayKitClient } from "@solana/pay-kit/client";
+import { getBase58Decoder } from "@solana/kit";
 import { Credential } from "mppx";
 
 import type { InboundOffer, PaymentCredential } from "../../src/ports/inbound.js";
@@ -23,6 +24,8 @@ export interface MppSolanaTestPayer {
   credentialFor(offer: InboundOffer, mode?: "transaction" | "signature"): Promise<PaymentCredential>;
   /** 直近の pay-kit の wire（`Authorization` の値）。 */
   readonly lastWire: () => string | undefined;
+  /** 直近の credential の取引の署名（`transaction` 型は tx の [0]、`signature` 型は送出した署名）= Router の `source.txRef` に一致すべき値。 */
+  readonly lastSignature: () => string | undefined;
   close(): Promise<void>;
 }
 
@@ -38,6 +41,7 @@ export async function createMppSolanaTestPayer(options: { readonly rpcUrl: strin
   const signer = payKitSigner.signer as unknown as Parameters<typeof createPayKitClient>[0]["signer"];
   const client = await createPayKitClient({ signer, rpcUrl: options.rpcUrl, network: "devnet", accept: ["mpp"] });
   let lastWire: string | undefined;
+  let lastSignature: string | undefined;
   let challengeHeader = "";
   const server = http.createServer((request, response) => {
     const authorization = request.headers["authorization"];
@@ -64,6 +68,7 @@ export async function createMppSolanaTestPayer(options: { readonly rpcUrl: strin
   return {
     address: String(signer.address),
     lastWire: () => lastWire,
+    lastSignature: () => lastSignature,
     async credentialFor(offer, mode = "transaction") {
       const serialized = offer.extra["challenge"];
       if (typeof serialized !== "string" || serialized === "") throw new Error("the offer carries no serialized challenge");
@@ -74,9 +79,13 @@ export async function createMppSolanaTestPayer(options: { readonly rpcUrl: strin
       const captured = (lastWire as string | undefined) ?? undefined;
       if (response.status !== 200 || captured === undefined) throw new Error(`pay-kit client did not pay (status ${response.status})`);
       let wire: string = captured;
+      const transactionBase64 = transactionOfWire(wire);
+      const bytes = Buffer.from(transactionBase64, "base64");
+      lastSignature = getBase58Decoder().decode(new Uint8Array(bytes.subarray(1, 65)));
       if (mode === "signature") {
         const decoded = Credential.deserialize(wire);
-        const signature = await broadcast(transactionOfWire(wire));
+        const signature = await broadcast(transactionBase64);
+        lastSignature = signature;
         wire = Credential.serialize({ ...decoded, payload: { type: "signature", signature } } as never);
       }
       return { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, credential: wire } };

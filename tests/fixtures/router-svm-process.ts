@@ -11,7 +11,8 @@
  * - `SUBETHA_TEST_CA_PATH`: 試験用 CA の PEM
  * - `SUBETHA_TEST_SVM_SEED`: base58 の 32 バイト seed（SVM の送信の鍵。試験の使い捨て）
  * - `SUBETHA_TEST_SIGN_LOG`: 署名のたびに 1 行（`{"at":<ms>,"bytes":<len>}`）を**同期で追記**する file（親が「停止前の回数」を数える）
- * - `SUBETHA_TEST_SVM_STOP_AT`: `afterReserve`／`afterSign`／`beforeSend` のどれかなら、その停止点で **自分に SIGKILL**（core の catch も終端の追記も通さない）
+ * - `SUBETHA_TEST_SVM_STOP_AT`: `afterReserve`／`afterSign`／`beforeSend`（SVM の送信）、`inboundBeforeSend`／`inboundAfterSend`／`inboundBeforeSettled`（MPP Solana の受信）の
+ *   どれかなら、その停止点で **自分に SIGKILL**（core の catch も終端の追記も通さない）
  */
 import { appendFileSync, readFileSync } from "node:fs";
 
@@ -71,6 +72,12 @@ const capabilities: RouterCapabilities = {
     afterReserve: () => stop("afterReserve"),
     afterSign: () => stop("afterSign"),
     beforeSend: () => stop("beforeSend"),
+  },
+  // MPP Solana 受信の停止点（タスク M5）: `transaction` 型の送出の前・後、両型の settled を返す直前。
+  mppSolanaInboundHooksForTest: {
+    beforeSend: () => stop("inboundBeforeSend"),
+    afterSend: () => stop("inboundAfterSend"),
+    beforeSettled: () => stop("inboundBeforeSettled"),
   },
 };
 
