@@ -438,6 +438,43 @@ AC-18 の続き（16:07Z）: 一覧は route 10・プロファイル 18 のま�
 `dyn-sol-to-solmpp`（Solana USDC/x402 11,000（`feePayer`・`memo` 付き）→ Provider D の URL、`destinationPayTo` は Provider D の受取、`fundsMoveOnCredential: false`）。これで **12 組すべてに 1 回の quote**（支払わない）。
 **MG（G-1″〜G-4″）はこれで完了**。公開の停止は 2 回の入れ替えで各約 10 秒。
 
+### 2e. 残っていた動的 6 組の実決済（G-5、2026-10-08 17:41Z〜17:52Z。**公開の Router `b-3606fb6` の hosted MCP を HTTPS で呼んだ。公開は止めていない**）
+
+AC-18 まで quote だけだった動的 6 組（`dyn-arc-to-x402`・`dyn-sol-to-mpp`・`dyn-solmpp-to-arc`・`dyn-solmpp-to-sol`・`dyn-arc-to-solmpp`・`dyn-sol-to-solmpp`）を、owner の承認（2026-10-08。6 件、各 11,000 base units
+= 上流 10,000 ＋ Router 手数料 1,000、総額の上限 110,000、x402 受信は資金が動かずに失敗したときだけ新しい quote で 1 回まで再試行、MPP 受信は再試行しない、使い捨て鍵 2 本の利用）のもと、
+`subetha_router_quote_url` → credential（`tools/sign-run.ts` = `npm run sign` の本体。鍵は手元）→ `subetha_router_purchase` → `subetha_router_status` を 1 件ずつ流した。payer は使い捨て: Arc testnet USDC は `0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1`
+（§2c の G-3 と同じ鍵）、Solana devnet USDC／SOL は `HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5`（ATA `6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y`。G-3・G-3″ と同じ鍵）。quote は 1 件ごとに新しい `requestId`（`g5-<label>-<UTC>`）で取り、
+driver（私的な `.claude_workflow/local/g5-purchase.ts`）が額 ≤ 11,000・profile・network・scheme・両レグの受取先を承認した表と照合してから鍵に触れる。上流は運用者の Provider（A・B・Arc Worker・Solana Worker・D）の公開 URL。
+
+| # | profile（受信 → 送信） | 結果 | 受信の tx（payer → Router の受取） | Router → Provider の tx | 所要 |
+|---|---|---|---|---|---|
+| 1 | `dyn-arc-to-x402`（Arc USDC/x402 → Provider A/Base x402）**1 回目** | **`paid_data_unavailable`**（`destination_rejected`） | Arc `0x2f1042…4b83`（block 66172881、`success`、11,000 → `0xAF42…`） | **無し**（attempt 1、領収なし。Provider A の残高は不変） | 9.7 秒 |
+| 1b | 同上、**再試行**（owner の承認、新しい quote、`wrangler tail` を流しながら） | delivered | Arc `0xf6f83b…3851`（block 66174073、`success`） | Base `0xf59336…2693`（block 47856819、`success`、10,000 → `0x9014…`、送出は x402.org の facilitator `0xd407…`） | 6.6 秒 |
+| 2 | `dyn-sol-to-mpp`（Solana USDC/x402 → Provider B/Tempo MPP） | delivered | Solana `tnJxCo…mzCV`（slot 508896497、finalized、11,000 → Router の ATA `7pjZ…`、fee payer は facilitator `CKPK…`、memo = quoteId） | Tempo `0x7878c5…9ca3`（block 38738512、`success`、10,000 → `0x9014…`。チェーン手数料 29 ≤ cap 158） | 4.7 秒 |
+| 3 | `dyn-solmpp-to-arc`（Solana USDC/MPP → Arc Worker/x402） | delivered | Solana `4o2XUt…MRCq`（slot 508896822、finalized、fee payer は payer、手数料 5,001 lamports、memo = challenge の `externalId`） | Arc `0xe2ceeb…dc72`（block 66173495、`success`、10,000 → `0x719e…`） | 7.8 秒 |
+| 4 | `dyn-solmpp-to-sol`（Solana USDC/MPP → Solana Worker/x402） | delivered | Solana `67BuiB…y6Db`（slot 508896984、finalized、11,000 → `7pjZ…`） | Solana `qFLeTp…9qHG`（slot 508897000、finalized、**別の取引**: Router の ATA `2mpw…` → Worker の ATA `Hnuscu…` 10,000、fee payer は facilitator、memo `subetha:<paymentId>`） | 5.6 秒 |
+| 5 | `dyn-arc-to-solmpp`（Arc USDC/x402 → Provider D/Solana MPP） | delivered | Arc `0xc8ba2f…ec23`（block 66173647、`success`） | Solana `qJesBo…6G1`（slot 508897184、finalized、`2mpw…` → Provider D の ATA `MUbNo…` 10,000、fee payer は D の `DAmvTY…`） | 8.9 秒 |
+| 6 | `dyn-sol-to-solmpp`（Solana USDC/x402 → Provider D/Solana MPP） | delivered | Solana `5ejVE4…ZoxB`（slot 508897289、finalized、fee payer は facilitator、memo = quoteId） | Solana `29vSAB…mXDx`（slot 508897305、finalized、**別の取引**、`2mpw…` → `MUbNo…` 10,000） | 6.9 秒 |
+
+**証拠**（すべて `.claude_workflow/local/` の ignored なファイル。鍵と `ownerKey` は別 file で、記録には入れていない）: purchase と status の応答 `g5-<label>.json`、チェーンの読取 `g5-<label>-chain.json`
+（`g5-verify.ts`。公開 RPC `sepolia.base.org`・`rpc.testnet.arc.io`・`rpc.moderato.tempo.xyz`・`api.devnet.solana.com` で receipt／`getSignatureStatuses(searchTransactionHistory)`＋`getTransaction` を読み、
+Transfer／`transferChecked` の送り手・受取・額・mint を上の表のとおり確認。Router の申告（journal の projection）とは独立）、残高 `g5-balances-{before,after,after2}.json`、status の再読取 `g5-status-reread.json`、承認の依頼 `g5-approval-request.md`。
+
+- **残高の差分**（17:38:58Z → 17:52:41Z、7 件分）: Arc payer −33,000（3 件）、Router の Arc 受取 `0xAF42…` +33,000、Router の Arc 送信 `0x5d78…` −10,000、Arc Worker `0x719e…` +10,000、Provider A（Base）+10,000（1b だけ。1 回目は +0）、
+  Router の Base 送信 −10,000、Provider B（Tempo）+10,000、Solana payer −44,000（4 件）と −10,002 lamports（MPP 受信 2 件の手数料）、Router の Solana 受取 ATA +44,000、Router の Solana 送信 ATA −30,000（3 件）、Solana Worker の ATA +10,000、Provider D の ATA +20,000。
+- **journal**（本番ホストの `journal.ndjson` を SSH で読取のみ。seq 140〜177）: delivered の 6 件は `created → source_pending → source_settled(txRef) → destination_pending(attempt 1) → delivered(txRef)`、1 回目の #1 は `created → source_pending → source_settled(txRef) → destination_pending(attempt 1) → dest_failed(rejected, destination_rejected)`。
+  Solana 宛の送信 3 件（#4 は x402、#5・#6 は MPP）は `destination_pending` の後に `destination_message_reserved` を挟む。txRef は status の projection と一致。
+- **再取得**: 保存した `paymentId`＋`ownerKey` で `subetha_router_status` を読み直すと 7 件とも purchase 時の projection と同じ（status・両レグの txRef）。`ownerKey` 無しは `found: false`（404）。
+- **Provider 側**: 各 Worker の `wrangler tail`（読取のみ）で、Router（egress `3.221.108.225`）からの 402 の読取と `payment-signature`／`Authorization` 付きの有料要求 200 を #1b・#3〜#6 で確認（#2 は tail の接続前で 402 の 2 件だけ）。
+- 本文は delivered の 6 件とも契約の 6 鍵（`providerId`・`market`・`dataSource`・`payment`・`fetchedAt`・`data`）。1 回目の #1 に本文は無い（`paid_data_unavailable`）。`proof` は `upstreamReceipt: "claimed"`・`onChainFinality: "not_checked"` のまま（Router は確定を確かめない。上の finalized／`success` はこの記録のための独立の読取）。
+- **#1 の 1 回目の失敗**: 受信の Arc の settle は成立（11,000 は Router の受取先に入り、開示どおり返金しない）。送信の attempt 1 で Provider A が 2.1 秒で領収なしの応答を返し、Router は `rejected` で止めて再署名しなかった
+  （`src/adapters/outbound/x402-dynamic.ts`: 領収が無く、2xx でも 5xx でもない応答は `rejected`。**実際の状態コードは記録されない**）。Router の送信の authorization はチェーンに出ていない（Provider A の残高 +0）。その 40 秒前には同じ profile の quote が 1 回 `quote_failed`（直後の再 quote は ok）。
+  **原因は未特定**: hosted の入口は上流の状態コードも理由も返さず journal にも無い。Provider A は Cloudflare Workers（observability 有効）なので、owner は dashboard の Workers Logs で 17:41:58Z〜17:42:01Z の要求を読める（この記録ではそこまで読んでいない）。
+  10 分後の再試行（1b）は同じコード・同じ設定で delivered。`b-3606fb6` の Base x402 送信は 1 回目の #1 が初回だった。
+- **quote の rate limit**（呼び出し元ごとに 3 件/分）: 承認用の dry-run の quote 6 件は 3 件ずつ 2 回に分けた。dry-run の quote（支払わない）は 10 分で期限切れ。
+- 動かしていないもの: Router の再デプロイ・停止、faucet、mainnet。これで **公開中の 18 組すべてに hosted Router での実購入の記録がある**（`docs/public-brief-2026-10-08.md` §3）。
+
+
 ### journal を残す（`-v` は必須）
 
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
