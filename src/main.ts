@@ -21,7 +21,7 @@ import { resolveSvmInboundPolicy } from "./adapters/inbound/x402-svm-startup.js"
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
-import { createX402SvmOutbound } from "./adapters/outbound/x402-svm.js";
+import { createX402SvmOutbound, type X402SvmOutboundOptions } from "./adapters/outbound/x402-svm.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "./net/bounded-body.js";
 import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
 import { denyHostsOf } from "./net/upstream-url.js";
@@ -103,6 +103,11 @@ export interface RouterCapabilities {
    * インタフェース一覧だけ。`allowLoopback` と `report` は配線が決める）。統合試験が静的と動的を同じ fixture の網に閉じ込めるため。
    */
   readonly transportHooksForTest?: DynamicTransportHooks;
+  /**
+   * **試験専用。** SVM の送信 adapter の停止点（`afterReserve`／`afterSign`／`beforeSend`）と wire の改変（送信の設計 §7.2 の中断の試験）。
+   * 本番の入口は渡さない。adapter の検査の順序は変わらない（hook は検査の後の停止点）。
+   */
+  readonly svmOutboundHooksForTest?: X402SvmOutboundOptions["hooksForTest"];
   /**
    * 能力が接続する依存先（送信 MPP の RPC など）の URL。動的上流 URL の**拒否ホスト**に入れる（設計 §7.4）。
    * 起動時の確認で、MPP 能力の client の RPC ホストがここに含まれていなければ起動を止める。
@@ -547,6 +552,7 @@ export function composeRails(
         decimals: known.decimals,
         tokenProgram: known.tokenProgram,
         ...(dynamicTransport === undefined || Object.keys(ownProfiles).length === 0 ? {} : { dynamic: { profiles: ownProfiles, transport: dynamicTransport, denyHosts } }),
+        ...(capabilities.svmOutboundHooksForTest === undefined ? {} : { hooksForTest: capabilities.svmOutboundHooksForTest }),
       });
       rails[key] = svmRail;
       // 起動時の非同期の準備（Router の ATA・運用者の ATA・静的の宛先 ATA の検査）。`startRouter` が core を作る前に待つ。

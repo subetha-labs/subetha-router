@@ -392,8 +392,15 @@ export class IntentStore {
   async #resolveInterrupted(): Promise<void> {
     const pending = [...this.#intents.values()].filter((intent) => isInterrupted(intent.status));
     for (const intent of pending) {
+      if (intent.status === "source_settled") {
+        // 受信は確定、送信は始めていない（`destination_pending` の前）: 不明ではなく「課金は成立・未送出」の終端。再送も再購入もしない。
+        // メモリ上だけの確定にせず、journal にも残す（SR-3 SVM レビュー #2、2026-10-08）。
+        await this.append(intent.paymentId, "paid_undelivered", { outcome: "not_sent", reason: "interrupted_at_restart" });
+        continue;
+      }
       // メモリ上だけの確定にせず、`unknown` を journal にも残す。
       await this.append(intent.paymentId, "unknown", {
+        // 送信を始める前（`source_pending`）なら送信の結果はそのまま（未送出）。送信の途中なら不明。
         outcome: intent.status === "source_pending" ? intent.destination.outcome : "unknown",
         reason: "interrupted_at_restart",
       });

@@ -1171,7 +1171,7 @@ test("destination_pending のまま中断した購入は再起動で unknown に
   expect(outbound.payCalls).toBe(1);
 });
 
-test("source_settled 直後に中断しても、再起動後に受信 settle をやり直さない", async () => {
+test("source_settled 直後に中断すると、再起動で paid_undelivered（interrupted_at_restart）に確定し、受信 settle をやり直さず送信も始めない", async () => {
   const core = await boot();
   const quote = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
   expect(quote.ok).toBe(true);
@@ -1193,10 +1193,11 @@ test("source_settled 直後に中断しても、再起動後に受信 settle を
 
   delete outbound.readChallengeImpl;
   const restarted = await boot();
-  expect(restarted.status(quote.paymentId, "alice")?.status).toBe("paid");
+  // 受信は確定・送信は未実行の終端（2026-10-08、SR-3 SVM レビュー #2: 以前は `paid` のまま終端にならなかった）。
+  expect(restarted.status(quote.paymentId, "alice")).toMatchObject({ status: "paid_data_unavailable", terminalReason: "interrupted_at_restart" });
 
   const retried = await restarted.purchase(purchaseArgs(quote));
-  expect(retried.status).toBe("paid");
+  expect(retried).toMatchObject({ status: "paid_data_unavailable", terminalReason: "interrupted_at_restart" });
   // 受信レグの重複 settle も、送信レグの自動送出もしない。
   expect(inbound.settleCalls).toBe(1);
   expect(outbound.payCalls).toBe(0);

@@ -51,9 +51,14 @@ const TERMINAL: ReadonlySet<InternalStatus> = new Set<InternalStatus>([
   "dest_failed",
 ]);
 
-/** 再起動時に `unknown` へ確定する中断された途中状態。 */
+/**
+ * 再起動時に終端へ確定する中断された途中状態。`source_pending`・`destination_pending`・`destination_submitted` は `unknown`。
+ * `source_settled`（受信は確定、送信の `destination_pending` を書く前の読み直しの最中）は `paid_undelivered`（未送出）: 含めないと再起動後も
+ * 終端にならず、再提出が `paid` を返し続ける（SR-3 SVM レビュー #2、2026-10-08）。受信の証跡は保たれ、送信は始めない。
+ */
 const INTERRUPTED: ReadonlySet<InternalStatus> = new Set<InternalStatus>([
   "source_pending",
+  "source_settled",
   "destination_pending",
   "destination_submitted",
 ]);

@@ -947,7 +947,7 @@ describe("MPP 送信: 手数料は quote 時のガス代の見積りから（dyn
     const second = await quoteOf(router, MPP_PROFILE, MPP_URL, "r2");
     const credential2 = await credentialFor(fixtures, second);
     fixtures.facilitator.onSettle = () => { fixtures.rpc.quote.baseFeePerGas = BASE_FEE * 5n; };
-    expect(await purchase(router, second, credential2, "r2")).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_rejected" });
+    expect(await purchase(router, second, credential2, "r2")).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_not_signed" });
     expect(router.signatures()).toEqual({ x402: 0, mpp: 1 });
     expect(fixtures.rpc.sentRaw).toHaveLength(1);
     expect(journalEvents(router).slice(-5)).toEqual(["created", "source_pending", "source_settled", "destination_pending", "dest_failed"]);
