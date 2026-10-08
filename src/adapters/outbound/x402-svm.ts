@@ -33,6 +33,7 @@ import { parseUpstreamUrl } from "../../net/upstream-url.js";
 import { DynamicTargetUnsupportedError, type DestinationOffer, type OutboundRail, type PayRequest, type PayResult, type SvmSigningCapability, type UpstreamTarget } from "../../ports/outbound.js";
 import { buildSvmTransactionMessage, checkSvmTransaction, MEMO_PROGRAM_ADDRESS, SVM_DEFAULT_COMPUTE_UNITS, SVM_DEFAULT_MICRO_LAMPORTS_PER_UNIT, SVM_TRANSACTION_MAX_BYTES, type SvmInboundPolicy } from "../inbound/x402-svm.js";
 import { assertAtaAccount, svmFetchJson } from "../inbound/x402-svm-startup.js";
+import { createSvmOutboundCommon, type SvmStaticDestination } from "./svm-outbound-common.js";
 import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
 import { paidOutcomeOf, SVM_RECEIPT_FORM } from "./x402-dynamic.js";
 
@@ -166,7 +167,8 @@ export interface SvmExpected {
   readonly mint: string;
   readonly amount: bigint;
   readonly decimals: number;
-  readonly memo: string;
+  /** Memo。`undefined` なら Memo 命令の無い 3 命令の形（MPP Solana 送信で challenge に `externalId` が無いとき）。x402 は常に文字列。 */
+  readonly memo: string | undefined;
   readonly units: number;
   readonly microLamports: bigint;
   readonly blockhash: string;
@@ -242,7 +244,7 @@ export function expectedStaticAccountsOf(expected: SvmExpected): readonly string
   const signerWritable = [expected.feePayer];
   const signerReadonly = [expected.authority];
   const nonSignerWritable = sortAddresses([expected.source, expected.destination]);
-  const nonSignerReadonly = sortAddresses([expected.mint, expected.tokenProgram, String(COMPUTE_BUDGET_PROGRAM_ADDRESS), String(MEMO_PROGRAM_ADDRESS)]);
+  const nonSignerReadonly = sortAddresses([expected.mint, expected.tokenProgram, String(COMPUTE_BUDGET_PROGRAM_ADDRESS), ...(expected.memo === undefined ? [] : [String(MEMO_PROGRAM_ADDRESS)])]);
   return [...signerWritable, ...signerReadonly, ...nonSignerWritable, ...nonSignerReadonly];
 }
 
@@ -266,17 +268,19 @@ export function checkSvmOutboundMessage(messageBytes: Uint8Array, expected: SvmE
   const lookups = (compiled as { addressTableLookups?: readonly unknown[] }).addressTableLookups;
   if (lookups !== undefined && lookups.length > 0) return fail("lookup_tables");
   const header = compiled.header;
-  if (header.numSignerAccounts !== 2 || header.numReadonlySignerAccounts !== 1 || header.numReadonlyNonSignerAccounts !== 4) return fail("header");
+  const readonlyNonSigners = expected.memo === undefined ? 3 : 4;
+  if (header.numSignerAccounts !== 2 || header.numReadonlySignerAccounts !== 1 || header.numReadonlyNonSignerAccounts !== readonlyNonSigners) return fail("header");
   const accounts = compiled.staticAccounts.map((value) => String(value));
   const expectedAccounts = expectedStaticAccountsOf(expected);
   if (accounts.length !== expectedAccounts.length || accounts.some((value, index) => value !== expectedAccounts[index])) return fail("accounts");
   if (String(compiled.lifetimeToken) !== expected.blockhash) return fail("blockhash");
   const instructions = compiled.instructions;
-  if (instructions.length !== 4) return fail("instruction_count");
+  if (instructions.length !== (expected.memo === undefined ? 3 : 4)) return fail("instruction_count");
   const indexOf = (value: string): number => accounts.indexOf(value);
   const dataOf = (ix: { readonly data?: ArrayLike<number> }): Uint8Array => new Uint8Array(ix.data ?? []);
   const accountIndicesOf = (ix: { readonly accountIndices?: readonly number[] }): readonly number[] => ix.accountIndices ?? [];
-  const [limitIx, priceIx, transferIx, memoIx] = instructions as [typeof instructions[number], typeof instructions[number], typeof instructions[number], typeof instructions[number]];
+  const [limitIx, priceIx, transferIx] = instructions as [typeof instructions[number], typeof instructions[number], typeof instructions[number]];
+  const memoIx = expected.memo === undefined ? undefined : instructions[3]!;
   // (i) ComputeBudget SetComputeUnitLimit: discriminator 2、data 5 バイト、口座 0。
   const limitData = dataOf(limitIx);
   if (limitIx.programAddressIndex !== indexOf(String(COMPUTE_BUDGET_PROGRAM_ADDRESS)) || accountIndicesOf(limitIx).length !== 0 || limitData.length !== 5 || limitData[0] !== COMPUTE_UNIT_LIMIT_DISCRIMINATOR) return fail("compute_limit");
@@ -298,11 +302,13 @@ export function checkSvmOutboundMessage(messageBytes: Uint8Array, expected: SvmE
   const readonlyNonSignerStart = accounts.length - header.numReadonlyNonSignerAccounts;
   if (!(sourceIndex >= writableNonSignerStart && sourceIndex < readonlyNonSignerStart) || !(destinationIndex >= writableNonSignerStart && destinationIndex < readonlyNonSignerStart)) return fail("transfer_roles");
   if (!(mintIndex >= readonlyNonSignerStart) || authorityIndex !== 1) return fail("transfer_roles");
-  // (iv) Memo: 口座 0、data が memo の UTF-8 と byte 一致。
-  const memoData = dataOf(memoIx);
-  const expectedMemo = new TextEncoder().encode(expected.memo);
-  if (memoIx.programAddressIndex !== indexOf(String(MEMO_PROGRAM_ADDRESS)) || accountIndicesOf(memoIx).length !== 0) return fail("memo");
-  if (memoData.length !== expectedMemo.length || Buffer.compare(Buffer.from(memoData), Buffer.from(expectedMemo)) !== 0) return fail("memo_value");
+  // (iv) Memo: 口座 0、data が memo の UTF-8 と byte 一致（期待値に memo が無ければ命令も無い = 上の命令数で決まる）。
+  if (memoIx !== undefined && expected.memo !== undefined) {
+    const memoData = dataOf(memoIx);
+    const expectedMemo = new TextEncoder().encode(expected.memo);
+    if (memoIx.programAddressIndex !== indexOf(String(MEMO_PROGRAM_ADDRESS)) || accountIndicesOf(memoIx).length !== 0) return fail("memo");
+    if (memoData.length !== expectedMemo.length || Buffer.compare(Buffer.from(memoData), Buffer.from(expectedMemo)) !== 0) return fail("memo_value");
+  }
   return { ok: true };
 }
 
@@ -365,12 +371,7 @@ export function recheckSvmWire(wire: Uint8Array, snapshot: Uint8Array, signature
 
 // ---- U7: adapter（送信の設計 §4.1・§4.3〜§4.6、FR-24・FR-32〜FR-37。`src/adapters/outbound/x402-svm.ts` の末尾に足す） ----
 
-/** 静的 route の destination（起動時の ATA の検査と候補の照合に使う固定値）。 */
-export interface SvmStaticDestination {
-  readonly payTo: string;
-  readonly asset: string;
-  readonly scheme: string;
-}
+export type { SvmStaticDestination } from "./svm-outbound-common.js";
 
 export interface X402SvmOutboundOptions {
   readonly network: string;
@@ -472,15 +473,20 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
   }
   const receiptForm = SVM_RECEIPT_FORM(capability.address);
 
-  /** `startup()` が埋める。 */
-  let routerAta: string | undefined;
-  /** 静的 route の宛先 ATA（起動時に導いて検査した値）。 */
-  const staticAtas = new Map<string, string>();
-
-  function ready(): string {
-    if (routerAta === undefined) throw new Error("svm outbound: startup() has not completed");
-    return routerAta;
-  }
+  // 起動時の検査・ATA・RPC・残高は共有の部品（`svm-outbound-common.ts`。挙動は括り出す前と同じ）。
+  const common = createSvmOutboundCommon({
+    label: "svm outbound",
+    rpc: options.rpc,
+    rpcTimeoutMs,
+    mint: options.mint,
+    decimals: options.decimals,
+    tokenProgram: options.tokenProgram,
+    routerAddress: capability.address,
+    operatorAddresses: operators,
+    destinations: options.destinations,
+    staticScheme: "exact",
+  });
+  const { ready, ataOf, rpcResult, ataExists, blockhashOf } = common;
 
   function scopeOf(routeId: string): SvmOutboundScope {
     const ata = ready();
@@ -494,33 +500,6 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
       routerAta: ata,
       ...(profile === undefined ? {} : { maxUpstreamAmount: profile.maxUpstreamAmount }),
     };
-  }
-
-  async function ataOf(owner: string): Promise<string> {
-    const [ata] = await findAssociatedTokenPda({ mint: address(options.mint), owner: address(owner), tokenProgram: address(options.tokenProgram) });
-    return String(ata);
-  }
-
-  /** JSON-RPC の封筒を組んで `result` を返す（method は 3 つだけ。失敗は `undefined`）。 */
-  async function rpcResult(method: "getAccountInfo" | "getLatestBlockhash" | "getTokenAccountBalance", params: unknown[], operation: string, routeId: string): Promise<Record<string, unknown> | undefined> {
-    let reply: Record<string, unknown> | undefined;
-    try {
-      reply = await svmFetchJson(options.rpc.transport, options.rpc.url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }, rpcTimeoutMs, operation, routeId);
-    } catch {
-      return undefined;
-    }
-    return reply;
-  }
-
-  /** 宛先 ATA が表どおりに存在するか（`getAccountInfo` → `assertAtaAccount`）。 */
-  async function ataExists(ata: string, owner: string, operation: string, routeId: string): Promise<boolean> {
-    const reply = await rpcResult("getAccountInfo", [ata, { encoding: "jsonParsed", commitment: "confirmed" }], operation, routeId);
-    try {
-      assertAtaAccount(reply, { owner, mint: options.mint, tokenProgram: options.tokenProgram });
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   /** 静的の destination との照合（payTo・asset・scheme の完全一致）。 */
@@ -539,7 +518,7 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
     const isStatic = options.upstreams[routeId] !== undefined;
     if (isStatic) {
       if (!matchesStatic(routeId, offer)) return undefined;
-      const ata = staticAtas.get(routeId);
+      const ata = common.staticAtaOf(routeId);
       if (ata === undefined) return undefined;
       return checkSvmOfferAtas(offer, scopeOf(routeId), ata) === undefined ? ata : undefined;
     }
@@ -605,57 +584,13 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
     return staticChallenge(routeId, ctx);
   }
 
-  function blockhashOf(reply: Record<string, unknown> | undefined): { blockhash: string; lastValidBlockHeight: bigint } | undefined {
-    const result = reply?.["result"];
-    const value = isRecord(result) ? result["value"] : undefined;
-    if (!isRecord(value)) return undefined;
-    const blockhash = value["blockhash"];
-    const height = value["lastValidBlockHeight"];
-    if (typeof blockhash !== "string" || !isSvmPublicKey(blockhash)) return undefined;
-    let lastValidBlockHeight: bigint;
-    if (typeof height === "number" && Number.isSafeInteger(height) && height > 0) lastValidBlockHeight = BigInt(height);
-    else if (typeof height === "string" && /^[1-9][0-9]*$/.test(height)) lastValidBlockHeight = BigInt(height);
-    else return undefined;
-    return { blockhash, lastValidBlockHeight };
-  }
-
   return {
     async startup(): Promise<void> {
-      const ata = await ataOf(capability.address);
-      for (const [routeId, destination] of Object.entries(options.destinations)) {
-        if (!isSvmPublicKey(destination.payTo) || destination.asset !== options.mint || destination.scheme !== "exact") {
-          throw new Error(`svm outbound: static route ${routeId} has a destination this adapter cannot pay`);
-        }
-        const destinationAta = await ataOf(destination.payTo);
-        if (destinationAta === ata) throw new Error(`svm outbound: static route ${routeId} pays the Router's own token account`);
-        if (!(await ataExists(destinationAta, destination.payTo, "solana_rpc_startup", routeId))) {
-          throw new Error(`svm outbound: the destination token account of static route ${routeId} does not exist or is not the table's ATA`);
-        }
-        staticAtas.set(routeId, destinationAta);
-      }
-      // 運用者の集合に Router の ATA と、集合にある SVM の公開鍵の ATA を足す（§2.3 (c)）。
-      operators.add(ata);
-      for (const operator of [...operators]) {
-        if (isSvmPublicKey(operator) && operator !== ata) {
-          try {
-            operators.add(await ataOf(operator));
-          } catch {
-            // ATA を導けない文字列（program 等）はそのまま。
-          }
-        }
-      }
-      routerAta = ata;
+      await common.startup();
     },
 
     async balanceOf(routeId: string, asset: string): Promise<bigint> {
-      const ata = ready();
-      if (asset !== options.mint) throw new Error("svm outbound: balance requested for a different asset");
-      const reply = await rpcResult("getTokenAccountBalance", [ata, { commitment: "confirmed" }], "solana_rpc_balance", routeId);
-      const result = reply?.["result"];
-      const value = isRecord(result) ? result["value"] : undefined;
-      const amount = isRecord(value) ? value["amount"] : undefined;
-      if (typeof amount !== "string" || !AMOUNT_PATTERN.test(amount)) throw new Error("svm outbound: the RPC did not return a token balance");
-      return BigInt(amount);
+      return common.balanceOf(routeId, asset);
     },
 
     async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {

@@ -406,6 +406,11 @@ export class IntentStore {
   readonly #requestToQuote = new Map<string, string>();
   /** 予約済みの message の hash（journal から復元。永続）。 */
   readonly #messageHashes = new Set<string>();
+  /**
+   * 受信で消費した署名（`source_settled` の行の `txRef`。journal から復元、append でも足す。永続）。MPP Solana 受信の replay の防御の層
+   * （`docs/mpp-solana-design.md` §2.3、要件 SR-M2）。記録そのものは `source_settled` の行で、別の行は書かない。
+   */
+  readonly #settledSourceTxRefs = new Set<string>();
   /** 追記の直列化（同一性検査 → append → 反映を不可分にする）。 */
   #queue: Promise<void> = Promise.resolve();
 
@@ -475,6 +480,15 @@ export class IntentStore {
       return;
     }
     this.#intents.set(paymentId, reduce(current, event, patch, at));
+    if (event === "source_settled") {
+      const txRef = patch["txRef"];
+      if (typeof txRef === "string" && txRef !== "") this.#settledSourceTxRefs.add(txRef);
+    }
+  }
+
+  /** 受信で消費した署名の集合（読取だけ。`source_settled` の行から復元・追記で更新）。 */
+  get settledSourceTxRefs(): ReadonlySet<string> {
+    return this.#settledSourceTxRefs;
   }
 
   /**

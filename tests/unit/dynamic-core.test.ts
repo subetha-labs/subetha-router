@@ -4,7 +4,7 @@
  * 合成レール（鍵も送金も無い）と接続カウンタで、**何が書かれ、何に接続したか**を数える。
  * 「外部接続 0」は上流（readChallenge・pay）・facilitator／RPC（verify・settle）の呼び出し回数で見る。
  */
-import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -170,7 +170,8 @@ let outbound: SyntheticOutbound;
 let clock = 1_800_000_000_000;
 const opened: RouterCore[] = [];
 
-async function boot(config: RouterConfig = baseConfig(), extra: { balanceOf?: (profileId: string, asset: string) => Promise<bigint | undefined>; gate?: DynamicGate } = {}): Promise<RouterCore> {
+async function boot(config: RouterConfig = baseConfig(), extra: { balanceOf?: (profileId: string, asset: string) => Promise<bigint | undefined>; gate?: DynamicGate; onStoreLoaded?: (view: { readonly settledSourceTxRefs: ReadonlySet<string> }) => void } = {}): Promise<RouterCore> {
+  const { onStoreLoaded, ...dynamicExtra } = extra;
   const core = await createRouterCore({
     journalPath,
     config,
@@ -178,7 +179,8 @@ async function boot(config: RouterConfig = baseConfig(), extra: { balanceOf?: (p
     outbound,
     now: () => clock,
     nextPaymentId: () => `pay-${(issuedIds += 1)}`,
-    dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes"), ...extra },
+    dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes"), ...dynamicExtra },
+    ...(onStoreLoaded === undefined ? {} : { onStoreLoaded }),
   });
   opened.push(core);
   return core;
@@ -1199,6 +1201,113 @@ describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-sol
       await core.close();
       opened.length = 0;
       for (const [name, text] of original) await writeFile(path.join(ledgerDir, name), text);
+    }
+  });
+});
+
+/** journal の消費済み署名の集合と、`source_settled` の追記の失敗（`docs/mpp-solana-design.md` §2.3、要件 FR-48・SR-M2。タスク M2）。 */
+describe("消費済み署名の集合と source_settled の追記の失敗（M2）", () => {
+  /** `FileHandle` の prototype（journal の append/fsync を外から失敗させる最小の spy。本番コードに注入口を作らない）。 */
+  async function fileHandleProto(): Promise<{ appendFile: (...args: unknown[]) => Promise<void>; sync: () => Promise<void> }> {
+    const probe = await open(path.join(workDir, "fsync-probe"), "a");
+    const proto = Object.getPrototypeOf(probe) as { appendFile: (...args: unknown[]) => Promise<void>; sync: () => Promise<void> };
+    await probe.close();
+    return proto;
+  }
+  async function staticQuote(core: RouterCore, requestId: string) {
+    const quote = await core.quote({ principalId: "alice", requestId, routeId: STATIC_ROUTE });
+    expect(quote.ok).toBe(true);
+    return quote as OkQuote;
+  }
+  function staticPurchaseArgs(quote: OkQuote, requestId: string) {
+    return { principalId: "alice", requestId, quoteId: quote.quoteId, approval: quote.quoteId, credential: inbound.credentialFor(quote.source.offer) };
+  }
+
+  test("onStoreLoaded: load の直後に 1 回。集合は生きていて purchase の source_settled で増え、再起動では journal から復元される", async () => {
+    const views: ReadonlySet<string>[] = [];
+    let core = await boot(baseConfig(), { onStoreLoaded: (view) => views.push(view.settledSourceTxRefs) });
+    expect(views).toHaveLength(1);
+    expect(views[0]!.size).toBe(0);
+    const quote = await quoteOk(core);
+    expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+    expect([...views[0]!]).toEqual(["src-tx-1"]);
+    const s = await staticQuote(core, "s1");
+    expect((await core.purchase(staticPurchaseArgs(s, "s1"))).status).toBe("delivered");
+    expect([...views[0]!]).toEqual(["src-tx-1"]);
+    inbound.settleImpl = async () => ({ outcome: "settled", txRef: "src-tx-2" });
+    const s2 = await staticQuote(core, "s2");
+    expect((await core.purchase(staticPurchaseArgs(s2, "s2"))).status).toBe("delivered");
+    expect([...views[0]!].sort()).toEqual(["src-tx-1", "src-tx-2"]);
+    await core.close();
+    opened.length = 0;
+    core = await boot(baseConfig(), { onStoreLoaded: (view) => views.push(view.settledSourceTxRefs) });
+    expect([...views[1]!].sort()).toEqual(["src-tx-1", "src-tx-2"]);
+  });
+
+  test("source_settled の追記が失敗（appendFile）: 応答は unknown/source_settle_unknown、送信は始めない、別の行も書かない。再起動では行が無いので unknown（interrupted_at_restart）。静的・動的とも", async () => {
+    const proto = await fileHandleProto();
+    const originalAppend = proto.appendFile;
+    const spy = vi.spyOn(proto, "appendFile").mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      if (String(args[0]).includes('"source_settled"')) throw new Error("disk full");
+      return originalAppend.apply(this, args);
+    });
+    try {
+      for (const kind of ["dynamic", "static"] as const) {
+        let core = await boot();
+        const quote = kind === "dynamic" ? await quoteOk(core, `q-${kind}`) : await staticQuote(core, `q-${kind}`);
+        const args = kind === "dynamic" ? { ...purchaseArgs(quote), requestId: `q-${kind}` } : staticPurchaseArgs(quote, `q-${kind}`);
+        const paysBefore = outbound.payCalls;
+        const linesBefore = (await journalLines()).length;
+        expect(await core.purchase(args)).toEqual({ paymentId: quote.paymentId, status: "unknown", terminalReason: "source_settle_unknown" });
+        expect(outbound.payCalls).toBe(paysBefore);
+        // 昇格（created）と source_pending は書かれるが、source_settled も、失敗を記す別の行（unknown）も書かれない。
+        const events = (await journalLines()).slice(linesBefore).map((line) => line.event);
+        expect(events.filter((event) => event === "source_settled" || event === "unknown")).toEqual([]);
+        expect(events).toContain("source_pending");
+        await core.close();
+        opened.length = 0;
+        core = await boot();
+        expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "unknown" });
+        await core.close();
+        opened.length = 0;
+        await rm(journalPath, { force: true });
+        await rm(path.join(workDir, "dynamic-quotes"), { recursive: true, force: true });
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("fsync だけ失敗: 応答は unknown/source_settle_unknown で送信は始めない。行は残るので再起動では paid_undelivered（送信は再開しない）", async () => {
+    const proto = await fileHandleProto();
+    let lastLine = "";
+    const originalAppend = proto.appendFile;
+    const originalSync = proto.sync;
+    const appendSpy = vi.spyOn(proto, "appendFile").mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      lastLine = String(args[0]);
+      return originalAppend.apply(this, args);
+    });
+    const syncSpy = vi.spyOn(proto, "sync").mockImplementation(async function (this: unknown) {
+      if (lastLine.includes('"source_settled"')) throw new Error("fsync failed");
+      return originalSync.apply(this);
+    });
+    try {
+      let core = await boot();
+      const quote = await quoteOk(core);
+      expect(await core.purchase(purchaseArgs(quote))).toEqual({ paymentId: quote.paymentId, status: "unknown", terminalReason: "source_settle_unknown" });
+      expect(outbound.payCalls).toBe(0);
+      await core.close();
+      opened.length = 0;
+      appendSpy.mockRestore();
+      syncSpy.mockRestore();
+      expect((await journalLines()).at(-1)?.event).toBe("source_settled");
+      core = await boot();
+      // 行が残っているので「課金は成立・未送出」の終端（公開の形は paid_data_unavailable、理由は interrupted_at_restart。送信は再開しない）。
+      expect(core.status(quote.paymentId, "alice", quote.ownerKey)).toMatchObject({ status: "paid_data_unavailable", terminalReason: "interrupted_at_restart", destination: { outcome: "not_sent" }, source: { txRef: "src-tx-1" } });
+      expect(outbound.payCalls).toBe(0);
+    } finally {
+      appendSpy.mockRestore();
+      syncSpy.mockRestore();
     }
   });
 });

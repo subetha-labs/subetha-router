@@ -261,3 +261,41 @@ describe("buildSvmTransactionMessage の lastValidBlockHeight", () => {
 // 参照だけ（型の確認）。
 void COMPUTE_BUDGET_PROGRAM_ADDRESS;
 void MEMO_PROGRAM_ADDRESS;
+
+/** Memo 任意・compute budget の形（`docs/mpp-solana-design.md` §5.1、タスク M2）: x402 の既定の bytes は変わらず、MPP Solana の形も同じ部品で組めて検査できる。 */
+describe("Memo 任意・compute budget の形（M2）", () => {
+  test("memo 無し: 命令 3 つ・readonly non-signer 3・Memo program 無し。検査・署名・wire の再検査（第 2 層も memo 無しの形）が通り、memo の有無が違えば落ちる", () => {
+    const expected: SvmExpected = Object.freeze({ ...first.expected, memo: undefined });
+    const bytes = compileSvmMessage(expected);
+    const compiled = getCompiledTransactionMessageDecoder().decode(bytes) as unknown as { instructions: readonly unknown[]; header: { numReadonlyNonSignerAccounts: number }; staticAccounts: readonly string[] };
+    expect(compiled.instructions.length).toBe(3);
+    expect(compiled.header.numReadonlyNonSignerAccounts).toBe(3);
+    expect(compiled.staticAccounts.map(String)).not.toContain(String(MEMO_PROGRAM_ADDRESS));
+    expect(compiled.staticAccounts.map(String)).toEqual([...expectedStaticAccountsOf(expected)]);
+    expect(checkSvmOutboundMessage(bytes, expected)).toEqual({ ok: true });
+    expect(checkSvmOutboundMessage(compileSvmMessage(first.expected), expected).ok).toBe(false);
+    expect(checkSvmOutboundMessage(bytes, first.expected).ok).toBe(false);
+    const signature = ed25519.sign(bytes, first.routerSeed);
+    expect(verifySvmSignature(signature, bytes, first.router)).toBe(true);
+    const wire = assembleSvmWire(bytes, expected, signature);
+    expect(recheckSvmWire(wire, bytes, signature, expected, first.provider)).toEqual({ ok: true });
+    expect(recheckSvmWire(wire, bytes, signature, first.expected, first.provider).ok).toBe(false);
+  });
+
+  test("x402 の bytes は変わらない: 既定の引数と明示の limit-first は同じ bytes。price-first は別の bytes で送信の検査（limit-first 固定）が落ちる。片方だけの compute budget も組める", () => {
+    const params = { ...first.expected };
+    const encode = (message: ReturnType<typeof buildSvmTransactionMessage>): Uint8Array => Uint8Array.from(getCompiledTransactionMessageEncoder().encode(compileTransactionMessage(message)));
+    const base = encode(buildSvmTransactionMessage(params));
+    expect(Buffer.compare(Buffer.from(base), Buffer.from(compileSvmMessage(first.expected)))).toBe(0);
+    const explicit = encode(buildSvmTransactionMessage({ ...params, computeBudget: { limit: true, price: true, order: "limit-first" } }));
+    expect(Buffer.compare(Buffer.from(explicit), Buffer.from(base))).toBe(0);
+    const priceFirst = encode(buildSvmTransactionMessage({ ...params, computeBudget: { limit: true, price: true, order: "price-first" } }));
+    expect(Buffer.compare(Buffer.from(priceFirst), Buffer.from(base))).not.toBe(0);
+    expect(checkSvmOutboundMessage(priceFirst, first.expected)).toEqual({ ok: false, reason: "compute_limit" });
+    const instructionCount = (bytes: Uint8Array): number => (getCompiledTransactionMessageDecoder().decode(bytes) as unknown as { instructions: readonly unknown[] }).instructions.length;
+    const priceOnly = { instructions: { length: instructionCount(encode(buildSvmTransactionMessage({ ...params, computeBudget: { limit: false, price: true, order: "limit-first" } }))) } };
+    expect(priceOnly.instructions.length).toBe(3);
+    const none = { instructions: { length: instructionCount(encode(buildSvmTransactionMessage({ ...params, memo: undefined, computeBudget: { limit: false, price: false, order: "limit-first" } }))) } };
+    expect(none.instructions.length).toBe(1);
+  });
+});

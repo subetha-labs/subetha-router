@@ -616,7 +616,13 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     const outcome = isRecord(settled) ? settled["outcome"] : undefined;
     const txRef = isRecord(settled) ? settled["txRef"] : undefined;
     if (outcome === "settled" && typeof txRef === "string" && txRef !== "") {
-      await store.append(paymentId, "source_settled", { txRef });
+      try {
+        await store.append(paymentId, "source_settled", { txRef });
+      } catch {
+        // 静的と同じ（`orchestrator.ts` の settle）: 記録できなければ `unknown` を返し、別の行を書かず、送信を始めない。
+        note?.(`source_settled could not be journaled (paymentId=${paymentId}); answering unknown`);
+        return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
+      }
       return options.deliver(paymentId);
     }
     /**
