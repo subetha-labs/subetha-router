@@ -29,8 +29,10 @@ The Router exposes **four routes**. **Pick the one you can pay with what you hol
 | `md-mpp-eth-snapshot-arc` | **Arc testnet USDC** (x402) | a provider that only accepts MPP |
 | `md-x402-eth-snapshot-sol` | **Solana devnet USDC** (x402) | a provider that only accepts x402 |
 
-Outbound rails to providers that accept only **Arc** or **Solana** are being added (`md-arc-eth-snapshot`, `md-sol-eth-snapshot-mpp`, profiles
-`dyn-x402-to-arc` / `dyn-mpp-to-arc` / `dyn-x402-to-sol` / `dyn-mpp-to-sol`). **They appear in the listing only after the operator enables them**; until then they do not exist for you.
+Outbound rails to providers that accept only **Arc** or **Solana** are implemented behind the operator's switch (`md-arc-eth-snapshot`: pay **Base Sepolia USDC**, reaches an Arc
+provider; `md-sol-eth-snapshot-mpp`: pay **Tempo pathUSD** over MPP, reaches a Solana provider; profiles `dyn-x402-to-arc` / `dyn-mpp-to-arc` / `dyn-x402-to-sol` / `dyn-mpp-to-sol`).
+**They appear in the listing only after the operator enables them**; until then they do not exist for you. When they do, the steps are the same as above (`npm run sign` detects the rail
+you pay with from the offer; the MPP disclosure is unchanged), and the Router signs the Solana transfer with its own key — you never hold Solana funds for these routes.
 
 Steps:
 

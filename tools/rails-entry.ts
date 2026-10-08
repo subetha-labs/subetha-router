@@ -12,13 +12,18 @@
 import { DEFAULT_SOLANA_RPC_URL, type RouterCapabilities } from "../src/main.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
 import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
-import { INBOUND_ARC, OUTBOUND_ARC, RAIL_UPSTREAMS, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
+import { createRealSvmCapability } from "./real-svm-capability.js";
+import { INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, RAIL_UPSTREAMS, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
 /** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out"` の部分集合。空 = すべて無効）。 */
 export const RAILS_ACTIVATION_ENV = "SUBETHA_RAILS_ACTIVATION";
 /** Arc の Provider の受取先（送信が有効で静的 route を出すときだけ。D-10）。 */
 export const ARC_PROVIDER_ENV = "SUBETHA_ARC_PROVIDER_PAYTO";
+/** Solana の Provider の受取先（owner の公開鍵。送信が有効で静的 route を出すときだけ。D-10）。 */
+export const SOLANA_PROVIDER_ENV = "SUBETHA_SOLANA_PROVIDER_PAYTO";
+/** Solana の送信の鍵（ed25519 の seed。`wallet:new:solana`）。`solana.outbound` のときだけ読む。 */
+export const SOLANA_OUTBOUND_KEY_ENV = "SUBETHA_OUTBOUND_SOLANA_KEY";
 /** Solana の受取 owner の address（鍵はホストに置かない。ATA は運用者が作る）。 */
 export const SOLANA_RECEIVER_ENV = "SUBETHA_SOLANA_RECEIVER";
 /** Solana の JSON-RPC（起動時の ATA の検査だけ）。無ければ公開 devnet の既定。URL は鍵を含み得るのでログに出さない。 */
@@ -81,10 +86,14 @@ export function railsReceiversOf(activation: RailsActivation, env: Readonly<Reco
  * URL が空（Provider が立っていない。今の Arc）なら env に触れない。無ければ欄ごと無し: 有無の判定は設定生成（`providerOf`）が行う。
  */
 export function railsProvidersOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>, upstreams: RailUpstreams = RAIL_UPSTREAMS): RailProviders {
-  const providers: { arc?: string } = {};
+  const providers: { arc?: string; solana?: string } = {};
   if (activation.arc.outbound && upstreams.arc !== "") {
     const payTo = env[ARC_PROVIDER_ENV];
     if (payTo !== undefined && payTo !== "") providers.arc = payTo;
+  }
+  if (activation.solana.outbound && upstreams.solana !== "") {
+    const payTo = env[SOLANA_PROVIDER_ENV];
+    if (payTo !== undefined && payTo !== "") providers.solana = payTo;
   }
   return providers;
 }
@@ -114,9 +123,15 @@ export function railsCapabilitiesOf(activation: RailsActivation, env: Readonly<R
 
 /** Router の process の起動が止まる理由（固定文は入口が選ぶ。鍵・URL の値は持たない）。 */
 export class ProcessEntryError extends Error {
-  readonly code: "outbound_keys" | "rails";
-  constructor(code: "outbound_keys" | "rails") {
-    super(code === "outbound_keys" ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required" : "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)");
+  readonly code: "outbound_keys" | "rails" | "solana_key";
+  constructor(code: "outbound_keys" | "rails" | "solana_key") {
+    super(
+      code === "outbound_keys"
+        ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required"
+        : code === "solana_key"
+          ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail is activated"
+          : "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)",
+    );
     this.name = "ProcessEntryError";
     this.code = code;
   }
@@ -147,12 +162,24 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
     throw new ProcessEntryError("outbound_keys");
   }
   const evm = evmKey === undefined || evmKey === "" ? undefined : createRealEvmCapability(evmKey);
+  // Solana の送信（送信の設計 §6.2、D-11）: 専用の ed25519 の鍵を **`solana.outbound` のときだけ**読む。無い・形が違えば起動しない（値は出さない）。
+  let svm: ReturnType<typeof createRealSvmCapability> | undefined;
+  if (activation.solana.outbound) {
+    const solKey = env[SOLANA_OUTBOUND_KEY_ENV];
+    if (solKey === undefined || solKey === "") throw new ProcessEntryError("solana_key");
+    try {
+      svm = createRealSvmCapability(solKey);
+    } catch {
+      throw new ProcessEntryError("solana_key");
+    }
+  }
   return {
     // 動的上流 URL の拒否ホスト（設計 §7.4）: 送信 MPP の RPC と、Solana の起動時の検査の RPC。URL は値ごと渡すが、使うのはホスト名だけ（ログには出ない）。
     dependencyUrls: [mppRpcUrl === undefined || mppRpcUrl === "" ? TEMPO_MODERATO_RPC : mppRpcUrl, ...(rails.dependencyUrls ?? [])],
     ...(rails.sellerProofs === undefined ? {} : { sellerProofs: rails.sellerProofs }),
     ...(evm === undefined ? {} : { evmSigning: evm.capability("eip155:84532") }),
     ...(evm !== undefined && activation.arc.outbound ? { evmSigningByNetwork: { [OUTBOUND_ARC.network]: evm.capability(OUTBOUND_ARC.network) } } : {}),
+    ...(svm === undefined ? {} : { svmSigning: { [OUTBOUND_SOL.network]: svm.capability(OUTBOUND_SOL.network) } }),
     ...(mppKey === undefined || mppKey === "" ? {} : { mppTempo: createRealMppCapability(mppKey, { ...(mppRpcUrl === undefined || mppRpcUrl === "" ? {} : { rpcUrl: mppRpcUrl }) }).capability() }),
   };
 }
@@ -174,6 +201,11 @@ export function railsChildEnvOf(activation: RailsActivation, env: Readonly<Recor
       out[SOLANA_RPC_ENV] = rpc;
       out["ROUTER_SOLANA_RPC_URL"] = rpc;
     }
+  }
+  // Solana の送信の鍵は `solana.outbound` のときだけ読んで渡す（無効なら参照もしない）。
+  if (activation.solana.outbound) {
+    const key = env[SOLANA_OUTBOUND_KEY_ENV];
+    if (key !== undefined && key !== "") out[SOLANA_OUTBOUND_KEY_ENV] = key;
   }
   return out;
 }

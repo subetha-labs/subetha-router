@@ -1,8 +1,10 @@
 /**
  * 本番の入口（`tools/remote-mcp.ts`）が Router に渡す**設定の生成**。鍵と子プロセスの起動から切り離してある
  * （試験で、どの env を与えても動的機能の有効・無効とプロファイルの構成が変わらないことを確かめる。T13・G-4）。
- * このファイルは Router の SDK に依存しない（試験から import できる）。
+ * このファイルは Router の SDK に依存しない（試験から import できる）。依存は `@solana/kit` の base58（受取先・Provider の公開鍵の 32 バイトの検査）だけ。
  */
+import { getBase58Encoder } from "@solana/kit";
+
 
 /**
  * 経路 1（既存・変更しない）: **x402 で払って MPP の Provider B に届く**。
@@ -86,6 +88,21 @@ export const OUTBOUND_ARC = {
 export const UPSTREAM_ARC = "";
 /** 静的 route（送信の設計 §6.3・D-12）: Base USDC で払って Arc の Provider に届く。 */
 export const ROUTE_ARC_OUT = "md-arc-eth-snapshot";
+/**
+ * Solana の Provider に払う送信（x402 の SVM `exact`。表 `KNOWN_NETWORKS` と同じ network・mint・token program）。鍵は専用の
+ * `SUBETHA_OUTBOUND_SOLANA_KEY`（ed25519。`wallet:new:solana` と同じ base58 32 バイトの seed。D-11）。受取先（Provider の owner）は env
+ * `SUBETHA_SOLANA_PROVIDER_PAYTO`（D-10。Provider が立ったら入る）。
+ */
+export const OUTBOUND_SOL = {
+  network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+  asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  decimals: 6,
+  tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+} as const;
+/** Solana の Provider の URL（D-10。Provider が立つまで空。空なら静的 route は生成しない。動的プロファイルは生成する）。 */
+export const UPSTREAM_SOL = "";
+/** 静的 route（送信の設計 §6.3・D-12 の O-4）: Tempo pathUSD（MPP 受信）で払って Solana の Provider に届く。 */
+export const ROUTE_SOL_OUT = "md-sol-eth-snapshot-mpp";
 
 /** 1 つのレールの有効化（方向別。送信の設計 §6.1、FR-30）。 */
 export interface RailActivation {
@@ -113,8 +130,9 @@ export interface RailProviders {
 /** Provider の URL（レールごと。本番は定数 `UPSTREAM_ARC`。試験が静的 route の生成を確かめるために差し替えられる）。 */
 export interface RailUpstreams {
   readonly arc: string;
+  readonly solana: string;
 }
-export const RAIL_UPSTREAMS: RailUpstreams = Object.freeze({ arc: UPSTREAM_ARC });
+export const RAIL_UPSTREAMS: RailUpstreams = Object.freeze({ arc: UPSTREAM_ARC, solana: UPSTREAM_SOL });
 export interface RailsOptions {
   readonly activation: RailsActivation;
   readonly receivers: RailReceivers;
@@ -137,13 +155,22 @@ export function railActive(activation: RailsActivation): boolean {
 }
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const BASE58_32 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const BASE58_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+/** base58 で **32 バイトに復号できる**公開鍵か（文字数だけでは決めない: 33 個の 1 は 33 バイト）。 */
+function isBase58PublicKey(value: string): boolean {
+  if (!BASE58_PATTERN.test(value)) return false;
+  try {
+    return getBase58Encoder().encode(value).length === 32;
+  } catch {
+    return false;
+  }
+}
 
 /** **受信**が有効なレールの受取先を取り出す。無い・形が違うなら起動しない（値は出さない）。送信だけ有効なら読まない。 */
 function receiverOf(rails: RailsOptions, rail: "arc" | "solana"): string | undefined {
   if (!rails.activation[rail].inbound) return undefined;
   const value = rails.receivers[rail];
-  const wellFormed = typeof value === "string" && (rail === "arc" ? EVM_ADDRESS.test(value) : BASE58_32.test(value));
+  const wellFormed = typeof value === "string" && (rail === "arc" ? EVM_ADDRESS.test(value) : isBase58PublicKey(value));
   if (!wellFormed) {
     throw new Error(`the ${rail} rail is activated but its receiver address is missing or malformed`);
   }
@@ -156,7 +183,7 @@ function receiverOf(rails: RailsOptions, rail: "arc" | "solana"): string | undef
 function providerOf(rails: RailsOptions, rail: "arc" | "solana", upstream: string): string | undefined {
   if (!rails.activation[rail].outbound || upstream === "") return undefined;
   const value = rails.providers?.[rail];
-  const wellFormed = typeof value === "string" && (rail === "arc" ? EVM_ADDRESS.test(value) : BASE58_32.test(value));
+  const wellFormed = typeof value === "string" && (rail === "arc" ? EVM_ADDRESS.test(value) : isBase58PublicKey(value));
   if (!wellFormed) {
     throw new Error(`the ${rail} outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed`);
   }
@@ -229,7 +256,19 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
     maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
     fee: DYNAMIC_FEE_X402_OUT,
   });
+  /** Solana の Provider へ（送信の設計 §6.3・D-12 の O-3・O-4）: 宛先は表の mint・桁・token program（`tokenDomain` は無い）。 */
+  const toSol = (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }): Record<string, unknown> => ({
+    profileId,
+    sourceRail,
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo: receiver },
+    rail: "x402",
+    destination: { scheme: "exact", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: OUTBOUND_SOL.decimals, tokenProgram: OUTBOUND_SOL.tokenProgram },
+    par: true,
+    maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+    fee: DYNAMIC_FEE_X402_OUT,
+  });
   const arcOutbound = rails.activation.arc.outbound;
+  const solOutbound = rails.activation.solana.outbound;
   const profiles: Record<string, unknown> = {
     // 多レール（設計 §8）: 受信が有効なレールの分だけ。公開の process は `RAILS_ACTIVATION`（G-4 で受信は両方 true）。
     ...(arcReceiver === undefined ? {} : { "dyn-arc-to-mpp": toMpp("dyn-arc-to-mpp", INBOUND_ARC, arcReceiver), "dyn-arc-to-x402": toX402("dyn-arc-to-x402", INBOUND_ARC, arcReceiver) }),
@@ -237,6 +276,9 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
     // 送信（Arc の Provider へ。送信の設計 §6.3）: 送信が有効なときだけ。Provider の受取先は要らない（呼び出し側の URL が決める）。
     ...(arcOutbound ? { "dyn-x402-to-arc": toArc("dyn-x402-to-arc", "x402", INBOUND) } : {}),
     ...(arcOutbound && mppInboundEnabled ? { "dyn-mpp-to-arc": toArc("dyn-mpp-to-arc", "mpp", INBOUND_MPP) } : {}),
+    // 送信（Solana の Provider へ。送信の設計 §6.3）: 送信が有効なときだけ。公開する組は O-3（Base x402 → Solana）・O-4（Tempo MPP → Solana）。
+    ...(solOutbound ? { "dyn-x402-to-sol": toSol("dyn-x402-to-sol", "x402", INBOUND) } : {}),
+    ...(solOutbound && mppInboundEnabled ? { "dyn-mpp-to-sol": toSol("dyn-mpp-to-sol", "mpp", INBOUND_MPP) } : {}),
     ...(MPP_OUTBOUND_PROFILE_ENABLED
       ? {
           "dyn-x402-to-mpp": {
@@ -287,13 +329,17 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
   const upstreamArc = (rails.upstreams ?? RAIL_UPSTREAMS).arc;
   const arcProvider = providerOf(rails, "arc", upstreamArc);
   const arcOutbound = rails.activation.arc.outbound;
+  const upstreamSol = (rails.upstreams ?? RAIL_UPSTREAMS).solana;
+  // 静的の Solana 送信（O-4）は MPP 受信が源なので、MPP 受信が無い構成では URL があっても出さない（受取先も読まない）。
+  const solProvider = mppInboundEnabled ? providerOf(rails, "solana", upstreamSol) : undefined;
+  const solOutbound = rails.activation.solana.outbound;
   /**
    * 新しい `(network, asset)` の区分（D-7: 既存と同じ桁。静的は 1 件 10,000、動的は 1 件 20,000）。
    * その network が**受信か送信のどちらか**で有効なら出す（受信と送信は同じ区分に合算する。送信の設計 §6.3、FR-29、D-14）。
    */
   const railBuckets = (maxPerPurchase: string, maxTotal: string): Record<string, unknown>[] => [
     ...(arcReceiver === undefined && !arcOutbound ? [] : [{ network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, maxTotal, maxPerPurchase }]),
-    ...(solReceiver === undefined ? [] : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase }]),
+    ...(solReceiver === undefined && !solOutbound ? [] : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase }]),
   ];
   const profiles = dynamicProfilesOf(env, receiver, mppInboundEnabled, rails);
   return {
@@ -387,6 +433,19 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                 destination: { scheme: "exact", network: OUTBOUND_ARC.network, asset: OUTBOUND_ARC.asset, payTo: arcProvider },
               },
             }),
+        // 送信（送信の設計 §6.3・D-12 の O-4）: Tempo pathUSD（MPP 受信）で払って Solana の Provider に届く。MPP 受信があり、Provider の URL と受取先がそろったときだけ。
+        ...(solProvider === undefined
+          ? {}
+          : {
+              [ROUTE_SOL_OUT]: {
+                routeId: ROUTE_SOL_OUT,
+                canonicalPath: `/v1/routes/${ROUTE_SOL_OUT}/resource`,
+                rail: "x402",
+                sourceRail: "mpp",
+                source: { amount: INBOUND_MPP.amount, asset: INBOUND_MPP.asset, decimals: 6, network: INBOUND_MPP.network, payTo: receiver },
+                destination: { scheme: "exact", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, payTo: solProvider },
+              },
+            }),
       },
       // 「予算の続く限り」使えるように大きく取るが、暴走時に止まるようゼロにはしない。
       // bucket は (network, asset) 単位。2 経路は同じ 2 組を向きだけ変えて使うので、
@@ -450,6 +509,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ...(arcReceiver === undefined ? {} : { [ROUTE_ARC]: UPSTREAM }),
         ...(solReceiver === undefined ? {} : { [ROUTE_SOL]: UPSTREAM_X402 }),
         ...(arcProvider === undefined ? {} : { [ROUTE_ARC_OUT]: upstreamArc }),
+        ...(solProvider === undefined ? {} : { [ROUTE_SOL_OUT]: upstreamSol }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
       ...(arcReceiver === undefined && solReceiver === undefined

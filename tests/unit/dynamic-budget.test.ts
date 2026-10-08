@@ -375,9 +375,9 @@ test("動的の行を含む journal を、動的を知らない読み方（静�
   await journal.append({ paymentId: "pay-1", event: "source_settled", patch: { txRef: "0xabc" } });
   await journal.close();
   const reopened = await journalOf();
-  // 起動できる（途中状態は unknown に確定する）。静的予算は 0 のまま。
+  // 起動できる（途中状態は終端に確定する: `source_settled` は 2026-10-08 の U8-b から `paid_undelivered`／`interrupted_at_restart`。受信の証跡は残る）。静的予算は 0 のまま。
   const store = await IntentStore.load(reopened);
-  expect(store.byPaymentId("pay-1")?.status).toBe("source_settled");
+  expect(store.byPaymentId("pay-1")).toMatchObject({ status: "paid_undelivered", terminalReason: "interrupted_at_restart" });
   const fixed = Budget.load(limits(), reopened, async () => {});
   expect(fixed.purchases).toBe(0);
   // 動的予算は、動的を無効にした設定でも数え続けられる。
