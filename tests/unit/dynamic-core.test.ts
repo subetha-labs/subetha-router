@@ -6,14 +6,21 @@
  */
 import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
 import { capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import { stableJson } from "../../src/core/intent.js";
 import { createRouterCore, type QuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
+import * as storeModule from "../../src/core/store.js";
 import { capCoversFee } from "../../src/core/store.js";
+
+/** purchase 時の `capCoversFee` の呼び出しを観測する（Solana 宛の MPP の例外が検査を飛ばしていないこと。SR-3 SVM レビュー #1）。素通しの wrapper。 */
+vi.mock("../../src/core/store.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/store.js")>();
+  return { ...original, capCoversFee: vi.fn(original.capCoversFee) };
+});
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
 
@@ -1096,3 +1103,102 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
   });
 });
 
+/** Solana 宛の MPP 送信の手数料の例外（`docs/mpp-solana-design.md` §1.4 (b)(c)、要件 FR-44。タスク M1）: 設定の検査は `dynamic-fee-exception.test.ts`。ここは core と store。 */
+describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-solana 設計 §1.4、M1）", () => {
+  const SOL = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+  const SOL_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+  const SOL_OWNER = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+  const SOL_MPP: DynamicProfile = {
+    ...PROFILE,
+    profileId: "dyn-x402-to-solmpp",
+    sourceRail: "x402",
+    rail: "mpp",
+    source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" },
+    destination: { scheme: "solana/charge", network: SOL, asset: SOL_USDC, decimals: 6 },
+    fee: { flat: "1000", bps: 0, min: "1000" },
+  };
+  const solOffer = (): DestinationOffer => ({ scheme: "solana/charge", network: SOL, asset: SOL_USDC, amount: "5000", payTo: SOL_OWNER, extra: { realm: "r", terms: "{}" } });
+  const solConfig = (): RouterConfig => {
+    const config = baseConfig({ profile: SOL_MPP });
+    return { ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets: [...config.dynamic!.budget.buckets, { network: SOL, asset: SOL_USDC, maxTotal: "1000000", maxPerPurchase: "200000" }] } } };
+  };
+  const quoteSol = (core: RouterCore, requestId = "r1") => core.quote({ principalId: "alice", requestId, routeId: SOL_MPP.profileId, upstream: { url: URL_A }, source: "alice" });
+
+  test("quote: 見積りを呼ばず、pricing に maxFee・estimate が無く、手数料は規則の額。受信 offer の額は total。見積りが失敗する状態でも出る", async () => {
+    outbound.offers = [solOffer()];
+    const core = await boot(solConfig());
+    const quote = (await quoteSol(core)) as OkQuote;
+    expect(quote.ok).toBe(true);
+    expect(outbound.estimateCalls).toBe(0);
+    expect(quote.dynamic!.pricing).toEqual({ upstreamAmount: "5000", converted: "5000", fee: "1000", total: "6000" });
+    expect(quote.source.amount).toBe("6000");
+    outbound.estimateBound = undefined;
+    expect(((await quoteSol(core, "r2")) as OkQuote).ok).toBe(true);
+    expect(outbound.estimateCalls).toBe(0);
+  });
+
+  test("purchase: capCoversFee は残し（cap 無しで通る）、再見積りを呼ばず verify に進む。pay に maxFee を渡さない。予約は 2 本で手数料の leg は無い", async () => {
+    outbound.offers = [solOffer()];
+    const core = await boot(solConfig());
+    const quote = (await quoteSol(core)) as OkQuote;
+    outbound.estimateBound = undefined; // 見積りが呼ばれれば fee_estimate_unavailable で止まる
+    const capChecks = vi.mocked(storeModule.capCoversFee);
+    capChecks.mockClear();
+    expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+    expect(outbound.estimateCalls).toBe(0);
+    // purchase 時の capCoversFee は残っている（Solana 宛でも飛ばさない）: 設定の宛先（network・asset、feeAsset 無し）で 1 回。
+    expect(capChecks.mock.calls.some(([, bound]) => bound.destination?.network === SOL && bound.destination?.asset === SOL_USDC && bound.destination?.feeAsset === undefined)).toBe(true);
+    expect(inbound.verifyCalls).toBe(1);
+    expect(outbound.paidFor[0]).not.toHaveProperty("maxFee");
+    const created = (await journalLines())[0]!.patch["dynamic"] as { pricing: Record<string, unknown>; reservation: { legs: unknown[] } };
+    expect(created.pricing).not.toHaveProperty("maxFee");
+    expect(created.pricing).not.toHaveProperty("estimate");
+    expect(created.reservation.legs).toEqual([{ network: DST_NETWORK, asset: DST_ASSET, amount: "6000" }, { network: SOL, asset: SOL_USDC, amount: "5000" }]);
+  });
+
+  test("復元: cap の無い Solana 宛の記録は dynamicCapInvalid にならない（再起動後に status が読め、控えの quote は offerFor で再提示できる）", async () => {
+    outbound.offers = [solOffer()];
+    let core = await boot(solConfig());
+    const bought = (await quoteSol(core, "buy")) as OkQuote;
+    expect((await core.purchase({ ...purchaseArgs(bought), requestId: "buy" })).status).toBe("delivered");
+    const pending = (await quoteSol(core, "pending")) as OkQuote;
+    await core.close();
+    opened.length = 0;
+    core = await boot(solConfig());
+    expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
+    expect(core.offerFor(pending.quoteId, "alice", undefined, pending.ownerKey)).toMatchObject({ amount: "6000" });
+    // 同じ記録が cap を名乗っていたら不可（Solana 宛は cap を持たない）。対象は**控えの未購入の quote**（購入済みの intent は status に関わらず offerFor が undefined なので観測にならない）。
+    // 形の悪い cap（片方だけ・形違い）も、正規化で落ちる前の生の欄で見るので不可。控えの行は読めている（status が返る）のに offerFor は出さない、で観測する。
+    await core.close();
+    opened.length = 0;
+    const { writeFile } = await import("node:fs/promises");
+    const ledgerDir = path.join(workDir, "dynamic-quotes");
+    const ledgerFiles = (await readdir(ledgerDir)).filter((name) => name.endsWith(".ndjson")).sort();
+    const original = new Map<string, string>();
+    for (const name of ledgerFiles) original.set(name, await readFile(path.join(ledgerDir, name), "utf8"));
+    const variants: Array<(pricing: Record<string, unknown>) => void> = [
+      (pricing) => { pricing["maxFee"] = "1"; pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 }; },
+      (pricing) => { pricing["maxFee"] = "1"; },
+      (pricing) => { pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 }; },
+      (pricing) => { pricing["maxFee"] = "1e3"; pricing["estimate"] = { gas: "1" }; },
+    ];
+    for (const variant of variants) {
+      for (const [name, text] of original) {
+        const lines = text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>);
+        for (const line of lines) {
+          if (line["kind"] === "quote" && line["quoteId"] === pending.quoteId) {
+            const record = line["record"] as { dynamic: { pricing: Record<string, unknown> } };
+            variant(record.dynamic.pricing);
+          }
+        }
+        await writeFile(path.join(ledgerDir, name), lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+      }
+      core = await boot(solConfig());
+      expect(core.status(pending.paymentId, "alice", pending.ownerKey)).toBeDefined(); // 控えの行は読めている
+      expect(core.offerFor(pending.quoteId, "alice", undefined, pending.ownerKey)).toBeUndefined(); // だが cap を名乗る Solana 宛は再提示しない
+      await core.close();
+      opened.length = 0;
+      for (const [name, text] of original) await writeFile(path.join(ledgerDir, name), text);
+    }
+  });
+});

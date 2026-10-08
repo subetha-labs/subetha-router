@@ -12,7 +12,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import { assetKeyOf, dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig } from "../config.js";
+import { assetKeyOf, dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig, usesGasIndexedFee } from "../config.js";
 import { parseUpstreamUrl } from "../net/upstream-url.js";
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, OutboundRail } from "../ports/outbound.js";
@@ -334,9 +334,10 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       if (selected === undefined) {
         return { ok: false, code: "quote_failed", reason: "no_matching_offer" };
       }
-      // MPP 送信: その送金のガス代を今見積もり、cap と手数料を決める（`docs/dynamic-gas-fee-design.md` §1・§2）。定額には落とさない。
+      // Tempo 宛の MPP 送信: その送金のガス代を今見積もり、cap と手数料を決める（`docs/dynamic-gas-fee-design.md` §1・§2）。定額には落とさない。
+      // Solana 宛の MPP は cap を持たない（`usesGasIndexedFee` が false。`docs/mpp-solana-design.md` §1.4 (b)）: 規則の手数料だけ。
       let cap: Parameters<typeof priceOf>[2];
-      if (profile.rail === "mpp") {
+      if (usesGasIndexedFee(profile)) {
         const estimated = await estimateFor(profile, selected, parsed.url);
         if (!estimated.ok) {
           return { ok: false, code: "quote_failed", reason: estimated.reason };
@@ -537,18 +538,21 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         sourceAmount: intent.source.offer.amount,
         upstreamOfferAmount: intent.destination.selectedOffer.amount,
         requireReservation: isPromoted,
-        destination: { network: profile.destination.network, feeAsset: profile.destination.feeAsset },
+        destination: { network: profile.destination.network, feeAsset: profile.destination.feeAsset, asset: profile.destination.asset },
       };
       if (!capCoversFee(intent.dynamic!, bound)) {
         return { paymentId, status: "rejected", code: "quote_unreadable" };
       }
       // 再見積り（§1.4）: 今の bound が記録の cap を超えていれば verify に進まない。cap は上げない。記録にも書かない。
-      const current = await estimateFor(profile, intent.destination.selectedOffer, url);
-      if (!current.ok) {
-        return awaiting("fee_estimate_unavailable");
-      }
-      if (BigInt(current.estimate.bound) > BigInt(intent.dynamic!.pricing.maxFee!)) {
-        return awaiting("fee_too_high");
+      // Solana 宛の MPP は cap を持たないので見積もらない（`docs/mpp-solana-design.md` §1.4 (b)。上の `capCoversFee` の検査は残す）。
+      if (usesGasIndexedFee(profile)) {
+        const current = await estimateFor(profile, intent.destination.selectedOffer, url);
+        if (!current.ok) {
+          return awaiting("fee_estimate_unavailable");
+        }
+        if (BigInt(current.estimate.bound) > BigInt(intent.dynamic!.pricing.maxFee!)) {
+          return awaiting("fee_too_high");
+        }
       }
     }
     let verified: { isValid: boolean };

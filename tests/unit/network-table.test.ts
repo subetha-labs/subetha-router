@@ -127,10 +127,11 @@ describe("否定（static route）", () => {
     expectInvalid(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: thirtyOne })]), /source\.payTo must be a well-formed address/);
   });
   test("送信の payTo の形（EVM）", () => expectInvalid(config([route({}, {}, { payTo: "not-an-address" })]), /destination\.payTo is not a well-formed address/));
-  test("Solana の受信は owner の公開鍵で通り、mpp 送信は表に無い", () => {
+  test("Solana の受信は owner の公開鍵で通り、mpp 送信も表で通る（mpp-solana 設計 §1.1、M1。scheme は solana/charge）", () => {
     const parsed = parseRouterConfig(config([route({}, { network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), { networks: KNOWN_NETWORKS });
     expect(parsed.routes["r"]?.source.payTo).toBe(SOL_OWNER);
-    expectInvalid(config([route({ rail: "mpp" }, {}, { scheme: "tempo/charge", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), /outbound rail "mpp" is not allowed/);
+    const mpp = parseRouterConfig(config([route({ rail: "mpp" }, {}, { scheme: "solana/charge", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), { networks: KNOWN_NETWORKS });
+    expect(mpp.routes["r"]?.destination.network).toBe(SOL_DEVNET);
   });
 });
 
@@ -150,10 +151,11 @@ describe("送信の表（Arc・Solana 宛。U1）", () => {
     expect(parsed.routes["arc"]?.destination.network).toBe("eip155:5042002");
     expect(parsed.routes["sol"]?.destination.payTo).toBe(SOL_OWNER);
     expect(KNOWN_NETWORKS.find((entry) => entry.network === "eip155:5042002")?.outbound).toEqual(["x402"]);
-    expect(KNOWN_NETWORKS.find((entry) => entry.network === SOL_DEVNET)?.outbound).toEqual(["x402"]);
+    // Solana は MPP も（mpp-solana 設計 §1.1、M1）。
+    expect(KNOWN_NETWORKS.find((entry) => entry.network === SOL_DEVNET)?.outbound).toEqual(["x402", "mpp"]);
   });
   test("表: 試験の表も Arc・Solana の送信を許す（本番の項目をそのまま保つ）", () => {
-    expect(TEST_NETWORKS.find((entry) => entry.network === SOL_DEVNET)?.outbound).toEqual(["x402"]);
+    expect(TEST_NETWORKS.find((entry) => entry.network === SOL_DEVNET)?.outbound).toEqual(["x402", "mpp"]);
     expect(TEST_NETWORKS.find((entry) => entry.network === "eip155:5042002")?.outbound).toEqual(["x402"]);
   });
   test("動的: Arc 宛は tokenDomain（USDC/2）で通る。Solana 宛は tokenDomain 無し・decimals ありで通り、asset が mint", () => {
@@ -322,8 +324,8 @@ describe("本番と試験の表", () => {
       expect(test?.x402Facilitator).toBe(entry.x402Facilitator);
       for (const asset of entry.assets) expect(test?.assets.some((a) => a.id === asset.id && a.decimals === asset.decimals && a.domain?.name === asset.domain?.name && a.tokenProgram === asset.tokenProgram)).toBe(true);
     }
-    // 本番が拒む向きは試験の表でも拒む（Solana への mpp 送信、Tempo での x402 受信）。
-    expectInvalid(config([route({ rail: "mpp" }, {}, { scheme: "tempo/charge", network: SOL_DEVNET, asset: SOL_USDC, payTo: SOL_OWNER })]), /outbound rail "mpp" is not allowed/, TEST_NETWORKS);
+    // 本番が拒む向きは試験の表でも拒む（Base への mpp 送信、Tempo での x402 受信）。
+    expectInvalid(config([route({ rail: "mpp" }, {}, { scheme: "tempo/charge", network: "eip155:84532", asset: USDC, payTo: RECEIVER })]), /outbound rail "mpp" is not allowed/, TEST_NETWORKS);
     expectInvalid(config([route({}, { network: "eip155:42431", asset: PATHUSD })]), /inbound rail "x402" is not allowed/, TEST_NETWORKS);
   });
 

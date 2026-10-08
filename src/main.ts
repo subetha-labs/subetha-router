@@ -39,6 +39,7 @@ import {
   type RouteConfig,
   type RouterConfig,
   type RuntimeConfig,
+  usesGasIndexedFee,
 } from "./config.js";
 import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
@@ -254,6 +255,14 @@ export function operatorAddressesOf(
   return [...addresses];
 }
 
+/**
+ * gas-indexed の手数料（Tempo 宛の MPP）を使う動的プロファイルだけ（`usesGasIndexedFee`）。起動時の MPP 能力の確認（`assertDynamicMppCapability`・
+ * RPC ホスト・`eth_fillTransaction` の probe）はこの集合に掛ける。Solana 宛の MPP は別の adapter が `startup()` で確かめる（`docs/mpp-solana-design.md` §1.4）。純粋関数。
+ */
+export function gasIndexedMppProfilesOf(profiles: Readonly<Record<string, DynamicProfile>>): Record<string, DynamicProfile> {
+  return Object.fromEntries(Object.entries(profiles).filter(([, profile]) => usesGasIndexedFee(profile)));
+}
+
 function railByRoute(
   routes: Readonly<Record<string, { readonly rail?: string; readonly destination: { readonly network: string } }>>,
   rails: Readonly<Record<string, OutboundRail>>,
@@ -384,6 +393,26 @@ export function composeRails(
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
 ): { inbound: InboundRail; outbound: OutboundRail; balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>; dynamic?: DynamicWiring; startup?: () => Promise<void> } {
+  /**
+   * Solana の MPP（`docs/mpp-solana-design.md` §3・§4）はタスク M3-b（受信）・M4-b（送信）で配線する。それまでは設定に現れた時点で、
+   * **adapter を 1 つも作る前に**（合成レールの分岐よりも前に）起動を止める（Tempo の adapter に落とさない。fail closed）。表（`KNOWN_NETWORKS`）はもう許しているので、ここが唯一の門。
+   */
+  for (const route of Object.values(config.router.routes)) {
+    if (route.sourceRail === "mpp" && networkFamilyOf(route.source.network) === "svm") {
+      throw new ConfigError(`routes.${route.routeId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
+    }
+    if ((route.rail ?? "x402") === "mpp" && networkFamilyOf(route.destination.network) === "svm") {
+      throw new ConfigError(`routes.${route.routeId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
+    }
+  }
+  for (const profile of Object.values(config.router.dynamic?.profiles ?? {})) {
+    if (profile.sourceRail === "mpp" && networkFamilyOf(profile.source.network) === "svm") {
+      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
+    }
+    if (profile.rail === "mpp" && networkFamilyOf(profile.destination.network) === "svm") {
+      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
+    }
+  }
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
@@ -791,9 +820,11 @@ export function composeRails(
           gate,
           balanceOf: async (id, asset) => balanceOfFor(id, asset),
           verify: async () => {
-            const mppProfiles = Object.values(profiles).filter((profile) => profile.rail === "mpp");
+            // Tempo 宛の MPP だけ（Solana 宛の MPP は gas-indexed の cap を持たず、`assertDynamicMppCapability` の chainId の読み方にも合わない。`docs/mpp-solana-design.md` §1.4）。
+            const gasIndexed = gasIndexedMppProfilesOf(profiles);
+            const mppProfiles = Object.values(gasIndexed);
             if (mppProfiles.length > 0 && capabilities.mppTempo !== undefined) {
-              await assertDynamicMppCapability(capabilities.mppTempo, profiles);
+              await assertDynamicMppCapability(capabilities.mppTempo, gasIndexed);
               // 能力の RPC ホストは拒否ホストに入っていること（`dependencyUrls` で申告する）。
               for (const profile of mppProfiles) {
                 const client = await capabilities.mppTempo.getClient({ chainId: Number(profile.destination.network.replace(/^eip155:/, "")) });

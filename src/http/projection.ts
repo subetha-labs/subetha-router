@@ -3,7 +3,7 @@
  * 上流 URL・principal トークン・内部ヘッダ・例外文字列は決して載せない。
  */
 
-import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig } from "../config.js";
+import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig, usesGasIndexedFee } from "../config.js";
 import type { Projection, QuoteDocument } from "../core/orchestrator.js";
 import type { InboundOffer } from "../ports/inbound.js";
 
@@ -26,8 +26,9 @@ export function dynamicListingOf(config: RouterConfig): Record<string, unknown> 
       destination: { rail: profile.rail, scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, decimals: profile.destination.decimals },
       maxUpstreamAmount: profile.maxUpstreamAmount,
       fee: { ...profile.fee },
-      ...(profile.rail === "mpp" ? { feePolicy: { kind: "gas-indexed", feeMargin: profile.destination.feeMargin, maxFeeCeiling: profile.destination.maxFee } } : {}),
-      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp", profile.rail === "mpp"),
+      // gas-indexed の手数料は Tempo 宛の MPP だけ（Solana 宛の MPP は cap を持たない。`docs/mpp-solana-design.md` §1.4）。
+      ...(usesGasIndexedFee(profile) ? { feePolicy: { kind: "gas-indexed", feeMargin: profile.destination.feeMargin, maxFeeCeiling: profile.destination.maxFee } } : {}),
+      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp", usesGasIndexedFee(profile)),
     })),
   };
 }
@@ -166,7 +167,7 @@ export function dynamicQuoteBody(quote: QuoteDocument, profile: DynamicProfile, 
       quoteFingerprint: quote.destination.quoteFingerprint,
     },
     pricing: { ...pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
-    disclosures: dynamicDisclosuresOf(fundsMoveOnCredential, profile.rail === "mpp"),
+    disclosures: dynamicDisclosuresOf(fundsMoveOnCredential, usesGasIndexedFee(profile)),
     approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
     ownerKey: quote.ownerKey,
   };

@@ -65,7 +65,17 @@ function profiles(mppToX402 = true): Record<string, unknown> {
   };
 }
 
-function envFor(options: { dynamic?: boolean; enabled?: boolean; mode?: "real" | "synthetic"; mppSecret?: boolean; perAddressPerMinute?: number } = {}): Record<string, string> {
+const SOL = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+const SOL_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const SOL_OWNER = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+/** Solana の MPP のプロファイル（mpp-solana 設計 §6.3 の形。M1 では配線の guard の試験だけに使う）。 */
+function solanaMppProfile(direction: "outbound" | "inbound"): Record<string, unknown> {
+  return direction === "outbound"
+    ? { profileId: "dyn-x402-to-solmpp", sourceRail: "x402", source: { network: "eip155:84532", asset: USDC, decimals: 6, payTo: RECEIVER }, rail: "mpp", destination: { scheme: "solana/charge", network: SOL, asset: SOL_USDC, decimals: 6 }, par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } }
+    : { profileId: "dyn-solmpp-to-x402", sourceRail: "mpp", source: { network: SOL, asset: SOL_USDC, decimals: 6, payTo: SOL_OWNER }, rail: "x402", destination: { scheme: "exact", network: "eip155:84532", asset: USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" } }, par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } };
+}
+
+function envFor(options: { dynamic?: boolean; enabled?: boolean; mode?: "real" | "synthetic"; mppSecret?: boolean; perAddressPerMinute?: number; solanaMpp?: "outbound" | "inbound" | "inbound-route" | "outbound-route" } = {}): Record<string, string> {
   mkdirSync(runtimeRoot, { recursive: true });
   const dir = mkdtempSync(path.join(runtimeRoot, "t13-wiring-"));
   dirs.push(dir);
@@ -81,6 +91,12 @@ function envFor(options: { dynamic?: boolean; enabled?: boolean; mode?: "real" |
           source: { amount: "10000", asset: USDC, decimals: 6, network: "eip155:84532", payTo: RECEIVER },
           destination: { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, payTo: "0x00000000000000000000000000000000000000b1" },
         },
+        ...(options.solanaMpp === "outbound-route"
+          ? { "r-to-solmpp": { routeId: "r-to-solmpp", canonicalPath: "/v1/routes/r-to-solmpp/resource", rail: "mpp", sourceRail: "x402", source: { amount: "10000", asset: USDC, decimals: 6, network: "eip155:84532", payTo: RECEIVER }, destination: { scheme: "solana/charge", network: SOL, asset: SOL_USDC, payTo: SOL_OWNER } } }
+          : {}),
+        ...(options.solanaMpp === "inbound-route"
+          ? { "r-solmpp": { routeId: "r-solmpp", canonicalPath: "/v1/routes/r-solmpp/resource", rail: "x402", sourceRail: "mpp", source: { amount: "10000", asset: SOL_USDC, decimals: 6, network: SOL, payTo: SOL_OWNER }, destination: { scheme: "exact", network: "eip155:84532", asset: USDC, payTo: "0x00000000000000000000000000000000000000b1" } } }
+          : {}),
       },
       budget: { maxPurchases: 8, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "100000", maxPerPurchase: "20000" }, { network: "eip155:42431", asset: PATHUSD, maxTotal: "100000", maxPerPurchase: "20000" }] },
       ...(options.dynamic === false
@@ -88,16 +104,16 @@ function envFor(options: { dynamic?: boolean; enabled?: boolean; mode?: "real" |
         : {
             dynamic: {
               enabled: options.enabled ?? true,
-              profiles: profiles(),
-              budget: { maxPurchases: 8, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "100000", maxPerPurchase: "20000" }, { network: "eip155:42431", asset: PATHUSD, maxTotal: "100000", maxPerPurchase: "20000" }] },
+              profiles: { ...profiles(), ...(options.solanaMpp === undefined || options.solanaMpp === "inbound-route" || options.solanaMpp === "outbound-route" ? {} : { [solanaMppProfile(options.solanaMpp)["profileId"] as string]: solanaMppProfile(options.solanaMpp) }) },
+              budget: { maxPurchases: 8, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "100000", maxPerPurchase: "20000" }, { network: "eip155:42431", asset: PATHUSD, maxTotal: "100000", maxPerPurchase: "20000" }, { network: SOL, asset: SOL_USDC, maxTotal: "100000", maxPerPurchase: "20000" }] },
               denyHosts: ["denied.test"],
               ...(options.perAddressPerMinute === undefined ? {} : { limits: { perAddressPerMinute: options.perAddressPerMinute } }),
             },
           }),
     },
     ...(options.mode === "synthetic"
-      ? { synthetic: { facilitatorUrl: "http://127.0.0.1:1", upstreams: { "r-mpp": "http://127.0.0.1:1/x" } } }
-      : { x402: { upstreams: { "r-mpp": UPSTREAM_A } } }),
+      ? { synthetic: { facilitatorUrl: "http://127.0.0.1:1", upstreams: { "r-mpp": "http://127.0.0.1:1/x", ...(options.solanaMpp === "inbound-route" ? { "r-solmpp": "http://127.0.0.1:1/x" } : options.solanaMpp === "outbound-route" ? { "r-to-solmpp": "http://127.0.0.1:1/x" } : {}) } } }
+      : { x402: { upstreams: { "r-mpp": UPSTREAM_A, ...(options.solanaMpp === "inbound-route" ? { "r-solmpp": UPSTREAM_A } : options.solanaMpp === "outbound-route" ? { "r-to-solmpp": UPSTREAM_A } : {}) } } }),
   };
   const file = path.join(dir, "router.config.json");
   writeFileSync(file, JSON.stringify(document));
@@ -383,5 +399,25 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
     } finally {
       await core.close();
     }
+  });
+});
+
+/** Solana の MPP は M3-b（受信）・M4-b（送信）で配線する。それまで設定に現れたら起動を止める（Tempo の adapter に落とさない。`docs/mpp-solana-design.md`、タスク M1）。 */
+describe("Solana の MPP はまだ配線しない（M1 の guard）", () => {
+  test("送信（rail mpp ∧ solana:）のプロファイルがあれば起動しない", () => {
+    expect(() => compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/dynamic\.profiles\.dyn-x402-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+  });
+  test("受信（sourceRail mpp ∧ solana:）のプロファイルがあれば起動しない", () => {
+    expect(() => compose(envFor({ solanaMpp: "inbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/dynamic\.profiles\.dyn-solmpp-to-x402: the Solana MPP inbound adapter is not wired yet/);
+  });
+  test("送信（rail mpp ∧ solana:）の静的 route があれば起動しない。どの guard も adapter を作る前に効く（fixture の署名器の loopback の検査より先）", () => {
+    expect(() => compose(envFor({ solanaMpp: "outbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+  });
+  test("合成レール（synthetic）でも同じ guard が先に効く（合成の adapter を作らない）", () => {
+    expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "outbound-route" }), {})).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+    expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "inbound-route" }), {})).toThrow(/routes\.r-solmpp: the Solana MPP inbound adapter is not wired yet/);
+  });
+  test("受信（sourceRail mpp ∧ solana:）の静的 route があれば起動しない", () => {
+    expect(() => compose(envFor({ solanaMpp: "inbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-solmpp: the Solana MPP inbound adapter is not wired yet/);
   });
 });
