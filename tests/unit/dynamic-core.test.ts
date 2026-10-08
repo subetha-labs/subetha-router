@@ -1096,3 +1096,77 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
   });
 });
 
+/** Solana 宛の MPP 送信の手数料の例外（`docs/mpp-solana-design.md` §1.4 (b)(c)、要件 FR-44。タスク M1）: 設定の検査は `dynamic-fee-exception.test.ts`。ここは core と store。 */
+describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-solana 設計 §1.4、M1）", () => {
+  const SOL = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+  const SOL_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+  const SOL_OWNER = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+  const SOL_MPP: DynamicProfile = {
+    ...PROFILE,
+    profileId: "dyn-x402-to-solmpp",
+    sourceRail: "x402",
+    rail: "mpp",
+    source: { network: DST_NETWORK, asset: DST_ASSET, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" },
+    destination: { scheme: "solana/charge", network: SOL, asset: SOL_USDC, decimals: 6 },
+    fee: { flat: "1000", bps: 0, min: "1000" },
+  };
+  const solOffer = (): DestinationOffer => ({ scheme: "solana/charge", network: SOL, asset: SOL_USDC, amount: "5000", payTo: SOL_OWNER, extra: { realm: "r", terms: "{}" } });
+  const solConfig = (): RouterConfig => {
+    const config = baseConfig({ profile: SOL_MPP });
+    return { ...config, dynamic: { ...config.dynamic!, budget: { ...config.dynamic!.budget, buckets: [...config.dynamic!.budget.buckets, { network: SOL, asset: SOL_USDC, maxTotal: "1000000", maxPerPurchase: "200000" }] } } };
+  };
+  const quoteSol = (core: RouterCore, requestId = "r1") => core.quote({ principalId: "alice", requestId, routeId: SOL_MPP.profileId, upstream: { url: URL_A }, source: "alice" });
+
+  test("quote: 見積りを呼ばず、pricing に maxFee・estimate が無く、手数料は規則の額。受信 offer の額は total。見積りが失敗する状態でも出る", async () => {
+    outbound.offers = [solOffer()];
+    const core = await boot(solConfig());
+    const quote = (await quoteSol(core)) as OkQuote;
+    expect(quote.ok).toBe(true);
+    expect(outbound.estimateCalls).toBe(0);
+    expect(quote.dynamic!.pricing).toEqual({ upstreamAmount: "5000", converted: "5000", fee: "1000", total: "6000" });
+    expect(quote.source.amount).toBe("6000");
+    outbound.estimateBound = undefined;
+    expect(((await quoteSol(core, "r2")) as OkQuote).ok).toBe(true);
+    expect(outbound.estimateCalls).toBe(0);
+  });
+
+  test("purchase: capCoversFee は残し（cap 無しで通る）、再見積りを呼ばず verify に進む。pay に maxFee を渡さない。予約は 2 本で手数料の leg は無い", async () => {
+    outbound.offers = [solOffer()];
+    const core = await boot(solConfig());
+    const quote = (await quoteSol(core)) as OkQuote;
+    outbound.estimateBound = undefined; // 見積りが呼ばれれば fee_estimate_unavailable で止まる
+    expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
+    expect(outbound.estimateCalls).toBe(0);
+    expect(inbound.verifyCalls).toBe(1);
+    expect(outbound.paidFor[0]).not.toHaveProperty("maxFee");
+    const created = (await journalLines())[0]!.patch["dynamic"] as { pricing: Record<string, unknown>; reservation: { legs: unknown[] } };
+    expect(created.pricing).not.toHaveProperty("maxFee");
+    expect(created.pricing).not.toHaveProperty("estimate");
+    expect(created.reservation.legs).toEqual([{ network: DST_NETWORK, asset: DST_ASSET, amount: "6000" }, { network: SOL, asset: SOL_USDC, amount: "5000" }]);
+  });
+
+  test("復元: cap の無い Solana 宛の記録は dynamicCapInvalid にならない（再起動後に status が読め、控えの quote は offerFor で再提示できる）", async () => {
+    outbound.offers = [solOffer()];
+    let core = await boot(solConfig());
+    const bought = (await quoteSol(core, "buy")) as OkQuote;
+    expect((await core.purchase({ ...purchaseArgs(bought), requestId: "buy" })).status).toBe("delivered");
+    const pending = (await quoteSol(core, "pending")) as OkQuote;
+    await core.close();
+    opened.length = 0;
+    core = await boot(solConfig());
+    expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
+    expect(core.offerFor(pending.quoteId, "alice", undefined, pending.ownerKey)).toMatchObject({ amount: "6000" });
+    // 同じ記録が cap を名乗っていたら不可（Solana 宛は cap を持たない）: journal の created 行に maxFee を書き足して再起動 → 購入は quote_unreadable。
+    const lines = (await readFile(journalPath, "utf8")).split("\n").filter((line) => line !== "");
+    await core.close();
+    opened.length = 0;
+    const { writeFile } = await import("node:fs/promises");
+    const row = JSON.parse(lines[0]!) as { patch: { dynamic: { pricing: Record<string, unknown> } } };
+    row.patch.dynamic.pricing["maxFee"] = "1";
+    row.patch.dynamic.pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 };
+    await writeFile(journalPath, `${JSON.stringify(row)}\n${lines.slice(1).join("\n")}\n`);
+    core = await boot(solConfig());
+    expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
+    expect(core.offerFor(bought.quoteId, "alice", undefined, bought.ownerKey)).toBeUndefined();
+  });
+});

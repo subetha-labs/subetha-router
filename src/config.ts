@@ -19,6 +19,9 @@ export type InboundRailName = "x402" | "mpp";
 export type OutboundRailName = "x402" | "mpp";
 export type X402FacilitatorKind = "x402" | "circle";
 
+/** MPP の Solana charge の scheme（offer・route・プロファイルの `scheme`。Tempo の `tempo/charge` に対応。`docs/mpp-solana-design.md` §3.1）。 */
+export const MPP_SOLANA_SCHEME = "solana/charge";
+
 export interface KnownAsset {
   /** EVM: `0x` アドレス（比較は小文字化）。SVM: mint（base58。比較はそのまま）。 */
   readonly id: string;
@@ -68,11 +71,11 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
     assets: [{ id: "0x3600000000000000000000000000000000000000", decimals: 6, domain: { name: "USDC", version: "2" } }],
   },
   {
-    // Solana devnet。送信（S-4）は x402 の SVM `exact`（送信の設計 §4）。
+    // Solana devnet。送信（S-4）は x402 の SVM `exact`（送信の設計 §4）。MPP（S-5 受信・S-6 送信。`docs/mpp-solana-design.md` §1.1）も受信・送信とも許す。
     network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
     family: "svm",
-    inbound: ["x402"],
-    outbound: ["x402"],
+    inbound: ["x402", "mpp"],
+    outbound: ["x402", "mpp"],
     x402Facilitator: "x402",
     assets: [{ id: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }],
   },
@@ -361,6 +364,15 @@ export function resolveProfile(config: RouterConfig, profileId: string): Dynamic
  * 「変わったら、変更前の quote で払ってはいけない」欄をすべて含める: プロファイルの全欄と `enabled`。
  * 頻度の上限・拒否ホスト・動的予算は支払いの条件ではないので含めない。
  */
+/**
+ * gas-indexed の手数料（quote ごとの見積り × `feeMargin` の cap。`docs/dynamic-gas-fee-design.md`）を使う送信か。
+ * **Tempo（EVM）宛の MPP だけ**。Solana 宛の MPP は pull で Router が手数料を払わないので cap を持たない（`docs/mpp-solana-design.md` §1.4、FR-44 の明示の例外）。
+ * 設定・動的 core・store・合成がこの 1 つの判定を共有する。
+ */
+export function usesGasIndexedFee(profile: Pick<DynamicProfile, "rail"> & { readonly destination: Pick<DynamicProfile["destination"], "network"> }): boolean {
+  return profile.rail === "mpp" && networkFamilyOf(profile.destination.network) === "evm";
+}
+
 export function dynamicAuthoritativeTermsOf(dynamic: DynamicConfig, profile: DynamicProfile): unknown {
   return {
     dynamic: true,
@@ -377,11 +389,11 @@ export function dynamicAuthoritativeTermsOf(dynamic: DynamicConfig, profile: Dyn
       tokenDomain: profile.destination.tokenDomain,
       feeAsset: profile.destination.feeAsset,
       maxFee: profile.destination.maxFee,
-      // MPP 送信だけ: 手数料の決め方（quote 時のガス代に連動）も支払いの条件。x402 送信の直列化は変えない（発行済みの quote を無効にしない）。
-      ...(profile.rail === "mpp" ? { feeMargin: profile.destination.feeMargin } : {}),
+      // Tempo 宛の MPP 送信だけ: 手数料の決め方（quote 時のガス代に連動）も支払いの条件。x402 送信・Solana 宛 MPP の直列化は変えない（発行済みの quote を無効にしない）。
+      ...(usesGasIndexedFee(profile) ? { feeMargin: profile.destination.feeMargin } : {}),
     },
     // v2（2026-10-06）: priority 1 固定・`maxFeePerGas = ceil(2.4 × baseFee) + 1`・capPerGas への clamp（`docs/dynamic-gas-fee-design.md` §8）。
-    ...(profile.rail === "mpp" ? { pricingPolicy: "gas-indexed-v2" } : {}),
+    ...(usesGasIndexedFee(profile) ? { pricingPolicy: "gas-indexed-v2" } : {}),
     par: profile.par,
     maxUpstreamAmount: profile.maxUpstreamAmount,
     fee: { ...profile.fee },
@@ -757,6 +769,27 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     // SVM の x402 送信（送信の設計 §1.2）: domain は無い。token program は任意（表と照合）。桁は必須（下の requireDecimals）。
     if (Object.hasOwn(destination, "tokenDomain")) {
       throw new ConfigError(`${at}.destination.tokenDomain is not allowed for an svm destination`);
+    }
+    const program = destination["tokenProgram"];
+    if (program !== undefined) {
+      if (typeof program !== "string" || program === "") {
+        throw new ConfigError(`${at}.destination.tokenProgram must be a non-empty string`);
+      }
+      tokenProgram = program;
+    }
+  } else if (rail === "mpp" && networkFamilyOf(destinationNetwork) === "svm") {
+    /**
+     * Solana 宛の MPP 送信（`docs/mpp-solana-design.md` §1.2・§1.4 (a)、要件 FR-44）: pull なので Router は手数料を払わず、gas-indexed の
+     * cap の欄（`feeAsset`・`maxFee`・`feeMargin`）は**持たないことを要求**する（書けば効くと誤解させない: 無視ではなく拒否）。domain も無い。
+     * token program は任意（表と照合）。scheme は `solana/charge` だけ。
+     */
+    for (const key of ["feeAsset", "maxFee", "feeMargin", "tokenDomain"] as const) {
+      if (Object.hasOwn(destination, key)) {
+        throw new ConfigError(`${at}.destination.${key} is not allowed for an mpp destination on an svm network (the provider's fee payer pays; docs/mpp-solana-design.md §1.4)`);
+      }
+    }
+    if (destination["scheme"] !== MPP_SOLANA_SCHEME) {
+      throw new ConfigError(`${at}.destination.scheme must be "${MPP_SOLANA_SCHEME}" for an mpp destination on an svm network`);
     }
     const program = destination["tokenProgram"];
     if (program !== undefined) {

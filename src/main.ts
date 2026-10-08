@@ -39,6 +39,7 @@ import {
   type RouteConfig,
   type RouterConfig,
   type RuntimeConfig,
+  usesGasIndexedFee,
 } from "./config.js";
 import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
@@ -252,6 +253,14 @@ export function operatorAddressesOf(
   for (const capability of capabilities.svmByNetwork.values()) addresses.add(capability.address);
   if (capabilities.mppTempo !== undefined) addresses.add(capabilities.mppTempo.account.address);
   return [...addresses];
+}
+
+/**
+ * gas-indexed の手数料（Tempo 宛の MPP）を使う動的プロファイルだけ（`usesGasIndexedFee`）。起動時の MPP 能力の確認（`assertDynamicMppCapability`・
+ * RPC ホスト・`eth_fillTransaction` の probe）はこの集合に掛ける。Solana 宛の MPP は別の adapter が `startup()` で確かめる（`docs/mpp-solana-design.md` §1.4）。純粋関数。
+ */
+export function gasIndexedMppProfilesOf(profiles: Readonly<Record<string, DynamicProfile>>): Record<string, DynamicProfile> {
+  return Object.fromEntries(Object.entries(profiles).filter(([, profile]) => usesGasIndexedFee(profile)));
 }
 
 function railByRoute(
@@ -559,6 +568,10 @@ export function composeRails(
       svmStartups.push(() => svmRail.startup());
       continue;
     }
+    if (pair.rail === "mpp" && networkFamilyOf(pair.network) === "svm") {
+      // Solana 宛の MPP 送信（`docs/mpp-solana-design.md` §4）はタスク M4-b で配線する。それまでは Tempo の adapter に落とさず起動を止める（fail closed）。
+      throw new ConfigError(`outbound mpp to ${pair.network}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
+    }
     if (pair.rail === "mpp") {
       const capability = capabilities.mppTempo;
       if (capability === undefined) {
@@ -726,6 +739,10 @@ export function composeRails(
     }
     for (const route of Object.values(config.router.routes)) {
       if (route.sourceRail !== "mpp") continue;
+      if (networkFamilyOf(route.source.network) === "svm") {
+        // Solana の MPP 受信（`docs/mpp-solana-design.md` §3）はタスク M3-b で配線する。それまでは起動を止める（fail closed）。
+        throw new ConfigError(`routes.${route.routeId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
+      }
       const payTo = route.source.payTo;
       if (payTo === undefined) {
         throw new ConfigError(`routes.${route.routeId}.source.payTo is required for mpp inbound`);
@@ -752,6 +769,9 @@ export function composeRails(
     // 動的プロファイルの受信（MPP）: transport は動的用（loopback 不可）。
     for (const profile of Object.values(profiles)) {
       if (profile.sourceRail !== "mpp" || dynamicTransport === undefined) continue;
+      if (networkFamilyOf(profile.source.network) === "svm") {
+        throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
+      }
       const chainId = Number(profile.source.network.replace(/^eip155:/, ""));
       if (!Number.isInteger(chainId) || chainId <= 0) {
         throw new ConfigError(`dynamic.profiles.${profile.profileId}.source.network must be eip155:<chainId> for mpp inbound`);
@@ -791,9 +811,11 @@ export function composeRails(
           gate,
           balanceOf: async (id, asset) => balanceOfFor(id, asset),
           verify: async () => {
-            const mppProfiles = Object.values(profiles).filter((profile) => profile.rail === "mpp");
+            // Tempo 宛の MPP だけ（Solana 宛の MPP は gas-indexed の cap を持たず、`assertDynamicMppCapability` の chainId の読み方にも合わない。`docs/mpp-solana-design.md` §1.4）。
+            const gasIndexed = gasIndexedMppProfilesOf(profiles);
+            const mppProfiles = Object.values(gasIndexed);
             if (mppProfiles.length > 0 && capabilities.mppTempo !== undefined) {
-              await assertDynamicMppCapability(capabilities.mppTempo, profiles);
+              await assertDynamicMppCapability(capabilities.mppTempo, gasIndexed);
               // 能力の RPC ホストは拒否ホストに入っていること（`dependencyUrls` で申告する）。
               for (const profile of mppProfiles) {
                 const client = await capabilities.mppTempo.getClient({ chainId: Number(profile.destination.network.replace(/^eip155:/, "")) });

@@ -4,6 +4,7 @@
  */
 
 import type { InboundOffer } from "../ports/inbound.js";
+import { networkFamilyOf } from "../config.js";
 import type { MessageReservation } from "../ports/outbound.js";
 import type { DestinationOffer } from "../ports/outbound.js";
 import {
@@ -201,31 +202,60 @@ export function capCoversFee(
     readonly upstreamOfferAmount: string;
     readonly requireReservation?: boolean;
     /**
-     * 予約の区分を引く宛先（network・feeAsset）。再開では**設定のプロファイル**（指紋で quote 時のものと一致を確かめ済み）を渡す。
+     * 予約の区分を引く宛先（network・feeAsset・asset）。再開では**設定のプロファイル**（指紋で quote 時のものと一致を確かめ済み）を渡す。
      * 省略時は記録のプロファイルの写し（復元。写しは書き換えられ得るので、実行は再開の検査が守る）。
      */
-    readonly destination?: { readonly network: string; readonly feeAsset: string | undefined };
+    readonly destination?: { readonly network: string; readonly feeAsset: string | undefined; readonly asset?: string | undefined };
   },
 ): boolean {
-  const cap = capFieldsOf(dynamic.pricing as unknown as Record<string, unknown>);
-  if (cap === undefined) return false;
+  const pricing = dynamic.pricing as unknown as Record<string, unknown>;
+  const copied = dynamic.profile["destination"];
+  const copiedNetwork = isPlainRecord(copied) ? copied["network"] : undefined;
+  const boundNetwork = bound.destination?.network;
+  const network = boundNetwork ?? copiedNetwork;
+  if (typeof network !== "string") return false;
+  const family = networkFamilyOf(network);
+  if (family === undefined) return false;
+  // 再開では設定の宛先（bound）と記録の写しの両方が見える。family が食い違う記録は不可（写しを書き換えて Solana の例外に逃げさせない）。
+  if (typeof boundNetwork === "string" && typeof copiedNetwork === "string" && networkFamilyOf(copiedNetwork) !== family) return false;
   const { fee, upstreamAmount, converted, total } = dynamic.pricing;
   if (![fee, upstreamAmount, converted, total, bound.sourceAmount, bound.upstreamOfferAmount].every((value) => typeof value === "string" && AMOUNT.test(value))) return false;
-  const maxFee = BigInt(cap.maxFee);
-  if (BigInt(fee) < maxFee) return false;
+  let maxFee: bigint;
+  if (family === "svm") {
+    // Solana 宛の MPP（`docs/mpp-solana-design.md` §1.4 (c)、FR-44 の明示の例外）: cap を持たない。cap を名乗る記録は core が作らないので不可。
+    if (pricing["maxFee"] !== undefined || pricing["estimate"] !== undefined) return false;
+    maxFee = 0n;
+  } else {
+    const cap = capFieldsOf(pricing);
+    if (cap === undefined) return false;
+    maxFee = BigInt(cap.maxFee);
+    if (BigInt(fee) < maxFee) return false;
+  }
   if (BigInt(converted) + BigInt(fee) !== BigInt(total)) return false;
   if (BigInt(converted) !== BigInt(upstreamAmount)) return false;
   if (BigInt(bound.sourceAmount) !== BigInt(total) || BigInt(bound.upstreamOfferAmount) !== BigInt(upstreamAmount)) return false;
   if (dynamic.reservation === undefined) {
     return bound.requireReservation !== true;
   }
-  const copied = dynamic.profile["destination"];
-  const network = bound.destination !== undefined ? bound.destination.network : isPlainRecord(copied) ? copied["network"] : undefined;
-  const feeAsset = bound.destination !== undefined ? bound.destination.feeAsset : isPlainRecord(copied) ? copied["feeAsset"] : undefined;
-  if (typeof network !== "string" || typeof feeAsset !== "string") return false;
+  // 予約の区分: Tempo は手数料の資産（= 送信資産）で upstreamAmount + maxFee。Solana は送信資産で upstreamAmount（手数料の leg は無い）。
+  const asset =
+    family === "svm"
+      ? bound.destination !== undefined
+        ? bound.destination.asset
+        : isPlainRecord(copied)
+          ? copied["asset"]
+          : undefined
+      : bound.destination !== undefined
+        ? bound.destination.feeAsset
+        : isPlainRecord(copied)
+          ? copied["feeAsset"]
+          : undefined;
+  if (typeof asset !== "string") return false;
+  // EVM の資産は小文字化して比べ、SVM の mint は大文字小文字を保つ（multirail 設計 §1、FR-4）。
+  const sameAsset = (candidate: string): boolean => (family === "svm" ? candidate === asset : candidate.toLowerCase() === asset.toLowerCase());
   let reserved = 0n;
   for (const leg of dynamic.reservation.legs) {
-    if (leg.network === network && leg.asset.toLowerCase() === feeAsset.toLowerCase()) reserved += BigInt(leg.amount);
+    if (leg.network === network && sameAsset(leg.asset)) reserved += BigInt(leg.amount);
   }
   return reserved >= BigInt(upstreamAmount) + maxFee;
 }
