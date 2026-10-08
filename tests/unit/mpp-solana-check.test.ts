@@ -4,7 +4,7 @@
  * 改変の口: 額・桁・mint・宛先・source・Memo（無し／違い／余分）・compute budget（順序・片方・無し・上限超え・重複）・余分な命令・署名 2 つ・署名の破壊・自己支払い・読み残し。
  */
 import { describe, expect, test } from "vitest";
-import { address, appendTransactionMessageInstructions, compileTransactionMessage, createNoopSigner, createTransactionMessage, generateKeyPairSigner, getBase58Encoder, getCompiledTransactionMessageEncoder, getTransactionEncoder, pipe, setTransactionMessageFeePayer, setTransactionMessageFeePayerSigner, setTransactionMessageLifetimeUsingBlockhash, signTransactionMessageWithSigners, type Instruction, type KeyPairSigner } from "@solana/kit";
+import { address, appendTransactionMessageInstructions, compileTransactionMessage, createNoopSigner, createTransactionMessage, generateKeyPairSigner, getBase58Encoder, getCompiledTransactionMessageEncoder, getTransactionDecoder, getTransactionEncoder, pipe, setTransactionMessageFeePayer, setTransactionMessageFeePayerSigner, setTransactionMessageLifetimeUsingBlockhash, signBytes, signTransactionMessageWithSigners, type Instruction, type KeyPairSigner } from "@solana/kit";
 import { findAssociatedTokenPda, getTransferCheckedInstruction, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { getSetComputeUnitLimitInstruction, getSetComputeUnitPriceInstruction } from "@solana-program/compute-budget";
 import { Challenge, Credential } from "mppx";
@@ -128,6 +128,37 @@ describe("checkMppSolanaTransaction: 各欄の変異で落ちる", () => {
     expect(checkMppSolanaTransaction(new Uint8Array(1233), w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
     expect(checkMppSolanaTransaction(new Uint8Array(0), w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
     expect(signerOf(new Uint8Array(0))).toBeUndefined();
+  });
+
+  /** message の bytes を書き換えて payer が署名し直した wire（欄の検査は通るが、組み直しの比較だけが捕まえる形を作る）。 */
+  async function resignedWire(w: World, mutate: (message: Uint8Array) => Uint8Array): Promise<Uint8Array> {
+    const good = await wireOf(w);
+    const [tx] = getTransactionDecoder().read(good, 0);
+    const message = mutate(Uint8Array.from(tx.messageBytes));
+    const signature = await signBytes(w.payer.keyPair.privateKey, message);
+    return new Uint8Array([1, ...signature, ...message]);
+  }
+
+  test("組み直しの比較だけが捕まえる形: header の読取専用の数を変えた message（命令・口座・data は同じ）。lookup table 付き・legacy の version も落ちる", async () => {
+    const w = await world();
+    // v0 の message: [0] version の印、[1] 署名者の数、[2] 読取専用の署名者、[3] 読取専用の非署名者。mint 等を書込扱いにする = header だけの改変。
+    const headerOnly = await resignedWire(w, (m) => { m[3] = (m[3] ?? 1) - 1; return m; });
+    expect(checkMppSolanaTransaction(headerOnly, w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
+    // 署名は正しい（署名の検査だけなら通る形）: 同じ bytes を payer が署名している。
+    const [tamperedTx] = getTransactionDecoder().read(headerOnly, 0);
+    expect(tamperedTx.messageBytes.length).toBe((await wireOf(w)).length - 65);
+    // lookup table を 1 つ足す（末尾の count 0 を、1 件の table に置き換える）。
+    const withLookup = await resignedWire(w, (m) => new Uint8Array([...m.subarray(0, m.length - 1), 1, ...new Uint8Array(32).fill(7), 1, 0, 0]));
+    expect(checkMppSolanaTransaction(withLookup, w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
+    // legacy（version の印が無い）message。
+    const legacy = pipe(
+      createTransactionMessage({ version: "legacy" }),
+      (m) => setTransactionMessageFeePayerSigner(w.payer, m),
+      (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: BLOCKHASH as never, lastValidBlockHeight: 0n }, m),
+      (m) => appendTransactionMessageInstructions([getSetComputeUnitLimitInstruction({ units: 200_000 }), getSetComputeUnitPriceInstruction({ microLamports: 1n }), getTransferCheckedInstruction({ source: address(w.payerAta), mint: address(MINT), destination: address(w.ownerAta), authority: w.payer, amount: 10_000n, decimals: 6 }, { programAddress: TOKEN_PROGRAM_ADDRESS }), { programAddress: MEMO_PROGRAM_ADDRESS, accounts: [], data: new TextEncoder().encode(w.externalId) }], m),
+    );
+    const legacyWire = Uint8Array.from(getTransactionEncoder().encode(await signTransactionMessageWithSigners(legacy)));
+    expect(checkMppSolanaTransaction(legacyWire, w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
   });
 
   test("署名 2 つ（fee payer が別の鍵 = sponsorship の形）は受けない。署名者の ATA を source にした別の鍵の署名も受けない", async () => {
