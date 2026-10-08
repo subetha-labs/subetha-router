@@ -293,3 +293,357 @@ export function preflightMppSolana(offer: InboundOffer, credential: PaymentCrede
   }
   return { ok: true };
 }
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * adapter（`docs/mpp-solana-design.md` §3.1・§3.5・§3.6。タスク M3-b）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+import { Challenge } from "mppx";
+import { Mppx } from "mppx/server";
+import { findAssociatedTokenPda } from "@solana-program/token";
+
+import type { GuardedTransport } from "../../net/guarded-fetch.js";
+import type { CreateOfferRequest, InboundCallContext, InboundRail, SettleResult } from "../../ports/inbound.js";
+import { followSvmSignature, svmSignatureStatusOf as followUpStatusOf } from "./svm-follow-up.js";
+import { assertAtaAccount, svmFetchJson } from "./x402-svm-startup.js";
+
+/** journal の消費済み署名の読み口（`docs/mpp-solana-design.md` §2.3）。合成が渡し、`startRouter` が store の load の後に bind する。bind の前の `has` は throw。 */
+export interface ConsumedSignatures {
+  has(txRef: string): boolean;
+}
+
+export class ConsumedSignaturesHolder implements ConsumedSignatures {
+  #view: ReadonlySet<string> | undefined;
+  bind(view: ReadonlySet<string>): void {
+    this.#view = view;
+  }
+  has(txRef: string): boolean {
+    if (this.#view === undefined) throw new Error("mpp solana inbound: the consumed-signature set is not bound yet (startRouter binds it after the store loads)");
+    return this.#view.has(txRef);
+  }
+}
+
+export interface MppSolanaInboundOptions {
+  /** challenge の HMAC 束縛鍵（32 バイト以上。Tempo 受信と同じ注入）。 */
+  readonly secretKey: string;
+  /** 受取 owner（base58 32 バイト）。 */
+  readonly recipient: string;
+  readonly mint: string;
+  readonly decimals: number;
+  readonly tokenProgram: string;
+  /** CAIP-2（`solana:…`。表の network）。 */
+  readonly network: string;
+  readonly maxTimeoutSeconds: number;
+  readonly rpc: { readonly url: string; readonly transport: GuardedTransport };
+  readonly consumed: ConsumedSignatures;
+  readonly realm?: string;
+  /** 単調な時計（ms。既定 `performance.now`）と `sleep`（試験の注入口）。 */
+  readonly clock?: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** `transaction` 型の settle 全体の期限（経過時間、ms。既定 50,000）。 */
+  readonly settleDeadlineMs?: number;
+  /** 追跡（§3.5 の 4）: 開始からの期限（既定 30,000）、間隔（既定 2,000）、回数（既定 15）。 */
+  readonly followUp?: { readonly totalMs?: number; readonly intervalMs?: number; readonly maxPolls?: number };
+  /** RPC の 1 要求の期限（既定 10,000）。 */
+  readonly rpcTimeoutMs?: number;
+  readonly onDiagnostic?: (code: string) => void;
+  /** 時刻（ms。offer の期限と `signature` 型の `blockTime` の窓に）。既定 `Date.now`。 */
+  readonly now?: () => number;
+}
+
+export type MppSolanaInbound = InboundRail & { startup(): Promise<void> };
+
+export const MPP_SOLANA_SETTLE_DEADLINE_MS = 50_000;
+export const MPP_SOLANA_FOLLOW_UP_DEFAULTS = Object.freeze({ totalMs: 30_000, intervalMs: 2_000, maxPolls: 15 });
+export const MPP_SOLANA_RPC_TIMEOUT_MS = 10_000;
+const MPP_SOLANA_RPC_MAX_BYTES = 64 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `getTransaction`（base64）の応答を読む。`null` = 無い。形違いは `undefined`。 */
+function transactionResultOf(reply: Record<string, unknown> | undefined): { readonly bytes: Uint8Array; readonly err: unknown; readonly slot: number; readonly blockTime: number | null } | null | undefined {
+  if (reply === undefined) return undefined;
+  const result = reply["result"];
+  if (result === null) return null;
+  if (!isRecord(result)) return undefined;
+  const transaction = result["transaction"];
+  const meta = result["meta"];
+  const slot = result["slot"];
+  const blockTime = result["blockTime"];
+  if (!Array.isArray(transaction) || typeof transaction[0] !== "string" || transaction[1] !== "base64") return undefined;
+  if (!isRecord(meta) || !Object.hasOwn(meta, "err")) return undefined;
+  if (typeof slot !== "number" || !Number.isSafeInteger(slot) || slot <= 0) return undefined;
+  if (blockTime !== null && (typeof blockTime !== "number" || !Number.isSafeInteger(blockTime))) return undefined;
+  const bytes = decodeBase64Strict(transaction[0]);
+  if (bytes === undefined || bytes.length > SVM_TRANSACTION_MAX_BYTES) return undefined;
+  return { bytes, err: meta["err"], slot, blockTime: blockTime as number | null };
+}
+
+/**
+ * MPP の Solana charge の受信 adapter（push = `signature` 型と、Router が送出する `transaction` 型。sponsorship は持たない。D-18・D-28）。
+ * challenge の発行と HMAC は `mppx` 0.11.0（`Mppx.create` + `Method.toServer`）、構造の検査と送出・追跡は Router 自身。
+ */
+export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSolanaInbound {
+  if (options.secretKey.length < 32) {
+    throw new Error("MPP inbound secretKey must be at least 32 bytes");
+  }
+  const networkLabel = MPP_SOLANA_NETWORK_LABELS[options.network];
+  if (networkLabel === undefined) {
+    throw new Error("mpp solana inbound: the network is not in the table of MPP Solana networks");
+  }
+  if (!isSvmPublicKeyString(options.recipient)) {
+    throw new Error("mpp solana inbound: recipient must be a 32-byte base58 owner address");
+  }
+  const now = options.now ?? Date.now;
+  const clock = options.clock ?? ((): number => performance.now());
+  const sleep = options.sleep ?? ((ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)));
+  const settleDeadlineMs = options.settleDeadlineMs ?? MPP_SOLANA_SETTLE_DEADLINE_MS;
+  const followUp = { ...MPP_SOLANA_FOLLOW_UP_DEFAULTS, ...options.followUp };
+  const rpcTimeoutMs = options.rpcTimeoutMs ?? MPP_SOLANA_RPC_TIMEOUT_MS;
+  const rpc = options.rpc;
+
+  /** `startup()` が埋める（受取 owner の ATA。存在・owner・mint を RPC で確かめた値）。 */
+  let policy: MppSolanaPolicy | undefined;
+  function ready(): MppSolanaPolicy {
+    if (policy === undefined) throw new Error("mpp solana inbound: startup() has not completed");
+    return policy;
+  }
+
+  const serverMethod = Method.toServer(mppSolanaChargeMethod, {
+    // 構造の検査は SDK の外（§3.3）。ここは HMAC・期限・scope の後に SDK が呼ぶ hook で、credential と challenge をそのまま返す。
+    validate: async ({ credential }) => ({ challenge: credential.challenge, credential, details: {}, intent: MPP_SOLANA_INTENT, method: MPP_SOLANA_METHOD, request: credential.challenge.request }),
+    // Router は `broadcastCredential` を呼ばない（送出は Router 自身。§3.5）。呼ばれたら設計の違反。
+    broadcast: async () => {
+      options.onDiagnostic?.("mpp_solana_sdk_broadcast_called");
+      throw new Error("mpp solana inbound: the SDK broadcast hook must never be called");
+    },
+  });
+  const mppx = Mppx.create({
+    secretKey: options.secretKey,
+    ...(options.realm === undefined ? {} : { realm: options.realm }),
+    methods: [serverMethod],
+  });
+
+  async function rpcCall(method: "getAccountInfo" | "getTransaction" | "sendTransaction" | "getSignatureStatuses", params: unknown[], routeId: string, operation: string, timeoutMs: number): Promise<Record<string, unknown> | undefined> {
+    return svmFetchJson(rpc.transport, rpc.url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }, timeoutMs, operation, routeId);
+  }
+
+  function offerOf(challenge: Record<string, unknown>, request: CreateOfferRequest, externalId: string): InboundOffer {
+    const id = challenge["id"];
+    if (typeof id !== "string" || id === "") throw new Error("mppx challenge has no id");
+    // SDK が束縛した値と、payer に見せる値の一致（Tempo 受信と同じ: 型では守れない）。
+    const bound = challenge["request"];
+    if (!isRecord(bound)) throw new Error("mppx challenge has no request to verify against");
+    const details = bound["methodDetails"];
+    if (
+      bound["amount"] !== request.amount ||
+      bound["currency"] !== options.mint ||
+      bound["recipient"] !== options.recipient ||
+      bound["externalId"] !== externalId ||
+      !isRecord(details) ||
+      details["network"] !== networkLabel ||
+      details["decimals"] !== options.decimals ||
+      details["tokenProgram"] !== options.tokenProgram ||
+      details["feePayer"] !== false
+    ) {
+      throw new Error("mppx bound a different request than offered");
+    }
+    const expires = challenge["expires"];
+    if (typeof expires !== "string" || expires === "") throw new Error("mppx challenge did not carry an expiry");
+    const expiresMs = Date.parse(expires);
+    if (!Number.isFinite(expiresMs)) throw new Error("mppx challenge has an unparsable expiry");
+    return {
+      scheme: MPP_SOLANA_SCHEME,
+      network: options.network,
+      asset: options.mint,
+      amount: request.amount,
+      payTo: options.recipient,
+      maxTimeoutSeconds: options.maxTimeoutSeconds,
+      extra: {
+        challengeNonce: id,
+        expiresAt: Math.floor(expiresMs / 1000),
+        routeBinding: request.routeBinding,
+        // D-29: 保守的な開示（`signature` 型の payer は credential の時点で送金済み。`transaction` 型は purchase の送出で動く）。
+        fundsMoveOnCredential: true,
+        challenge: Challenge.serialize(challenge as never),
+        externalId,
+        decimals: options.decimals,
+        tokenProgram: options.tokenProgram,
+      },
+    };
+  }
+
+  /** verify の共通部分: (1) SDK の HMAC・期限・scope、(2) 型ごとに bytes を得て署名者と ATA を導き、(3) §3.3。 */
+  async function checkCredential(offer: InboundOffer, credential: PaymentCredential, context: InboundCallContext | undefined): Promise<{ readonly ok: true; readonly kind: "transaction" | "signature"; readonly check: Extract<MppSolanaCheck, { ok: true }>; readonly bytes: Uint8Array } | { readonly ok: false }> {
+    const current = ready();
+    const wire = credential.payload["credential"];
+    if (typeof wire !== "string" || wire === "") return { ok: false };
+    if (embeddedChallengeIdOf(wire) !== offer.extra.challengeNonce) return { ok: false };
+    try {
+      await mppx.validateCredential(wire, { scope: offer.extra.routeBinding });
+    } catch {
+      return { ok: false };
+    }
+    const externalId = offer.extra["externalId"];
+    if (typeof externalId !== "string" || externalId === "") return { ok: false };
+    const payload = mppSolanaPayloadOf(wire);
+    if (payload === undefined) return { ok: false };
+    const routeId = context?.routeId ?? "-";
+    let bytes: Uint8Array;
+    if (payload.type === "transaction") {
+      bytes = payload.bytes;
+    } else {
+      // `signature` 型: 設定の RPC で 1 回読む（RPC の失敗・形違いは throw = core の `source_verify_unavailable`）。
+      const reply = await rpcCall("getTransaction", [payload.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" }], routeId, "mpp_solana_get_transaction", rpcTimeoutMs);
+      const read = transactionResultOf(reply);
+      if (read === undefined) throw new Error("mpp solana inbound: the RPC did not answer getTransaction in the expected form");
+      if (read === null) return { ok: false };
+      if (read.err !== null) return { ok: false };
+      // `blockTime` は challenge の発行〜期限の窓（FR-47）。`null` は不正。
+      const issuedAt = offer.extra.expiresAt - offer.maxTimeoutSeconds;
+      if (read.blockTime === null || read.blockTime < issuedAt || read.blockTime > offer.extra.expiresAt) return { ok: false };
+      bytes = read.bytes;
+    }
+    const signer = signerOf(bytes);
+    if (signer === undefined) return { ok: false };
+    let signerAta: string;
+    try {
+      signerAta = String((await findAssociatedTokenPda({ mint: address(current.mint), owner: address(signer), tokenProgram: address(current.tokenProgram) }))[0]);
+    } catch {
+      return { ok: false };
+    }
+    const check = checkMppSolanaTransaction(bytes, current, offer.amount, externalId, signerAta);
+    if (!check.ok) return { ok: false };
+    if (payload.type === "signature" && check.signature !== payload.signature) return { ok: false };
+    return { ok: true, kind: payload.type, check, bytes };
+  }
+
+  /** `transaction` 型の settle（§3.5）: 消費済み → 送出 1 回 → error なら status 1 回 → 追跡 → 行。 */
+  async function settleTransaction(bytes: Uint8Array, signature: string, routeId: string): Promise<SettleResult> {
+    if (options.consumed.has(signature)) return { outcome: "rejected", reason: "source_rejected" };
+    const deadlineAt = clock() + settleDeadlineMs;
+    const remaining = (): number => Math.max(0, Math.floor(deadlineAt - clock()));
+    const base64 = Buffer.from(bytes).toString("base64");
+    let sent: Record<string, unknown> | undefined;
+    let sendFailed = false;
+    try {
+      sent = await rpcCall("sendTransaction", [base64, { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 0 }], routeId, "mpp_solana_send", Math.min(rpcTimeoutMs, remaining()));
+    } catch (error) {
+      rpc.transport.report(error, { routeId, operation: "mpp_solana_send" });
+      sendFailed = true;
+    }
+    const followed = async (): Promise<SettleResult> => {
+      const start = clock();
+      const result = await followSvmSignature({
+        rpc,
+        signature,
+        routeId,
+        operation: "mpp_solana_follow_up",
+        deadlineAt: Math.min(deadlineAt, start + followUp.totalMs),
+        intervalMs: followUp.intervalMs,
+        requestTimeoutMs: rpcTimeoutMs,
+        clock,
+        sleep,
+        errTerminalAt: "confirmed",
+        searchTransactionHistory: true,
+        maxPolls: followUp.maxPolls,
+      });
+      if (result === "settled") return { outcome: "settled", txRef: signature };
+      if (result === "failed") {
+        options.onDiagnostic?.("mpp_solana_tx_failed_on_chain");
+        return { outcome: "rejected", reason: "source_rejected" };
+      }
+      return { outcome: "unknown", reason: "source_settle_unknown" };
+    };
+    if (sendFailed || sent === undefined) return followed();
+    if (sent["error"] !== undefined) {
+      // RPC の error（preflight の失敗を含む）: 1 回だけ履歴つきで status を読む。既に chain 上なら settled、err なら rejected、見えなければ追跡へ。
+      options.onDiagnostic?.("mpp_solana_send_rejected");
+      let status: "settled" | "failed" | "pending" = "pending";
+      try {
+        const reply = await rpcCall("getSignatureStatuses", [[signature], { searchTransactionHistory: true }], routeId, "mpp_solana_send_recovery", Math.min(rpcTimeoutMs, remaining()));
+        status = svmSignatureStatusOfReply(reply);
+      } catch (error) {
+        rpc.transport.report(error, { routeId, operation: "mpp_solana_send_recovery" });
+      }
+      if (status === "settled") return { outcome: "settled", txRef: signature };
+      if (status === "failed") {
+        options.onDiagnostic?.("mpp_solana_tx_failed_on_chain");
+        return { outcome: "rejected", reason: "source_rejected" };
+      }
+      return followed();
+    }
+    // 応答の署名が自分の署名と違えば不明（送った bytes と別のものを受理したことになる）。
+    if (sent["result"] !== signature) return { outcome: "unknown", reason: "source_settle_unknown" };
+    return followed();
+  }
+
+  return {
+    async startup(): Promise<void> {
+      let destinationAta: string;
+      try {
+        destinationAta = String((await findAssociatedTokenPda({ mint: address(options.mint), owner: address(options.recipient), tokenProgram: address(options.tokenProgram) }))[0]);
+      } catch {
+        throw new Error("mpp solana inbound: the receiving ATA could not be derived from the recipient, mint and token program");
+      }
+      let reply: Record<string, unknown> | undefined;
+      try {
+        reply = await rpcCall("getAccountInfo", [destinationAta, { encoding: "jsonParsed", commitment: "confirmed" }], "-", "mpp_solana_startup", rpcTimeoutMs);
+      } catch {
+        throw new Error("mpp solana inbound: the Solana RPC could not be read at startup");
+      }
+      assertAtaAccount(reply, { owner: options.recipient, mint: options.mint, tokenProgram: options.tokenProgram });
+      policy = Object.freeze({ recipient: options.recipient, destinationAta, mint: options.mint, decimals: options.decimals, tokenProgram: options.tokenProgram });
+    },
+
+    async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
+      ready();
+      if (request.asset !== options.mint || request.network !== options.network) {
+        throw new Error("mpp solana inbound: the route asset or network is not the fixed mint or network");
+      }
+      const externalId = newExternalId();
+      const expires = new Date(request.nowMs + options.maxTimeoutSeconds * 1000).toISOString();
+      const challenge: unknown = await mppx.challenge.solana.charge({
+        amount: request.amount,
+        currency: options.mint,
+        recipient: options.recipient,
+        externalId,
+        methodDetails: { network: networkLabel, decimals: options.decimals, tokenProgram: options.tokenProgram, feePayer: false },
+        expires,
+        scope: request.routeBinding,
+        meta: { routeBinding: request.routeBinding, paymentId: `${request.routeId}:${request.nowMs}:${externalId}` },
+      } as never);
+      if (!isRecord(challenge)) throw new Error("mppx did not return a challenge");
+      return offerOf(challenge, request, externalId);
+    },
+
+    preflight(offer: InboundOffer, credential: PaymentCredential, nowMs: number): PreflightResult {
+      ready();
+      return preflightMppSolana(offer, credential, nowMs);
+    },
+
+    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
+      const checked = await checkCredential(offer, credential, context);
+      return { isValid: checked.ok };
+    },
+
+    async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
+      // verify と同じ検査をもう一度（core の呼び出し順に依存させない。RPC の失敗は throw = `source_settle_unknown`）。
+      const checked = await checkCredential(offer, credential, context);
+      if (!checked.ok) return { outcome: "rejected", reason: "source_rejected" };
+      const routeId = context?.routeId ?? "-";
+      if (checked.kind === "signature") {
+        if (options.consumed.has(checked.check.signature)) return { outcome: "rejected", reason: "source_rejected" };
+        return { outcome: "settled", txRef: checked.check.signature };
+      }
+      return settleTransaction(checked.bytes, checked.check.signature, routeId);
+    },
+  };
+}
+
+/** `getSignatureStatuses` の応答（JSON-RPC の封筒）の 1 件の判定（`errTerminalAt: "confirmed"`）。 */
+function svmSignatureStatusOfReply(reply: Record<string, unknown> | undefined): "settled" | "failed" | "pending" {
+  return reply === undefined ? "pending" : followUpStatusOf(reply, "confirmed");
+}

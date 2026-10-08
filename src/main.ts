@@ -18,6 +18,7 @@ import { createMppInbound } from "./adapters/inbound/mpp.js";
 import { createX402Inbound, type X402FacilitatorKind } from "./adapters/inbound/x402.js";
 import { createX402SvmInbound, type SvmInboundPolicy } from "./adapters/inbound/x402-svm.js";
 import { resolveSvmInboundPolicy } from "./adapters/inbound/x402-svm-startup.js";
+import { ConsumedSignaturesHolder, createMppSolanaInbound, type MppSolanaInbound } from "./adapters/inbound/mpp-solana.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
@@ -199,7 +200,7 @@ export function svmUsageOf(
 ): { readonly inbound: boolean; readonly outbound: boolean } {
   const all = [...Object.values(routes), ...Object.values(profiles)];
   return {
-    inbound: all.some((entry) => entry.sourceRail === "x402" && networkFamilyOf(entry.source.network) === "svm"),
+    inbound: all.some((entry) => (entry.sourceRail === "x402" || entry.sourceRail === "mpp") && networkFamilyOf(entry.source.network) === "svm"),
     outbound: all.some((entry) => networkFamilyOf(entry.destination.network) === "svm"),
   };
 }
@@ -387,28 +388,33 @@ export function transportFor(allowLoopback: boolean, report: (event: TransportEv
   return createGuardedTransport({ ...hooks, allowLoopback, report });
 }
 
+export interface ComposedRails {
+  readonly inbound: InboundRail;
+  readonly outbound: OutboundRail;
+  readonly balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>;
+  readonly dynamic?: DynamicWiring;
+  readonly startup?: () => Promise<void>;
+  /** `createRouterCore` の `onStoreLoaded` に渡す（`docs/mpp-solana-design.md` §2.3）。MPP Solana 受信の replay 検査が journal の消費済み署名を読む。 */
+  readonly bindConsumed: (view: { readonly settledSourceTxRefs: ReadonlySet<string> }) => void;
+}
+
 export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
-): { inbound: InboundRail; outbound: OutboundRail; balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>; dynamic?: DynamicWiring; startup?: () => Promise<void> } {
+): ComposedRails {
   /**
-   * Solana の MPP（`docs/mpp-solana-design.md` §3・§4）はタスク M3-b（受信）・M4-b（送信）で配線する。それまでは設定に現れた時点で、
+   * Solana 宛の MPP（`docs/mpp-solana-design.md` §4）はタスク M4-b（送信）で配線する。それまでは設定に現れた時点で、
    * **adapter を 1 つも作る前に**（合成レールの分岐よりも前に）起動を止める（Tempo の adapter に落とさない。fail closed）。表（`KNOWN_NETWORKS`）はもう許しているので、ここが唯一の門。
+   * 受信（§3）は M3-b で配線済み（`createMppSolanaInbound`）。
    */
   for (const route of Object.values(config.router.routes)) {
-    if (route.sourceRail === "mpp" && networkFamilyOf(route.source.network) === "svm") {
-      throw new ConfigError(`routes.${route.routeId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
-    }
     if ((route.rail ?? "x402") === "mpp" && networkFamilyOf(route.destination.network) === "svm") {
       throw new ConfigError(`routes.${route.routeId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
     }
   }
   for (const profile of Object.values(config.router.dynamic?.profiles ?? {})) {
-    if (profile.sourceRail === "mpp" && networkFamilyOf(profile.source.network) === "svm") {
-      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
-    }
     if (profile.rail === "mpp" && networkFamilyOf(profile.destination.network) === "svm") {
       throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
     }
@@ -425,6 +431,7 @@ export function composeRails(
     return {
       inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl, transport: transportFor(true, report) }),
       outbound: createSyntheticX402Outbound({ upstreams: config.synthetic.upstreams, transport: transportFor(true, report) }),
+      bindConsumed: () => {},
     };
   }
 
@@ -462,9 +469,10 @@ export function composeRails(
   })();
   /** MPP 受信の RPC（設定が無ければ chain の既知の公開 RPC）。拒否ホストにも入れる。 */
   const mppInboundRpcUrlFor = (chainId: number): string | undefined => real.mppInboundRpcUrl ?? [tempoMainnet, tempoModerato].find((chain) => chain.id === chainId)?.rpcUrls.default.http[0];
+  // Tempo（EVM）の受信だけ。Solana の MPP 受信は Solana RPC（`solanaRpcUrl`）を使う（`docs/mpp-solana-design.md` §1.4・§3.1）。
   const mppInboundChains = [
-    ...Object.values(config.router.routes).filter((route) => route.sourceRail === "mpp").map((route) => Number(route.source.network.replace(/^eip155:/, ""))),
-    ...Object.values(profiles).filter((profile) => profile.sourceRail === "mpp").map((profile) => Number(profile.source.network.replace(/^eip155:/, ""))),
+    ...Object.values(config.router.routes).filter((route) => route.sourceRail === "mpp" && networkFamilyOf(route.source.network) === "evm").map((route) => Number(route.source.network.replace(/^eip155:/, ""))),
+    ...Object.values(profiles).filter((profile) => profile.sourceRail === "mpp" && networkFamilyOf(profile.source.network) === "evm").map((profile) => Number(profile.source.network.replace(/^eip155:/, ""))),
   ];
   /**
    * 自分自身と依存先には向けない（設計 §7.4）: facilitator・自分の canonical・受信 MPP の RPC・能力の依存先の各ホスト名。
@@ -476,9 +484,8 @@ export function composeRails(
     ...Object.values(config.router.routes).filter((route) => route.sourceRail === "x402").map((route) => route.source.network),
     ...Object.values(profiles).filter((profile) => profile.sourceRail === "x402").map((profile) => profile.source.network),
   ]);
-  const usesSvmInbound = [...x402InboundNetworks].some((network) => networkFamilyOf(network) === "svm");
-  // SVM の送信（送信の設計 §2.2）: 受信が無くても、Solana 宛の route／プロファイルがあれば RPC は依存先・拒否ホストに入る。
-  const usesSvmOutbound = svmUsageOf(config.router.routes, profiles).outbound;
+  // SVM の受信（x402 と MPP の両方）と送信（送信の設計 §2.2）: どちらかがあれば Solana RPC は依存先・拒否ホストに入る。
+  const { inbound: usesSvmInbound, outbound: usesSvmOutbound } = svmUsageOf(config.router.routes, profiles);
   const solanaRpcUrl = usesSvmInbound || usesSvmOutbound ? (real.solanaRpcUrl ?? DEFAULT_SOLANA_RPC_URL) : undefined;
   const denyHosts =
     dynamicConfig === undefined
@@ -615,8 +622,19 @@ export function composeRails(
     }),
   };
   const usesX402Inbound = x402InboundNetworks.size > 0;
+  /** 受信の network と asset を表で引く（x402 と MPP Solana の受信が共有）。 */
+  const knownAssetFor = (network: string, asset: string, at: string) => {
+    const entry = knownNetworkOf(networks, network);
+    const known = entry === undefined ? undefined : knownAssetOf(entry, asset);
+    if (entry === undefined || known === undefined) {
+      throw new ConfigError(`${at}: the inbound network or asset is not in the table of known networks`);
+    }
+    return { entry, known };
+  };
   /** 起動時の非同期の検査（SVM の `/supported`・ATA）。`startRouter` が core を作る前に待つ。 */
   const startupChecks: Array<() => Promise<void>> = [];
+  /** journal の消費済み署名（`docs/mpp-solana-design.md` §2.3）。`startRouter` が store の load の後に bind する。bind の前の `settle` は throw（fail closed）。 */
+  const consumedSignatures = new ConsumedSignaturesHolder();
   if (usesX402Inbound) {
     /**
      * network ごとの facilitator（multirail 設計 §2）: `eip155:84532` は env、それ以外は設定ファイルの `x402.inboundFacilitators`。
@@ -636,14 +654,6 @@ export function composeRails(
       return configured;
     };
     /** 表の資産（domain・mint・桁・token program）。表に無い組は設定の照合で既に落ちている。 */
-    const knownAssetFor = (network: string, asset: string, at: string) => {
-      const entry = knownNetworkOf(networks, network);
-      const known = entry === undefined ? undefined : knownAssetOf(entry, asset);
-      if (entry === undefined || known === undefined) {
-        throw new ConfigError(`${at}: the inbound network or asset is not in the table of known networks`);
-      }
-      return { entry, known };
-    };
     /** kind `circle` の売り手証明の能力: network ごとに注入され、`payTo` と一致していること（設計 §3）。 */
     const sellerProofFor = (network: string, payTo: string, at: string): SellerProofCapability => {
       const capability = capabilities.sellerProofs?.[network];
@@ -753,11 +763,47 @@ export function composeRails(
         'ROUTER_MPP_INBOUND_SECRET is required when a route uses sourceRail "mpp"',
       );
     }
+    /**
+     * Solana の MPP 受信（`docs/mpp-solana-design.md` §3・§2.2）: 同じ (network, payTo, mint) は 1 つの adapter を共有する（起動時の ATA の検査も 1 回）。
+     * 消費済み署名の holder は `startRouter` が store の load の後に bind する（§2.3）。RPC は x402 の Solana 受信・送信と同じ `solanaRpcUrl`。
+     */
+    const solanaMppRails = new Map<string, MppSolanaInbound>();
+    const solanaMppRail = (network: string, asset: string, payTo: string, at: string): InboundRail => {
+      const { known } = knownAssetFor(network, asset, at);
+      if (known.tokenProgram === undefined) {
+        throw new ConfigError(`${at}: the table has no token program for the inbound mint`);
+      }
+      const key = `${network}|${payTo}|${known.id}`;
+      let rail = solanaMppRails.get(key);
+      if (rail === undefined) {
+        const created = createMppSolanaInbound({
+          secretKey,
+          recipient: payTo,
+          mint: known.id,
+          decimals: known.decimals,
+          tokenProgram: known.tokenProgram,
+          network,
+          maxTimeoutSeconds: real.mppInboundOfferSeconds ?? 600,
+          // 起動時の検査・`signature` 型の読み取り・送出と追跡の transport: x402 の Solana 受信と同じ方針（fixture の差し替えの上に、loopback の方針と DNS の期限）。
+          rpc: { url: solanaRpcUrl!, transport: svmRpcTransportOf(staticHooks, inboundLoopback, report) },
+          consumed: consumedSignatures,
+          onDiagnostic: (code) => note(`router: solana mpp diagnostic ${code} (${at})`),
+        });
+        solanaMppRails.set(key, created);
+        startupChecks.push(() => created.startup());
+        rail = created;
+      }
+      return rail;
+    };
     for (const route of Object.values(config.router.routes)) {
       if (route.sourceRail !== "mpp") continue;
       const payTo = route.source.payTo;
       if (payTo === undefined) {
         throw new ConfigError(`routes.${route.routeId}.source.payTo is required for mpp inbound`);
+      }
+      if (networkFamilyOf(route.source.network) === "svm") {
+        inboundRails[`mpp:${route.routeId}`] = solanaMppRail(route.source.network, route.source.asset, payTo, `routes.${route.routeId}`);
+        continue;
       }
       // CAIP-2 の `eip155:<id>` から数値 chainId を取り出す（adapter は数値で受ける）。
       const chainId = Number(route.source.network.replace(/^eip155:/, ""));
@@ -781,6 +827,10 @@ export function composeRails(
     // 動的プロファイルの受信（MPP）: transport は動的用（loopback 不可）。
     for (const profile of Object.values(profiles)) {
       if (profile.sourceRail !== "mpp" || dynamicTransport === undefined) continue;
+      if (networkFamilyOf(profile.source.network) === "svm") {
+        inboundRails[`mpp:${profile.profileId}`] = solanaMppRail(profile.source.network, profile.source.asset, profile.source.payTo, `dynamic.profiles.${profile.profileId}`);
+        continue;
+      }
       const chainId = Number(profile.source.network.replace(/^eip155:/, ""));
       if (!Number.isInteger(chainId) || chainId <= 0) {
         throw new ConfigError(`dynamic.profiles.${profile.profileId}.source.network must be eip155:<chainId> for mpp inbound`);
@@ -862,6 +912,7 @@ export function composeRails(
     // 残高の hook は動的の設定の有無と独立に渡す（静的だけの構成でも静的 route の残高を見る。送信の設計 §2.6）。
     balanceOf: balanceOfFor,
     ...(dynamic === undefined ? {} : { dynamic }),
+    bindConsumed: (view) => consumedSignatures.bind(view.settledSourceTxRefs),
   };
 }
 
@@ -973,6 +1024,8 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     note: (message) => process.stderr.write(`${message}\n`),
     ...(rails.balanceOf === undefined ? {} : { balanceOf: rails.balanceOf }),
     ...(rails.dynamic === undefined ? {} : { dynamic: dynamicCoreOptionsOf(rails.dynamic, capabilities, config) }),
+    // journal の消費済み署名を MPP Solana 受信に見せる（`docs/mpp-solana-design.md` §2.3）。load の直後、core が公開される前。
+    onStoreLoaded: rails.bindConsumed,
   });
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。

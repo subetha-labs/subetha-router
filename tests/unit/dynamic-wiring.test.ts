@@ -23,6 +23,7 @@ import { TEST_NETWORKS } from "../fixtures/known-networks.js";
 import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 import { createPayerSpy } from "../fixtures/mpp-payer-spy.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
+import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 
 const runtimeRoot = path.resolve(import.meta.dirname, "../../runtime");
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
@@ -402,22 +403,30 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
   });
 });
 
-/** Solana の MPP は M3-b（受信）・M4-b（送信）で配線する。それまで設定に現れたら起動を止める（Tempo の adapter に落とさない。`docs/mpp-solana-design.md`、タスク M1）。 */
-describe("Solana の MPP はまだ配線しない（M1 の guard）", () => {
+/**
+ * Solana の MPP: 送信は M4-b で配線する。それまで設定に現れたら起動を止める（Tempo の adapter に落とさない。`docs/mpp-solana-design.md`、タスク M1）。
+ * 受信は M3-b で配線済み: 設定に現れれば `createMppSolanaInbound` が組まれ、`startup`（ATA の検査）の前は offer を出さない（fail closed。試験は `tests/wire/mpp-solana-inbound.test.ts`）。
+ */
+describe("Solana の MPP: 送信はまだ配線しない（M1 の guard）、受信は配線済み（M3-b）", () => {
   test("送信（rail mpp ∧ solana:）のプロファイルがあれば起動しない", () => {
     expect(() => compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/dynamic\.profiles\.dyn-x402-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
   });
-  test("受信（sourceRail mpp ∧ solana:）のプロファイルがあれば起動しない", () => {
-    expect(() => compose(envFor({ solanaMpp: "inbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/dynamic\.profiles\.dyn-solmpp-to-x402: the Solana MPP inbound adapter is not wired yet/);
+  test("受信（sourceRail mpp ∧ solana:）のプロファイルは組まれる: startup が要り、その前は offer を出さない", async () => {
+    const { rails } = compose(envFor({ solanaMpp: "inbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES });
+    expect(rails.startup).toBeDefined();
+    await expect(rails.inbound.createOffer({ routeId: "dyn-solmpp-to-x402", amount: "10000", asset: SOL_USDC, network: SOL, routeBinding: "dynamic|dyn-solmpp-to-x402|GET|https%3A%2F%2Fprovider.test%2F", nowMs: Date.now() })).rejects.toThrow(/startup\(\) has not completed/);
   });
-  test("送信（rail mpp ∧ solana:）の静的 route があれば起動しない。どの guard も adapter を作る前に効く（fixture の署名器の loopback の検査より先）", () => {
+  test("送信（rail mpp ∧ solana:）の静的 route があれば起動しない。guard は adapter を作る前に効く（fixture の署名器の loopback の検査より先）", () => {
     expect(() => compose(envFor({ solanaMpp: "outbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
   });
-  test("合成レール（synthetic）でも同じ guard が先に効く（合成の adapter を作らない）", () => {
+  test("合成レール（synthetic）でも送信の guard が先に効く（合成の adapter を作らない）。受信の route は合成レールでは他の受信レールと同じく無視される", () => {
     expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "outbound-route" }), {})).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
-    expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "inbound-route" }), {})).toThrow(/routes\.r-solmpp: the Solana MPP inbound adapter is not wired yet/);
+    const { rails } = compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "inbound-route" }), {});
+    expect(rails.startup).toBeUndefined();
   });
-  test("受信（sourceRail mpp ∧ solana:）の静的 route があれば起動しない", () => {
-    expect(() => compose(envFor({ solanaMpp: "inbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-solmpp: the Solana MPP inbound adapter is not wired yet/);
+  test("受信（sourceRail mpp ∧ solana:）の静的 route は組まれる（送信の x402 は実鍵の能力）: startup の前は offer を出さない", async () => {
+    const { rails } = compose(envFor({ solanaMpp: "inbound-route" }), { evmSigning: createRealEvmCapability(generatePrivateKey()).capability("eip155:84532"), mppTempo: realMpp(), ...DEPENDENCIES });
+    expect(rails.startup).toBeDefined();
+    await expect(rails.inbound.createOffer({ routeId: "r-solmpp", amount: "10000", asset: SOL_USDC, network: SOL, routeBinding: "r-solmpp|GET|%2Fv1%2Froutes%2Fr-solmpp%2Fresource", nowMs: Date.now() })).rejects.toThrow(/startup\(\) has not completed/);
   });
 });
