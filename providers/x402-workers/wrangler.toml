@@ -11,7 +11,8 @@ name = "provider-x402-arc"
 routes = [{ pattern = "provider-x402-arc.subethalabs.com", custom_domain = true }]
 [env.arc.vars]
 PROVIDER_NETWORK = "arc"
-PAY_TO = ""
+# 2026-10-08 に owner が scripts/keygen.mjs で作った受取 address（鍵は Worker の secret SELLER_PROOF_KEY にだけ）。
+PAY_TO = "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1"
 FACILITATOR_URL = "https://api.circle.com/v1/facilitator/x402"
 
 [env.sol]
@@ -19,5 +20,6 @@ name = "provider-x402-sol"
 routes = [{ pattern = "provider-x402-sol.subethalabs.com", custom_domain = true }]
 [env.sol.vars]
 PROVIDER_NETWORK = "solana"
-PAY_TO = ""
+# 2026-10-08 に owner が scripts/keygen-solana.mjs で作った受取 owner の公開鍵（seed は owner のファイルにだけ）。
+PAY_TO = "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc"
 FACILITATOR_URL = "https://www.x402.org/facilitator"

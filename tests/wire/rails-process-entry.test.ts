@@ -109,7 +109,8 @@ describe("Router の process: Solana の送信の鍵（U9）", () => {
   test("solana-out で鍵が無い → 固定文 solana_key で止まる（listen しない、probe に進まない、鍵は出ない）。鍵があれば多レールの段を通り Tempo の probe で止まる", async () => {
     const dir = workDir("t8b-process-solout-");
     const configPath = path.join(dir, "router.config.json");
-    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: {} })));
+    // 静的 route は対象外（URL を空にする。本番の定数は配備した URL なので、空にしないと受取先が要る）。
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: {}, upstreams: { arc: "", solana: "" } })));
     const missing = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-out" }));
     expect(missing.code).not.toBe(0);
     expect(missing.stderr).toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed/);

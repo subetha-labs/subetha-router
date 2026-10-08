@@ -85,7 +85,7 @@ export const OUTBOUND_ARC = {
   tokenDomain: { name: "USDC", version: "2" },
 } as const;
 /** Arc の Provider の URL（D-10。Provider が立つまで空。空なら静的 route は生成しない。動的プロファイルは生成する）。 */
-export const UPSTREAM_ARC = "";
+export const UPSTREAM_ARC = "https://provider-x402-arc.subethalabs.com/v1/eth/snapshot";
 /** 静的 route（送信の設計 §6.3・D-12）: Base USDC で払って Arc の Provider に届く。 */
 export const ROUTE_ARC_OUT = "md-arc-eth-snapshot";
 /**
@@ -100,7 +100,7 @@ export const OUTBOUND_SOL = {
   tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
 } as const;
 /** Solana の Provider の URL（D-10。Provider が立つまで空。空なら静的 route は生成しない。動的プロファイルは生成する）。 */
-export const UPSTREAM_SOL = "";
+export const UPSTREAM_SOL = "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot";
 /** 静的 route（送信の設計 §6.3・D-12 の O-4）: Tempo pathUSD（MPP 受信）で払って Solana の Provider に届く。 */
 export const ROUTE_SOL_OUT = "md-sol-eth-snapshot-mpp";
 
