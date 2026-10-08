@@ -198,7 +198,14 @@ export interface X402OutboundOptions {
   readonly capability: EvmSigningCapability;
   /** 上流へ出る全要求が通る transport（SSRF 防御 A。必須）。 */
   readonly transport: GuardedTransport;
+  /** 402 の読取（無課金）の期限。既定 5 秒。 */
   readonly timeoutMs?: number;
+  /**
+   * 有料要求（支払いヘッダつきの GET）の期限。既定 `X402_STATIC_PAID_TIMEOUT_MS`（30 秒）: 動的経路（`paidTimeoutMs`）と Solana と同じ。
+   * Provider は facilitator の verify と settle をこの要求の中で終える（Arc の Worker は data 2 + verify 4 + settle ≤ 20 秒。
+   * `docs/provider-x402-workers.md` §2.2・§9 の 6）。5 秒では settle の途中で Router が諦めて `unknown` を記録し、資金だけ動きうる。
+   */
+  readonly paidTimeoutMs?: number;
   /**
    * 動的上流 URL の経路（`x402-dynamic.ts`）。**省略時は動的経路が無く**、上流の URL を受け取ったら例外にする。
    * 静的 route の挙動はこの有無で変わらない。
@@ -275,8 +282,12 @@ function isDeadlineRefusal(error: unknown): boolean {
 
 type Challenge = X402Challenge;
 
+/** 静的 route の有料要求の期限（既定）。動的経路・Solana の `paidTimeoutMs` の既定と同じ値。 */
+export const X402_STATIC_PAID_TIMEOUT_MS = 30_000;
+
 export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   const timeoutMs = options.timeoutMs ?? 5_000;
+  const paidTimeoutMs = options.paidTimeoutMs ?? X402_STATIC_PAID_TIMEOUT_MS;
   const capability = options.capability;
   const transport = options.transport;
   const now = options.now ?? Date.now;
@@ -381,7 +392,8 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
     }
     let response: Response;
     try {
-      response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(timeoutMs) }, payCtx);
+      // 期限は有料要求のもの（Provider の verify と settle を含む）。
+      response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(paidTimeoutMs) }, payCtx);
     } catch {
       return { outcome: "unknown", reason: "destination_pay_unknown" };
     }
@@ -548,12 +560,12 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       }
       let response: Response;
       try {
-        // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。
+        // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。期限は有料要求のもの（Provider の settle を含む）。
         response = await transport.fetch(url, {
           method: "GET",
           headers: paymentHeaders,
           redirect: "error",
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(paidTimeoutMs),
         }, payCtx);
       } catch {
         // 送ったかどうか分からない。自動再送しない（durable unknown）。transport は既に報告済み。

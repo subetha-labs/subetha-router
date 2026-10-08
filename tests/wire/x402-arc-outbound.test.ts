@@ -45,7 +45,7 @@ vi.mock("@x402/evm", async (importOriginal) => {
   return { ...actual, ExactEvmScheme: TamperingScheme };
 });
 
-import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
+import { createX402Outbound, X402_STATIC_PAID_TIMEOUT_MS } from "../../src/adapters/outbound/x402.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import { createGuardedTransport, type TransportEvent } from "../../src/net/guarded-fetch.js";
@@ -104,7 +104,7 @@ interface Harness {
 }
 
 /** `network` の能力で静的 route（Arc 宛）と動的プロファイルを持つ rail。`rebuild` は静的の組み直し。 */
-async function harness(options: { network?: string; rebuild?: boolean; operatorAddresses?: readonly string[]; now?: () => number } = {}): Promise<Harness> {
+async function harness(options: { network?: string; rebuild?: boolean; operatorAddresses?: readonly string[]; now?: () => number; paidTimeoutMs?: number } = {}): Promise<Harness> {
   const upstream = await startX402Upstream(TLS);
   closers.push(upstream.close);
   upstream.state.accepts = [arcAccept()];
@@ -140,6 +140,7 @@ async function harness(options: { network?: string; rebuild?: boolean; operatorA
     transport,
     capability,
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.paidTimeoutMs === undefined ? {} : { paidTimeoutMs: options.paidTimeoutMs }),
     rebuildSignatures: rebuild,
     ...(rebuild ? { tokenDomains: DOMAINS } : {}),
     ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
@@ -210,6 +211,38 @@ describe("静的 route（組み直しの署名器）", () => {
     expect(await pay(h, ROUTE, offer)).toEqual({ outcome: "not_sent", reason: "destination_payload_mismatch" });
     expect(h.upstream.seen.payments).toHaveLength(0);
   });
+
+  test("有料要求の期限は 30 秒（既定）: Provider が settle に 6 秒かけても paid（5 秒で諦めない）", async () => {
+    expect(X402_STATIC_PAID_TIMEOUT_MS).toBe(30_000);
+    const h = await harness();
+    h.upstream.state.pay = () => ({ ...paidOk(h.address, { price: 1 }, ARC), delayMs: 6_000 });
+    const started = Date.now();
+    expect(await pay(h, ROUTE, (await h.rail.readChallenge(ROUTE))[0]!)).toMatchObject({ outcome: "paid", body: { price: 1 } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5_500);
+    expect(h.upstream.seen.payments).toHaveLength(1);
+  }, 20_000);
+
+  test("有料要求の期限は paidTimeoutMs が決める（402 の読取の timeoutMs ではない）: 300 ms なら 1 秒の settle は unknown、1 回だけ送る", async () => {
+    const h = await harness({ paidTimeoutMs: 300 });
+    h.upstream.state.pay = () => ({ ...paidOk(h.address, { price: 1 }, ARC), delayMs: 1_000 });
+    expect(await pay(h, ROUTE, (await h.rail.readChallenge(ROUTE))[0]!)).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(h.upstream.seen.payments).toHaveLength(1);
+  });
+
+  test("従来の経路（`rebuildSignatures: false`、Base と同じ SDK の経路）も同じ有料要求の期限: 6 秒の settle は paid、paidTimeoutMs 300 ms なら unknown", async () => {
+    const slow = await harness({ rebuild: false });
+    slow.upstream.state.pay = () => ({ ...paidOk(slow.address, { price: 1 }, ARC), delayMs: 6_000 });
+    const started = Date.now();
+    expect(await pay(slow, ROUTE, (await slow.rail.readChallenge(ROUTE))[0]!)).toMatchObject({ outcome: "paid", body: { price: 1 } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5_500);
+    expect(slow.upstream.seen.payments).toHaveLength(1);
+    const short = await harness({ rebuild: false, paidTimeoutMs: 300 });
+    short.upstream.state.pay = () => ({ ...paidOk(short.address, { price: 1 }, ARC), delayMs: 1_000 });
+    expect(await pay(short, ROUTE, (await short.rail.readChallenge(ROUTE))[0]!)).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(short.upstream.seen.payments).toHaveLength(1);
+  }, 20_000);
 
   test("領収は共有の表: network が Base の領収は Arc の送信では unknown", async () => {
     const h = await harness();

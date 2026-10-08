@@ -434,7 +434,8 @@ describe("diagnostics after headers (T-A17)", () => {
       const fixture = await start("tests/fixtures/x402-upstream.ts", ["--after-headers", mode, "--after-headers-on", "pay"]);
       const events: TransportEvent[] = [];
       const spy = createSignerSpy();
-      const rail = createX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network), timeoutMs: SHORT });
+      // 有料要求の期限は `paidTimeoutMs`（既定 30 秒）。この試験は body の停滞を短い期限で観測したいので両方を SHORT にする。
+      const rail = createX402Outbound({ transport: denyAt(undefined, events), upstreams: { [X402.route]: `${fixture.baseUrl}/v1/eth/snapshot` }, capability: spy.capability(X402.network), timeoutMs: SHORT, paidTimeoutMs: SHORT });
       const [offer] = await rail.readChallenge(X402.route);
       const result = await rail.pay({ routeId: X402.route, offer: offer!, paymentId: `p-x-${mode}`, attempt: 1, deadlineMs: Date.now() + 600_000 });
       expect(result, mode).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
