@@ -1,10 +1,11 @@
-# Arc・Solana の Provider（`subetha-provider-x402` の Arc 版・Solana 版）— 要件と設計（第 2 版）
+# Arc・Solana の Provider（`subetha-provider-x402` の Arc 版・Solana 版）— 要件と設計（第 3 版）
 
 owner の決定（2026-10-08）: 既存の Provider と同じ **Cloudflare Workers** に揃える。新しい鍵は Router 側（この worktree の作業者）が作る。
 公開名は `provider-x402-arc.subethalabs.com`（Arc）・`provider-x402-sol.subethalabs.com`（Solana）。
 送信レールの要件 D-10（`docs/multirail-outbound-requirements.md`）で「owner が `subetha-provider-x402` を Arc と Solana に配備する」と決めた分の実体。
 
-第 2 版はレビュー 1 回目（§8）の 6 点を反映: settle は **1 回だけ**（SDK の再試行を使わない）、送出後の失敗は **502（Router は `unknown`）**、本文は **記録済みの Provider A の契約そのもの**、期限の予算、鍵の扱い、証拠のラベル。
+第 2 版はレビュー 1 回目（§8）の 6 点を反映: settle は **1 回だけ**（SDK の再試行を使わない）、送出後の失敗は **502（Router は `unknown`）**、本文は **記録済みの Provider A の契約**、期限の予算、鍵の扱い、証拠のラベル。
+第 3 版は readback（§8）の 5 点を反映: 領収の `payer` は**同一性**まで検査、本文は契約の**拡張**（`payment.network`）として chat 側の確認を gate に、数値の制約、要求ごとの**1 つの期限**（cold start を含む）、Solana の seed を出力しない作り方、`unknown` の後の扱い。
 
 ## 0. 範囲と置き場
 
@@ -44,33 +45,35 @@ owner の決定（2026-10-08）: 既存の Provider と同じ **Cloudflare Worke
 
 ### 2.2 支払いつきの GET（`PAYMENT-SIGNATURE`）と結果の表
 
-処理の順序と時間の予算（Router の有料要求の期限 30 秒の内側に収める。合計の上限 **28 秒**）:
+処理の順序と時間の予算。**要求ごとに 1 つの期限**（要求の到着から **26 秒**）を持ち、各段の HTTP の期限はその残りと段の上限の小さい方。cold start（isolate の最初の要求）は facilitator の `/supported` の読み込み（上限 **5 秒**。失敗なら **503** 固定文、支払いは受けない）も同じ期限の内側。
+settle に入る前に残りが **12 秒未満**なら settle を呼ばずに **503** `{ error: "provider_busy" }`（送出前なので資金は動いていない。Router は領収なしの 5xx = `unknown` にするが、facilitator は呼んでいない）。warm の経路: data 2 + verify 4 + settle 20 = 26 秒。cold の経路: 5 + 2 + 4 + settle（残り ≥ 15 秒）。
 
 | 段 | 内容 | 期限 | 失敗したときの応答 |
 |---|---|---|---|
 | 0 | ヘッダを decode。`accepted` が自分の requirements（§2.1 を同じ関数で組み直す）と**完全一致** | — | **402**（`PAYMENT-REQUIRED` を付け直す。本文は固定文。資金は動いていない） |
 | 1 | データを取る（Hyperliquid）。検証（§2.3 の形）と大きさ（64 KiB）までここで終える | 2 秒 | **502** `{ error: "data_unavailable" }`。facilitator は呼ばない（「払ったのにデータが無い」を作らない） |
 | 2 | `/verify`（自前の client。§3.2） | 4 秒 | `isValid: false` → **402**（本文 `{ error: "payment_invalid" }`。facilitator の文言は透過しない）。HTTP 不達・期限・形違い → **502** `{ error: "facilitator_unavailable" }`（資金は動いていないが、Router 側で `rejected` にしないため。verify は冪等なので Router が新しい購入で再試行できる） |
-| 3 | `/settle` **1 回だけ**（§3.2 の guard。SDK の `settlePayment` は使わない） | 20 秒 | 下の表 |
-| 4 | **200** + `PAYMENT-RESPONSE` + 本文（§2.3。1 で取った値を返すだけ） | — | — |
+| 3 | `/settle` **1 回だけ**（§3.2 の guard。SDK の `settlePayment` は使わない） | min(20 秒, 残り) | 下の表 |
+| 4 | **200** + `PAYMENT-RESPONSE` + 本文（§2.3。1 で取った値を返すだけ。`content-length` と `content-type: application/json` を付け、本文は 1 回の `end` で送る） | — | 本文の送出で接続が切れれば Router は `paid_no_data`（Provider からは防げない。再送しない） |
 
 settle の結果の表（送出後なので、成功を確かめられたとき以外は **`unknown` を Router に伝える = 領収なしの 502**）:
 
 | facilitator の応答 | Provider の応答 | Router の結果（送信の設計 §5） |
 |---|---|---|
-| 200、`success: true`、`network` が requirements と一致、`transaction` が形どおり（Arc: `0x` + 64 hex、Solana: base58 で 64 バイトに復号）、`payer` があれば形どおり | **200** + `PAYMENT-RESPONSE { success: true, transaction, network, payer? }` + 本文 | `paid` → `delivered` |
+| 200、`success: true`、`network` が requirements と一致、`transaction` が形どおり（Arc: `0x` + 64 hex、Solana: base58 で 64 バイトに復号）、`payer` があれば**支払い側の署名者と同一**（Arc: `paymentPayload.payload.authorization.from` と大文字小文字無視で一致。Solana: `paymentPayload.payload.transaction` を復号した message の 2 番目の static account（authority。Router の受信と同じ読み方）と一致） | **200** + `PAYMENT-RESPONSE { success: true, transaction, network, payer? }` + 本文 | `paid` → `delivered`（Router は `payer` を自分の署名者と比べる。facilitator が別の `payer` を返したら Provider が 502 にするので `unknown`） |
+| 200、`success: true` だが `payer` が署名者と違う | **502** `{ error: "receipt_malformed" }` | `unknown` |
 | 200、`success: false`、`errorReason: "settlement_pending"`（Solana。署名つきでも） | **502** `{ error: "settlement_pending" }`（追跡はしない。範囲外） | `unknown` |
 | 200、`success: false`、他の `errorReason` | **502** `{ error: "settle_failed" }` | `unknown` |
 | 200 だが `transaction`／`network`／`payer` の形が違う | **502** `{ error: "receipt_malformed" }`（成功を名乗らない） | `unknown` |
-| 403 `registration_required`（Circle の trial 切れ） | **502** `{ error: "facilitator_registration_required" }`。運用者向けに同じ固定文を `console.error`（値無し） | `unknown`。**自動で再試行しない、facilitator を替えない** |
+| 403 `registration_required`（Circle の trial 切れ。`/verify` でも `/settle` でも） | **502** `{ error: "facilitator_registration_required" }`。運用者向けに同じ固定文を `console.error`（値無し） | `unknown`（verify で起きたときも 5xx = `unknown` に揃える。資金は動いていないが、Router が `rejected` と記録して次の購入に進まないのを避けるため） |
 | 4xx・5xx・不達・期限・JSON でない | **502** `{ error: "facilitator_unavailable" }` | `unknown` |
 
 - **応答の本文もヘッダも固定文だけ**（facilitator の文言・例外の文字列・鍵・URL を含めない）。SDK の `processHTTPRequest` は例外の文言を 402 に入れるので、支払いつきの経路では使わない（§3.1）。
-- 1 要求で facilitator の settle は最大 1 回。Provider は再試行しない。client（Router）の再送は新しい購入として扱う（同じ authorization の nonce は facilitator が拒む）。
+- 1 要求で facilitator の settle は最大 1 回。Provider は再試行しない。Router 側は `unknown` を**そのまま保つ**（自動で買い直さない・新しい authorization を作らない: 送信の設計 §5）。同じ authorization をそのまま再送されても facilitator が nonce で拒む（これは同じ署名の再生の防御であって、新しい署名による二重払いの防御ではない。二重払いを防ぐのは Router の「`unknown` は再送しない」規則）。
 
-### 2.3 本文（支払い後）— 記録済みの Provider A の契約そのもの
+### 2.3 本文（支払い後）— 記録済みの Provider A の契約の、`payment.network` だけの拡張
 
-`docs/t5-design.md` §1.5・`tests/fixtures/market-snapshot-server.ts` の形を**過不足なく**:
+`docs/t5-design.md` §1.5・`tests/fixtures/market-snapshot-server.ts` の形を**過不足なく**。記録済みの契約は `payment.network` を `eip155:84532` と書いているので、Arc／Solana の値は**契約の拡張**になる。拡張の受け入れは chat（契約の持ち主）の確認を gate にする（§7。確認が取れるまで chat からの利用は主張しない。Router の配達には影響しない）。
 
 ```json
 {
@@ -83,7 +86,7 @@ settle の結果の表（送出後なので、成功を確かめられたとき�
 }
 ```
 
-- 数値は文字列 `/^-?\d+(?:\.\d+)?$/`（指数表記・`+`・空白・`.5`・`5.` 不可）。`assetIndex` は JSON number。鍵の集合は上と完全一致（余剰の鍵を 1 つも足さない）。
+- 数値は文字列 `/^-?\d+(?:\.\d+)?$/`（指数表記・`+`・空白・`.5`・`5.` 不可）。**`markPx`・`prevDayPx` は正**（`-` で始まらず `1`〜`9` を含む）、**`dayNtlVlm` は非負**、**`assetIndex` は非負の安全な整数**（JSON number）。鍵の集合は上と完全一致（余剰の鍵を 1 つも足さない）。これらは**settle の前**（段 1）に検査し、満たさなければ 502 で支払いを受けない。
 - `providerId` は **`market-data-a`**（これらは Provider A（x402 の Provider）の別チェーン版で、契約の ID は固定。チェーンは `payment.network` で表す）。**未確認**: chat 側の検証が `payment.network` を `eip155:84532` に限っていれば、Arc／Solana の本文は chat では弾かれる（Router の配達には影響しない）。契約の持ち主（chat）の確認を §7 に残す。
 - `change24h.absolute = markPx − prevDayPx`、`percent = absolute / prevDayPx × 100`。小数の桁は Hyperliquid の値をそのまま（絶対値は `markPx` と同じ桁、percent は小数 2 桁）。
 - Hyperliquid の応答の形が違えば（ETH が無い、数値の形が違う）**502**（段 1）。
@@ -98,7 +101,7 @@ settle の結果の表（送出後なので、成功を確かめられたとき�
 | `FACILITATOR_URL` | var | `https://api.circle.com/v1/facilitator/x402` | `https://www.x402.org/facilitator` |
 
 - **鍵の作り方（標準出力に出さない）**: `providers/x402-workers/scripts/keygen.mjs` が乱数の鍵を作り、**標準出力には address だけ**を出し、鍵は `wrangler secret put SELLER_PROOF_KEY --env arc` の標準入力に**直接**流す（`node scripts/keygen.mjs | wrangler secret put …` ではなく、script が wrangler を子 process で起動して stdin に書く。端末・ログ・file に鍵が残らない）。owner が `wrangler login` 済みの端末で実行する。
-- Solana の受取 owner の鍵は **owner の管理**（`npm run wallet:new:solana` は鍵を標準出力に出すので、owner が自分の端末で実行し `.env.local` にだけ保存する手順のまま）。Provider に渡すのは公開鍵だけ。
+- Solana の受取 owner の鍵は **owner の管理**。`providers/x402-workers/scripts/keygen-solana.mjs` が乱数の seed を **owner が指定した file にだけ**（mode 0600、既存なら上書きしない）書き、標準出力には**公開鍵だけ**を出す（`wallet:new:solana` や `echo` のように鍵を端末に出さない）。Provider に渡すのは公開鍵だけ。
 - 受取先は **Router の運用者の address の全部**と別にする: Router の受取先（Base `SUBETHA_ROUTER_RECEIVER`、Arc `SUBETHA_ARC_RECEIVER_KEY` の address、Solana `SUBETHA_SOLANA_RECEIVER`）、送信の署名者（`SUBETHA_OUTBOUND_X402_KEY`／`SUBETHA_OUTBOUND_PRIVATE_KEY` の address、`SUBETHA_OUTBOUND_SOLANA_KEY` の公開鍵）とそれらの ATA。新しく作る鍵なので一致しないが、配備の手順で address の一覧と突き合わせる（Router 側は運用者の集合で二重に拒む）。
 - Solana: 受取 owner の **USDC の ATA を配備前に作る**（rent を払う devnet の鍵は owner）。Provider は起動時の検査を持たないので、配備の手順（§5）で `getAccountInfo` を見る。
 
@@ -125,7 +128,8 @@ providers/x402-workers/
     facilitator-client.ts  自前の client（§3.2。verify/settle/getSupported。期限・redirect・本文の上限・固定の失敗。Circle のときは売り手証明）
     seller-proof.ts    Router の seller-proof.ts の純粋部分の写し（§3.3）
     snapshot.ts        Hyperliquid の取得と §2.3 の封筒（形の検証を含む）
-    receipt.ts         settle の応答の検査（§2.2 の表）と `PAYMENT-RESPONSE` の作成
+    receipt.ts         settle の応答の検査（§2.2 の表。`payer` の同一性は支払い側の `from`／authority と）と `PAYMENT-RESPONSE` の作成
+    deadline.ts        要求ごとの 1 つの期限（残りの計算、各段の期限 = min(段の上限, 残り)、settle の前の最小残り 12 秒）
   test/                vitest（Node で: 純粋関数と、fetch を差し替えた handler。facilitator と Hyperliquid は差し替え）
 ```
 
@@ -134,9 +138,9 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 ### 3.2 自前の facilitator client
 
 - 1 つのクラスを両方で使う。`verify`／`settle` は `JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements })` を **1 度だけ**作り、Circle のときはその文字列の keccak256 を `bodyHash` にして `SellerRequest` に署名し `Facilitator-Seller-Proof` を付ける。同じ文字列を body に送る。
-- `redirect: "error"`、期限 verify **4 秒**・settle **20 秒**・supported 10 秒。応答の本文は 64 KiB まで。HTTP の状態と本文の形を見て §2.2 の表に写す。facilitator の文言は client の外に出さない（固定の分類だけ）。
+- `redirect: "error"`、期限 verify **4 秒**・settle **min(20 秒, 要求の残り)**・supported **5 秒**。応答の本文は 64 KiB まで。HTTP の状態と本文の形を見て §2.2 の表に写す。facilitator の文言は client の外に出さない（固定の分類だけ）。
 - **settle の guard**: 要求ごとの client の object が `settle` の呼び出しを数え、2 度目は throw（試験で確かめる。SDK を通さないので再試行は起きないが、二重の防御）。
-- `getSupported` は GET。SDK の `x402ResourceServer` に渡すのはこの client（`initialize()` が `/supported` を読む）。isolate ごとに 1 度 `initialize()`（失敗したら次の要求でやり直す。402 を出せない間は 503 固定文）。
+- `getSupported` は GET（上限 **5 秒**）。SDK の `x402ResourceServer` に渡すのはこの client（`initialize()` が `/supported` を読む）。isolate ごとに 1 度 `initialize()`（要求ごとの期限の内側で。失敗したら次の要求でやり直す。402 を出せない間は 503 固定文、支払いは受けない）。
 
 ### 3.3 売り手証明（Arc）
 
@@ -156,8 +160,8 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 
 | 層 | 内容 |
 |---|---|
-| unit（Worker） | config（network の表、payTo の形、鍵の形、鍵 → address の一致、Solana に鍵があれば拒む、例外の文言に値が無い）、seller-proof の往復（Router の fixture と同じ検証: 復号 → recover → payTo 一致 → bodyHash 一致 → 寿命）、snapshot の封筒（§2.3 の鍵の集合と数値の形。Hyperliquid の形違い → 失敗）、receipt の検査（表の各行） |
-| handler（Node で fetch を差し替え） | 402 の形（§2.1 と byte 一致の `accepts`、トップレベルの鍵）、支払いつき: `accepted` 不一致 → 402、データ不達 → 502 で facilitator 0 回、verify 不正 → 402、verify 不達 → 502、settle の各行 → 502 と settle 1 回、成功 → 200 と `PAYMENT-RESPONSE`（SDK の decoder で読める）、**応答のヘッダと本文に facilitator の文言・鍵・URL が無い** |
+| unit（Worker） | config（network の表、payTo の形、鍵の形、鍵 → address の一致、Solana に鍵があれば拒む、例外の文言に値が無い）、seller-proof の往復（Router の fixture と同じ検証: 復号 → recover → payTo 一致 → bodyHash 一致 → 寿命）、snapshot の封筒（§2.3 の鍵の集合・数値の形・正負の制約。Hyperliquid の形違い → 失敗）、receipt の検査（表の各行。`payer` が `from`／authority と違えば `receipt_malformed`）、deadline（残りの計算、settle 前の最小残り） |
+| handler（Node で fetch を差し替え） | 402 の形（§2.1 と byte 一致の `accepts`、トップレベルの鍵）、支払いつき: `accepted` 不一致 → 402、データ不達 → 502 で facilitator 0 回、verify 不正 → 402、verify 不達・403 registration_required → 502、settle の各行 → 502 と settle 1 回、`payer` 違い → 502、成功 → 200 と `PAYMENT-RESPONSE`（SDK の decoder で読める）、cold start で `/supported` が遅い・落ちる → 503 で支払いを受けない、残りが 12 秒未満で settle を呼ばず 503、**応答のヘッダと本文に facilitator の文言・鍵・URL が無い** |
 | Router の既存の試験 | §3.5 の変更の wire 試験。`x402-arc-outbound`・`x402-svm-outbound` の fixture の accepts を §2.1 と同じ値にして候補になることを確認 |
 | 結合（手元、AC-P2） | `wrangler dev` に Router の fixture の facilitator を向け、Router の wire 試験の harness から購入 → `delivered`。settle の pending／4xx／不達の各行 → Router が `unknown`、fixture の settle の計数 1 |
 
@@ -165,7 +169,7 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 
 1. Router 側の P-0 を merge。
 2. owner: `wrangler login`（この機械には認証が無い。私は認証情報を扱わない）。Cloudflare の DNS に 2 つのサブドメインを Worker の custom domain として追加。
-3. 鍵: Arc は `scripts/keygen.mjs`（§2.4。address だけが出る。`--env arc` の secret に直接）。`PAY_TO` にその address を `wrangler.toml` の `[env.arc.vars]` に書く。Solana は owner が `wallet:new:solana` で作り、公開鍵を `[env.sol.vars]` の `PAY_TO` に。
+3. 鍵: Arc は `scripts/keygen.mjs`（§2.4。address だけが出る。`--env arc` の secret に直接）。`PAY_TO` にその address を `wrangler.toml` の `[env.arc.vars]` に書く。Solana は owner が `scripts/keygen-solana.mjs <file>` で作り（file にだけ。公開鍵だけが出る）、公開鍵を `[env.sol.vars]` の `PAY_TO` に。
 4. Solana: owner が ATA を作る（`spl-token create-account 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU --owner <公開鍵> --url devnet`。rent は owner の devnet の鍵）。私が `getAccountInfo` で確かめる（V-7）。
 5. 受取先が Router の運用者の address（§2.4）のどれとも違うことを一覧で確認。
 6. `wrangler deploy --env arc`／`--env sol`。配備後に 402 を 2 回取り記録（V-6・V-12）。
@@ -185,3 +189,4 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（高 3: SDK の settle の再試行、settle 失敗を 402 にする誤り、本文が記録済みの契約と違う；中 3: 期限の不整合、鍵の作り方と配備、V-13 のラベル）。第 2 版で反映 |
+| 2 | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **REJECT**（解決: 再試行、V-13。残り: `payer` の同一性と本文の受領、契約は拡張であること・数値の制約、cold start を含む 1 つの期限、Solana の seed の出力、`unknown` の後の文言）。第 3 版で反映 |
