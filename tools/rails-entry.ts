@@ -13,7 +13,7 @@ import { DEFAULT_SOLANA_RPC_URL, type RouterCapabilities } from "../src/main.js"
 import { createRealEvmCapability } from "./real-evm-capability.js";
 import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
 import { createRealSvmCapability } from "./real-svm-capability.js";
-import { INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, RAIL_UPSTREAMS, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
+import { INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
 /** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out"` の部分集合。空 = すべて無効）。 */
@@ -37,8 +37,13 @@ const RAIL_NAMES = [
   ["solana", "solana"],
   ["solanaMpp", "solana-mpp"],
 ] as const satisfies readonly (readonly [keyof RailsActivation, string])[];
-/** 内部 env の token（方向別。送信の設計 §6.1）。旧い `arc`・`solana` は受け付けない。 */
-const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out"] as const;
+/** 組の token（送信の設計 §13.1）。`RAIL_NAMES` とは別に、末尾に付ける。 */
+const PAIR_TOKENS = [
+  ["arcToSol", "arc-to-sol"],
+  ["solToArc", "sol-to-arc"],
+] as const satisfies readonly (readonly [keyof PairsActivation, string])[];
+/** 内部 env の token（方向別。送信の設計 §6.1。組の 2 語は §13.1）。旧い `arc`・`solana` は受け付けない。 */
+const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc"] as const;
 const ACTIVATION_TOKENS_TEXT = ACTIVATION_TOKENS.join(",");
 
 export function activationToEnv(activation: RailsActivation): string {
@@ -47,6 +52,8 @@ export function activationToEnv(activation: RailsActivation): string {
     if (activation[rail].inbound) tokens.push(`${stem}-in`);
     if (activation[rail].outbound) tokens.push(`${stem}-out`);
   }
+  const pairs = pairsOf(activation);
+  for (const [pair, token] of PAIR_TOKENS) if (pairs[pair]) tokens.push(token);
   return tokens.join(",");
 }
 
@@ -62,10 +69,13 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
       seen.add(name);
     }
   }
+  const pairs: PairsActivation = { arcToSol: seen.has("arc-to-sol"), solToArc: seen.has("sol-to-arc") };
   return {
     arc: { inbound: seen.has("arc-in"), outbound: seen.has("arc-out") },
     solana: { inbound: seen.has("solana-in"), outbound: seen.has("solana-out") },
     solanaMpp: { inbound: seen.has("solana-mpp-in"), outbound: seen.has("solana-mpp-out") },
+    // 組は token があるときだけ欄を持つ（無い = 両方 false。`pairsOf`）。
+    ...(pairs.arcToSol || pairs.solToArc ? { pairs } : {}),
   };
 }
 

@@ -41,6 +41,7 @@ import {
   UPSTREAM_ARC,
   UPSTREAM_X402,
   type RailsOptions,
+  type PairsActivation, type RailsActivation,
 } from "../../tools/remote-mcp-config.js";
 
 const RECEIVER = "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405";
@@ -93,7 +94,7 @@ describe("公開の process の既定: Arc・Solana はどちらも無効", () =
     expect(RAILS_NONE).toEqual({ arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_NONE)).toBe(true);
     expect(RAILS_DISABLED.activation).toBe(RAILS_NONE);
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: false, solToArc: false } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
     const document = routerConfigOf({}, RECEIVER, true);
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true, RAILS_DISABLED));
@@ -256,7 +257,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
   const OUT_ONLY: RailsOptions = { activation: { arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { arc: ARC_PROVIDER } };
 
   test("公開の定数は受信 true・送信 true（Arc・Solana とも。G-4′ 2026-10-08）。railActive は方向のどれかで決まる", () => {
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: false, solToArc: false } });
     expect(Object.isFrozen(RAILS_ACTIVATION) && Object.isFrozen(RAILS_ACTIVATION.arc)).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
     expect(railActive({ arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } })).toBe(true);
@@ -630,16 +631,17 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     expect(() => routerConfigOf({}, RECEIVER, true, { ...all, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER }, upstreams: RAIL_UPSTREAMS })).toThrow(/solana mpp outbound rail is activated with an upstream URL/);
   });
 
-  test("動的予算の 1 件の上限: 本番の 18 プロファイルすべてで上限額（上流 10,000）の quote が区分の上限に収まる。両レグが同じ Solana USDC の区分に落ちる dyn-solmpp-to-sol・dyn-sol-to-solmpp は 21,000 ちょうど（1 base unit 上回ると per_purchase_limit）。他の区分は 20,000 のまま", () => {
+  test("動的予算の 1 件の上限: 本番の 20 プロファイル（組 O-5・O-6 を含む）すべてで上限額（上流 10,000）の quote が区分の上限に収まる。両レグが同じ Solana USDC の区分に落ちる dyn-solmpp-to-sol・dyn-sol-to-solmpp は 21,000 ちょうど（1 base unit 上回ると per_purchase_limit）。他の区分は 20,000 のまま", () => {
     const all: RailsOptions = {
-      activation: { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } },
+      activation: { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true } },
       receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER },
       providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER },
       upstreams: RAIL_UPSTREAMS,
     };
     const router = routerOf(routerConfigOf({}, RECEIVER, true, all));
     const profiles = Object.values(router.dynamic!.profiles);
-    expect(profiles).toHaveLength(18);
+    expect(profiles).toHaveLength(20);
+    expect(profiles.map((profile) => profile.profileId)).toEqual(expect.arrayContaining(["dyn-arc-to-sol", "dyn-sol-to-arc"]));
     // 上限額の quote の予約が、どのプロファイルでも 1 件の上限に収まる。Tempo 宛の MPP は gas の見積りが cap になる
     // （G-3″ の実測は 158 base unit。規則の手数料 1,000 以下なら手数料はそのまま）。cap が規則の手数料を超えれば源のレグがその分増え、
     // 上流 10,000 のとき cap が 10,000 を超えると Tempo の区分の 20,000 を超えて `per_purchase_limit`（天井 50,000 の `fee_too_high` より先）。
@@ -666,5 +668,89 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     for (const bucket of dynamicBuckets.filter((bucket) => bucket.network !== INBOUND_SOL.network)) expect(bucket.maxPerPurchase, bucket.network).toBe("20000");
     // 静的の予算は変えない（静的 route は片レグ 10,000 のまま）。
     for (const bucket of router.budget.buckets) expect(bucket.maxPerPurchase, bucket.network).toBe("10000");
+  });
+});
+
+/** O-5・O-6（Arc x402 ↔ Solana x402）の組（送信の要件 §11 FR-39〜FR-43・AC-19、設計 §13。D-17 の決定 2026-10-09）。 */
+describe("O-5・O-6: 組の切り替え pairs と dyn-arc-to-sol・dyn-sol-to-arc の生成", () => {
+  const ARC_PROVIDER = "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1";
+  const SOL_PROVIDER = "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d";
+  const SOL_MPP_PROVIDER = "4LrBc1whdzuLzk7qgo6y5JEgHtyhgNoPpzPpHebaJ5oM";
+  const FULL: RailsActivation = { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } };
+  const optionsOf = (pairs: PairsActivation | undefined, activation: RailsActivation = FULL, receivers: RailsOptions["receivers"] = { arc: ARC_RECEIVER, solana: SOL_OWNER }): RailsOptions => ({
+    activation: { ...activation, ...(pairs === undefined ? {} : { pairs }) },
+    receivers,
+    providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER },
+    upstreams: RAIL_UPSTREAMS,
+  });
+  const EIGHTEEN = ["dyn-arc-to-mpp", "dyn-arc-to-solmpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402", "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp"];
+
+  test("pairs 両方 true: 20 本（18 本 + dyn-arc-to-sol + dyn-sol-to-arc）。route は 10 本のまま。本番の読み込みを通り、一覧に出る", () => {
+    const document = routerConfigOf({}, RECEIVER, true, optionsOf({ arcToSol: true, solToArc: true }));
+    const loaded = loadAsProduction(document);
+    expect(Object.keys(loaded.router.dynamic!.profiles).sort()).toEqual([...EIGHTEEN, "dyn-arc-to-sol", "dyn-sol-to-arc"].sort());
+    expect(Object.keys(loaded.router.routes)).toHaveLength(10);
+    const ids = listedIds(loaded.router);
+    expect(ids.profiles).toHaveLength(20);
+    expect(ids.profiles).toEqual(expect.arrayContaining(["dyn-arc-to-sol", "dyn-sol-to-arc"]));
+    expect(new Set([...ids.routes, ...ids.profiles]).size).toBe(30);
+  });
+
+  test.each([
+    ["arcToSol だけ", { arcToSol: true, solToArc: false }, "dyn-arc-to-sol", "dyn-sol-to-arc"],
+    ["solToArc だけ", { arcToSol: false, solToArc: true }, "dyn-sol-to-arc", "dyn-arc-to-sol"],
+  ] as const)("%s true: 19 本で、足されるのはその 1 本だけ（方向は結合していない）", (_name, pairs, present, absent) => {
+    const document = routerConfigOf({}, RECEIVER, true, optionsOf(pairs));
+    const ids = Object.keys(routerOf(document).dynamic!.profiles).sort();
+    expect(ids).toEqual([...EIGHTEEN, present].sort());
+    expect(JSON.stringify(document)).not.toContain(`${absent}"`);
+  });
+
+  test("pairs 両方 false、または無し（公開の定数の G-2⁗ の形）: 18 本のまま。ID は文書に出ない", () => {
+    for (const pairs of [{ arcToSol: false, solToArc: false }, undefined]) {
+      const document = routerConfigOf({}, RECEIVER, true, optionsOf(pairs));
+      expect(Object.keys(routerOf(document).dynamic!.profiles).sort()).toEqual(EIGHTEEN);
+      expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol"|dyn-sol-to-arc"/);
+    }
+    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, true, optionsOf(RAILS_ACTIVATION.pairs, RAILS_ACTIVATION))).dynamic!.profiles)).toHaveLength(18);
+  });
+
+  test.each([
+    ["arc-to-sol で arc.inbound が無い（受取先無し）", { arcToSol: true, solToArc: false }, { ...FULL, arc: { inbound: false, outbound: true } }, { solana: SOL_OWNER }, /pair arc-to-sol requires arc\.inbound/],
+    ["arc-to-sol で solana.outbound が無い", { arcToSol: true, solToArc: false }, { ...FULL, solana: { inbound: true, outbound: false } }, { arc: ARC_RECEIVER, solana: SOL_OWNER }, /pair arc-to-sol requires/],
+    ["sol-to-arc で solana.inbound が無い（受取 owner 無し）", { arcToSol: false, solToArc: true }, { ...FULL, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: true } }, { arc: ARC_RECEIVER }, /pair sol-to-arc requires solana\.inbound/],
+    ["sol-to-arc で arc.outbound が無い", { arcToSol: false, solToArc: true }, { ...FULL, arc: { inbound: true, outbound: false } }, { arc: ARC_RECEIVER, solana: SOL_OWNER }, /pair sol-to-arc requires/],
+  ] as const)("%s → 固定文で止まる（黙って出さない、はしない。値は出ない）", (_name, pairs, activation, receivers, pattern) => {
+    let caught: unknown;
+    try {
+      routerConfigOf({}, RECEIVER, true, optionsOf(pairs, activation, receivers));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(pattern);
+    expect((caught as Error).message).not.toContain(ARC_RECEIVER);
+    expect((caught as Error).message).not.toContain(SOL_OWNER);
+    expect(() => dynamicProfilesOf({}, RECEIVER, true, optionsOf(pairs, activation, receivers))).toThrow(pattern);
+  });
+
+  test("生成の中身: dyn-arc-to-sol は Arc USDC（受取鍵の address）→ Solana の表の mint・桁・token program（tokenDomain は無い）、dyn-sol-to-arc は Solana USDC（受取 owner）→ Arc の表の asset と tokenDomain。par 1:1、上流 10,000、手数料 定額 1,000、sourceRail x402", () => {
+    const router = routerOf(routerConfigOf({}, RECEIVER, true, optionsOf({ arcToSol: true, solToArc: true })));
+    const arcToSol = router.dynamic!.profiles["dyn-arc-to-sol"]!;
+    const solToArc = router.dynamic!.profiles["dyn-sol-to-arc"]!;
+    expect(arcToSol).toMatchObject({ profileId: "dyn-arc-to-sol", sourceRail: "x402", rail: "x402", par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" }, source: { network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, decimals: 6, payTo: ARC_RECEIVER }, destination: { scheme: "exact", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: 6, tokenProgram: OUTBOUND_SOL.tokenProgram } });
+    expect(arcToSol.destination).not.toHaveProperty("tokenDomain");
+    expect(arcToSol.destination).not.toHaveProperty("maxFee");
+    expect(solToArc).toMatchObject({ profileId: "dyn-sol-to-arc", sourceRail: "x402", rail: "x402", par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" }, source: { network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, decimals: 6, payTo: SOL_OWNER }, destination: { scheme: "exact", network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, decimals: 6, tokenDomain: { name: "USDC", version: "2" } } });
+    expect(solToArc.destination).not.toHaveProperty("tokenProgram");
+    // 予算（FR-42）: 新しい区分は無い。O-5 の予約は Arc 11,000 + Solana 10,000、O-6 はその逆。どちらも 1 件の上限の内側で、両レグが同じ区分ではない。
+    for (const [profile, sourceNetwork, destinationNetwork] of [[arcToSol, INBOUND_ARC.network, OUTBOUND_SOL.network], [solToArc, INBOUND_SOL.network, INBOUND_ARC.network]] as const) {
+      const pricing = priceOf(profile, profile.maxUpstreamAmount, undefined);
+      expect(pricing).toBeDefined();
+      const reservation = reservationOf(profile, pricing!);
+      expect(reservation.legs.map((leg) => [leg.network, leg.amount])).toEqual([[sourceNetwork, "11000"], [destinationNetwork, "10000"]]);
+      expect(perPurchaseLimitOf(router, reservation), profile.profileId).toBeUndefined();
+    }
+    expect(bucketsOf(router).dynamic).toHaveLength(4);
   });
 });

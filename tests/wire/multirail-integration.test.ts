@@ -74,7 +74,7 @@ const SOLMPP_URL = `https://${HOSTS.solMppProvider}/v1/price?symbol=ETH`;
 const STATIC_SOLMPP_URL = `https://${HOSTS.solMppProvider}/v1/static`;
 
 const ROUTES = { arcX402: "arc-x402", arcMpp: "arc-mpp", solX402: "sol-x402", solMpp: "sol-mpp", base: "base", baseArc: "base-arc", tempoSol: "tempo-sol" , solmppX402: "solmpp-x402", solmppMpp: "solmpp-mpp", baseSolmpp: "base-solmpp", tempoSolmpp: "tempo-solmpp" } as const;
-const PROFILES = { arcX402: "dyn-arc-to-x402", arcMpp: "dyn-arc-to-mpp", solX402: "dyn-sol-to-x402", solMpp: "dyn-sol-to-mpp", baseMpp: "dyn-x402-to-mpp", tempoX402: "dyn-mpp-to-x402", x402Arc: "dyn-x402-to-arc", mppArc: "dyn-mpp-to-arc", x402Sol: "dyn-x402-to-sol", mppSol: "dyn-mpp-to-sol" , solmppX402: "dyn-solmpp-to-x402", solmppMpp: "dyn-solmpp-to-mpp", solmppArc: "dyn-solmpp-to-arc", solmppSol: "dyn-solmpp-to-sol", x402Solmpp: "dyn-x402-to-solmpp", mppSolmpp: "dyn-mpp-to-solmpp", arcSolmpp: "dyn-arc-to-solmpp", solSolmpp: "dyn-sol-to-solmpp" } as const;
+const PROFILES = { arcX402: "dyn-arc-to-x402", arcMpp: "dyn-arc-to-mpp", solX402: "dyn-sol-to-x402", solMpp: "dyn-sol-to-mpp", baseMpp: "dyn-x402-to-mpp", tempoX402: "dyn-mpp-to-x402", x402Arc: "dyn-x402-to-arc", mppArc: "dyn-mpp-to-arc", x402Sol: "dyn-x402-to-sol", mppSol: "dyn-mpp-to-sol" , solmppX402: "dyn-solmpp-to-x402", solmppMpp: "dyn-solmpp-to-mpp", solmppArc: "dyn-solmpp-to-arc", solmppSol: "dyn-solmpp-to-sol", x402Solmpp: "dyn-x402-to-solmpp", mppSolmpp: "dyn-mpp-to-solmpp", arcSolmpp: "dyn-arc-to-solmpp", solSolmpp: "dyn-sol-to-solmpp", arcSol: "dyn-arc-to-sol", solArc: "dyn-sol-to-arc" } as const;
 
 let TLS: TlsMaterial;
 let owner: string;
@@ -348,6 +348,9 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
           [PROFILES.mppSolmpp]: profile(PROFILES.mppSolmpp, { ...tempo }, "solmpp"),
           [PROFILES.arcSolmpp]: profile(PROFILES.arcSolmpp, { rail: "x402", ...arc, asset: ARC_USDC }, "solmpp"),
           [PROFILES.solSolmpp]: { ...profile(PROFILES.solSolmpp, { rail: "x402", ...sol }, "solmpp"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
+          // O-5・O-6（送信の要件 §11、D-17 の決定 2026-10-09）: Arc x402 ↔ Solana x402。動的だけ。
+          [PROFILES.arcSol]: { ...profile(PROFILES.arcSol, { rail: "x402", ...arc, asset: ARC_USDC }, "sol"), maxUpstreamAmount: options.solMaxUpstream ?? "10000" },
+          [PROFILES.solArc]: profile(PROFILES.solArc, { rail: "x402", ...sol }, "arc"),
         }),
     [PROFILES.baseMpp]: profile(PROFILES.baseMpp, { rail: "x402", ...base, asset: USDC }, "mpp"),
     [PROFILES.tempoX402]: profile(PROFILES.tempoX402, { rail: "mpp", network: TEMPO, asset: PATHUSD, payTo: BASE_RECEIVER }, "x402"),
@@ -1182,14 +1185,17 @@ describe("T11: Solana の settle が settlement_pending（署名つき）でも�
 
 /* ------------------------------------------------------------------ 送信（U8-a）: 公開する組 D-12 */
 
-describe("送信: 公開する組（静的 O-1 Base → Arc・O-4 Tempo → Solana、動的 O-1〜O-4）が delivered。能力は evmSigningByNetwork[ARC]・svmSigning[SOL]", () => {
-  const matrix: [string, "static" | "dynamic", string, "base" | "tempo", "arc" | "sol"][] = [
+describe("送信: 公開する組（静的 O-1 Base → Arc・O-4 Tempo → Solana、動的 O-1〜O-6）が delivered。能力は evmSigningByNetwork[ARC]・svmSigning[SOL]", () => {
+  const matrix: [string, "static" | "dynamic", string, "base" | "tempo" | "arc" | "sol", "arc" | "sol"][] = [
     ["Base → Arc（静的 O-1）", "static", ROUTES.baseArc, "base", "arc"],
     ["Tempo → Solana（静的 O-4）", "static", ROUTES.tempoSol, "tempo", "sol"],
     ["Base → Arc（動的 O-1）", "dynamic", PROFILES.x402Arc, "base", "arc"],
     ["Tempo → Arc（動的 O-2）", "dynamic", PROFILES.mppArc, "tempo", "arc"],
     ["Base → Solana（動的 O-3）", "dynamic", PROFILES.x402Sol, "base", "sol"],
     ["Tempo → Solana（動的 O-4）", "dynamic", PROFILES.mppSol, "tempo", "sol"],
+    // O-5・O-6（送信の要件 §11 AC-19）: 受信は Arc（Circle）／Solana（x402.org の形の svm fixture）、送信はもう一方の Worker の fixture。
+    ["Arc → Solana（動的 O-5）", "dynamic", PROFILES.arcSol, "arc", "sol"],
+    ["Solana → Arc（動的 O-6）", "dynamic", PROFILES.solArc, "sol", "arc"],
   ];
   test.each(matrix)("%s: delivered。送信は該当の Provider に 1 回、Solana は署名 1 回で facilitator の verify を通る", async (_name, kind, id, source, destination) => {
     const fixtures = await startFixtures();
@@ -1197,13 +1203,15 @@ describe("送信: 公開する組（静的 O-1 Base → Arc・O-4 Tempo → Sola
     const signsBefore = solSigner.signCount();
     const quote = kind === "static" ? await staticQuote(router, id, "o1") : await dynamicQuote(router, id, "o1");
     const offer = offerOf(quote);
-    expect(offer.network).toBe(source === "base" ? BASE : TEMPO);
+    expect(offer.network).toBe(source === "base" ? BASE : source === "tempo" ? TEMPO : source === "arc" ? ARC : SOL);
     const result = await purchase(router, quote, await credentialFor(fixtures, quote), "o1");
     expect(result).toMatchObject({ outcome: "delivered", snapshot: destination === "arc" ? { price: 2 } : { ok: true, source: "svm-provider" } });
     const calls = inboundCalls(fixtures);
-    expect(calls.circle).toEqual({ verify: 0, settle: 0 });
+    // 受信の facilitator は source で決まる（Base は legacy、Arc は Circle、Solana は svm）。svm の verify・settle は Solana 受信（O-6）か Solana 送信（Provider の fixture が svm に verify・settle する）のどちらかで 1。
+    expect(calls.circle).toEqual(source === "arc" ? { verify: 1, settle: 1 } : { verify: 0, settle: 0 });
     expect(calls.legacy).toEqual(source === "base" ? { verify: 1, settle: 1 } : { verify: 0, settle: 0 });
-    expect(calls.svm).toEqual(destination === "sol" ? { verify: 1, settle: 1, supported: 1 } : { verify: 0, settle: 0, supported: 1 });
+    expect(calls.svm).toEqual(source === "sol" || destination === "sol" ? { verify: 1, settle: 1, supported: 1 } : { verify: 0, settle: 0, supported: 1 });
+    if (source === "arc") expect(fixtures.circle.seen.proofFailures).toEqual([]);
     // Tempo 受信は呼び出し側が fixture の RPC に送金する（mppSends 1）。送信の MPP は無い。
     expect(outboundCalls(fixtures)).toEqual({ x402Payments: 0, mppSends: source === "tempo" ? 1 : 0, mppCredentials: 0 });
     expect(providerPayments(fixtures)).toEqual(destination === "arc" ? { arcPayments: 1, solPayments: 0 } : { arcPayments: 0, solPayments: 1 });
@@ -1220,8 +1228,9 @@ describe("送信: 公開する組（静的 O-1 Base → Arc・O-4 Tempo → Sola
     } else {
       expect(solRpcCallsSince(fixtures, router)).toBe(0);
     }
-    // 接続先: 受信（Base は legacy の facilitator、Tempo は tempoRpc）と送信（Provider。Solana は RPC も）。
-    const expected = new Set<string>([source === "base" ? HOSTS.legacy : HOSTS.tempoRpc, destination === "arc" ? HOSTS.arcProvider : HOSTS.solProvider, ...(destination === "sol" ? [HOSTS.solRpc] : [])]);
+    // 接続先: 受信（Base は legacy の facilitator、Tempo は tempoRpc、Arc は Circle、Solana は svm）と送信（Provider。Solana は RPC も）。
+    const sourceHost = source === "base" ? HOSTS.legacy : source === "tempo" ? HOSTS.tempoRpc : source === "arc" ? HOSTS.circle : HOSTS.svm;
+    const expected = new Set<string>([sourceHost, destination === "arc" ? HOSTS.arcProvider : HOSTS.solProvider, ...(destination === "sol" ? [HOSTS.solRpc] : [])]);
     expect(new Set(fixtures.dialed)).toEqual(expected);
     const status = await router.client().status(quote.paymentId, quote.ownerKey);
     expect(status).toMatchObject({ found: true, projection: { status: "delivered" } });

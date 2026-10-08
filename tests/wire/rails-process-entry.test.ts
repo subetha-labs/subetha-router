@@ -234,9 +234,9 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     expect(readdirSync(path.join(dir, "acceptance"))).toBeDefined();
     // 受け入れ用の起動は公開の定数を書き換えない（ソースの上の値は G-4 の両方 true のまま）。
     // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信も両方 true（G-4′、2026-10-08）。
-    // 公開の定数（G-4″ の後の形）: arc・solana・solanaMpp すべて両方 true。
+    // 公開の定数（G-4″ の後の形）: arc・solana・solanaMpp すべて両方 true。組 O-5・O-6（pairs）は G-2⁗ では両方 false（G-4⁗ で true にする）。
     const source = readFileSync("tools/remote-mcp-config.ts", "utf8");
-    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*\}\)/);
+    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?pairs: Object\.freeze\(\{ arcToSol: false, solToArc: false \}\),\s*\}\)/);
   }, 40_000);
 });
 
@@ -310,6 +310,44 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
       await rpc.close();
       tls.cleanup();
     }
+  }, 60_000);
+
+  test("受け入れ用の起動 --rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc（O-5・O-6、設計 §13）: 設定に dyn-arc-to-sol・dyn-sol-to-arc が入り、子の有効化に 2 語が渡る（probe で止まる。鍵は出ない）", async () => {
+    const dir = workDir("t8b-acceptance-pairs-");
+    const key = generatePrivateKey();
+    const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
+    const owner = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+    const journalPath = path.join(dir, "acceptance", "journal.ndjson");
+    const before = new Set(readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-")));
+    const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc"], {
+      SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
+      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-t8b-acceptance-pairs",
+      SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
+      [ARC_RECEIVER_KEY_ENV]: key,
+      SUBETHA_SOLANA_RECEIVER: owner,
+      SUBETHA_SOLANA_RPC_URL: "https://rpc.solana.invalid",
+      SUBETHA_ARC_PROVIDER_PAYTO: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1",
+      SUBETHA_SOLANA_PROVIDER_PAYTO: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d",
+      SUBETHA_OUTBOUND_SOLANA_KEY: seed,
+      SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
+      SUBETHA_ACCEPTANCE_PORT: "0",
+    });
+    const created = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    for (const name of created) dirs.push(path.join(runtimeRoot, name));
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("could not start the Router");
+    expect(result.stdout).not.toContain("listening");
+    expect(result.stdout + result.stderr).not.toContain(key.slice(2));
+    expect(result.stdout + result.stderr).not.toContain(seed);
+    expect(created).toHaveLength(1);
+    const document = JSON.parse(readFileSync(path.join(runtimeRoot, created[0]!, "router.config.json"), "utf8")) as { router: { dynamic: { profiles: Record<string, { source: { payTo: string } }> } } };
+    const ids = Object.keys(document.router.dynamic.profiles).sort();
+    expect(ids).toEqual(expect.arrayContaining(["dyn-arc-to-sol", "dyn-sol-to-arc"]));
+    expect(ids).toHaveLength(12); // Arc・Solana の x402 の受信 4 + Base/Tempo からの送信 4 + 既存 2 + 組 2（MPP Solana は無効）
+    expect(document.router.dynamic.profiles["dyn-arc-to-sol"]?.source.payTo).toBe(privateKeyToAccount(key).address);
+    expect(document.router.dynamic.profiles["dyn-sol-to-arc"]?.source.payTo).toBe(owner);
+    expect(JSON.stringify(document)).not.toContain(key.slice(2));
   }, 60_000);
 
   test("受け入れ用の起動 --rails solana-mpp-in: 設定に MPP Solana の受信の route とプロファイルが出て（x402 の Solana の route・facilitator は無い）、子には秘密と有効化が渡る（probe で止まる。鍵は出ない）", async () => {

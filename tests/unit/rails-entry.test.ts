@@ -25,7 +25,7 @@ import { getBase58Decoder } from "@solana/kit";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { createRealMppCapability } from "../../tools/real-mpp-capability.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
-import { INBOUND_ARC, INBOUND_SOL, OUTBOUND_SOL, RAIL_UPSTREAMS, RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { INBOUND_ARC, INBOUND_SOL, OUTBOUND_SOL, RAIL_UPSTREAMS, railActive, RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
 import { HostPlanError, hostPlanOf, listenMcp, publicJournalPathOf, type HostOptions,
   hasX402Outbound,
 } from "../../tools/remote-mcp.js";
@@ -432,7 +432,7 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）の選択�
     expect(options.journalPath).toBe(path.resolve("runtime", "acceptance", "journal.ndjson"));
     expect(options.journalPath).not.toBe(path.resolve(publicJournalPathOf({})));
     // 公開の定数は受信（G-4）も送信（G-4′）も両方 true（受け入れ用の起動はそれを読まず、--rails で決める。既定の無効は RAILS_NONE）。
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: false, solToArc: false } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
   });
 
@@ -646,7 +646,7 @@ describe("Solana の MPP の有効化（solanaMpp）: token・受取 owner・鍵
     expect(activationToEnv(RAILS_ACTIVATION)).toBe("arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out");
     expect(activationFromEnv("")).toEqual(RAILS_NONE);
     for (const bad of ["solana-mpp", "solanampp-in", "solana-mpp-in,solana-mpp-in", "mpp-in"]) {
-      expect(() => activationFromEnv(bad), bad).toThrow(/must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out"/);
+      expect(() => activationFromEnv(bad), bad).toThrow(/must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc"/);
     }
   });
 
@@ -779,5 +779,67 @@ describe("Solana の MPP の有効化（solanaMpp）: token・受取 owner・鍵
     expect(acceptanceOptionsOf({}, ["--rails", "solana-mpp-in"]).activation).toEqual(MPP_IN);
     expect(acceptanceOptionsOf({}, ["--rails", "arc-in,solana-in,solana-mpp-in,solana-mpp-out"]).activation).toEqual({ arc: { inbound: true, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: true, outbound: true } });
     expect(() => acceptanceOptionsOf({}, ["--rails", ""])).toThrow(/solana-mpp-in, solana-mpp-out/);
+  });
+});
+
+/** O-5・O-6 の組の token と入口（送信の設計 §13.1、要件 FR-40・FR-41・FR-43、AC-19）。 */
+describe("組の token arc-to-sol・sol-to-arc（設計 §13.1）", () => {
+  const base: RailsActivation = { arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: false, outbound: false } };
+  const baseEnv = { SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(), SUBETHA_ROUTER_RECEIVER: RECEIVER, SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-pairs" };
+
+  test("往復: 組の語は末尾、片方・両方はその語だけ、両方 false は語が無い（= 欄も無い）。重複・似た語は拒否。組だけでは railActive は false", () => {
+    expect(activationToEnv({ ...base, pairs: { arcToSol: true, solToArc: false } })).toBe("arc-in,arc-out,solana-in,solana-out,arc-to-sol");
+    expect(activationToEnv({ ...base, pairs: { arcToSol: false, solToArc: true } })).toBe("arc-in,arc-out,solana-in,solana-out,sol-to-arc");
+    expect(activationToEnv({ ...base, pairs: { arcToSol: true, solToArc: true } })).toBe("arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc");
+    expect(activationToEnv({ ...base, pairs: { arcToSol: false, solToArc: false } })).toBe("arc-in,arc-out,solana-in,solana-out");
+    expect(activationToEnv(RAILS_ACTIVATION)).toBe("arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out");
+    for (const pairs of [{ arcToSol: true, solToArc: false }, { arcToSol: false, solToArc: true }, { arcToSol: true, solToArc: true }]) {
+      expect(activationFromEnv(activationToEnv({ ...base, pairs }))).toEqual({ ...base, pairs });
+    }
+    expect(activationFromEnv("arc-in,arc-out,solana-in,solana-out")).toEqual(base);
+    expect(activationFromEnv("sol-to-arc, arc-in")).toEqual({ arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false }, pairs: { arcToSol: false, solToArc: true } });
+    for (const bad of ["arc-to-sol,arc-to-sol", "sol-to-arc,sol-to-arc", "arc-in,sol-to-arc,sol-to-arc", "arc-sol", "arc_to_sol", "ARC-TO-SOL", "sol-to-arc,"]) {
+      expect(() => activationFromEnv(bad), bad).toThrow(/SUBETHA_RAILS_ACTIVATION must be a comma-separated subset/);
+    }
+    expect(railActive({ ...NONE, pairs: { arcToSol: true, solToArc: true } })).toBe(false);
+  });
+
+  test("hostPlanOf: 全レール true + pairs 両方 true → 20 本と子の env の 8 語（能力・鍵の転送は変わらない）。片方だけ → 19 本。pairs だけ true（レールの方向無し）→ 固定文（config）で計画は作れない", () => {
+    const key = generatePrivateKey();
+    const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
+    const fullEnv = { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key, [SOLANA_RECEIVER_ENV]: SOL_OWNER, [ARC_PROVIDER_ENV]: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", [SOLANA_PROVIDER_ENV]: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", [SOLANA_MPP_PROVIDER_ENV]: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc", [SOLANA_OUTBOUND_KEY_ENV]: seed };
+    const both: RailsActivation = { ...RAILS_ACTIVATION, pairs: { arcToSol: true, solToArc: true } };
+    const plan = hostPlanOf({ activation: both, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, fullEnv);
+    const config = loadAsProduction(plan.config);
+    expect(Object.keys(config.router.dynamic!.profiles)).toHaveLength(20);
+    expect(config.router.dynamic!.profiles["dyn-arc-to-sol"]?.source.payTo).toBe(privateKeyToAccount(key).address);
+    expect(config.router.dynamic!.profiles["dyn-sol-to-arc"]?.source.payTo).toBe(SOL_OWNER);
+    expect(plan.childEnv[RAILS_ACTIVATION_ENV]).toBe("arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc");
+    // 子の env は pairs 無しの計画と、有効化の語以外は同じ（FR-43: 鍵・能力は組を見ない）。
+    const plain = hostPlanOf({ activation: RAILS_ACTIVATION, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, fullEnv);
+    const { [RAILS_ACTIVATION_ENV]: _a, ...withPairs } = plan.childEnv;
+    const { [RAILS_ACTIVATION_ENV]: _b, ...without } = plain.childEnv;
+    expect(withPairs).toEqual(without);
+    expect(Object.keys(loadAsProduction(plain.config).router.dynamic!.profiles)).toHaveLength(18);
+    for (const [pairs, present] of [[{ arcToSol: true, solToArc: false }, "dyn-arc-to-sol"], [{ arcToSol: false, solToArc: true }, "dyn-sol-to-arc"]] as const) {
+      const one = hostPlanOf({ activation: { ...RAILS_ACTIVATION, pairs }, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, fullEnv);
+      const ids = Object.keys(loadAsProduction(one.config).router.dynamic!.profiles);
+      expect(ids).toHaveLength(19);
+      expect(ids).toContain(present);
+    }
+    // 組だけ true: 受取先も送信の方向も無いので固定文で止まる（code は config。値は出ない）。
+    let caught: unknown;
+    try {
+      hostPlanOf({ activation: { ...NONE, pairs: { arcToSol: true, solToArc: true } }, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, fullEnv);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(HostPlanError);
+    expect((caught as HostPlanError).code).toBe("config");
+    expect(String((caught as Error).message)).not.toContain(key.slice(2));
+    // 子（process）側の復元も同じ語を受け付け、能力は組を見ない: pairs の有無で routerProcessCapabilitiesOf の形は変わらない。
+    const childEnvWithPairs = { ...plan.childEnv, [RAILS_ACTIVATION_ENV]: "arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc" };
+    const childEnvPlain = { ...plan.childEnv, [RAILS_ACTIVATION_ENV]: "arc-in,arc-out,solana-in,solana-out" };
+    expect(Object.keys(routerProcessCapabilitiesOf(childEnvWithPairs)).sort()).toEqual(Object.keys(routerProcessCapabilitiesOf(childEnvPlain)).sort());
   });
 });

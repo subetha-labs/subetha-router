@@ -322,6 +322,26 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。**journal では追跡で確定した settle と facilitator が直接成功を返した settle を
 区別できない**（どちらも `source_settled`）ので、hosted の Router で追跡が働いた回数は分からない。数えられるのは、受け入れ用の起動のように stderr が読める起動だけ）。
 
+### 2c-2. Arc x402 ↔ Solana x402 の組（O-5・O-6。動的プロファイルだけ）— **G-2⁗ の配備では無効（`pairs` 両方 `false`。一覧は 18 本のまま）**
+
+D-17 の決定（owner、2026-10-09 JST）: Arc USDC ↔ Solana USDC は testnet では par、公開は動的プロファイル **`dyn-arc-to-sol`**（Arc USDC/x402 で払って Solana の x402 Provider の URL へ）と
+**`dyn-sol-to-arc`**（Solana USDC/x402 で払って Arc の x402 Provider の URL へ）だけ（要件 `multirail-outbound-requirements.md` §11、設計 `multirail-outbound-design.md` §13、タスク U10・UG-P）。
+新しいレール・鍵・env・能力・Provider は無い（受信は §2c の Arc／Solana の x402、送信は G-4′ の Arc／Solana の x402。予算の区分も既存のまま: O-5 は Arc 11,000 + Solana 10,000、O-6 はその逆）。
+
+**有効・無効は §2c と同じ定数の `pairs`**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION.pairs = { arcToSol, solToArc }`（方向別。内部 env `SUBETHA_RAILS_ACTIVATION` の token は `arc-to-sol`・`sol-to-arc`、
+受け入れ用の起動は `--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`）。組が `true` で必要なレールの方向（`arc.inbound ∧ solana.outbound`／`solana.inbound ∧ arc.outbound`）が無ければ、入口は固定文で止まる（黙って出さない、はしない）。
+組だけでは能力も鍵も変わらない（子プロセスの能力はレールの方向で決まる）。
+
+**gate**（各段 owner の確認）:
+
+1. **G-2⁗**: U10 を含むイメージを `pairs` 両方 `false` のまま `deploy/swap-image.sh` で入れ替える。確かめるのは「公開の一覧が route 10・プロファイル 18 のまま」、子の env の `SUBETHA_RAILS_ACTIVATION` が従来の 6 語、`subetha-egress check` 合格
+2. **G-3⁗**: 公開の Router を止め、受け入れ用の起動（`--rails` の 6 語）で `dyn-arc-to-sol`（上流 `provider-x402-sol.subethalabs.com`）・`dyn-sol-to-arc`（上流 `provider-x402-arc.subethalabs.com`）を各 1 件 `delivered`。
+   payer は使い捨て（Arc USDC `0xfCea…`、Solana USDC `HTaz…`。§2e と同じ）。証拠は AC-13／AC-14 と同じ（両レグの tx と確定、受取先・額、Provider の応答、client の結果、再読取）
+3. **G-4⁗**: `pairs` 両方 `true` の PR（同じ PR で `RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に。`pairs` を `false` にした固定の構成で 18 本を見る試験は残す）と入れ替え。
+   公開の一覧が route 10・プロファイル 20、各 1 回の quote、**hosted で各 1 件の実購入**（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20）を更新
+
+**rollback**: `pairs` を `false` に戻してイメージを作り直す（§2c と同じ）。
+
 ### 2d. Solana の MPP（Solana devnet USDC を **MPP** で受ける・払う）— **本番で両方向が有効（2026-10-08 15:42Z の G-4″ から。`b-3606fb6` で AC-18 を満たした。下の記録）**
 
 呼び出し側が **Solana devnet の USDC を MPP（`solana/charge`、pull）** で払って既存の Provider A（x402）・B（MPP）に届く**受信**と、Router が **Provider D**

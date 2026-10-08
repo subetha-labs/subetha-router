@@ -142,6 +142,23 @@ export interface RailsActivation {
    * x402 の `solana` とは独立に切り替える。同じ受取 owner・同じ送信鍵・同じ RPC・同じ Solana USDC の予算の区分を共有する。
    */
   readonly solanaMpp: RailActivation;
+  /**
+   * **組の切り替え**（送信の要件 §11・設計 §13、D-17 の決定 2026-10-09）: Arc x402 ↔ Solana x402 の動的プロファイル `dyn-arc-to-sol`・`dyn-sol-to-arc` を出すか。
+   * 無ければ両方 `false`。組だけでは何も動かない（能力・鍵・env はレールの方向で決まり、`railActive` も見ない）。組が `true` で必要なレールの方向が無ければ設定生成は固定文で止まる（FR-41）。
+   */
+  readonly pairs?: PairsActivation;
+}
+/** Arc x402 ↔ Solana x402 の組（方向別。内部 env の token は `arc-to-sol`・`sol-to-arc`）。 */
+export interface PairsActivation {
+  /** `dyn-arc-to-sol`: Arc USDC（x402）で払って Solana の x402 Provider へ。`arc.inbound ∧ solana.outbound` が要る。 */
+  readonly arcToSol: boolean;
+  /** `dyn-sol-to-arc`: Solana USDC（x402）で払って Arc の x402 Provider へ。`solana.inbound ∧ arc.outbound` が要る。 */
+  readonly solToArc: boolean;
+}
+export const PAIRS_NONE: PairsActivation = Object.freeze({ arcToSol: false, solToArc: false });
+/** `pairs` の既定（無ければ両方 `false`）。 */
+export function pairsOf(activation: RailsActivation): PairsActivation {
+  return activation.pairs ?? PAIRS_NONE;
 }
 /** 受取先（受信が有効なレールの分だけ要る）。Arc は証明専用の受取鍵の address、Solana は受取 owner の address。 */
 export interface RailReceivers {
@@ -179,6 +196,8 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   solana: Object.freeze({ inbound: true, outbound: true }),
   /** Solana の MPP: **2026-10-08 に両方 `true`**（G-4″。owner の決定「両方進めていただきたい」。G-3″ で受信 3 件・送信 3 件が delivered。`docs/DEPLOY.md` §2d）。戻すのはここ（イメージを作り直して入れ替える）。 */
   solanaMpp: Object.freeze({ inbound: true, outbound: true }),
+  /** Arc x402 ↔ Solana x402 の組: **G-2⁗ では両方 `false`**（一覧は 18 本のまま）。G-4⁗（owner の判断）で `true`。戻すのはここ。 */
+  pairs: Object.freeze({ arcToSol: false, solToArc: false }),
 });
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });
@@ -343,7 +362,14 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
   const arcOutbound = rails.activation.arc.outbound;
   const solOutbound = rails.activation.solana.outbound;
   const solMppOutbound = rails.activation.solanaMpp.outbound;
+  // Arc x402 ↔ Solana x402 の組（送信の要件 §11 FR-40・FR-41、設計 §13.2）: 組が true なのに必要なレールの方向が無ければ固定文で止まる（黙って出さない、はしない）。
+  const pairs = pairsOf(rails.activation);
+  if (pairs.arcToSol && (arcReceiver === undefined || !solOutbound)) throw new Error("pair arc-to-sol requires arc.inbound (its receiver) and solana.outbound");
+  if (pairs.solToArc && (solReceiver === undefined || !arcOutbound)) throw new Error("pair sol-to-arc requires solana.inbound (its receiver) and arc.outbound");
   const profiles: Record<string, unknown> = {
+    // O-5・O-6（D-17 の決定 2026-10-09。動的だけ。宛先は既存の toSol／toArc と同じ表の値、par 1:1、手数料は定額 1,000）。
+    ...(pairs.arcToSol ? { "dyn-arc-to-sol": toSol("dyn-arc-to-sol", "x402", INBOUND_ARC, arcReceiver) } : {}),
+    ...(pairs.solToArc ? { "dyn-sol-to-arc": toArc("dyn-sol-to-arc", "x402", INBOUND_SOL, solReceiver) } : {}),
     // Solana の MPP 受信から（設計 §6.3）: Base x402 は常に、Tempo MPP は `MPP_OUTBOUND_PROFILE_ENABLED`、Arc・Solana の x402 はそのレールの送信が有効なとき。
     ...(solMppReceiver === undefined
       ? {}
