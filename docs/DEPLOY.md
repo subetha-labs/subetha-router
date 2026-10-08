@@ -254,6 +254,12 @@ G-1′ の手順: (1) `npm run wallet:new:solana` で鍵を作り、ホストの
 V-8b（実 facilitator の probe。資金が動く）は owner の承認で **公開の Router の外**で行い、G-3′ は公開の Router を止めて受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out`）で O-4 静的・O-3 動的・O-4 動的を各 1 件（`docs/multirail-outbound-tasks.md` UG-S）。
 `RAILS_ACTIVATION` は **`solana.outbound: false` のまま**（G-4′ で `true` にする。`arc` は UG-A で承認された状態のまま）。
 
+**G-1′ の記録（2026-10-08。両レール）**: owner が Arc・Solana の Provider（Cloudflare Workers、`providers/x402-workers/`。`docs/provider-x402-workers.md` §10）を配備した。
+`UPSTREAM_ARC = https://provider-x402-arc.subethalabs.com/v1/eth/snapshot`、`UPSTREAM_SOL = https://provider-x402-sol.subethalabs.com/v1/eth/snapshot`（この PR の commit で固定）。
+ホストの env に置く受取先: `SUBETHA_ARC_PROVIDER_PAYTO=0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1`、`SUBETHA_SOLANA_PROVIDER_PAYTO=4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc`（Solana の受取 ATA
+`HnuscuMcYCh8urbQ83vYNd3vTH4VKMdBLCW52tt6J63E` は owner が作成済み。Router は `solana-out` の起動時にこの ATA を確かめる）。**まだ owner の作業として残るもの**: Arc 送信鍵（`SUBETHA_OUTBOUND_X402_KEY` の address）への Arc testnet USDC、
+Solana 送信鍵（`wallet:new:solana` → `SUBETHA_OUTBOUND_SOLANA_KEY`）とその ATA・devnet USDC。送信の有効化（`outbound`）は両レールとも `false` のままなので、この commit の配備（G-2′）で公開の経路は変わらない。
+
 **実施の記録（G-4、2026-10-07 11:03Z。owner の決定「進めて良いです」）**: PR #68（`ce7de77`）で `RAILS_ACTIVATION = { arc: true, solana: true }`。
 イメージ `b-ce7de77` は手元で作った（§6。製品のファイルは PR の最初の試験済みの commit から変えていないことを `git diff` で確かめ、読み込み済みのイメージに tag を付け直した）。
 入れ替えは `deploy/swap-image.sh`（Codex のレビュー 7 回: #1 は有効化の変更に APPROVE WITH CHANGES、#2〜#6 は script の失敗時の扱いに REJECT、#7 で APPROVE WITH CHANGES を反映。
