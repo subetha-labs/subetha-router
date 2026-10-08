@@ -1231,6 +1231,14 @@ describe("消費済み署名の集合と source_settled の追記の失敗（M2�
     const quote = await quoteOk(core);
     expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
     expect([...views[0]!]).toEqual(["src-tx-1"]);
+    // 読取専用の facade: cast しても add/delete/clear は無い（journal の行無しに replay の防御を変えられない）。中身は生きている。
+    const asSet = views[0] as unknown as { add?: unknown; delete?: unknown; clear?: unknown };
+    expect(asSet.add).toBeUndefined();
+    expect(asSet.delete).toBeUndefined();
+    expect(asSet.clear).toBeUndefined();
+    expect(Object.isFrozen(views[0])).toBe(true);
+    expect(views[0]!.has("src-tx-1")).toBe(true);
+    expect(views[0]!.size).toBe(1);
     const s = await staticQuote(core, "s1");
     expect((await core.purchase(staticPurchaseArgs(s, "s1"))).status).toBe("delivered");
     expect([...views[0]!]).toEqual(["src-tx-1"]);

@@ -70,7 +70,8 @@ describe("startup: 静的 route の destination の検査は RPC に出る前", 
     const routerAta = await ataOf(ROUTER);
     for (const scheme of ["exact", "solana/charge"]) {
       const rpc = fakeRpc((method, params) => (method === "getAccountInfo" && (params as string[])[0] === providerAta ? ataReply(PROVIDER) : null));
-      const operators = new Set<string>([ROUTER, "not-a-key"]);
+      const OTHER_OPERATOR = "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBd".replace(/d$/, "c"); // 別の運用者（受取 owner の形の公開鍵）
+      const operators = new Set<string>([ROUTER, "not-a-key", OTHER_OPERATOR]);
       const c = common(rpc.transport, { r: { payTo: PROVIDER, asset: MINT, scheme } }, scheme, operators);
       expect(() => c.ready()).toThrow(/startup\(\) has not completed/);
       await expect(c.balanceOf("r", MINT)).rejects.toThrow(/startup\(\) has not completed/);
@@ -78,6 +79,10 @@ describe("startup: 静的 route の destination の検査は RPC に出る前", 
       expect(c.ready()).toBe(routerAta);
       expect(c.staticAtaOf("r")).toBe(providerAta);
       expect(operators.has(routerAta)).toBe(true);
+      // 集合にある別の運用者の公開鍵の ATA も足される（§2.3 (c)）。導けない文字列はそのまま。
+      expect(operators.has(await ataOf(OTHER_OPERATOR))).toBe(true);
+      expect(operators.has("not-a-key")).toBe(true);
+      expect(operators.size).toBe(5);
       expect(rpc.calls.map((call) => call.method)).toEqual(["getAccountInfo"]);
     }
   });
@@ -94,7 +99,12 @@ describe("balanceOf と blockhashOf", () => {
     expect(await c.balanceOf("r", MINT)).toBe(123456n);
     expect(rpc.calls.at(-1)).toEqual({ method: "getTokenAccountBalance", params: [routerAta, { commitment: "confirmed" }] });
     await expect(c.balanceOf("r", "So11111111111111111111111111111111111111112")).rejects.toThrow(/different asset/);
+    // 桁数の上限は無い（括り出す前と同じ）: 31 桁も通る。
+    balance = { context: { slot: 1 }, value: { amount: "1" + "0".repeat(30) } };
+    expect(await c.balanceOf("r", MINT)).toBe(10n ** 30n);
     balance = { context: { slot: 1 }, value: { amount: 5 } };
+    await expect(c.balanceOf("r", MINT)).rejects.toThrow(/did not return a token balance/);
+    balance = { context: { slot: 1 }, value: { amount: "01" } };
     await expect(c.balanceOf("r", MINT)).rejects.toThrow(/did not return a token balance/);
   });
 

@@ -10,7 +10,8 @@ import type { GuardedTransport } from "../../net/guarded-fetch.js";
 import { assertAtaAccount, svmFetchJson } from "../inbound/x402-svm-startup.js";
 import { isSvmPublicKey } from "./x402-svm.js";
 
-const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
+/** base units の 10 進文字列（括り出す前の `x402-svm.ts` と同じ: 桁数の上限は設けない）。 */
+const AMOUNT_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
