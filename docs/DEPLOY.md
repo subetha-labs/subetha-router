@@ -337,7 +337,7 @@ D-17 の決定（owner、2026-10-09 JST）: Arc USDC ↔ Solana USDC は testnet
 1. **G-2⁗**: U10 を含むイメージを `pairs` 両方 `false` のまま `deploy/swap-image.sh` で入れ替える。確かめるのは「公開の一覧が route 10・プロファイル 18 のまま」、子の env の `SUBETHA_RAILS_ACTIVATION` が従来の 6 語、`subetha-egress check` 合格
 2. **G-3⁗**: 公開の Router を止め、受け入れ用の起動（`--rails` の 6 語）で `dyn-arc-to-sol`（上流 `provider-x402-sol.subethalabs.com`）・`dyn-sol-to-arc`（上流 `provider-x402-arc.subethalabs.com`）を各 1 件 `delivered`。
    payer は使い捨て（Arc USDC `0xfCea…`、Solana USDC `HTaz…`。§2e と同じ）。証拠は AC-13／AC-14 と同じ（両レグの tx と確定、受取先・額、Provider の応答、client の結果、再読取）
-3. **G-4⁗**: `pairs` 両方 `true` の PR（同じ PR で `RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に。`pairs` を `false` にした固定の構成で 18 本を見る試験は残す）と入れ替え。
+3. **G-4⁗**: `pairs` 両方 `true` の PR（同じ PR で `RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に: `tests/unit/remote-mcp-config.test.ts` の定数の形の 2 か所と公開の一覧の 18 本、`tests/unit/rails-entry.test.ts` の定数の形・6 語・組の試験の「pairs 無しの計画 = 18 本」の対照、`tests/wire/rails-process-entry.test.ts` のソースを固定する正規表現の `false` の 2 か所。`pairs` を `false` にした固定の構成で 18 本を見る試験は残す）と入れ替え。
    公開の一覧が route 10・プロファイル 20、各 1 回の quote、**hosted で各 1 件の実購入**（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20）を更新
 
 **rollback**: `pairs` を `false` に戻してイメージを作り直す（§2c と同じ）。
