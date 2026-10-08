@@ -291,7 +291,13 @@ export function checkDynamicX402Offer(
   const extra = raw["extra"];
   if (!isRecord(extra)) return "extra";
   for (const key of Object.keys(extra)) {
-    // `assetTransferMethod`・`paymentFlow`・`feePayer` などは、SDK が支払いの仕方そのものを変える欄。
+    // `assetTransferMethod` は SDK が支払いの仕方そのものを変える欄。許すのは **`"eip3009"` だけ**（Circle の facilitator が Arc の
+    // 受取側に要求する値で、SDK の client の既定の経路。組み直しの署名器は domain・宛先・額・型を自分で固定するので署名の内容は変わらない。
+    // `docs/provider-x402-workers.md` §3.5、V-6）。`permit2` など他の値、`paymentFlow`・`feePayer` などの他の鍵は候補外。
+    if (key === "assetTransferMethod") {
+      if (extra[key] !== "eip3009") return "extra";
+      continue;
+    }
     if (!EXTRA_KEYS.has(key)) return "extra";
   }
   const tokenDomain = destination.tokenDomain;
