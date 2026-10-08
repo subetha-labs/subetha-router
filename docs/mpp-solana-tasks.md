@@ -90,7 +90,7 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 
 - **範囲**: `RailsActivation.solanaMpp`・token `solana-mpp-in`／`solana-mpp-out`・`railActive`、`solanaMppReceiverOf`、route 4 本・プロファイル 8 本・区分・`x402.upstreams`、env の条件（秘密・受取 owner・鍵・RPC・`SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`）、`UPSTREAM_SOL_MPP`（空）、`classifyOffer` の `mpp-svm`、`tools/svm-mpp-payer.ts`、`sign-run.ts` の stderr、`wallet-new-solana.ts` の案内、`docs/DEPLOY.md` §2d、CLAUDE.md（表・MPP Solana の節・「送信済み」の置き換え）、README
 - **成果物**: 上の変更、`tests/unit/remote-mcp-config.test.ts`・`rails-entry.test.ts`（有効化の組み合わせの表）、`tests/wire/rails-process-entry.test.ts`（token・env・静的 route の起動時の検査）、`tests/wire/mpp-solana-cli.test.ts`（道具 → Router の受信 → `settled`。RPC は `getLatestBlockhash` 1 回・`sendTransaction` 0 回、拒否の各行、鍵を出さない）
-- **完了条件（unit・wire。Linux）**: 上記。`RAILS_ACTIVATION.solanaMpp` は両方 `false`。有効化の各組で出る route／プロファイルと子の env が表どおり（`solana.outbound` も `solanaMpp.outbound` も無効なら鍵を渡さない、片方だけなら渡す）。受取 owner があるだけで x402 の route が出ない
+- **完了条件（unit・wire。Linux）**: 上記。**最後の横断確認**（§3 の M6 の 3 行）: 設計 §8.2 の表の全行が存在して Linux で緑、§8.3 の gate 以外の条件（既存 suite・変異の表・SR-M の 2 回のレビューの記録）、SR-M1 の全体（両 adapter と道具の RPC の method・回数・transport・64 KiB・10 秒・`maxRetries: 0`）。`RAILS_ACTIVATION.solanaMpp` は両方 `false`。有効化の各組で出る route／プロファイルと子の env が表どおり（`solana.outbound` も `solanaMpp.outbound` も無効なら鍵を渡さない、片方だけなら渡す）。受取 owner があるだけで x402 の route が出ない
 - **sabotage**: `sendTransaction` を道具に足す → 回数の試験が落ちる／`solanaMppReceiverOf` を `receiverOf` に戻す → x402 の route が出て試験が落ちる／鍵の転送の条件を `solana.outbound` だけに → 試験が落ちる
 
 ### MG — gate（要件 §8、AC-17・AC-18。owner の作業と並行）
@@ -114,13 +114,13 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 | 設計 §4.2、FR-50、SR-M4 | M4-a | M4-b |
 | 設計 §4.3〜§4.6、FR-51〜FR-54、SR-M3、D-19・D-23・D-24・D-30 | M4-b | M5 |
 | 設計 §2.2 の両方向の整合・§8.2 の integration と中断、FR-39・FR-43、AC-20 | M5 | M3-b・M4-b（各方向） |
-| 設計 §8.2 の表の unit／wire／process の各行（ファイルを作るタスクが主担当: `mpp-solana-check` = M3-a、`mpp-solana-challenge-check` = M4-a、`svm-outbound-message` の追加 = M2、`dynamic-fee-exception` = M1、`remote-mcp-config`／`rails-entry`／`rails-process-entry`／`mpp-solana-cli` = M6、`mpp-solana-inbound` = M3-b、`mpp-solana-outbound` = M4-b、`multirail-integration`／`crash-recovery` = M5） | 各行のタスク | M5（表の全行が存在し Linux で緑） |
-| 設計 §8.3 の gate 以外の完了条件（既存 suite が緑、Linux、変異の表、SR-M の 2 回のレビュー） | M5（全体の確認） | 各タスク（自分の PR） |
+| 設計 §8.2 の表の unit／wire／process の各行（ファイルを作るタスクが主担当: `mpp-solana-check` = M3-a、`mpp-solana-challenge-check` = M4-a、`svm-outbound-message` の追加 = M2、`dynamic-fee-exception` = M1、`remote-mcp-config`／`rails-entry`／`rails-process-entry`／`mpp-solana-cli` = M6、`mpp-solana-inbound` = M3-b、`mpp-solana-outbound` = M4-b、`multirail-integration`／`crash-recovery` = M5） | 各行のタスク | M6（最後の実装タスクとして、表の全行が存在し Linux で緑であることを横断で確かめる） |
+| 設計 §8.3 の gate 以外の完了条件（既存 suite が緑、Linux、変異の表、SR-M の 2 回のレビュー） | M6（最後の横断確認。SR-M の 2 回目の置き場は AC-21 のとおり M5 の PR） | 各タスク（自分の PR） |
 | 設計 §6・§7・§6.4、FR-40・FR-42・FR-49・FR-55・FR-56、D-27・D-29、AC-19 | M6 | MG（公開の確認） |
 | 設計 §8.1 の RPC・client の fixture、§9（依存）、SR-M6、D-25（U-10 の判定） | M3-a | — |
 | 設計 §8.1 の Provider D の fixture | M4-b | — |
 | 設計 §8.3 の記録、要件 §8、AC-17・AC-18、D-26、U-13 | MG | — |
-| SR-M1（RPC の上限の全体: 受信・送信の method と回数、追跡の 30 秒／15 回、道具の 1 method、**共通の transport（guarded・loopback 拒否）・応答 64 KiB・期限 10 秒・`maxRetries: 0`**） | M5（統合で両 adapter と道具の呼び出しを数え、transport と上限を確かめる） | M3-b（受信）、M4-b（送信）、M6（道具）、M2（helper の `maxPolls`） |
+| SR-M1（RPC の上限の全体: 受信・送信の method と回数、追跡の 30 秒／15 回、道具の 1 method、**共通の transport（guarded・loopback 拒否）・応答 64 KiB・期限 10 秒・`maxRetries: 0`**） | M6（最後の横断確認: 両 adapter と道具の呼び出しを数え、transport と上限を確かめる。道具の変更は M6 自身） | M3-b（受信）、M4-b（送信）、M5（統合の回数）、M2（helper の `maxPolls`） |
 | SR-M2（送信の予約・受信の消費済み集合の永続化） | M2 | M3-b（settle の unit）、M5（再起動） |
 | SR-M5（固定の失敗の文） | M6（起動の文） | M3-b・M4-b（adapter の理由の列挙） |
 | AC-15（受信の fixture の試験） | M3-b | M5（行列） |
@@ -133,6 +133,7 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `e87b9ce`） | **REJECT**（8 項目: §3 の主担当の一意性、M4-a の依存、fixture の準備の完了条件、FR-53／FR-54／中断の期待値、sabotage の観測点、G-3″ の資金と接続は両レグ、再配備の規則、§0 の変更の一覧）。第 2 版で反映 |
 | 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `ebe7c54`） | **REJECT**（残り 5: §3 の §3.1・§4.1・§8.2・§8.3 と SR-M1 の単一の主担当、§1 の並行の文、M5 の停止点ごとの回数・再提示・署名後の衝突、bind の sabotage の観測点、§0 の資金の文）。第 3 版で反映 |
+| 2r | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `011d45e`） | **APPROVE WITH CHANGES**（1 点: 横断の確認と SR-M1 の主担当は M5 ではなく最後の M6 に。反映済み）。他の 4 点は解消 |
 
 ## 5. 本書で決めていないこと
 
