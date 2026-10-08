@@ -6,14 +6,21 @@
  */
 import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
 import { capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import { stableJson } from "../../src/core/intent.js";
 import { createRouterCore, type QuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
+import * as storeModule from "../../src/core/store.js";
 import { capCoversFee } from "../../src/core/store.js";
+
+/** purchase 時の `capCoversFee` の呼び出しを観測する（Solana 宛の MPP の例外が検査を飛ばしていないこと。SR-3 SVM レビュー #1）。素通しの wrapper。 */
+vi.mock("../../src/core/store.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/store.js")>();
+  return { ...original, capCoversFee: vi.fn(original.capCoversFee) };
+});
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
 
@@ -1135,8 +1142,12 @@ describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-sol
     const core = await boot(solConfig());
     const quote = (await quoteSol(core)) as OkQuote;
     outbound.estimateBound = undefined; // 見積りが呼ばれれば fee_estimate_unavailable で止まる
+    const capChecks = vi.mocked(storeModule.capCoversFee);
+    capChecks.mockClear();
     expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
     expect(outbound.estimateCalls).toBe(0);
+    // purchase 時の capCoversFee は残っている（Solana 宛でも飛ばさない）: 設定の宛先（network・asset、feeAsset 無し）で 1 回。
+    expect(capChecks.mock.calls.some(([, bound]) => bound.destination?.network === SOL && bound.destination?.asset === SOL_USDC && bound.destination?.feeAsset === undefined)).toBe(true);
     expect(inbound.verifyCalls).toBe(1);
     expect(outbound.paidFor[0]).not.toHaveProperty("maxFee");
     const created = (await journalLines())[0]!.patch["dynamic"] as { pricing: Record<string, unknown>; reservation: { legs: unknown[] } };
@@ -1162,11 +1173,22 @@ describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-sol
     opened.length = 0;
     const { writeFile } = await import("node:fs/promises");
     const row = JSON.parse(lines[0]!) as { patch: { dynamic: { pricing: Record<string, unknown> } } };
-    row.patch.dynamic.pricing["maxFee"] = "1";
-    row.patch.dynamic.pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 };
-    await writeFile(journalPath, `${JSON.stringify(row)}\n${lines.slice(1).join("\n")}\n`);
-    core = await boot(solConfig());
-    expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
-    expect(core.offerFor(bought.quoteId, "alice", undefined, bought.ownerKey)).toBeUndefined();
+    // 形の悪い cap（片方だけ・形違い）も、正規化で落ちる前の生の欄で見るので不可。
+    const variants: Array<(pricing: Record<string, unknown>) => void> = [
+      (pricing) => { pricing["maxFee"] = "1"; pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 }; },
+      (pricing) => { pricing["maxFee"] = "1"; },
+      (pricing) => { pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 }; },
+      (pricing) => { pricing["maxFee"] = "1e3"; pricing["estimate"] = { gas: "1" }; },
+    ];
+    for (const variant of variants) {
+      const tampered = structuredClone(row);
+      variant(tampered.patch.dynamic.pricing);
+      await writeFile(journalPath, `${JSON.stringify(tampered)}\n${lines.slice(1).join("\n")}\n`);
+      core = await boot(solConfig());
+      expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
+      expect(core.offerFor(bought.quoteId, "alice", undefined, bought.ownerKey)).toBeUndefined();
+      await core.close();
+      opened.length = 0;
+    }
   });
 });

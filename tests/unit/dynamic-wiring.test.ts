@@ -112,7 +112,7 @@ function envFor(options: { dynamic?: boolean; enabled?: boolean; mode?: "real" |
           }),
     },
     ...(options.mode === "synthetic"
-      ? { synthetic: { facilitatorUrl: "http://127.0.0.1:1", upstreams: { "r-mpp": "http://127.0.0.1:1/x" } } }
+      ? { synthetic: { facilitatorUrl: "http://127.0.0.1:1", upstreams: { "r-mpp": "http://127.0.0.1:1/x", ...(options.solanaMpp === "inbound-route" ? { "r-solmpp": "http://127.0.0.1:1/x" } : options.solanaMpp === "outbound-route" ? { "r-to-solmpp": "http://127.0.0.1:1/x" } : {}) } } }
       : { x402: { upstreams: { "r-mpp": UPSTREAM_A, ...(options.solanaMpp === "inbound-route" ? { "r-solmpp": UPSTREAM_A } : options.solanaMpp === "outbound-route" ? { "r-to-solmpp": UPSTREAM_A } : {}) } } }),
   };
   const file = path.join(dir, "router.config.json");
@@ -412,6 +412,10 @@ describe("Solana の MPP はまだ配線しない（M1 の guard）", () => {
   });
   test("送信（rail mpp ∧ solana:）の静的 route があれば起動しない。どの guard も adapter を作る前に効く（fixture の署名器の loopback の検査より先）", () => {
     expect(() => compose(envFor({ solanaMpp: "outbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+  });
+  test("合成レール（synthetic）でも同じ guard が先に効く（合成の adapter を作らない）", () => {
+    expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "outbound-route" }), {})).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+    expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "inbound-route" }), {})).toThrow(/routes\.r-solmpp: the Solana MPP inbound adapter is not wired yet/);
   });
   test("受信（sourceRail mpp ∧ solana:）の静的 route があれば起動しない", () => {
     expect(() => compose(envFor({ solanaMpp: "inbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-solmpp: the Solana MPP inbound adapter is not wired yet/);

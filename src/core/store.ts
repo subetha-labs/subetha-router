@@ -165,7 +165,15 @@ export function dynamicFieldsOf(
       upstreamOfferAmount: String(selected["amount"]),
       requireReservation: options.requireReservation === true,
     };
-    if (!capCoversFee(dynamic, bound)) {
+    /**
+     * Solana 宛の MPP の記録は cap を**名乗ってもいけない**（`docs/mpp-solana-design.md` §1.4 (c)）。`capFieldsOf` は形の悪い cap を落として `dynamic.pricing`
+     * を組むので、`capCoversFee` には「無い」と見える。正規化の前の**生の欄の有無**で見る（片方だけ・形違いも不可。SR-3 SVM レビュー #1 の指摘）。
+     */
+    const copiedDestination = isPlainRecord(profile["destination"]) ? profile["destination"] : undefined;
+    const copiedNetwork = copiedDestination?.["network"];
+    const rawClaimsCap = Object.hasOwn(pricing, "maxFee") || Object.hasOwn(pricing, "estimate");
+    const svmWithCap = typeof copiedNetwork === "string" && networkFamilyOf(copiedNetwork) === "svm" && rawClaimsCap;
+    if (svmWithCap || !capCoversFee(dynamic, bound)) {
       return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic, dynamicCapInvalid: true };
     }
   }

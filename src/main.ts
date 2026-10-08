@@ -393,6 +393,26 @@ export function composeRails(
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
 ): { inbound: InboundRail; outbound: OutboundRail; balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>; dynamic?: DynamicWiring; startup?: () => Promise<void> } {
+  /**
+   * Solana の MPP（`docs/mpp-solana-design.md` §3・§4）はタスク M3-b（受信）・M4-b（送信）で配線する。それまでは設定に現れた時点で、
+   * **adapter を 1 つも作る前に**（合成レールの分岐よりも前に）起動を止める（Tempo の adapter に落とさない。fail closed）。表（`KNOWN_NETWORKS`）はもう許しているので、ここが唯一の門。
+   */
+  for (const route of Object.values(config.router.routes)) {
+    if (route.sourceRail === "mpp" && networkFamilyOf(route.source.network) === "svm") {
+      throw new ConfigError(`routes.${route.routeId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
+    }
+    if ((route.rail ?? "x402") === "mpp" && networkFamilyOf(route.destination.network) === "svm") {
+      throw new ConfigError(`routes.${route.routeId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
+    }
+  }
+  for (const profile of Object.values(config.router.dynamic?.profiles ?? {})) {
+    if (profile.sourceRail === "mpp" && networkFamilyOf(profile.source.network) === "svm") {
+      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
+    }
+    if (profile.rail === "mpp" && networkFamilyOf(profile.destination.network) === "svm") {
+      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
+    }
+  }
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
@@ -420,26 +440,6 @@ export function composeRails(
    */
   const dynamicConfig = config.router.dynamic;
   const profiles = dynamicConfig?.profiles ?? {};
-  /**
-   * Solana の MPP（`docs/mpp-solana-design.md` §3・§4）はタスク M3-b（受信）・M4-b（送信）で配線する。それまでは設定に現れた時点で、
-   * **adapter を 1 つも作る前に**起動を止める（Tempo の adapter に落とさない。fail closed）。表（`KNOWN_NETWORKS`）はもう許しているので、ここが唯一の門。
-   */
-  for (const route of Object.values(config.router.routes)) {
-    if (route.sourceRail === "mpp" && networkFamilyOf(route.source.network) === "svm") {
-      throw new ConfigError(`routes.${route.routeId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
-    }
-    if ((route.rail ?? "x402") === "mpp" && networkFamilyOf(route.destination.network) === "svm") {
-      throw new ConfigError(`routes.${route.routeId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
-    }
-  }
-  for (const profile of Object.values(profiles)) {
-    if (profile.sourceRail === "mpp" && networkFamilyOf(profile.source.network) === "svm") {
-      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP inbound adapter is not wired yet (docs/mpp-solana-design.md §3)`);
-    }
-    if (profile.rail === "mpp" && networkFamilyOf(profile.destination.network) === "svm") {
-      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
-    }
-  }
   const gate = dynamicConfig === undefined ? undefined : new DynamicGate({ limits: dynamicConfig.limits });
   const dynamicTransport = ((): GuardedTransport | undefined => {
     if (dynamicConfig === undefined || gate === undefined) return undefined;
