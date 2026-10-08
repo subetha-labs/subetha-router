@@ -20,7 +20,7 @@ Each phase: minimal artifact, independent review, parent readback. No repeated w
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.
 **The Router never holds your key**, so the signature is produced here.
 
-The Router exposes **six routes** (the two outbound ones only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
+The Router exposes **ten routes** (each rail only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
 
 | routeId | you pay with | reaches |
 |---|---|---|
@@ -35,8 +35,8 @@ The Router exposes **six routes** (the two outbound ones only while the operator
 | `md-solmpp-eth-snapshot` | **Base Sepolia USDC** (x402) | a provider that only accepts **Solana devnet USDC over MPP** |
 | `md-solmpp-eth-snapshot-mpp` | **Tempo pathUSD** (MPP) | a provider that only accepts **Solana devnet USDC over MPP** |
 
-The four `solmpp` routes exist in the code (2026-10-08) but are **switched off on the hosted Router** until the operator turns them on;
-see "MPP on Solana" below. **If they are missing from `subetha_router_list_routes`, they do not exist for you.**
+The four `solmpp` routes are **on the hosted Router since 2026-10-08** (G-4″); see "MPP on Solana" below. The operator can switch them
+off again with one constant: **if they are missing from `subetha_router_list_routes`, they do not exist for you.**
 
 Outbound rails to providers that accept only **Arc** or **Solana** are switched on by the operator's constant (G-4′, 2026-10-08; the hosted Router carries it from the image swap recorded in
 `docs/DEPLOY.md` §2c) (`md-arc-eth-snapshot`: pay **Base Sepolia USDC**, reaches an Arc provider; `md-sol-eth-snapshot-mpp`: pay **Tempo pathUSD** over MPP, reaches a Solana provider;
@@ -50,8 +50,9 @@ Steps:
 2. Call `subetha_router_quote`. **Use a fresh `requestId` for each purchase**
    (e.g. purpose + timestamp). **Within one purchase, use the same value for quote and purchase**
 3. **Ask the human to approve.** Show the returned `subject`: amount, `decimals`,
-   recipient, deadline. **If paying over MPP, also say that running the next step sends
-   the funds immediately and cannot be undone** (see below)
+   recipient, deadline. **If paying over MPP on Tempo, also say that running the next step sends
+   the funds immediately and cannot be undone.** If paying over MPP on Solana, say that the next step
+   only signs and that the Router broadcasts at purchase, where the funds move (see below)
 4. Once approved, pass the `quote` field through unchanged:
 
    ```sh
@@ -116,7 +117,7 @@ again with one constant: **if they are missing from `subetha_router_list_routes`
 - A Solana key: `npm run wallet:new:solana`. `npm run wallet:balance` shows Base Sepolia USDC only (not Arc USDC, not devnet USDC).
 - The MPP disclosure above is unchanged: only MPP moves funds at `sign`.
 
-### MPP on Solana (in the code since 2026-10-08, switched off on the hosted Router)
+### MPP on Solana (on the hosted Router since 2026-10-08)
 
 The Router can also take **Solana devnet USDC over MPP** (`solana/charge`, routes `md-x402-eth-snapshot-solmpp` /
 `md-mpp-eth-snapshot-solmpp`, profiles `dyn-solmpp-to-*`) and pay a provider that accepts only that
