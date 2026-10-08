@@ -11,7 +11,9 @@ import { address, getAddressDecoder, getBase58Decoder, getBase58Encoder } from "
 import { ed25519 } from "@noble/curves/ed25519";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 
-import { checkMppSolanaChallenge, createMppSolanaOutbound, mppSolanaViewOf, type MppSolanaOutbound } from "../../src/adapters/outbound/mpp-solana.js";
+import { Challenge } from "mppx";
+
+import { checkMppSolanaChallenge, checkMppSolanaChallengeAtas, createMppSolanaOutbound, mppSolanaViewOf, type MppSolanaOutbound } from "../../src/adapters/outbound/mpp-solana.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer, MessageReservation, PayRequest } from "../../src/ports/outbound.js";
 import { configOf, seedFromKey } from "../../providers/mpp-solana-workers/src/config.js";
@@ -251,6 +253,30 @@ describe("Provider D: 402（§2.1）と Router の候補の検査", () => {
     expect(await h.rail.readChallenge(ROUTE)).toEqual([]);
   });
 
+  test("候補の除外（設計 §4.2 の 5・6。Router の純粋な検査を実物の 402 に掛ける）: 受取先が運用者／Router の ATA、fee payer が運用者／Router の鍵／受取先／宛先 ATA → 候補外。そのままなら候補", async () => {
+    const h = await harness();
+    const got = await direct(h, "/v1/eth/snapshot");
+    const challenge = Challenge.deserialize(got.headers.get("www-authenticate")!);
+    const view = mppSolanaViewOf(challenge);
+    expect(view).toBeDefined();
+    const routerAta = await ataOf(h.router);
+    const policy = { routerAddress: h.router, routerAta, mint: MINT, decimals: 6, tokenProgram: TOKEN_PROGRAM, network: SOL };
+    const scope = `GET ${UPSTREAM}`;
+    const feePayer = h.runtime.paykit.feePayer;
+    expect(checkMppSolanaChallenge(view!, scope, policy, h.operators, Date.now())).toBeUndefined();
+    expect(checkMppSolanaChallenge(view!, scope, policy, new Set([...h.operators, h.recipient]), Date.now())).toBe("pay_to");
+    expect(checkMppSolanaChallenge(view!, scope, { ...policy, routerAta: h.recipient }, h.operators, Date.now())).toBe("pay_to");
+    expect(checkMppSolanaChallenge(view!, scope, policy, new Set([...h.operators, feePayer]), Date.now())).toBe("fee_payer");
+    expect(checkMppSolanaChallenge(view!, scope, { ...policy, routerAddress: feePayer }, h.operators, Date.now())).toBe("fee_payer");
+    const details = view!.request["methodDetails"] as Record<string, unknown>;
+    const asRecipient = { ...view!, request: { ...view!.request, methodDetails: { ...details, feePayerKey: h.recipient } } };
+    expect(checkMppSolanaChallenge(asRecipient, scope, policy, h.operators, Date.now())).toBe("fee_payer");
+    expect(checkMppSolanaChallengeAtas(view!, { routerAta }, h.recipientAta)).toBeUndefined();
+    expect(checkMppSolanaChallengeAtas(view!, { routerAta: h.recipientAta }, h.recipientAta)).toBe("pay_to");
+    const asDestinationAta = { ...view!, request: { ...view!.request, methodDetails: { ...details, feePayerKey: h.recipientAta } } };
+    expect(checkMppSolanaChallengeAtas(asDestinationAta, { routerAta }, h.recipientAta)).toBe("fee_payer");
+  });
+
   test("404: 別のパス・クエリつき・POST・HEAD（固定文。pay-kit もデータ源も呼ばない）", async () => {
     const h = await harness();
     for (const [path, method] of [["/v1/eth/other", "GET"], ["/v1/eth/snapshot?x=1", "GET"], ["/v1/eth/snapshot", "POST"], ["/", "GET"]] as const) {
@@ -367,6 +393,23 @@ describe("Provider D: 支払いつきの経路（§2.2）", () => {
     expect(fourOTwo.headers.get("www-authenticate")).toBe("Payment y");
     expect(fourOTwo.headers.get("content-length")).toBe("2");
     expect(h.data.calls).toBe(4);
+  });
+
+  test("同じ秘密で受取 owner だけが違う Provider に出した credential は 402（pay-kit の受取先の検証）: 本文は出ない、領収は無い、chain の取引は増えない", async () => {
+    const h = await harness();
+    const offers = await h.rail.readChallenge(ROUTE);
+    expect((await h.rail.pay(requestOf(h, offers[0]!))).outcome).toBe("paid");
+    const credential = h.seen.authorizations[0]!;
+    const other = await runtimeOf({ ...h.env, PAY_TO: newSeed().publicKey });
+    const seenOther: Seen = { paths: [], authorizations: [], statuses: [], contentLengthMismatches: [] };
+    const providerOther = await serveProvider(other, seenOther);
+    closers.push(providerOther.close);
+    const chainBefore = Object.keys(h.rpc.state.transactions).length;
+    const got = await direct({ ...h, provider: providerOther }, "/v1/eth/snapshot", { headers: { authorization: credential } });
+    expect(got.status).toBe(402);
+    expect(got.text).toBe("{}");
+    expect(got.headers.get("payment-receipt")).toBeNull();
+    expect(Object.keys(h.rpc.state.transactions).length).toBe(chainBefore);
   });
 
   test("別の Provider（別の秘密・別の受取 owner）向けの credential は 402（pay-kit の HMAC の検証）、送出 0", async () => {

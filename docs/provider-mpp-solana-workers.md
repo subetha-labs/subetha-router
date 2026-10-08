@@ -159,6 +159,8 @@ pay-kit の RPC は素の `fetch`（redirect は既定、上限なし、1 回の
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（P1 2 点: isolate ごとの replay store では同時の replay で本文が 2 回出得る（限界として明示するか共有 store）、`Authorization` の判定が pay-kit の大文字小文字を区別しない判定と違い未払いの枝で settle し得る。P2: `expiresIn` の既定は 120、`simulateTransaction` は呼ばれる、RPC の不達は 402、AC-PD2 の強化（cold start・同時・送出後の切断・45 秒超の RPC）、領収をそのまま、`no-store`・`content-length`、鍵の file はリポジトリの外・upload の成功の後に資金、mppx の log の伏せ字）。第 2 版で反映 |
 | 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **APPROVE WITH CHANGES**（P1 2 点は解消。残り P2 1 点: §1 の `expiresIn` の既定の記述の矛盾 → 120 に訂正、反映済み）。replay の受け入れは owner の決定（§6 の 6）、手元の spike は AC-PD2 の代わりにならない |
+| I-1 | 2026-10-08 | `gpt-6-astra`（read-only。実装 `940564e`） | **REJECT**（P1 3 点: 受取 owner の seed の file の検査が字面だけで symlink を見抜けない、AC-PD2 が Miniflare の `cf.json` の取得と継いだ env で外に出得る、workerd での確定待ち 30 秒と RPC が 45 秒超黙る行が無い。P2: 未払いの枝の `Authorization` 除去を handler 越しに観測する、harness が `content-length` を付け直して欠けを隠す、別の mint／受取先・本文の上限・例外の正規化・候補の除外の行、seed の消去を finally に、`--dry-run` と `secret put` の下書きの文書）。`b024da8` で反映 |
+| I-1r | 2026-10-08 | `gpt-6-astra`（readback。`b024da8`） | **APPROVE WITH CHANGES**（P1 3 点・P2 4 点は解消。残り P2 1 点: 同じ秘密で受取 owner だけ違う credential の行と候補の除外の各行 → 追加、反映済み） |
 
 ## 9. 実装と AC-PD1／AC-PD2 の記録（2026-10-08）
 
