@@ -1,0 +1,27 @@
+{
+  "name": "@subetha/payer",
+  "version": "0.1.0",
+  "description": "Local payer for the SubEtha Router: holds your key, confirms every payment with you, and talks to the hosted Router for an AI agent (stdio MCP) and for you (CLI). Testnets only.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "subetha-payer": "bin/subetha-payer"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "npm-shrinkwrap.json"
+  ],
+  "scripts": {
+    "build": "../../node_modules/.bin/tsc -p tsconfig.build.json",
+    "types": "../../node_modules/.bin/tsc --noEmit -p tsconfig.json",
+    "test": "../../node_modules/.bin/vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "3.25.76"
+  }
+}
