@@ -144,7 +144,7 @@ direction; **if a route or profile is missing from `subetha_router_list_routes`,
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`. On the hosted Router ten profiles are enabled once the G-4′ swap is in place (six before it). The original two: `dyn-mpp-to-x402` (you pay **Tempo
+with `enabled`. On the hosted Router **eighteen profiles** are enabled since G-4″ (2026-10-08; ten after G-4′, six before it); the eight `*solmpp*` ones are described under "MPP on Solana" above. The original two: `dyn-mpp-to-x402` (you pay **Tempo
 pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**) and `dyn-x402-to-mpp` (you pay
 **Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); since 2026-10-07 also `dyn-arc-to-mpp` /
 `dyn-arc-to-x402` (you pay **Arc testnet USDC**) and `dyn-sol-to-x402` / `dyn-sol-to-mpp` (you pay **Solana devnet USDC**); with G-4′ also `dyn-x402-to-arc` / `dyn-x402-to-sol`
