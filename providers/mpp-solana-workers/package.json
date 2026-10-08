@@ -1,0 +1,25 @@
+{
+  "name": "subetha-provider-mpp-solana-workers",
+  "private": true,
+  "version": "0.1.0",
+  "description": "MPP solana/charge (pull) resource server for Solana devnet USDC, wrapping @solana/pay-kit's server in one Cloudflare Worker (docs/provider-mpp-solana-workers.md). Tests run from the repository root's vitest (tests/wire/provider-mpp-solana-*.test.ts, tests/acceptance/provider-mpp-solana-workers.test.ts)",
+  "type": "module",
+  "scripts": {
+    "types": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "keygen:fee-payer": "node scripts/keygen-fee-payer.mjs",
+    "keygen:recipient": "node scripts/keygen-recipient.mjs",
+    "secret:mpp": "node scripts/secret-new.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.1",
+    "@solana/kit": "8.4.0",
+    "@solana/pay-kit": "0.13.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261008.1",
+    "typescript": "5.9.3",
+    "wrangler": "^4.40.0"
+  }
+}

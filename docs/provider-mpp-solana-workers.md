@@ -130,7 +130,8 @@ pay-kit の RPC は素の `fetch`（redirect は既定、上限なし、1 回の
 
 1. この文書の独立レビュー → owner の確認 → 実装の PR（Router の試験には影響しない。`tests/acceptance/provider-mpp-solana-workers.test.ts` は gate つき）→ **AC-PD2 が手元で通る**（私の機械。通らなければ配備しない）→ 独立レビュー → merge。
 2. owner: `wrangler login` 済みの端末で `providers/mpp-solana-workers/` の `npm ci`。Cloudflare の DNS に `provider-mpp-sol.subethalabs.com` を Worker の custom domain として追加。
-3. 鍵（owner の端末。鍵は端末に出ない）: `node scripts/keygen-fee-payer.mjs`（seed を secret `FEE_PAYER_KEY` に直接。**upload が成功したときだけ**公開鍵を出す → `wrangler.toml` の `FEE_PAYER_PUBKEY`）、`node scripts/keygen-recipient.mjs <リポジトリの外の file>`（公開鍵だけ出る → `PAY_TO`。seed は owner の file 0600。排他的に作る）、`node scripts/secret-new.mjs`（`MPP_SECRET` に直接）。任意: `wrangler secret put SOLANA_RPC_URL`。
+3. 鍵（owner の端末。鍵は端末に出ない）: `node scripts/keygen-fee-payer.mjs`（seed を secret `FEE_PAYER_KEY` に直接。**upload が成功したときだけ**公開鍵を出す → `wrangler.toml` の `FEE_PAYER_PUBKEY`。`--dry-run` は wrangler を呼ばず**使い捨ての**公開鍵を出すだけ（その seed は捨てられ、どこにも無い。本番には使えない））、`node scripts/keygen-recipient.mjs <リポジトリの外の file>`（公開鍵だけ出る → `PAY_TO`。seed は owner の file 0600。排他的に作る。symlink でリポジトリの中を指すパスも拒む）、`node scripts/secret-new.mjs`（`MPP_SECRET` に直接）。任意: `wrangler secret put SOLANA_RPC_URL`。
+   **注意**: Worker がまだ無いときの `wrangler secret put` は、その名前の Worker（空の下書き）を Cloudflare に作ってから secret を入れる。6 の `wrangler deploy` はそれを置き換えるので順序はこのままでよい。
 4. owner（**3 の upload が成功した後に**）: fee payer の公開鍵に **devnet SOL**（faucet。0.1 SOL で十分）。受取 owner の **USDC の ATA を作る**（`spl-token create-account 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU --owner <PAY_TO> --url devnet`。rent は owner の devnet の鍵）。私が `getAccountInfo`・SOL の残高を読んで確かめる（AC-PD3）。
 5. fee payer と受取 owner が Router の運用者の address（§2.4）のどれとも違うことを一覧で確認。
 6. `wrangler deploy`。配備後に 402 を 2 回取り記録（AC-PD3）。Router の候補の検査に手元で掛ける。
@@ -158,3 +159,21 @@ pay-kit の RPC は素の `fetch`（redirect は既定、上限なし、1 回の
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（P1 2 点: isolate ごとの replay store では同時の replay で本文が 2 回出得る（限界として明示するか共有 store）、`Authorization` の判定が pay-kit の大文字小文字を区別しない判定と違い未払いの枝で settle し得る。P2: `expiresIn` の既定は 120、`simulateTransaction` は呼ばれる、RPC の不達は 402、AC-PD2 の強化（cold start・同時・送出後の切断・45 秒超の RPC）、領収をそのまま、`no-store`・`content-length`、鍵の file はリポジトリの外・upload の成功の後に資金、mppx の log の伏せ字）。第 2 版で反映 |
 | 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **APPROVE WITH CHANGES**（P1 2 点は解消。残り P2 1 点: §1 の `expiresIn` の既定の記述の矛盾 → 120 に訂正、反映済み）。replay の受け入れは owner の決定（§6 の 6）、手元の spike は AC-PD2 の代わりにならない |
+| I-1 | 2026-10-08 | `gpt-6-astra`（read-only。実装 `940564e`） | **REJECT**（P1 3 点: 受取 owner の seed の file の検査が字面だけで symlink を見抜けない、AC-PD2 が Miniflare の `cf.json` の取得と継いだ env で外に出得る、workerd での確定待ち 30 秒と RPC が 45 秒超黙る行が無い。P2: 未払いの枝の `Authorization` 除去を handler 越しに観測する、harness が `content-length` を付け直して欠けを隠す、別の mint／受取先・本文の上限・例外の正規化・候補の除外の行、seed の消去を finally に、`--dry-run` と `secret put` の下書きの文書）。`b024da8` で反映 |
+| I-1r | 2026-10-08 | `gpt-6-astra`（readback。`b024da8`） | **APPROVE WITH CHANGES**（P1 3 点・P2 4 点は解消。残り P2 1 点: 同じ秘密で受取 owner だけ違う credential の行と候補の除外の各行 → 追加、反映済み） |
+
+## 9. 実装と AC-PD1／AC-PD2 の記録（2026-10-08）
+
+- 実装: `providers/mpp-solana-workers/`（branch `provider-d/impl`）。§3.1 のとおり。`package.json` に vitest は無い（この機械の npm の resolver が vitest 5 の peer の集合で落ちたため。
+  試験はリポジトリの根の vitest から Worker のソースを直接 import して走らせる: `tests/wire/provider-mpp-solana-handler.test.ts`・`provider-mpp-solana-scripts.test.ts`・
+  `provider-mpp-solana-timing.test.ts`（実時間 30 秒）・`tests/acceptance/provider-mpp-solana-workers.test.ts`（AC-PD2、gate `PROVIDER_WORKER_AC=1`）。
+  Router の `tsc` は Worker のソースも型検査する（Web の型だけを使う。`@cloudflare/workers-types` の型は使わない））。
+- `log.ts` の伏せ字は install 時点の console の method を包む（isolate の起動時のもの。試験の spy もその 1 つ）。
+- AC-PD1（Node。pay-kit は本物、RPC は Router の fixture、Hyperliquid は差し替え、Router の実 adapter で購入）: handler 14 行、script 3 行、実時間 1 行。
+  観測した限界（§2.2）: 同じ credential を**未消費の 2 instance**に同時に出すと両方が 200 を返し得る（fixture では 2 つ目の instance が同じ取引を送出し直し、chain は同じ署名を 1 件のまま、`getTransaction` で成功を見て 200）。
+- AC-PD2（macOS、wrangler 4.148.0、workerd）: cold start の購入 `paid`（本文は契約、領収あり、Worker の 200 の wire は `content-type`・`no-store`・`Payment-Receipt`）、warm、同時 2 件（別の adapter・別の blockhash）、
+  送出の RPC error → Worker 402（領収なし）→ Router `unknown`、送出の後に Router が去る（期限 2 秒）→ Router `unknown`・Worker は続行して 200 + 領収（資金は動く）、
+  **確定待ちの timeout（workerd の中の pay-kit、30 秒）→ 402 → Router `unknown`（45 秒の内側）**、**RPC が 45 秒超黙る → Router は 45 秒で `unknown`、chain への送出 0**、生の log に seed・秘密なし。
+  外に出ない根拠: fixture・proxy・front は 127.0.0.1、wrangler の telemetry・error report・banner・Miniflare の `cf.json` の取得（`CLOUDFLARE_CF_FETCH_ENABLED=false`）は env で止め、npm の registry は閉じた loopback、子の env は親を継がない。
+- 変異: §4 の表の 21 件（`provider-d-mutations.py`。各 1 件ずつ当てて該当の suite を走らせ、commit から戻す）。結果は PR に記録。
+- 独立レビュー（実装）: §8 の表。
