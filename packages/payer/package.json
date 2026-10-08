@@ -7,9 +7,6 @@
   "engines": {
     "node": ">=22"
   },
-  "os": [
-    "darwin"
-  ],
   "bin": {
     "subetha-payer": "bin/subetha-payer"
   },
