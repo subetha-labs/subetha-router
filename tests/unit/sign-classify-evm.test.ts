@@ -87,6 +87,29 @@ describe("classifyEvmOffer: x402 の EVM だけ", () => {
   });
 });
 
+/**
+ * 1 つの TypeScript の source から module の指定子を全部取り出す（静的 import / re-export、副作用 import、`import()`、`require()`。
+ * 引用符は `"`・`'`・backtick）。コメントは先に落とす。**リテラルでない `import(`・`require(` は検査できないので例外**にする（動的な読み込みは拒む）。
+ * 型だけの import も数える（実行時には消えるが、保守的に「依存」とみなす）。
+ */
+export function specifiersOf(source: string): string[] {
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  const found: string[] = [];
+  const quoted = String.raw`(["'\`])([^"'\`\n]+)\1`;
+  const patterns = [
+    new RegExp(String.raw`\b(?:import|export)\b[^;'"\`]*?\bfrom\s*` + quoted, "g"),
+    new RegExp(String.raw`\bimport\s*` + quoted, "g"),
+    new RegExp(String.raw`\bimport\s*\(\s*` + quoted + String.raw`\s*\)`, "g"),
+    new RegExp(String.raw`\brequire\s*\(\s*` + quoted + String.raw`\s*\)`, "g"),
+  ];
+  for (const pattern of patterns) for (const match of text.matchAll(pattern)) found.push(match[2]!);
+  for (const match of text.matchAll(/\b(?:import|require)\s*\(\s*([^)]*)\)/g)) {
+    const argument = match[1]!.trim();
+    if (!/^(["'\`])[^"'\`\n]+\1$/.test(argument)) throw new Error(`dynamic module loading with a non-literal specifier is not allowed: ${match[0]}`);
+  }
+  return [...new Set(found)];
+}
+
 /** 相対 import を辿って、module の集合に外部パッケージ `mppx`・`@solana/*` が無いことを見る（静的な import graph の検査）。 */
 function importGraphOf(entry: string): { files: string[]; packages: string[] } {
   const files = new Set<string>();
@@ -95,9 +118,7 @@ function importGraphOf(entry: string): { files: string[]; packages: string[] } {
     const resolved = path.resolve(file);
     if (files.has(resolved)) return;
     files.add(resolved);
-    const text = readFileSync(resolved, "utf8");
-    for (const match of text.matchAll(/(?:import|export)\s[^;]*?from\s+"([^"]+)"/g)) {
-      const spec = match[1]!;
+    for (const spec of specifiersOf(readFileSync(resolved, "utf8"))) {
       if (spec.startsWith(".")) {
         visit(path.resolve(path.dirname(resolved), spec.replace(/\.js$/, ".ts")));
       } else {
@@ -109,13 +130,42 @@ function importGraphOf(entry: string): { files: string[]; packages: string[] } {
   return { files: [...files], packages: [...packages] };
 }
 
+/** 外部パッケージの指定子が禁止の集合（`mppx`・`mppx/…`・`@solana/…`・`@solana-program/…`）か。 */
+function isForbidden(spec: string): boolean {
+  return spec === "mppx" || spec.startsWith("mppx/") || spec.startsWith("@solana/") || spec.startsWith("@solana-program/");
+}
+
 describe("P-0: import graph", () => {
   test("sign-classify-evm.ts は mppx・@solana/* を（相対 import を辿っても）引き込まない", () => {
     const graph = importGraphOf(path.resolve(import.meta.dirname, "../../tools/sign-classify-evm.ts"));
-    const external = graph.packages.filter((p) => p === "mppx" || p.startsWith("@solana/") || p.startsWith("@solana-program/"));
+    const external = graph.packages.filter(isForbidden);
     expect(external).toEqual([]);
     // 辿った module は shared の表だけ。表は外部パッケージに依存しない（base58 の検査は自前）。
     expect(graph.files.map((f) => path.relative(path.resolve(import.meta.dirname, "../.."), f)).sort()).toEqual(["src/shared/networks.ts", "tools/sign-classify-evm.ts"]);
+  });
+
+  test("specifiersOf: 二重引用符・一重引用符・backtick、副作用 import、import()、require()、re-export、型だけの import、コメントの中は無視、サブパス", () => {
+    const source = [
+      'import { a } from "./a.js";',
+      "import b from './b.js';",
+      "import 'side-effect';",
+      'export { c } from "pkg-c";',
+      "export * from 'pkg-d';",
+      "const e = await import('mppx/client');",
+      'const f = require("@solana/kit");',
+      'import type { G } from "type-only";',
+      '// import { x } from "commented-out";',
+      '/* import { y } from "block-commented"; */',
+      "const text = 'not an import';",
+    ].join("\n");
+    expect(specifiersOf(source).sort()).toEqual(["./a.js", "./b.js", "@solana/kit", "mppx/client", "pkg-c", "pkg-d", "side-effect", "type-only"].sort());
+    expect(["mppx", "mppx/client", "@solana/kit", "@solana-program/token"].every(isForbidden)).toBe(true);
+    expect(["viem", "mppxish", "@solanaX/y"].some(isForbidden)).toBe(false);
+  });
+
+  test("specifiersOf: リテラルでない import()・require() は検査できないので拒む", () => {
+    expect(() => specifiersOf("const m = await import(name);")).toThrow(/non-literal/);
+    expect(() => specifiersOf("const m = require(process.env.X);")).toThrow(/non-literal/);
   });
 
   test("sign-dispatch.ts（全レール）は今までどおり mppx と Solana の検査を持つ", () => {
