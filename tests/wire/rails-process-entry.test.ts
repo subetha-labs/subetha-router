@@ -15,6 +15,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { runToExit } from "../fixtures/loopback.js";
 import { RAILS_ACTIVATION_ENV, SOLANA_OUTBOUND_KEY_ENV } from "../../tools/rails-entry.js";
 import { getBase58Decoder } from "@solana/kit";
+import { startSolanaRpc } from "../fixtures/solana-rpc.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
 import { INBOUND, ROUTE, ROUTE_ARC, ROUTE_MPP_IN, routerConfigOf } from "../../tools/remote-mcp-config.js";
 
@@ -120,6 +121,31 @@ describe("Router の process: Solana の送信の鍵（U9）", () => {
     expect(withKey.stderr).not.toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY/);
     expect(withKey.stderr).toMatch(PROBE_FAILED);
     expect(withKey.stdout + withKey.stderr).not.toContain(seed);
+  }, 60_000);
+});
+
+describe("Router の process: 静的 Solana route の宛先 ATA（U9）", () => {
+  test("静的 route（URL と受取先あり）で宛先 ATA が確かめられなければ process は起動しない（固定文。listen しない、probe に進まない、鍵は出ない）", async () => {
+    const dir = workDir("t8b-process-solata-");
+    const configPath = path.join(dir, "router.config.json");
+    const owner = "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d";
+    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: { solana: owner }, upstreams: { arc: "", solana: "https://provider-sol.test/v1/eth/snapshot" } });
+    expect(Object.keys((document["router"] as { routes: Record<string, unknown> }).routes)).toContain("md-sol-eth-snapshot-mpp");
+    writeFileSync(configPath, JSON.stringify(document));
+    // 宛先の ATA を持たない RPC の fixture（本番の入口の guarded transport は loopback を拒むので、応答に達しない場合も同じ fail closed の経路: ATA を確かめられない → 起動しない）。
+    const rpc = await startSolanaRpc({ mint: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6 });
+    try {
+      const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
+      const result = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-out", [SOLANA_OUTBOUND_KEY_ENV]: seed, ROUTER_SOLANA_RPC_URL: rpc.url, SUBETHA_SOLANA_RPC_URL: rpc.url }));
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("listening");
+      expect(result.stderr).toMatch(/destination token account of static route md-sol-eth-snapshot-mpp does not exist or is not the table's ATA/);
+      expect(result.stderr).not.toMatch(PROBE_FAILED);
+      expect(result.stdout + result.stderr).not.toContain(seed);
+      expect(result.stdout + result.stderr).not.toContain(rpc.url);
+    } finally {
+      await rpc.close();
+    }
   }, 60_000);
 });
 

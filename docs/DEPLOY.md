@@ -247,8 +247,9 @@ Provider の URL（`tools/remote-mcp-config.ts` の `UPSTREAM_SOL`。Provider �
 鍵は **専用の** `SUBETHA_OUTBOUND_SOLANA_KEY`（ed25519 の seed。`npm run wallet:new:solana` が出す base58 32 バイト。D-11）: `solana-out` のときだけ読んで子に渡し、無効なら参照もしない。
 無い・形が違えば process は固定文 `SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed …` で止まる（鍵の値は出ない）。
 G-1′ の手順: (1) `npm run wallet:new:solana` で鍵を作り、ホストの env に `SUBETHA_OUTBOUND_SOLANA_KEY` として置く（journal と同じく他に写さない）。(2) **その address の USDC の ATA を運用者が作る**
-（`spl-token create-account 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU --owner <address>` 相当。rent は運用者。Router は ATA を作らない: 起動時に `getAccountInfo` で確かめるだけ）。
-(3) devnet USDC を入れる（https://faucet.circle.com → Solana Devnet / USDC）。残高は `getTokenAccountBalance <ATA>`（`solana` CLI なら `spl-token balance --owner <address> 4zMMC9…`）。
+（`spl-token create-account 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU --owner <address>` 相当。rent は運用者。Router は ATA を作らない。**起動時に確かめるのは静的 route の宛先（Provider）の ATA だけ**で、
+送信元（Router）の ATA の有無は起動では見ない——残高は購入ごとに `getTokenAccountBalance` で読み、ATA が無ければその購入が `operator_funds_unavailable` で止まる。起動の成功を送信元の ATA の存在の確認と読まないこと）。
+(3) devnet USDC を入れる（https://faucet.circle.com → Solana Devnet / USDC）。残高は `getTokenAccountBalance <ATA>`（`solana` CLI なら `spl-token balance --owner <address> --url devnet 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`）。
 送信は facilitator（x402.org）の fee payer が手数料を払うので **SOL は要らない**。Router は購入ごとに残高を 1 回読み（D-15）、足りなければ `operator_funds_unavailable` で受信の verify の前に止まる。
 V-8b（実 facilitator の probe。資金が動く）は owner の承認で **公開の Router の外**で行い、G-3′ は公開の Router を止めて受け入れ用の起動（`--rails arc-in,arc-out,solana-in,solana-out`）で O-4 静的・O-3 動的・O-4 動的を各 1 件（`docs/multirail-outbound-tasks.md` UG-S）。
 `RAILS_ACTIVATION` は **`solana.outbound: false` のまま**（G-4′ で `true` にする。`arc` は UG-A で承認された状態のまま）。
