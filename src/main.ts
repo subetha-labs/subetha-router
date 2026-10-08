@@ -23,6 +23,7 @@ import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
 import { createX402SvmOutbound, type X402SvmOutboundOptions } from "./adapters/outbound/x402-svm.js";
+import { createMppSolanaOutbound } from "./adapters/outbound/mpp-solana.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "./net/bounded-body.js";
 import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
 import { denyHostsOf } from "./net/upstream-url.js";
@@ -40,8 +41,7 @@ import {
   type RouteConfig,
   type RouterConfig,
   type RuntimeConfig,
-  usesGasIndexedFee,
-} from "./config.js";
+  usesGasIndexedFee, MPP_SOLANA_SCHEME } from "./config.js";
 import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
@@ -404,21 +404,6 @@ export function composeRails(
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
 ): ComposedRails {
-  /**
-   * Solana 宛の MPP（`docs/mpp-solana-design.md` §4）はタスク M4-b（送信）で配線する。それまでは設定に現れた時点で、
-   * **adapter を 1 つも作る前に**（合成レールの分岐よりも前に）起動を止める（Tempo の adapter に落とさない。fail closed）。表（`KNOWN_NETWORKS`）はもう許しているので、ここが唯一の門。
-   * 受信（§3）は M3-b で配線済み（`createMppSolanaInbound`）。
-   */
-  for (const route of Object.values(config.router.routes)) {
-    if ((route.rail ?? "x402") === "mpp" && networkFamilyOf(route.destination.network) === "svm") {
-      throw new ConfigError(`routes.${route.routeId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
-    }
-  }
-  for (const profile of Object.values(config.router.dynamic?.profiles ?? {})) {
-    if (profile.rail === "mpp" && networkFamilyOf(profile.destination.network) === "svm") {
-      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the Solana MPP outbound adapter is not wired yet (docs/mpp-solana-design.md §4)`);
-    }
-  }
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
@@ -593,6 +578,42 @@ export function composeRails(
       rails[key] = svmRail;
       // 起動時の非同期の準備（Router の ATA・運用者の ATA・静的の宛先 ATA の検査）。`startRouter` が core を作る前に待つ。
       svmStartups.push(() => svmRail.startup());
+      continue;
+    }
+    if (pair.rail === "mpp" && networkFamilyOf(pair.network) === "svm") {
+      // Solana 宛の MPP（`docs/mpp-solana-design.md` §2.2・§4）: x402 SVM 送信と同じ能力・RPC・表の資産。pull だけ（D-23）。
+      const capability = svmByNetwork.get(pair.network);
+      if (capability === undefined || solanaRpcUrl === undefined) {
+        throw new SignerNotAuthorizedError();
+      }
+      const entry = knownNetworkOf(networks, pair.network);
+      const known = entry?.assets[0];
+      if (entry === undefined || known === undefined || known.tokenProgram === undefined || entry.assets.length !== 1) {
+        throw new ConfigError(`outbound ${pair.network}: the table must list exactly one asset with a token program`);
+      }
+      const ownRoutes = Object.entries(config.router.routes).filter(([, route]) => (route.rail ?? "x402") === "mpp" && route.destination.network === pair.network);
+      for (const [routeId, route] of ownRoutes) {
+        if (route.destination.asset !== known.id) throw new ConfigError(`routes.${routeId}: the destination asset is not the table's mint for ${pair.network}`);
+        if (route.destination.scheme !== MPP_SOLANA_SCHEME) throw new ConfigError(`routes.${routeId}: the destination scheme must be ${MPP_SOLANA_SCHEME} for MPP on ${pair.network}`);
+      }
+      const ownProfiles = Object.fromEntries(Object.entries(profiles).filter(([, profile]) => profile.rail === "mpp" && profile.destination.network === pair.network));
+      const rpcTransport = svmRpcTransportOf(staticHooks, capabilities.fixtureFacilitators === true, report);
+      const mppSvmRail = createMppSolanaOutbound({
+        network: pair.network,
+        upstreams: upstreamsFor(pair.rail, pair.network),
+        destinations: Object.fromEntries(ownRoutes.map(([routeId, route]) => [routeId, { payTo: route.destination.payTo, asset: route.destination.asset, scheme: route.destination.scheme }])),
+        capability,
+        transport: transportFor(false, report, staticHooks),
+        rpc: { url: solanaRpcUrl, transport: rpcTransport },
+        operatorAddresses: operatorSet,
+        mint: known.id,
+        decimals: known.decimals,
+        tokenProgram: known.tokenProgram,
+        ...(dynamicTransport === undefined || Object.keys(ownProfiles).length === 0 ? {} : { dynamic: { profiles: ownProfiles, transport: dynamicTransport, denyHosts } }),
+        ...(capabilities.svmOutboundHooksForTest === undefined ? {} : { hooksForTest: capabilities.svmOutboundHooksForTest }),
+      });
+      rails[key] = mppSvmRail;
+      svmStartups.push(() => mppSvmRail.startup());
       continue;
     }
     if (pair.rail === "mpp") {

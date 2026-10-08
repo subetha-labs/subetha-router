@@ -24,6 +24,11 @@ export interface SolanaRpcAccounts {
   readonly blockhash?: string;
   /** TLS で待つ（guarded transport の本番方針の試験）。 */
   readonly tls?: TlsMaterial;
+  /**
+   * 別の fixture と **state を共有する**（`atas`・`transactions`・`signatureStatuses`…）。`calls` はこの fixture の分だけ。
+   * MPP Solana 送信: Router の RPC と pay-kit の server の RPC を別の口にして、Router の要求だけを数える。
+   */
+  readonly shareStateWith?: SolanaRpcFixture;
 }
 
 export interface SolanaRpcAta {
@@ -58,6 +63,11 @@ export interface SolanaRpcState {
    * `no-response` = 応答しない（接続は開いたまま）、`wrong-signature` = 登録はするが**別の署名**を返す（RPC が送った bytes と違うものを受理した形）。
    */
   sendReply: "ok" | "rpc-error" | "already-processed" | "no-response" | "wrong-signature";
+  /**
+   * `getTransaction` の **base64** の読み（MPP Solana 送信の領収の照合。pay-kit の server は jsonParsed で読むので影響しない）:
+   * `ok`、`null`（無い）、`err`（`meta.err` あり）、`no-slot`（`slot` 無し）、`other`（登録済みの**別の**取引を返す。無ければ null）。
+   */
+  transactionBase64Reply: "ok" | "null" | "err" | "no-slot" | "other" | "tamper-message" | "tamper-sig0" | "tamper-sig1";
   /** 受けた `sendTransaction` の base64（順）。 */
   sent: string[];
   /** `getTransaction` が返す transaction（署名 → 内容）。`sendTransaction` の `ok`／`already-processed` が登録し、試験が直接も置ける。 */
@@ -73,6 +83,8 @@ export interface SolanaRpcFixture {
   readonly calls: { method: string; params: unknown }[];
   readonly connections: () => number;
   readonly state: SolanaRpcState;
+  /** この口だけで JSON-RPC の error を返す method（state を共有する別の口には効かない）。 */
+  readonly localFailMethods: string[];
   close(): Promise<void>;
 }
 
@@ -135,7 +147,9 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
   const tokenProgram = accounts.tokenProgram ?? TOKEN_PROGRAM_ADDRESS;
   const blockhash = accounts.blockhash ?? "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD";
   const calls: { method: string; params: unknown }[] = [];
-  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, sendReply: "ok", sent: [], transactions: new Map(), atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])], failMethods: [] };
+  /** この口だけで JSON-RPC の error を返す method（`state.failMethods` は共有の state 全体に効く）。 */
+  const localFailMethods: string[] = [];
+  const state: SolanaRpcState = accounts.shareStateWith?.state ?? { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, sendReply: "ok", transactionBase64Reply: "ok", sent: [], transactions: new Map(), atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])], failMethods: [] };
   let connections = 0;
   const mintData = Buffer.from(
     getMintEncoder().encode({ mintAuthority: null, supply: 1_000_000_000_000n, decimals: accounts.decimals, isInitialized: true, freezeAuthority: null }),
@@ -204,7 +218,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
       const params = body["params"];
       calls.push({ method, params });
       const id = body["id"];
-      if (state.failMethods.includes(method)) {
+      if (state.failMethods.includes(method) || localFailMethods.includes(method)) {
         reply(undefined, id, { code: -32000, message: "fixture: method failure" });
         return;
       }
@@ -251,14 +265,30 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
       }
       if (method === "getTransaction") {
         const [signature, config] = (params as [string, { encoding?: string } | undefined] | undefined) ?? [];
-        const known = typeof signature === "string" ? state.transactions.get(signature) : undefined;
+        const encoding = config?.encoding ?? "json";
+        let known = typeof signature === "string" ? state.transactions.get(signature) : undefined;
+        // MPP Solana 送信の領収の照合（base64 の読み）だけを操作する（pay-kit の server の jsonParsed の読みはそのまま）。
+        if (encoding === "base64" && state.transactionBase64Reply === "null") known = undefined;
+        if (encoding === "base64" && state.transactionBase64Reply === "other") {
+          known = [...state.transactions.entries()].find(([sig]) => sig !== signature)?.[1];
+        }
         if (known === undefined) {
           reply(null, id);
           return;
         }
-        const encoding = config?.encoding ?? "json";
-        const transaction = encoding === "base64" ? [known.base64, "base64"] : parsedTransactionOf(known.base64);
-        reply({ slot: known.slot, blockTime: known.blockTime, version: 0, transaction, meta: { err: known.err, fee: 5000, preBalances: [], postBalances: [], innerInstructions: [], logMessages: [], preTokenBalances: [], postTokenBalances: [], rewards: [], computeUnitsConsumed: 1, loadedAddresses: { readonly: [], writable: [] } } }, id);
+        let base64 = known.base64;
+        if (encoding === "base64" && state.transactionBase64Reply.startsWith("tamper-")) {
+          // 1 バイトだけ変える: message の末尾 / 署名 [0] の先頭 / 署名 [1] の先頭（他は同じ = その 1 点の照合だけを観測する）。
+          const bytes = Buffer.from(base64, "base64");
+          const at = state.transactionBase64Reply === "tamper-message" ? bytes.length - 1 : state.transactionBase64Reply === "tamper-sig0" ? 1 : 65;
+          bytes[at] = (bytes[at] ?? 0) ^ 0x01;
+          base64 = bytes.toString("base64");
+        }
+        const transaction = encoding === "base64" ? [base64, "base64"] : parsedTransactionOf(known.base64);
+        const err = encoding === "base64" && state.transactionBase64Reply === "err" ? { InstructionError: [2, "Custom"] } : known.err;
+        const result: Record<string, unknown> = { slot: known.slot, blockTime: known.blockTime, version: 0, transaction, meta: { err, fee: 5000, preBalances: [], postBalances: [], innerInstructions: [], logMessages: [], preTokenBalances: [], postTokenBalances: [], rewards: [], computeUnitsConsumed: 1 } };
+        if (encoding === "base64" && state.transactionBase64Reply === "no-slot") delete result["slot"];
+        reply(result, id);
         return;
       }
       if (method === "getLatestBlockhash") {
@@ -310,5 +340,5 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   const port = typeof addr === "object" && addr !== null ? addr.port : 0;
-  return { url: `${accounts.tls === undefined ? "http" : "https"}://127.0.0.1:${port}`, port, calls, connections: () => connections, state, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+  return { url: `${accounts.tls === undefined ? "http" : "https"}://127.0.0.1:${port}`, port, calls, connections: () => connections, state, localFailMethods, close: () => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
 }
