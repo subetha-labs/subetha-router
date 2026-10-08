@@ -92,7 +92,7 @@ describe("公開の process の既定: Arc・Solana はどちらも無効", () =
     expect(RAILS_NONE).toEqual({ arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_NONE)).toBe(true);
     expect(RAILS_DISABLED.activation).toBe(RAILS_NONE);
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: false, outbound: false } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
     const document = routerConfigOf({}, RECEIVER, true);
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true, RAILS_DISABLED));
@@ -253,20 +253,21 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
   const OUT_ONLY: RailsOptions = { activation: { arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { arc: ARC_PROVIDER } };
 
   test("公開の定数は受信 true・送信 true（Arc・Solana とも。G-4′ 2026-10-08）。railActive は方向のどれかで決まる", () => {
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: false, outbound: false } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true } });
     expect(Object.isFrozen(RAILS_ACTIVATION) && Object.isFrozen(RAILS_ACTIVATION.arc)).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
     expect(railActive({ arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } })).toBe(true);
   });
 
-  test("公開の設定（定数、G-4′ の後）: 受信 4 本 + 送信 2 本の route と 10 本のプロファイル。O-5・O-6（Arc ↔ Solana）は無い（D-12・D-16）。送信の受取先が無ければ起動しない", () => {
-    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d" } });
+  test("公開の設定（定数、G-4″ の後）: route 10 本（受信 4 + 送信 2 + MPP Solana の受信 2・送信 2）と 18 本のプロファイル。O-5・O-6（Arc ↔ Solana の x402）は無い（D-12・D-16）。送信の受取先が無ければ起動しない", () => {
+    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
     const router = routerOf(document);
-    expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC, ROUTE_SOL, ROUTE_ARC_OUT, ROUTE_SOL_OUT].sort());
-    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol"]);
-    expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol|dyn-sol-to-arc/);
-    // URL（定数）があるのに受取先が無ければ起動しない（固定文）。
+    expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC, ROUTE_SOL, ROUTE_ARC_OUT, ROUTE_SOL_OUT, ROUTE_SOLMPP_TO_X402, ROUTE_SOLMPP_TO_MPP, ROUTE_SOLMPP_OUT, ROUTE_SOLMPP_OUT_MPP].sort());
+    expect(Object.keys(router.dynamic!.profiles)).toHaveLength(18);
+    expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol"|dyn-sol-to-arc/);
+    // URL（定数）があるのに受取先が無ければ起動しない（固定文）。Provider D の受取 owner が欠けても同じ。
     expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } })).toThrow();
+    expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d" } })).toThrow(/solana mpp outbound rail/);
   });
 
   test("arc.outbound だけ true（受信は無効）: 動的 dyn-x402-to-arc と（MPP 受信があれば）dyn-mpp-to-arc が出て、受取先の env は読まれず、Arc USDC の区分が静的・動的に出る", () => {
@@ -370,17 +371,17 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
   const SOL_OUT: RailsOptions = { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { solana: SOL_PROVIDER } };
   const SOL_URL = "https://provider-sol.test/v1/eth/snapshot";
 
-  test("公開の定数は solana.outbound true（G-4′）。URL の定数は配備した Provider（G-1′）。公開の ID は route 6・プロファイル 10 で重複なし", () => {
+  test("公開の定数は solana.outbound true（G-4′）。URL の定数は配備した Provider（G-1′）。公開の ID は route 10・プロファイル 18（G-4″ の後）で重複なし", () => {
     expect(RAILS_ACTIVATION.solana.outbound).toBe(true);
     expect(UPSTREAM_SOL).toBe("https://provider-x402-sol.subethalabs.com/v1/eth/snapshot");
     expect(RAIL_UPSTREAMS.solana).toBe(UPSTREAM_SOL);
-    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: SOL_PROVIDER } }));
+    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: SOL_PROVIDER, solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } }));
     const ids = listedIds(router);
     expect(ids.routes).toContain(ROUTE_SOL_OUT);
     expect(ids.profiles).toContain("dyn-x402-to-sol");
     expect(ids.profiles).toContain("dyn-mpp-to-sol");
-    expect(ids.routes).toHaveLength(6);
-    expect(ids.profiles).toHaveLength(10);
+    expect(ids.routes).toHaveLength(10);
+    expect(ids.profiles).toHaveLength(18);
     expect(new Set([...ids.routes, ...ids.profiles]).size).toBe(ids.routes.length + ids.profiles.length);
   });
 
@@ -445,8 +446,8 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
   const SOL_MPP_URL = "https://provider-solmpp.test/v1/eth/snapshot";
   const SOLMPP_DEST = { scheme: "solana/charge", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: 6, tokenProgram: OUTBOUND_SOL.tokenProgram };
 
-  test("公開の定数: solanaMpp は両方 false（M6。G-4″ まで無効）、UPSTREAM_SOL_MPP は配備した Provider D の URL（G-1″、2026-10-08）。railActive は solanaMpp だけでも true。公開の設定は今までどおり route 6・プロファイル 10", () => {
-    expect(RAILS_ACTIVATION.solanaMpp).toEqual(OFF);
+  test("公開の定数: solanaMpp は両方 true（G-4″、2026-10-08）、UPSTREAM_SOL_MPP は配備した Provider D の URL（G-1″）。railActive は solanaMpp だけでも true。公開の設定は route 10・プロファイル 18 で、solmpp の 4 本と 8 本を含む", () => {
+    expect(RAILS_ACTIVATION.solanaMpp).toEqual({ inbound: true, outbound: true });
     expect(Object.isFrozen(RAILS_ACTIVATION.solanaMpp)).toBe(true);
     expect(RAILS_NONE.solanaMpp).toEqual(OFF);
     expect(UPSTREAM_SOL_MPP).toBe("https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot");
@@ -454,12 +455,13 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     expect(railActive({ arc: OFF, solana: OFF, solanaMpp: IN })).toBe(true);
     expect(railActive({ arc: OFF, solana: OFF, solanaMpp: OUT })).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
-    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER } }));
+    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER } }));
     const ids = listedIds(router);
-    expect(ids.routes).toHaveLength(6);
-    expect(ids.profiles).toHaveLength(10);
-    expect(JSON.stringify(router)).not.toContain("solmpp");
-    expect(JSON.stringify(router)).not.toContain("solana/charge");
+    expect(ids.routes).toHaveLength(10);
+    expect(ids.profiles).toHaveLength(18);
+    expect(ids.routes.filter((r) => r.includes("solmpp"))).toEqual(["md-mpp-eth-snapshot-solmpp", "md-solmpp-eth-snapshot", "md-solmpp-eth-snapshot-mpp", "md-x402-eth-snapshot-solmpp"]);
+    expect(ids.profiles.filter((p) => p.includes("solmpp"))).toHaveLength(8);
+    expect(router.routes[ROUTE_SOLMPP_OUT]?.destination.payTo).toBe(SOL_MPP_PROVIDER);
   });
 
   test("solanaMpp.inbound だけ: 静的 md-x402-eth-snapshot-solmpp・md-mpp-eth-snapshot-solmpp（source は solana の受取 owner、sourceRail mpp）、動的 dyn-solmpp-to-x402・dyn-solmpp-to-mpp。x402 の Solana 受信（md-x402-eth-snapshot-sol・dyn-sol-to-*・facilitator）は出ない。Solana USDC の区分が出る。本番の読み込みを通る", () => {

@@ -234,9 +234,9 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     expect(readdirSync(path.join(dir, "acceptance"))).toBeDefined();
     // 受け入れ用の起動は公開の定数を書き換えない（ソースの上の値は G-4 の両方 true のまま）。
     // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信も両方 true（G-4′、2026-10-08）。
-    // 公開の定数（M6 の後の形）: arc・solana は両方 true、solanaMpp は無効（RAIL_OFF）。
+    // 公開の定数（G-4″ の後の形）: arc・solana・solanaMpp すべて両方 true。
     const source = readFileSync("tools/remote-mcp-config.ts", "utf8");
-    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: RAIL_OFF,\s*\}\)/);
+    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*\}\)/);
   }, 40_000);
 });
 
@@ -352,7 +352,7 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
     const after = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
     for (const name of after) if (!created.includes(name)) dirs.push(path.join(runtimeRoot, name));
     expect(after).toHaveLength(created.length);
-    // 公開の定数は solanaMpp が無効のまま。
-    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/solanaMpp: RAIL_OFF,/);
+    // 公開の定数は G-4″ で solanaMpp も両方 true（受け入れ用の起動は定数を読まず --rails で決める）。
+    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),/);
   }, 60_000);
 });
