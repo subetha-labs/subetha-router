@@ -238,7 +238,10 @@ describe("facilitator client（自前）", () => {
     let signings = 0;
     const slowSigner = { network: "eip155:5042002", chainId: 5042002, address: ARC_ADDRESS, signTypedData: () => { signings += 1; return new Promise<`0x${string}`>((r) => setTimeout(() => r(`0x${"11".repeat(65)}`), 300)); } };
     const client = new BoundedFacilitatorClient({ url: "https://f.test/x402", signer: slowSigner, signalFor: () => AbortSignal.timeout(50), fetch: (async () => { posts += 1; return jsonResponse(200, { isValid: true }); }) as typeof fetch });
+    const started = Date.now();
     await expect(client.verify(payload, requirements)).rejects.toThrow(DeadlineError);
+    // signal が切れた時点で reject する（署名の完了 300 ms を待たない）。
+    expect(Date.now() - started).toBeLessThan(200);
     await new Promise((r) => setTimeout(r, 350));
     expect(posts).toBe(0);
     expect(signings).toBe(1);
