@@ -78,6 +78,32 @@ function withEvidence(deps: ToolDeps, body: Record<string, unknown>): Record<str
   return { ...body, evidence: deps.evidence, adapterMode: deps.mode };
 }
 
+/** `rate_limited` に `Retry-After` が無いときの目安（動的の門の窓 = 60 秒）。 */
+const RATE_LIMITED_DEFAULT_RETRY_AFTER_MS = 60_000;
+
+/**
+ * quote の失敗を tool の応答に写す（H-1、要件 FR-A25）。既存の `error` に `reason`・`httpStatus`・`retryAfterMs` を**加える**。
+ * `retryAfterMs` は **quote を取り直す目安**であって、purchase の再試行を許可する意味ではない（文面にも書く）。
+ */
+function quoteFailureOf(result: { readonly error: string; readonly status: number; readonly reason?: string; readonly retryAfterMs?: number }): Record<string, unknown> {
+  const rateLimited = result.error === "rate_limited";
+  const retryAfterMs = rateLimited ? (result.retryAfterMs ?? RATE_LIMITED_DEFAULT_RETRY_AFTER_MS) : result.retryAfterMs;
+  return {
+    ok: false,
+    error: result.error,
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+    ...(result.status === 0 ? {} : { httpStatus: result.status }),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(rateLimited
+      ? {
+          nextStep:
+            `The Router's quote rate limit was hit. You may retry the quote after about ${String(Math.ceil((retryAfterMs ?? RATE_LIMITED_DEFAULT_RETRY_AFTER_MS) / 1000))} seconds ` +
+            "with a fresh requestId. Never retry a purchase on your own because of this: a purchase that failed or ended unknown may already have moved funds.",
+        }
+      : {}),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -162,7 +188,16 @@ function dynamicSubjectFields(quote: QuoteView): Record<string, unknown> {
  * fee payer が持つ。Arc は Circle の facilitator 経由で、settle に数十秒掛かり得る。EVM の x402 は従来どおり。
  */
 function railHintOf(quote: QuoteView): string {
-  const network = String((quote.source as Record<string, unknown>)["network"] ?? "");
+  const source = quote.source as Record<string, unknown>;
+  const network = String(source["network"] ?? "");
+  const offer = source["offer"];
+  const scheme = isRecord(offer) ? String(offer["scheme"] ?? "") : "";
+  if (scheme === "solana/charge") {
+    // Solana の **MPP**（H-1、要件 FR-A29）: 署名の道具は全署名だけで、送出は Router が purchase で行う（Tempo の MPP とは違う）。
+    return " This offer is paid with MPP on Solana (solana/charge): `npm run sign` fully signs a transfer with your Solana key (your key pays the devnet SOL fee) " +
+      "and nothing is sent at sign; the Router broadcasts it at purchase, where the funds move. Call purchase right after sign (the blockhash expires in about a minute). " +
+      "A credential of the already-broadcast kind from another client would have moved funds at the credential, so approve before building it either way.";
+  }
   if (network.startsWith("solana:")) {
     return " This offer is paid on Solana (x402 exact): `npm run sign` builds and partially signs a transaction with your Solana key " +
       "(`SOLANA_PAYER_PRIVATE_KEY`; `npm run wallet:new:solana`); nothing moves until the Router settles it through the facilitator, whose fee payer broadcasts.";
@@ -191,15 +226,27 @@ function dynamicNextStep(quote: QuoteView): string {
         : ""),
     `Only ${String(disclosures["supportedResponse"] ?? "an application/json object up to 256 KiB")} is delivered; ` +
       "any other response is reported as paid without data.",
-    fundsMove
-      ? "**On this route, building the credential already spends the funds, and that cannot be undone.** " +
-        "The Router can still refuse after the funds moved (expired quote, upstream changed, feature disabled, budget " +
-        "exhausted, operator funds unavailable); `awaiting_payment` then does NOT mean unpaid. Get approval FIRST, then " +
-        `build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
-      : `If the human approves, call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key) and ` +
-        "this quoteId as `approval`. If not, do not call it.",
+    fundsMove && sourceSchemeOf(quote) === "solana/charge"
+      ? "**You pay with MPP on Solana.** With `npm run sign` the credential is a fully signed transaction and nothing is sent at sign: the Router broadcasts it at purchase, " +
+        "where the funds move (your key pays the devnet SOL fee; call purchase right after sign because the blockhash expires in about a minute). A credential of the already-broadcast " +
+        "kind would have moved funds at the credential, so **approve BEFORE building the credential** either way. The Router can still refuse after the funds moved (expired quote, " +
+        "upstream changed, feature disabled, budget exhausted, operator funds unavailable); `awaiting_payment` then does NOT mean unpaid. " +
+        `After approval, build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
+      : fundsMove
+        ? "**On this route (MPP on Tempo), building the credential already spends the funds, and that cannot be undone.** " +
+          "The Router can still refuse after the funds moved (expired quote, upstream changed, feature disabled, budget " +
+          "exhausted, operator funds unavailable); `awaiting_payment` then does NOT mean unpaid. Get approval FIRST, then " +
+          `build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
+        : `If the human approves, call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key) and ` +
+          "this quoteId as `approval`. If not, do not call it.",
   ];
   return lines.join(" ");
+}
+
+/** 受信 offer の scheme（`exact` / `tempo/charge` / `solana/charge`）。無ければ空。 */
+function sourceSchemeOf(quote: QuoteView): string {
+  const offer = (quote.source as Record<string, unknown>)["offer"];
+  return isRecord(offer) && typeof offer["scheme"] === "string" ? offer["scheme"] : "";
 }
 
 function estimateTimeOf(pricing: Record<string, unknown>): string {
@@ -289,7 +336,7 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
         requestId: input.requestId,
       });
       if (!result.ok) {
-        return withEvidence(deps, { ok: false, error: result.error });
+        return withEvidence(deps, quoteFailureOf(result));
       }
       issued.set(result.quote.quoteId, result.quote);
       return withEvidence(deps, {
@@ -314,7 +361,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           ? "Explicit human approval is required. **On this route, building the credential " +
             "may already spend the funds, and that cannot be undone.** Money can leave before " +
             `${TOOL_NAMES.purchase} is called. Get approval FIRST, then build the credential. ` +
-            "If the human does not approve, do not build it."
+            "If the human does not approve, do not build it." +
+            railHintOf(result.quote)
           : "Explicit human approval is required. If the human approves, call " +
             `${TOOL_NAMES.purchase} with this quoteId as \`approval\`. If not, do not call it.` +
             railHintOf(result.quote),
@@ -325,7 +373,7 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
     async quoteUrl(input): Promise<Record<string, unknown>> {
       const result = await deps.client.quoteUrl({ profileId: input.profileId, url: input.url, requestId: input.requestId });
       if (!result.ok) {
-        return withEvidence(deps, { ok: false, error: result.error });
+        return withEvidence(deps, quoteFailureOf(result));
       }
       issued.set(result.quote.quoteId, result.quote);
       return withEvidence(deps, {

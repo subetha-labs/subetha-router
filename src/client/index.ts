@@ -175,6 +175,27 @@ function projectionViewOf(body: unknown): ProjectionView | undefined {
 }
 
 /** 固定の理由コードだけを外に出す（サーバ由来の文字列も安全な短いコードに限る）。 */
+/** Router が返した固定の `reason`（形式に合うものだけ。自由文・例外文字列は通さない）。 */
+function reasonOf(body: unknown): { reason?: string } {
+  if (isRecord(body)) {
+    const reason = body["reason"];
+    if (typeof reason === "string" && /^[a-z_]{1,64}$/.test(reason)) {
+      return { reason };
+    }
+  }
+  return {};
+}
+
+/** `Retry-After`（秒か HTTP-date）を ms に。読めなければ無し。負は 0。 */
+function retryAfterMsOf(header: string | null): { retryAfterMs?: number } {
+  if (header === null || header.trim() === "") return {};
+  const text = header.trim();
+  if (/^\d{1,9}$/.test(text)) return { retryAfterMs: Number(text) * 1000 };
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) return {};
+  return { retryAfterMs: Math.max(0, at - Date.now()) };
+}
+
 function errorCodeOf(body: unknown, fallback: string): string {
   if (isRecord(body)) {
     const error = body["error"];
@@ -227,7 +248,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
   async function call(
     path: string,
     init: { method: "GET" | "POST"; headers?: Record<string, string>; body?: string; timeoutMs?: number },
-  ): Promise<{ status: number; body: unknown; contentType: string; paymentId?: string }> {
+  ): Promise<{ status: number; body: unknown; contentType: string; paymentId?: string; retryAfterMs?: number }> {
     const response = await doFetch(new URL(path, origin), {
       method: init.method,
       headers: headers(init.headers ?? {}),
@@ -250,6 +271,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
       body,
       contentType: response.headers.get("content-type") ?? "application/json",
       ...(paymentId === null || paymentId === "" ? {} : { paymentId }),
+      ...retryAfterMsOf(response.headers.get("retry-after")),
     };
   }
 
@@ -286,7 +308,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { ok: false, error: "transport_failed", status: 0 };
       }
       if (result.status !== 200) {
-        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status };
+        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status, ...reasonOf(result.body), ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) };
       }
       const parsed = quoteViewOf(result.body);
       if (parsed === undefined) {
@@ -315,7 +337,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { ok: false, error: "transport_failed", status: 0 };
       }
       if (result.status !== 200) {
-        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status };
+        return { ok: false, error: errorCodeOf(result.body, "quote_failed"), status: result.status, ...reasonOf(result.body), ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) };
       }
       const parsed = quoteViewOf(result.body);
       // 動的 quote の応答として `upstream`・`ownerKey` を持たないもの、頼んだ URL・プロファイルと違うものは受け入れない。
@@ -513,6 +535,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         error: errorCodeOf(result.body, `http_${result.status}`),
         status: result.status,
         paymentId,
+        ...reasonOf(result.body),
       };
     },
 
@@ -527,7 +550,9 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         return { found: false as const, status: 0, reason: "transport_failed" };
       }
       if (result.status !== 200) {
-        return { found: false as const, status: result.status };
+        // 404 は「Router に無い」、401・403 は動的の `ownerKey` が無い・違う。他は http_error（回復の表では `unreadable` 側）。
+        const reason = result.status === 404 ? "not_found" : result.status === 401 || result.status === 403 ? "unauthorized" : "http_error";
+        return { found: false as const, status: result.status, reason };
       }
       const projection = projectionViewOf(result.body);
       if (projection === undefined) {

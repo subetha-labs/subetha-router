@@ -210,6 +210,8 @@ export interface DestinationAllow {
   readonly network: string;
   readonly asset: string;
   readonly payTo: string;
+  /** 宛先の資産の桁。表（`networks`）で読み込んだときだけ埋まる（公開射影に出す。H-1）。合成の構成では無い。 */
+  readonly decimals?: number;
 }
 
 export interface RouteConfig {
@@ -949,8 +951,21 @@ export function parseRouterConfig(raw: unknown, options: RouterConfigOptions = {
   const router = parseRouterConfigUnchecked(raw);
   if (options.networks !== undefined) {
     validateRouterConfigAgainstTable(router, options.networks);
+    return withDestinationDecimals(router, options.networks);
   }
   return router;
+}
+
+/** 表で検証した後に、各 route の宛先の桁を表から写す（検証は済んでいるので無ければそのまま）。 */
+function withDestinationDecimals(router: RouterConfig, networks: readonly KnownNetwork[]): RouterConfig {
+  const routes = Object.fromEntries(
+    Object.entries(router.routes).map(([routeId, route]) => {
+      const entry = knownNetworkOf(networks, route.destination.network);
+      const asset = entry === undefined ? undefined : knownAssetOf(entry, route.destination.asset);
+      return [routeId, asset === undefined ? route : { ...route, destination: { ...route.destination, decimals: asset.decimals } }];
+    }),
+  );
+  return { ...router, routes };
 }
 
 /**

@@ -65,9 +65,10 @@ The Router does not hold the caller's key, so the signing capability has to be l
   back-to-back runs (measured: 2/20 failures at 0ms spacing, 0/15 with 3 seconds of spacing).
 - **`paid_data_unavailable` can come back.** This is the state where the payment went through but
   fetching the data failed, and **the funds have moved**. The Router **does not auto-retry** (to
-  avoid double payment). Retrying will go through.
-  **This is not rare**: there is a real case from another environment where a real settlement
-  **hit this on the first attempt** (`delivered` on retry).
+  avoid double payment). **A new purchase is a new payment**: it needs a **new quote and a new human
+  approval** (never reuse the old `requestId`). The same holds for `unknown` and `awaiting_payment`:
+  none of them proves that nothing was paid. **This is not rare**: there is a real case from another
+  environment where a real settlement **hit this on the first attempt** (`delivered` on a new purchase).
 - **Pass the `quote` object back into purchase.** The remote Router is **stateless** and does not
   retain the quote. `quoteId` alone gives you `quote_required`.
   You pass **5 things**: `quoteId` / `requestId` / `approval` / `quote` / `credential`

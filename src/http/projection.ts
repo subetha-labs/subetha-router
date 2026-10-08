@@ -97,6 +97,9 @@ export function quoteBody(
       asset: quote.destination.asset,
       network: quote.destination.network,
       quoteFingerprint: quote.destination.quoteFingerprint,
+      // H-1（要件 FR-A14）: 静的 route の宛先は運用者が固定している。承認の記録に写せるように受取先と桁を**加える**（動的と同じ欄名）。
+      payTo: route.destination.payTo,
+      ...(route.destination.decimals === undefined ? {} : { decimals: route.destination.decimals }),
     },
     approval: {
       required: true,
