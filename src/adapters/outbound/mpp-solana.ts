@@ -75,7 +75,19 @@ export function mppSolanaViewOf(challenge: unknown): MppSolanaChallengeView | un
     // `expires` があるのに読めない → 期限不明として `expired` に倒す（検査の 9 行目）。NaN で表す。
     expiresAt = typeof expires === "string" ? Date.parse(expires) : Number.NaN;
   }
-  return { id, realm, method, intent, scope, request, amount, currency, recipient, expiresAt, terms: stableJson({ realm, method, intent, request, meta: meta ?? null }) };
+  return { id, realm, method, intent, scope, request, amount, currency, recipient, expiresAt, terms: stableJson({ realm, method, intent, request: requestForTerms(request), meta: meta ?? null }) };
+}
+
+/**
+ * `terms` に入れる `request`: `methodDetails.recentBlockhash` を除く（D-24: Router は読むが使わない hint で、pay-kit の server は RPC が答えるとき
+ * **402 ごとに新しい値**を入れる。含めると quote 時と purchase 時の 402 が決して一致せず `destination_offer_changed` になる——2026-10-08 の G-3″ で本番の
+ * Provider D に対して判明。fixture の RPC は blockhash が固定なので出なかった）。`request` そのものは変えない（§4.2 の 8 行目の形の検査と `feePayerKey` の取り出しは元の値で）。
+ */
+export function requestForTerms(request: Record<string, unknown>): Record<string, unknown> {
+  const details = request["methodDetails"];
+  if (!isRecord(details) || !Object.hasOwn(details, "recentBlockhash")) return request;
+  const { recentBlockhash: _hint, ...rest } = details;
+  return { ...request, methodDetails: rest };
 }
 
 /** この adapter（1 つの network・1 つの mint）の固定値。`routerAta` は startup で導く。 */

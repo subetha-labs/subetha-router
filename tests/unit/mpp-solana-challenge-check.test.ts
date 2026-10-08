@@ -24,7 +24,7 @@ import {
   MPP_SOLANA_SCHEME,
   type MppSolanaChallengeRejection,
   type MppSolanaOutboundPolicy,
-} from "../../src/adapters/outbound/mpp-solana.js";
+ requestForTerms } from "../../src/adapters/outbound/mpp-solana.js";
 import { SYSTEM_PROGRAM_ADDRESS } from "../../src/adapters/outbound/x402-svm.js";
 import { MEMO_PROGRAM_ADDRESS } from "../../src/adapters/inbound/x402-svm.js";
 
@@ -188,6 +188,22 @@ describe("MPP Solana 送信: challenge の view と候補の検査（§4.2 の 9
     const withBadDescription = mppSolanaViewOf({ ...challenge, request: { ...(challenge["request"] as Record<string, unknown>), description: 1 } })!;
     expect(checkMppSolanaChallenge(withBadDescription, SCOPE, policy, [operator], Date.now())).toBe("field_type");
     expect(await rejectionOf({ request: { description: "a service" } })).toBeUndefined();
+  });
+
+  test("terms は methodDetails.recentBlockhash を含まない（D-24: pay-kit の server は RPC が答えると 402 ごとに新しい hint を入れる。G-3″ で判明）: hint だけが違う 2 つの challenge は同じ terms・同じ offer", async () => {
+    const a = mppSolanaViewOf(await issue({ details: { recentBlockhash: recipient } }))!;
+    const b = mppSolanaViewOf(await issue({ details: { recentBlockhash: feePayerKey } }))!;
+    const plain = mppSolanaViewOf(await issue())!;
+    expect(a.terms).toBe(b.terms);
+    expect(a.terms).toBe(plain.terms);
+    expect(a.terms).not.toContain(recipient.slice(0, 20) + '"');
+    expect(mppSolanaOfferOf(a, policy)).toEqual(mppSolanaOfferOf(b, policy));
+    // view の request そのものは変えない（8 行目の形の検査は元の値で）。
+    expect((a.request["methodDetails"] as Record<string, unknown>)["recentBlockhash"]).toBe(recipient);
+    expect(requestForTerms({ amount: "1" })).toEqual({ amount: "1" });
+    const noHint = { amount: "1", methodDetails: { network: "devnet" } };
+    expect(requestForTerms(noHint)).toBe(noHint);
+    expect(requestForTerms({ amount: "1", methodDetails: { network: "devnet", recentBlockhash: "x" } })).toEqual({ amount: "1", methodDetails: { network: "devnet" } });
   });
 
   test("8: recentBlockhash があれば base58 32 バイト（読むが使わない）", async () => {

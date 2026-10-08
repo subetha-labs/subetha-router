@@ -377,6 +377,14 @@ Router の候補の検査（`checkMppSolanaChallenge` に本番の運用者の�
 公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。rollback は `subetha-router-prev-20261008T145546Z`（`b-24bae1a`）。確かめたこと: コンテナは healthy、公開 MCP の一覧は **route 6・プロファイル 10 のまま**（`solmpp` の route・プロファイル無し）、
 子プロセスの env は `SUBETHA_RAILS_ACTIVATION=arc-in,arc-out,solana-in,solana-out`（`solana-mpp-*` の語は無い）で、**`SUBETHA_SOLANA_MPP_PROVIDER_PAYTO` は子に渡っていない**（無効なので読まれない。`/proc/<pid>/environ` の名前だけを見た）。次は G-3″。
 
+**G-3″ の 1 回目（2026-10-08 15:01Z〜15:07Z。owner の決定「進めてください」）**: 公開の Router を止め、受け入れ用の起動（`b-c73936d`、`--rails` 6 語。起動 11 秒、一覧は route 10・プロファイル 18）で購入。
+受信 S-5 の 3 件は **delivered**（credential は `tools/sign-run.ts` = `npm run sign` の本体で作成。payer の Solana 取引は 3 件とも devnet で finalized）: 静的 `md-x402-eth-snapshot-solmpp` 5.0 秒（受信 signature `AacEzU…`、送信 Base tx `0x29e7…`）、
+動的 `dyn-solmpp-to-x402`（Provider A）6.8 秒（`5WSoXD…` → `0x65d8…`）、動的 `dyn-solmpp-to-mpp`（Provider B）6.8 秒（`bTghQw…` → Tempo `0xe5ea…`）。
+送信 S-6 の 1 件目 `md-solmpp-eth-snapshot` は **`unknown`（`destination_pay_unknown`）**: 受信の Base の支払い（`0x09d3…`）は settle、Provider D は 402（領収なし）を返し、送信レグの資金は動いていない。
+原因は 2 つ（どちらも Router・Provider のコードの検証では見えなかった本番の差）: (1) Provider D の Worker から公開 devnet RPC への要求が遮断されていた（`docs/provider-mpp-solana-workers.md` §7 U-P3。owner が Alchemy の RPC を secret に入れて解決）、
+(2) RPC が答えると pay-kit の 402 は **`recentBlockhash` の hint を 402 ごとに新しく**入れ、Router の `terms` がそれを含んでいたため購入時の読み直しが一致せず `destination_offer_changed`（not_sent）になる（設計 §13。Router の修正 PR の番号はこの下の記録）。
+公開の停止は約 6 分（15:01:00Z〜15:06:57Z）。固定した commit・イメージに対して 1 度、の規則どおり、修正を含むイメージで G-2″ から繰り返す。
+
 **rollback**: 定数を `false` に戻してイメージを作り直す（§2c と同じ。env は残してよい——無効なら読まれない）。
 
 **有効にした後に見るもの**（§2c の注と同じく、hosted の入口は Router の process の stderr を転送しない）: 受信の `transaction` 型で Router が送出した後に確定を観測できなかった purchase は
