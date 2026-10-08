@@ -20,7 +20,7 @@ Each phase: minimal artifact, independent review, parent readback. No repeated w
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.
 **The Router never holds your key**, so the signature is produced here.
 
-The Router exposes **four routes**. **Pick the one you can pay with what you hold**:
+The Router exposes **six routes** (the two outbound ones only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
 
 | routeId | you pay with | reaches |
 |---|---|---|
@@ -28,10 +28,13 @@ The Router exposes **four routes**. **Pick the one you can pay with what you hol
 | `md-x402-eth-snapshot` | **Tempo pathUSD** (MPP) | a provider that only accepts x402 |
 | `md-mpp-eth-snapshot-arc` | **Arc testnet USDC** (x402) | a provider that only accepts MPP |
 | `md-x402-eth-snapshot-sol` | **Solana devnet USDC** (x402) | a provider that only accepts x402 |
+| `md-arc-eth-snapshot` | **Base Sepolia USDC** (x402) | a provider that only accepts **Arc testnet USDC** |
+| `md-sol-eth-snapshot-mpp` | **Tempo pathUSD** (MPP) | a provider that only accepts **Solana devnet USDC** |
 
-Outbound rails to providers that accept only **Arc** or **Solana** are implemented behind the operator's switch (`md-arc-eth-snapshot`: pay **Base Sepolia USDC**, reaches an Arc
-provider; `md-sol-eth-snapshot-mpp`: pay **Tempo pathUSD** over MPP, reaches a Solana provider; profiles `dyn-x402-to-arc` / `dyn-mpp-to-arc` / `dyn-x402-to-sol` / `dyn-mpp-to-sol`).
-**They appear in the listing only after the operator enables them**; until then they do not exist for you. When they do, the steps are the same as above (`npm run sign` detects the rail
+Outbound rails to providers that accept only **Arc** or **Solana** are switched on by the operator's constant (G-4′, 2026-10-08; the hosted Router carries it from the image swap recorded in
+`docs/DEPLOY.md` §2c) (`md-arc-eth-snapshot`: pay **Base Sepolia USDC**, reaches an Arc provider; `md-sol-eth-snapshot-mpp`: pay **Tempo pathUSD** over MPP, reaches a Solana provider;
+profiles `dyn-x402-to-arc` / `dyn-mpp-to-arc` / `dyn-x402-to-sol` / `dyn-mpp-to-sol`).
+The operator can switch them off again with the same constant: **if they are missing from `subetha_router_list_routes`, they do not exist for you.** The steps are the same as above (`npm run sign` detects the rail
 you pay with from the offer; the MPP disclosure is unchanged), and the Router signs the Solana transfer with its own key — you never hold Solana funds for these routes.
 
 Steps:
@@ -106,10 +109,11 @@ again with one constant: **if they are missing from `subetha_router_list_routes`
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`. On the hosted Router six profiles are enabled. The original two: `dyn-mpp-to-x402` (you pay **Tempo
+with `enabled`. On the hosted Router ten profiles are enabled once the G-4′ swap is in place (six before it). The original two: `dyn-mpp-to-x402` (you pay **Tempo
 pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**) and `dyn-x402-to-mpp` (you pay
 **Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); since 2026-10-07 also `dyn-arc-to-mpp` /
-`dyn-arc-to-x402` (you pay **Arc testnet USDC**) and `dyn-sol-to-x402` / `dyn-sol-to-mpp` (you pay **Solana devnet USDC**).
+`dyn-arc-to-x402` (you pay **Arc testnet USDC**) and `dyn-sol-to-x402` / `dyn-sol-to-mpp` (you pay **Solana devnet USDC**); with G-4′ also `dyn-x402-to-arc` / `dyn-x402-to-sol`
+(you pay **Base Sepolia USDC**, the upstream accepts **Arc testnet USDC** / **Solana devnet USDC**) and `dyn-mpp-to-arc` / `dyn-mpp-to-sol` (you pay **Tempo pathUSD** over MPP).
 A profile that is not listed,
 or `enabled: false`, means `subetha_router_quote_url` answers `unknown_route` / `dynamic_disabled`.
 The steps differ from the static ones in these ways:

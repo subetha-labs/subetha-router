@@ -143,9 +143,9 @@ export interface RailsOptions {
 const RAIL_OFF: RailActivation = Object.freeze({ inbound: false, outbound: false });
 /**
  * 公開の process の有効化。受信は **2026-10-07 に両方 `true`**（T10 の G-4。`docs/DEPLOY.md` §2c の記録）。
- * 送信は **`false`**（送信の gate UG-A・UG-S の G-4′ でレールごとに `true` にする。送信の設計 §6.1）。env からは変えられない。戻すのはここ（イメージを作り直して入れ替える）。
+ * 送信は **2026-10-08 に両方 `true`**（UG-A・UG-S の G-4′。`docs/DEPLOY.md` §2c の記録。送信の設計 §6.1）。env からは変えられない。戻すのはここ（イメージを作り直して入れ替える）。
  */
-export const RAILS_ACTIVATION: RailsActivation = Object.freeze({ arc: Object.freeze({ inbound: true, outbound: false }), solana: Object.freeze({ inbound: true, outbound: false }) });
+export const RAILS_ACTIVATION: RailsActivation = Object.freeze({ arc: Object.freeze({ inbound: true, outbound: true }), solana: Object.freeze({ inbound: true, outbound: true }) });
 /** どちらも無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF });
 export const RAILS_DISABLED: RailsOptions = Object.freeze({ activation: RAILS_NONE, receivers: Object.freeze({}) });

@@ -131,10 +131,11 @@ not an env, and setting them back to `false` removes them from the listing again
 | `md-mpp-eth-snapshot-arc` | x402 (Arc testnet USDC, facilitator: Circle) | MPP (`subetha-provider-mpp`) |
 | `md-x402-eth-snapshot-sol` | x402 (Solana devnet USDC, facilitator: x402.org, SVM `exact`) | x402 (`subetha-provider-x402`) |
 
-**Outbound rails** (paying providers that accept only Arc or Solana) are being added behind the same one-constant switch, now per direction
-(`RAILS_ACTIVATION = { arc: { inbound, outbound }, solana: { inbound, outbound } }`; outbound is `false` on the hosted Router until its own gate). The Arc outbound routes
+**Outbound rails** (paying providers that accept only Arc or Solana) sit behind the same one-constant switch, per direction
+(`RAILS_ACTIVATION = { arc: { inbound, outbound }, solana: { inbound, outbound } }`); **outbound was switched on at G-4′ (2026-10-08)** after six acceptance purchases
+to the operator's own Arc and Solana providers (Cloudflare Workers, `providers/x402-workers/`); the hosted Router carries it from the image swap recorded in `docs/DEPLOY.md` §2c. The Arc outbound routes
 (`md-arc-eth-snapshot`, `dyn-x402-to-arc`, `dyn-mpp-to-arc`) and the Solana outbound routes (`md-sol-eth-snapshot-mpp`: Tempo pathUSD in, Solana devnet USDC out through the x402
-SVM `exact` scheme signed by the Router's own ed25519 key; `dyn-x402-to-sol`, `dyn-mpp-to-sol`) appear in the listing only after enablement. The Solana path builds the transfer
+SVM `exact` scheme signed by the Router's own ed25519 key; `dyn-x402-to-sol`, `dyn-mpp-to-sol`) are in the listing while the switch is on. The Solana path builds the transfer
 transaction itself (fixed shape: compute budget, SPL `TransferChecked`, memo), checks the compiled message independently of the builder, reserves its hash in the journal before
 signing so the same message is never signed twice (also across a crash and restart), verifies the signature and the wire before the single send, and keeps a per-purchase balance
 pre-check; all of this is covered by fixture tests including child-process SIGKILL interruption tests, and by two independent signing-boundary reviews.
