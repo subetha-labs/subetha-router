@@ -169,20 +169,53 @@ export const PurchaseSummary = z
   .strict();
 export type PurchaseSummary = z.infer<typeof PurchaseSummary>;
 
-/** JSON として直列化できて、UTF-8 で 256 KiB 以下の object だけ（上流の本文の全文。`includeBody` のときだけ返す）。 */
-const boundedJsonObject = z.unknown().superRefine((value, ctx) => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "body must be a JSON object" });
-    return;
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * JSON の**データ**だけを再帰的に検証して plain な複製を返す（`Date`・`toJSON` を持つ object・class の instance・関数・NaN・BigInt・undefined は拒む。
+ * `toJSON` による直列化の差し替えや、状態を持つ直列化で測った大きさをすり抜けることを防ぐ。レビュー P-1a #3）。深さは 64 まで。
+ */
+function plainJsonOf(value: unknown, depth: number): JsonValue | undefined {
+  if (depth > 64) return undefined;
+  if (value === null) return null;
+  if (typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (Array.isArray(value)) {
+    const out: JsonValue[] = [];
+    for (const item of value) {
+      const copied = plainJsonOf(item, depth + 1);
+      if (copied === undefined) return undefined;
+      out.push(copied);
+    }
+    return out;
   }
-  let text: string;
-  try {
-    text = JSON.stringify(value);
-  } catch {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "body must be JSON-serialisable" });
-    return;
+  if (typeof value === "object") {
+    const proto = Object.getPrototypeOf(value) as unknown;
+    if (proto !== Object.prototype && proto !== null) return undefined;
+    const out: { [key: string]: JsonValue } = {};
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      if (key === "__proto__" || key === "toJSON") return undefined;
+      const copied = plainJsonOf((value as Record<string, unknown>)[key], depth + 1);
+      if (copied === undefined) return undefined;
+      out[key] = copied;
+    }
+    return out;
   }
-  if (text === undefined || Buffer.byteLength(text, "utf8") > 262_144) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "body must be at most 256 KiB" });
+  return undefined;
+}
+
+/** JSON の object で、UTF-8 で 256 KiB 以下（上流の本文の全文。`includeBody` のときだけ返す）。検証した**複製**を返す。 */
+const boundedJsonObject = z.unknown().transform((value, ctx) => {
+  const copied = typeof value === "object" && value !== null && !Array.isArray(value) ? plainJsonOf(value, 0) : undefined;
+  if (copied === undefined || typeof copied !== "object" || copied === null || Array.isArray(copied)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "body must be a plain JSON object" });
+    return z.NEVER;
+  }
+  if (Buffer.byteLength(JSON.stringify(copied), "utf8") > 262_144) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "body must be at most 256 KiB" });
+    return z.NEVER;
+  }
+  return copied;
 });
 
 /** `status` に `includeBody: true` を付けたときだけ使う schema。普通の `PurchaseSummary` は `body` を持たない（拒む）。 */

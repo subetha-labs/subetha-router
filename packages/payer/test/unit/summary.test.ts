@@ -111,6 +111,19 @@ describe("Summary: strict output validation", () => {
     const circular: Record<string, unknown> = {};
     circular["self"] = circular;
     expect(toSummary(PurchaseBodySummary, { ...purchase, result: { ...purchase.result, body: circular } })).toEqual({ ok: false, error: "internal_error" });
+    // JSON のデータだけ: Date・toJSON を持つ object・class の instance・NaN・undefined・関数・BigInt は拒む。通ったものは plain な複製（元の object ではない）。
+    for (const body of [new Date(), { toJSON: () => [] }, { n: NaN }, { u: undefined }, { f: () => 1 }, { b: 1n }, new (class X { x = 1 })(), { nested: { toJSON: () => "x" } }, Object.create({ inherited: 1 })]) {
+      expect(toSummary(PurchaseBodySummary, { ...purchase, result: { ...purchase.result, body } }), String(body)).toEqual({ ok: false, error: "internal_error" });
+    }
+    const source = { price: 1, nested: { list: [1, "a", null, true], text: "あ" } };
+    const out = toSummary(PurchaseBodySummary, { ...purchase, result: { ...purchase.result, body: source } }) as { result: { body: unknown } };
+    expect(out.result.body).toEqual(source);
+    expect(out.result.body).not.toBe(source);
+    // 状態を持つ直列化（2 回目に大きくなる）も、複製を測るので通らない／すり抜けない。
+    let calls = 0;
+    const stateful = { get big() { calls += 1; return calls === 1 ? "x" : "x".repeat(300_000); } };
+    const first = toSummary(PurchaseBodySummary, { ...purchase, result: { ...purchase.result, body: stateful } }) as { ok: boolean; result?: { body: { big: string } } };
+    if (first.ok) expect(Buffer.byteLength(JSON.stringify(first.result!.body), "utf8")).toBeLessThanOrEqual(262_144);
   });
 
   test("wallet and routes summaries: addresses, amounts and ids have shapes; a secret in an allowed field is rejected", () => {
