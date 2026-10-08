@@ -10,7 +10,7 @@ import https from "node:https";
 
 import type { TlsMaterial } from "./tls/generate.js";
 
-import { address } from "@solana/kit";
+import { address, getBase58Decoder, getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
 import { getMintEncoder, getTokenEncoder, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 
 export interface SolanaRpcAccounts {
@@ -52,6 +52,16 @@ export interface SolanaRpcState {
    * `null` は「知らない署名」、`processed`／`confirmed`／`finalized` はその確定度、`err` はチェーン上の失敗。未設定・空の列なら `null`。
    */
   signatureStatuses: Array<"null" | "processed" | "confirmed" | "finalized" | "err" | "err-confirmed" | "empty" | "no-err-key"> | undefined;
+  /**
+   * `sendTransaction` の応答（MPP Solana 受信の `transaction` 型の送出。`docs/mpp-solana-design.md` §8.1）: `ok` = 署名を返し `transactions` に登録、
+   * `rpc-error` = JSON-RPC の error（preflight の失敗の形）、`already-processed` = error だが `transactions` に登録（payer が先に送出していた形）、
+   * `no-response` = 応答しない（接続は開いたまま）。
+   */
+  sendReply: "ok" | "rpc-error" | "already-processed" | "no-response";
+  /** 受けた `sendTransaction` の base64（順）。 */
+  sent: string[];
+  /** `getTransaction` が返す transaction（署名 → 内容）。`sendTransaction` の `ok`／`already-processed` が登録し、試験が直接も置ける。 */
+  transactions: Map<string, { base64: string; err: unknown; slot: number; blockTime: number | null }>;
   /** 応答を返す前に待つ合図（試験が順序を固定するための barrier）。`undefined` なら待たない。 */
   gate: (() => Promise<void>) | undefined;
   redirectTo: string | undefined;
@@ -76,11 +86,56 @@ export function uiAmountStringOf(amount: string, decimals: number): string {
   return fraction === "" ? whole : `${whole}.${fraction}`;
 }
 
+/** wire（base64）の署名 [0]（base58）。読めなければ `undefined`。 */
+export function signatureOfBase64(base64: string): string | undefined {
+  try {
+    const bytes = Buffer.from(base64, "base64");
+    if (bytes.length < 65 || bytes[0] === 0) return undefined;
+    return getBase58Decoder().decode(new Uint8Array(bytes.subarray(1, 65)));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `getTransaction` の `jsonParsed` の形（pay-kit の server の `verifyOnChain` が読む欄だけ: `message.instructions[].programId`・`program`・`parsed`、
+ * `accountKeys`、`signatures`）。`TransferChecked`（discriminator 12）と Memo だけ parse し、他は `programId` と `data` のまま。
+ */
+export function parsedTransactionOf(base64: string): unknown {
+  const bytes = new Uint8Array(Buffer.from(base64, "base64"));
+  const [tx] = getTransactionDecoder().read(bytes, 0);
+  const compiled = getCompiledTransactionMessageDecoder().decode(tx.messageBytes) as unknown as { staticAccounts: readonly string[]; header: { numSignerAccounts: number; numReadonlySignerAccounts: number; numReadonlyNonSignerAccounts: number }; instructions: readonly { programAddressIndex: number; accountIndices?: readonly number[]; data?: ArrayLike<number> }[]; lifetimeToken: string };
+  const keys = compiled.staticAccounts.map(String);
+  const signatureCount = bytes[0] ?? 0;
+  const signatures: string[] = [];
+  for (let i = 0; i < signatureCount; i += 1) signatures.push(getBase58Decoder().decode(bytes.subarray(1 + i * 64, 65 + i * 64)));
+  const instructions = compiled.instructions.map((ix) => {
+    const programId = keys[ix.programAddressIndex]!;
+    const data = new Uint8Array(ix.data ?? []);
+    const accounts = (ix.accountIndices ?? []).map((index) => keys[index]!);
+    if ((programId === String(TOKEN_PROGRAM_ADDRESS) || programId === "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb") && data[0] === 12 && data.length === 10 && accounts.length >= 4) {
+      let amount = 0n;
+      for (let i = 7; i >= 0; i -= 1) amount = (amount << 8n) | BigInt(data[1 + i]!);
+      const decimals = data[9]!;
+      return { programId, program: "spl-token", parsed: { type: "transferChecked", info: { source: accounts[0], mint: accounts[1], destination: accounts[2], authority: accounts[3], tokenAmount: { amount: amount.toString(), decimals, uiAmount: Number(amount) / 10 ** decimals, uiAmountString: (Number(amount) / 10 ** decimals).toString() } } } };
+    }
+    if (programId === "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr") {
+      return { programId, program: "spl-memo", parsed: new TextDecoder().decode(data) };
+    }
+    return { programId, accounts, data: getBase58Decoder().decode(data) };
+  });
+  const signerCount = compiled.header.numSignerAccounts;
+  const readonlySigners = compiled.header.numReadonlySignerAccounts;
+  const readonlyNonSigners = compiled.header.numReadonlyNonSignerAccounts;
+  const accountKeys = keys.map((pubkey, index) => ({ pubkey, signer: index < signerCount, writable: index < signerCount ? index < signerCount - readonlySigners : index < keys.length - readonlyNonSigners, source: "transaction" }));
+  return { signatures, message: { accountKeys, instructions, recentBlockhash: String(compiled.lifetimeToken) } };
+}
+
 export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<SolanaRpcFixture> {
   const tokenProgram = accounts.tokenProgram ?? TOKEN_PROGRAM_ADDRESS;
   const blockhash = accounts.blockhash ?? "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD";
   const calls: { method: string; params: unknown }[] = [];
-  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])], failMethods: [] };
+  const state: SolanaRpcState = { delayMs: 0, reply: "ok", redirectTo: undefined, signatureStatuses: undefined, gate: undefined, sendReply: "ok", sent: [], transactions: new Map(), atas: [...(accounts.ata === undefined ? [] : [accounts.ata]), ...(accounts.atas ?? [])], failMethods: [] };
   let connections = 0;
   const mintData = Buffer.from(
     getMintEncoder().encode({ mintAuthority: null, supply: 1_000_000_000_000n, decimals: accounts.decimals, isInitialized: true, freezeAuthority: null }),
@@ -164,6 +219,46 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
           : kind === "err-confirmed" ? { slot: 1, confirmations: 1, err: { InstructionError: [2, "Custom"] }, confirmationStatus: "confirmed" }
           : { slot: 1, confirmations: kind === "finalized" ? null : 1, err: null, confirmationStatus: kind };
         reply({ context: { slot: 1 }, value: [entry] }, id);
+        return;
+      }
+      if (method === "simulateTransaction") {
+        // pay-kit の server が送出の前に呼ぶ（`result.value.err` を見る）。
+        reply({ context: { slot: 1 }, value: { err: null, logs: [], unitsConsumed: 1, accounts: null, returnData: null } }, id);
+        return;
+      }
+      if (method === "sendTransaction") {
+        const [base64] = (params as [string] | undefined) ?? [];
+        if (typeof base64 !== "string") {
+          reply(undefined, id, { code: -32602, message: "invalid params" });
+          return;
+        }
+        state.sent.push(base64);
+        const signature = signatureOfBase64(base64);
+        if (state.sendReply === "no-response") return; // 応答しない（要求の期限で切れる）
+        if (state.sendReply === "rpc-error") {
+          reply(undefined, id, { code: -32002, message: "Transaction simulation failed: Blockhash not found" });
+          return;
+        }
+        if (signature !== undefined && !state.transactions.has(signature)) {
+          state.transactions.set(signature, { base64, err: null, slot: 1, blockTime: Math.floor(Date.now() / 1000) });
+        }
+        if (state.sendReply === "already-processed") {
+          reply(undefined, id, { code: -32002, message: "Transaction simulation failed: This transaction has already been processed" });
+          return;
+        }
+        reply(signature ?? "", id);
+        return;
+      }
+      if (method === "getTransaction") {
+        const [signature, config] = (params as [string, { encoding?: string } | undefined] | undefined) ?? [];
+        const known = typeof signature === "string" ? state.transactions.get(signature) : undefined;
+        if (known === undefined) {
+          reply(null, id);
+          return;
+        }
+        const encoding = config?.encoding ?? "json";
+        const transaction = encoding === "base64" ? [known.base64, "base64"] : parsedTransactionOf(known.base64);
+        reply({ slot: known.slot, blockTime: known.blockTime, version: 0, transaction, meta: { err: known.err, fee: 5000, preBalances: [], postBalances: [], innerInstructions: [], logMessages: [], preTokenBalances: [], postTokenBalances: [], rewards: [], computeUnitsConsumed: 1, loadedAddresses: { readonly: [], writable: [] } } }, id);
         return;
       }
       if (method === "getLatestBlockhash") {
