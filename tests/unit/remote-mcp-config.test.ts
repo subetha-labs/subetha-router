@@ -94,7 +94,7 @@ describe("公開の process の既定: Arc・Solana はどちらも無効", () =
     expect(RAILS_NONE).toEqual({ arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_NONE)).toBe(true);
     expect(RAILS_DISABLED.activation).toBe(RAILS_NONE);
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: false, solToArc: false } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
     const document = routerConfigOf({}, RECEIVER, true);
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true, RAILS_DISABLED));
@@ -257,18 +257,19 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
   const OUT_ONLY: RailsOptions = { activation: { arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { arc: ARC_PROVIDER } };
 
   test("公開の定数は受信 true・送信 true（Arc・Solana とも。G-4′ 2026-10-08）。railActive は方向のどれかで決まる", () => {
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: false, solToArc: false } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true } });
     expect(Object.isFrozen(RAILS_ACTIVATION) && Object.isFrozen(RAILS_ACTIVATION.arc)).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
     expect(railActive({ arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } })).toBe(true);
   });
 
-  test("公開の設定（定数、G-4″ の後）: route 10 本（受信 4 + 送信 2 + MPP Solana の受信 2・送信 2）と 18 本のプロファイル。O-5・O-6（Arc ↔ Solana の x402）は無い（D-12・D-16）。送信の受取先が無ければ起動しない", () => {
+  test("公開の設定（定数、G-4⁗ の後）: route 10 本（受信 4 + 送信 2 + MPP Solana の受信 2・送信 2）と 20 本のプロファイル（O-5・O-6 の dyn-arc-to-sol・dyn-sol-to-arc を含む。D-17）。送信の受取先が無ければ起動しない", () => {
     const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
     const router = routerOf(document);
     expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC, ROUTE_SOL, ROUTE_ARC_OUT, ROUTE_SOL_OUT, ROUTE_SOLMPP_TO_X402, ROUTE_SOLMPP_TO_MPP, ROUTE_SOLMPP_OUT, ROUTE_SOLMPP_OUT_MPP].sort());
-    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-solmpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402", "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp"]);
-    expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol"|dyn-sol-to-arc/);
+    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-sol", "dyn-arc-to-solmpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-sol-to-arc", "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402", "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp"]);
+    expect(JSON.stringify(document)).toMatch(/dyn-arc-to-sol"/);
+    expect(JSON.stringify(document)).toMatch(/dyn-sol-to-arc"/);
     // URL（定数）があるのに受取先が無ければ起動しない（固定文）。Provider D の受取 owner が欠けても同じ。
     expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } })).toThrow();
     expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d" } })).toThrow(/solana mpp outbound rail/);
@@ -385,7 +386,7 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
     expect(ids.profiles).toContain("dyn-x402-to-sol");
     expect(ids.profiles).toContain("dyn-mpp-to-sol");
     expect(ids.routes).toHaveLength(10);
-    expect(ids.profiles).toHaveLength(18);
+    expect(ids.profiles).toHaveLength(20);
     expect(new Set([...ids.routes, ...ids.profiles]).size).toBe(ids.routes.length + ids.profiles.length);
   });
 
@@ -462,7 +463,7 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER } }));
     const ids = listedIds(router);
     expect(ids.routes).toHaveLength(10);
-    expect(ids.profiles).toHaveLength(18);
+    expect(ids.profiles).toHaveLength(20);
     expect(ids.routes.filter((r) => r.includes("solmpp"))).toEqual(["md-mpp-eth-snapshot-solmpp", "md-solmpp-eth-snapshot", "md-solmpp-eth-snapshot-mpp", "md-x402-eth-snapshot-solmpp"]);
     expect(ids.profiles.filter((p) => p.includes("solmpp"))).toHaveLength(8);
     expect(router.routes[ROUTE_SOLMPP_OUT]?.destination.payTo).toBe(SOL_MPP_PROVIDER);
@@ -706,13 +707,14 @@ describe("O-5・O-6: 組の切り替え pairs と dyn-arc-to-sol・dyn-sol-to-ar
     expect(JSON.stringify(document)).not.toContain(`${absent}"`);
   });
 
-  test("pairs 両方 false、または無し（公開の定数の G-2⁗ の形）: 18 本のまま。ID は文書に出ない", () => {
+  test("pairs 両方 false、または無し（G-2⁗ の配備の形）: 18 本のまま。ID は文書に出ない。公開の定数（G-4⁗）は 20 本", () => {
     for (const pairs of [{ arcToSol: false, solToArc: false }, undefined]) {
       const document = routerConfigOf({}, RECEIVER, true, optionsOf(pairs));
       expect(Object.keys(routerOf(document).dynamic!.profiles).sort()).toEqual(EIGHTEEN);
       expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol"|dyn-sol-to-arc"/);
     }
-    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, true, optionsOf(RAILS_ACTIVATION.pairs, RAILS_ACTIVATION))).dynamic!.profiles)).toHaveLength(18);
+    // 公開の定数は G-4⁗ で両方 true → 20 本。false の固定の構成（上）が 18 本の対照。
+    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, true, optionsOf(RAILS_ACTIVATION.pairs, RAILS_ACTIVATION))).dynamic!.profiles)).toHaveLength(20);
   });
 
   test.each([

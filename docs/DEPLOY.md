@@ -322,7 +322,7 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。**journal では追跡で確定した settle と facilitator が直接成功を返した settle を
 区別できない**（どちらも `source_settled`）ので、hosted の Router で追跡が働いた回数は分からない。数えられるのは、受け入れ用の起動のように stderr が読める起動だけ）。
 
-### 2c-2. Arc x402 ↔ Solana x402 の組（O-5・O-6。動的プロファイルだけ）— **G-2⁗ の配備では無効（`pairs` 両方 `false`。一覧は 18 本のまま）**
+### 2c-2. Arc x402 ↔ Solana x402 の組（O-5・O-6。動的プロファイルだけ）— **この commit で `pairs` 両方 `true`（公開に出るのは G-4⁗ の入れ替えから。入れ替えと hosted の実購入の記録は下に足す）**
 
 D-17 の決定（owner、2026-10-09 JST）: Arc USDC ↔ Solana USDC は testnet では par、公開は動的プロファイル **`dyn-arc-to-sol`**（Arc USDC/x402 で払って Solana の x402 Provider の URL へ）と
 **`dyn-sol-to-arc`**（Solana USDC/x402 で払って Arc の x402 Provider の URL へ）だけ（要件 `multirail-outbound-requirements.md` §11、設計 `multirail-outbound-design.md` §13、タスク U10・UG-P）。
@@ -339,6 +339,24 @@ D-17 の決定（owner、2026-10-09 JST）: Arc USDC ↔ Solana USDC は testnet
    payer は使い捨て（Arc USDC `0xfCea…`、Solana USDC `HTaz…`。§2e と同じ）。証拠は AC-13／AC-14 と同じ（両レグの tx と確定、受取先・額、Provider の応答、client の結果、再読取）
 3. **G-4⁗**: `pairs` 両方 `true` の PR（同じ PR で `RAILS_ACTIVATION` を直接読む試験の期待を 20 本・8 語に: `tests/unit/remote-mcp-config.test.ts` の定数の形の 2 か所と公開の一覧の 18 本、`tests/unit/rails-entry.test.ts` の定数の形・6 語・組の試験の「pairs 無しの計画 = 18 本」の対照、`tests/wire/rails-process-entry.test.ts` のソースを固定する正規表現の `false` の 2 か所。`pairs` を `false` にした固定の構成で 18 本を見る試験は残す）と入れ替え。
    公開の一覧が route 10・プロファイル 20、各 1 回の quote、**hosted で各 1 件の実購入**（§2e と同じ証拠）。CLAUDE.md・README・公開ブリーフ（20/20）を更新
+
+**G-2⁗ の記録（2026-10-08 18:40Z。owner の決定「G-2⁗ と G-3⁗ を両方進める」）**: main `10f251c`（PR #127。`pairs` 両方 `false`）のイメージ `b-10f251c`（手元 arm64 で build、`docker save`/`load`、14 層の内容ハッシュ一致、`swap-image.sh` は repo と同一の sha256）を
+`swap-image.sh` で入れ替え: 18:40:21Z 開始、18:40:32Z 終了、exit 0、journal の先頭 146,394 バイト不変、egress check ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。rollback は `subetha-router-prev-20261008T184021Z`（`b-3606fb6`。それより古い prev は削除）。
+確かめたこと: コンテナ healthy、公開 MCP の一覧は **route 10・プロファイル 18 のまま**（`dyn-arc-to-sol`・`dyn-sol-to-arc` 無し）。
+
+**G-3⁗ の記録（2026-10-08 18:41:50Z〜18:43:56Z。同じ決定）— AC-20 を満たした**: caddy を止め、公開の Router を止め（直前の journal は seq 177 `delivered`、進行中の購入なし）、同じイメージ・同じ network・同じボリューム・同じ env file で受け入れ用に起動
+（`--rails arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc`、`-p 127.0.0.1:8788`。listening 行の `rails` は 6 語、一覧は route 6・プロファイル 12 で `dyn-arc-to-sol`・`dyn-sol-to-arc` を含む）。手元から ssh トンネルで 2 件（driver は §2e と同じ私的 script、payer も同じ使い捨て鍵）:
+
+| # | profile | 受信の tx（payer → Router の受取） | Router → Provider の tx | 所要 |
+|---|---|---|---|---|
+| O-5 | `dyn-arc-to-sol`（Arc USDC/x402 11,000 → Solana Worker の URL） | Arc `0x6489f1…cdad`（block 66180036、`success`、`0xfCea…` → `0xAF42…` 11,000） | Solana `2VBwu1…DHaD`（slot 508910782、finalized、Router の ATA `2mpw…` → Worker の ATA `Hnuscu…` 10,000、fee payer は facilitator `CKPK…`、memo `subetha:<paymentId>`） | 8.0 秒 |
+| O-6 | `dyn-sol-to-arc`（Solana USDC/x402 11,000 → Arc Worker の URL） | Solana `3tTCa6…Mfiq`（slot 508910887、finalized、`HTaz…` の ATA → Router の ATA `7pjZ…` 11,000、fee payer は facilitator、memo = quoteId） | Arc `0xb011eb…5a60`（block 66180101、`success`、`0x5d78…` → `0x719e…` 10,000） | 6.9 秒 |
+
+証拠（`.claude_workflow/local/g5-o5-arc-to-sol*.json`・`g5-o6-sol-to-arc*.json`・`g5-o56-status-reread.json`・`g5-balances-after-o56.json`）: 2 件とも `delivered`、本文は契約の 6 鍵、`proof` は `claimed`／`not_checked`。受け入れ journal（`acceptance/journal.ndjson` seq 130〜140）は `created → source_pending → source_settled → destination_pending → (destination_message_reserved) → delivered`。
+保存した `paymentId`＋`ownerKey` の再読取は 2 件とも purchase 時と同じ、`ownerKey` 無しは 404。残高の差分: Arc payer −11,000、Router の Arc 受取 +11,000、Router の Arc 送信 −10,000、Arc Worker +10,000、Solana payer −11,000、Router の Solana 受取 ATA +11,000、Router の Solana 送信 ATA −10,000、Solana Worker の ATA +10,000。
+終了後: 受け入れコンテナを停止（残プロセス無し）→ `docker start subetha-router` → healthy → `/healthz` ok → `subetha-egress check` exit 0 → caddy start → 公開 HTTPS の `/healthz` ok。公開の journal は seq 177 のまま。公開の停止は約 2 分。
+
+**G-4⁗ の記録**: 下に足す（イメージの入れ替え、一覧 20 本、quote、hosted の実購入）。
 
 **rollback**: `pairs` を `false` に戻してイメージを作り直す（§2c と同じ）。
 
