@@ -292,7 +292,9 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
     expect(() => routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, providers: {} })).toThrow();
     // URL が空なら（試験の差し替え）受取先があっても出ないし、受取先が無くても起動する。
     const empty = { arc: "", solana: "" };
-    expect(routerOf(routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, upstreams: empty })).routes[ROUTE_ARC_OUT]).toBeUndefined();
+    const withoutUrl = routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, upstreams: empty });
+    expect(routerOf(withoutUrl).routes[ROUTE_ARC_OUT]).toBeUndefined();
+    expect(Object.keys((withoutUrl["x402"] as { upstreams: Record<string, string> }).upstreams)).not.toContain(ROUTE_ARC_OUT);
     expect(() => routerConfigOf({}, RECEIVER, true, { ...OUT_ONLY, providers: {}, upstreams: empty })).not.toThrow();
   });
 
