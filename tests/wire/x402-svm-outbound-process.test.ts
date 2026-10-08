@@ -220,7 +220,7 @@ describe("停止点で SIGKILL → 予約の行は残り、再起動で unknown�
     });
   }
 
-  test("source_settled の最中（受信の settle の後、送信の destination_pending を書く前の読み直し）に親から SIGKILL → 再起動で unknown（interrupted_at_restart）。受信の証跡は残り、署名 0・支払い 0、再提出でも送信しない", async () => {
+  test("source_settled の最中（受信の settle の後、送信の destination_pending を書く前の読み直し）に親から SIGKILL → 再起動で paid_undelivered（interrupted_at_restart。受信は確定・未送出）。受信の証跡は残り、署名 0・支払い 0、再提出でも送信しない", async () => {
     const w = await world();
     const first = await boot(w);
     const quote = await quoteOf(first, "s1");
@@ -239,14 +239,14 @@ describe("停止点で SIGKILL → 予約の行は残り、再起動で unknown�
     expect(w.legacy.calls).toMatchObject({ verify: 1, settle: 1 });
 
     const second = await boot(w);
-    expect(await client(second).status(quote.paymentId)).toMatchObject({ found: true, projection: { status: "unknown", terminalReason: "interrupted_at_restart" } });
+    expect(await client(second).status(quote.paymentId)).toMatchObject({ found: true, projection: { status: "paid_data_unavailable", terminalReason: "interrupted_at_restart" } });
     const events = journalEvents(w, quote.paymentId);
     expect(events).toContain("source_settled");
-    expect(events.at(-1)).toBe("unknown");
+    expect(events.at(-1)).toBe("paid_undelivered");
     expect(events).not.toContain("destination_pending");
     expect(readFileSync(w.journalPath, "utf8")).toContain("\"txRef\"");
     const again = await client(second).execute({ quote, requestId: "s1", approval: { approved: true, quoteId: quote.quoteId }, credential });
-    expect(again).toMatchObject({ outcome: "unknown", reason: "interrupted_at_restart" });
+    expect(again).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "interrupted_at_restart" });
     expect(signLines(w).signs).toBe(0);
     expect(w.provider.seen.paid).toHaveLength(0);
     expect(w.legacy.calls).toMatchObject({ settle: 1 });
