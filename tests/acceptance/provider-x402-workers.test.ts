@@ -422,7 +422,7 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
       expect(circle.seen.proofFailures).toEqual([]);
     }, 120_000);
 
-    test("settle の HTTP の期限（facilitator が 25 秒黙る）: Worker は段の上限（20 秒）で 502 facilitator_unavailable、settle 1 回。Router の静的 EVM 経路は 5 秒で unknown（§9 の 6: 本番の不整合、Router 側の follow-up）", async () => {
+    test("settle の HTTP の期限（facilitator が 25 秒黙る）: Worker は段の上限（20 秒）で 502 facilitator_unavailable、settle 1 回。Router の静的 EVM 経路は有料要求の期限が 30 秒（§9 の 6 の解消。`paidTimeoutMs`）なので Worker の 502 を受けて unknown", async () => {
       circle.state.settleDelayMs = 25_000;
       const settles = circle.seen.settleCalls;
       const paid = arcFront.paid.length;
@@ -431,11 +431,12 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
       try {
         result = await buyArc();
         const routerElapsed = Date.now() - started;
-        // Router の静的 EVM の x402 送信は有料要求に 5 秒の期限（`createX402Outbound` の `timeoutMs` の既定）: Worker の settle が続いていても unknown。
+        // Router の静的 EVM の x402 送信は有料要求に 30 秒の期限（`X402_STATIC_PAID_TIMEOUT_MS`。§9 の 6 の解消）: Worker が段の上限（20 秒）で返す
+        // 502（領収なし）を受けて unknown。Router が先に去ることはない（去っていた頃は 5 秒で unknown だった = 旧い §9 の 6）。
         expect(result.outcome).toBe("unknown");
-        expect(routerElapsed).toBeGreaterThanOrEqual(4_500);
-        expect(routerElapsed).toBeLessThan(19_000);
-        // Worker 側: Router が去った後も要求は段の上限まで続き、20 秒で 502（front が記録する）。facilitator の settle は 1 回のまま。
+        expect(routerElapsed).toBeGreaterThanOrEqual(19_000);
+        expect(routerElapsed).toBeLessThan(26_000);
+        // Worker 側: 20 秒で 502（front が記録する）。facilitator の settle は 1 回のまま。
         while (arcFront.paid.length === paid && Date.now() - started < 30_000) await new Promise((resolve) => setTimeout(resolve, 250));
       } finally {
         circle.state.settleDelayMs = 0;
