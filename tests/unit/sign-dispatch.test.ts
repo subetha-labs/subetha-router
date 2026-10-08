@@ -207,6 +207,8 @@ describe("classifyOffer: MPP の Solana（solana/charge → mpp-svm）", () => {
     ["challenge に splits", solmpp({}, {}, { splits: [{ recipient: OWNER, amount: "1" }] }), /splits/],
     ["challenge に feePayerKey", solmpp({}, {}, { feePayerKey: OWNER }), /fee payer key or a blockhash/],
     ["challenge に recentBlockhash", solmpp({}, {}, { recentBlockhash: "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD" }), /fee payer key or a blockhash/],
+    ["challenge の methodDetails に feePayerKey（mppx の置き場）", solmpp({}, {}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: false, feePayerKey: OWNER } }), /fee payer key or a blockhash/],
+    ["challenge の methodDetails に recentBlockhash", solmpp({}, {}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: false, recentBlockhash: "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD" } }), /fee payer key or a blockhash/],
     ["challenge の method が solana でない", solmpp({}, {}, {}, { method: "tempo" }), /not solana\/charge/],
     ["payTo の形違い（0x）", solmpp({ payTo: RECEIVER }), /payTo is not a well-formed/],
     ["nonce 無し", solmpp({}, { challengeNonce: undefined }), /challengeNonce/],
