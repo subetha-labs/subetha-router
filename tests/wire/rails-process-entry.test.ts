@@ -14,8 +14,10 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { runToExit } from "../fixtures/loopback.js";
 import { RAILS_ACTIVATION_ENV, SOLANA_OUTBOUND_KEY_ENV } from "../../tools/rails-entry.js";
-import { getBase58Decoder } from "@solana/kit";
+import { address, generateKeyPairSigner, getBase58Decoder } from "@solana/kit";
+import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { startSolanaRpc } from "../fixtures/solana-rpc.js";
+import { generateTestTls } from "../fixtures/tls/generate.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
 import { INBOUND, ROUTE, ROUTE_ARC, ROUTE_MPP_IN, routerConfigOf } from "../../tools/remote-mcp-config.js";
 
@@ -145,6 +147,53 @@ describe("Router の process: 静的 Solana route の宛先 ATA（U9）", () => 
       expect(result.stdout + result.stderr).not.toContain(rpc.url);
     } finally {
       await rpc.close();
+    }
+  }, 60_000);
+});
+
+describe("Router の process（本番の能力の組み立て＋fixture への transport）: 静的 Solana route の宛先 ATA を RPC で確かめる（U9）", () => {
+  const MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+  const RPC_HOST = "rpc.provider.test";
+
+  test.each([
+    ["宛先 ATA が無い（RPC が null）", false],
+    ["宛先 ATA がある（対照: SVM の段を通り、Tempo の probe で止まる）", true],
+  ])("%s", async (_name, ataPresent) => {
+    const dir = workDir("t8b-process-solata-rpc-");
+    const configPath = path.join(dir, "router.config.json");
+    const owner = String((await generateKeyPairSigner()).address);
+    const destinationAta = String((await findAssociatedTokenPda({ mint: address(MINT), owner: address(owner), tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
+    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: { solana: owner }, upstreams: { arc: "", solana: "https://provider-sol.test/v1/eth/snapshot" } });
+    writeFileSync(configPath, JSON.stringify(document));
+    const tls = generateTestTls();
+    const rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls, ...(ataPresent ? { atas: [{ address: destinationAta, owner }] } : {}) });
+    try {
+      const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
+      const result = await runToExit("tests/fixtures/router-production-process.ts", [], processEnv(dir, configPath, {
+        [RAILS_ACTIVATION_ENV]: "solana-out",
+        [SOLANA_OUTBOUND_KEY_ENV]: seed,
+        ROUTER_SOLANA_RPC_URL: `https://${RPC_HOST}`,
+        SUBETHA_SOLANA_RPC_URL: `https://${RPC_HOST}`,
+        SUBETHA_TEST_DIAL_MAP: JSON.stringify({ [RPC_HOST]: rpc.port }),
+        SUBETHA_TEST_CA_PATH: path.join(tls.dir, "ca.pem"),
+      }));
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("listening");
+      // RPC は fixture に届き、宛先 ATA を getAccountInfo で見た。
+      const lookups = rpc.calls.filter((c) => c.method === "getAccountInfo" && (c.params as unknown[])[0] === destinationAta);
+      expect(lookups.length).toBeGreaterThanOrEqual(1);
+      expect(new Set(rpc.calls.map((c) => c.method))).toEqual(new Set(["getAccountInfo"]));
+      if (ataPresent) {
+        expect(result.stderr).not.toMatch(/destination token account/);
+        expect(result.stderr).toMatch(PROBE_FAILED);
+      } else {
+        expect(result.stderr).toMatch(/destination token account of static route md-sol-eth-snapshot-mpp does not exist or is not the table's ATA/);
+        expect(result.stderr).not.toMatch(PROBE_FAILED);
+      }
+      expect(result.stdout + result.stderr).not.toContain(seed);
+    } finally {
+      await rpc.close();
+      tls.cleanup();
     }
   }, 60_000);
 });
