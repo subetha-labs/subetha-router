@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 
 import type { RouterClient } from "../../src/client/index.js";
 import type { QuoteView } from "../../src/client/types.js";
+import { guarded } from "../../src/mcp/server.js";
 import { createToolHandlers, type Evidence } from "../../src/mcp/tools.js";
 
 const EVIDENCE: Evidence = { label: "test", source: "operator_asserted", verified: false };
@@ -47,9 +48,12 @@ describe("MCP failures carry reason / httpStatus / retryAfterMs", () => {
     expect(b).toMatchObject({ ok: false, error: "rate_limited", retryAfterMs: 60_000 });
   });
 
-  test("internal_error has no reason (unchanged)", async () => {
+  test("internal_error (guarded) carries no reason and no exception text", async () => {
     const handlers = handlersWith({ quote: async () => { throw new Error("secret detail"); } });
-    await expect(handlers.quote({ routeId: "r", requestId: "x" })).rejects.toThrow();
+    const result = await guarded(() => handlers.quote({ routeId: "r", requestId: "x" }));
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, error: "internal_error" });
+    expect(JSON.stringify(result)).not.toMatch(/secret detail/);
   });
 
   test("status found:false passes the client's reason through", async () => {
@@ -84,5 +88,11 @@ describe("Solana MPP guidance", () => {
     expect(s).not.toMatch(/already spends the funds/);
     expect(s).toMatch(/Router broadcasts it at purchase/);
     expect(s).toMatch(/approve.*before/i);
+    // 申告が無い（保守的に true）が scheme が Tempo でも Solana でもない → 一般の「may spend」で、Tempo と断定しない。
+    const other = handlersWith({ quoteUrl: async () => ({ ok: true, quote: quoteWith("exact", "eip155:84532", true, true) }) });
+    const o = String((await other.quoteUrl({ profileId: "p", url: "https://u.test/x", requestId: "x" }))["nextStep"]);
+    expect(o).toMatch(/may already spend the funds/);
+    expect(o).not.toMatch(/MPP on Tempo/);
+    expect(o).not.toMatch(/already spends the funds/);
   });
 });

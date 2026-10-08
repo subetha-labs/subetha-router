@@ -58,13 +58,19 @@ describe("client failures keep reason, status and Retry-After", () => {
     expect(result).not.toHaveProperty("retryAfterMs");
   });
 
-  test("quote: an unparsable Retry-After is ignored", async () => {
-    const client = clientWith(() => json(429, { error: "rate_limited" }, { "retry-after": "soon" }));
-    const result = await client.quote({ routeId: "r", requestId: "x" });
-    expect(result).not.toHaveProperty("retryAfterMs");
+  test("quote: Retry-After parser boundaries — malformed, negative, fractional, exponent and oversized numbers are ignored; a past date is 0; huge values are capped at 1 hour", async () => {
+    for (const header of ["soon", "-5", "1.5", "1e3", "99999999999", "Mon, 32 Jan 2026 00:00:00 GMT", "2026-10-08T00:00:00Z", "Tue, 08 Oct 2026 00:00:00 UTC"]) {
+      const client = clientWith(() => json(429, { error: "rate_limited" }, { "retry-after": header }));
+      const result = await client.quote({ routeId: "r", requestId: "x" });
+      expect(result, header).not.toHaveProperty("retryAfterMs");
+    }
+    const past = clientWith(() => json(429, { error: "rate_limited" }, { "retry-after": "Sun, 06 Nov 1994 08:49:37 GMT" }));
+    expect(await past.quote({ routeId: "r", requestId: "x" })).toMatchObject({ retryAfterMs: 0 });
+    const huge = clientWith(() => json(429, { error: "rate_limited" }, { "retry-after": "9999999" }));
+    expect(await huge.quote({ routeId: "r", requestId: "x" })).toMatchObject({ retryAfterMs: 3_600_000 });
   });
 
-  test("status: 404 → found:false, reason not_found; 401/403 → unauthorized; other → http_error", async () => {
+  test("status: 404 → found:false, reason not_found (absent OR inaccessible: a wrong ownerKey also looks like this); 401/403 → unauthorized; other → http_error", async () => {
     for (const [status, reason] of [[404, "not_found"], [401, "unauthorized"], [403, "unauthorized"], [500, "http_error"]] as const) {
       const client = clientWith(() => json(status, { error: "x" }));
       expect(await client.status("p1")).toEqual({ found: false, status, reason });

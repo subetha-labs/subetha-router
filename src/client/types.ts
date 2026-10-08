@@ -174,7 +174,7 @@ export interface ProjectionView {
 export type StatusResult =
   | { readonly found: true; readonly projection: ProjectionView }
   /**
-   * 見つからない／受理しない。`reason` は固定コードのみ: `not_found`（404）/ `unauthorized`（401・403 = 動的の `ownerKey` が無い・違う）/
+   * 見つからない／受理しない。`reason` は固定コードのみ: `not_found`（404 = **無いか読めない**。動的の `ownerKey` が無い・違うときも Router は 404 を返す）/ `unauthorized`（401・403 = principal の認可）/
    * `http_error`（他の status）/ `projection_malformed` / `payment_id_mismatch` / `transport_failed`（H-1 で常に付く）。
    */
   | { readonly found: false; readonly status: number; readonly reason: string };

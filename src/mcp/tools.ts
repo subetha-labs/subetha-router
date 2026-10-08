@@ -232,13 +232,17 @@ function dynamicNextStep(quote: QuoteView): string {
         "kind would have moved funds at the credential, so **approve BEFORE building the credential** either way. The Router can still refuse after the funds moved (expired quote, " +
         "upstream changed, feature disabled, budget exhausted, operator funds unavailable); `awaiting_payment` then does NOT mean unpaid. " +
         `After approval, build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
-      : fundsMove
+      : fundsMove && sourceSchemeOf(quote) === "tempo/charge"
         ? "**On this route (MPP on Tempo), building the credential already spends the funds, and that cannot be undone.** " +
           "The Router can still refuse after the funds moved (expired quote, upstream changed, feature disabled, budget " +
           "exhausted, operator funds unavailable); `awaiting_payment` then does NOT mean unpaid. Get approval FIRST, then " +
           `build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
-        : `If the human approves, call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key) and ` +
-          "this quoteId as `approval`. If not, do not call it.",
+        : fundsMove
+          ? "**On this route, building the credential may already spend the funds, and that cannot be undone** (the offer does not say otherwise). " +
+            "The Router can still refuse after the funds moved; `awaiting_payment` then does NOT mean unpaid. Get approval FIRST, then " +
+            `build the credential, then call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key).`
+          : `If the human approves, call ${TOOL_NAMES.purchase} with this quote document (it carries the owner key) and ` +
+            "this quoteId as `approval`. If not, do not call it.",
   ];
   return lines.join(" ");
 }

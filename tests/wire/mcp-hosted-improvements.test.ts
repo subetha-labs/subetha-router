@@ -52,7 +52,7 @@ describe("H-1: hosted MCP improvements", () => {
   );
 
   it(
-    "structuredContent passes the outputSchema for a success, a failure with a reason and a not-found status (the SDK would mark a mismatch as an error)",
+    "structuredContent passes the outputSchema for a success, a 404 failure (httpStatus, no reason because the Router gives none here) and a not-found status (the SDK would mark a mismatch as an error)",
     async () => {
       await withHarness(async (h) => {
         const list = (await h.client.callTool({ name: "subetha_router_list_routes", arguments: {} })) as { isError?: boolean; structuredContent?: Record<string, unknown> };
@@ -67,6 +67,7 @@ describe("H-1: hosted MCP improvements", () => {
         expect(unknown.structuredContent?.["ok"]).toBe(false);
         expect(typeof unknown.structuredContent?.["error"]).toBe("string");
         expect(unknown.structuredContent?.["httpStatus"]).toBe(404);
+        expect(unknown.structuredContent?.["reason"]).toBeUndefined();
 
         const status = await callTool(h.client, "subetha_router_status", { paymentId: "00000000-0000-4000-8000-000000000000" });
         expect(status["found"]).toBe(false);
