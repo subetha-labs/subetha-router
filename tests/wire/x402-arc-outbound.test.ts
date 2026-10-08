@@ -234,10 +234,28 @@ describe("動的プロファイル dyn-x402-to-arc", () => {
     expect(h.signed[0]!.domain).toMatchObject({ chainId: 5042002, verifyingContract: getAddress(ARC_USDC) });
   });
 
-  test("extra.assetTransferMethod を含む offer は V-6 の結果まで候補にしない", async () => {
+  test("extra.assetTransferMethod は \"eip3009\" だけ候補（Circle の受取側が出す値。V-6）: 動的の購入が署名 1 回で delivered。permit2・他の値は候補外、pay の再検査でも not_sent", async () => {
     const h = await harness();
     h.upstream.state.accepts = [arcAccept({ extra: { name: "USDC", version: "2", assetTransferMethod: "eip3009" } })];
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    expect(offers).toHaveLength(1);
+    expect(offers[0]!.extra?.["assetTransferMethod"]).toBe("eip3009");
+    h.upstream.state.pay = () => paidOk(h.address, { ok: true }, ARC);
+    const result = await h.rail.pay({ routeId: PROFILE_ID, offer: offers[0]!, paymentId: "p-eip3009", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url: URL_A } });
+    expect(result).toMatchObject({ outcome: "paid" });
+    expect(h.signed).toHaveLength(1);
+    // 署名した typed data は組み直しの署名器のもの（domain は表、宛先と額は承認値）。
+    expect(h.signed[0]!.domain).toMatchObject({ chainId: 5042002, verifyingContract: getAddress(ARC_USDC) });
+    expect(h.upstream.seen.payments).toHaveLength(1);
+    for (const value of ["permit2", "EIP3009", "", 1]) {
+      h.upstream.state.accepts = [arcAccept({ extra: { name: "USDC", version: "2", assetTransferMethod: value } })];
+      expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A }), String(value)).toEqual([]);
+    }
+    // 保存した offer に permit2 が入っていれば pay の再検査で not_sent（署名 0・支払い 0）。
+    const tampered = { ...offers[0]!, extra: { ...offers[0]!.extra, assetTransferMethod: "permit2" } };
+    expect(await h.rail.pay({ routeId: PROFILE_ID, offer: tampered, paymentId: "p-permit2", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url: URL_A } })).toEqual({ outcome: "not_sent", reason: "destination_offer_not_allowed" });
+    expect(h.signed).toHaveLength(1);
+    expect(h.upstream.seen.payments).toHaveLength(1);
   });
 
   test("運用者の集合（合成が注入する）にある受取先は候補に出ない", async () => {
