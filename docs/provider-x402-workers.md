@@ -52,20 +52,20 @@ settle に入る前に残りが **12 秒未満**なら settle を呼ばずに **
 |---|---|---|---|
 | 0 | ヘッダを decode。`accepted` が自分の requirements（§2.1 を同じ関数で組み直す）と**完全一致** | — | **402**（`PAYMENT-REQUIRED` を付け直す。本文は固定文。資金は動いていない） |
 | 1 | データを取る（Hyperliquid）。検証（§2.3 の形）と大きさ（64 KiB）までここで終える | 2 秒 | **502** `{ error: "data_unavailable" }`。facilitator は呼ばない（「払ったのにデータが無い」を作らない） |
-| 2 | `/verify`（自前の client。§3.2） | 4 秒 | `isValid: false` → **402**（本文 `{ error: "payment_invalid" }`。facilitator の文言は透過しない）。HTTP 不達・期限・形違い → **502** `{ error: "facilitator_unavailable" }`（資金は動いていないが、Router 側で `rejected` にしないため。verify は冪等なので Router が新しい購入で再試行できる） |
+| 2 | `/verify`（自前の client。§3.2） | 4 秒 | `isValid: false` → **402**（本文 `{ error: "payment_invalid" }`。facilitator の文言は透過しない）。HTTP 不達・期限・形違い → **502** `{ error: "facilitator_unavailable" }`（資金は動いていないが、Provider からは断定できないので `unknown` に揃える。Router は `unknown` を保ち、買い直さない） |
 | 3 | `/settle` **1 回だけ**（§3.2 の guard。SDK の `settlePayment` は使わない） | min(20 秒, 残り) | 下の表 |
-| 4 | **200** + `PAYMENT-RESPONSE` + 本文（§2.3。1 で取った値を返すだけ。`content-length` と `content-type: application/json` を付け、本文は 1 回の `end` で送る） | — | 本文の送出で接続が切れれば Router は `paid_no_data`（Provider からは防げない。再送しない） |
+| 4 | **200** + `PAYMENT-RESPONSE` + 本文（§2.3。1 で取った値を返すだけ。`content-length` と `content-type: application/json` を付け、本文は 1 回の `end` で送る。署名（Arc の売り手証明）と応答の本文の読み書きも要求の期限の内側） | — | 領収を受け取った後に本文の送出で接続が切れれば Router は `paid_no_data`（Provider からは防げない。Router は再送しない） |
 
 settle の結果の表（送出後なので、成功を確かめられたとき以外は **`unknown` を Router に伝える = 領収なしの 502**）:
 
 | facilitator の応答 | Provider の応答 | Router の結果（送信の設計 §5） |
 |---|---|---|
-| 200、`success: true`、`network` が requirements と一致、`transaction` が形どおり（Arc: `0x` + 64 hex、Solana: base58 で 64 バイトに復号）、`payer` があれば**支払い側の署名者と同一**（Arc: `paymentPayload.payload.authorization.from` と大文字小文字無視で一致。Solana: `paymentPayload.payload.transaction` を復号した message の 2 番目の static account（authority。Router の受信と同じ読み方）と一致） | **200** + `PAYMENT-RESPONSE { success: true, transaction, network, payer? }` + 本文 | `paid` → `delivered`（Router は `payer` を自分の署名者と比べる。facilitator が別の `payer` を返したら Provider が 502 にするので `unknown`） |
+| 200、`success: true`、`network` が requirements と一致、`transaction` が形どおり（Arc: `0x` + 64 hex、Solana: base58 で 64 バイトに復号）、`payer` があれば**支払い側の署名者と同一**（Arc: `paymentPayload.payload.authorization.from` と大文字小文字無視で一致。Solana: `paymentPayload.payload.transaction` を復号した message の 2 番目の static account（authority。Router の受信と同じ読み方）と一致） | **200** + `PAYMENT-RESPONSE { success: true, transaction, network, payer? }` + 本文 | `paid` → `delivered`（**本文まで受け取れたとき**。Router は `payer` を自分の署名者と比べる。facilitator が別の `payer` を返したら Provider が 502 にするので `unknown`） |
 | 200、`success: true` だが `payer` が署名者と違う | **502** `{ error: "receipt_malformed" }` | `unknown` |
 | 200、`success: false`、`errorReason: "settlement_pending"`（Solana。署名つきでも） | **502** `{ error: "settlement_pending" }`（追跡はしない。範囲外） | `unknown` |
 | 200、`success: false`、他の `errorReason` | **502** `{ error: "settle_failed" }` | `unknown` |
 | 200 だが `transaction`／`network`／`payer` の形が違う | **502** `{ error: "receipt_malformed" }`（成功を名乗らない） | `unknown` |
-| 403 `registration_required`（Circle の trial 切れ。`/verify` でも `/settle` でも） | **502** `{ error: "facilitator_registration_required" }`。運用者向けに同じ固定文を `console.error`（値無し） | `unknown`（verify で起きたときも 5xx = `unknown` に揃える。資金は動いていないが、Router が `rejected` と記録して次の購入に進まないのを避けるため） |
+| 403 `registration_required`（Circle の trial 切れ。`/verify` でも `/settle` でも） | **502** `{ error: "facilitator_registration_required" }`。運用者向けに同じ固定文を `console.error`（値無し） | `unknown`（verify で起きたときも 5xx = `unknown` に揃える。Router は `unknown` を保ち、買い直さない。運用者が登録してから新しい購入を始める） |
 | 4xx・5xx・不達・期限・JSON でない | **502** `{ error: "facilitator_unavailable" }` | `unknown` |
 
 - **応答の本文もヘッダも固定文だけ**（facilitator の文言・例外の文字列・鍵・URL を含めない）。SDK の `processHTTPRequest` は例外の文言を 402 に入れるので、支払いつきの経路では使わない（§3.1）。
@@ -190,3 +190,4 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（高 3: SDK の settle の再試行、settle 失敗を 402 にする誤り、本文が記録済みの契約と違う；中 3: 期限の不整合、鍵の作り方と配備、V-13 のラベル）。第 2 版で反映 |
 | 2 | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **REJECT**（解決: 再試行、V-13。残り: `payer` の同一性と本文の受領、契約は拡張であること・数値の制約、cold start を含む 1 つの期限、Solana の seed の出力、`unknown` の後の文言）。第 3 版で反映 |
+| 3 | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `cbe704c`） | **APPROVE WITH CHANGES**（文言 3 点: verify の失敗・403 の行に残っていた「新しい購入で再試行できる」の根拠を削除、`delivered` は本文まで受け取れたときと明記、署名と本文の読み書きも期限の内側と明記）。同じ版で反映（小さな訂正なので再レビューはしない） |
