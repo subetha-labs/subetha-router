@@ -12,6 +12,8 @@
  */
 
 import { assetKeyOf, evmChainIdOf, isWellFormedPayTo, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, networkFamilyOf, type KnownNetwork } from "../src/config.js";
+import { Challenge } from "mppx";
+
 import { checkSvmMppChallenge } from "./svm-mpp-payer.js";
 
 /** 1 回の受信レグで払ってよい上限（base units）。D-7（2026-10-06）: 動的 quote の「上流額＋手数料」を賄う。 */
@@ -32,6 +34,36 @@ const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
 const NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 /** mppx が生成する challenge の id（HMAC-SHA256 の base64url、43 文字）。MPP（Tempo・Solana）の offer の nonce はこの形。 */
 const MPPX_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Tempo の MPP の challenge の中身が offer と一致するか（送金の前。`tools/mpp-payer.ts` も払う直前に同じ判定を呼ぶ）。
+ * mppx の client は `request.amount`・`currency`・`recipient` から送金を組むので、封筒の offer（人間が承認した値）と中身の一致を確かめる。HMAC は payer 側では照合できない（秘密は Router の側）。
+ */
+export function checkTempoChallenge(serialized: string, offer: { amount: string; asset: string; payTo: string; extra: Record<string, unknown> }, chainId: number, nowMs: number): { ok: true } | { ok: false; reason: string } {
+  let challenge: unknown;
+  try {
+    challenge = Challenge.deserialize(serialized);
+  } catch {
+    return { ok: false, reason: "the MPP offer's challenge cannot be read" };
+  }
+  if (!isRecord(challenge)) return { ok: false, reason: "the MPP offer's challenge cannot be read" };
+  if (challenge["id"] !== offer.extra["challengeNonce"]) return { ok: false, reason: "the challenge id is not the offer's challengeNonce" };
+  if (challenge["method"] !== "tempo" || challenge["intent"] !== "charge") return { ok: false, reason: "the challenge is not tempo/charge" };
+  const expires = challenge["expires"];
+  if (typeof expires === "string") {
+    const at = Date.parse(expires);
+    if (!Number.isFinite(at) || at <= nowMs) return { ok: false, reason: "the challenge has expired; take a new quote and ask for approval again" };
+  }
+  const request = challenge["request"];
+  if (!isRecord(request)) return { ok: false, reason: "the challenge has no request" };
+  if (request["amount"] !== offer.amount) return { ok: false, reason: "the challenge amount differs from the offer" };
+  if (typeof request["currency"] !== "string" || request["currency"].toLowerCase() !== offer.asset.toLowerCase()) return { ok: false, reason: "the challenge currency differs from the offer's asset" };
+  if (typeof request["recipient"] !== "string" || request["recipient"].toLowerCase() !== offer.payTo.toLowerCase()) return { ok: false, reason: "the challenge recipient differs from the offer's payTo" };
+  if ("splits" in request) return { ok: false, reason: "the challenge carries splits (not supported)" };
+  const details = request["methodDetails"];
+  if (!isRecord(details) || details["chainId"] !== chainId) return { ok: false, reason: "the challenge chain differs from the offer's network" };
+  return { ok: true };
+}
 
 /** offer を読んで、どの payer で署名するか（または拒む理由）を決める。 */
 export function classifyOffer(offer: unknown, nowMs: number, networks: readonly KnownNetwork[] = KNOWN_NETWORKS, maxAmount: bigint = SIGN_MAX_AMOUNT): SignDispatch {
@@ -65,6 +97,9 @@ export function classifyOffer(offer: unknown, nowMs: number, networks: readonly 
     if (chainId === undefined || !entry.inbound.includes("mpp")) return { kind: "refuse", reason: "MPP offers are only accepted on the table's MPP networks" };
     // MPP の payer は serialized challenge（`extra.challenge`）で払う。無い offer は**送金の前に**拒む。
     if (typeof extra?.["challenge"] !== "string" || extra["challenge"] === "") return { kind: "refuse", reason: "the MPP offer does not carry the mppx challenge" };
+    // SDK は **challenge の中身**（`request.amount`・`currency`・`recipient`）から送金を組む。封筒の offer と中身が違えば、承認した額と違う額が動く → 送金の前に拒む（M6 のレビューで指摘）。
+    const checked = checkTempoChallenge(extra["challenge"], { amount, asset, payTo, extra }, chainId, nowMs);
+    if (!checked.ok) return { kind: "refuse", reason: checked.reason };
     return { kind: "mpp", chainId, asset, payTo, amount };
   }
   if (scheme === "solana/charge") {

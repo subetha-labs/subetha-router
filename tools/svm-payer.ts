@@ -3,14 +3,16 @@
  *
  * SDK の client（`@x402/svm`）は**使わない**（mint の metadata を RPC から読み、桁と program を RPC の値で決めるため）。
  * transaction は **Router と同じ builder**（`buildSvmTransactionMessage`）で**固定値だけ**から組む: 表の mint・桁・token program、
- * offer の `payTo`（owner）→ 宛先 ATA、額、`feePayer`、memo。RPC は **`getLatestBlockhash` の 1 回だけ**（mint も残高も読まない。simulate しない）。
+ * offer の `payTo`（owner）→ 宛先 ATA、額、`feePayer`、memo。RPC は **`getLatestBlockhash` の 1 回だけ**（mint も残高も読まない。simulate しない。
+ * 口は `tools/svm-rpc.ts`: Router と同じ guarded transport、loopback の拒否、10 秒、64 KiB）。
  *
  * **署名だけで資金は動かない**（送信は facilitator の fee payer）。秘密鍵は引数で受け取り、戻り値・ログには出さない。
  */
 
-import { address, createKeyPairSignerFromPrivateKeyBytes, getBase58Encoder, getTransactionEncoder, partiallySignTransactionMessageWithSigners, type KeyPairSigner } from "@solana/kit";
+import { address, createKeyPairSignerFromPrivateKeyBytes, getTransactionEncoder, partiallySignTransactionMessageWithSigners, type KeyPairSigner } from "@solana/kit";
 
 import { svmSeedFromKey } from "./svm-key.js";
+import { createSvmRpc } from "./svm-rpc.js";
 import { findAssociatedTokenPda } from "@solana-program/token";
 
 import { buildSvmTransactionMessage, SVM_DEFAULT_COMPUTE_UNITS, SVM_DEFAULT_MICRO_LAMPORTS_PER_UNIT } from "../src/adapters/inbound/x402-svm.js";
@@ -46,29 +48,15 @@ export async function svmSignerFromKey(key: string): Promise<KeyPairSigner> {
   }
 }
 
-interface RpcOptions {
+export interface SvmPayerRpcOptions {
   readonly rpcUrl?: string;
-  /** 試験の差し替え（既定は globalThis.fetch）。 */
-  readonly fetch?: typeof fetch;
+  /** loopback の RPC（手元の node・試験の fixture）を許す。既定は拒む。 */
+  readonly allowLoopback?: boolean;
 }
 
-export async function createSvmPayer(key: string, options: RpcOptions = {}): Promise<SvmPayer> {
+export async function createSvmPayer(key: string, options: SvmPayerRpcOptions = {}): Promise<SvmPayer> {
   const signer = await svmSignerFromKey(key);
-  const rpcUrl = options.rpcUrl ?? SOLANA_DEVNET_RPC;
-  const doFetch = options.fetch ?? globalThis.fetch;
-
-  async function latestBlockhash(): Promise<string> {
-    const response = await doFetch(rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestBlockhash", params: [{ commitment: "confirmed" }] }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const json = (await response.json()) as { result?: { value?: { blockhash?: unknown } } };
-    const blockhash = json.result?.value?.blockhash;
-    if (typeof blockhash !== "string" || getBase58Encoder().encode(blockhash).length !== 32) throw new Error("the RPC did not return a blockhash");
-    return blockhash;
-  }
+  const rpc = createSvmRpc({ rpcUrl: options.rpcUrl ?? SOLANA_DEVNET_RPC, ...(options.allowLoopback === undefined ? {} : { allowLoopback: options.allowLoopback }) });
 
   return {
     address: String(signer.address),
@@ -78,7 +66,7 @@ export async function createSvmPayer(key: string, options: RpcOptions = {}): Pro
       }
       const [source] = await findAssociatedTokenPda({ mint: address(scope.mint), owner: signer.address, tokenProgram: address(scope.tokenProgram) });
       const [destination] = await findAssociatedTokenPda({ mint: address(scope.mint), owner: address(offer.payTo), tokenProgram: address(scope.tokenProgram) });
-      const blockhash = await latestBlockhash();
+      const blockhash = await rpc.latestBlockhash();
       const message = buildSvmTransactionMessage({
         feePayer: offer.extra.feePayer,
         source: String(source),

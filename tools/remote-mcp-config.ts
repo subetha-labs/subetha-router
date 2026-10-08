@@ -107,7 +107,7 @@ export const ROUTE_SOL_OUT = "md-sol-eth-snapshot-mpp";
 /* ------------------------------------------------------------------ Solana の MPP（受信・送信。`docs/mpp-solana-design.md` §6、タスク M6） */
 
 /**
- * Solana の MPP の Provider D（pay-kit の server。`solana/charge`、pull、`feePayer: false`）の URL。**Provider D が立つまで空**（D-26。空なら静的の送信 route は
+ * Solana の MPP の Provider D（pay-kit の server。`solana/charge`、pull、**`feePayer: true`** = Provider の fee payer が送出する。Router が発行する受信の challenge は `feePayer: false`）の URL。**Provider D が立つまで空**（D-26。空なら静的の送信 route は
  * 生成しない。動的プロファイルは生成する）。受取 owner は env `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`（`solanaMpp.outbound` ∧ URL ≠ "" のときだけ読む。D-10 と同じ規則）。
  */
 export const UPSTREAM_SOL_MPP = "";

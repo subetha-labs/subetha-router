@@ -5,6 +5,7 @@ import { Challenge } from "mppx";
 import { describe, expect, test } from "vitest";
 
 import { createMppInbound } from "../../src/adapters/inbound/mpp.js";
+import { createMppPayer } from "../../tools/mpp-payer.js";
 import { KNOWN_NETWORKS, type KnownNetwork } from "../../src/config.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import { classifyOffer, SIGN_MAX_AMOUNT } from "../../tools/sign-dispatch.js";
@@ -26,8 +27,22 @@ function evm(overrides: Record<string, unknown> = {}, extra: Record<string, unkn
 function svm(overrides: Record<string, unknown> = {}, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { scheme: "exact", network: SOL, asset: MINT, amount: "10000", payTo: OWNER, maxTimeoutSeconds: 40, extra: { feePayer: OWNER, memo: NONCE, challengeNonce: NONCE, expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: false, ...extra }, ...overrides };
 }
-function mpp(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: 'Payment id="x"', expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true }, ...overrides };
+/** Tempo の challenge（mppx の形。HMAC は照合しない: 道具は秘密を持たない）。`request` の中身が封筒の offer と一致するかを道具が見る。 */
+function tempoChallengeOf(request: Record<string, unknown> = {}, overrides: Record<string, unknown> = {}): string {
+  return Challenge.serialize(
+    Challenge.from({
+      id: NONCE,
+      realm: "router-test",
+      method: "tempo",
+      intent: "charge",
+      expires: new Date((EXPIRES - 1) * 1000).toISOString(),
+      request: { amount: "10000", currency: PATHUSD, recipient: RECEIVER, methodDetails: { chainId: 42431 }, ...request },
+      ...overrides,
+    } as never) as never,
+  );
+}
+function mpp(overrides: Record<string, unknown> = {}, request: Record<string, unknown> = {}, challengeOverrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: tempoChallengeOf(request, challengeOverrides), expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true }, ...overrides };
 }
 
 describe("classifyOffer: 振り分け", () => {
@@ -60,8 +75,23 @@ describe("classifyOffer: MPP（Tempo）の nonce は mppx の challenge の id�
     expect(offer.extra.challengeNonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(classifyOffer(offer, NOW)).toEqual({ kind: "mpp", chainId: 42431, asset: PATHUSD, payTo: RECEIVER, amount: "10000" });
     // 旧い形（0x の hex）も通る（試験の fixture の形）。x402 は hex だけ。
-    expect(classifyOffer(mpp({ extra: { challengeNonce: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0", challenge: 'Payment id="x"', expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true } }), NOW).kind).toBe("mpp");
+    const MPP_ID = "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0";
+    expect(classifyOffer(mpp({ extra: { challengeNonce: MPP_ID, challenge: tempoChallengeOf({}, { id: MPP_ID }), expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true } }), NOW).kind).toBe("mpp");
     expect(classifyOffer(mpp(), NOW).kind).toBe("mpp");
+    // 実 adapter の offer の challenge を**中身だけ**変えて封筒に載せ直す（HMAC は道具では照合できないので中身の矛盾で拒むしかない）: 額・通貨・受取先・chain・id・期限。
+    const decoded = Challenge.deserialize(offer.extra["challenge"] as string) as unknown as { request: Record<string, unknown> };
+    const reissue = (request: Record<string, unknown>, top: Record<string, unknown> = {}): Record<string, unknown> => ({ ...offer, extra: { ...offer.extra, challenge: Challenge.serialize({ ...(decoded as unknown as Record<string, unknown>), ...top, request: { ...decoded.request, ...request } } as never) } });
+    expect(classifyOffer(reissue({ amount: "20000" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge amount differs/) });
+    expect(classifyOffer(reissue({ currency: USDC }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge currency differs/) });
+    expect(classifyOffer(reissue({ recipient: "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge recipient differs/) });
+    expect(classifyOffer(reissue({ methodDetails: { chainId: 42429 } }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge chain differs/) });
+    expect(classifyOffer(reissue({}, { id: MPP_ID }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge id is not the offer's challengeNonce/) });
+    expect(classifyOffer(reissue({}, { expires: new Date(NOW - 1).toISOString() }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge has expired/) });
+    expect(classifyOffer(reissue({ splits: [{ recipient: RECEIVER, amount: "1" }] }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/splits/) });
+    // 同じ判定を payer（`tools/mpp-payer.ts`）が送金の直前にも行う: 中身が違えば client を作る前に throw（RPC には触れない）。
+    const payer = createMppPayer(`0x${"11".repeat(32)}`, { chainId: 42431, asset: PATHUSD, payTo: RECEIVER, maxAmount: 20_000n }, { rpcUrl: "http://127.0.0.1:1" });
+    await expect(payer.payAndCredential(reissue({ amount: "20000" }) as never)).rejects.toThrow(/challenge amount differs/);
+    await expect(payer.payAndCredential(reissue({ recipient: "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2" }) as never)).rejects.toThrow(/challenge recipient differs/);
     expect(classifyOffer(evm({}, { challengeNonce: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challengeNonce/) });
     expect(classifyOffer(svm({}, { challengeNonce: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0", memo: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challengeNonce/) });
   });
@@ -88,6 +118,10 @@ describe("classifyOffer: 署名の前に拒む（SR-7）", () => {
     ["nonce が無い", evm({}, { challengeNonce: undefined }), /challengeNonce/],
     ["nonce の形違い", evm({}, { challengeNonce: "abc" }), /challengeNonce/],
     ["MPP の challenge 無し", mpp({ extra: { challengeNonce: NONCE, expiresAt: EXPIRES } }), /mppx challenge/],
+    ["MPP の challenge が読めない", mpp({ extra: { challengeNonce: NONCE, challenge: 'Payment id="x"', expiresAt: EXPIRES } }), /challenge cannot be read/],
+    ["MPP の challenge の額が封筒と違う", mpp({}, { amount: "20000" }), /challenge amount differs/],
+    ["MPP の challenge の chain が違う", mpp({}, { methodDetails: { chainId: 42429 } }), /challenge chain differs/],
+    ["MPP の challenge の method が違う", mpp({}, {}, { method: "solana" }), /not tempo\/charge/],
     ["SVM の extra が桁を名乗って表と違う", svm({}, { decimals: 18 }), /decimals conflict/],
     ["SVM の extra が token program を名乗って表と違う", svm({}, { tokenProgram: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" }), /token program conflicts/],
     ["SVM の extra が mint を名乗って表と違う", svm({}, { mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" }), /mint conflicts/],

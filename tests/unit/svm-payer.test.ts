@@ -39,7 +39,8 @@ function offerOf(extra: Record<string, unknown> = {}) {
 
 describe("svm payer", () => {
   test("組んだ transaction を Router の検査が受ける。RPC は getLatestBlockhash の 1 回だけ、封筒は x402 と同じ形", async () => {
-    const payer = await createSvmPayer(seedKey(), { rpcUrl: rpc.url });
+    // fixture は loopback: 道具の既定（拒む）を明示的に外す（M6、`tools/svm-rpc.ts`）。
+    const payer = await createSvmPayer(seedKey(), { rpcUrl: rpc.url, allowLoopback: true });
     const before = rpc.calls.length;
     const credential = await payer.credentialFor(offerOf(), SCOPE);
     expect(rpc.calls.slice(before).map((c) => c.method)).toEqual(["getLatestBlockhash"]);
@@ -52,16 +53,26 @@ describe("svm payer", () => {
   });
 
   test("memo ≠ nonce・feePayer 無しは RPC の前に拒む（要求 0）", async () => {
-    const payer = await createSvmPayer(seedKey(), { rpcUrl: rpc.url });
+    const payer = await createSvmPayer(seedKey(), { rpcUrl: rpc.url, allowLoopback: true });
     const before = rpc.calls.length;
     await expect(payer.credentialFor(offerOf({ memo: `0x${"cd".repeat(32)}` }) as never, SCOPE)).rejects.toThrow(/memo/);
     await expect(payer.credentialFor(offerOf({ feePayer: undefined }) as never, SCOPE)).rejects.toThrow(/feePayer/);
     expect(rpc.calls.length).toBe(before);
   });
 
-  test("RPC が blockhash を返さなければ署名しない", async () => {
-    const payer = await createSvmPayer(seedKey(), { rpcUrl: rpc.url, fetch: (async () => new Response('{"jsonrpc":"2.0","id":1,"result":{"value":{}}}', { headers: { "content-type": "application/json" } })) as typeof fetch });
-    await expect(payer.credentialFor(offerOf(), SCOPE)).rejects.toThrow(/blockhash/);
+  test("RPC が blockhash を返さなければ署名しない（JSON でない・HTTP error・64 KiB 超・JSON-RPC error）。口は Router と同じ transport: loopback は既定で拒む（要求が届かない）", async () => {
+    const payer = await createSvmPayer(seedKey(), { rpcUrl: rpc.url, allowLoopback: true });
+    for (const reply of ["malformed", "error", "huge", "rpc-error"] as const) {
+      rpc.state.reply = reply;
+      const before = rpc.calls.length;
+      await expect(payer.credentialFor(offerOf(), SCOPE), reply).rejects.toThrow(/blockhash|HTTP/);
+      expect(rpc.calls.length - before, reply).toBe(1);
+    }
+    rpc.state.reply = "ok";
+    const strict = await createSvmPayer(seedKey(), { rpcUrl: rpc.url });
+    const before = rpc.calls.length;
+    await expect(strict.credentialFor(offerOf(), SCOPE)).rejects.toThrow();
+    expect(rpc.calls.length).toBe(before);
   });
 
   test("鍵の形: base58 の 32 バイトの seed・hex の seed・base58 の 64 バイト", async () => {

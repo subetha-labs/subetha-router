@@ -5,17 +5,19 @@
  * （`buildSvmTransactionMessage`）で**固定値だけ**から組む: 表の mint・桁・token program、offer の `payTo`（受取 owner）→ 宛先 ATA、額、Memo = challenge の `externalId`。
  * 署名の前に **challenge の `request` の全欄が offer と表に一致すること**を確かめる（封筒の `extra` だけでなく中身も。SR-7 と同じ精神）。
  *
- * RPC は **`getLatestBlockhash` の 1 回だけ**（mint も残高も読まない。simulate しない。**`sendTransaction` は呼ばない**）。
+ * RPC は **`getLatestBlockhash` の 1 回だけ**（mint も残高も読まない。simulate しない。**`sendTransaction` は呼ばない**。口は `tools/svm-rpc.ts`:
+ * Router と同じ guarded transport、loopback の拒否、10 秒、64 KiB）。
  * **署名だけで資金は動かない**: 送出するのは Router（purchase の settle）で、**fee payer はこの鍵**なので devnet SOL が要る。blockhash の寿命（約 1 分）の中で purchase を呼ぶこと。
  * 秘密鍵は引数で受け取り、戻り値・ログには出さない。
  */
 
-import { address, getBase58Encoder, getTransactionEncoder, signTransactionMessageWithSigners } from "@solana/kit";
+import { address, getTransactionEncoder, signTransactionMessageWithSigners } from "@solana/kit";
 import { findAssociatedTokenPda } from "@solana-program/token";
 import { Challenge, Credential } from "mppx";
 
 import { buildSvmTransactionMessage, SVM_DEFAULT_COMPUTE_UNITS, SVM_DEFAULT_MICRO_LAMPORTS_PER_UNIT } from "../src/adapters/inbound/x402-svm.js";
-import { SOLANA_DEVNET_RPC, svmSignerFromKey } from "./svm-payer.js";
+import { SOLANA_DEVNET_RPC, svmSignerFromKey, type SvmPayerRpcOptions } from "./svm-payer.js";
+import { createSvmRpc } from "./svm-rpc.js";
 
 /** challenge の `request.externalId`（Memo）の上限（bytes）。Memo の上限と同じ（受信 adapter の `MPP_SOLANA_EXTERNAL_ID_MAX_BYTES` と同じ値）。 */
 export const SVM_MPP_EXTERNAL_ID_MAX_BYTES = 256;
@@ -72,9 +74,12 @@ export function checkSvmMppChallenge(serialized: string, offer: { amount: string
   }
   if (externalId !== offer.extra["externalId"]) return { ok: false, reason: "the challenge externalId differs from the offer" };
   if ("splits" in request) return { ok: false, reason: "the challenge carries splits (not supported)" };
-  if ("feePayerKey" in request || "recentBlockhash" in request) return { ok: false, reason: "the challenge names a fee payer key or a blockhash (not a pull charge)" };
   const details = request["methodDetails"];
   if (!isRecord(details)) return { ok: false, reason: "the challenge has no methodDetails" };
+  // protocol の欄は request の直下にも methodDetails にも置かれ得る（mppx の形は後者）。どちらにあっても拒む（この builder は読まないが、約束した拒否は完全に）。
+  if ("feePayerKey" in request || "recentBlockhash" in request || "feePayerKey" in details || "recentBlockhash" in details) {
+    return { ok: false, reason: "the challenge names a fee payer key or a blockhash (not a pull charge)" };
+  }
   if (details["network"] !== "devnet") return { ok: false, reason: "the challenge network is not devnet (refusing to sign for another cluster)" };
   if (details["decimals"] !== scope.decimals) return { ok: false, reason: "the challenge decimals conflict with the table" };
   if (details["tokenProgram"] !== scope.tokenProgram) return { ok: false, reason: "the challenge token program conflicts with the table" };
@@ -82,31 +87,10 @@ export function checkSvmMppChallenge(serialized: string, offer: { amount: string
   return { ok: true, challenge, externalId };
 }
 
-interface RpcOptions {
-  readonly rpcUrl?: string;
-  /** 試験の差し替え（既定は globalThis.fetch）。 */
-  readonly fetch?: typeof fetch;
-  readonly nowMs?: () => number;
-}
-
-export async function createSvmMppPayer(key: string, options: RpcOptions = {}): Promise<SvmMppPayer> {
+export async function createSvmMppPayer(key: string, options: SvmPayerRpcOptions & { readonly nowMs?: () => number } = {}): Promise<SvmMppPayer> {
   const signer = await svmSignerFromKey(key);
-  const rpcUrl = options.rpcUrl ?? SOLANA_DEVNET_RPC;
-  const doFetch = options.fetch ?? globalThis.fetch;
+  const rpc = createSvmRpc({ rpcUrl: options.rpcUrl ?? SOLANA_DEVNET_RPC, ...(options.allowLoopback === undefined ? {} : { allowLoopback: options.allowLoopback }) });
   const nowMs = options.nowMs ?? Date.now;
-
-  async function latestBlockhash(): Promise<string> {
-    const response = await doFetch(rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestBlockhash", params: [{ commitment: "confirmed" }] }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const json = (await response.json()) as { result?: { value?: { blockhash?: unknown } } };
-    const blockhash = json.result?.value?.blockhash;
-    if (typeof blockhash !== "string" || getBase58Encoder().encode(blockhash).length !== 32) throw new Error("the RPC did not return a blockhash");
-    return blockhash;
-  }
 
   return {
     address: String(signer.address),
@@ -116,7 +100,7 @@ export async function createSvmMppPayer(key: string, options: RpcOptions = {}): 
       if (!checked.ok) throw new Error(checked.reason);
       const [source] = await findAssociatedTokenPda({ mint: address(scope.mint), owner: signer.address, tokenProgram: address(scope.tokenProgram) });
       const [destination] = await findAssociatedTokenPda({ mint: address(scope.mint), owner: address(offer.payTo), tokenProgram: address(scope.tokenProgram) });
-      const blockhash = await latestBlockhash();
+      const blockhash = await rpc.latestBlockhash();
       // Router の受信の検査（§3.3）と同じ形: fee payer = 署名者 = 転送の authority、compute budget は limit → price、Memo = externalId。
       const message = buildSvmTransactionMessage({
         feePayer: String(signer.address),

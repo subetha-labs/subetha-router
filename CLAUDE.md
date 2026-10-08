@@ -130,6 +130,8 @@ direction; **if a route or profile is missing from `subetha_router_list_routes`,
 - **Call purchase right away after `sign`**: the blockhash expires in about a minute. Take a new quote if you waited.
 - **You need devnet SOL** on the paying key for the transaction fee (the Router broadcasts your transaction and your key pays), plus
   devnet USDC. `npm run wallet:new:solana` prints both faucets. `npm run wallet:balance` shows neither.
+- `sign` reads the blockhash from `SOLANA_RPC_URL` (default: public devnet) through the same guarded transport the Router uses:
+  no redirects, 64 KiB, 10 s, and **a loopback RPC is refused** unless `SOLANA_RPC_ALLOW_LOOPBACK=1` (only for a node you run yourself).
 - The quote's `subject.fundsMoveOnCredential` is `true` for these routes too. With `npm run sign` funds move **at purchase**, not at
   `sign`; the flag stays `true` because another client could hand the Router an already-broadcast (`signature` type) credential, which
   moves funds at the credential. Either way, **approve before `sign`** and treat a failed or `unknown` step 5 as "funds may have moved".

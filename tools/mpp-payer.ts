@@ -19,7 +19,9 @@
  * memo の challenge 束縛・額・宛先の組み立ては**SDK に任せる**（自前で memo を作らない）。
  */
 
-import { Challenge, Credential } from "mppx";
+import { Credential } from "mppx";
+
+import { checkTempoChallenge } from "./sign-dispatch.js";
 import { Mppx, tempo } from "mppx/client";
 import { createWalletClient, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -107,7 +109,9 @@ export function createMppPayer(
       if (typeof serialized !== "string" || serialized === "") {
         throw new Error("offer does not carry the mppx challenge; cannot pay it");
       }
-      const challenge = Challenge.deserialize(serialized);
+      // 中身（SDK が送金を組む `request`）が封筒の offer と一致しなければ払わない（振り分けと同じ判定を、鍵を持つ側でももう一度）。
+      const checked = checkTempoChallenge(serialized, offer as { amount: string; asset: string; payTo: string; extra: Record<string, unknown> }, scope.chainId, Date.now());
+      if (!checked.ok) throw new Error(checked.reason);
 
       const client = createWalletClient({
         account,
@@ -163,7 +167,6 @@ export function createMppPayer(
       } catch {
         // hash を読めなくても credential 自体は有効。照合を諦めるだけ。
       }
-      void challenge;
       return { credential, txRef };
     },
   };

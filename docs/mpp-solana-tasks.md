@@ -96,6 +96,8 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 - **記録（2026-10-08）**: 実装は上の範囲のとおり（`tools/svm-mpp-payer.ts` の `checkSvmMppChallenge` を `classifyOffer` と payer が共有。`hostPlanOf` は `solanaMpp.inbound` で秘密が無ければ固定文で止まる）。
   **見つけた既存の欠陥**: `classifyOffer` の共通の nonce の検査（T5）は `0x` の hex だけを通し、MPP の adapter（Tempo・Solana）が出す nonce は mppx の challenge の id（base64url）なので、
   **T5 から M6 まで `npm run sign` は Tempo の MPP の offer を拒んでいた**。M6 で MPP の 2 レールに mppx の id の形を許し、実 adapter の offer の回帰試験を置いた（設計 §13）。
+  **レビュー 1 で見つかった既存の穴**: Tempo の `npm run sign` は封筒の offer だけを見て払っていた（mppx の client は challenge の中身から送金を組む）→ `checkTempoChallenge` を振り分けと payer の両方に。
+  道具の RPC は素の `fetch` で上限が無かった → `tools/svm-rpc.ts`（Router と同じ guarded transport、loopback の拒否、10 秒、64 KiB）を x402・MPP の両 payer で。
   設計からの逸脱（M3-b〜M6）は設計 §13 に集約
 
 ### MG — gate（要件 §8、AC-17・AC-18。owner の作業と並行）

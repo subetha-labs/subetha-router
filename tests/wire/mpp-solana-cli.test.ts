@@ -149,7 +149,8 @@ function newSeed(): string {
 }
 
 async function sign(b: Booted, quote: Record<string, unknown>, seed: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const result = await runToExit("tools/sign-payment.ts", [JSON.stringify(quote)], { SOLANA_PAYER_PRIVATE_KEY: seed, SOLANA_RPC_URL: b.toolRpc.url });
+  // fixture は loopback: 道具の既定（拒む）を env で明示的に外す。
+  const result = await runToExit("tools/sign-payment.ts", [JSON.stringify(quote)], { SOLANA_PAYER_PRIVATE_KEY: seed, SOLANA_RPC_URL: b.toolRpc.url, SOLANA_RPC_ALLOW_LOOPBACK: "1" });
   return { code: result.code, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -253,13 +254,43 @@ describe("npm run sign → Router の MPP Solana 受信 → settled（AC-19）",
     ];
     for (const [name, patched, pattern] of rows) {
       // 壊れた鍵を渡す: 拒否は鍵を読む前なので、鍵の形の文ではなく拒否の文で止まる。
-      const result = await runToExit("tools/sign-payment.ts", [JSON.stringify({ quoteId: quote.quoteId, source: { offer: patched } })], { SOLANA_PAYER_PRIVATE_KEY: "not-a-key", SOLANA_RPC_URL: b.toolRpc.url });
+      const result = await runToExit("tools/sign-payment.ts", [JSON.stringify({ quoteId: quote.quoteId, source: { offer: patched } })], { SOLANA_PAYER_PRIVATE_KEY: "not-a-key", SOLANA_RPC_URL: b.toolRpc.url, SOLANA_RPC_ALLOW_LOOPBACK: "1" });
       expect(result.code, name).toBe(2);
       expect(result.stdout, name).toBe("");
       expect(result.stderr, name).toMatch(pattern);
       expect(result.stderr, name).not.toMatch(/must be base58/);
     }
     expect(b.toolRpc.calls).toEqual([]);
+    expect(b.rpc.state.sent).toEqual([]);
+  }, 60_000);
+
+  it("道具の RPC の口（SR-M1）: loopback の RPC は env の明示が無ければ拒み（RPC に届かない、署名しない）、64 KiB 超の応答は読まず署名しない、HTTP の error も署名しない。鍵は出ない", async () => {
+    const b = await boot();
+    const seed = newSeed();
+    const quote = await quoteOf(b, "req-rpc");
+    // loopback の既定: 拒む（fixture に要求が届かない）。
+    const refused = await runToExit("tools/sign-payment.ts", [JSON.stringify(quoteDocumentOf(quote))], { SOLANA_PAYER_PRIVATE_KEY: seed, SOLANA_RPC_URL: b.toolRpc.url });
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(b.toolRpc.calls).toEqual([]);
+    expect(refused.stdout + refused.stderr).not.toContain(seed);
+    // 64 KiB 超（正しい結果に padding）: 読まずに失敗。署名しない。
+    b.rpc.state.reply = "huge";
+    const huge = await sign(b, quoteDocumentOf(quote), seed);
+    expect(huge.code).not.toBe(0);
+    expect(huge.stdout).toBe("");
+    expect(b.toolRpc.calls.map((c) => c.method)).toEqual(["getLatestBlockhash"]);
+    expect(huge.stdout + huge.stderr).not.toContain(seed);
+    // HTTP 500（本文は正しい結果）: 失敗。署名しない。
+    b.rpc.state.reply = "error";
+    const error = await sign(b, quoteDocumentOf(quote), seed);
+    expect(error.code).not.toBe(0);
+    expect(error.stdout).toBe("");
+    expect(b.toolRpc.calls.map((c) => c.method)).toEqual(["getLatestBlockhash", "getLatestBlockhash"]);
+    // 正常に戻せば署名できる（同じ quote）。
+    b.rpc.state.reply = "ok";
+    const ok = await sign(b, quoteDocumentOf(quote), seed);
+    expect(ok.code, ok.stderr).toBe(0);
     expect(b.rpc.state.sent).toEqual([]);
   }, 60_000);
 

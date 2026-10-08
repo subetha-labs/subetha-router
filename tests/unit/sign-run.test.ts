@@ -28,8 +28,10 @@ function evm(overrides: Record<string, unknown> = {}, extra: Record<string, unkn
 function svm(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { scheme: "exact", network: SOL, asset: MINT, amount: "10000", payTo: OWNER, maxTimeoutSeconds: 40, extra: { feePayer: OWNER, memo: NONCE, challengeNonce: NONCE, expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: false, ...extra } };
 }
+const TEMPO_CHALLENGE = (request: Record<string, unknown> = {}): string =>
+  Challenge.serialize(Challenge.from({ id: NONCE, realm: "r", method: "tempo", intent: "charge", expires: new Date((EXPIRES - 1) * 1000).toISOString(), request: { amount: "10000", currency: PATHUSD, recipient: RECEIVER, methodDetails: { chainId: 42431 }, ...request } } as never) as never);
 function mpp(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: 'Payment id="x", realm="r"', expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true, ...extra } };
+  return { scheme: "tempo/charge", network: "eip155:42431", asset: PATHUSD, amount: "10000", payTo: RECEIVER, maxTimeoutSeconds: 600, extra: { challengeNonce: NONCE, challenge: TEMPO_CHALLENGE(), expiresAt: EXPIRES, routeBinding: "r", fundsMoveOnCredential: true, ...extra } };
 }
 
 interface Trace {
@@ -110,6 +112,7 @@ describe("runSign", () => {
   test("拒む offer では鍵を読まず、payer を呼ばない（MPP の challenge 無し・nonce 無し・失効・上限超・表に無い network・SVM の桁の矛盾）", async () => {
     const refused: [string, Record<string, unknown>, RegExp][] = [
       ["MPP の challenge 無し", mpp({ challenge: undefined }), /does not carry the mppx challenge/],
+      ["MPP の challenge の額が封筒と違う（SDK は中身から送金を組む）", mpp({ challenge: TEMPO_CHALLENGE({ amount: "20000" }) }), /challenge amount differs/],
       ["MPP の nonce 無し", mpp({ challengeNonce: undefined }), /challengeNonce/],
       ["EVM の失効", evm({}, { expiresAt: 1 }), /expired/],
       ["上限超", evm({ amount: "20001" }), /exceeds the cap/],

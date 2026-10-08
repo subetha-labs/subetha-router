@@ -325,7 +325,7 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 ### 2d. Solana の MPP（Solana devnet USDC を **MPP** で受ける・払う）— **コードは入っているが本番では無効**（M6、2026-10-08。有効化は G-4″）
 
 呼び出し側が **Solana devnet の USDC を MPP（`solana/charge`、pull）** で払って既存の Provider A（x402）・B（MPP）に届く**受信**と、Router が **Provider D**
-（運用者の pay-kit の server、`solana/charge`、pull、`feePayer: false`）に Solana devnet の USDC を MPP で払う**送信**（要件 `mpp-solana-requirements.md`、設計 `mpp-solana-design.md`、
+（運用者の pay-kit の server、`solana/charge`、pull、**`feePayer: true`** = Provider の fee payer が共同署名して送出する）に Solana devnet の USDC を MPP で払う**送信**（要件 `mpp-solana-requirements.md`、設計 `mpp-solana-design.md`、
 タスク `mpp-solana-tasks.md`）。x402 の Solana（§2c）とは別のレールで、**同じ受取 owner・同じ送信鍵・同じ RPC・同じ Solana USDC の予算の区分**を共有する。
 
 **有効・無効は §2c と同じ 1 つの定数**: `tools/remote-mcp-config.ts` の `RAILS_ACTIVATION.solanaMpp = { inbound, outbound }`（M6 の配備では両方 `false`。内部の token は
@@ -348,7 +348,7 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 
 **gate（要件 §8。AC-17・AC-18。owner の作業と並行）**:
 
-1. **G-1″（owner）**: Provider D を devnet で立てる（pay-kit の server。`solana/charge`、`feePayer: false`。`externalId` の有無は任意——Router は無くても払う。
+1. **G-1″（owner）**: Provider D を devnet で立てる（pay-kit の server。`solana/charge`、**`feePayer: true`**（Provider の fee payer が送出する pull。Router は `feePayer: false` の challenge を `mode` で拒む: 設計 §4.2 の 6）。`externalId` の有無は任意——Router は無くても払う。
    受取 owner の ATA は運用者が作る。置き場は Node か Workers。D-26）。URL を定数 `UPSTREAM_SOL_MPP` に入れ、受取 owner を `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO` に。
    Router の送信鍵（`SUBETHA_OUTBOUND_SOLANA_KEY` の address）の ATA に devnet USDC（Router は起動時に自分の ATA も確かめる）
 2. **G-2″（配備。無効のまま）**: M6 を含むイメージに入れ替える（§2c と同じ `deploy/swap-image.sh`。rollback の container を 1 つ保つ）。確かめるのは「公開の一覧が従来の route 6・プロファイル 10 のまま」、

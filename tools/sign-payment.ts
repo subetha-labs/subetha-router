@@ -30,6 +30,7 @@ import { createMppPayer } from "./mpp-payer.js";
 import { runSign } from "./sign-run.js";
 import { createSvmMppPayer } from "./svm-mpp-payer.js";
 import { createSvmPayer } from "./svm-payer.js";
+import { SVM_RPC_ALLOW_LOOPBACK_ENV } from "./svm-rpc.js";
 import { createX402Payer } from "./x402-payer.js";
 
 function envValue(name: string): string | undefined {
@@ -70,11 +71,14 @@ try {
 }
 
 const solanaRpcUrl = envValue("SOLANA_RPC_URL");
+// loopback の Solana RPC は既定で拒む（Router と同じ transport の方針）。手元の node・fixture に向けるときだけ `SOLANA_RPC_ALLOW_LOOPBACK=1`。
+const solanaRpcAllowLoopback = envValue(SVM_RPC_ALLOW_LOOPBACK_ENV) === "1";
 const outcome = await runSign(quote, {
   nowMs: Date.now,
   readEvmKey: () => requireKey("SUBETHA_PAYER_PRIVATE_KEY", "npm run wallet:new"),
   readSolanaKey: () => requireKey("SOLANA_PAYER_PRIVATE_KEY", "npm run wallet:new:solana"),
   ...(solanaRpcUrl === undefined ? {} : { solanaRpcUrl }),
+  ...(solanaRpcAllowLoopback ? { solanaRpcAllowLoopback } : {}),
   mppPayer: (key, scope) => createMppPayer(key, scope),
   evmPayer: (key) => createX402Payer(key),
   svmPayer: (key, options) => createSvmPayer(key, options),
