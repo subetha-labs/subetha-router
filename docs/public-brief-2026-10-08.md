@@ -1,10 +1,10 @@
-# SubEtha Router — public brief (as of 2026-10-08)
+# SubEtha Router — public brief (as of 2026-10-08; updated 2026-10-08 17:55Z after the remaining six pairs were purchased)
 
 Source material for the official site, announcements and the hackathon submission. Every statement here is backed by a record in this repository; the pointers are in §7. Nothing here is a promise about mainnet.
 
 ## 1. One-paragraph description
 
-SubEtha Router is a proof of concept, on testnets only, that lets an AI agent pay for an HTTP resource over one payment rail while the provider is paid over another. The caller pays the Router over x402 (Base Sepolia USDC, Arc testnet USDC or Solana devnet USDC) or over MPP (Tempo pathUSD or Solana devnet USDC); the Router pays the provider over whichever of those five the provider accepts and returns the provider's response. It is exposed as a hosted MCP server, and the Router never holds the caller's key: the caller signs the inbound payment locally and hands the Router a credential. Each of the five rails has been settled end to end on testnets in both directions, with both legs confirmed on chain; 12 of the 18 offered rail pairs have been purchased end to end, the other 6 are covered by the wire test matrix and verified by public quotes (see §3).
+SubEtha Router is a proof of concept, on testnets only, that lets an AI agent pay for an HTTP resource over one payment rail while the provider is paid over another. The caller pays the Router over x402 (Base Sepolia USDC, Arc testnet USDC or Solana devnet USDC) or over MPP (Tempo pathUSD or Solana devnet USDC); the Router pays the provider over whichever of those five the provider accepts and returns the provider's response. It is exposed as a hosted MCP server, and the Router never holds the caller's key: the caller signs the inbound payment locally and hands the Router a credential. Each of the five rails has been settled end to end on testnets in both directions, with both legs confirmed on chain, and all 18 offered rail pairs have been purchased end to end on testnets (12 during the rollouts of 2026-10-05 … 2026-10-08, the remaining 6 on 2026-10-08 17:41–17:52Z against the hosted Router; see §3).
 
 ## 2. What is live on the hosted Router
 
@@ -62,8 +62,8 @@ The caller names a public `https` URL of a third-party x402 or MPP provider whos
 ## 3. Claims that are safe to publish
 
 - Cross-rail payment routing between x402 and MPP, in both directions, on five rail/asset combinations across four testnets (Base Sepolia, Arc testnet, Tempo testnet, Solana devnet).
-- Settled end to end on testnets, with both legs' transaction hashes/signatures, finality, balance deltas and the provider's response in the acceptance records: Base x402 ↔ Tempo MPP (both directions, static and dynamic); Arc x402 → Tempo MPP (static and dynamic); Solana x402 → Base x402 (static and dynamic); Base x402 → Arc x402 (static and dynamic); Tempo MPP → Arc x402 (dynamic); Tempo MPP → Solana x402 (static and dynamic); Base x402 → Solana x402 (dynamic); Solana MPP → Base x402 (static and dynamic); Solana MPP → Tempo MPP (dynamic); Base x402 → Solana MPP (static and dynamic); Tempo MPP → Solana MPP (dynamic). That is 12 of the 18 offered pairs and every rail inbound and outbound.
-- Not purchased on testnets (covered by the wire test matrix with reference-implementation fixtures, and quoted without payment on the hosted Router on 2026-10-08): `dyn-arc-to-x402`, `dyn-sol-to-mpp`, `dyn-solmpp-to-arc`, `dyn-solmpp-to-sol`, `dyn-arc-to-solmpp`, `dyn-sol-to-solmpp`. Say "quoted" for these, not "settled".
+- Settled end to end on testnets, with both legs' transaction hashes/signatures, finality, balance deltas and the provider's response in the acceptance records: Base x402 ↔ Tempo MPP (both directions, static and dynamic); Arc x402 → Tempo MPP (static and dynamic); Solana x402 → Base x402 (static and dynamic); Base x402 → Arc x402 (static and dynamic); Tempo MPP → Arc x402 (dynamic); Tempo MPP → Solana x402 (static and dynamic); Base x402 → Solana x402 (dynamic); Solana MPP → Base x402 (static and dynamic); Solana MPP → Tempo MPP (dynamic); Base x402 → Solana MPP (static and dynamic); Tempo MPP → Solana MPP (dynamic); and, purchased on 2026-10-08 17:41–17:52Z against the hosted Router (`b-3606fb6`, dynamic profiles, `docs/DEPLOY.md` §2e): Arc x402 → Base x402; Solana x402 → Tempo MPP; Solana MPP → Arc x402; Solana MPP → Solana x402; Arc x402 → Solana MPP; Solana x402 → Solana MPP. That is all 18 offered pairs and every rail inbound and outbound.
+- Until 2026-10-08 17:41Z the six profiles `dyn-arc-to-x402`, `dyn-sol-to-mpp`, `dyn-solmpp-to-arc`, `dyn-solmpp-to-sol`, `dyn-arc-to-solmpp`, `dyn-sol-to-solmpp` had only been quoted (AC-18, 2026-10-08 15:43–16:07Z) and covered by the wire test matrix; since the purchases of 2026-10-08 17:41–17:52Z they are settled like the others (both legs on chain, balance deltas, provider body delivered, status re-readable from the saved ids). One honest detail to keep: the first attempt on `dyn-arc-to-x402` ended `paid_data_unavailable` (the caller's Arc payment settled, Provider A rejected the Router's Base payment without a receipt, nothing refunded, cause not identified from the hosted entry); the retry ten minutes later delivered. 7 purchases, 6 delivered.
 - The Router never holds the caller's key. The caller signs locally (`npm run sign` in the repository detects the rail from the quote) and only the credential travels.
 - Dynamic upstreams: an agent can pay a compatible public x402 or MPP provider URL on a supported rail without the operator having configured it (compatible = the provider's 402 meets the constraints in §2.3).
 - Hosted as an MCP server over HTTPS, usable from Claude Code or any MCP client.
@@ -84,7 +84,7 @@ The caller names a public `https` URL of a third-party x402 or MPP provider whos
 
 Short:
 
-> SubEtha Router (PoC, testnets only) bridges payment rails in both directions: an agent pays over x402 (Base Sepolia USDC, Arc testnet USDC, Solana devnet USDC) or MPP (Tempo pathUSD, Solana devnet USDC) and reaches a provider that accepts one of the others (18 of the 20 cross-rail pairs), through a hosted MCP server that never holds the caller's key. Every rail has been settled end to end on testnets in both directions; caps are small and dynamic upstreams are unverified.
+> SubEtha Router (PoC, testnets only) bridges payment rails in both directions: an agent pays over x402 (Base Sepolia USDC, Arc testnet USDC, Solana devnet USDC) or MPP (Tempo pathUSD, Solana devnet USDC) and reaches a provider that accepts one of the others (18 of the 20 cross-rail pairs), through a hosted MCP server that never holds the caller's key. Every rail has been settled end to end on testnets in both directions and every offered pair has been purchased end to end; caps are small and dynamic upstreams are unverified.
 
 Longer (three sentences for a site section):
 
@@ -98,10 +98,11 @@ Longer (three sentences for a site section):
 | 2026-10-06 | Dynamic upstream URLs enabled (caller-chosen providers), both directions |
 | 2026-10-07 | Inbound Arc testnet USDC and Solana devnet USDC (x402) enabled |
 | 2026-10-08 | Outbound Arc and Solana (x402) enabled (G-4′); MPP on Solana enabled inbound and outbound (G-4″); the shared-bucket cap fix (PR #116); production image `b-3606fb6` |
+| 2026-10-08 (17:41–17:52Z) | The remaining six dynamic pairs purchased end to end on the hosted Router (G-5); every offered pair now settled on testnets; one first attempt ended paid-no-data and was retried |
 
 ## 7. Evidence pointers (repository)
 
-- Deployment and gate records: `docs/DEPLOY.md` §2b (dynamic upstreams), §2c (Arc/Solana x402, G-1…G-4′), §2d (MPP on Solana, G-1″…G-4″ including AC-18).
+- Deployment and gate records: `docs/DEPLOY.md` §2b (dynamic upstreams), §2c (Arc/Solana x402, G-1…G-4′), §2d (MPP on Solana, G-1″…G-4″ including AC-18), §2e (G-5: the remaining six pairs purchased on the hosted Router, 2026-10-08 17:41–17:52Z).
 - Designs: `docs/design.md` (core), `docs/dynamic-upstream-design.md`, `docs/dynamic-gas-fee-design.md`, `docs/multirail-design.md`, `docs/multirail-outbound-design.md`, `docs/mpp-solana-design.md`; requirements and task records next to each.
 - Security: `docs/ssrf-requirements.md`, `docs/ssrf-app-guard-design.md`, `docs/ssrf-egress-design.md`.
 - Providers: `docs/provider-x402-workers.md`, `docs/provider-mpp-solana-workers.md`, code under `providers/`.
