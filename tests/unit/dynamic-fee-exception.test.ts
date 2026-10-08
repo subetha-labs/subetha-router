@@ -9,6 +9,7 @@ import { describe, expect, test } from "vitest";
 
 import { ConfigError, dynamicAuthoritativeTermsOf, KNOWN_NETWORKS, MPP_SOLANA_SCHEME, parseRouterConfig, usesGasIndexedFee, type DynamicProfile } from "../../src/config.js";
 import { capCoversFee } from "../../src/core/store.js";
+import { dynamicListingOf } from "../../src/http/projection.js";
 import { gasIndexedMppProfilesOf } from "../../src/main.js";
 
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
@@ -128,6 +129,18 @@ describe("動的プロファイル（設計 §1.2・§1.4 (a)）", () => {
     expect(Object.keys(sol["destination"] as Json)).not.toContain("feeMargin");
     expect(tempo["pricingPolicy"]).toBe("gas-indexed-v2");
     expect((tempo["destination"] as Json)["feeMargin"]).toBe(20_000);
+  });
+
+  test("公開の一覧（projection）: Solana 宛の mpp は feePolicy を持たず、開示に fee_too_high の項目が無い。Tempo 宛は今までどおり", () => {
+    const parsed = parseRouterConfig(config([tempoMppProfile(), solMppProfile()]), { networks: KNOWN_NETWORKS });
+    const listing = dynamicListingOf(parsed)! as { profiles: Json[] };
+    const sol = listing.profiles.find((p) => p["profileId"] === "dyn-x402-to-solmpp")!;
+    const tempo = listing.profiles.find((p) => p["profileId"] === "dyn-x402-to-mpp")!;
+    expect(sol).not.toHaveProperty("feePolicy");
+    expect(sol["disclosures"]).not.toHaveProperty("feeEstimateIsNotADeliveryGuarantee");
+    expect(sol["disclosures"]).not.toHaveProperty("routerMayRejectAfterSettle");
+    expect(tempo["feePolicy"]).toEqual({ kind: "gas-indexed", feeMargin: 20_000, maxFeeCeiling: "50000" });
+    expect((tempo["disclosures"] as Json)["routerMayRejectAfterSettle"]).toEqual(["fee_too_high"]);
   });
 
   test("usesGasIndexedFee: Tempo 宛の mpp だけ true", () => {
