@@ -184,7 +184,7 @@ describe("MPP Solana 受信: 起動時の検査（設計 §3.1）", () => {
     expect(MPP_SOLANA_SETTLE_DEADLINE_MS).toBe(50_000);
     expect(MPP_SOLANA_FOLLOW_UP_DEFAULTS).toEqual({ totalMs: 30_000, intervalMs: 2_000, maxPolls: 15 });
     expect(MPP_SOLANA_RPC_TIMEOUT_MS).toBe(10_000);
-    expect(MPP_SOLANA_EVIDENCE_GRACE_MS).toBe(180_000);
+    expect(MPP_SOLANA_EVIDENCE_GRACE_MS).toBe(3_600_000);
   });
 });
 
@@ -806,6 +806,25 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     }
     expect(rpcAgain.state.sent).toEqual([]);
     expect(rpcAgain.calls.map((call) => call.method)).toEqual(["getAccountInfo"]);
+  });
+
+  it("core は settle の直前に offer の期限をもう一度見る: verify の後に期限が過ぎた purchase は settle を呼ばず approval_expired（静的・動的とも。証拠の保持 = 期限 + 猶予 の根拠）", async () => {
+    const c = await compose();
+    await c.rails.startup!();
+    let clock = Date.now();
+    // verify の中で時計を offer の期限の先に進める（core の verify と settle の間で遅れた purchase）。
+    const inbound = { ...c.rails.inbound, verify: async (offer: InboundOffer, credential: PaymentCredential, context?: { routeId: string }) => { const r = await c.rails.inbound.verify(offer, credential, context); clock = offer.extra.expiresAt * 1000 + 1; return r; } };
+    const core = await createRouterCore({ journalPath: c.config.journalPath, config: c.config.router, inbound, outbound: new StubOutbound(), note: () => {}, now: () => clock, dynamic: { ledgerDir: path.join(c.dir, "dynamic-quotes") }, onStoreLoaded: c.rails.bindConsumed });
+    opened.push(core);
+    const q1 = await staticQuote(core, "r-solmpp", "req-1");
+    const cred1 = await c.payer.credentialFor(q1.source.offer, "signature");
+    expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
+    clock = Date.now();
+    const q2 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-2");
+    const cred2 = await c.payer.credentialFor(q2.source.offer);
+    expect(await core.purchase(purchaseArgs(q2, "req-2", cred2))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
+    // settle は呼ばれていない: 送出は payer の fixture の 1 回（signature 型）だけ。
+    expect(c.rpc.state.sent).toHaveLength(1);
   });
 
   it("bind の前（`onStoreLoaded` を渡さない core）: verify は通るが settle が throw → 静的の core は unknown（source_settle_unknown）。送出しない", async () => {

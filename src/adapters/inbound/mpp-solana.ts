@@ -357,10 +357,13 @@ export const MPP_SOLANA_SETTLE_DEADLINE_MS = 50_000;
 export const MPP_SOLANA_FOLLOW_UP_DEFAULTS = Object.freeze({ totalMs: 30_000, intervalMs: 2_000, maxPolls: 15 });
 export const MPP_SOLANA_RPC_TIMEOUT_MS = 10_000;
 /**
- * verify が残す証拠の保持: offer の期限の後、さらにこの猶予（core の purchase の予算 180 秒）まで。**数では捨てない**（進行中の purchase の証拠を
- * 他の purchase の verify が押し出してはいけない。数は発行済みの offer の寿命で自然に有界）。
+ * verify が残す証拠の保持: offer の期限の後、さらにこの猶予（1 時間）まで。**数では捨てない**（進行中の purchase の証拠を他の purchase の verify が
+ * 押し出してはいけない）。core は settle の**直前**に offer の期限を再検査し（`orchestrator.ts` の `approval_expired`、`dynamic.ts` の「期限の再検査」）、
+ * 期限の後は settle を呼ばない。期限の前に再検査を通った purchase が settle に至るまでにあるのは予算の予約（journal の追記）だけなので、
+ * 猶予はその追記が止まり得る時間の上界として取る（1 時間止まった journal は Router 全体が止まっている）。再起動で証拠は消えるが、
+ * 再起動をまたぐ purchase は core が `interrupted_at_restart` で終え、settle を再開しない。
  */
-export const MPP_SOLANA_EVIDENCE_GRACE_MS = 180_000;
+export const MPP_SOLANA_EVIDENCE_GRACE_MS = 3_600_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
