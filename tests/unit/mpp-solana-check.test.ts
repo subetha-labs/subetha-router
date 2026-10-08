@@ -102,8 +102,12 @@ describe("checkMppSolanaTransaction: 各欄の変異で落ちる", () => {
       ["source（別の ATA。owner が署名者でない）", () => wireOf(w, { source: otherAta }), "credential_mismatch"],
       ["compute limit > 200,000", () => wireOf(w, { units: 200_001 }), "credential_mismatch"],
       ["compute price > 5,000,000", () => wireOf(w, { microLamports: 5_000_001n }), "credential_mismatch"],
-      ["limit が 2 つ", () => wireOf(w, { instructions: (base) => [limit(1), ...base] }), "credential_mismatch"],
-      ["price が 2 つ", () => wireOf(w, { instructions: (base) => [price(1n), ...base] }), "credential_mismatch"],
+      ["limit が 2 つ（5 命令）", () => wireOf(w, { instructions: (base) => [limit(1), ...base] }), "credential_mismatch"],
+      ["price が 2 つ（5 命令）", () => wireOf(w, { instructions: (base) => [price(1n), ...base] }), "credential_mismatch"],
+      ["limit が 2 つ（4 命令: price の代わりに）", () => wireOf(w, { instructions: (base) => [base[0]!, limit(1), base[2]!, base[3]!] }), "credential_mismatch"],
+      ["price が 2 つ（4 命令: limit の代わりに）", () => wireOf(w, { instructions: (base) => [price(2n), base[1]!, base[2]!, base[3]!] }), "credential_mismatch"],
+      ["ATA の作成（idempotent）が compute budget の代わり（4 命令）", () => wireOf(w, { instructions: (base) => [{ programAddress: address("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"), accounts: [], data: new Uint8Array([1]) } as Instruction, base[1]!, base[2]!, base[3]!] }), "credential_mismatch"],
+      ["ATA の作成（idempotent）を足す（5 命令）", () => wireOf(w, { instructions: (base) => [...base.slice(0, 2), { programAddress: address("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"), accounts: [], data: new Uint8Array([1]) } as Instruction, ...base.slice(2)] }), "credential_mismatch"],
       ["余分な命令（Memo が 2 つ）", () => wireOf(w, { instructions: (base) => [...base, memoIx("x")] }), "credential_mismatch"],
       ["Memo が転送の前", () => wireOf(w, { instructions: (base) => [base[0]!, base[1]!, base[3]!, base[2]!] }), "credential_mismatch"],
       ["Memo 無し（3 命令）", () => wireOf(w, { memo: undefined }), "credential_mismatch"],
@@ -150,6 +154,9 @@ describe("checkMppSolanaTransaction: 各欄の変異で落ちる", () => {
     // lookup table を 1 つ足す（末尾の count 0 を、1 件の table に置き換える）。
     const withLookup = await resignedWire(w, (m) => new Uint8Array([...m.subarray(0, m.length - 1), 1, ...new Uint8Array(32).fill(7), 1, 0, 0]));
     expect(checkMppSolanaTransaction(withLookup, w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
+    // version 1（印が 0x81）: kit の decoder が知らない version。
+    const versionOne = await resignedWire(w, (m) => { m[0] = 0x81; return m; });
+    expect(checkMppSolanaTransaction(versionOne, w.policy, "10000", w.externalId, w.payerAta)).toEqual({ ok: false, reason: "credential_mismatch" });
     // legacy（version の印が無い）message。
     const legacy = pipe(
       createTransactionMessage({ version: "legacy" }),

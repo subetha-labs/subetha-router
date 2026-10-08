@@ -10,14 +10,17 @@
 import { execFileSync } from "node:child_process";
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { address, generateKeyPairSigner } from "@solana/kit";
+import { address, generateKeyPairSigner, getBase58Decoder, getTransactionEncoder, partiallySignTransactionMessageWithSigners } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { createPayKit, Signer, usd } from "@solana/pay-kit";
 import { Challenge, Credential, Method } from "mppx";
+import { Mppx as ClientMppx } from "mppx/client";
 import { Mppx } from "mppx/server";
 
+import { buildSvmTransactionMessage } from "../../src/adapters/inbound/x402-svm.js";
 import {
   checkMppSolanaTransaction,
+  isSvmPublicKeyString,
   mppSolanaChargeMethod,
   mppSolanaPayloadOf,
   newExternalId,
@@ -99,10 +102,10 @@ afterAll(async () => {
 
 describe("U-10: Router の mppx 0.11.0 と pay-kit（0.13.x）の互換", () => {
   test("npm の解決: Router の mppx は 0.11.0、pay-kit の下は 0.13.2（overrides）", () => {
-    const out = execFileSync("npm", ["ls", "mppx", "--depth=2"], { encoding: "utf8" });
-    expect(out).toContain("mppx@0.11.0");
-    expect(out).toContain("@solana/pay-kit@0.13.1");
-    expect(out).toMatch(/pay-kit@0\.13\.1[^\n]*\n[^\n]*mppx@0\.13\.2/);
+    const tree = JSON.parse(execFileSync("npm", ["ls", "mppx", "--depth=2", "--json"], { encoding: "utf8" })) as { dependencies: Record<string, { version: string; dependencies?: Record<string, { version: string }> }> };
+    expect(tree.dependencies["mppx"]?.version).toBe("0.11.0");
+    expect(tree.dependencies["@solana/pay-kit"]?.version).toBe("0.13.1");
+    expect(tree.dependencies["@solana/pay-kit"]?.dependencies?.["mppx"]?.version).toBe("0.13.2");
   });
 
   test("0.11.0 の challenge → pay-kit の client（既定）→ transaction 型の credential。0.11.0 の deserialize と validateCredential（HMAC・scope）が通り、Router の検査も通る", async () => {
@@ -214,6 +217,63 @@ describe("RPC の fixture は pay-kit の server の verify を満たす（M4-b 
       expect(paid.status).toBe(200);
       expect(paid.headers.get("payment-receipt")).toBeTruthy();
     } finally {
+      await d.close();
+    }
+  });
+
+  test("U-10 の送信の向き: 0.11.0 の client（preparePayment）が pay-kit の server の challenge（feePayer: true、feePayerKey あり）を読み、Router の builder の pull の transaction を 0.11.0 が serialize した credential を pay-kit の server が共同署名して settle する", async () => {
+    const d = await providerD(true);
+    try {
+      rpc.state.signatureStatuses = ["confirmed"];
+      const payerKey = await generateKeyPairSigner();
+      const payerAta = await ataOf(String(payerKey.address));
+      let seen: Record<string, unknown> | undefined;
+      const method = Method.toClient(mppSolanaChargeMethod, {
+        async createCredential({ challenge }) {
+          seen = challenge as unknown as Record<string, unknown>;
+          const request = challenge.request as { amount: string; currency: string; recipient: string; externalId?: string; methodDetails: { feePayer?: boolean; feePayerKey?: string; decimals: number; tokenProgram?: string } };
+          expect(request.methodDetails.feePayer).toBe(true);
+          expect(isSvmPublicKeyString(request.methodDetails.feePayerKey)).toBe(true);
+          // Router の builder（送信の設計 §4.3 の形: [0] fee payer = feePayerKey は空、[1] = payer）。Memo は externalId があるときだけ。
+          const message = buildSvmTransactionMessage({
+            feePayer: request.methodDetails.feePayerKey!,
+            source: payerAta,
+            authority: payerKey,
+            destination: await ataOf(request.recipient),
+            mint: request.currency,
+            amount: BigInt(request.amount),
+            decimals: request.methodDetails.decimals,
+            memo: request.externalId,
+            units: 60_000,
+            microLamports: 1n,
+            blockhash: "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD",
+            tokenProgram: request.methodDetails.tokenProgram ?? TOKEN_PROGRAM,
+          });
+          const signed = await partiallySignTransactionMessageWithSigners(message);
+          return Credential.serialize({ challenge, payload: { type: "transaction", transaction: Buffer.from(getTransactionEncoder().encode(signed)).toString("base64") } } as never);
+        },
+      });
+      const client = ClientMppx.create({ methods: [method], polyfill: false, maxPaymentRetries: 0 } as never) as unknown as { rawFetch: typeof fetch; preparePayment: (response: Response, options: { request: RequestInit }) => Promise<{ challenge: Record<string, unknown>; createCredential: () => Promise<string>; setCredential: (init: RequestInit, credential: string) => RequestInit }> };
+      const init: RequestInit = { method: "GET" };
+      const first = await client.rawFetch(`${d.base}/paid`, init);
+      expect(first.status).toBe(402);
+      const prepared = await client.preparePayment(first, { request: init });
+      expect(prepared.challenge).toMatchObject({ method: "solana", intent: "charge" });
+      const credential = await prepared.createCredential();
+      expect(seen).toBeDefined();
+      const sentBefore = rpc.state.sent.length;
+      const paid = await client.rawFetch(`${d.base}/paid`, { ...prepared.setCredential(init, credential), method: "GET" });
+      expect(paid.status).toBe(200);
+      const receipt = JSON.parse(Buffer.from(paid.headers.get("payment-receipt")!, "base64url").toString("utf8")) as Record<string, unknown>;
+      expect(receipt).toMatchObject({ method: "solana", status: "success" });
+      // server が共同署名して送出した（fee payer の署名 [0] が入った wire）。領収の reference はその署名。
+      expect(rpc.state.sent.length).toBe(sentBefore + 1);
+      const sentBytes = Buffer.from(rpc.state.sent.at(-1)!, "base64");
+      expect(sentBytes[0]).toBe(2);
+      expect(sentBytes.subarray(1, 65).some((b) => b !== 0)).toBe(true);
+      expect(receipt["reference"]).toBe(getBase58Decoder().decode(new Uint8Array(sentBytes.subarray(1, 65))));
+    } finally {
+      rpc.state.signatureStatuses = undefined;
       await d.close();
     }
   });
