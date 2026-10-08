@@ -196,8 +196,8 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   solana: Object.freeze({ inbound: true, outbound: true }),
   /** Solana の MPP: **2026-10-08 に両方 `true`**（G-4″。owner の決定「両方進めていただきたい」。G-3″ で受信 3 件・送信 3 件が delivered。`docs/DEPLOY.md` §2d）。戻すのはここ（イメージを作り直して入れ替える）。 */
   solanaMpp: Object.freeze({ inbound: true, outbound: true }),
-  /** Arc x402 ↔ Solana x402 の組: **G-2⁗ では両方 `false`**（一覧は 18 本のまま）。G-4⁗（owner の判断）で `true`。戻すのはここ。 */
-  pairs: Object.freeze({ arcToSol: false, solToArc: false }),
+  /** Arc x402 ↔ Solana x402 の組: **2026-10-08 に両方 `true`**（G-4⁗。owner の決定。G-3⁗ で O-5・O-6 を各 1 件 delivered。`docs/DEPLOY.md` §2c-2）。戻すのはここ（イメージを作り直して入れ替える）。 */
+  pairs: Object.freeze({ arcToSol: true, solToArc: true }),
 });
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });

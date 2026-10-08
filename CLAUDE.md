@@ -20,7 +20,7 @@ Each phase: minimal artifact, independent review, parent readback. No repeated w
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.
 **The Router never holds your key**, so the signature is produced here.
 
-The Router exposes **ten routes** (each rail only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
+The Router exposes **ten routes** and **twenty dynamic profiles** (each rail only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
 
 | routeId | you pay with | reaches |
 |---|---|---|
@@ -144,7 +144,7 @@ direction; **if a route or profile is missing from `subetha_router_list_routes`,
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`. On the hosted Router **eighteen profiles** are enabled since G-4″ (2026-10-08; ten after G-4′, six before it); the eight `*solmpp*` ones are described under "MPP on Solana" above. The original two: `dyn-mpp-to-x402` (you pay **Tempo
+with `enabled`. On the hosted Router **twenty profiles** are enabled since G-4⁗ (2026-10-08; eighteen after G-4″, ten after G-4′, six before it); the eight `*solmpp*` ones are described under "MPP on Solana" above, and the two newest are `dyn-arc-to-sol` (you pay **Arc testnet USDC** over x402, the upstream accepts **Solana devnet USDC** over x402) and `dyn-sol-to-arc` (you pay **Solana devnet USDC** over x402, the upstream accepts **Arc testnet USDC** over x402); both are x402 on both legs, so `npm run sign` only signs and funds move at purchase. The original two: `dyn-mpp-to-x402` (you pay **Tempo
 pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**) and `dyn-x402-to-mpp` (you pay
 **Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); since 2026-10-07 also `dyn-arc-to-mpp` /
 `dyn-arc-to-x402` (you pay **Arc testnet USDC**) and `dyn-sol-to-x402` / `dyn-sol-to-mpp` (you pay **Solana devnet USDC**); with G-4′ also `dyn-x402-to-arc` / `dyn-x402-to-sol`

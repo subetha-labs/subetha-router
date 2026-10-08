@@ -234,9 +234,9 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     expect(readdirSync(path.join(dir, "acceptance"))).toBeDefined();
     // 受け入れ用の起動は公開の定数を書き換えない（ソースの上の値は G-4 の両方 true のまま）。
     // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信も両方 true（G-4′、2026-10-08）。
-    // 公開の定数（G-4″ の後の形）: arc・solana・solanaMpp すべて両方 true。組 O-5・O-6（pairs）は G-2⁗ では両方 false（G-4⁗ で true にする）。
+    // 公開の定数（G-4″ の後の形）: arc・solana・solanaMpp すべて両方 true。組 O-5・O-6（pairs）は G-4⁗ で両方 true。
     const source = readFileSync("tools/remote-mcp-config.ts", "utf8");
-    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?pairs: Object\.freeze\(\{ arcToSol: false, solToArc: false \}\),\s*\}\)/);
+    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?pairs: Object\.freeze\(\{ arcToSol: true, solToArc: true \}\),\s*\}\)/);
   }, 40_000);
 });
 
