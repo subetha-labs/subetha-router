@@ -431,6 +431,13 @@ G-3″ はこの 2 組を購入していない（要件 AC-17 の選択は受信
 **修正**（この変更）: Solana USDC の**動的**の区分だけ 1 件の上限を 21,000（= 10,000 + 1,000 + 10,000。他の区分と静的の予算は変えない）。単体試験は本番の 18 プロファイルすべてで上限額の quote の予約が区分に収まること（Tempo 宛の MPP は gas の cap = 規則の手数料の前提。上流 10,000 のとき cap > 10,000 は Tempo の区分で `per_purchase_limit`）、
 両レグ同じ区分の 2 組は 21,000 ちょうどで通り、上流が 1 base unit 増えると両レグで 2 増えて `perPurchaseLimitOf` が `per_purchase_limit` を返すことを見る（quote の全体では上流 10,001 は先に `no_matching_offer` で止まる。試験は予約の検査を直接呼ぶ）。配備（G-2″ からのやり直し = イメージの入れ替え）と、残り 2 組の quote の記録は下に足す。
 
+**G-4″ の 2 回目（2026-10-08 16:06Z。PR #116 の修正を含む）— AC-18 を満たした**: main `3606fb6`（PR #116: Solana USDC の動的の区分の 1 件の上限 21,000。Codex `gpt-6-astra` APPROVE WITH CHANGES（文書の訂正のみ、反映済み）、Linux 2019 pass）のイメージ
+`b-3606fb6`（手元で build、14 層の内容ハッシュ一致）を `swap-image.sh` で入れ替え: 16:06:31Z 開始、16:06:41Z 終了、exit 0、journal は旧の接頭辞のまま、egress ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。
+rollback は `subetha-router-prev-20261008T160631Z`（`b-29ae9da`）。コンテナは healthy、子の env は `SUBETHA_RAILS_ACTIVATION` が 6 語、受取 owner の env は子に渡っていない（名前だけ見た）。
+AC-18 の続き（16:07Z）: 一覧は route 10・プロファイル 18 のまま。残っていた 2 組の quote が ok: `dyn-solmpp-to-sol`（Solana USDC/MPP 11,000 → Solana の x402 Provider の URL、`destinationPayTo` はその受取、`fundsMoveOnCredential: true`）と
+`dyn-sol-to-solmpp`（Solana USDC/x402 11,000（`feePayer`・`memo` 付き）→ Provider D の URL、`destinationPayTo` は Provider D の受取、`fundsMoveOnCredential: false`）。これで **12 組すべてに 1 回の quote**（支払わない）。
+**MG（G-1″〜G-4″）はこれで完了**。公開の停止は 2 回の入れ替えで各約 10 秒。
+
 ### journal を残す（`-v` は必須）
 
 R4（`subetha_router_status`）は**保存 → 再オープン**を謳っている。journal が消えると
