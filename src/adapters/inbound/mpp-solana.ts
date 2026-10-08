@@ -12,7 +12,7 @@
  * 復号・compile・比較の例外はすべて `credential_mismatch`。Memo の不一致だけ `nonce_mismatch`。例外の文言は出さない。
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { ed25519 } from "@noble/curves/ed25519";
 import { address, compileTransactionMessage, getAddressEncoder, getBase58Decoder, getBase58Encoder, getCompiledTransactionMessageDecoder, getCompiledTransactionMessageEncoder, getTransactionDecoder, type Instruction } from "@solana/kit";
@@ -481,11 +481,15 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
     const wire = credential.payload["credential"];
     if (typeof wire !== "string" || wire === "") return { ok: false };
     if (embeddedChallengeIdOf(wire) !== offer.extra.challengeNonce) return { ok: false };
+    // (1) SDK の HMAC・期限・scope・method。SDK が返した challenge の id も offer の nonce と一致すること（§3.5）。
+    let validated: unknown;
     try {
-      await mppx.validateCredential(wire, { scope: offer.extra.routeBinding });
+      validated = await mppx.validateCredential(wire, { scope: offer.extra.routeBinding });
     } catch {
       return { ok: false };
     }
+    const validatedChallenge = isRecord(validated) ? validated["challenge"] : undefined;
+    if (!isRecord(validatedChallenge) || validatedChallenge["id"] !== offer.extra.challengeNonce) return { ok: false };
     const externalId = offer.extra["externalId"];
     if (typeof externalId !== "string" || externalId === "") return { ok: false };
     const payload = mppSolanaPayloadOf(wire);
@@ -613,7 +617,7 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
         methodDetails: { network: networkLabel, decimals: options.decimals, tokenProgram: options.tokenProgram, feePayer: false },
         expires,
         scope: request.routeBinding,
-        meta: { routeBinding: request.routeBinding, paymentId: `${request.routeId}:${request.nowMs}:${externalId}` },
+        meta: { routeBinding: request.routeBinding, paymentId: `${request.routeId}:${request.nowMs}:${randomUUID()}` },
       } as never);
       if (!isRecord(challenge)) throw new Error("mppx did not return a challenge");
       return offerOf(challenge, request, externalId);
