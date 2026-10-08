@@ -78,10 +78,11 @@ async function paymentRequired(runtime: Runtime, canonical: string, error?: stri
   return json(402, error === undefined ? {} : { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(required) });
 }
 
-function facilitatorError(error: unknown): Response {
+function facilitatorError(stage: "verify" | "settle", error: unknown): Response {
   if (error instanceof SettleCalledTwiceError) return json(502, { error: "internal" });
   const kind = error instanceof FacilitatorUnavailableError ? error.kind : "facilitator_unavailable";
-  if (kind === "facilitator_registration_required") console.error("provider: facilitator registration required");
+  // 運用者向けの固定文: 段と分類と例外の名前だけ（facilitator の文言・URL・鍵は出さない）。
+  console.error(`provider: ${stage} failed (${kind}${error instanceof FacilitatorUnavailableError ? `, status ${error.status ?? "none"}` : error instanceof Error ? `, ${error.name}` : ""})`);
   return json(502, { error: kind });
 }
 
@@ -163,7 +164,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   try {
     verified = await facilitator.verify(payload, requirements);
   } catch (error) {
-    return facilitatorError(error);
+    return facilitatorError("verify", error);
   }
   if (!verified.isValid) return paymentRequired(runtime, canonical, "payment_invalid");
 
@@ -173,7 +174,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   try {
     settled = await facilitator.settle(payload, requirements);
   } catch (error) {
-    return facilitatorError(error);
+    return facilitatorError("settle", error);
   }
   const receipt = checkReceipt(runtime.config.network, runtime.config.table.network, payload, settled);
   if (!receipt.ok) return json(502, { error: receipt.reason });
