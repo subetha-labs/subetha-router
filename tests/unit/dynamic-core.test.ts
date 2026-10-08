@@ -1167,13 +1167,15 @@ describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-sol
     core = await boot(solConfig());
     expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
     expect(core.offerFor(pending.quoteId, "alice", undefined, pending.ownerKey)).toMatchObject({ amount: "6000" });
-    // 同じ記録が cap を名乗っていたら不可（Solana 宛は cap を持たない）: journal の created 行に maxFee を書き足して再起動 → 購入は quote_unreadable。
-    const lines = (await readFile(journalPath, "utf8")).split("\n").filter((line) => line !== "");
+    // 同じ記録が cap を名乗っていたら不可（Solana 宛は cap を持たない）。対象は**控えの未購入の quote**（購入済みの intent は status に関わらず offerFor が undefined なので観測にならない）。
+    // 形の悪い cap（片方だけ・形違い）も、正規化で落ちる前の生の欄で見るので不可。控えの行は読めている（status が返る）のに offerFor は出さない、で観測する。
     await core.close();
     opened.length = 0;
     const { writeFile } = await import("node:fs/promises");
-    const row = JSON.parse(lines[0]!) as { patch: { dynamic: { pricing: Record<string, unknown> } } };
-    // 形の悪い cap（片方だけ・形違い）も、正規化で落ちる前の生の欄で見るので不可。
+    const ledgerDir = path.join(workDir, "dynamic-quotes");
+    const ledgerFiles = (await readdir(ledgerDir)).filter((name) => name.endsWith(".ndjson")).sort();
+    const original = new Map<string, string>();
+    for (const name of ledgerFiles) original.set(name, await readFile(path.join(ledgerDir, name), "utf8"));
     const variants: Array<(pricing: Record<string, unknown>) => void> = [
       (pricing) => { pricing["maxFee"] = "1"; pricing["estimate"] = { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 1 }; },
       (pricing) => { pricing["maxFee"] = "1"; },
@@ -1181,14 +1183,22 @@ describe("Solana 宛の MPP 送信: cap を持たず見積もらない（mpp-sol
       (pricing) => { pricing["maxFee"] = "1e3"; pricing["estimate"] = { gas: "1" }; },
     ];
     for (const variant of variants) {
-      const tampered = structuredClone(row);
-      variant(tampered.patch.dynamic.pricing);
-      await writeFile(journalPath, `${JSON.stringify(tampered)}\n${lines.slice(1).join("\n")}\n`);
+      for (const [name, text] of original) {
+        const lines = text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Record<string, unknown>);
+        for (const line of lines) {
+          if (line["kind"] === "quote" && line["quoteId"] === pending.quoteId) {
+            const record = line["record"] as { dynamic: { pricing: Record<string, unknown> } };
+            variant(record.dynamic.pricing);
+          }
+        }
+        await writeFile(path.join(ledgerDir, name), lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+      }
       core = await boot(solConfig());
-      expect(core.status(bought.paymentId, "alice", bought.ownerKey)).toMatchObject({ status: "delivered" });
-      expect(core.offerFor(bought.quoteId, "alice", undefined, bought.ownerKey)).toBeUndefined();
+      expect(core.status(pending.paymentId, "alice", pending.ownerKey)).toBeDefined(); // 控えの行は読めている
+      expect(core.offerFor(pending.quoteId, "alice", undefined, pending.ownerKey)).toBeUndefined(); // だが cap を名乗る Solana 宛は再提示しない
       await core.close();
       opened.length = 0;
+      for (const [name, text] of original) await writeFile(path.join(ledgerDir, name), text);
     }
   });
 });
