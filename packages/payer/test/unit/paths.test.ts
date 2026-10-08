@@ -30,6 +30,16 @@ describe("paths", () => {
     expect(() => storeDirOf({ HOME: "relative" })).toThrow(/home_unavailable/);
   });
 
+  test("ensureStoreDir refuses an absent HOME and does not create anything outside home", () => {
+    const h = home();
+    expect(() => ensureStoreDir(path.join(h, "nope", "store"), path.join(h, "missing-home"), uid, realFs)).toThrow(/home_unavailable/);
+    const outside = mkdtempSync(path.join(tmpdir(), "payer-outside-"));
+    temps.push(outside);
+    const target = path.join(outside, "not-yet", "store");
+    expect(ensureStoreDir(target, h, uid, realFs)).toEqual([{ path: target, code: "outside_home" }]);
+    expect(realFs.existsSync(target), "nothing is created outside home").toBe(false);
+  });
+
   test("ensureStoreDir creates the directory with 0700 and reports no issue; files with 0600 are fine", () => {
     const h = home();
     const dir = path.join(h, ".config", "subetha-payer");
@@ -54,6 +64,20 @@ describe("paths", () => {
     symlinkSync(elsewhere, path.join(dir, STORE_FILES.keys));
     expect(ensureStoreDir(dir, h, uid, realFs)).toEqual([{ path: path.join(dir, STORE_FILES.keys), code: "symlink" }]);
     rmSync(path.join(dir, STORE_FILES.keys));
+    // dangling な symlink（existsSync では見えない）も symlink として拒む。
+    symlinkSync(path.join(h, "does-not-exist.json"), path.join(dir, STORE_FILES.config));
+    expect(ensureStoreDir(dir, h, uid, realFs)).toEqual([{ path: path.join(dir, STORE_FILES.config), code: "symlink" }]);
+    rmSync(path.join(dir, STORE_FILES.config));
+    // socket の名前の普通のファイルは not_socket。mode は「ちょうど」0600 / 0700（0400 や 0500 も拒む）。
+    writeFileSync(path.join(dir, STORE_FILES.socket), "", { mode: 0o600 });
+    expect(ensureStoreDir(dir, h, uid, realFs)).toEqual([{ path: path.join(dir, STORE_FILES.socket), code: "not_socket" }]);
+    rmSync(path.join(dir, STORE_FILES.socket));
+    chmodSync(path.join(dir, STORE_FILES.ledger), 0o400);
+    expect(ensureStoreDir(dir, h, uid, realFs)).toEqual([{ path: path.join(dir, STORE_FILES.ledger), code: "mode" }]);
+    chmodSync(path.join(dir, STORE_FILES.ledger), 0o600);
+    chmodSync(dir, 0o500);
+    expect(ensureStoreDir(dir, h, uid, realFs)).toEqual([{ path: dir, code: "mode" }]);
+    chmodSync(dir, 0o700);
     // ディレクトリ自体が symlink（home の中を指していても拒む）。
     const real = path.join(h, "real-store");
     mkdirSync(real, { mode: 0o700 });

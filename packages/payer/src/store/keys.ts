@@ -64,9 +64,13 @@ export function subkeysOf(master: Buffer): Subkeys {
   return { kek, lek, verifier: Buffer.from(verifier) };
 }
 
+const RAIL_PATTERN = /^[a-z0-9]{1,16}$/;
+const ADDRESS_PATTERN = /^[0-9A-Za-z]{1,64}$/;
+const B64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
 export function seal(key: Buffer, plaintext: Buffer, aad: string): SealedBox {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const cipher = createCipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
   cipher.setAAD(Buffer.from(aad, "utf8"));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return { cipher: "aes-256-gcm", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
@@ -75,12 +79,22 @@ export function seal(key: Buffer, plaintext: Buffer, aad: string): SealedBox {
 /** 復号。tag が合わなければ `StoreError("seal_mismatch")`（中身は返さない）。 */
 export function open(key: Buffer, box: SealedBox, aad: string): Buffer {
   if (box.cipher !== "aes-256-gcm") throw new StoreError("seal_unsupported");
+  const iv = Buffer.from(box.iv, "base64");
+  const tag = Buffer.from(box.tag, "base64");
+  if (iv.length !== 12 || tag.length !== 16 || !B64_PATTERN.test(box.iv) || !B64_PATTERN.test(box.tag) || !B64_PATTERN.test(box.ciphertext)) throw new StoreError("seal_mismatch");
+  let partial: Buffer | undefined;
   try {
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(box.iv, "base64"));
+    const decipher = createDecipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
     decipher.setAAD(Buffer.from(aad, "utf8"));
-    decipher.setAuthTag(Buffer.from(box.tag, "base64"));
-    return Buffer.concat([decipher.update(Buffer.from(box.ciphertext, "base64")), decipher.final()]);
+    decipher.setAuthTag(tag);
+    partial = decipher.update(Buffer.from(box.ciphertext, "base64"));
+    const rest = decipher.final();
+    const out = Buffer.concat([partial, rest]);
+    zero(partial, rest);
+    return out;
   } catch {
+    // 認証に失敗した中間の平文も残さない。
+    if (partial !== undefined) zero(partial);
     throw new StoreError("seal_mismatch");
   }
 }
@@ -95,19 +109,33 @@ export function zero(...buffers: Buffer[]): void {
  */
 export function createKeysDocument(passphrase: string, wallets: Readonly<Record<string, { readonly address: string; readonly secret: Buffer }>>): KeysDocument {
   if (!isValidPassphrase(passphrase)) throw new StoreError("passphrase_invalid");
+  for (const [rail, wallet] of Object.entries(wallets)) {
+    // AAD の区切り（`:`）と曖昧にならない文法だけ。
+    if (!RAIL_PATTERN.test(rail) || !ADDRESS_PATTERN.test(wallet.address) || wallet.secret.length === 0 || wallet.secret.length > 128) throw new StoreError("wallet_invalid");
+  }
   const salt = randomBytes(16);
   const pass = Buffer.from(passphrase, "utf8");
-  const master = deriveMaster(pass, salt);
-  const keys = subkeysOf(master);
+  let master: Buffer | undefined;
+  let keys: Subkeys | undefined;
   try {
+    master = deriveMaster(pass, salt);
+    keys = subkeysOf(master);
     const sealed: Record<string, WalletEntry> = {};
     for (const [rail, wallet] of Object.entries(wallets)) {
       sealed[rail] = { address: wallet.address, ...seal(keys.kek, wallet.secret, `wallet:${rail}:${wallet.address}`) };
     }
     return { version: KEYS_VERSION, kdf: { ...SCRYPT_PARAMS, salt: salt.toString("base64") }, verifier: keys.verifier.toString("base64"), wallets: sealed };
   } finally {
-    zero(pass, master, keys.kek, keys.lek, keys.verifier);
+    zero(pass);
+    if (master !== undefined) zero(master);
+    if (keys !== undefined) zero(keys.kek, keys.lek, keys.verifier);
   }
+}
+
+const KDF_BOUNDS = { N: [1 << 14, 1 << 22] as const, r: [1, 32] as const, p: [1, 16] as const };
+
+function isPowerOfTwo(n: number): boolean {
+  return Number.isSafeInteger(n) && n > 0 && (n & (n - 1)) === 0;
 }
 
 export function parseKeysDocument(text: string): KeysDocument {
@@ -117,12 +145,31 @@ export function parseKeysDocument(text: string): KeysDocument {
   } catch {
     throw new StoreError("store_corrupt");
   }
-  if (typeof doc !== "object" || doc === null) throw new StoreError("store_corrupt");
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) throw new StoreError("store_corrupt");
   const d = doc as Record<string, unknown>;
   if (d["version"] !== KEYS_VERSION) throw new StoreError("store_unsupported_version");
-  const kdf = d["kdf"] as Record<string, unknown> | undefined;
-  if (kdf === undefined || kdf["name"] !== "scrypt" || typeof kdf["N"] !== "number" || typeof kdf["r"] !== "number" || typeof kdf["p"] !== "number" || typeof kdf["salt"] !== "string") throw new StoreError("store_corrupt");
-  if (typeof d["verifier"] !== "string" || typeof d["wallets"] !== "object" || d["wallets"] === null) throw new StoreError("store_corrupt");
+  const kdf = d["kdf"];
+  if (typeof kdf !== "object" || kdf === null) throw new StoreError("store_corrupt");
+  const k = kdf as Record<string, unknown>;
+  const N = k["N"];
+  const r = k["r"];
+  const p = k["p"];
+  if (k["name"] !== "scrypt" || typeof N !== "number" || !isPowerOfTwo(N) || N < KDF_BOUNDS.N[0] || N > KDF_BOUNDS.N[1]) throw new StoreError("store_corrupt");
+  if (typeof r !== "number" || !Number.isSafeInteger(r) || r < KDF_BOUNDS.r[0] || r > KDF_BOUNDS.r[1]) throw new StoreError("store_corrupt");
+  if (typeof p !== "number" || !Number.isSafeInteger(p) || p < KDF_BOUNDS.p[0] || p > KDF_BOUNDS.p[1]) throw new StoreError("store_corrupt");
+  const salt = typeof k["salt"] === "string" && B64_PATTERN.test(k["salt"]) ? Buffer.from(k["salt"], "base64") : undefined;
+  if (salt === undefined || salt.length < 16 || salt.length > 64) throw new StoreError("store_corrupt");
+  const verifier = typeof d["verifier"] === "string" && B64_PATTERN.test(d["verifier"]) ? Buffer.from(d["verifier"], "base64") : undefined;
+  if (verifier === undefined || verifier.length !== 16) throw new StoreError("store_corrupt");
+  const wallets = d["wallets"];
+  if (typeof wallets !== "object" || wallets === null || Array.isArray(wallets)) throw new StoreError("store_corrupt");
+  for (const [rail, entry] of Object.entries(wallets as Record<string, unknown>)) {
+    if (!RAIL_PATTERN.test(rail) || typeof entry !== "object" || entry === null) throw new StoreError("store_corrupt");
+    const e = entry as Record<string, unknown>;
+    if (typeof e["address"] !== "string" || !ADDRESS_PATTERN.test(e["address"]) || e["cipher"] !== "aes-256-gcm") throw new StoreError("store_corrupt");
+    for (const field of ["iv", "tag", "ciphertext"]) if (typeof e[field] !== "string" || !B64_PATTERN.test(e[field] as string)) throw new StoreError("store_corrupt");
+    if (Buffer.from(e["iv"] as string, "base64").length !== 12 || Buffer.from(e["tag"] as string, "base64").length !== 16 || Buffer.from(e["ciphertext"] as string, "base64").length === 0) throw new StoreError("store_corrupt");
+  }
   return d as unknown as KeysDocument;
 }
 
@@ -133,9 +180,15 @@ export function parseKeysDocument(text: string): KeysDocument {
 export function unlockKeys(doc: KeysDocument, passphrase: string): { readonly kek: Buffer; readonly lek: Buffer } {
   if (!isValidPassphrase(passphrase)) throw new StoreError("bad_passphrase");
   const pass = Buffer.from(passphrase, "utf8");
-  const master = deriveMaster(pass, Buffer.from(doc.kdf.salt, "base64"), { name: "scrypt", N: doc.kdf.N, r: doc.kdf.r, p: doc.kdf.p });
-  const keys = subkeysOf(master);
-  zero(pass, master);
+  let master: Buffer | undefined;
+  let keys: Subkeys;
+  try {
+    master = deriveMaster(pass, Buffer.from(doc.kdf.salt, "base64"), { name: "scrypt", N: doc.kdf.N, r: doc.kdf.r, p: doc.kdf.p });
+    keys = subkeysOf(master);
+  } finally {
+    zero(pass);
+    if (master !== undefined) zero(master);
+  }
   const stored = Buffer.from(doc.verifier, "base64");
   const ok = stored.length === keys.verifier.length && timingSafeEqual(stored, keys.verifier);
   zero(keys.verifier);

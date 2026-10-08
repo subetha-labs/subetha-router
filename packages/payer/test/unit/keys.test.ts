@@ -20,10 +20,11 @@ describe("keys: derivation", () => {
     expect(a.verifier.length).toBe(16);
     expect(a.kek.equals(a.lek)).toBe(false);
     expect(a.kek.subarray(0, 16).equals(a.verifier)).toBe(false);
-    // 固定の値（回帰: パラメータや info を変えると壊れる）。
-    expect(master.toString("hex")).toMatch(/^[0-9a-f]{64}$/);
-    const pinned = { master: master.toString("hex"), kek: a.kek.toString("hex"), verifier: a.verifier.toString("hex") };
-    expect(pinned.master).toBe(deriveMaster(Buffer.from(PASS, "utf8"), salt).toString("hex"));
+    // 固定のベクトル（2026-10-09 に計算して固定。パラメータ・info・導出を変えると壊れる）。
+    expect(master.toString("hex")).toBe("383c0968df8f334694cccb4bbe115d0f1d4df21157c63ab9d7a040ffcaaab7c6");
+    expect(a.kek.toString("hex")).toBe("1fe8ed23b9e88ccb72860ce0419775afc664a46ba496d6ba95c6d1ebb247e04a");
+    expect(a.lek.toString("hex")).toBe("6584f96ee9fe6289c2b89a461c309bebdd1d89db4a279782064cbf11b789bd20");
+    expect(a.verifier.toString("hex")).toBe("e9566c39721c7261f49b66ac0362c8ff");
     expect(SCRYPT_PARAMS).toEqual({ name: "scrypt", N: 131_072, r: 8, p: 1 });
     // 別の passphrase・別の salt は別の鍵。
     expect(deriveMaster(Buffer.from(PASS + "x", "utf8"), salt).equals(master)).toBe(false);
@@ -74,7 +75,21 @@ describe("keys: document", () => {
     expect(() => parseKeysDocument(JSON.stringify({ ...doc, version: 2 }))).toThrow(/store_unsupported_version/);
     expect(() => parseKeysDocument("not json")).toThrow(/store_corrupt/);
     expect(() => parseKeysDocument(JSON.stringify({ ...doc, kdf: { name: "pbkdf2" } }))).toThrow(/store_corrupt/);
+    // KDF のパラメータの境界、salt・verifier・iv・tag の長さ、wallet の形、rail と address の文法（AAD の区切りと曖昧にならない）。
+    for (const kdf of [{ ...doc.kdf, N: 1 << 13 }, { ...doc.kdf, N: 1 << 23 }, { ...doc.kdf, N: 100_000 }, { ...doc.kdf, r: 0 }, { ...doc.kdf, p: 17 }, { ...doc.kdf, salt: "AAAA" }, { ...doc.kdf, salt: "not base64!" }]) {
+      expect(() => parseKeysDocument(JSON.stringify({ ...doc, kdf })), JSON.stringify(kdf)).toThrow(/store_corrupt/);
+    }
+    expect(() => parseKeysDocument(JSON.stringify({ ...doc, verifier: "AAAA" }))).toThrow(/store_corrupt/);
+    const wallet = doc.wallets["eip155"]!;
+    for (const bad of [{ ...wallet, iv: "AAAA" }, { ...wallet, tag: "AAAA" }, { ...wallet, ciphertext: "" }, { ...wallet, address: "0x:injected" }, { ...wallet, cipher: "aes-128-gcm" }]) {
+      expect(() => parseKeysDocument(JSON.stringify({ ...doc, wallets: { eip155: bad } })), JSON.stringify(bad).slice(0, 40)).toThrow(/store_corrupt/);
+    }
+    expect(() => parseKeysDocument(JSON.stringify({ ...doc, wallets: { "eip:155": wallet } }))).toThrow(/store_corrupt/);
+    expect(() => parseKeysDocument(JSON.stringify({ ...doc, kdf: null }))).toThrow(/store_corrupt/);
     expect(() => createKeysDocument("short", {})).toThrow(/passphrase_invalid/);
+    expect(() => createKeysDocument(PASS, { "eip:155": { address: "0xabc", secret: Buffer.from("x") } })).toThrow(/wallet_invalid/);
+    expect(() => createKeysDocument(PASS, { eip155: { address: "0x:abc", secret: Buffer.from("x") } })).toThrow(/wallet_invalid/);
+    expect(() => createKeysDocument(PASS, { eip155: { address: "0xabc", secret: Buffer.alloc(0) } })).toThrow(/wallet_invalid/);
     const e = (() => { try { parseKeysDocument("x"); return undefined; } catch (err) { return err; } })();
     expect(e).toBeInstanceOf(StoreError);
   });

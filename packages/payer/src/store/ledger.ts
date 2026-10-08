@@ -16,6 +16,30 @@ export const GENESIS_HASH = "0".repeat(64);
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
+/** JSON の**データ**だけ（有限の数、plain な object、深さ 64）。NaN や Date を黙って null や文字列にしない。 */
+export function isPlainJson(value: unknown, depth = 0): value is JsonValue {
+  if (depth > 64) return false;
+  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every((item) => isPlainJson(item, depth + 1));
+  if (typeof value === "object") {
+    const proto = Object.getPrototypeOf(value) as unknown;
+    if (proto !== Object.prototype && proto !== null) return false;
+    return Object.keys(value as object).every((key) => key !== "__proto__" && key !== "toJSON" && isPlainJson((value as Record<string, unknown>)[key], depth + 1));
+  }
+  return false;
+}
+
+/** 全バイトを書く（`writeSync` は短い書き込みを返し得る）。 */
+function writeAll(fs: StoreFs, fd: number, data: Buffer): void {
+  let offset = 0;
+  while (offset < data.length) {
+    const written = fs.writeSync(fd, data.subarray(offset));
+    if (written <= 0) throw new StoreError("store_write_failed");
+    offset += written;
+  }
+}
+
 export interface LedgerRow {
   readonly v: number;
   readonly seq: number;
@@ -62,39 +86,55 @@ function parseRow(line: string): LedgerRow | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const r = parsed as Record<string, unknown>;
   if (r["v"] !== LEDGER_VERSION) throw new StoreError("store_unsupported_version");
-  if (typeof r["seq"] !== "number" || typeof r["prev"] !== "string" || typeof r["ts"] !== "number" || typeof r["ref"] !== "string" || typeof r["state"] !== "string" || typeof r["hash"] !== "string") return undefined;
+  if (typeof r["seq"] !== "number" || !Number.isSafeInteger(r["seq"]) || r["seq"] < 1) return undefined;
+  if (typeof r["prev"] !== "string" || !/^[0-9a-f]{64}$/.test(r["prev"])) return undefined;
+  if (typeof r["ts"] !== "number" || !Number.isSafeInteger(r["ts"]) || r["ts"] < 0) return undefined;
+  if (typeof r["ref"] !== "string" || typeof r["state"] !== "string" || typeof r["hash"] !== "string" || !/^[0-9a-f]{64}$/.test(r["hash"])) return undefined;
+  if (!isPlainJson(r["data"])) return undefined;
+  if (r["sealed"] !== undefined) {
+    const s = r["sealed"] as Record<string, unknown> | null;
+    if (s === null || typeof s !== "object" || s["cipher"] !== "aes-256-gcm" || typeof s["iv"] !== "string" || typeof s["tag"] !== "string" || typeof s["ciphertext"] !== "string") return undefined;
+  }
   return r as unknown as LedgerRow;
 }
 
+function chains(row: LedgerRow, head: string, seq: number): boolean {
+  const expected = rowHash({ v: row.v, seq: row.seq, prev: row.prev, ts: row.ts, ref: row.ref, state: row.state, data: row.data, ...(row.sealed === undefined ? {} : { sealed: row.sealed }) });
+  return row.prev === head && row.hash === expected && row.seq === seq;
+}
+
 /**
- * 台帳を開く: 先頭から hash を検証し、最後の完全な行までを採用。末尾の途切れた行は切り詰める（fsync）。途中の破損は `store_corrupt`。
+ * 台帳を開く: 先頭から hash を検証する。改行で閉じた行が読めない・繋がらない → `store_corrupt`（最後の行でも。**fail closed**: 完全な記録を黙って捨てない）。
+ * 改行で閉じていない末尾は「書きかけ」: 読めて繋がるなら採用して改行を補い、読めなければ切り詰める（fsync）。
  */
 export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
   const rows: LedgerRow[] = [];
   let head = GENESIS_HASH;
   let keepBytes = 0;
   let total = 0;
+  let repairNewline = false;
   if (fs.existsSync(path)) {
     const buffer = fs.readFileSync(path);
     total = buffer.length;
     let offset = 0;
     while (offset < buffer.length) {
       const nl = buffer.indexOf(0x0a, offset);
-      if (nl === -1) break; // 途切れた末尾（改行で閉じていない）
-      const line = buffer.subarray(offset, nl).toString("utf8");
-      const row = parseRow(line);
-      if (row === undefined) {
-        // 閉じているのに読めない行: 最後の行なら途切れ、途中なら破損。
-        if (nl === buffer.length - 1) break;
-        throw new StoreError("store_corrupt");
+      const terminated = nl !== -1;
+      const end = terminated ? nl : buffer.length;
+      const row = parseRow(buffer.subarray(offset, end).toString("utf8"));
+      const ok = row !== undefined && chains(row, head, rows.length + 1);
+      if (!ok) {
+        if (terminated) throw new StoreError("store_corrupt");
+        break; // 改行の無い読めない末尾 = 書きかけ → 切り詰め
       }
-      const expected = rowHash({ v: row.v, seq: row.seq, prev: row.prev, ts: row.ts, ref: row.ref, state: row.state, data: row.data, ...(row.sealed === undefined ? {} : { sealed: row.sealed }) });
-      if (row.prev !== head || row.hash !== expected || row.seq !== rows.length + 1) {
-        if (nl === buffer.length - 1) break; // 最後の行だけが合わない = 途切れ扱い（書きかけ）
-        throw new StoreError("store_corrupt");
+      rows.push(row!);
+      head = row!.hash;
+      if (!terminated) {
+        // 読めて繋がるが改行が無い（改行の直前で落ちた）: 採用して改行を補う。
+        keepBytes = end;
+        repairNewline = true;
+        break;
       }
-      rows.push(row);
-      head = row.hash;
       offset = nl + 1;
       keepBytes = offset;
     }
@@ -102,6 +142,10 @@ export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
   const fd = fs.openSync(path, "a", 0o600);
   if (keepBytes < total) {
     fs.ftruncateSync(fd, keepBytes);
+    fs.fsyncSync(fd);
+  }
+  if (repairNewline) {
+    writeAll(fs, fd, Buffer.from("\n", "utf8"));
     fs.fsyncSync(fd);
   }
   let writeFailed = false;
@@ -117,18 +161,20 @@ export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
     append(input) {
       if (closed) throw new StoreError("store_closed");
       if (writeFailed) throw new StoreError("store_write_failed");
-      // head の検査: file の最後の完全な行の hash がメモリの head と違えば巻き戻り（別 process の書き込み・複製の差し戻し）。
+      if (!isPlainJson(input.data)) throw new StoreError("ledger_data_invalid");
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.ref) || !/^[a-z_]{1,32}$/.test(input.state)) throw new StoreError("ledger_data_invalid");
+      // head の検査: file の最後の完全な行を**中身まで検証して**、メモリの head と違えば巻き戻り（別 process の書き込み・複製の差し戻し）。
       const current = fs.readFileSync(path);
-      const tailHash = lastHashOf(current);
-      if (tailHash !== head) throw new StoreError("store_rollback");
+      if (lastRowHashOf(current, rows.length === 0 ? GENESIS_HASH : rows[rows.length - 2]?.hash ?? GENESIS_HASH, rows.length) !== head) throw new StoreError("store_rollback");
       const sealed = input.sealedPlain === undefined ? undefined : seal(lek, input.sealedPlain, `${input.ref}:${input.state}`);
       const partial = { v: LEDGER_VERSION, seq: rows.length + 1, prev: head, ts: input.ts ?? Date.now(), ref: input.ref, state: input.state, data: input.data, ...(sealed === undefined ? {} : { sealed }) };
       const row: LedgerRow = { ...partial, hash: rowHash(partial) };
       const line = Buffer.from(`${JSON.stringify(row)}\n`, "utf8");
       try {
-        fs.writeSync(fd, line);
+        writeAll(fs, fd, line);
         fs.fsyncSync(fd);
       } catch {
+        // 書けたかどうか分からない（短い write・fsync の失敗）。durable かは不明なので、以後の副作用を止める。
         writeFailed = true;
         throw new StoreError("store_write_failed");
       }
@@ -149,16 +195,16 @@ export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
   return ledger;
 }
 
-/** file の最後の完全な行の hash（無ければ genesis）。append の head の検査に使う。 */
-function lastHashOf(buffer: Buffer): string {
-  let end = buffer.length;
-  if (end === 0) return GENESIS_HASH;
-  if (buffer[end - 1] !== 0x0a) {
-    const nl = buffer.lastIndexOf(0x0a);
-    if (nl === -1) return GENESIS_HASH;
-    end = nl + 1;
-  }
+/**
+ * file の最後の完全な行の hash（無ければ genesis）。**中身を再計算して**検証する（保存された hash を信じない）。
+ * 末尾に改行の無い書きかけがあれば巻き戻りとみなす（自分の append は常に改行で閉じる）。
+ */
+function lastRowHashOf(buffer: Buffer, expectedPrev: string, expectedSeq: number): string {
+  if (buffer.length === 0) return GENESIS_HASH;
+  if (buffer[buffer.length - 1] !== 0x0a) return "partial";
+  const end = buffer.length;
   const start = buffer.lastIndexOf(0x0a, end - 2) + 1;
   const row = parseRow(buffer.subarray(start, end - 1).toString("utf8"));
-  return row === undefined ? GENESIS_HASH : row.hash;
+  if (row === undefined || !chains(row, expectedPrev, expectedSeq)) return "invalid";
+  return row.hash;
 }
