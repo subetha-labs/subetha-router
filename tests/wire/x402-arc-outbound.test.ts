@@ -230,6 +230,19 @@ describe("静的 route（組み直しの署名器）", () => {
     expect(h.upstream.seen.payments).toHaveLength(1);
   });
 
+  test("従来の経路（`rebuildSignatures: false`、Base と同じ SDK の経路）も同じ有料要求の期限: 6 秒の settle は paid、paidTimeoutMs 300 ms なら unknown", async () => {
+    const slow = await harness({ rebuild: false });
+    slow.upstream.state.pay = () => ({ ...paidOk(slow.address, { price: 1 }, ARC), delayMs: 6_000 });
+    const started = Date.now();
+    expect(await pay(slow, ROUTE, (await slow.rail.readChallenge(ROUTE))[0]!)).toMatchObject({ outcome: "paid", body: { price: 1 } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5_500);
+    const short = await harness({ rebuild: false, paidTimeoutMs: 300 });
+    short.upstream.state.pay = () => ({ ...paidOk(short.address, { price: 1 }, ARC), delayMs: 1_000 });
+    expect(await pay(short, ROUTE, (await short.rail.readChallenge(ROUTE))[0]!)).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(short.upstream.seen.payments).toHaveLength(1);
+  }, 20_000);
+
   test("領収は共有の表: network が Base の領収は Arc の送信では unknown", async () => {
     const h = await harness();
     h.upstream.state.pay = () => paidOk(h.address, { price: 1 }, FIXTURE_NETWORK);
