@@ -144,6 +144,7 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 | 2r | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `011d45e`） | **APPROVE WITH CHANGES**（1 点: 横断の確認と SR-M1 の主担当は M5 ではなく最後の M6 に。反映済み）。他の 4 点は解消 |
 | M6-1 | 2026-10-08 | `gpt-6-astra`（read-only。M6 の実装 `4ce93cd`） | **REJECT**（P1 3 点: 道具の RPC の口が素の `fetch`（transport・loopback・64 KiB 無し）、Provider D の案内が `feePayer: false`（Router は `true` を要求）、Tempo の `npm run sign` が封筒の offer だけを見て払う（SDK は challenge の中身から送金を組む）。P2 2 点: `methodDetails` の `feePayerKey`／`recentBlockhash`、回帰試験の記述）。`ec39d35`・`b76bd15` で反映 |
 | M6-1r | 2026-10-08 | `gpt-6-astra`（readback。`b76bd15`） | **APPROVE WITH CHANGES**（P1 3 点・P2 2 点は解消。残り P2 1 点: Tempo の `splits` は `methodDetails` の下も拒む）。`89975f5` で反映（Solana の MPP の検査も同じ置き場を拒む） |
+| MG-1 | 2026-10-08 | `gpt-6-astra`（read-only。G-4″ AC-18 の修正 `6e3704f`、PR #116） | **APPROVE WITH CHANGES**（上限 21,000 は正しく、他の生成物に同じ区分の組は無い、通算・件数の上限は変わらない。文書の訂正 1 点: Tempo 宛の MPP の gas の cap > 10,000 は `fee_too_high` ではなく `per_purchase_limit` で止まる、と試験の前提・+1 が合算 +2 である旨）。次の commit で反映 |
 
 ## 5. 本書で決めていないこと
 

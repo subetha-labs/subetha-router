@@ -257,7 +257,8 @@ const DYNAMIC_MAX_UPSTREAM_AMOUNT = "10000";
 /**
  * 動的予算の 1 件の上限（`dynamic.budget.buckets[].maxPerPurchase`）。区分は (network, asset) で、1 件の予約は源（上流の上限 + 手数料）と
  * 宛先（上流の上限）の区分ごとの**合算**で見る（`src/core/dynamic.ts` の `perPurchaseLimitOf`、要件 FR-43）。
- * 両レグが別の区分なら片レグの最大 = 11,000 で、20,000 は余裕。**x402 Solana ↔ MPP Solana の組**（`dyn-solmpp-to-sol`・`dyn-sol-to-solmpp`。行列 I-4・O-10）だけは
+ * 両レグが別の区分なら片レグの最大 = 11,000（手数料が規則の額のとき。Tempo 宛の MPP は gas の cap が手数料を押し上げ得て、
+ * 上流 10,000 のとき cap > 10,000 は 20,000 を超えて `per_purchase_limit`）で、20,000 は余裕。**x402 Solana ↔ MPP Solana の組**（`dyn-solmpp-to-sol`・`dyn-sol-to-solmpp`。行列 I-4・O-10）だけは
  * 両レグが同じ Solana USDC の区分に落ちるので、その区分の上限は両レグの合計 10,000 + 1,000 + 10,000 = 21,000。
  * G-4″ の AC-18（2026-10-08）で、この 2 組の quote が `per_purchase_limit` で止まって見つかった（`docs/DEPLOY.md` §2d）。
  */

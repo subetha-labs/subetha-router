@@ -641,8 +641,9 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     const profiles = Object.values(router.dynamic!.profiles);
     expect(profiles).toHaveLength(18);
     // 上限額の quote の予約が、どのプロファイルでも 1 件の上限に収まる。Tempo 宛の MPP は gas の見積りが cap になる
-    // （G-3″ の実測は 158 base unit。規則の手数料 1,000 以下なら手数料はそのまま）。cap が規則の手数料を超えれば源のレグがその分増える
-    // （天井 50,000 までは別の検査 `fee_too_high` の範囲で、本行の対象ではない）。
+    // （G-3″ の実測は 158 base unit。規則の手数料 1,000 以下なら手数料はそのまま）。cap が規則の手数料を超えれば源のレグがその分増え、
+    // 上流 10,000 のとき cap が 10,000 を超えると Tempo の区分の 20,000 を超えて `per_purchase_limit`（天井 50,000 の `fee_too_high` より先）。
+    // 本行は cap = 規則の手数料の前提での収まりを見る（gas の cap の範囲は本行の対象ではない）。
     const reservationAt = (profile: (typeof profiles)[number], upstreamAmount: string) => {
       const cap = profile.destination.maxFee === undefined ? undefined : { maxFee: profile.fee.flat, estimate: { gas: "1", maxFeePerGas: "1", bound: "1", atMs: 0 } };
       const pricing = priceOf(profile, upstreamAmount, cap);
