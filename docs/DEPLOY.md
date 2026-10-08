@@ -260,6 +260,15 @@ V-8b（実 facilitator の probe。資金が動く）は owner の承認で **�
 `HnuscuMcYCh8urbQ83vYNd3vTH4VKMdBLCW52tt6J63E` は owner が作成済み。Router は `solana-out` の起動時にこの ATA を確かめる）。**まだ owner の作業として残るもの**: Arc 送信鍵（`SUBETHA_OUTBOUND_X402_KEY` の address）への Arc testnet USDC、
 Solana 送信鍵（`wallet:new:solana` → `SUBETHA_OUTBOUND_SOLANA_KEY`）とその ATA・devnet USDC。送信の有効化（`outbound`）は両レールとも `false` のままなので、この commit の配備（G-2′）で公開の経路は変わらない。
 
+**G-2′ の記録（2026-10-08 04:22Z。owner の決定「進めて良いです」）**: 送信鍵の資金は入った（Arc: 送信 address `0x5d78CBD6fFA81a5dBe435ccfC79271a0F6a42274` に 20 USDC、tx `0x65855a…18a4e`。
+Solana: 送信鍵 `CLtWCWFy3dD8ufQoAnAFGfBxpThxbTearB77tyRzP9Vw`、ATA `2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf` に 20 USDC、faucet の tx は finalized。どちらも読取で確認）。
+owner がホストの env に `SUBETHA_OUTBOUND_SOLANA_KEY`・`SUBETHA_ARC_PROVIDER_PAYTO`・`SUBETHA_SOLANA_PROVIDER_PAYTO` を足した（9 行、root 0600。鍵は形だけ確認）。
+イメージ `b-f0c9f0e`（main `f0c9f0e`: Provider の URL、静的 x402 の有料要求 30 秒、`outbound` は両レールとも `false`）は手元（arm64）で build し `docker save`/`load` で入れた。
+ホスト側の image ID は手元と違う（image store の方式の違い）が、**14 層の内容ハッシュはすべて一致**。`swap-image.sh` で入れ替え: 04:22:00Z 開始、04:22:09Z 終了、exit 0、
+journal の先頭 93,818 バイトは不変、`subetha-egress check` 合格、子の listening 行あり、`could not start` 0 行。rollback は `subetha-router-prev-20261008T042200Z`（`b-ce7de77`）。
+確かめたこと: コンテナは healthy、公開 MCP の一覧は 4 route・6 プロファイルのまま、既存 route の quote が成立（支払わない）、**子プロセスの env は `SUBETHA_RAILS_ACTIVATION=arc-in,solana-in` で、
+Solana の送信鍵も 2 つの受取先も子には渡っていない**（`/proc/<pid>/environ` の名前だけを見た）。次は G-3′（受け入れの購入。公開の Router を止めて行う。owner の確認）。
+
 **実施の記録（G-4、2026-10-07 11:03Z。owner の決定「進めて良いです」）**: PR #68（`ce7de77`）で `RAILS_ACTIVATION = { arc: true, solana: true }`。
 イメージ `b-ce7de77` は手元で作った（§6。製品のファイルは PR の最初の試験済みの commit から変えていないことを `git diff` で確かめ、読み込み済みのイメージに tag を付け直した）。
 入れ替えは `deploy/swap-image.sh`（Codex のレビュー 7 回: #1 は有効化の変更に APPROVE WITH CHANGES、#2〜#6 は script の失敗時の扱いに REJECT、#7 で APPROVE WITH CHANGES を反映。
