@@ -213,21 +213,32 @@ describe("MPP Solana 送信: challenge の view と候補の検査（§4.2 の 9
     expect(mppSolanaViewOf({ ...challenge, id: "" })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, realm: 1 })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, request: "x" })).toBeUndefined();
-    // opaque が無い・空（scope 無し）は読める（pay-kit の形）。
-    expect(mppSolanaViewOf({ ...challenge, opaque: "" })?.scope).toBeUndefined();
+    // opaque が無い・空（scope 無し）は**読める**（pay-kit の形）: view はあり、scope だけ undefined。
+    const emptyOpaque = mppSolanaViewOf({ ...challenge, opaque: "" });
+    expect(emptyOpaque).toBeDefined();
+    expect(emptyOpaque!.scope).toBeUndefined();
     const { opaque: _opaque, ...withoutOpaque } = challenge;
-    expect(mppSolanaViewOf(withoutOpaque)?.scope).toBeUndefined();
+    const noOpaque = mppSolanaViewOf(withoutOpaque);
+    expect(noOpaque).toBeDefined();
+    expect(noOpaque!.scope).toBeUndefined();
+    expect(noOpaque!.amount).toBe("10000");
     // opaque が**あって読めない**（復号できない・文字列でない）、meta の `_mppx_scope` が文字列でない（数値・null）→ 読めない（無いものとして通さない）。
     expect(mppSolanaViewOf({ ...challenge, opaque: "!!!not-a-payment-request" })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, opaque: 5 })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: 5 } as never) })).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: null } as never) })).toBeUndefined();
-    // meta はあるが scope の鍵が無い → scope 無しとして読める。
-    expect(mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ other: "x" } as never) })?.scope).toBeUndefined();
-    // wire を通した形でも同じ（`Challenge.serialize` → `deserialize` は opaque をそのまま運ぶ）。
+    // meta はあるが scope の鍵が無い → scope 無しとして**読める**（meta は terms に入る）。
+    const metaWithoutScope = mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ other: "x" } as never) });
+    expect(metaWithoutScope).toBeDefined();
+    expect(metaWithoutScope!.scope).toBeUndefined();
+    expect(metaWithoutScope!.terms).toContain("\"other\":\"x\"");
+    // wire を通した形でも同じ（`Challenge.serialize` → `deserialize` は opaque をそのまま運ぶ）: 数値・null の scope、復号できない opaque は読めない。
     const roundTripped = (value: unknown): Record<string, unknown> => Challenge.deserialize(Challenge.serialize(value as never)) as unknown as Record<string, unknown>;
     expect(mppSolanaViewOf(roundTripped({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: 5 } as never) }))).toBeUndefined();
+    expect(mppSolanaViewOf(roundTripped({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: null } as never) }))).toBeUndefined();
     expect(mppSolanaViewOf(roundTripped({ ...challenge, opaque: "!!!not-a-payment-request" }))).toBeUndefined();
+    // 同じ wire で、正しい scope ならもちろん読める（round trip 自体が view を壊していない証拠）。
+    expect(mppSolanaViewOf(roundTripped(challenge))!.scope).toBe(SCOPE);
     expect(mppSolanaViewOf({ ...challenge, request: { ...(challenge["request"] as object), amount: 1 } })).toBeUndefined();
   });
 });
