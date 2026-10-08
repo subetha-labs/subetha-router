@@ -827,6 +827,46 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     expect(c.rpc.state.sent).toHaveLength(1);
   });
 
+  it("core は予約・昇格の追記の後、settle を呼ぶ直前にも期限を見る: 最初の再検査を期限の直前に通り、追記の間に期限が過ぎた purchase は settle を呼ばず approval_expired（静的・動的）", async () => {
+    const c = await compose();
+    await c.rails.startup!();
+    let clock = Date.now();
+    let advance = false;
+    // verify の中で時計を「期限の 1 ms 前」に置き、以後は読むたびに 1 ms 進める: settle 前の 1 回目の再検査は通り、追記の後の 2 回目で期限を過ぎる。
+    // 期限 = min(承認の期限, offer の期限)（core の `approvalDeadlineMs`）。quote の応答から取る。
+    let deadlineMs = 0;
+    /** 時計が期限を過ぎる合図: journal にこの行（event:paymentId）が現れたら（= 予約／昇格の追記の後）。それまでは期限の 2 ms 前。 */
+    let trigger = "";
+    const journalHas = (needle: string): boolean => { try { return readFileSync(c.config.journalPath, "utf8").split("\n").some((l) => l !== "" && (JSON.parse(l) as { event: string; paymentId: string }).event === needle.split(":")[0] && (JSON.parse(l) as { paymentId: string }).paymentId === needle.split(":")[1]); } catch { return false; } };
+    const inbound = { ...c.rails.inbound, verify: async (offer: InboundOffer, credential: PaymentCredential, context?: { routeId: string }) => { const r = await c.rails.inbound.verify(offer, credential, context); clock = deadlineMs - 2; advance = true; return r; } };
+    const core = await createRouterCore({ journalPath: c.config.journalPath, config: c.config.router, inbound, outbound: new StubOutbound(), note: () => {}, now: () => (advance && journalHas(trigger) ? deadlineMs : clock), dynamic: { ledgerDir: path.join(c.dir, "dynamic-quotes") }, onStoreLoaded: c.rails.bindConsumed });
+    opened.push(core);
+    const journal = () => readFileSync(c.config.journalPath, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { event: string; patch: Record<string, unknown> });
+    const q1 = await staticQuote(core, "r-solmpp", "req-1");
+    deadlineMs = Math.min(q1.approval.deadlineMs, q1.source.offer.extra.expiresAt * 1000);
+    trigger = `budget_reserved:${q1.paymentId}`;
+    const cred1 = await c.payer.credentialFor(q1.source.offer, "signature");
+    expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
+    // 静的: 予約（budget_reserved）の**後**に source_failed（= 2 回目の再検査で止まった。1 回目なら予約の前で終わる）。
+    const staticEvents = journal().map((l) => l.event);
+    expect(staticEvents.indexOf("source_failed")).toBeGreaterThan(staticEvents.indexOf("budget_reserved"));
+    expect(staticEvents.indexOf("budget_reserved")).toBeGreaterThan(-1);
+    advance = false;
+    clock = Date.now();
+    const q2 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-2");
+    deadlineMs = Math.min(q2.approval.deadlineMs, q2.source.offer.extra.expiresAt * 1000);
+    trigger = `source_pending:${q2.paymentId}`;
+    const cred2 = await c.payer.credentialFor(q2.source.offer);
+    expect(await core.purchase(purchaseArgs(q2, "req-2", cred2))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
+    // 動的: 昇格（created）と source_pending の**後**に source_failed（1 回目の再検査なら昇格の前で終わり、行は増えない）。
+    const dynamicEvents = journal().slice(staticEvents.length).map((l) => l.event);
+    expect(dynamicEvents.indexOf("source_pending")).toBeGreaterThan(-1);
+    expect(dynamicEvents.indexOf("source_failed")).toBeGreaterThan(dynamicEvents.indexOf("source_pending"));
+    // settle は呼ばれていない（送出は payer の fixture の 1 回だけ）。
+    expect(c.rpc.state.sent).toHaveLength(1);
+    expect(journal().filter((l) => l.event === "source_failed").map((l) => l.patch)).toEqual([{ outcome: "not_sent", reason: "approval_expired" }, { outcome: "not_sent", reason: "approval_expired" }]);
+  });
+
   it("bind の前（`onStoreLoaded` を渡さない core）: verify は通るが settle が throw → 静的の core は unknown（source_settle_unknown）。送出しない", async () => {
     const c = await compose();
     await c.rails.startup!();
