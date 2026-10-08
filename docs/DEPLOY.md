@@ -614,6 +614,14 @@ wc -l /var/lib/subetha-router/journal.ndjson
 最終確認は **`docker restart` してから同じ paymentId を R4 で読む**こと。
 読めれば成立、404 なら経路がどこかで切れている。
 
+### 2f. agent 用の payer（`@subetha/payer`）の gate（要件 `docs/agent-payer-requirements.md` §8、タスク `docs/agent-payer-tasks.md`）
+
+**H-1 の配備（2026-10-08 19:54Z。owner の決定「入れ替えて良いです」）**: main `3b60355`（PR #126 = H-1 hosted MCP の改善、#129 = P-0、#131 = P-1a に加え、owner の別 session の #127・#128・#130 = Arc↔Solana の x402 の組を含む）のイメージ `b-3b60355`
+（手元で build、layer の内容ハッシュ一致）を `swap-image.sh` で入れ替え: 19:54:06Z 開始、19:54:16Z 終了、exit 0、journal は旧の接頭辞のまま、egress ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。
+rollback は `subetha-router-prev-20261008T195406Z`（`b-d162524`）。コンテナは healthy。
+公開の MCP を client から確認（読取だけ）: initialize の `instructions` 13 行（手順・資金が動く時点・never・回復の規則）、5 tool すべてに `outputSchema`、`subetha_router_purchase` に `_meta["anthropic/requiresUserInteraction"]: true`、
+存在しない `paymentId` の `status` が `{ found: false, status: 404, reason: "not_found" }`。既存の tool 名・引数・出力の形は変わっていない（AC-A7 の公開側）。**G-A2 の前提の配備はこれ**（以後の Router の変更があれば記録を足す）。
+
 ## 3. 動作確認
 
 ```sh
