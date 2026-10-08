@@ -21,7 +21,7 @@
 
 import { Credential } from "mppx";
 
-import { checkTempoChallenge } from "./sign-dispatch.js";
+import { checkTempoChallenge } from "./sign-check-tempo.js";
 import { Mppx, tempo } from "mppx/client";
 import { createWalletClient, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
