@@ -154,6 +154,11 @@ export interface RouterCoreOptions {
     readonly gate?: DynamicGate;
     readonly balanceOf?: (profileId: string, asset: string) => Promise<bigint | undefined>;
   };
+  /**
+   * store の load の直後（budget の load の前、quote／purchase を受ける前）に 1 回呼ぶ。受信 adapter が journal の消費済み署名の集合を
+   * 読むための口（`docs/mpp-solana-design.md` §2.3）。読取だけ。省略時は何もしない。
+   */
+  readonly onStoreLoaded?: (view: { readonly settledSourceTxRefs: ReadonlySet<string> }) => void;
 }
 
 export interface RouterCore {
@@ -331,6 +336,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
   let budget: Budget;
   try {
     store = await IntentStore.load(journal);
+    options.onStoreLoaded?.({ settledSourceTxRefs: store.settledSourceTxRefs });
     budget = Budget.load(config.budget, journal, (paymentId, event, patch) =>
       store.append(paymentId, event, patch),
     );
@@ -736,7 +742,17 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     }
     const txRef = isRecord(settled) ? settled["txRef"] : undefined;
     if (outcome === "settled" && typeof txRef === "string" && txRef !== "") {
-      await store.append(intent.paymentId, "source_settled", { txRef });
+      try {
+        await store.append(intent.paymentId, "source_settled", { txRef });
+      } catch {
+        /**
+         * 受信は chain 上で settle 済みだが記録できなかった（journal はその後使えない）。別の行を書こうとせず `unknown` を返し、送信は始めない
+         * （要件 FR-48 の表。`docs/mpp-solana-design.md` §2.3）。memory の intent は `source_pending` のまま: 再提示は現在の終端、再起動では行の有無で
+         * `unknown`（行なし）か `paid_undelivered`（append は成功し fsync だけ失敗 = 行あり）。どちらも再送しない。
+         */
+        options.note?.(`source_settled could not be journaled (paymentId=${intent.paymentId}); answering unknown`);
+        return { paymentId: intent.paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
+      }
       return deliver(intent.paymentId);
     }
 

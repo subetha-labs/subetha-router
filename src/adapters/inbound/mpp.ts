@@ -109,7 +109,7 @@ function unixSecondsOf(expires: unknown): number {
  * （同じ route の quote は scope が同じ。SDK の replay ストアはプロセス内なので、再起動後は同じ支払いが
  * 別の quote で 2 度使える）。
  */
-function embeddedChallengeIdOf(wire: string): string | undefined {
+export function embeddedChallengeIdOf(wire: string): string | undefined {
   try {
     const id: unknown = Credential.deserialize(wire).challenge.id;
     return typeof id === "string" && id !== "" ? id : undefined;

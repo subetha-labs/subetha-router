@@ -3,6 +3,7 @@
  * `checkSvmOutboundMessage` は builder を呼ばない: 正しい message は通り、各欄・構造の変異は落ち、builder を変異させても検査が落ちる。
  * source/destination の相対順が逆になる 2 組の鍵で確かめる（kit の並びの規則を単一の fixture で一般化しない）。
  */
+import { createHash } from "node:crypto";
 import { beforeAll, describe, expect, test } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 import { address, getAddressComparator, getAddressDecoder, getCompiledTransactionMessageDecoder, getCompiledTransactionMessageEncoder, compileTransactionMessage } from "@solana/kit";
@@ -261,3 +262,57 @@ describe("buildSvmTransactionMessage の lastValidBlockHeight", () => {
 // 参照だけ（型の確認）。
 void COMPUTE_BUDGET_PROGRAM_ADDRESS;
 void MEMO_PROGRAM_ADDRESS;
+
+/** Memo 任意・compute budget の形（`docs/mpp-solana-design.md` §5.1、タスク M2）: x402 の既定の bytes は変わらず、MPP Solana の形も同じ部品で組めて検査できる。 */
+describe("Memo 任意・compute budget の形（M2）", () => {
+  test("memo 無し: 命令 3 つ・readonly non-signer 3・Memo program 無し。検査・署名・wire の再検査（第 2 層も memo 無しの形）が通り、memo の有無が違えば落ちる", () => {
+    const expected: SvmExpected = Object.freeze({ ...first.expected, memo: undefined });
+    const bytes = compileSvmMessage(expected);
+    const compiled = getCompiledTransactionMessageDecoder().decode(bytes) as unknown as { instructions: readonly unknown[]; header: { numReadonlyNonSignerAccounts: number }; staticAccounts: readonly string[] };
+    expect(compiled.instructions.length).toBe(3);
+    expect(compiled.header.numReadonlyNonSignerAccounts).toBe(3);
+    expect(compiled.staticAccounts.map(String)).not.toContain(String(MEMO_PROGRAM_ADDRESS));
+    expect(compiled.staticAccounts.map(String)).toEqual([...expectedStaticAccountsOf(expected)]);
+    expect(checkSvmOutboundMessage(bytes, expected)).toEqual({ ok: true });
+    expect(checkSvmOutboundMessage(compileSvmMessage(first.expected), expected).ok).toBe(false);
+    expect(checkSvmOutboundMessage(bytes, first.expected).ok).toBe(false);
+    const signature = ed25519.sign(bytes, first.routerSeed);
+    expect(verifySvmSignature(signature, bytes, first.router)).toBe(true);
+    const wire = assembleSvmWire(bytes, expected, signature);
+    expect(recheckSvmWire(wire, bytes, signature, expected, first.provider)).toEqual({ ok: true });
+    expect(recheckSvmWire(wire, bytes, signature, first.expected, first.provider).ok).toBe(false);
+  });
+
+  test("x402 の bytes は変わらない: 既定の引数と明示の limit-first は同じ bytes。price-first は別の bytes で送信の検査（limit-first 固定）が落ちる。片方だけの compute budget も組める", () => {
+    const params = { ...first.expected };
+    const encode = (message: ReturnType<typeof buildSvmTransactionMessage>): Uint8Array => Uint8Array.from(getCompiledTransactionMessageEncoder().encode(compileTransactionMessage(message)));
+    const base = encode(buildSvmTransactionMessage(params));
+    expect(Buffer.compare(Buffer.from(base), Buffer.from(compileSvmMessage(first.expected)))).toBe(0);
+    // M2 の前（`main` の `ac623c7`、builder に memo・computeBudget の引数が無かった版）で同じ鍵・同じ期待値から compile した message の sha256（独立の基準。
+    // 取り方: `git archive main` を展開した tree で `compileSvmMessage(expectedOf(...))` を走らせた）。既定の引数の bytes はこれと一致しなければならない。
+    const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+    expect(sha256(base)).toBe("ba1b42fce1ef563f505908354d9b3c639b73595c4585e5f34e8169598dd3c979");
+    expect(sha256(compileSvmMessage(second.expected))).toBe("64acd0e02766d310f468b2becbbaebc061e7c844ae7087bd360e89d0c4b36bb7");
+    const explicit = encode(buildSvmTransactionMessage({ ...params, computeBudget: { limit: true, price: true, order: "limit-first" } }));
+    expect(Buffer.compare(Buffer.from(explicit), Buffer.from(base))).toBe(0);
+    const priceFirst = encode(buildSvmTransactionMessage({ ...params, computeBudget: { limit: true, price: true, order: "price-first" } }));
+    expect(Buffer.compare(Buffer.from(priceFirst), Buffer.from(base))).not.toBe(0);
+    expect(checkSvmOutboundMessage(priceFirst, first.expected)).toEqual({ ok: false, reason: "compute_limit" });
+    // price-first の中身: [0] が SetComputeUnitPrice（discriminator 3、u64 LE = microLamports）、[1] が SetComputeUnitLimit（discriminator 2、u32 LE = units）、[2] transfer、[3] memo。
+    const decoded = getCompiledTransactionMessageDecoder().decode(priceFirst) as unknown as { instructions: readonly { programAddressIndex: number; data?: ArrayLike<number> }[]; staticAccounts: readonly string[] };
+    const data = decoded.instructions.map((ix) => Array.from(ix.data ?? []));
+    expect(decoded.instructions.map((ix) => String(decoded.staticAccounts[ix.programAddressIndex]))).toEqual([String(COMPUTE_BUDGET_PROGRAM_ADDRESS), String(COMPUTE_BUDGET_PROGRAM_ADDRESS), TOKEN_PROGRAM_ADDRESS, String(MEMO_PROGRAM_ADDRESS)]);
+    expect(data[0]![0]).toBe(3);
+    expect(Buffer.from(data[0]!.slice(1)).readBigUInt64LE()).toBe(first.expected.microLamports);
+    expect(data[1]![0]).toBe(2);
+    expect(Buffer.from(data[1]!.slice(1)).readUInt32LE()).toBe(first.expected.units);
+    // 既定（limit-first）はその逆。
+    const defaultDecoded = getCompiledTransactionMessageDecoder().decode(base) as unknown as { instructions: readonly { data?: ArrayLike<number> }[] };
+    expect([defaultDecoded.instructions[0]!.data![0], defaultDecoded.instructions[1]!.data![0]]).toEqual([2, 3]);
+    const instructionCount = (bytes: Uint8Array): number => (getCompiledTransactionMessageDecoder().decode(bytes) as unknown as { instructions: readonly unknown[] }).instructions.length;
+    const priceOnly = { instructions: { length: instructionCount(encode(buildSvmTransactionMessage({ ...params, computeBudget: { limit: false, price: true, order: "limit-first" } }))) } };
+    expect(priceOnly.instructions.length).toBe(3);
+    const none = { instructions: { length: instructionCount(encode(buildSvmTransactionMessage({ ...params, memo: undefined, computeBudget: { limit: false, price: false, order: "limit-first" } }))) } };
+    expect(none.instructions.length).toBe(1);
+  });
+});

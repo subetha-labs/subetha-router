@@ -406,11 +406,31 @@ export class IntentStore {
   readonly #requestToQuote = new Map<string, string>();
   /** 予約済みの message の hash（journal から復元。永続）。 */
   readonly #messageHashes = new Set<string>();
+  /**
+   * 受信で消費した署名（`source_settled` の行の `txRef`。journal から復元、append でも足す。永続）。MPP Solana 受信の replay の防御の層
+   * （`docs/mpp-solana-design.md` §2.3、要件 SR-M2）。記録そのものは `source_settled` の行で、別の行は書かない。
+   */
+  readonly #settledSourceTxRefs = new Set<string>();
   /** 追記の直列化（同一性検査 → append → 反映を不可分にする）。 */
   #queue: Promise<void> = Promise.resolve();
 
   private constructor(journal: Journal) {
     this.#journal = journal;
+    const backing = this.#settledSourceTxRefs;
+    const view: ReadonlySet<string> = Object.freeze({
+      has: (value: string): boolean => backing.has(value),
+      get size(): number {
+        return backing.size;
+      },
+      forEach: (callback: (value: string, value2: string, set: ReadonlySet<string>) => void, thisArg?: unknown): void => {
+        for (const value of backing) callback.call(thisArg, value, value, view);
+      },
+      entries: () => backing.entries(),
+      keys: () => backing.keys(),
+      values: () => backing.values(),
+      [Symbol.iterator]: () => backing.values(),
+    }) as unknown as ReadonlySet<string>;
+    this.#settledSourceTxRefsView = view;
   }
 
   static async load(journal: Journal): Promise<IntentStore> {
@@ -475,7 +495,20 @@ export class IntentStore {
       return;
     }
     this.#intents.set(paymentId, reduce(current, event, patch, at));
+    if (event === "source_settled") {
+      const txRef = patch["txRef"];
+      if (typeof txRef === "string" && txRef !== "") this.#settledSourceTxRefs.add(txRef);
+    }
   }
+
+  /**
+   * 受信で消費した署名の集合（読取だけ。`source_settled` の行から復元・追記で更新）。**裏の Set は渡さない**: 返すのは生きた読取専用の facade
+   * （`add`・`delete`・`clear` を持たない）。JavaScript から cast しても journal の行無しに replay の防御を変えられない。
+   */
+  get settledSourceTxRefs(): ReadonlySet<string> {
+    return this.#settledSourceTxRefsView;
+  }
+  readonly #settledSourceTxRefsView: ReadonlySet<string>;
 
   /**
    * journal への追記をこの store に一本化し、単一 mutex で直列化する。

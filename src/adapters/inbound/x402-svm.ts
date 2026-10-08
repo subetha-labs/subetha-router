@@ -79,19 +79,34 @@ export interface SvmMessageParams {
   readonly mint: string;
   readonly amount: bigint;
   readonly decimals: number;
-  readonly memo: string;
+  /** Memo の文字列。`undefined` なら Memo 命令を付けない（MPP Solana 送信で相手の challenge に `externalId` が無いとき。`docs/mpp-solana-design.md` §5.1）。x402 は常に渡す。 */
+  readonly memo: string | undefined;
   readonly units: number;
   readonly microLamports: bigint;
+  /**
+   * compute budget の命令の形（省略時は今までどおり `SetComputeUnitLimit(units)` → `SetComputeUnitPrice(microLamports)` の順で両方）。
+   * MPP Solana 受信の組み直しが、観測した組み合わせ（各高々 1 つ・順序は 2 通り）で組むために使う（`docs/mpp-solana-design.md` §3.3・§5.1）。
+   */
+  readonly computeBudget?: { readonly limit: boolean; readonly price: boolean; readonly order: "limit-first" | "price-first" };
   readonly blockhash: string;
   /** lifetime の高さ（message の bytes には入らない。送信は RPC の値を渡し、受信・道具は省略 = 0n）。 */
   readonly lastValidBlockHeight?: bigint;
   readonly tokenProgram?: string;
 }
 
-/** Router が受け取る唯一の形の message（version 0、命令 4 つ）。 */
+/**
+ * Router が受け取る・組む message（version 0）。x402 の形は命令ちょうど 4 つ = SetComputeUnitLimit・SetComputeUnitPrice・`TransferChecked`・Memo（既定の引数）。
+ * MPP Solana（`docs/mpp-solana-design.md` §5.1）は Memo を省けて（命令 3 つ）、compute budget の 2 命令を各高々 1 つ・2 通りの順で組める。
+ * 既定の引数では bytes は従来と同じ（x402 の wire 試験が証拠）。
+ */
 export function buildSvmTransactionMessage(params: SvmMessageParams) {
   const authority = typeof params.authority === "string" ? createNoopSigner(address(params.authority)) : params.authority;
   const programAddress = address(params.tokenProgram ?? TOKEN_PROGRAM_ADDRESS);
+  const budget = params.computeBudget ?? { limit: true, price: true, order: "limit-first" };
+  const limitIx = budget.limit ? [getSetComputeUnitLimitInstruction({ units: params.units })] : [];
+  const priceIx = budget.price ? [getSetComputeUnitPriceInstruction({ microLamports: params.microLamports })] : [];
+  const computeIxs = budget.order === "limit-first" ? [...limitIx, ...priceIx] : [...priceIx, ...limitIx];
+  const memoIxs = params.memo === undefined ? [] : [{ programAddress: MEMO_PROGRAM_ADDRESS, accounts: [], data: new TextEncoder().encode(params.memo) }];
   return pipe(
     createTransactionMessage({ version: 0 }),
     (m) => setTransactionMessageFeePayer(address(params.feePayer), m),
@@ -99,13 +114,12 @@ export function buildSvmTransactionMessage(params: SvmMessageParams) {
     (m) =>
       appendTransactionMessageInstructions(
         [
-          getSetComputeUnitLimitInstruction({ units: params.units }),
-          getSetComputeUnitPriceInstruction({ microLamports: params.microLamports }),
+          ...computeIxs,
           getTransferCheckedInstruction(
             { source: address(params.source), mint: address(params.mint), destination: address(params.destination), authority, amount: params.amount, decimals: params.decimals },
             { programAddress },
           ),
-          { programAddress: MEMO_PROGRAM_ADDRESS, accounts: [], data: new TextEncoder().encode(params.memo) },
+          ...memoIxs,
         ],
         m,
       ),
@@ -121,7 +135,7 @@ export type SvmCheckResult =
 const MISMATCH: SvmCheckResult = Object.freeze({ ok: false, reason: "credential_mismatch" });
 const NONCE_MISMATCH: SvmCheckResult = Object.freeze({ ok: false, reason: "nonce_mismatch" });
 
-function decodeBase64Strict(text: string): Uint8Array | undefined {
+export function decodeBase64Strict(text: string): Uint8Array | undefined {
   if (text.length === 0 || text.length > SVM_TRANSACTION_MAX_BASE64_CHARS || !BASE64_PATTERN.test(text) || text.length % 4 !== 0) return undefined;
   const bytes = Buffer.from(text, "base64");
   // 正準な base64 だけ（読み直して同じ文字列になること）。
@@ -150,8 +164,9 @@ function instructionOf(compiled: { readonly staticAccounts: readonly Address[] }
 /**
  * 提出された transaction（base64）を、承認済みの値（policy・amount・memo）に対して同期で検査する。
  * 通れば提出値（authority・source・compute）を返す。
+ * `memo` が `undefined` なら Memo 命令の無い 3 命令の形を要求する（MPP Solana 送信の wire の再検査。`docs/mpp-solana-design.md` §5.1）。x402 受信は常に文字列。
  */
-export function checkSvmTransaction(transaction: unknown, policy: SvmInboundPolicy, amount: string, memo: string): SvmCheckResult {
+export function checkSvmTransaction(transaction: unknown, policy: SvmInboundPolicy, amount: string, memo: string | undefined): SvmCheckResult {
   try {
     if (typeof transaction !== "string") return MISMATCH;
     const bytes = decodeBase64Strict(transaction);
@@ -176,20 +191,25 @@ export function checkSvmTransaction(transaction: unknown, policy: SvmInboundPoli
     const authority = compiled.staticAccounts[1];
     if (feePayer === undefined || authority === undefined) return MISMATCH;
     if (String(feePayer) !== policy.feePayer) return MISMATCH;
-    if (compiled.instructions.length !== SVM_INSTRUCTION_COUNT) return MISMATCH;
+    const expectedCount = memo === undefined ? SVM_INSTRUCTION_COUNT - 1 : SVM_INSTRUCTION_COUNT;
+    if (compiled.instructions.length !== expectedCount) return MISMATCH;
 
     // 3. 命令の parse と範囲。program の照合は組み直しでも決まるが、parse の前に見る。
     const ix = compiled.instructions.map((c) => instructionOf(compiled, c));
     if (ix.some((i) => i === undefined)) return MISMATCH;
-    const [limitIx, priceIx, transferIx, memoIx] = ix as [Instruction, Instruction, Instruction, Instruction];
+    const [limitIx, priceIx, transferIx] = ix as [Instruction, Instruction, Instruction];
+    const memoIx = memo === undefined ? undefined : (ix[3] as Instruction);
     if (String(limitIx.programAddress) !== COMPUTE_BUDGET_PROGRAM_ADDRESS || String(priceIx.programAddress) !== COMPUTE_BUDGET_PROGRAM_ADDRESS) return MISMATCH;
-    if (String(transferIx.programAddress) !== policy.tokenProgram || String(memoIx.programAddress) !== String(MEMO_PROGRAM_ADDRESS)) return MISMATCH;
+    if (String(transferIx.programAddress) !== policy.tokenProgram) return MISMATCH;
+    if (memoIx !== undefined && String(memoIx.programAddress) !== String(MEMO_PROGRAM_ADDRESS)) return MISMATCH;
     const units = parseSetComputeUnitLimitInstruction(limitIx as never).data.units;
     const microLamports = parseSetComputeUnitPriceInstruction(priceIx as never).data.microLamports;
     const transfer = parseTransferCheckedInstruction(transferIx as never);
     // memo はこの quote の nonce。違えば `nonce_mismatch`（署名の検査より先）。
-    const memoText = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(memoIx.data ?? []));
-    if ((memoIx.accounts ?? []).length !== 0 || memoText !== memo) return NONCE_MISMATCH;
+    if (memoIx !== undefined) {
+      const memoText = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(memoIx.data ?? []));
+      if ((memoIx.accounts ?? []).length !== 0 || memoText !== memo) return NONCE_MISMATCH;
+    }
     if (!Number.isSafeInteger(units) || units <= 0 || units > SVM_MAX_COMPUTE_UNITS) return MISMATCH;
     if (microLamports < 0n || microLamports > SVM_MAX_MICRO_LAMPORTS_PER_UNIT) return MISMATCH;
     const source = String(transfer.accounts.source.address);
@@ -291,6 +311,7 @@ export function preflightSvm(offer: InboundOffer, credential: PaymentCredential,
 import { randomBytes } from "node:crypto";
 
 import { readBoundedBody } from "../../net/bounded-body.js";
+import { followSvmSignature, svmFollowUpRequestTimeoutOf as followUpRequestTimeoutOf, svmSignatureStatusOf as followUpStatusOf } from "./svm-follow-up.js";
 import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
 import type { CreateOfferRequest, InboundCallContext, InboundRail, SettleResult } from "../../ports/inbound.js";
 
@@ -346,7 +367,7 @@ export function svmSettleFollowUpOf(options: Pick<X402SvmInboundOptions, "follow
  * 要求が RangeError で失敗し、残りが 10 秒を切った後の要求が全部失敗する（adapter の試験で見つけた）。
  */
 export function svmFollowUpRequestTimeoutOf(remainingMs: number, requestTimeoutMs: number = SVM_SETTLE_FOLLOW_UP_DEFAULTS.requestTimeoutMs): number {
-  return Math.max(0, Math.floor(Math.min(requestTimeoutMs, remainingMs)));
+  return followUpRequestTimeoutOf(remainingMs, requestTimeoutMs);
 }
 
 /** 追跡に入る条件（設計 §5.8 の 2）: 本文が JSON object で、`transaction` が署名の形で、`network` が offer と一致。HTTP status は問わない。 */
@@ -358,25 +379,9 @@ export function svmFollowUpSignatureOf(json: unknown, offer: Pick<InboundOffer, 
   return isSvmSignature(transaction) ? transaction : undefined;
 }
 
-const SVM_COMMITMENTS: ReadonlySet<unknown> = new Set(["processed", "confirmed", "finalized"]);
-
-/**
- * `getSignatureStatuses` の 1 件の判定（設計 §5.8 の 4）。**形の正しい status**（object で `err` の欄を持ち、`confirmationStatus` が
- * processed／confirmed／finalized）だけを判定に使う。`null`（知らない署名）・形の違うもの（`{}`、`err` の欄の無いもの）は `pending`。
- */
+/** 判定（`svm-follow-up.ts` に括り出した。x402 受信は `err` を見たら終端 = 今までどおり）。 */
 export function svmSignatureStatusOf(json: unknown): "settled" | "failed" | "pending" {
-  if (typeof json !== "object" || json === null || Array.isArray(json)) return "pending";
-  const result = (json as Record<string, unknown>)["result"];
-  if (typeof result !== "object" || result === null) return "pending";
-  const value = (result as Record<string, unknown>)["value"];
-  if (!Array.isArray(value)) return "pending";
-  const entry = value[0];
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "pending";
-  const status = entry as Record<string, unknown>;
-  if (!Object.hasOwn(status, "err") || !SVM_COMMITMENTS.has(status["confirmationStatus"])) return "pending";
-  if (status["err"] !== null) return "failed";
-  const confirmation = status["confirmationStatus"];
-  return confirmation === "confirmed" || confirmation === "finalized" ? "settled" : "pending";
+  return followUpStatusOf(json, "any");
 }
 
 /** settle の `transaction` が SVM の signature の形（base58 で 64 バイト）か。 */
@@ -419,42 +424,23 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
    */
   async function followSignature(signature: string, routeId: string): Promise<SettleResult> {
     if (rpc === undefined) return { outcome: "unknown", reason: "source_settle_unknown" };
-    const deadlineAt = clock() + followUp.totalMs;
-    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSignatureStatuses", params: [[signature], { searchTransactionHistory: true }] });
-    for (;;) {
-      const remaining = deadlineAt - clock();
-      if (remaining <= 0) break;
-      let status: "settled" | "failed" | "pending" = "pending";
-      try {
-        const response = await rpc.transport.fetch(
-          rpc.url,
-          { method: "POST", headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(svmFollowUpRequestTimeoutOf(remaining, followUp.requestTimeoutMs)) },
-          { routeId, operation: "svm_settle_follow_up" },
-        );
-        const read = await readBoundedBody(response, SVM_RESPONSE_MAX_BYTES);
-        if (response.status === 200 && read.ok) {
-          let json: unknown;
-          try {
-            json = JSON.parse(new TextDecoder("utf-8", { fatal: false }).decode(read.bytes));
-          } catch {
-            json = undefined;
-          }
-          status = svmSignatureStatusOf(json);
-        }
-      } catch (error) {
-        // transport の失敗（timeout・切断・上限超過）は報告して次の間隔へ（期限が守る）。
-        rpc.transport.report(error, { routeId, operation: "svm_settle_follow_up" });
-      }
-      // 完了の期限は応答を読んだ後にも見る（要求の期限は取り消しを予約するだけで、続きが期限の前に走ることを保証しない）。
-      if (clock() > deadlineAt) break;
-      if (status === "settled") {
-        options.onDiagnostic?.("svm_settle_followed_up");
-        return { outcome: "settled", txRef: signature };
-      }
-      if (status === "failed") break;
-      const wait = Math.min(followUp.intervalMs, deadlineAt - clock());
-      if (wait <= 0) break;
-      await sleep(wait);
+    const followed = await followSvmSignature({
+      rpc,
+      signature,
+      routeId,
+      operation: "svm_settle_follow_up",
+      deadlineAt: clock() + followUp.totalMs,
+      intervalMs: followUp.intervalMs,
+      requestTimeoutMs: followUp.requestTimeoutMs,
+      clock,
+      sleep,
+      // x402 受信の今までの読み方: chain 上の `err` を見たら打ち切り（`unknown`）、確定度は問わない。
+      errTerminalAt: "any",
+      searchTransactionHistory: true,
+    });
+    if (followed === "settled") {
+      options.onDiagnostic?.("svm_settle_followed_up");
+      return { outcome: "settled", txRef: signature };
     }
     return { outcome: "unknown", reason: "source_settle_unknown" };
   }
