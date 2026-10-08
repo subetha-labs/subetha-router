@@ -372,6 +372,11 @@ upload 3,051 KiB / gzip 518 KiB、起動 55 ms、custom domain `provider-mpp-sol
 Router の候補の検査（`checkMppSolanaChallenge` に本番の運用者の集合 = Solana の受取 owner・送信鍵とその ATA・x402 Provider の受取先とその ATA）を手元で掛けて**候補**、ATA の不等式も通る。別のパス・HEAD は 404。
 この PR で `UPSTREAM_SOL_MPP` を定数に入れた（`solanaMpp.outbound` は `false` のままなので公開の経路は変わらない）。**残る owner の作業**: ホストの env に `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO=26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc` を足す（G-2″ の配備の前）。
 
+**G-2″ の記録（2026-10-08 14:55Z。owner の決定「進めてください」）**: owner がホストの env に `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO` を足した（名前だけ確認）。main `c73936d`（PR #111 まで。`UPSTREAM_SOL_MPP` あり、`solanaMpp` は両方 `false`）の
+イメージ `b-c73936d` を手元（arm64）で build し `docker save`/`load`（14 層の内容ハッシュ一致）。`swap-image.sh` で入れ替え: 14:55:46Z 開始、14:55:56Z 終了、exit 0、journal の先頭 102,693 バイトは不変、`subetha-egress check` 合格、
+公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。rollback は `subetha-router-prev-20261008T145546Z`（`b-24bae1a`）。確かめたこと: コンテナは healthy、公開 MCP の一覧は **route 6・プロファイル 10 のまま**（`solmpp` の route・プロファイル無し）、
+子プロセスの env は `SUBETHA_RAILS_ACTIVATION=arc-in,arc-out,solana-in,solana-out`（`solana-mpp-*` の語は無い）で、**`SUBETHA_SOLANA_MPP_PROVIDER_PAYTO` は子に渡っていない**（無効なので読まれない。`/proc/<pid>/environ` の名前だけを見た）。次は G-3″。
+
 **rollback**: 定数を `false` に戻してイメージを作り直す（§2c と同じ。env は残してよい——無効なら読まれない）。
 
 **有効にした後に見るもの**（§2c の注と同じく、hosted の入口は Router の process の stderr を転送しない）: 受信の `transaction` 型で Router が送出した後に確定を観測できなかった purchase は
