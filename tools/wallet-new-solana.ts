@@ -4,7 +4,8 @@
  *   npm run wallet:new:solana
  *
  * 出力した秘密鍵は **`.env.local`（gitignore 済み）に自分で保存**する。このツールはファイルを書かない。
- * devnet の USDC を入れる: https://faucet.circle.com → Solana Devnet / USDC。SOL は要らない（送信は facilitator の fee payer）。
+ * devnet の USDC を入れる: https://faucet.circle.com → Solana Devnet / USDC。x402 で払うなら SOL は要らない（送信は facilitator の fee payer）。
+ * **MPP（`solana/charge`）で払うなら devnet SOL も要る**（Router が送出する transaction の fee payer はこの鍵。`docs/mpp-solana-design.md` §7）。
  */
 import { createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder } from "@solana/kit";
 
@@ -27,7 +28,11 @@ Created a disposable Solana wallet (devnet only).
 2) Fund that address with **Solana Devnet USDC**
 
    https://faucet.circle.com  → pick network **Solana Devnet** and token **USDC**.
-   **You do not need SOL.** The facilitator's fee payer broadcasts and pays the fee;
-   \`npm run sign\` only signs (nothing moves until the Router settles).
+   Paying over **x402** (routes whose offer scheme is \`exact\`): **you do not need SOL.**
+   The facilitator's fee payer broadcasts and pays the fee; \`npm run sign\` only signs.
+
+3) Paying over **MPP** (routes whose offer scheme is \`solana/charge\`): **you also need devnet SOL**
+   on this address for the transaction fee. \`npm run sign\` still only signs; the Router broadcasts
+   the transaction at purchase and **this key is the fee payer**. SOL faucet: https://faucet.solana.com
 
 `);

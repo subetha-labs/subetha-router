@@ -371,6 +371,23 @@ x402 SVM 受信の `followSignature`（`x402-svm.ts:420-460`）を関数に出�
 | `package.json` | `@solana/pay-kit`（dev）と `overrides` の `mppx` |
 | `docs/DEPLOY.md`・`CLAUDE.md`・`README.md` | §6.4 |
 
+## 13. 実装の記録（設計からの逸脱。各タスクの PR のレビューで決まったもの。M6 で転記）
+
+設計の本文は第 3 版のまま残し、実装が変えた点をここに集める（主担当のタスクと PR）。
+
+| 節 | 設計 | 実装 | 由来 |
+|---|---|---|---|
+| §3.5 verify | 証拠を残さない | **verify の証拠**: `verify` は `{kind, check, bytes}` を `nonce | sha256(stableJson(offer) + "\0" + wire)` で保持し、offer の期限 + 1 h（`MPP_SOLANA_EVIDENCE_GRACE_MS`）まで（期限だけで掃く。件数の上限は無い）、使う settle が消費する。**`signature` 型の settle は RPC も再判定もしない**（payer は払い済み。再検査で `rejected` = 未払いの宣言にしない）。証拠が無ければ throw（core は `unknown`）。`transaction` 型は証拠が無ければ RPC 無しの同じ検査をやり直す。消費済みの検査は最初 | M3-b（PR #102、Codex 4 回） |
+| §2.3 core | — | **settle の直前の期限の再検査**: `orchestrator.ts`（予約の後）と `dynamic.ts`（`source_pending` の後）が `inbound.settle` を呼ぶ直前に承認・offer の期限を見て `approval_expired` で終える（`source_failed { not_sent }`）。証拠の保持の上限はこれで決まる（settle は期限の前にしか呼ばれない） | M3-b |
+| §2.3・§3.6 core | — | **資金が動いた credential の写像**: `InboundRail.verify` は `fundsMoved?` を返せる。verify の後に期限の再検査か予算の予約で止まるとき、資金が動いた credential（MPP Solana の `signature` 型、`fundsMoveOnCredential: true` の offer = Tempo の push）は `source_failed { not_sent }` ではなく **`unknown { reason: "source_paid_unsettled" }`**（動的は promotion の後だけ）。Tempo の push の既存の予算の行 3 本がこれで変わった | M5（PR #105） |
+| §4.2 | server metadata の scope は必須 | pay-kit 0.13.1 の server は `opaque` を出さない → **scope は任意**（無ければ通す、あれば一致、`terms` に残す）。mppx 0.11.0 の client の `preparePayment` は request を schema で parse しない（未知の欄は残る。`externalId` の欠けは client 側では問題にならない） | M4-a（PR #103） |
+| §4.3 | 承認期限と blockhash の年齢 | 署名の前と送出の前に **challenge の `expires` も**見る。`createCredential` の hook は export した純粋な `createCredentialHookOf`。Provider D の fixture はプロセス内（TLS の loopback の後ろの本物の pay-kit の server。応答は後から書き換える）。実時間の試験は `mpp-solana-outbound-timing.test.ts`（≈80 s、変異の表から除外） | M4-b（PR #104） |
+| §4.1・SR-M1 | quote 時に 1 回 | **送信の ATA の存在の証拠** `createAtaEvidence`: ATA ごと、最新の quote の challenge の期限 + 1 h まで保持（hit で延長、件数の上限は無い）。purchase 時の 402 の再読取は読まない。`pay` は送出の前に必ず読み直す。x402 SVM 送信の動的の再読取は変えていない（毎回読む） | M5 |
+| §3.2・§7 | nonce の形は書いていない | **MPP（Tempo・Solana）の `challengeNonce` は mppx の challenge の id（HMAC の base64url、43 文字）**で、x402 の `0x` の hex ではない。`npm run sign` の共通の nonce の検査（T5、2026-10-07）は hex だけを通していたので、**Tempo の MPP の offer は T5 から M6 まで `npm run sign` で「no well-formed challengeNonce」と拒まれていた**（道具だけの欠陥。Router・adapter は正しい）。M6 で MPP の 2 レールに mppx の id の形を許し、実 adapter の offer で回帰試験を置いた | M6 |
+| §7 | 振り分けと payer が別々に検査 | challenge の中身の検査は **1 つの純粋関数 `checkSvmMppChallenge`**（`tools/svm-mpp-payer.ts`）で、`classifyOffer`（鍵の前）と payer（署名の前）の両方が呼ぶ | M6 |
+| §6.2 | — | `hostPlanOf` は `solanaMpp.inbound` で `SUBETHA_MPP_INBOUND_SECRET` が無ければ **env の固定文で止まる**（子の Router の `ROUTER_MPP_INBOUND_SECRET is required` より前）。`RailProviders.solanaMpp`・`RailUpstreams.solanaMpp`（Provider D の受取 owner と URL は x402 の Solana の欄と別） | M6 |
+| §6.4 | — | CLAUDE.md の「step 5 が失敗したら支払いは送信済み」は Tempo に限り、MPP Solana は「資金は既に動いているかもしれない。`rejected` も `unknown` も未送金の証明ではない。自分で再試行せず報告する」に置き換えた。`wallet:new:solana` は MPP で払うなら devnet SOL が要ると案内する | M6 |
+
 ## 12. 独立レビューの記録
 
 | 回 | 日付 | モデル | 判定 |

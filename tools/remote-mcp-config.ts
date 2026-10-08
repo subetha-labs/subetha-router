@@ -104,6 +104,24 @@ export const UPSTREAM_SOL = "https://provider-x402-sol.subethalabs.com/v1/eth/sn
 /** 静的 route（送信の設計 §6.3・D-12 の O-4）: Tempo pathUSD（MPP 受信）で払って Solana の Provider に届く。 */
 export const ROUTE_SOL_OUT = "md-sol-eth-snapshot-mpp";
 
+/* ------------------------------------------------------------------ Solana の MPP（受信・送信。`docs/mpp-solana-design.md` §6、タスク M6） */
+
+/**
+ * Solana の MPP の Provider D（pay-kit の server。`solana/charge`、pull、`feePayer: false`）の URL。**Provider D が立つまで空**（D-26。空なら静的の送信 route は
+ * 生成しない。動的プロファイルは生成する）。受取 owner は env `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`（`solanaMpp.outbound` ∧ URL ≠ "" のときだけ読む。D-10 と同じ規則）。
+ */
+export const UPSTREAM_SOL_MPP = "";
+/** 静的 route（設計 §6.3）: Solana USDC（MPP）で払って Provider A（x402）に届く。 */
+export const ROUTE_SOLMPP_TO_X402 = "md-x402-eth-snapshot-solmpp";
+/** 静的 route（設計 §6.3）: Solana USDC（MPP）で払って Provider B（MPP）に届く。 */
+export const ROUTE_SOLMPP_TO_MPP = "md-mpp-eth-snapshot-solmpp";
+/** 静的 route（設計 §6.3）: Base USDC（x402）で払って Provider D（Solana の MPP）に届く。 */
+export const ROUTE_SOLMPP_OUT = "md-solmpp-eth-snapshot";
+/** 静的 route（設計 §6.3）: Tempo pathUSD（MPP）で払って Provider D（Solana の MPP）に届く。 */
+export const ROUTE_SOLMPP_OUT_MPP = "md-solmpp-eth-snapshot-mpp";
+/** MPP Solana の宛先の `scheme`（`src/config.ts` の `MPP_SOLANA_SCHEME` と同じ文字列。このファイルは Router の SDK に依存しない）。 */
+const SOLANA_MPP_SCHEME = "solana/charge";
+
 /** 1 つのレールの有効化（方向別。送信の設計 §6.1、FR-30）。 */
 export interface RailActivation {
   readonly inbound: boolean;
@@ -115,24 +133,33 @@ export interface RailActivation {
  */
 export interface RailsActivation {
   readonly arc: RailActivation;
+  /** Solana の **x402**（受信: SVM `exact` の facilitator、送信: Router の鍵で SVM `exact`）。 */
   readonly solana: RailActivation;
+  /**
+   * Solana の **MPP**（受信: `solana/charge` の challenge を Router が発行して送出、送信: Provider D に `solana/charge` で払う。`docs/mpp-solana-design.md` §6.1）。
+   * x402 の `solana` とは独立に切り替える。同じ受取 owner・同じ送信鍵・同じ RPC・同じ Solana USDC の予算の区分を共有する。
+   */
+  readonly solanaMpp: RailActivation;
 }
 /** 受取先（受信が有効なレールの分だけ要る）。Arc は証明専用の受取鍵の address、Solana は受取 owner の address。 */
 export interface RailReceivers {
   readonly arc?: string;
   readonly solana?: string;
 }
-/** Provider の受取先（送信が有効で静的 route を出すときだけ要る。D-10）。Arc は `0x`、Solana は owner の公開鍵。 */
+/** Provider の受取先（送信が有効で静的 route を出すときだけ要る。D-10）。Arc は `0x`、Solana（x402 の Provider と MPP の Provider D）は owner の公開鍵。 */
 export interface RailProviders {
   readonly arc?: string;
   readonly solana?: string;
+  /** Provider D（Solana の MPP）の受取 owner。`solanaMpp.outbound` ∧ `UPSTREAM_SOL_MPP` ≠ "" のときだけ。 */
+  readonly solanaMpp?: string;
 }
-/** Provider の URL（レールごと。本番は定数 `UPSTREAM_ARC`。試験が静的 route の生成を確かめるために差し替えられる）。 */
+/** Provider の URL（レールごと。本番は定数 `UPSTREAM_ARC`・`UPSTREAM_SOL`・`UPSTREAM_SOL_MPP`。試験が静的 route の生成を確かめるために差し替えられる）。 */
 export interface RailUpstreams {
   readonly arc: string;
   readonly solana: string;
+  readonly solanaMpp: string;
 }
-export const RAIL_UPSTREAMS: RailUpstreams = Object.freeze({ arc: UPSTREAM_ARC, solana: UPSTREAM_SOL });
+export const RAIL_UPSTREAMS: RailUpstreams = Object.freeze({ arc: UPSTREAM_ARC, solana: UPSTREAM_SOL, solanaMpp: UPSTREAM_SOL_MPP });
 export interface RailsOptions {
   readonly activation: RailsActivation;
   readonly receivers: RailReceivers;
@@ -145,13 +172,18 @@ const RAIL_OFF: RailActivation = Object.freeze({ inbound: false, outbound: false
  * 公開の process の有効化。受信は **2026-10-07 に両方 `true`**（T10 の G-4。`docs/DEPLOY.md` §2c の記録）。
  * 送信は **2026-10-08 に両方 `true`**（UG-A・UG-S の G-4′。`docs/DEPLOY.md` §2c の記録。送信の設計 §6.1）。env からは変えられない。戻すのはここ（イメージを作り直して入れ替える）。
  */
-export const RAILS_ACTIVATION: RailsActivation = Object.freeze({ arc: Object.freeze({ inbound: true, outbound: true }), solana: Object.freeze({ inbound: true, outbound: true }) });
-/** どちらも無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
-export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF });
+export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
+  arc: Object.freeze({ inbound: true, outbound: true }),
+  solana: Object.freeze({ inbound: true, outbound: true }),
+  /** Solana の MPP は **無効のまま配備**（M6。`docs/mpp-solana-design.md` §6.1、`docs/DEPLOY.md` §2d の G-2″）。方向別に `true` にするのは G-4″（owner）。 */
+  solanaMpp: RAIL_OFF,
+});
+/** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
+export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });
 export const RAILS_DISABLED: RailsOptions = Object.freeze({ activation: RAILS_NONE, receivers: Object.freeze({}) });
 /** どれか 1 つでも有効か（受け入れ用の起動の「少なくとも 1 つ」の判定）。 */
 export function railActive(activation: RailsActivation): boolean {
-  return [activation.arc, activation.solana].some((rail) => rail.inbound || rail.outbound);
+  return [activation.arc, activation.solana, activation.solanaMpp].some((rail) => rail.inbound || rail.outbound);
 }
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -166,7 +198,7 @@ function isBase58PublicKey(value: string): boolean {
   }
 }
 
-/** **受信**が有効なレールの受取先を取り出す。無い・形が違うなら起動しない（値は出さない）。送信だけ有効なら読まない。 */
+/** **受信**が有効なレールの受取先を取り出す。無い・形が違うなら起動しない（値は出さない）。送信だけ有効なら読まない。`"solana"` は **x402** の受信（`solana.inbound`）。 */
 function receiverOf(rails: RailsOptions, rail: "arc" | "solana"): string | undefined {
   if (!rails.activation[rail].inbound) return undefined;
   const value = rails.receivers[rail];
@@ -177,15 +209,27 @@ function receiverOf(rails: RailsOptions, rail: "arc" | "solana"): string | undef
   return value;
 }
 /**
+ * Solana の **MPP** 受信の受取 owner（設計 §6.2）: `solanaMpp.inbound` のときだけ、x402 の受信と**同じ値**（`receivers.solana`）を返す。
+ * 述語を `receiverOf(rails, "solana")` と分けるのは、受取 owner があるだけで x402 の route（`md-x402-eth-snapshot-sol` と `dyn-sol-to-*`）が出ないようにするため。
+ */
+function solanaMppReceiverOf(rails: RailsOptions): string | undefined {
+  if (!rails.activation.solanaMpp.inbound) return undefined;
+  const value = rails.receivers.solana;
+  if (typeof value !== "string" || !isBase58PublicKey(value)) {
+    throw new Error("the solana mpp rail is activated but its receiver address is missing or malformed");
+  }
+  return value;
+}
+/**
  * **送信**が有効で、Provider の URL が定数に入っているときの Provider の受取先（静的 route の `destination.payTo`）。
  * URL が空（Provider が立っていない）なら静的 route を出さないので読まない。URL があるのに受取先が無い・形が違うなら起動しない。
  */
-function providerOf(rails: RailsOptions, rail: "arc" | "solana", upstream: string): string | undefined {
+function providerOf(rails: RailsOptions, rail: "arc" | "solana" | "solanaMpp", upstream: string): string | undefined {
   if (!rails.activation[rail].outbound || upstream === "") return undefined;
   const value = rails.providers?.[rail];
   const wellFormed = typeof value === "string" && (rail === "arc" ? EVM_ADDRESS.test(value) : isBase58PublicKey(value));
   if (!wellFormed) {
-    throw new Error(`the ${rail} outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed`);
+    throw new Error(`the ${rail === "solanaMpp" ? "solana mpp" : rail} outbound rail is activated with an upstream URL but the provider pay-to address is missing or malformed`);
   }
   return value;
 }
@@ -224,10 +268,11 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
   void env;
   const arcReceiver = receiverOf(rails, "arc");
   const solReceiver = receiverOf(rails, "solana");
-  /** 新しいレールの source から x402・MPP の送信へ（par 1:1、手数料は既存の規則）。 */
-  const toMpp = (profileId: string, source: { network: string; asset: string }, payTo: string): Record<string, unknown> => ({
+  const solMppReceiver = solanaMppReceiverOf(rails);
+  /** 新しいレールの source から x402・MPP の送信へ（par 1:1、手数料は既存の規則）。`sourceRail` は既定 x402（Solana の MPP 受信は `"mpp"`）。 */
+  const toMpp = (profileId: string, source: { network: string; asset: string }, payTo: string, sourceRail: "x402" | "mpp" = "x402"): Record<string, unknown> => ({
     profileId,
-    sourceRail: "x402",
+    sourceRail,
     source: { network: source.network, asset: source.asset, decimals: 6, payTo },
     rail: "mpp",
     destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, decimals: 6, feeAsset: OUTBOUND.asset, maxFee: DYNAMIC_MAX_FEE_CEILING, feeMargin: DYNAMIC_FEE_MARGIN_BPS },
@@ -235,9 +280,9 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
     maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
     fee: DYNAMIC_FEE_MPP_OUT,
   });
-  const toX402 = (profileId: string, source: { network: string; asset: string }, payTo: string): Record<string, unknown> => ({
+  const toX402 = (profileId: string, source: { network: string; asset: string }, payTo: string, sourceRail: "x402" | "mpp" = "x402"): Record<string, unknown> => ({
     profileId,
-    sourceRail: "x402",
+    sourceRail,
     source: { network: source.network, asset: source.asset, decimals: 6, payTo },
     rail: "x402",
     destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, decimals: 6, tokenDomain: { name: "USDC", version: "2" } },
@@ -246,10 +291,10 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
     fee: DYNAMIC_FEE_X402_OUT,
   });
   /** Arc の Provider へ（送信の設計 §6.3・D-12）: Base x402 で払う、Tempo MPP で払う（MPP 受信があるときだけ）。 */
-  const toArc = (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }): Record<string, unknown> => ({
+  const toArc = (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }, payTo: string = receiver): Record<string, unknown> => ({
     profileId,
     sourceRail,
-    source: { network: source.network, asset: source.asset, decimals: 6, payTo: receiver },
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo },
     rail: "x402",
     destination: { scheme: "exact", network: OUTBOUND_ARC.network, asset: OUTBOUND_ARC.asset, decimals: OUTBOUND_ARC.decimals, tokenDomain: { ...OUTBOUND_ARC.tokenDomain } },
     par: true,
@@ -257,19 +302,48 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
     fee: DYNAMIC_FEE_X402_OUT,
   });
   /** Solana の Provider へ（送信の設計 §6.3・D-12 の O-3・O-4）: 宛先は表の mint・桁・token program（`tokenDomain` は無い）。 */
-  const toSol = (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }): Record<string, unknown> => ({
+  const toSol = (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }, payTo: string = receiver): Record<string, unknown> => ({
     profileId,
     sourceRail,
-    source: { network: source.network, asset: source.asset, decimals: 6, payTo: receiver },
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo },
     rail: "x402",
     destination: { scheme: "exact", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: OUTBOUND_SOL.decimals, tokenProgram: OUTBOUND_SOL.tokenProgram },
     par: true,
     maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
     fee: DYNAMIC_FEE_X402_OUT,
   });
+  /**
+   * Solana の MPP の Provider へ（`docs/mpp-solana-design.md` §6.3・§1.4）: 宛先は `solana/charge` と表の mint・桁・token program。**`feeAsset`・`maxFee`・`feeMargin` は無い**
+   * （Router はこの送信にチェーン手数料を払わない: Provider の fee payer が送出する。設定の読み込みが 3 欄を禁じる）。手数料は MPP 送信と同じ規則（定額 1,000）。
+   */
+  const toSolMpp = (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }, payTo: string = receiver): Record<string, unknown> => ({
+    profileId,
+    sourceRail,
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo },
+    rail: "mpp",
+    destination: { scheme: SOLANA_MPP_SCHEME, network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: OUTBOUND_SOL.decimals, tokenProgram: OUTBOUND_SOL.tokenProgram },
+    par: true,
+    maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+    fee: DYNAMIC_FEE_MPP_OUT,
+  });
   const arcOutbound = rails.activation.arc.outbound;
   const solOutbound = rails.activation.solana.outbound;
+  const solMppOutbound = rails.activation.solanaMpp.outbound;
   const profiles: Record<string, unknown> = {
+    // Solana の MPP 受信から（設計 §6.3）: Base x402 は常に、Tempo MPP は `MPP_OUTBOUND_PROFILE_ENABLED`、Arc・Solana の x402 はそのレールの送信が有効なとき。
+    ...(solMppReceiver === undefined
+      ? {}
+      : {
+          "dyn-solmpp-to-x402": toX402("dyn-solmpp-to-x402", INBOUND_SOL, solMppReceiver, "mpp"),
+          ...(MPP_OUTBOUND_PROFILE_ENABLED ? { "dyn-solmpp-to-mpp": toMpp("dyn-solmpp-to-mpp", INBOUND_SOL, solMppReceiver, "mpp") } : {}),
+          ...(arcOutbound ? { "dyn-solmpp-to-arc": toArc("dyn-solmpp-to-arc", "mpp", INBOUND_SOL, solMppReceiver) } : {}),
+          ...(solOutbound ? { "dyn-solmpp-to-sol": toSol("dyn-solmpp-to-sol", "mpp", INBOUND_SOL, solMppReceiver) } : {}),
+        }),
+    // Solana の MPP の Provider へ（設計 §6.3）: Base x402 は常に、Tempo MPP は MPP 受信があるとき、Arc・Solana の x402 はそのレールの受信が有効なとき。
+    ...(solMppOutbound ? { "dyn-x402-to-solmpp": toSolMpp("dyn-x402-to-solmpp", "x402", INBOUND) } : {}),
+    ...(solMppOutbound && mppInboundEnabled ? { "dyn-mpp-to-solmpp": toSolMpp("dyn-mpp-to-solmpp", "mpp", INBOUND_MPP) } : {}),
+    ...(solMppOutbound && arcReceiver !== undefined ? { "dyn-arc-to-solmpp": toSolMpp("dyn-arc-to-solmpp", "x402", INBOUND_ARC, arcReceiver) } : {}),
+    ...(solMppOutbound && solReceiver !== undefined ? { "dyn-sol-to-solmpp": toSolMpp("dyn-sol-to-solmpp", "x402", INBOUND_SOL, solReceiver) } : {}),
     // 多レール（設計 §8）: 受信が有効なレールの分だけ。公開の process は `RAILS_ACTIVATION`（G-4 で受信は両方 true）。
     ...(arcReceiver === undefined ? {} : { "dyn-arc-to-mpp": toMpp("dyn-arc-to-mpp", INBOUND_ARC, arcReceiver), "dyn-arc-to-x402": toX402("dyn-arc-to-x402", INBOUND_ARC, arcReceiver) }),
     ...(solReceiver === undefined ? {} : { "dyn-sol-to-x402": toX402("dyn-sol-to-x402", INBOUND_SOL, solReceiver), "dyn-sol-to-mpp": toMpp("dyn-sol-to-mpp", INBOUND_SOL, solReceiver) }),
@@ -333,13 +407,19 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
   // 静的の Solana 送信（O-4）は MPP 受信が源なので、MPP 受信が無い構成では URL があっても出さない（受取先も読まない）。
   const solProvider = mppInboundEnabled ? providerOf(rails, "solana", upstreamSol) : undefined;
   const solOutbound = rails.activation.solana.outbound;
+  // Solana の MPP（設計 §6.3）: 受信の受取 owner は x402 と同じ値（別の述語）、Provider D の受取 owner は URL（定数。Provider D が立つまで空）があるときだけ。
+  const solMppReceiver = solanaMppReceiverOf(rails);
+  const upstreamSolMpp = (rails.upstreams ?? RAIL_UPSTREAMS).solanaMpp;
+  const solMppProvider = providerOf(rails, "solanaMpp", upstreamSolMpp);
+  const solMppOutbound = rails.activation.solanaMpp.outbound;
   /**
    * 新しい `(network, asset)` の区分（D-7: 既存と同じ桁。静的は 1 件 10,000、動的は 1 件 20,000）。
    * その network が**受信か送信のどちらか**で有効なら出す（受信と送信は同じ区分に合算する。送信の設計 §6.3、FR-29、D-14）。
+   * Solana USDC の区分は x402 と MPP の 4 つの向きが同じ 1 区分（`docs/mpp-solana-design.md` §6.3、FR-43）。
    */
   const railBuckets = (maxPerPurchase: string, maxTotal: string): Record<string, unknown>[] => [
     ...(arcReceiver === undefined && !arcOutbound ? [] : [{ network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, maxTotal, maxPerPurchase }]),
-    ...(solReceiver === undefined && !solOutbound ? [] : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase }]),
+    ...(solReceiver === undefined && !solOutbound && solMppReceiver === undefined && !solMppOutbound ? [] : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase }]),
   ];
   const profiles = dynamicProfilesOf(env, receiver, mppInboundEnabled, rails);
   return {
@@ -446,6 +526,52 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                 destination: { scheme: "exact", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, payTo: solProvider },
               },
             }),
+        // Solana の MPP 受信（`docs/mpp-solana-design.md` §6.3）: Solana USDC（`solana/charge`、Router が送出）で払って Provider A（x402）・Provider B（MPP）に届く。
+        ...(solMppReceiver === undefined
+          ? {}
+          : {
+              [ROUTE_SOLMPP_TO_X402]: {
+                routeId: ROUTE_SOLMPP_TO_X402,
+                canonicalPath: `/v1/routes/${ROUTE_SOLMPP_TO_X402}/resource`,
+                rail: "x402",
+                sourceRail: "mpp",
+                source: { amount: INBOUND_SOL.amount, asset: INBOUND_SOL.asset, decimals: 6, network: INBOUND_SOL.network, payTo: solMppReceiver },
+                destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
+              },
+              [ROUTE_SOLMPP_TO_MPP]: {
+                routeId: ROUTE_SOLMPP_TO_MPP,
+                canonicalPath: `/v1/routes/${ROUTE_SOLMPP_TO_MPP}/resource`,
+                rail: "mpp",
+                sourceRail: "mpp",
+                source: { amount: INBOUND_SOL.amount, asset: INBOUND_SOL.asset, decimals: 6, network: INBOUND_SOL.network, payTo: solMppReceiver },
+                destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, payTo: OUTBOUND.payTo },
+              },
+            }),
+        // Solana の MPP 送信（設計 §6.3）: Base USDC（x402）／Tempo pathUSD（MPP 受信があるとき）で払って Provider D（`solana/charge`）に届く。URL（定数）と受取 owner がそろったときだけ。
+        ...(solMppProvider === undefined
+          ? {}
+          : {
+              [ROUTE_SOLMPP_OUT]: {
+                routeId: ROUTE_SOLMPP_OUT,
+                canonicalPath: `/v1/routes/${ROUTE_SOLMPP_OUT}/resource`,
+                rail: "mpp",
+                sourceRail: "x402",
+                source: { amount: INBOUND.amount, asset: INBOUND.asset, decimals: 6, network: INBOUND.network, payTo: receiver },
+                destination: { scheme: SOLANA_MPP_SCHEME, network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, payTo: solMppProvider },
+              },
+              ...(mppInboundEnabled
+                ? {
+                    [ROUTE_SOLMPP_OUT_MPP]: {
+                      routeId: ROUTE_SOLMPP_OUT_MPP,
+                      canonicalPath: `/v1/routes/${ROUTE_SOLMPP_OUT_MPP}/resource`,
+                      rail: "mpp",
+                      sourceRail: "mpp",
+                      source: { amount: INBOUND_MPP.amount, asset: INBOUND_MPP.asset, decimals: 6, network: INBOUND_MPP.network, payTo: receiver },
+                      destination: { scheme: SOLANA_MPP_SCHEME, network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, payTo: solMppProvider },
+                    },
+                  }
+                : {}),
+            }),
       },
       // 「予算の続く限り」使えるように大きく取るが、暴走時に止まるようゼロにはしない。
       // bucket は (network, asset) 単位。2 経路は同じ 2 組を向きだけ変えて使うので、
@@ -510,6 +636,9 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ...(solReceiver === undefined ? {} : { [ROUTE_SOL]: UPSTREAM_X402 }),
         ...(arcProvider === undefined ? {} : { [ROUTE_ARC_OUT]: upstreamArc }),
         ...(solProvider === undefined ? {} : { [ROUTE_SOL_OUT]: upstreamSol }),
+        // Solana の MPP（設計 §6.3）: 受信 2 本は Provider A・B の URL、送信 2 本は Provider D の URL。
+        ...(solMppReceiver === undefined ? {} : { [ROUTE_SOLMPP_TO_X402]: UPSTREAM_X402, [ROUTE_SOLMPP_TO_MPP]: UPSTREAM }),
+        ...(solMppProvider === undefined ? {} : { [ROUTE_SOLMPP_OUT]: upstreamSolMpp, ...(mppInboundEnabled ? { [ROUTE_SOLMPP_OUT_MPP]: upstreamSolMpp } : {}) }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
       ...(arcReceiver === undefined && solReceiver === undefined

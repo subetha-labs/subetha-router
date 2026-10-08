@@ -93,6 +93,10 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 - **成果物**: 上の変更、`tests/unit/remote-mcp-config.test.ts`・`rails-entry.test.ts`（有効化の組み合わせの表）、`tests/wire/rails-process-entry.test.ts`（token・env・静的 route の起動時の検査）、`tests/wire/mpp-solana-cli.test.ts`（道具 → Router の受信 → `settled`。RPC は `getLatestBlockhash` 1 回・`sendTransaction` 0 回、拒否の各行、鍵を出さない）
 - **完了条件（unit・wire。Linux）**: 上記。**最後の横断確認**（§3 の M6 の 3 行）: 設計 §8.2 の表の全行が存在して Linux で緑、§8.3 の gate 以外の条件（既存 suite・変異の表・SR-M の 2 回のレビューの記録）、SR-M1 の全体（両 adapter と道具の RPC の method・回数・transport・64 KiB・10 秒・`maxRetries: 0`）。`RAILS_ACTIVATION.solanaMpp` は両方 `false`。有効化の各組で出る route／プロファイルと子の env が表どおり（`solana.outbound` も `solanaMpp.outbound` も無効なら鍵を渡さない、片方だけなら渡す）。受取 owner があるだけで x402 の route が出ない
 - **sabotage**: `sendTransaction` を道具に足す → 回数の試験が落ちる／`solanaMppReceiverOf` を `receiverOf` に戻す → x402 の route が出て試験が落ちる／鍵の転送の条件を `solana.outbound` だけに → 試験が落ちる
+- **記録（2026-10-08）**: 実装は上の範囲のとおり（`tools/svm-mpp-payer.ts` の `checkSvmMppChallenge` を `classifyOffer` と payer が共有。`hostPlanOf` は `solanaMpp.inbound` で秘密が無ければ固定文で止まる）。
+  **見つけた既存の欠陥**: `classifyOffer` の共通の nonce の検査（T5）は `0x` の hex だけを通し、MPP の adapter（Tempo・Solana）が出す nonce は mppx の challenge の id（base64url）なので、
+  **T5 から M6 まで `npm run sign` は Tempo の MPP の offer を拒んでいた**。M6 で MPP の 2 レールに mppx の id の形を許し、実 adapter の offer の回帰試験を置いた（設計 §13）。
+  設計からの逸脱（M3-b〜M6）は設計 §13 に集約
 
 ### MG — gate（要件 §8、AC-17・AC-18。owner の作業と並行）
 

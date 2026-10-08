@@ -12,6 +12,8 @@ export interface SignDeps {
   readonly mppPayer: (key: string, scope: { chainId: number; asset: string; payTo: string; maxAmount: bigint }) => { readonly address: string; payAndCredential(offer: never): Promise<{ credential: string; txRef: string }> };
   readonly evmPayer: (key: string) => { readonly address: string; credentialFor(offer: never, chainId: number): Promise<string> };
   readonly svmPayer: (key: string, options: { rpcUrl?: string }) => Promise<{ readonly address: string; credentialFor(offer: never, scope: { mint: string; decimals: number; tokenProgram: string }): Promise<string> }>;
+  /** MPP の SVM（`solana/charge`）: 同じ Solana の鍵で全署名した mppx の wire を返す（封筒はここで組む）。 */
+  readonly svmMppPayer: (key: string, options: { rpcUrl?: string }) => Promise<{ readonly address: string; credentialFor(offer: never, scope: { mint: string; decimals: number; tokenProgram: string }): Promise<string> }>;
   readonly stderr: (text: string) => void;
 }
 
@@ -41,6 +43,19 @@ export async function runSign(quote: unknown, deps: SignDeps): Promise<SignOutco
     const extra = offerRecord["extra"] as Record<string, unknown> | undefined;
     const envelope = Buffer.from(JSON.stringify({ x402Version: 2, accepted: offerRecord, payload: { challengeNonce: extra?.["challengeNonce"], credential } }), "utf8").toString("base64");
     deps.stderr(`paid by ${payer.address} / tx ${txRef} (your key is never sent)\n`);
+    return { ok: true, stdout: `${envelope}\n`, dispatch };
+  }
+  if (dispatch.kind === "mpp-svm") {
+    // ---- MPP の Solana 受信（設計 §7）。**署名だけ**: 送出は Router の purchase（settle）。fee payer は自分の鍵（devnet SOL が要る）。
+    const payer = await deps.svmMppPayer(deps.readSolanaKey(), deps.solanaRpcUrl === undefined ? {} : { rpcUrl: deps.solanaRpcUrl });
+    const credential = await payer.credentialFor(offerRecord as never, { mint: dispatch.mint, decimals: dispatch.decimals, tokenProgram: dispatch.tokenProgram });
+    const extra = offerRecord["extra"] as Record<string, unknown> | undefined;
+    const envelope = Buffer.from(JSON.stringify({ x402Version: 2, accepted: offerRecord, payload: { challengeNonce: extra?.["challengeNonce"], credential } }), "utf8").toString("base64");
+    deps.stderr(
+      "MPP Solana: signed only, nothing was sent. Funds move when the Router broadcasts at purchase. " +
+        "Call purchase right away (the blockhash expires in about a minute). You need devnet SOL for the fee.\n",
+    );
+    deps.stderr(`signed by ${payer.address} on Solana (your key is never sent; the Router broadcasts)\n`);
     return { ok: true, stdout: `${envelope}\n`, dispatch };
   }
   if (dispatch.kind === "x402-evm") {

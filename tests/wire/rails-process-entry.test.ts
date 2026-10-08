@@ -64,7 +64,7 @@ describe("Router の process: 有効化の値は内部の env から、能力は
     const dir = workDir("t8b-process-arc-");
     const key = generatePrivateKey();
     const configPath = path.join(dir, "router.config.json");
-    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: privateKeyToAccount(key).address } })));
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: privateKeyToAccount(key).address } })));
     const result = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "arc-in", [ARC_RECEIVER_KEY_ENV]: key }));
     expect(result.code).not.toBe(0);
     expect(result.stderr).not.toMatch(/rails capabilities could not be created|seller proof capability/);
@@ -95,7 +95,7 @@ describe("Router の process: 有効化の値は内部の env から、能力は
     const address = privateKeyToAccount(key).address;
     const { activation, key: envKey, payTo, pattern, secret } = arrange(key, address);
     const configPath = path.join(dir, "router.config.json");
-    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false } }, receivers: { arc: payTo } })));
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: payTo } })));
     const result = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: activation, ...(envKey === undefined ? {} : { [ARC_RECEIVER_KEY_ENV]: envKey }) }));
     expect(result.code).not.toBe(0);
     expect(result.stdout).not.toContain("listening");
@@ -110,7 +110,7 @@ describe("Router の process: Solana の送信の鍵（U9）", () => {
     const dir = workDir("t8b-process-solout-");
     const configPath = path.join(dir, "router.config.json");
     // 静的 route は対象外（URL を空にする。本番の定数は配備した URL なので、空にしないと受取先が要る）。
-    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: {}, upstreams: { arc: "", solana: "" } })));
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: {}, upstreams: { arc: "", solana: "", solanaMpp: "" } })));
     const missing = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-out" }));
     expect(missing.code).not.toBe(0);
     expect(missing.stderr).toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed/);
@@ -132,7 +132,7 @@ describe("Router の process: 静的 Solana route の宛先 ATA（U9）", () => 
     const dir = workDir("t8b-process-solata-");
     const configPath = path.join(dir, "router.config.json");
     const owner = "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d";
-    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: { solana: owner }, upstreams: { arc: "", solana: "https://provider-sol.test/v1/eth/snapshot" } });
+    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { solana: owner }, upstreams: { arc: "", solana: "https://provider-sol.test/v1/eth/snapshot", solanaMpp: "" } });
     expect(Object.keys((document["router"] as { routes: Record<string, unknown> }).routes)).toContain("md-sol-eth-snapshot-mpp");
     writeFileSync(configPath, JSON.stringify(document));
     // 宛先の ATA を持たない RPC の fixture（本番の入口の guarded transport は loopback を拒むので、応答に達しない場合も同じ fail closed の経路: ATA を確かめられない → 起動しない）。
@@ -164,7 +164,7 @@ describe("Router の process（本番の能力の組み立て＋fixture への t
     const configPath = path.join(dir, "router.config.json");
     const owner = String((await generateKeyPairSigner()).address);
     const destinationAta = String((await findAssociatedTokenPda({ mint: address(MINT), owner: address(owner), tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
-    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: { solana: owner }, upstreams: { arc: "", solana: "https://provider-sol.test/v1/eth/snapshot" } });
+    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { solana: owner }, upstreams: { arc: "", solana: "https://provider-sol.test/v1/eth/snapshot", solanaMpp: "" } });
     writeFileSync(configPath, JSON.stringify(document));
     const tls = generateTestTls();
     const rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls, ...(ataPresent ? { atas: [{ address: destinationAta, owner }] } : {}) });
@@ -234,6 +234,125 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     expect(readdirSync(path.join(dir, "acceptance"))).toBeDefined();
     // 受け入れ用の起動は公開の定数を書き換えない（ソースの上の値は G-4 の両方 true のまま）。
     // 公開の定数（送信の設計 §6.1）: 受信は両方 true（G-4）、送信も両方 true（G-4′、2026-10-08）。
-    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{ arc: Object\.freeze\(\{ inbound: true, outbound: true \}\), solana: Object\.freeze\(\{ inbound: true, outbound: true \}\) \}\)/);
+    // 公開の定数（M6 の後の形）: arc・solana は両方 true、solanaMpp は無効（RAIL_OFF）。
+    const source = readFileSync("tools/remote-mcp-config.ts", "utf8");
+    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: RAIL_OFF,\s*\}\)/);
   }, 40_000);
+});
+
+/** Solana の MPP の有効化（`docs/mpp-solana-design.md` §6、タスク M6）: 新しい token、受取 owner・鍵・秘密の転送の条件、受信 adapter の起動時の検査。 */
+describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）", () => {
+  const MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+  const RPC_HOST = "rpc.provider.test";
+  const OFF = { inbound: false, outbound: false };
+
+  test("solana-mpp-out で鍵が無い・形が違う → 固定文 solana_key で止まる（listen しない、probe に進まない、鍵は出ない）。鍵があれば多レールの段を通り Tempo の probe で止まる", async () => {
+    const dir = workDir("t8b-process-solmppout-");
+    const configPath = path.join(dir, "router.config.json");
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: OFF, solana: OFF, solanaMpp: { inbound: false, outbound: true } }, receivers: {}, providers: {}, upstreams: { arc: "", solana: "", solanaMpp: "" } })));
+    const missing = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-mpp-out" }));
+    expect(missing.code).not.toBe(0);
+    expect(missing.stderr).toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail \(x402 or MPP\) is activated/);
+    expect(missing.stdout).not.toContain("listening");
+    expect(missing.stderr).not.toMatch(PROBE_FAILED);
+    const broken = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-mpp-out", [SOLANA_OUTBOUND_KEY_ENV]: "not-a-seed" }));
+    expect(broken.stderr).toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY is required/);
+    const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
+    const withKey = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-mpp-out", [SOLANA_OUTBOUND_KEY_ENV]: seed }));
+    expect(withKey.code).not.toBe(0);
+    expect(withKey.stderr).not.toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY/);
+    expect(withKey.stderr).toMatch(PROBE_FAILED);
+    expect(withKey.stdout + withKey.stderr).not.toContain(seed);
+    // 旧い語・知らない語は多レールの段で止まる。
+    const unknown = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-mpp", [SOLANA_OUTBOUND_KEY_ENV]: seed }));
+    expect(unknown.stderr).toMatch(/rails capabilities could not be created/);
+    expect(unknown.stderr).not.toMatch(PROBE_FAILED);
+  }, 90_000);
+
+  test.each([
+    ["受取 owner の ATA が無い（RPC が null）→ 受信 adapter の起動時の検査で止まる", false],
+    ["受取 owner の ATA がある → 受信の段を通り、Tempo の probe で止まる（対照）", true],
+  ])("solana-mpp-in（本番の能力の組み立て＋fixture への transport）: %s", async (_name, ataPresent) => {
+    const dir = workDir("t8b-process-solmppin-");
+    const configPath = path.join(dir, "router.config.json");
+    const ownerSigner = await generateKeyPairSigner();
+    const owner = String(ownerSigner.address);
+    const ownerAta = String((await findAssociatedTokenPda({ mint: address(MINT), owner: ownerSigner.address, tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
+    const document = routerConfigOf({}, RECEIVER, true, { activation: { arc: OFF, solana: OFF, solanaMpp: { inbound: true, outbound: false } }, receivers: { solana: owner }, providers: {}, upstreams: { arc: "", solana: "", solanaMpp: "" } });
+    expect(Object.keys((document["router"] as { routes: Record<string, unknown> }).routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, "md-mpp-eth-snapshot-solmpp", "md-x402-eth-snapshot-solmpp"].sort());
+    writeFileSync(configPath, JSON.stringify(document));
+    const tls = generateTestTls();
+    const rpc = await startSolanaRpc({ mint: MINT, decimals: 6, tls, ...(ataPresent ? { ata: { address: ownerAta, owner } } : {}) });
+    try {
+      // 受信だけ: 送信の鍵は渡さない（壊れた値があっても読まれない）。秘密は processEnv の ROUTER_MPP_INBOUND_SECRET。
+      const result = await runToExit("tests/fixtures/router-production-process.ts", [], processEnv(dir, configPath, {
+        [RAILS_ACTIVATION_ENV]: "solana-mpp-in",
+        [SOLANA_OUTBOUND_KEY_ENV]: "not-a-seed",
+        ROUTER_SOLANA_RPC_URL: `https://${RPC_HOST}`,
+        SUBETHA_SOLANA_RPC_URL: `https://${RPC_HOST}`,
+        SUBETHA_TEST_DIAL_MAP: JSON.stringify({ [RPC_HOST]: rpc.port }),
+        SUBETHA_TEST_CA_PATH: path.join(tls.dir, "ca.pem"),
+      }));
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("listening");
+      expect(result.stderr).not.toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY/);
+      // RPC は fixture に届き、受取 owner の ATA を getAccountInfo（jsonParsed）で 1 回見た（x402 の受信は無いので /supported は無い）。
+      expect(rpc.calls).toEqual([{ method: "getAccountInfo", params: [ownerAta, { encoding: "jsonParsed", commitment: "confirmed" }] }]);
+      if (ataPresent) {
+        expect(result.stderr).not.toMatch(/does not exist/);
+        expect(result.stderr).toMatch(PROBE_FAILED);
+      } else {
+        expect(result.stderr).toMatch(/does not exist/);
+        expect(result.stderr).not.toMatch(PROBE_FAILED);
+      }
+      expect(result.stdout + result.stderr).not.toContain("not-a-seed");
+    } finally {
+      await rpc.close();
+      tls.cleanup();
+    }
+  }, 60_000);
+
+  test("受け入れ用の起動 --rails solana-mpp-in: 設定に MPP Solana の受信の route とプロファイルが出て（x402 の Solana の route・facilitator は無い）、子には秘密と有効化が渡る（probe で止まる。鍵は出ない）", async () => {
+    const dir = workDir("t8b-acceptance-solmpp-");
+    const journalPath = path.join(dir, "acceptance", "journal.ndjson");
+    const owner = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+    const before = new Set(readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-")));
+    const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "solana-mpp-in"], {
+      SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
+      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-t8b-acceptance-solmpp",
+      SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
+      SUBETHA_SOLANA_RECEIVER: owner,
+      SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
+      SUBETHA_ACCEPTANCE_PORT: "0",
+    });
+    const created = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    for (const name of created) dirs.push(path.join(runtimeRoot, name));
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("could not start the Router");
+    expect(result.stdout).not.toContain("listening");
+    expect(created).toHaveLength(1);
+    const document = JSON.parse(readFileSync(path.join(runtimeRoot, created[0]!, "router.config.json"), "utf8")) as { router: { routes: Record<string, { source: { payTo: string } }>; dynamic: { profiles: Record<string, unknown> } }; x402: { inboundFacilitators?: Record<string, unknown>; upstreams: Record<string, string> } };
+    expect(Object.keys(document.router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, "md-mpp-eth-snapshot-solmpp", "md-x402-eth-snapshot-solmpp"].sort());
+    expect(document.router.routes["md-x402-eth-snapshot-solmpp"]?.source.payTo).toBe(owner);
+    expect(Object.keys(document.router.dynamic.profiles).sort()).toEqual(["dyn-mpp-to-x402", "dyn-solmpp-to-mpp", "dyn-solmpp-to-x402", "dyn-x402-to-mpp"]);
+    expect(document.x402.inboundFacilitators).toBeUndefined();
+    expect(document.x402.upstreams["md-x402-eth-snapshot-solmpp"]).toBe("https://provider-x402.subethalabs.com/v1/eth/snapshot");
+    // 秘密が無ければ、計画の段で止まる（Router を起動しない）。
+    const noSecret = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "solana-mpp-in"], {
+      SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
+      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
+      SUBETHA_SOLANA_RECEIVER: owner,
+      SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
+      SUBETHA_ACCEPTANCE_PORT: "0",
+    });
+    expect(noSecret.code).not.toBe(0);
+    expect(noSecret.stdout).not.toContain("listening");
+    const after = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    for (const name of after) if (!created.includes(name)) dirs.push(path.join(runtimeRoot, name));
+    expect(after).toHaveLength(created.length);
+    // 公開の定数は solanaMpp が無効のまま。
+    expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/solanaMpp: RAIL_OFF,/);
+  }, 60_000);
 });
