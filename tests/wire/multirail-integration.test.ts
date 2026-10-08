@@ -483,13 +483,17 @@ async function svmCredential(quote: QuoteView, options: SvmPayerBuildOptions = {
 }
 
 /** 呼び出し側: quote の source の network に応じた credential（EVM は署名だけ、Solana は部分署名だけ、MPP は fixture の RPC に実際に送金）。 */
+/** 直近の受信 MPP Solana の credential の取引の署名（Router の `source.txRef` と突き合わせる）。 */
+let lastSolMppSignature: string | undefined;
 async function credentialFor(fixtures: Fixtures, quote: QuoteView, solMppMode: "transaction" | "signature" = "transaction"): Promise<string> {
   const offer = offerOf(quote);
   if (offer.network === SOL && (offer as unknown as { scheme: string }).scheme === "solana/charge") {
     // 受信 MPP Solana: 本物の pay-kit の client（`transaction` 型 = Router が送出 / `signature` 型 = payer が fixture の RPC に送出済み）。
     const payer = await createMppSolanaTestPayer({ rpcUrl: fixtures.solRpcPlain.url });
     try {
-      return encode(await payer.credentialFor(offer as unknown as InboundOffer, solMppMode));
+      const credential = await payer.credentialFor(offer as unknown as InboundOffer, solMppMode);
+      lastSolMppSignature = payer.lastSignature();
+      return encode(credential);
     } finally {
       await payer.close();
     }
@@ -662,12 +666,22 @@ describe("MPP Solana の行列（要件 §7）: 受信 MPP Solana（I-1〜I-4）
     // 送信: MPP Solana の Provider D は有料要求 1 件を受け、領収を出した。
     expect(fixtures.solMppProvider.seen.payCalls).toBe(destination === "solmpp" ? 1 : 0);
     expect(fixtures.solMppProvider.seen.receipts).toHaveLength(destination === "solmpp" ? 1 : 0);
+    // Router の RPC（SR-M1。pay-kit の口は別に数える）。受信 MPP Solana: transaction 型 = sendTransaction 1 + getSignatureStatuses 1、signature 型 = getTransaction 1（verify）。
+    // 送信 MPP Solana: 残高 1（getTokenAccountBalance）+ 動的なら quote の宛先 ATA 1（purchase の読み直しは覚えた存在を使う）+ 送る直前の ATA 1 + blockhash 1 + 領収の getTransaction 1。
+    const routerRpc = fixtures.solRpc.calls.slice(router.rpcCallsAtStart).map((c) => c.method).sort();
+    const expectedRpc: string[] = [];
+    if (source === "solmpp") expectedRpc.push(...(mode === "transaction" ? ["sendTransaction", "getSignatureStatuses"] : ["getTransaction"]));
+    if (destination === "solmpp") expectedRpc.push("getTokenAccountBalance", ...(kind === "dynamic" ? ["getAccountInfo"] : []), "getAccountInfo", "getLatestBlockhash", "getTransaction");
+    // x402 Solana 送信（既存の adapter。本 PR では変えない）は動的の 402 の読み直しごとに宛先 ATA を読む: quote 1 + purchase の読み直し 2 + 送る直前 1 = 4。
+    if (destination === "sol") expectedRpc.push("getTokenAccountBalance", ...(kind === "dynamic" ? ["getAccountInfo", "getAccountInfo", "getAccountInfo"] : []), "getAccountInfo", "getLatestBlockhash");
+    if (source === "solmpp" || destination === "solmpp") expect(routerRpc).toEqual(expectedRpc.sort());
     // 結果の保存と再読取（動的は ownerKey つき）。
     const status = await router.client().status(quote.paymentId, quote.ownerKey);
     expect(status).toMatchObject({ found: true, projection: { status: "delivered" } });
     const signature = expect.stringMatching(/^[1-9A-HJ-NP-Za-km-z]{64,88}$/);
     if (destination === "solmpp") expect(status).toMatchObject({ projection: { destination: { txRef: signature } } });
-    if (source === "solmpp") expect(status).toMatchObject({ projection: { source: { txRef: signature } } });
+    // 受信 MPP Solana の txRef は、payer が作った取引の署名そのもの（transaction 型は Router が送出した tx の [0]、signature 型は payer が送出した署名）。
+    if (source === "solmpp") expect(status).toMatchObject({ projection: { source: { txRef: lastSolMppSignature } } });
     expect(journalEventsOf(router, quote.paymentId).at(-1)).toBe("delivered");
     // 接続先: 受信 MPP Solana は Solana RPC だけ、送信 MPP Solana は Provider D と Solana RPC。
     if (source === "solmpp") expect(fixtures.dialed).toContain(HOSTS.solRpc);

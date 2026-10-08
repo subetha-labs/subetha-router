@@ -228,7 +228,8 @@ describe("MPP Solana 受信: transaction 型（pay-kit の client の既定）�
     expect(mppSolanaPayloadOf(wireOf(credential))?.type).toBe("transaction");
     expect(b.rail.preflight(offer, credential, Date.now())).toEqual({ ok: true });
     const mark = b.mark();
-    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    // transaction 型: 資金はまだ動いていない（Router が settle で送出する）。
+    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true, fundsMoved: false });
     expect(b.since(mark)).toEqual([]);
     expect(b.rpc.state.sent).toEqual([]);
     b.rpc.state.signatureStatuses = ["confirmed"];
@@ -296,17 +297,17 @@ describe("MPP Solana 受信: transaction 型（pay-kit の client の既定）�
     const b = await boot();
     const offer = await issue(b.rail);
     const credential = await b.payer.credentialFor(offer);
-    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     const other = await issue(b.rail);
     expect(await b.rail.settle(other, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
     for (const copy of [{ ...offer, amount: "1" }, { ...offer, extra: { ...offer.extra, externalId: "x" } }, { ...offer, extra: { ...offer.extra, routeBinding: "other%7CGET%7C%2Fx" } }] as InboundOffer[]) {
-      expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+      expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
       expect(await b.rail.settle(copy, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
     }
     expect(b.rpc.state.sent).toEqual([]);
     // 証拠は 1 回の settle で使い切る: 同じ credential の 2 回目の settle（transaction 型）は RPC 無しの再検査を経てもう一度送出できる（重複の防御は core の journal）。
     b.rpc.state.signatureStatuses = ["confirmed"];
-    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     expect(await b.rail.settle(offer, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: signatureOfCredential(credential) });
     expect(await b.rail.settle(offer, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: signatureOfCredential(credential) });
     expect(b.rpc.state.sent).toHaveLength(2);
@@ -317,7 +318,7 @@ describe("MPP Solana 受信: transaction 型の settle の分岐（設計 §3.5 
   async function paid(b: Booted): Promise<{ offer: InboundOffer; credential: PaymentCredential; signature: string; mark: number }> {
     const offer = await issue(b.rail);
     const credential = await b.payer.credentialFor(offer);
-    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     return { offer, credential, signature: signatureOfCredential(credential), mark: b.mark() };
   }
 
@@ -487,7 +488,8 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     const b = await boot({ bound: new Set() });
     const p = await pushed(b);
     expect(b.rail.preflight(p.offer, p.credential, Date.now())).toEqual({ ok: true });
-    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    // signature 型: payer が送出済み = 資金は動いている（core は verify の後の失敗を not_sent にしない）。
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true, fundsMoved: true });
     expect(b.since(p.mark)).toEqual([{ method: "getTransaction", params: [p.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" }] }]);
     const mark = b.mark();
     // verify の後に RPC が transaction を返さなくなり、さらに届かなくなっても、settle は証拠で判定する（payer は送金済み）。
@@ -500,7 +502,7 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     // 期限の短い offer: verify の後に期限が過ぎても settle は settled（HMAC の再検査をしない）。
     const short = await boot({ bound: new Set(), extra: { maxTimeoutSeconds: 1 } });
     const q = await pushed(short);
-    expect(await short.rail.verify(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await short.rail.verify(q.offer, q.credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect(await short.rail.settle(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: q.signature });
   });
@@ -508,10 +510,10 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
   it("証拠は数では押し出されない: verify の後に他の purchase の verify が多数あっても、その signature 型の settle は RPC 無しで settled。同じ nonce で欄を変えた写しの下では throw", async () => {
     const b = await boot({ bound: new Set() });
     const p = await pushed(b);
-    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     for (let i = 0; i < 40; i += 1) {
       const other = await issue(b.rail);
-      expect(await b.rail.verify(other, await b.payer.credentialFor(other), { routeId: ROUTE_ID })).toEqual({ isValid: true });
+      expect(await b.rail.verify(other, await b.payer.credentialFor(other), { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     }
     await b.rpc.close();
     await expect(b.rail.settle({ ...p.offer, amount: "1" }, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
@@ -526,9 +528,9 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     const b = await boot({ bound: new Set(), extra: { maxTimeoutSeconds: 1, now: () => Date.now() + 1_000 + MPP_SOLANA_EVIDENCE_GRACE_MS + 1_000 } });
     // adapter の `now` を offer の期限 + 猶予の先に置く（verify の時点で既に保持の期限を過ぎている → 次の verify の掃除で消える）。
     const p = await pushed(b);
-    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     const other = await issue(b.rail);
-    expect(await b.rail.verify(other, await b.payer.credentialFor(other), { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(other, await b.payer.credentialFor(other), { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     await expect(b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
   });
 
@@ -554,7 +556,7 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     b.rpc.state.transactions.set(p.signature, { ...entry, slot: 0 });
     await expect(b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/expected form/);
     b.rpc.state.transactions.set(p.signature, entry);
-    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
   });
 
   it("verify_failed: chain に無い（null）、meta.err、blockTime が無い・発行より前・期限より後、署名と bytes の不一致。期限ちょうどは通る", async () => {
@@ -573,9 +575,9 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     b.rpc.state.transactions.set(p.signature, { ...entry, blockTime: p.offer.extra.expiresAt + 1 });
     expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: false });
     b.rpc.state.transactions.set(p.signature, { ...entry, blockTime: p.offer.extra.expiresAt });
-    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     b.rpc.state.transactions.set(p.signature, { ...entry, blockTime: issuedAt });
-    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toMatchObject({ isValid: true });
     // 署名の下に別の transaction（別 offer の、Memo が違う）が居る。
     const other = await issue(b.rail);
     const otherCredential = await b.payer.credentialFor(other);
@@ -808,7 +810,7 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     expect(rpcAgain.calls.map((call) => call.method)).toEqual(["getAccountInfo"]);
   });
 
-  it("core は settle の直前に offer の期限をもう一度見る: verify の後に期限が過ぎた purchase は settle を呼ばず approval_expired（静的・動的とも。証拠の保持 = 期限 + 猶予 の根拠）", async () => {
+  it("core は settle の直前に offer の期限をもう一度見る: verify の後に期限が過ぎた purchase は settle を呼ばない。資金が動いていない transaction 型は approval_expired、送出済みの signature 型は not_sent にせず unknown（source_paid_unsettled）", async () => {
     const c = await compose();
     await c.rails.startup!();
     let clock = Date.now();
@@ -818,16 +820,36 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     opened.push(core);
     const q1 = await staticQuote(core, "r-solmpp", "req-1");
     const cred1 = await c.payer.credentialFor(q1.source.offer, "signature");
-    expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
+    expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    expect(core.status(q1.paymentId, "judge")).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
     clock = Date.now();
     const q2 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-2");
     const cred2 = await c.payer.credentialFor(q2.source.offer);
     expect(await core.purchase(purchaseArgs(q2, "req-2", cred2))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
-    // settle は呼ばれていない: 送出は payer の fixture の 1 回（signature 型）だけ。
-    expect(c.rpc.state.sent).toHaveLength(1);
+    // 動的の 1 回目の再検査（昇格の前）は journal に書かない契約のまま: signature 型でも awaiting_payment（quote は台帳に残り、再試行できる）。
+    clock = Date.now();
+    const q3 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-3");
+    const cred3 = await c.payer.credentialFor(q3.source.offer, "signature");
+    expect(await core.purchase(purchaseArgs(q3, "req-3", cred3))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
+    // settle は呼ばれていない: 送出は payer の fixture の 2 回（signature 型）だけ。
+    expect(c.rpc.state.sent).toHaveLength(2);
   });
 
-  it("core は予約・昇格の追記の後、settle を呼ぶ直前にも期限を見る: 最初の再検査を期限の直前に通り、追記の間に期限が過ぎた purchase は settle を呼ばず approval_expired（静的・動的）", async () => {
+  it("verify の後に予算の予約が通らない（区分の通算）: 資金が動いていない transaction 型は awaiting_payment bucket_limit、送出済みの signature 型は unknown（source_paid_unsettled）。どちらも settle を呼ばない", async () => {
+    const c = await compose({ maxTotal: "10000" });
+    const core = await coreOf(c);
+    c.rpc.state.signatureStatuses = ["confirmed"];
+    const q1 = await staticQuote(core, "r-solmpp", "req-1");
+    expect((await core.purchase(purchaseArgs(q1, "req-1", await c.payer.credentialFor(q1.source.offer)))).status).toBe("delivered");
+    const q2 = await staticQuote(core, "r-solmpp", "req-2");
+    expect(await core.purchase(purchaseArgs(q2, "req-2", await c.payer.credentialFor(q2.source.offer)))).toMatchObject({ status: "awaiting_payment", code: "bucket_limit" });
+    const q3 = await staticQuote(core, "r-solmpp", "req-3");
+    expect(await core.purchase(purchaseArgs(q3, "req-3", await c.payer.credentialFor(q3.source.offer, "signature")))).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    // 送出: 1 件目の Router の送出 + 3 件目の payer の送出。2 件目・3 件目の settle は呼ばれていない。
+    expect(c.rpc.state.sent).toHaveLength(2);
+  });
+
+  it("core は予約・昇格の追記の後、settle を呼ぶ直前にも期限を見る: 最初の再検査を期限の直前に通り、追記の間に期限が過ぎた purchase は settle を呼ばない（静的 = signature 型は unknown source_paid_unsettled、動的 = transaction 型は approval_expired）", async () => {
     const c = await compose();
     await c.rails.startup!();
     let clock = Date.now();
@@ -842,15 +864,15 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     const inbound = { ...c.rails.inbound, verify: async (offer: InboundOffer, credential: PaymentCredential, context?: { routeId: string }) => { const r = await c.rails.inbound.verify(offer, credential, context); clock = deadlineMs - 2; advance = true; return r; } };
     const core = await createRouterCore({ journalPath: c.config.journalPath, config: c.config.router, inbound, outbound: new StubOutbound(), note: () => {}, now: () => (advance && journalHas(trigger) ? deadlineMs : clock), dynamic: { ledgerDir: path.join(c.dir, "dynamic-quotes") }, onStoreLoaded: c.rails.bindConsumed });
     opened.push(core);
-    const journal = () => readFileSync(c.config.journalPath, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { event: string; patch: Record<string, unknown> });
+    const journal = () => readFileSync(c.config.journalPath, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { event: string; paymentId: string; patch: Record<string, unknown> });
     const q1 = await staticQuote(core, "r-solmpp", "req-1");
     deadlineMs = Math.min(q1.approval.deadlineMs, q1.source.offer.extra.expiresAt * 1000);
     trigger = `budget_reserved:${q1.paymentId}`;
     const cred1 = await c.payer.credentialFor(q1.source.offer, "signature");
-    expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "awaiting_payment", code: "approval_expired" });
-    // 静的: 予約（budget_reserved）の**後**に source_failed（= 2 回目の再検査で止まった。1 回目なら予約の前で終わる）。
+    expect(await core.purchase(purchaseArgs(q1, "req-1", cred1))).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    // 静的（signature 型 = 送出済み）: 予約（budget_reserved）の**後**に unknown（= 2 回目の再検査で止まった。1 回目なら予約の前で終わる）。
     const staticEvents = journal().map((l) => l.event);
-    expect(staticEvents.indexOf("source_failed")).toBeGreaterThan(staticEvents.indexOf("budget_reserved"));
+    expect(staticEvents.indexOf("unknown")).toBeGreaterThan(staticEvents.indexOf("budget_reserved"));
     expect(staticEvents.indexOf("budget_reserved")).toBeGreaterThan(-1);
     advance = false;
     clock = Date.now();
@@ -863,9 +885,21 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     const dynamicEvents = journal().slice(staticEvents.length).map((l) => l.event);
     expect(dynamicEvents.indexOf("source_pending")).toBeGreaterThan(-1);
     expect(dynamicEvents.indexOf("source_failed")).toBeGreaterThan(dynamicEvents.indexOf("source_pending"));
-    // settle は呼ばれていない（送出は payer の fixture の 1 回だけ）。
+    // settle は呼ばれていない（送出は payer の fixture の 1 回だけ）。journal の終端は静的 unknown/source_paid_unsettled、動的 not_sent/approval_expired。
     expect(c.rpc.state.sent).toHaveLength(1);
-    expect(journal().filter((l) => l.event === "source_failed").map((l) => l.patch)).toEqual([{ outcome: "not_sent", reason: "approval_expired" }, { outcome: "not_sent", reason: "approval_expired" }]);
+    expect(journal().filter((l) => l.event === "unknown").map((l) => l.patch)).toEqual([{ outcome: "none", reason: "source_paid_unsettled" }]);
+    expect(journal().filter((l) => l.event === "source_failed").map((l) => l.patch)).toEqual([{ outcome: "not_sent", reason: "approval_expired" }]);
+    // 動的でも signature 型（送出済み）が昇格の後の再検査で止まれば unknown/source_paid_unsettled（source_pending の後に unknown の行）。
+    advance = false;
+    clock = Date.now();
+    const q3 = await dynamicQuote(core, "dyn-solmpp-to-x402", "req-3");
+    deadlineMs = Math.min(q3.approval.deadlineMs, q3.source.offer.extra.expiresAt * 1000);
+    trigger = `source_pending:${q3.paymentId}`;
+    const cred3 = await c.payer.credentialFor(q3.source.offer, "signature");
+    expect(await core.purchase(purchaseArgs(q3, "req-3", cred3))).toMatchObject({ status: "unknown", terminalReason: "source_paid_unsettled" });
+    const q3Events = journal().filter((l) => l.paymentId === q3.paymentId).map((l) => l.event);
+    expect(q3Events.indexOf("unknown")).toBeGreaterThan(q3Events.indexOf("source_pending"));
+    expect(c.rpc.state.sent).toHaveLength(2);
   });
 
   it("bind の前（`onStoreLoaded` を渡さない core）: verify は通るが settle が throw → 静的の core は unknown（source_settle_unknown）。送出しない", async () => {

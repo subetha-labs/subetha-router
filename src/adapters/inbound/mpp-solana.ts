@@ -671,12 +671,13 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
       return preflightMppSolana(offer, credential, nowMs);
     },
 
-    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
+    async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean; fundsMoved?: boolean }> {
       const checked = await checkCredential(offer, credential, context);
       if (!checked.ok) return { isValid: false };
       const key = evidenceKeyOf(offer, credential);
       if (key !== undefined) remember(key, offer, { kind: checked.kind, check: checked.check, bytes: checked.bytes });
-      return { isValid: true };
+      // `signature` 型は payer が送出済み（chain で確かめた）= 資金は動いている。`transaction` 型はまだ（Router が settle で送出する）。
+      return { isValid: true, fundsMoved: checked.kind === "signature" };
     },
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {

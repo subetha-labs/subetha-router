@@ -282,6 +282,8 @@ export type MppSolanaOutbound = OutboundRail & {
 export const MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS = 10_000;
 export const MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS = 45_000;
 export const MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS = 10_000;
+/** 動的の quote で確かめた宛先 ATA の存在を覚える時間（SR-M1: purchase の中の 402 の読み直しで存在を読み直さない。送る直前の再確認は別途、必ず読む）。 */
+export const MPP_SOLANA_ATA_EXISTENCE_TTL_MS = 60_000;
 
 class MppSolanaChallengeError extends Error {
   constructor(readonly reason: "url" | "status" | "unreadable") {
@@ -385,6 +387,15 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
     staticScheme: MPP_SOLANA_SCHEME,
   });
   const { ready, ataOf, rpcResult, ataExists, blockhashOf } = common;
+  /** quote で読んだ宛先 ATA の存在（ATA → 期限）。`readChallenge` だけが使う（`pay` の 3 は常に読む）。 */
+  const knownAtas = new Map<string, number>();
+  async function ataExistsForQuote(ata: string, owner: string, operation: string, routeId: string): Promise<boolean> {
+    const until = knownAtas.get(ata);
+    if (until !== undefined && until > now()) return true;
+    const exists = await ataExists(ata, owner, operation, routeId);
+    if (exists) knownAtas.set(ata, now() + MPP_SOLANA_ATA_EXISTENCE_TTL_MS);
+    return exists;
+  }
 
   function policyOf(routeId: string): MppSolanaOutboundPolicy {
     const routerAta = ready();
@@ -474,7 +485,7 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
       return undefined;
     }
     if (checkMppSolanaChallengeAtas(view, policy, ata) !== undefined) return undefined;
-    if (checkExistence && !(await ataExists(ata, offer.payTo, operation, routeId))) return undefined;
+    if (checkExistence && !(await ataExistsForQuote(ata, offer.payTo, operation, routeId))) return undefined;
     return ata;
   }
 

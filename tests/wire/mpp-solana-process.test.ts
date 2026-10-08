@@ -164,13 +164,25 @@ async function world(): Promise<World> {
   return { dir, journalPath, signLog, env, legacy, svm, rpc, payKitRpc, solProvider, providerD, payer, receiver, routerAddress, child: undefined };
 }
 
+/** 子の closer（識別子で外せるように持つ。`stop` した子の closer だけを外し、他の fixture の closer は残す）。 */
+const childClosers = new Map<Listening, () => Promise<void>>();
 async function boot(w: World, stopAt?: string): Promise<Listening> {
   const child = await startListening("tests/fixtures/router-svm-process.ts", [], { ...w.env, ...(stopAt === undefined ? {} : { SUBETHA_TEST_SVM_STOP_AT: stopAt }) }, { listenTimeoutMs: 40_000 });
   w.child = child;
-  closers.push(async () => {
+  const closer = async (): Promise<void> => {
     await child.stop();
-  });
+  };
+  childClosers.set(child, closer);
+  closers.push(closer);
   return child;
+}
+
+/** 子を止め、その closer だけを外す（他の closer には触れない）。 */
+async function stopChild(child: Listening): Promise<void> {
+  await child.stop();
+  const closer = childClosers.get(child);
+  const at = closer === undefined ? -1 : closers.indexOf(closer);
+  if (at !== -1) closers.splice(at, 1);
 }
 
 function client(child: Listening) {
@@ -349,8 +361,7 @@ describe("送信（MPP Solana、pull）の停止点で SIGKILL → 予約の行�
       // 衝突しない message（Provider D が別の externalId を出す）は届く: 予約が止めているのであって、adapter が壊れているのではない。
       const other = await startMppSolanaUpstream({ rpcUrl: w.payKitRpc.url, feePayer: true, recipient: w.providerD.recipient, tls: TLS, externalId: "order-m5-2" });
       closers.push(other.close);
-      await second.stop();
-      closers.splice(closers.length - 1, 1);
+      await stopChild(second);
       w.env["SUBETHA_TEST_DIAL_MAP"] = JSON.stringify({ ...(JSON.parse(w.env["SUBETHA_TEST_DIAL_MAP"]!) as Record<string, number>), [HOSTS.solMppProvider]: other.port });
       const third = await boot(w);
       const fresh = await outboundQuote(third, "o3");
