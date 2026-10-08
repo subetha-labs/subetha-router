@@ -606,6 +606,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
 
     // 6. 受信 settle → 送信（静的と同じ）
     await store.append(paymentId, "source_pending", {});
+    // 昇格と `source_pending` の追記（journal への待ち）の後、settle を呼ぶ直前にもう一度期限を見る（静的と同じ。受信 adapter の証拠の保持の根拠）。
+    const settleAtMs = now();
+    if (settleAtMs >= intent.approvalDeadlineMs || settleAtMs >= current.source.offer.extra.expiresAt * 1000) {
+      await store.append(paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired" });
+      return awaiting("approval_expired");
+    }
     let settled: unknown;
     try {
       settled = await inbound.settle(current.source.offer, credential, { routeId: current.routeId });

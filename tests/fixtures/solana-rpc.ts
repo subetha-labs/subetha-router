@@ -55,9 +55,9 @@ export interface SolanaRpcState {
   /**
    * `sendTransaction` の応答（MPP Solana 受信の `transaction` 型の送出。`docs/mpp-solana-design.md` §8.1）: `ok` = 署名を返し `transactions` に登録、
    * `rpc-error` = JSON-RPC の error（preflight の失敗の形）、`already-processed` = error だが `transactions` に登録（payer が先に送出していた形）、
-   * `no-response` = 応答しない（接続は開いたまま）。
+   * `no-response` = 応答しない（接続は開いたまま）、`wrong-signature` = 登録はするが**別の署名**を返す（RPC が送った bytes と違うものを受理した形）。
    */
-  sendReply: "ok" | "rpc-error" | "already-processed" | "no-response";
+  sendReply: "ok" | "rpc-error" | "already-processed" | "no-response" | "wrong-signature";
   /** 受けた `sendTransaction` の base64（順）。 */
   sent: string[];
   /** `getTransaction` が返す transaction（署名 → 内容）。`sendTransaction` の `ok`／`already-processed` が登録し、試験が直接も置ける。 */
@@ -246,7 +246,7 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
           reply(undefined, id, { code: -32002, message: "Transaction simulation failed: This transaction has already been processed" });
           return;
         }
-        reply(signature ?? "", id);
+        reply(state.sendReply === "wrong-signature" ? "1".repeat(87) : (signature ?? ""), id);
         return;
       }
       if (method === "getTransaction") {
