@@ -141,6 +141,8 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `e87b9ce`） | **REJECT**（8 項目: §3 の主担当の一意性、M4-a の依存、fixture の準備の完了条件、FR-53／FR-54／中断の期待値、sabotage の観測点、G-3″ の資金と接続は両レグ、再配備の規則、§0 の変更の一覧）。第 2 版で反映 |
 | 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `ebe7c54`） | **REJECT**（残り 5: §3 の §3.1・§4.1・§8.2・§8.3 と SR-M1 の単一の主担当、§1 の並行の文、M5 の停止点ごとの回数・再提示・署名後の衝突、bind の sabotage の観測点、§0 の資金の文）。第 3 版で反映 |
 | 2r | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `011d45e`） | **APPROVE WITH CHANGES**（1 点: 横断の確認と SR-M1 の主担当は M5 ではなく最後の M6 に。反映済み）。他の 4 点は解消 |
+| M6-1 | 2026-10-08 | `gpt-6-astra`（read-only。M6 の実装 `4ce93cd`） | **REJECT**（P1 3 点: 道具の RPC の口が素の `fetch`（transport・loopback・64 KiB 無し）、Provider D の案内が `feePayer: false`（Router は `true` を要求）、Tempo の `npm run sign` が封筒の offer だけを見て払う（SDK は challenge の中身から送金を組む）。P2 2 点: `methodDetails` の `feePayerKey`／`recentBlockhash`、回帰試験の記述）。`ec39d35`・`b76bd15` で反映 |
+| M6-1r | 2026-10-08 | `gpt-6-astra`（readback。`b76bd15`） | **APPROVE WITH CHANGES**（P1 3 点・P2 2 点は解消。残り P2 1 点: Tempo の `splits` は `methodDetails` の下も拒む）。`89975f5` で反映（Solana の MPP の検査も同じ置き場を拒む） |
 
 ## 5. 本書で決めていないこと
 
