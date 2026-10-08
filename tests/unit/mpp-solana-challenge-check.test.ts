@@ -9,7 +9,7 @@ import { describe, expect, test } from "vitest";
 import { generateKeyPairSigner } from "@solana/kit";
 import { ASSOCIATED_TOKEN_PROGRAM_ADDRESS, findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { address } from "@solana/kit";
-import { Challenge, Method, z } from "mppx";
+import { Challenge, Method, PaymentRequest, z } from "mppx";
 import { Mppx as ClientMppx } from "mppx/client";
 import { Mppx } from "mppx/server";
 
@@ -215,6 +215,19 @@ describe("MPP Solana 送信: challenge の view と候補の検査（§4.2 の 9
     expect(mppSolanaViewOf({ ...challenge, request: "x" })).toBeUndefined();
     // opaque が無い・空（scope 無し）は読める（pay-kit の形）。
     expect(mppSolanaViewOf({ ...challenge, opaque: "" })?.scope).toBeUndefined();
+    const { opaque: _opaque, ...withoutOpaque } = challenge;
+    expect(mppSolanaViewOf(withoutOpaque)?.scope).toBeUndefined();
+    // opaque が**あって読めない**（復号できない・文字列でない）、meta の `_mppx_scope` が文字列でない（数値・null）→ 読めない（無いものとして通さない）。
+    expect(mppSolanaViewOf({ ...challenge, opaque: "!!!not-a-payment-request" })).toBeUndefined();
+    expect(mppSolanaViewOf({ ...challenge, opaque: 5 })).toBeUndefined();
+    expect(mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: 5 } as never) })).toBeUndefined();
+    expect(mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: null } as never) })).toBeUndefined();
+    // meta はあるが scope の鍵が無い → scope 無しとして読める。
+    expect(mppSolanaViewOf({ ...challenge, opaque: PaymentRequest.serialize({ other: "x" } as never) })?.scope).toBeUndefined();
+    // wire を通した形でも同じ（`Challenge.serialize` → `deserialize` は opaque をそのまま運ぶ）。
+    const roundTripped = (value: unknown): Record<string, unknown> => Challenge.deserialize(Challenge.serialize(value as never)) as unknown as Record<string, unknown>;
+    expect(mppSolanaViewOf(roundTripped({ ...challenge, opaque: PaymentRequest.serialize({ _mppx_scope: 5 } as never) }))).toBeUndefined();
+    expect(mppSolanaViewOf(roundTripped({ ...challenge, opaque: "!!!not-a-payment-request" }))).toBeUndefined();
     expect(mppSolanaViewOf({ ...challenge, request: { ...(challenge["request"] as object), amount: 1 } })).toBeUndefined();
   });
 });
@@ -232,9 +245,13 @@ describe("MPP Solana 送信: terms・offer・client 側の method", () => {
     expect(offer).toEqual({ scheme: MPP_SOLANA_SCHEME, network: SOL, asset: MINT, amount: "10000", payTo: recipient, extra: { realm: "provider-test", scope: SCOPE, terms: a.terms, feePayerKey, decimals: 6, tokenProgram: TOKEN_PROGRAM, externalId: "order-7" } });
     expect(mppSolanaOfferTermsOf(offer)).toBe(a.terms);
     expect(mppSolanaOfferTermsOf({ ...offer, extra: {} })).toBeUndefined();
-    // externalId の無い challenge の offer には externalId が無い。額や受取人が違えば terms も違う。
+    // externalId の無い challenge の offer には externalId が無い。
     expect(mppSolanaOfferOf(mppSolanaViewOf(await issue())!, policy).extra).not.toHaveProperty("externalId");
-    expect(mppSolanaViewOf(await issue({ request: { amount: "10001" } }))!.terms).not.toBe(a.terms);
+    // 1 欄だけ変えた challenge（他は a と同じ）の terms は違う: 額、受取人、feePayerKey、externalId。
+    const otherKey = String((await generateKeyPairSigner()).address);
+    expect(mppSolanaViewOf(await issue({ request: { externalId: "order-7", amount: "10001" } }))!.terms).not.toBe(a.terms);
+    expect(mppSolanaViewOf(await issue({ request: { externalId: "order-7", recipient: otherKey } }))!.terms).not.toBe(a.terms);
+    expect(mppSolanaViewOf(await issue({ request: { externalId: "order-7" }, details: { feePayerKey: otherKey } }))!.terms).not.toBe(a.terms);
     expect(mppSolanaViewOf(await issue({ request: { externalId: "order-8" } }))!.terms).not.toBe(a.terms);
     // scope は terms に入る（meta 経由）: 同じ request で scope だけ違う・無い challenge の terms は違う。
     const sameRequest = mppSolanaViewOf(await issue({ request: { externalId: "order-7" }, scope: "GET https://provider.test/v1/other" }))!;

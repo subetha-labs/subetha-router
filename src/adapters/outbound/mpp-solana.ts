@@ -60,9 +60,13 @@ export function mppSolanaViewOf(challenge: unknown): MppSolanaChallengeView | un
   if (!isRecord(challenge)) return undefined;
   const { id, realm, method, intent, request, expires } = challenge;
   if (typeof id !== "string" || id === "" || typeof realm !== "string" || typeof method !== "string" || typeof intent !== "string" || !isRecord(request)) return undefined;
+  // server metadata: **無いのは通す**（pay-kit の形）が、**あって読めない**（`opaque` が文字列でない・復号できない・`_mppx_scope` が文字列でない）のは読めない challenge。
+  const opaque = challenge["opaque"];
   const meta = challengeMetaOf(challenge);
+  if (opaque !== undefined && opaque !== "" && (typeof opaque !== "string" || meta === undefined)) return undefined;
   const rawScope = meta?.[SCOPE_META_KEY];
-  const scope = typeof rawScope === "string" ? rawScope : undefined;
+  if (rawScope !== undefined && typeof rawScope !== "string") return undefined;
+  const scope = rawScope;
   const { amount, currency, recipient } = request;
   if (typeof amount !== "string" || typeof currency !== "string" || typeof recipient !== "string") return undefined;
   let expiresAt: number | undefined;
