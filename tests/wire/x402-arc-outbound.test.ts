@@ -6,7 +6,7 @@
  * - 動的プロファイル `dyn-x402-to-arc`: 既存の動的 x402 の経路が Arc 用の能力で動く
  * - **Base 用の能力は Arc の offer を拒み、Arc 用は Base を拒む**（AC-8 の両方向）
  * - Arc の送信で chain の RPC には出ない（FR-33）: transport の事象は Provider のホストだけ
- * - `extra.assetTransferMethod` は V-6 の結果まで拒否のまま（動的の候補の段階）
+ * - `extra.assetTransferMethod` は `"eip3009"` だけ候補（Circle の受取側が出す値。P-0、`docs/provider-x402-workers.md` §3.5）。他の値は候補外
  */
 import { getAddress } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
