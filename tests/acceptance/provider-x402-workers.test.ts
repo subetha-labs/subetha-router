@@ -303,7 +303,7 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
       const before = { verify: circle.seen.verifyCalls, settle: circle.seen.settleCalls };
       const result = await buyArc();
       const diag = () => JSON.stringify({ result, verifyCalls: circle.seen.verifyCalls, settleCalls: circle.seen.settleCalls, proofFailures: circle.seen.proofFailures, proxySeen: arcProxy.seen, workerLog: arcWorker.log().split("\n").slice(-12) });
-      if (result.outcome !== "paid") console.log(`AC-P2 arc diag ${diag()}`);
+      if (result.outcome !== "paid") process.stdout.write(`AC-P2 arc diag ${diag()}\n`);
       expect(result).toMatchObject({ outcome: "paid", contentType: "application/json" });
       const body = (result as { body: Record<string, unknown> }).body;
       expect(Object.keys(body).sort()).toEqual(CONTRACT_KEYS);
@@ -319,7 +319,7 @@ describeAc("AC-P2: wrangler dev の Worker を Router の送信 adapter で買�
       expect(paid["content-type"]).toBe("application/json");
       expect(paid["cache-control"]).toBe("no-store");
       expect(paid["payment-response"]).toBeDefined();
-      console.log(`AC-P2 arc 200 wire: content-length=${String(paid["content-length"])} transfer-encoding=${String(paid["transfer-encoding"])}`);
+      process.stdout.write(`AC-P2 arc 200 wire: content-length=${String(paid["content-length"])} transfer-encoding=${String(paid["transfer-encoding"])}\n`);
     }, 60_000);
 
     test("settle の結果の表の各行 → Router は unknown、settle は各 1 回（pending・失敗・403・500・形違い・切断・network 違い・64 KiB 超）", async () => {

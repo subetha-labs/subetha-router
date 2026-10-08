@@ -138,7 +138,7 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 ### 3.2 自前の facilitator client
 
 - 1 つのクラスを両方で使う。`verify`／`settle` は `JSON.stringify({ x402Version: 2, paymentPayload, paymentRequirements })` を **1 度だけ**作り、Circle のときはその文字列の keccak256 を `bodyHash` にして `SellerRequest` に署名し `Facilitator-Seller-Proof` を付ける。同じ文字列を body に送る。
-- `redirect: "error"`、期限 verify **4 秒**・settle **min(20 秒, 要求の残り)**・supported **5 秒**。応答の本文は 64 KiB まで。HTTP の状態と本文の形を見て §2.2 の表に写す。facilitator の文言は client の外に出さない（固定の分類だけ）。
+- `redirect: "manual"`（Workers の fetch に `error` は無い。3xx は状態コードの検査で失敗になる = 追わない）、期限 verify **4 秒**・settle **min(20 秒, 要求の残り)**・supported **5 秒**。応答の本文は 64 KiB まで。HTTP の状態と本文の形を見て §2.2 の表に写す。facilitator の文言は client の外に出さない（固定の分類だけ）。
 - **settle の guard**: 要求ごとの client の object が `settle` の呼び出しを数え、2 度目は throw（試験で確かめる。SDK を通さないので再試行は起きないが、二重の防御）。
 - `getSupported` は GET（上限 **5 秒**）。SDK の `x402ResourceServer` に渡すのはこの client（`initialize()` が `/supported` を読む）。isolate ごとに 1 度 `initialize()`（要求ごとの期限の内側で。失敗したら次の要求でやり直す。402 を出せない間は 503 固定文、支払いは受けない）。
 
@@ -191,3 +191,18 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版） | **REJECT**（高 3: SDK の settle の再試行、settle 失敗を 402 にする誤り、本文が記録済みの契約と違う；中 3: 期限の不整合、鍵の作り方と配備、V-13 のラベル）。第 2 版で反映 |
 | 2 | 2026-10-08 | `gpt-6-astra`（readback。第 2 版） | **REJECT**（解決: 再試行、V-13。残り: `payer` の同一性と本文の受領、契約は拡張であること・数値の制約、cold start を含む 1 つの期限、Solana の seed の出力、`unknown` の後の文言）。第 3 版で反映 |
 | 3 | 2026-10-08 | `gpt-6-astra`（readback。第 3 版 `cbe704c`） | **APPROVE WITH CHANGES**（文言 3 点: verify の失敗・403 の行に残っていた「新しい購入で再試行できる」の根拠を削除、`delivered` は本文まで受け取れたときと明記、署名と本文の読み書きも期限の内側と明記）。同じ版で反映（小さな訂正なので再レビューはしない） |
+
+## 9. 実装と AC-P2 の記録（2026-10-08）
+
+- 実装: `providers/x402-workers/`（PR #86。独立レビュー `gpt-6-astra`: REJECT（7 点）→ readback REJECT（3 点が部分的）→ readback APPROVE WITH CHANGES（3 点）→ 範囲を絞った readback APPROVE。unit と handler の試験 33、変異 27 を全部検出）。
+- AC-P2 の試験: `tests/acceptance/provider-x402-workers.test.ts`（**`PROVIDER_WORKER_AC=1` のときだけ**走る。`providers/x402-workers/node_modules` の wrangler が要るので、Linux の suite では skip）。
+  本物の Worker を `wrangler dev --env arc` / `--env sol`（workerd）で起動し、Router の fixture の facilitator（`circle-facilitator`・`svm-facilitator`）に向け、Router 自身の送信 adapter（Arc: `createX402Outbound` の組み直しの署名器、Solana: `createX402SvmOutbound` + RPC の fixture）で買う。Worker（平文 http）と TLS の fixture の間は試験が立てる loopback の proxy（Worker → facilitator は http→TLS、Router → Worker は `arc.provider.test` / `sol.provider.test` の TLS front）。Arc の売り手鍵は試験が乱数で作り、0600 の一時ファイル（`--env-file`）で渡して消す。
+  実行: `PROVIDER_WORKER_AC=1 npx vitest run tests/acceptance/provider-x402-workers.test.ts`
+- 結果（macOS、wrangler 4.148.0、workerd）: **6 件 pass**。Arc: 402 が Router の候補を通り、購入は `paid`（契約の本文、facilitator の verify 1・settle 1、売り手証明の失敗 0、領収の `payer` = Router の署名者）。settle の表の 8 行（pending・失敗・403・500・形違い・切断・network 違い・64 KiB 超の chunked）→ Router は `unknown`、settle は各 1 回。verify が不正 → Worker 402 → Router `rejected`（settle 0）。Solana: `/supported` の feePayer で 402、購入は `paid`、confirm の timeout（pending）・切断・409 → `unknown`、settle は各 1 回。Worker の log に鍵・facilitator の文言は無い。
+- **workerd で初めて分かったこと（Node の試験では出ない。実装に反映済み）**:
+  1. entry module（`src/index.ts`）の export に handler と関数以外の値があると workerd が起動しない（定数は `config.ts` へ）。
+  2. global の `fetch` を instance に持たせて `this.#fetch(...)` と呼ぶと `Illegal invocation`（`this` を付けずに呼ぶ）。
+  3. Workers の fetch に `redirect: "error"` は無い（`manual` にし、3xx は状態コードで失敗）。
+  4. Router は 402 の `resource.url` を canonical URL と**完全一致**で束縛する。Worker は `request.url` の origin から組むので、手元の `wrangler dev` では `--local-upstream <公開ホスト> --upstream-protocol https` が要る（本番は custom domain で `https://provider-x402-<arc|sol>.subethalabs.com` になる。`workers.dev` の host で開いた 402 は Router の候補にならない = 公開 URL は custom domain だけ）。
+  5. `wrangler dev` の proxy は Worker の 200 を `transfer-encoding: chunked` で中継し、明示した `content-length` は wire に出ない（§2.2 の段 4 は Worker が付けることを言い、edge の中継は別。Router は本文を上限つきで読むので依存しない。本番の edge の挙動は AC-P3/AC-P4 で見る）。
+- fixture の変更: `tests/fixtures/circle-facilitator.ts` の領収の `payer` を payload の `authorization.from`（本物の Circle と同じ）にした（受信の試験は値を見ない）。
