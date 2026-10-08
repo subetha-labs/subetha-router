@@ -155,6 +155,8 @@ async function harness(options: { operatorsIncludeFeePayer?: boolean } = {}): Pr
   const payKitRpc = await startSolanaRpc({ mint: MINT, decimals: 6, shareStateWith: rpc });
   closers.push(payKitRpc.close);
   rpc.state.signatureStatuses = ["confirmed"];
+  // 本物の chain のように blockhash を回す（pay-kit の 402 は recentBlockhash の hint を持ち、402 ごとに変わる。G-3″ の回帰）。
+  rpc.state.rotateBlockhash = true;
   const data = await startData();
   closers.push(data.close);
   const env: Record<string, string> = { PAY_TO: recipient, FEE_PAYER_PUBKEY: feePayer.publicKey, FEE_PAYER_KEY: feePayer.seed, MPP_SECRET: SECRET, SOLANA_RPC_URL: payKitRpc.url, DATA_URL: data.url };
@@ -241,10 +243,19 @@ describe("Provider D: 402（§2.1）と Router の候補の検査", () => {
     const expires = Date.parse(/expires="([^"]+)"/.exec(www)![1]!);
     expect(expires - Date.now()).toBeGreaterThan(290_000);
     expect(expires - Date.now()).toBeLessThanOrEqual(300_000);
-    // 2 回の 402 で変わるのは id と expires だけ（request は同じ）。
+    // 2 回の 402 で変わるのは id・expires と methodDetails.recentBlockhash（pay-kit の hint。RPC が答えるとき 402 ごとに新しい）だけ。Router の terms はこの hint を含まない。
     const again = await direct(h, "/v1/eth/snapshot");
-    const requestOfHeader = (header: string): string => /request="([^"]+)"/.exec(header)![1]!;
-    expect(requestOfHeader(again.headers.get("www-authenticate")!)).toBe(requestOfHeader(www));
+    const requestOfHeader = (header: string): Record<string, unknown> => JSON.parse(Buffer.from(/request="([^"]+)"/.exec(header)![1]!, "base64url").toString("utf8")) as Record<string, unknown>;
+    const r1 = requestOfHeader(www);
+    const r2 = requestOfHeader(again.headers.get("www-authenticate")!);
+    const d1 = r1["methodDetails"] as Record<string, unknown>;
+    const d2 = r2["methodDetails"] as Record<string, unknown>;
+    expect(typeof d1["recentBlockhash"]).toBe("string");
+    expect(d1["recentBlockhash"]).not.toBe(d2["recentBlockhash"]);
+    const { recentBlockhash: _h1, ...rest1 } = d1;
+    const { recentBlockhash: _h2, ...rest2 } = d2;
+    expect({ ...r1, methodDetails: rest1 }).toEqual({ ...r2, methodDetails: rest2 });
+    expect(offers[0]!.extra?.["terms"]).toBe((await h.rail.readChallenge(ROUTE))[0]!.extra?.["terms"]);
     expect(h.since(0).filter((m) => m !== "getAccountInfo")).toEqual([]); // 402 は RPC を使わない（startup の ATA の検査だけ）
   });
 

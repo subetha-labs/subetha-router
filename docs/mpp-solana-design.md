@@ -207,7 +207,7 @@ export function createMppSolanaOutbound(options: {
 | 5 | `recipient` は base58 32 バイト、`∉ operatorAddresses`、`≠ mint`・`≠ tokenProgram`・`≠ Router の鍵`。導出 ATA `≠ Router の ATA` | `pay_to` |
 | 6 | `feePayer === true` ∧ `feePayerKey` が base58 32 バイト ∧ `feePayerKey ∉ operatorAddresses ∪ { Router の鍵, Router の ATA, recipient, 宛先 ATA, mint, tokenProgram, System, ComputeBudget, Memo, ATA program }`（SR-M4）。`feePayer === true` で `feePayerKey` 無し・形違い → 候補外。**`feePayer` が無い・`false` → 候補外 `destination_unsupported_mode`**（pull だけ。D-23）。`feePayer: false` で `feePayerKey` あり → 候補外 | `fee_payer`／`mode` |
 | 7 | `externalId` があれば string、UTF-8 で 1..256 バイト、制御文字無し（`isValidSvmMemo`）。`description` は読まない | `memo` |
-| 8 | `recentBlockhash` があれば base58 32 バイト（読むが使わない。D-24） | `blockhash` |
+| 8 | `recentBlockhash` があれば base58 32 バイト（読むが使わない。D-24。**`terms` にも入れない**: pay-kit の server は RPC が答えると 402 ごとに新しい hint を入れるので、含めると quote 時と purchase 時の 402 が一致しない。§13） | `blockhash` |
 | 9 | `expires` があれば未来（静的・動的とも。purchase 時は署名の直前と送出の直前にもう一度） | `expired` |
 
 - `DestinationOffer`: `{ scheme: "solana/charge", network, asset: currency, amount, payTo: recipient, extra: { realm, scope, terms, feePayerKey, decimals, tokenProgram, externalId? } }`（`terms` = Tempo と同じ `stableJson({ realm, method, intent, request, meta })`。**`id`・`expires` を含まない**ので、Provider が要求ごとに新しい challenge を出しても承認値は変わらない）。静的は `destinations[routeId]`（payTo・asset・scheme）と一致するものだけ
@@ -388,6 +388,7 @@ x402 SVM 受信の `followSignature`（`x402-svm.ts:420-460`）を関数に出�
 | §7・SR-M1 | 道具の RPC は 1 method | 道具（x402 の `svm-payer.ts` も MPP の `svm-mpp-payer.ts` も）の RPC の口は **`tools/svm-rpc.ts`**: Router と同じ guarded transport（redirect 無し、pinning、**loopback の拒否**。手元の node・fixture は `SOLANA_RPC_ALLOW_LOOPBACK=1`）、10 秒、応答 64 KiB、再試行なし。T5 の x402 の payer は素の `fetch`・上限なしだった | M6（レビュー 1） |
 | — | Tempo の `npm run sign` は封筒の offer だけを見る | **Tempo の MPP の challenge の中身の検査 `checkTempoChallenge`**（`tools/sign-dispatch.ts`。`classifyOffer` と `tools/mpp-payer.ts` の送金の直前の両方）: id = nonce、method/intent、期限、`request.amount`・`currency`・`recipient`・`methodDetails.chainId` が封筒の offer と一致、`splits` 無し（request の直下でも `methodDetails` の下でも）。mppx の client は中身から送金を組むので、封筒だけの検査では承認した額と違う額が動き得た（T5 からの穴。M6 のレビューで指摘） | M6（レビュー 1） |
 | §6.2 | — | `hostPlanOf` は `solanaMpp.inbound` で `SUBETHA_MPP_INBOUND_SECRET` が無ければ **env の固定文で止まる**（子の Router の `ROUTER_MPP_INBOUND_SECRET is required` より前）。`RailProviders.solanaMpp`・`RailUpstreams.solanaMpp`（Provider D の受取 owner と URL は x402 の Solana の欄と別） | M6 |
+| §4.2 の 8・D-24 | `recentBlockhash` は読むが使わない | **`terms` からも除く**（`requestForTerms`）。本番の Provider D（pay-kit）は RPC が答えると **402 ごとに新しい `recentBlockhash`** を `methodDetails` に入れるので、`terms` に含めると購入時の読み直しが決して一致せず `destination_offer_changed`（not_sent）になった（2026-10-08 の G-3″ の送信 1 件目。資金は動いていない）。fixture の RPC は blockhash が固定だったので見えなかった → fixture に `rotateBlockhash` を足し、回帰の行を unit・wire・Provider D の試験に置いた | G-3″（PR の番号は DEPLOY §2d） |
 | §6.4 | — | CLAUDE.md の「step 5 が失敗したら支払いは送信済み」は Tempo に限り、MPP Solana は「資金は既に動いているかもしれない。`rejected` も `unknown` も未送金の証明ではない。自分で再試行せず報告する」に置き換えた。`wallet:new:solana` は MPP で払うなら devnet SOL が要ると案内する | M6 |
 
 ## 12. 独立レビューの記録

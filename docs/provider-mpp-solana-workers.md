@@ -64,7 +64,7 @@ Router 側の写像（設計 §4.4）: 領収つき 200 ∧ 照合が通る → 
 | `PAY_TO` | var | 受取 owner の公開鍵（base58 32 バイト）。**鍵は owner の file にだけ**（`scripts/keygen-recipient.mjs`。先行の `keygen-solana.mjs` と同じ: 排他的に作り（既存なら書かない）、mode 0600。**file はリポジトリの外**に置く。script はリポジトリの中のパスを拒む） |
 | `FEE_PAYER_KEY` | secret | fee payer の seed（base58 32 バイト）。`scripts/keygen-fee-payer.mjs` が乱数で作り、**標準出力には公開鍵だけ**、seed は `wrangler secret put FEE_PAYER_KEY` の stdin に直接（先行の `keygen.mjs` と同じ方式。端末・log・file に残らない）。**wrangler の終了コードが 0 のときだけ公開鍵を出す**（upload に失敗した鍵に資金を入れない） |
 | `MPP_SECRET` | secret | challenge の HMAC の秘密（32 バイト以上の乱数）。`scripts/secret-new.mjs` が作って `wrangler secret put MPP_SECRET` の stdin に直接 |
-| `SOLANA_RPC_URL` | secret（任意） | devnet の RPC。無ければ公開 `https://api.devnet.solana.com`。鍵を含み得るので var ではなく secret に。**mppx は検証の例外の文言を log に書き、RPC の URL を含み得る**（§1）: log は owner の dashboard・`wrangler tail` にだけ出るが、URL に鍵を埋める RPC を使うなら、鍵を header で渡せる RPC か、log の閲覧を owner に限ることを前提にする。Worker は `console.error` を**差し替えて**（isolate の起動時に 1 度）RPC の URL の文字列を `<rpc>` に伏せる |
+| `SOLANA_RPC_URL` | secret（**実質必須**。§7 U-P3: 公開 devnet RPC は Cloudflare からの要求を拒む） | devnet の RPC（owner の Alchemy 等）。無ければ公開 `https://api.devnet.solana.com`（402 は出るが支払いは通らない）。鍵を含み得るので var ではなく secret に。**mppx は検証の例外の文言を log に書き、RPC の URL を含み得る**（§1）: log は owner の dashboard・`wrangler tail` にだけ出るが、URL に鍵を埋める RPC を使うなら、鍵を header で渡せる RPC か、log の閲覧を owner に限ることを前提にする。Worker は `console.error` を**差し替えて**（isolate の起動時に 1 度）RPC の URL の文字列を `<rpc>` に伏せる |
 | `FEE_PAYER_PUBKEY` | var | fee payer の公開鍵。**起動ごとに `FEE_PAYER_KEY` から導いた公開鍵と一致を検査**（違えば全要求 500 固定文。先行の Arc の `PAY_TO` と同じ守り） |
 
 - fee payer の鍵が払うのは **devnet SOL の手数料だけ**（1 件 2 署名 × 5,000 lamports + 優先手数料。0.1 SOL で数千件）。USDC は持たない。
@@ -150,7 +150,7 @@ pay-kit の RPC は素の `fetch`（redirect は既定、上限なし、1 回の
 
 - U-P1（**手元の workerd で確認済み、2026-10-08**）: `wrangler dev`（workerd、`nodejs_compat`）で `@solana/kit` の Ed25519 の署名と検証が通り、pay-kit の `createPayKit`（`Signer.from(kit の signer, { feePayer: true })`）が起動し、`GET /v1/eth/snapshot` が 402 を返した（`WWW-Authenticate` の `request` は `amount: "10000"`、`currency` = mint、`methodDetails: { decimals: 6, feePayer: true, feePayerKey, network: "devnet", tokenProgram }`、`recipient`。本文は pay-kit の `accepts`）。使い捨ての鍵・loopback だけ・RPC は閉じたポート（402 は RPC を要しない）。残るのは支払いつきの経路（AC-PD2）。
 - U-P2: Workers の 1 要求の中で pay-kit の確定待ち 30 秒 + `getTransaction` が収まるか（Workers の HTTP の wall time に上限は無い。CPU は数十 ms。subrequest は数十回）。AC-PD2 と配備で観測。
-- U-P3: 公開 devnet RPC への Cloudflare からの `sendTransaction` のレート制限（配備で観測）。
+- U-P3（**解決、2026-10-08**）: 公開 devnet RPC（`api.devnet.solana.com`）は Cloudflare からの要求を **「Your IP or provider is blocked from this endpoint」で拒む**（`wrangler tail` で mppx の `internal verification error` に出た。未払いの 402 は RPC を要しないので通り、支払いつきの要求だけ pay-kit が送出の前に 402 で止まっていた。資金は動いていない）。owner が Alchemy の devnet の RPC を secret `SOLANA_RPC_URL` に入れて解決（再 deploy 不要）。`SOLANA_RPC_URL` は**実質必須**として §2.4・§5 を読むこと。
 - U-13（Router 側）: Router の 45 秒と pay-kit の 30 秒 + RPC の往復の関係。G-3″ で実測。
 
 ## 8. 独立レビューの記録

@@ -63,6 +63,8 @@ export interface SolanaRpcState {
    * `no-response` = 応答しない（接続は開いたまま）、`wrong-signature` = 登録はするが**別の署名**を返す（RPC が送った bytes と違うものを受理した形）。
    */
   sendReply: "ok" | "rpc-error" | "already-processed" | "no-response" | "wrong-signature";
+  /** `getLatestBlockhash` が呼ぶたびに新しい値を返す（既定 false = 固定。本物の chain に近づける行で使う）。 */
+  rotateBlockhash?: boolean;
   /**
    * `getTransaction` の **base64** の読み（MPP Solana 送信の領収の照合。pay-kit の server は jsonParsed で読むので影響しない）:
    * `ok`、`null`（無い）、`err`（`meta.err` あり）、`no-slot`（`slot` 無し）、`other`（登録済みの**別の**取引を返す。無ければ null）。
@@ -292,7 +294,9 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
         return;
       }
       if (method === "getLatestBlockhash") {
-        reply({ context: { slot: 1 }, value: { blockhash, lastValidBlockHeight: 1000 } }, id);
+        // `rotateBlockhash`: 本物の chain のように呼ぶたびに新しい blockhash（pay-kit の server は challenge ごとに `recentBlockhash` の hint を入れる）。
+        const value = state.rotateBlockhash === true ? getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32))) : blockhash;
+        reply({ context: { slot: 1 }, value: { blockhash: value, lastValidBlockHeight: 1000 } }, id);
         return;
       }
       if (method === "getTokenAccountBalance") {

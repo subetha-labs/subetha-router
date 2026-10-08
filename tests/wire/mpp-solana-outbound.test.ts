@@ -164,6 +164,27 @@ async function quoteAndPay(h: Harness, overrides: Partial<PayRequest> & { noRese
   return { offer: offers[0]!, request, result };
 }
 
+describe("本物の chain に近い RPC: blockhash が呼ぶたびに変わる（pay-kit の server は 402 ごとに recentBlockhash の hint を入れる）", () => {
+  test("静的も動的も paid（terms は hint を含まないので quote 時と purchase 時の 402 が一致する。G-3″ の本番で見つかった不一致の回帰試験）。pay-kit の 402 は recentBlockhash を持ち、2 回で違う", async () => {
+    const h = await harness();
+    h.rpc.state.rotateBlockhash = true;
+    const first = await h.rail.readChallenge(ROUTE);
+    const second = await h.rail.readChallenge(ROUTE);
+    expect(first[0]!.extra?.["terms"]).toBe(second[0]!.extra?.["terms"]);
+    // pay-kit の 402 の中身（上流の fixture の pay-kit が RPC から blockhash を取って hint に入れる）: 2 回で違う hint。
+    const hintOf = (header: string) => (JSON.parse(Buffer.from(/request="([^"]+)"/.exec(header)![1]!, "base64url").toString("utf8")) as { methodDetails: { recentBlockhash?: string } }).methodDetails.recentBlockhash;
+    const challenges = h.upstream.seen.challengeHeaders;
+    expect(challenges.length).toBeGreaterThanOrEqual(2);
+    expect(hintOf(challenges[0]!)).toBeDefined();
+    expect(hintOf(challenges[0]!)).not.toBe(hintOf(challenges[1]!));
+    const result = await h.rail.pay(requestOf(h, first[0]!));
+    expect(result.outcome, JSON.stringify(result)).toBe("paid");
+    const dynamicOffers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    const paid = await h.rail.pay(requestOf(h, dynamicOffers[0]!, { routeId: PROFILE_ID, target: { url: URL_A } } as never));
+    expect(paid.outcome, JSON.stringify(paid)).toBe("paid");
+  });
+});
+
 describe("startup・balanceOf", () => {
   test("startup の前は readChallenge・pay・balanceOf が throw。startup で Router の ATA が運用者の集合に入り、静的の宛先 ATA を RPC で検査する", async () => {
     const h = await harness({ startup: false });

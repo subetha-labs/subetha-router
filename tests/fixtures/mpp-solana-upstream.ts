@@ -56,6 +56,8 @@ export interface MppSolanaUpstreamSeen {
   receipts: string[];
   /** 支払い要求のパス（順）。 */
   paths: string[];
+  /** 402 の `WWW-Authenticate`（順。pay-kit の challenge の wire。`recentBlockhash` の hint の観測に）。 */
+  challengeHeaders: string[];
 }
 
 export interface MppSolanaUpstream {
@@ -117,7 +119,7 @@ export async function startMppSolanaUpstream(options: MppSolanaUpstreamOptions):
   );
   const handler = pay.fetch(gate, async () => Response.json({ ok: true, source: "mpp-solana-provider" }));
   const state: MppSolanaUpstreamState = { pay: "ok", challengeDelayMs: 0, noChallenge: false, extraChallenge: "none", holdMs: 0 };
-  const seen: MppSolanaUpstreamSeen = { challengeCalls: 0, payCalls: 0, credentials: [], receipts: [], paths: [] };
+  const seen: MppSolanaUpstreamSeen = { challengeCalls: 0, payCalls: 0, credentials: [], receipts: [], paths: [], challengeHeaders: [] };
 
   const handle = async (request: http.IncomingMessage, response: http.ServerResponse): Promise<void> => {
     const chunks: Buffer[] = [];
@@ -149,6 +151,7 @@ export async function startMppSolanaUpstream(options: MppSolanaUpstreamOptions):
       return;
     }
     const outHeaders = Object.fromEntries(out.headers.entries());
+    if (!paying && typeof outHeaders["www-authenticate"] === "string") seen.challengeHeaders.push(outHeaders["www-authenticate"]);
     if (!paying && state.extraChallenge !== "none" && typeof outHeaders["www-authenticate"] === "string") {
       const original = outHeaders["www-authenticate"];
       const extra = doubledCopyOf(original);
