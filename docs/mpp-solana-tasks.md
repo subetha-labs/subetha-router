@@ -1,16 +1,16 @@
 # タスク分解: Solana の MPP を受信・送信の両方で（S-5・S-6）
 
-> 2026-10-08、第 2 版。入力は `docs/mpp-solana-requirements.md`（要件 第 6 版、D-18〜D-30 は owner 採用）と `docs/mpp-solana-design.md`（設計 第 3 版、owner 承認「どちらも勧めて良いです」2026-10-08、PR #96）。
+> 2026-10-08、第 3 版。入力は `docs/mpp-solana-requirements.md`（要件 第 6 版、D-18〜D-30 は owner 採用）と `docs/mpp-solana-design.md`（設計 第 3 版、owner 承認「どちらも勧めて良いです」2026-10-08、PR #96）。
 > 以下「設計 §x」「要件 FR-x」はそれらを指す。本書はタスクフェーズの成果物で、コード・実行結果・合格の主張は含まない。記載のコマンドは**計画であり未実行**。
 > 先行の `docs/multirail-outbound-tasks.md` と同じ形（§0 の規則、1 タスク 1 PR、変異の表、独立レビュー）。
-> 第 1 版は独立レビューで REJECT（8 項目。§4）。第 2 版で反映: §3 を 1 項目 1 主担当に、M4-a の依存に M3-a、M3-a の fixture の完了条件（pay-kit の server の verify が fixture の RPC で通る）、M4-b の FR-53 の表と FR-54、M5 の中断の期待値、sabotage の観測点、MG の資金と接続の範囲（両レグ）と再配備の規則、§0 の変更の一覧。
+> 第 1 版は独立レビューで REJECT（8 項目。§4）。第 2 版で反映: §3 を 1 項目 1 主担当に、M4-a の依存に M3-a、M3-a の fixture の完了条件（pay-kit の server の verify が fixture の RPC で通る）、M4-b の FR-53 の表と FR-54、M5 の中断の期待値、sabotage の観測点、MG の資金と接続の範囲（両レグ）と再配備の規則、§0 の変更の一覧。第 3 版（readback #1）: §3 に設計 §3.1・§4.1・§8.2・§8.3 と SR-M1 の単一の主担当、§1 の並行の文、M5 の停止点ごとの回数と再提示の assert と署名後の衝突、bind の sabotage は settle の unit で、§0 の資金の文は親の操作に限定。
 
 ## 0. 全タスク共通
 
 - **担当**: 親（controller）が状態・commit を持ち、実装後に実ソースを読み戻してテストを実際に実行する。レビューは `gpt-6-astra`・read-only で差分を見る。writer は 1 つ
 - **順序**: まず落ちるテストを書き、赤を確かめてから実装する。完了条件の試験は**守っているコードを外して落ちること**（sabotage）を確かめ、結果を PR に書く。**変異の前に commit する**（復元は commit から）
 - **完了コマンド**: focused → `npm run types` → `npm test`。skip と失敗を区別して報告する。「Linux」と書いた完了条件は Linux（`node:22-bookworm`）で実行した結果を要する（`multirail-compose` の停止 DNS の 1 件は単独で再実行してから判断する）
-- **資金**: 資金が動くのは **MG の G-3″ だけ**。動くのは**両レグ**の testnet の資産: 受信 S-5 の行は payer の devnet USDC（手数料は devnet SOL）と Router の送信レグ（Base Sepolia USDC／Tempo pathUSD／Arc testnet USDC／devnet USDC のいずれか）、送信 S-6 の行は payer の Base Sepolia USDC か Tempo pathUSD（か Arc・devnet USDC）と Router の devnet USDC（pull なので Router の SOL は動かない）。owner の決定（2026-10-08）: **testnet の資産が動く段は owner に確認せずに進めてよい**。それ以外のタスクは本物の Provider・RPC に接続しない（loopback の fixture だけ。fixture の RPC の `sendTransaction` は模擬で、資金は動かない）。**mainnet の資産は一切使わない**
+- **資金**: **親の操作で**資金が動くのは **MG の G-3″ だけ**（owner の提供 = G-1″ の faucet・入金・Provider D の fee payer への SOL は owner の操作で、この規則の外）。G-3″ で動くのは**両レグ**の testnet の資産: 受信 S-5 の行は payer の devnet USDC（手数料は devnet SOL）と Router の送信レグ（Base Sepolia USDC／Tempo pathUSD／Arc testnet USDC／devnet USDC のいずれか）、送信 S-6 の行は payer の Base Sepolia USDC か Tempo pathUSD（か Arc・devnet USDC）と Router の devnet USDC（pull なので Router の SOL は動かない）。owner の決定（2026-10-08）: **testnet の資産が動く段は owner に確認せずに進めてよい**。それ以外のタスクは本物の Provider・RPC に接続しない（loopback の fixture だけ。fixture の RPC の `sendTransaction` は模擬で、資金は動かない）。**mainnet の資産は一切使わない**
 - **外部への接続は MG の中だけ**（各 1〜数回。日時・回数を記録）: Provider D の 402 と有料要求、Solana devnet の RPC（受信の `sendTransaction`／`getSignatureStatuses`／`getTransaction`、送信の 4 方法）、**もう一方のレグの既存の接続**（Provider A／B／Arc／Solana の Worker、x402.org と Circle の facilitator、Tempo の RPC。受け入れ用の起動が今までどおり使う）、運用者の確認の読取（署名の finalized・ATA の増分・EVM の tx）、公開 MCP の一覧と quote（AC-18。支払わない）。**owner の作業（G-1″）**: Provider D の配備（D-26）、payer の試験用鍵への devnet SOL と USDC、Provider D の fee payer に SOL。Router の送信鍵の USDC は既存。**親の作業（G-2″〜G-4″）**: 定数と env の名前の設定の commit、イメージの入れ替え、購入、記録
 - **既定で無効**: `RAILS_ACTIVATION.solanaMpp` は M6 が `{ inbound: false, outbound: false }` で固定し、MG の G-4″ で方向別に `true`。`UPSTREAM_SOL_MPP` は Provider D が立つまで空
 - **gate と開発の直列化**: MG が検証するのは固定した commit・設定・イメージ。MG の間に `tools/remote-mcp-config.ts`・`tools/rails-entry.ts`・`docs/DEPLOY.md`・`CLAUDE.md` を変える PR は gate の各段の合間に直列に取り込み、**取り込んだ後は G-2″ の配備からやり直す**（G-3″ の購入は固定した commit に対して 1 度。G-4″ の前に繰り返すのは: 受け入れ用の起動の `startup`（受取 owner の ATA・Router の ATA・静的 route の宛先 ATA）と、有効化した方向の各組 1 回の quote）
@@ -33,7 +33,7 @@ M6   本番の入口・`npm run sign`・文書                           ← M5
 MG   gate G-1″〜G-4″（AC-17・AC-18）                          ← M6、Provider D（owner、D-26）
 ```
 
-M2 の後は M3-a と M4-a が並行できる（writer は 1 つなので順に: M3 → M4）。
+M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の schema を使う。writer は 1 つなので順に: M3-a → M3-b → M4-a → M4-b）。
 
 ## 2. タスク
 
@@ -83,8 +83,8 @@ M2 の後は M3-a と M4-a が並行できる（writer は 1 つなので順に:
 ### M5 — 統合（設計 §8.2 の integration・中断・process、FR-43、AC-15〜AC-16 の行列・AC-20・AC-21）
 
 - **範囲**: `tests/wire/multirail-integration.test.ts`（行列 §7 の 12 本: 静的 4・動的 8。同じ USDC の区分を両レグで使う I-4・O-10 の 1 件の上限と通算）、中断（受信 `transaction` 型の送出の前・後・行の後、`signature` 型の行の前後、送信の予約・署名・送出の前。子 process + SIGKILL）、`tests/wire/rails-process-entry.test.ts`（M6 の前は fixture の起動側で能力の注入と `startup` の順序）
-- **完了条件（wire・integration。Linux）**: 行列 12 本が `delivered`、I-4・O-10 で 1 件の上限と通算が両レグ分で効く。**中断の期待値**（各停止点で SIGKILL → 同じ journal で再起動）: 受信 `transaction` 型の送出前 → `unknown`（`interrupted_at_restart`。送出 0）、送出後・行の前 → `unknown`（送出 1。chain 上の署名はそのまま）、行の後 → `paid_undelivered`（送信は始まらない。signer 0・支払い要求 0）、受信 `signature` 型の行の前 → `unknown`、行の後 → `paid_undelivered`、送信の予約の後 → `unknown`（signer 0・要求 0。同じ message を別の paymentId で → `collision`）、署名の後 → `unknown`（signer 1・要求 0）、送出の前 → `unknown`（要求 0）。**同じ intent の再提示**は再起動の後も現在の終端を返す（新しい購入を始めない）。既存の 4 レールの wire 試験が変わらない。**SR-M（2 回目）**: M2〜M5 の実ソース全体
-- **sabotage**: `startup` の登録を外す → 統合が落ちる／区分の合算を外す → 通算の試験が落ちる／`onStoreLoaded` の bind を外す → 再起動後の replay の試験が落ちる
+- **完了条件（wire・integration。Linux）**: 行列 12 本が `delivered`、I-4・O-10 で 1 件の上限と通算が両レグ分で効く。**中断の期待値**（各停止点で SIGKILL → 同じ journal で再起動）: 受信 `transaction` 型の送出前 → `unknown`（`interrupted_at_restart`。送出 0）、送出後・行の前 → `unknown`（送出 1。chain 上の署名はそのまま）、行の後 → `paid_undelivered`（送信は始まらない。signer 0・支払い要求 0）、受信 `signature` 型の行の前 → `unknown`、行の後 → `paid_undelivered`、送信の予約の後 → `unknown`（signer 0・要求 0。同じ message を別の paymentId で → `collision`）、署名の後 → `unknown`（signer 1・要求 0）、送出の前 → `unknown`（要求 0）。**すべての停止点で**: 再起動の後に signer の回数・`sendTransaction`／有料要求の回数が**増えない**（fixture の記録を再起動の前後で比べる）、**同じ intent の再提示**は現在の終端を返して新しい購入を始めない（終端の読み返しを各停止点で assert）、送信の予約の後・署名の後・送出の前のどこで止めても同じ message を別の paymentId で組むと `collision`（予約は署名の前に永続化されているので 3 点とも同じ）。既存の 4 レールの wire 試験が変わらない。**SR-M（2 回目）**: M2〜M5 の実ソース全体
+- **sabotage**: `startup` の登録を外す → 統合が落ちる／区分の合算を外す → 通算の試験が落ちる／`onStoreLoaded` の bind を外す → **settle の unit**（再起動後の store の集合で消費済みの署名を直接 settle に渡す）が `rejected` にならず落ちる（端から端の replay は preflight／Memo／終端の読み返しが先に拒むので観測点にしない）
 
 ### M6 — 本番の入口・`npm run sign`・文書（設計 §6・§7、FR-40・FR-42・FR-49・FR-55・FR-56、AC-19）
 
@@ -106,21 +106,21 @@ M2 の後は M3-a と M4-a が並行できる（writer は 1 つなので順に:
 | 対象 | 主担当 | 補助 |
 |---|---|---|
 | 設計 §1、FR-41・FR-44 | M1 | M6（生成の値） |
-| 設計 §2.1（能力。新しい型は無い）・§2.2 の送信側の合成 | M4-b | M5 |
-| 設計 §2.2 の受信側の合成（接続） | M3-b | M5（再起動） |
+| 設計 §2.1（能力。新しい型は無い）・§2.2 の送信側の合成・§4.1（adapter の構造。`estimateFee` を持たない） | M4-b | M5 |
+| 設計 §2.2 の受信側の合成（接続）・§3.1（adapter の構造と `startup`） | M3-b | M5（再起動） |
 | 設計 §2.3（集合・callback・try/catch）・§5（primitives・helper・括り出し） | M2 | M3-a・M4-a（利用）、M3-b（接続） |
 | 設計 §3.2〜§3.4、FR-46 | M3-a | M3-b |
 | 設計 §3.5〜§3.6、FR-45・FR-47・FR-48、D-18・D-20・D-21・D-22・D-28 | M3-b | M5 |
 | 設計 §4.2、FR-50、SR-M4 | M4-a | M4-b |
 | 設計 §4.3〜§4.6、FR-51〜FR-54、SR-M3、D-19・D-23・D-24・D-30 | M4-b | M5 |
 | 設計 §2.2 の両方向の整合・§8.2 の integration と中断、FR-39・FR-43、AC-20 | M5 | M3-b・M4-b（各方向） |
+| 設計 §8.2 の表の unit／wire／process の各行（ファイルを作るタスクが主担当: `mpp-solana-check` = M3-a、`mpp-solana-challenge-check` = M4-a、`svm-outbound-message` の追加 = M2、`dynamic-fee-exception` = M1、`remote-mcp-config`／`rails-entry`／`rails-process-entry`／`mpp-solana-cli` = M6、`mpp-solana-inbound` = M3-b、`mpp-solana-outbound` = M4-b、`multirail-integration`／`crash-recovery` = M5） | 各行のタスク | M5（表の全行が存在し Linux で緑） |
+| 設計 §8.3 の gate 以外の完了条件（既存 suite が緑、Linux、変異の表、SR-M の 2 回のレビュー） | M5（全体の確認） | 各タスク（自分の PR） |
 | 設計 §6・§7・§6.4、FR-40・FR-42・FR-49・FR-55・FR-56、D-27・D-29、AC-19 | M6 | MG（公開の確認） |
 | 設計 §8.1 の RPC・client の fixture、§9（依存）、SR-M6、D-25（U-10 の判定） | M3-a | — |
 | 設計 §8.1 の Provider D の fixture | M4-b | — |
 | 設計 §8.3 の記録、要件 §8、AC-17・AC-18、D-26、U-13 | MG | — |
-| SR-M1（受信の RPC の上限: method・回数・追跡の 30 秒／15 回） | M3-b | M2（helper の `maxPolls`） |
-| SR-M1（送信の RPC の上限: 4 方法・回数） | M4-b | — |
-| SR-M1（道具: `getLatestBlockhash` 1 回・送出 0） | M6 | — |
+| SR-M1（RPC の上限の全体: 受信・送信の method と回数、追跡の 30 秒／15 回、道具の 1 method、**共通の transport（guarded・loopback 拒否）・応答 64 KiB・期限 10 秒・`maxRetries: 0`**） | M5（統合で両 adapter と道具の呼び出しを数え、transport と上限を確かめる） | M3-b（受信）、M4-b（送信）、M6（道具）、M2（helper の `maxPolls`） |
 | SR-M2（送信の予約・受信の消費済み集合の永続化） | M2 | M3-b（settle の unit）、M5（再起動） |
 | SR-M5（固定の失敗の文） | M6（起動の文） | M3-b・M4-b（adapter の理由の列挙） |
 | AC-15（受信の fixture の試験） | M3-b | M5（行列） |
@@ -132,6 +132,7 @@ M2 の後は M3-a と M4-a が並行できる（writer は 1 つなので順に:
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `e87b9ce`） | **REJECT**（8 項目: §3 の主担当の一意性、M4-a の依存、fixture の準備の完了条件、FR-53／FR-54／中断の期待値、sabotage の観測点、G-3″ の資金と接続は両レグ、再配備の規則、§0 の変更の一覧）。第 2 版で反映 |
+| 1r | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `ebe7c54`） | **REJECT**（残り 5: §3 の §3.1・§4.1・§8.2・§8.3 と SR-M1 の単一の主担当、§1 の並行の文、M5 の停止点ごとの回数・再提示・署名後の衝突、bind の sabotage の観測点、§0 の資金の文）。第 3 版で反映 |
 
 ## 5. 本書で決めていないこと
 
