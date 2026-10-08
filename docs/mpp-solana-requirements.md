@@ -1,11 +1,16 @@
-# 要件: Solana の MPP（`method="solana"`、`intent="charge"`）を受信・送信の両方で（S-5・S-6。第 2 版、2026-10-08）
+# 要件: Solana の MPP（`method="solana"`、`intent="charge"`）を受信・送信の両方で（S-5・S-6。第 3 版、2026-10-08）
 
 > `multirail-requirements.md`（受信 S-1・S-2）・`multirail-outbound-requirements.md`（送信 S-3・S-4）の別紙。Arc・Solana の **x402** は受信（G-4、2026-10-07）も送信（G-4′、2026-10-08）も公開済み。
 > 本書は owner の指示「**Solana の MPP にも Router で inbound・outbound どちらも対応したい**」（2026-10-08）を要件に起こしたもの。設計・タスクは別紙。
 >
 > **先行文書の読み替え**: `multirail-requirements.md` §1 の表「MPP の adapter は Tempo 専用。これは変えない（MPP を Solana に広げない）」と §3.3「MPP で Solana に払う（SDK に client method が無い）」、
-> `multirail-outbound-requirements.md` §3 の「MPP で Arc・Solana に払う（MPP は Tempo 専用のまま）」は、**本書で範囲に入れる**ので superseded。FR-37〜FR-38 の規則（message hash の予約、運用者の集合）は引き継ぐ。
-> 番号は続きから: FR-39〜、SR-6〜（安全要件は先行文書の `SR` の慣例に戻す）、AC-15〜、D-18〜。
+> `multirail-outbound-requirements.md` §3 の「MPP で Arc・Solana に払う（MPP は Tempo 専用のまま）」、および**両文書の FR-25「Router の Solana 鍵は ed25519 で x402 の送信にだけ使う」**は、本書で範囲に入れる（D-19 で同じ鍵を MPP 送信にも束ねる）ので superseded。
+> FR-34〜FR-38 の規則（blockhash の取得〜署名の上限、fee payer の隔離、送出直前の期限、message hash の予約、運用者の集合）は引き継ぐ。
+> 番号は続きから: FR-39〜、AC-15〜、D-18〜。安全要件は先行の 2 文書が `SR-1`〜`SR-7` を別々に使っているので、本書は **`SR-M1`〜** と付ける。
+>
+> 第 3 版（独立レビュー #2、§11）: 手数料は pull・push の両方で core の gas-indexed の価格づけから外す（FR-44）、署名の検証と compute budget の限定（FR-47・FR-52）、verify の拒否は `verify_failed`、送信の表に chain 上の失敗・領収なし 200・本文の読取失敗（FR-48・FR-53）、
+> 埋め込み challenge の HMAC の検証と消費済み署名の記録を `source_settled` と同じ 1 行に（FR-46・SR-M2・AC-20）、pull の成功の証拠（FR-53）、fee payer の隔離に FR-35 の除外を全部（SR-M4）、payer の polling と送出の再試行（SR-M1）、記録は排他・永続・fail closed（FR-49）、
+> 行列の O-9/O-10 の分離と AC の整合（§6・§7）、FR-25 の読み替え、`SR-M` の番号、`ROUTER_MPP_INBOUND_SECRET` の transport。
 >
 > 第 2 版（独立レビュー #1、§11）: SOL の手数料の方針と予算（FR-44・FR-51・FR-54）、既存の SVM 検査は「そのまま」ではなく primitives の再利用と mode 別の検査（FR-47・FR-52）、mode 別の完全な結果の表（FR-48・FR-53）、
 > 承認値への束縛と永続の replay（FR-46・FR-47・FR-50・FR-52、SR-7）、pull の領収の対応づけ（FR-53）、blockhash・RPC・ATA・fee payer の規則（FR-45・FR-47・FR-52・FR-54、SR-6）、payer の鍵の名前は既存の `SOLANA_PAYER_PRIVATE_KEY`（FR-49）、
@@ -33,8 +38,8 @@
 
 ## 2. 今の Router が持つもの（本書の基準 `ed60794`、2026-10-08。リポジトリの事実）
 
-- **受信の MPP は Tempo 専用**: `src/adapters/inbound/mpp.ts` は `mppx/server` の `Mppx.create` + `tempo.charge`、**push 固定**（`supportedModes: ["push"]`）、challenge の HMAC 束縛鍵は注入（`SUBETHA_MPP_INBOUND_SECRET`。`src/config.ts` が注入値を**解析**するが、`src/` が process の env を直接読むことはない）。**credential は preflight で発行 offer に束縛**: `payload.challengeNonce` = offer の nonce、`accepted` = 保存した offer と完全一致、route binding、期限、wire の中の challenge id = nonce（`:286-310`）。verify は SDK、settle は `rejected`（`source_rejected`）／`unknown`（`source_settle_unknown`）／`settled`（`txRef`）。
-- **送信の MPP も Tempo 専用**: `src/adapters/outbound/mpp.ts`（静的）・`mpp-dynamic.ts`（動的）は `mppx/client` の `tempo.charge`、push 固定（こちらで送金して hash を渡す）、動的は許可した欄だけの challenge と組み直しの署名 facade。**結果の表**: 送出前の失敗は `not_sent`（理由は列挙）、送金 RPC の委譲の後の失敗は `unknown`（`destination_pay_unknown`）、**領収なしの応答は 4xx でも `unknown`**（送金済みのため）、領収が照合できなければ `unknown`（`destination_receipt_unverified`）、整合した領収つきの非 200 は `paid_no_data`、200 は `paid`（`:558-667`、`mpp-dynamic.ts:1059-1117`）。動的の手数料は `FeeEstimate`（EVM の gas の欄）と `feeAsset`（= 宛先の資産。`src/config.ts:273-275`、`:808`）で、Tempo 前提。
+- **受信の MPP は Tempo 専用**: `src/adapters/inbound/mpp.ts` は `mppx/server` の `Mppx.create` + `tempo.charge`、**push 固定**（`supportedModes: ["push"]`）、challenge の HMAC 束縛鍵は注入（ホストの `SUBETHA_MPP_INBOUND_SECRET` を入口が内部 env `ROUTER_MPP_INBOUND_SECRET` で子に渡し、`src/config.ts` が注入値を**解析**する。`src/` が process の env を直接読むことはない）。**credential は preflight で発行 offer に束縛**: `payload.challengeNonce` = offer の nonce、`accepted` = 保存した offer と完全一致、route binding、期限、wire の中の challenge id = nonce（`:286-310`）。verify は SDK、settle は `rejected`（`source_rejected`）／`unknown`（`source_settle_unknown`）／`settled`（`txRef`）。
+- **送信の MPP も Tempo 専用**: `src/adapters/outbound/mpp.ts`（静的）・`mpp-dynamic.ts`（動的）は `mppx/client` の `tempo.charge`、push 固定（こちらで送金して hash を渡す）、動的は許可した欄だけの challenge と組み直しの署名 facade。**結果の表**: 送出前の失敗は `not_sent`（理由は列挙）、送金 RPC の委譲の後の失敗は `unknown`（`destination_pay_unknown`）、**領収なしの応答は 4xx でも `unknown`**（送金済みのため）、領収が照合できなければ `unknown`（`destination_receipt_unverified`）、整合した領収つきの非 200 は `paid_no_data`（**静的は 502 だけ** `mpp.ts:630-660`、**動的はすべての非 200** `mpp-dynamic.ts:1115-1117`）、200 は `paid`。動的の手数料は `FeeEstimate`（EVM の gas の欄）と `feeAsset`（= 宛先の資産。`src/config.ts:273-275`、`:808`）で Tempo 前提。core は **プロファイルに `maxFee` があるときだけ** `estimateFee` を呼ぶ（`src/core/dynamic.ts:270`）。受信の verify で `isValid: false` は `verify_failed`、RPC の失敗は `source_verify_unavailable`（`src/core/orchestrator.ts:645-656`）。再起動時に `source_settled` の intent は `paid_undelivered`（`interrupted_at_restart`）で終端し、送信を再開しない（`src/core/store.ts:395`）。
 - **Solana は x402 だけ**: 受信は facilitator に verify/settle を委ね、`checkSvmTransaction`（`src/adapters/inbound/x402-svm.ts`）が **Router が受け取る唯一の形**（version 0、lookup table 無し、命令はちょうど 4 つ = SetComputeUnitLimit・SetComputeUnitPrice・TransferChecked・Memo、署名 2 つで fee payer の署名は空）を byte 一致で検査する。送信は Router が同じ形の message を組み、builder に依存しない検査、署名前の hash の予約、署名の検証、送出前の wire の再検査（`src/adapters/outbound/x402-svm.ts`）。鍵は専用の ed25519 `SUBETHA_OUTBOUND_SOLANA_KEY`（devnet USDC の ATA あり。**SOL は無い**）。受取は `SUBETHA_SOLANA_RECEIVER`（ATA あり）。RPC は guarded transport（設定の URL だけ。loopback 拒否）、受信の起動時の検査と送信の blockhash・残高で使い、方法と回数は列挙して固定。
 - **payer の道具**: `npm run sign`（`tools/sign-payment.ts`）は offer から rail を判定し、Solana の鍵は **`SOLANA_PAYER_PRIVATE_KEY`**（`wallet:new:solana` が出す。案内は「**SOL は要らない**」= x402 の facilitator が手数料を払う前提）。
 - **レール**は `"x402"` / `"mpp"` と network の組で合成。MPP の能力は `mppTempo` の 1 つ。有効化は公開の定数 `RAILS_ACTIVATION`（方向別）で、入口はその値を**内部の env**（`SUBETHA_RAILS_ACTIVATION`）で子に渡す（親の env からは変えられない）。journal・予算（`(network, asset)` の区分）・開示・SIGKILL の中断試験は既存。
@@ -54,39 +59,37 @@
 - FR-41 **network の束縛**: challenge の `methodDetails.network` は **`"devnet"`** だけを受ける／出す。`currency` は表の devnet USDC の mint、`tokenProgram` は表の Token program、`decimals` は 6。表に無い値は受信では発行せず、送信では候補外。識別子の比較は**大文字小文字を区別**する（base58）。
 - FR-42 **ID と開示**: route／プロファイル ID は既存の名前空間（例: 受信の静的 `md-x402-eth-snapshot-solmpp`・`md-mpp-eth-snapshot-solmpp`、送信の静的 `md-solmpp-eth-snapshot`、動的 `dyn-solmpp-to-x402` / `dyn-solmpp-to-mpp` / `dyn-x402-to-solmpp` / `dyn-mpp-to-solmpp`。確定は設計）。`subject` の `fundsMoveOnCredential` は受信 MPP Solana で `true`（Tempo と同じ開示: credential を作る時点で payer が送金し、Router が後で拒んでも返金されない）。
 - FR-43 **予算**: Solana devnet USDC の区分は既存の `(network, asset)` に**合算**（受信 x402 Solana・送信 x402 Solana・本書の受信・送信の 4 つが同じ区分。D-14）。**x402 Solana ↔ MPP Solana の組は両レグが同じ区分を使う**ので、1 件の上限と通算の両方が両レグ分で効くことを試験する（AC-15）。
-- FR-44 **SOL の手数料の方針**（D-23 で push を持つ場合にだけ効く。pull だけなら Router は SOL を一切持たない）:
-  - 手数料の資産は SOL（lamports）で、USDC の予算とは**別の勘定**。lamports と USDC の base units を比べない・合算しない。
-  - 1 購入の手数料の上限は**定数**（base fee 5,000 lamports × 署名数 + priority fee の上限。priority fee の `SetComputeUnitPrice` は固定値で、quote の時点でも署名の時点でも同じ）。上限を超える見積りは署名しない（`not_sent`）。
-  - Router の送信鍵の SOL 残高を purchase ごとに 1 回読み（`getBalance`）、「上限 × 1」未満なら送信の前（受信の verify の前）に `operator_funds_unavailable`。
-  - 手数料は運用者が負担し、quote の額に**転嫁しない**（Tempo の gas と同じ扱い。動的の `pricing.maxFee` は MPP Solana では出さない: `feeAsset` = 宛先の資産 の規則に SOL は入らない）。
-  - 動的の `FeeEstimate`（EVM の gas の欄）は MPP Solana の経路では**使わない**（`undefined` を返し、core の gas-indexed の手数料方針を付けない）。
+- FR-44 **手数料の方針（pull・push の両方）**:
+  - **価格づけ**: MPP Solana の動的プロファイルは **`maxFee`・`feeAsset` を持たない**（表の生成で付けない。`src/config.ts` の `feeAsset` = 宛先資産 の規則は `maxFee` があるときだけ効く）ので、core は `estimateFee` を呼ばず（`src/core/dynamic.ts:270`）、`pricing.maxFee`・`estimate`・`fee_too_high` は**出ない**。手数料は規則の手数料（flat/bps/min）だけ。動的 Tempo（gas の cap を価格に含む）とは**違う**。
+  - **pull**: Router は手数料を払わない（fee payer は相手）。SOL の勘定は無い。
+  - **push**（D-23 の第 2 段）: 手数料の資産は SOL（lamports）で、USDC の予算とは**別の勘定**（lamports と USDC の base units を比べない・合算しない）。1 購入の上限は**定数**（base fee 5,000 lamports × 署名数 + `SetComputeUnitPrice` × compute limit の上限。`SetComputeUnitPrice` は固定値）。**journal に lamports の区分を持ち**、署名の前に 1 購入分を**原子的に予約**し、通算の上限（定数）を超えれば `not_sent`（`budget_exhausted`）。Router の送信鍵の SOL 残高を purchase ごとに 1 回読み（`getBalance`）、「予約済み + 上限」未満なら受信の verify の前に `operator_funds_unavailable`。手数料は運用者が負担し quote の額に転嫁しない。
 
 ### 4.2 受信（S-5）
 
 - FR-45 **mode は push 固定**（Tempo と同じ: pull はサーバが broadcast して手数料を払う = Router に SOL と送信主体を持ち込む。D-18）。challenge は `feePayer: false`、`recentBlockhash` は**出さない**（push では payer が自分で取る。出すと期限の管理と「相手の値を信じる」問題が生じる）。
-- FR-46 **challenge の発行と承認値への束縛**: `mppx` の `Method.from` で Solana の charge の schema を定義し、既存の Tempo 受信と同じ `Mppx.create` + HMAC 束縛（注入した秘密）で発行する。`recipient` は `SUBETHA_SOLANA_RECEIVER`（owner の公開鍵。ATA は配備済み。起動時に ATA の存在・owner・mint を確かめる = 既存の受信 x402 Solana と同じ検査）。`amount` は quote の額、`currency`・`network`・`decimals`・`tokenProgram` は FR-41。**preflight は Tempo 受信と同じ 5 点**（`payload.challengeNonce` = 発行 offer の nonce、`accepted` = 保存した offer と完全一致、route binding、期限、wire の中の challenge id = nonce）に加えて `payload.type === "signature"` と署名の形（base58 64 バイト）。HMAC は challenge の改竄を防ぐだけで、**購入への束縛は preflight の一致検査**が担う。**Router は SDK の server 実装（pay-kit）を本番コードに入れない**（D-20）。
+- FR-46 **challenge の発行と承認値への束縛**: `mppx` の `Method.from` で Solana の charge の schema を定義し、既存の Tempo 受信と同じ `Mppx.create` + HMAC 束縛（注入した秘密）で発行する。`recipient` は `SUBETHA_SOLANA_RECEIVER`（owner の公開鍵。ATA は配備済み。起動時に ATA の存在・owner・mint を確かめる = 既存の受信 x402 Solana と同じ検査）。`amount` は quote の額、`currency`・`network`・`decimals`・`tokenProgram` は FR-41。**preflight は Tempo 受信と同じ 5 点**（`payload.challengeNonce` = 発行 offer の nonce、`accepted` = 保存した offer と完全一致、route binding、期限、wire の中の challenge id = nonce）に加えて `payload.type === "signature"` と署名の形（base58 64 バイト）、そして **wire の credential に埋め込まれた challenge の全欄（`request`・`methodDetails`・`expires`・`opaque`）を HMAC で検証**（mppx の server の検証をそのまま使う。id の写しだけでは足りない）。HMAC は challenge の改竄を防ぎ、**購入への束縛は preflight の一致検査**が担う。**Router は SDK の server 実装（pay-kit）を本番コードに入れない**（D-20）。
 - FR-47 **検証は Router 自身が RPC で**（層を分ける: preflight → verify → settle）:
-  - **verify**（`isValid` の判定。RPC が答えなければ既存の `source_verify_unavailable`）: 設定の Solana RPC（guarded transport）で `getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" })` を **1 回**（`null` = 見つからない → `isValid: false`。`finalized` は待たない。D-21）。transaction と meta を読み、**MPP Solana 受信の形**として検査する（`checkSvmTransaction` の **primitives**（命令の復号、`TransferChecked` の欄、Memo の欄、口座の役割）を再利用し、形は別に定義する。x402 の検査は変えない）: version 0、lookup table 無し、**署名はちょうど 1 つ**（fee payer = payer = 転送の authority）、命令は compute budget（0〜2 つ）・**`TransferChecked`**（program = 表、mint = `currency`、decimals = 6、額 = challenge の `amount`、宛先 = `recipient` の**導出 ATA**、source の owner = 署名者）・**Memo がちょうど 1 つで中身が challenge の `id` と byte 一致**（D-22）の順で、それ以外の命令は無い。`meta.err` が `null`、`blockTime` が challenge の発行〜期限の内（`null` なら不正）、`slot` が有る。読んだ transaction の署名が credential の署名と一致。応答の大きさ・時間は既存の RPC の上限（64 KiB・10 秒）。
-  - **settle**（RPC は呼ばない）: **消費済み署名の原子的な記録**（SR-7）に成功したら `settled`（`txRef` = 署名）。既に消費済みなら `rejected`（`source_rejected`）。記録に失敗したら `unknown`（`source_settle_unknown`）。
+  - **verify**（`isValid` の判定。RPC が答えなければ既存の `source_verify_unavailable`）: 設定の Solana RPC（guarded transport）で `getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0, encoding: "base64" })` を **1 回**（`null` = 見つからない → `isValid: false`。`finalized` は待たない。D-21）。transaction と meta を読み、**MPP Solana 受信の形**として検査する（`checkSvmTransaction` の **primitives**（命令の復号、`TransferChecked` の欄、Memo の欄、口座の役割）を再利用し、形は別に定義する。x402 の検査は変えない）: version 0、lookup table 無し、**署名はちょうど 1 つ**（fee payer = payer = 転送の authority。**署名の bytes が credential の署名と一致し、message に対して ed25519 で検証できる**。RPC が返した = 含まれた、だけに頼らない）、命令は compute budget（`SetComputeUnitLimit`・`SetComputeUnitPrice` を**それぞれ高々 1 つ**、limit は定数以下、他の compute-budget 命令は不可）・**`TransferChecked`**（program = 表、mint = `currency`、decimals = 6、額 = challenge の `amount`、宛先 = `recipient` の**導出 ATA**、source の owner = 署名者）・**Memo がちょうど 1 つで中身が challenge の `id` と byte 一致**（D-22）の順で、それ以外の命令は無い。`meta.err` が `null`、`blockTime` が challenge の発行〜期限の内（`null` なら不正）、`slot` が有る。読んだ transaction の署名が credential の署名と一致。応答の大きさ・時間は既存の RPC の上限（64 KiB・10 秒）。
+  - **settle**（RPC は呼ばない）: **消費済み署名の記録**（SR-M2）に成功したら `settled`（`txRef` = 署名）。既に消費済みなら `rejected`（`source_rejected`）。記録に失敗したら `unknown`（`source_settle_unknown`）。消費の記録は **`source_settled` の journal 行そのもの**（`txRef` = 署名）で行い、別の行にしない（記録と確定の間に crash の窓を作らない。replay の判定は journal の `source_settled` の `txRef` の集合から復元する）。
 - FR-48 **受信の結果の表**（payer は credential の時点で送金済み。`rejected` は「Router は受けない」であって「送金が無かった」ではない）:
 
   | 段 | 事象 | 結果 |
   |---|---|---|
   | preflight | nonce・accepted・route binding・期限・wire の id・`type`・署名の形のどれかが違う | `rejected`（既存の理由 `nonce_mismatch` 等。資金は動いていることがある = 開示どおり返金なし） |
   | verify | RPC 不達・形違い・上限超え | `unknown`（`source_verify_unavailable`。再試行しない） |
-  | verify | transaction が無い（`null`）、`err` あり、構造が形と違う、Memo が違う、額・mint・宛先が違う、期限外 | `rejected`（`source_rejected`） |
+  | verify | transaction が無い（`null`）、`err` あり、構造が形と違う、署名が検証できない、Memo が違う、額・mint・宛先が違う、期限外 | `isValid: false` → core が **`verify_failed`**（既存。settle に進まない） |
   | settle | 署名が既に消費済み（replay。別の購入か同じ購入の再送） | `rejected`（`source_rejected`） |
   | settle | 消費済みの記録（journal）に失敗 | `unknown`（`source_settle_unknown`） |
   | settle | 記録できた | `settled`（`txRef` = 署名）→ 送信へ |
 
-- FR-49 **payer 側の道具**: `npm run sign` が MPP Solana の challenge（`method="solana"`）を offer から判定し、**手元で FR-47 の形の transfer を組み・署名し・broadcast して、署名を `type="signature"` の credential に入れる**（Router の封筒は既存の MPP と同じ）。鍵は既存の **`SOLANA_PAYER_PRIVATE_KEY`**（名前は変えない）。**署名の前に拒む**: network が `"devnet"` でない、`currency`・`tokenProgram`・`decimals` が表と違う、期限切れ、`amount` が `SIGN_MAX_AMOUNT` を超える、`recipient` が base58 32 バイトでない、`feePayer: true`（push の payer は自分が fee payer）。blockhash は payer の RPC（`SOLANA_RPC_URL`、既定は公開 devnet）で取り、取得〜署名〜送出を 1 つの流れで行う。**送出の応答を失ったら再送しない**: 署名を `.env.local` と同じ場所の記録ファイルに先に書いてから送り、再実行時に同じ challenge id の記録があれば送らずにその署名で credential を作る（二重払いを作らない）。`wallet:new:solana` の案内「SOL は要らない」は「**MPP で払うときは devnet SOL（手数料）が要る**」に改める。CLAUDE.md に「MPP なので credential の時点で資金が動く」「devnet SOL が要る」を明記。
+- FR-49 **payer 側の道具**: `npm run sign` が MPP Solana の challenge（`method="solana"`）を offer から判定し、**手元で FR-47 の形の transfer を組み・署名し・broadcast して、署名を `type="signature"` の credential に入れる**（Router の封筒は既存の MPP と同じ）。鍵は既存の **`SOLANA_PAYER_PRIVATE_KEY`**（名前は変えない）。**署名の前に拒む**: network が `"devnet"` でない、`currency`・`tokenProgram`・`decimals` が表と違う、期限切れ、`amount` が `SIGN_MAX_AMOUNT` を超える、`recipient` が base58 32 バイトでない、`feePayer: true`（push の payer は自分が fee payer）。blockhash は payer の RPC（`SOLANA_RPC_URL`、既定は公開 devnet）で取り、取得〜署名〜送出を 1 つの流れで行う。**送出の応答を失っても再送しない**: 送る前に、challenge の `id` と offer の hash を鍵にした記録（署名済み transaction と署名）を**排他的に作成**（`wx`、fsync）してから送る。記録を作れなければ**送らない**（fail closed）。再実行で同じ鍵の記録があれば送らずにその署名で credential を作る。並行の 2 回の実行は `wx` の衝突で片方が止まる（二重払いを作らない）。`wallet:new:solana` の案内「SOL は要らない」は「**MPP で払うときは devnet SOL（手数料）が要る**」に改める。CLAUDE.md に「MPP なので credential の時点で資金が動く」「devnet SOL が要る」を明記。
 
 ### 4.3 送信（S-6）
 
 - FR-50 **challenge の検査と承認値への束縛**（動的は許可した欄だけ。x402 Solana の候補検査と同じ厳しさ）: `method="solana"`・`intent="charge"`、`request.currency` = 表の mint、`methodDetails.network = "devnet"`、`decimals = 6`、`tokenProgram` = 表、`recipient` が base58 32 バイトで**運用者の集合に無い**、`amount` が**承認値と一致**（静的: 承認 offer と完全一致。動的: 保存した offer の額・recipient と完全一致。上限の内側でも**変わっていれば `destination_offer_changed`**）、`splits`・`confidential` 無し、未知の欄は候補外。`feePayer`（bool）・`feePayerKey`（`feePayer: true` のときだけ必須、base58 32 バイト、運用者の集合に無く、`recipient` とも Router の鍵とも違う）・`recentBlockhash`（任意。読むが FR-52 のとおり使わない）。`feePayer: true` で `feePayerKey` が無い・形違い、`feePayer: false` で `feePayerKey` がある → 候補外。purchase の時点で challenge を読み直し、保存した offer と一致しなければ `not_sent`（`destination_offer_changed`）。期限は署名の直前と送出の直前に再検査。
 - FR-51 **mode**: `feePayer: true` なら **pull**（Router は payer として部分署名し、fee payer は `feePayerKey`。相手が broadcast する。Router に SOL は要らない。x402 Solana 送信と同じ「部分署名して相手に送らせる」形）。`feePayer: false` なら **push**（Router が自分で broadcast し手数料を払う。FR-44）。push を持たない構成（D-23 で見送る場合）では `feePayer: false` の challenge は候補外（`destination_unsupported_mode`）。
-- FR-52 **transaction は Router が組む**: x402 Solana 送信の **primitives**（message の組み立て、builder に依存しない検査、署名前の message hash の予約 FR-37、署名の検証、送出前の wire の再検査）を再利用し、**mode 別の形**を定義する。pull: 署名 2 つ（[0] fee payer = `feePayerKey` は空、[1] = Router）、命令は compute budget 2 つ + `TransferChecked`（source = Router の ATA、宛先 = `recipient` の導出 ATA、mint・decimals・額）+ Memo（challenge の `id` と byte 一致）。push: 署名 1 つ（Router = fee payer = authority）、命令は同じ。`recentBlockhash` は **challenge の値を使わず Router の RPC で取る**（D-24。取得〜署名の上限 FR-34 と、送出直前の期限の再検査。pull では相手が broadcast するまでの遅れがあるので、送出の直前に残りの slot を見積もって短ければ `not_sent`。保証ではないので pull の遅延は `unknown` 側に倒す）。**送出に失敗・不明でも組み直さない・再送しない**（同じ message は hash の予約で 2 度署名しない）。宛先 ATA は存在・owner・mint を RPC で確かめる（静的は起動時、動的は purchase ごと）。ATA の作成は Provider の責任（rent は Router が払わない）。
-- FR-53 **credential・送出・領収**: pull は `type="transaction"`（署名済み tx の base64、1232 バイト以下）、push は `type="signature"`。credential は mppx の `Credential.serialize`（`Authorization: Payment <base64url>`）。1 回だけ送る。領収 `Payment-Receipt` は `method === "solana"`、`challengeId` = challenge の id、`status === "success"`、`reference` が base58 64 バイトの署名であること。**pull の対応づけ**: Router は部分署名の時点では最終の署名（fee payer の署名が [0]）を知らないので、領収の `reference` を **RPC で 1 回 `getTransaction`** し、読めた transaction の message が**署名前に予約した message と byte 一致**すること（= Router が署名した正にその transaction）で照合する。読めない・一致しない → `unknown`（`destination_receipt_unverified`）。push: `reference` が自分の署名と一致すること（RPC は呼ばない）。
+- FR-52 **transaction は Router が組む**: x402 Solana 送信の **primitives**（message の組み立て、builder に依存しない検査、署名前の message hash の予約 FR-37、署名の検証、送出前の wire の再検査）を再利用し、**mode 別の形**を定義する。どちらの mode も version 0・lookup table 無し・命令はちょうど 4 つ（SetComputeUnitLimit・SetComputeUnitPrice・`TransferChecked`・Memo の順。x402 Solana 送信と同じ定数）。pull: 署名 2 つ（[0] fee payer = `feePayerKey` は空、[1] = Router）。`TransferChecked` は source = Router の ATA、宛先 = `recipient` の導出 ATA、mint・decimals・額。Memo は challenge の `id` と byte 一致。push: 署名 1 つ（Router = fee payer = authority）、命令は同じ。`recentBlockhash` は **challenge の値を使わず Router の RPC で取る**（D-24。`getLatestBlockhash` が返す `lastValidBlockHeight` を記録し、FR-34 のとおり取得〜署名を経過時間で制限し、送出の直前に承認の期限と経過時間を再検査する。slot の残りを RPC で見積もることは**しない**（方法を増やさない）。pull では相手が broadcast するまでの遅れは Router には見えないので、相手が期限切れで broadcast できなければ領収なし → `unknown`）。**送出に失敗・不明でも組み直さない・再送しない**（同じ message は hash の予約で 2 度署名しない）。宛先 ATA は存在・owner・mint を RPC で確かめる（静的は起動時、動的は purchase ごと）。ATA の作成は Provider の責任（rent は Router が払わない）。
+- FR-53 **credential・送出・領収**: pull は `type="transaction"`（署名済み tx の base64、1232 バイト以下）、push は `type="signature"`。credential は mppx の `Credential.serialize`（`Authorization: Payment <base64url>`）。1 回だけ送る。領収 `Payment-Receipt` は `method === "solana"`、`challengeId` = challenge の id、`status === "success"`、`reference` が base58 64 バイトの署名であること。**pull の対応づけと成功の証拠**: Router は部分署名の時点では最終の署名（fee payer の署名が [0]）を知らないので、領収の `reference` を **RPC で 1 回 `getTransaction`（`confirmed`）** し、(a) 読めた transaction の message が**署名前に予約した message と byte 一致**（= Router が署名した正にその transaction）、(b) 応答の署名列の [0] が `reference` と一致、(c) `meta.err === null`、(d) `meta`・`slot` が形どおり、であることを**すべて**確かめてから `paid`／`paid_no_data` に進む。読めない・`null`・`err` あり・一致しない・meta が形違い → `unknown`（`destination_receipt_unverified`）。領収に payer 相当の欄があれば base58 を大文字小文字を区別して Router の鍵と比べる。push: `reference` が自分の署名と byte 一致すること（RPC は呼ばない。自分で broadcast した transaction の成否は送出の応答で分かる）。
   **送信の結果の表（mode 別。既存の MPP の規則に揃える: 送金が動き得る時点の後の失敗は `unknown`）**:
 
   | 段 | 事象 | pull | push |
@@ -95,7 +98,9 @@
   | push の RPC 送出 | `sendTransaction` の委譲の後に失敗・不明 | — | `unknown`（`destination_pay_unknown`） |
   | 有料要求 | 送出の例外・期限（相手が broadcast したかもしれない） | `unknown`（`destination_pay_unknown`） | `unknown` |
   | 有料要求 | 領収なしの 4xx／5xx | `unknown`（`destination_pay_unknown`。4xx でも**送金済みの可能性**を否定できない） | `unknown` |
-  | 有料要求 | 領収の形違い・`reference` の照合失敗（pull: RPC で読めない／message 不一致。push: 署名違い） | `unknown`（`destination_receipt_unverified`） | 同左 |
+  | 有料要求 | 領収なしの 200 | `unknown`（`destination_receipt_unverified`。既存の MPP と同じ） | 同左 |
+  | 有料要求 | 領収の形違い・`reference` の照合失敗（pull: RPC で読めない／`null`／message 不一致／`meta.err` あり／meta 形違い。push: 署名違い） | `unknown`（`destination_receipt_unverified`） | 同左 |
+  | 有料要求 | 整合した領収つきで本文の読取が途中で止まる・切れる・256 KiB 超 | `paid_no_data`（既存の MPP の表 T-A17 と同じ） | 同左 |
   | 有料要求 | 整合した領収つきの非 200・JSON でない・256 KiB 超 | `paid_no_data` | 同左 |
   | 有料要求 | 整合した領収つきの 200 の JSON | `paid` | `paid` |
 
@@ -106,24 +111,24 @@
 - FR-55 CLAUDE.md（agent 向け）・README・DEPLOY §2c を更新: 新しい route／プロファイル、`npm run sign` の挙動（MPP Solana は credential の時点で送金、devnet SOL が要る、再実行で二重払いしない）、有効化の gate。
 - FR-56 `tools/remote-mcp-config.ts` の表に MPP Solana の受信・送信、`tools/rails-entry.ts` の env の読み方（増やす env は最小。D-19）。
 
-## 5. 安全要件（先行文書の SR-1〜SR-5 を引き継ぐ）
+## 5. 安全要件（先行の 2 文書の SR-1〜SR-7 を引き継ぐ。本書は `SR-M`）
 
-- SR-6 **RPC の上限**: 受信の verify は `getTransaction` 1 回、送信は `getLatestBlockhash` 1 回・`getTokenAccountBalance` 1 回・（push）`getBalance` 1 回・`sendTransaction` 1 回・（pull の領収）`getTransaction` 1 回、起動時／purchase ごとの宛先 ATA の `getAccountInfo` 1 回。方法はこれだけ。応答は 64 KiB・10 秒。すべて guarded transport（設定の RPC だけ、loopback 拒否）。`npm run sign` も同じ方法の集合（`getLatestBlockhash`・`sendTransaction`、任意で `getSignatureStatuses`）。
-- SR-7 **二重払いと replay の永続化**: 送信は message hash の予約（FR-37。静的・動的で**同じ台帳**、署名の前に原子的に永続化、並行の 2 件は後の方が `collision`、process の中断後の再起動で予約が残り `unknown` として確定、再送信 0）。受信は **消費済み署名の集合を journal に永続化**（settle で原子的に追加。同じ署名の並行 2 件は後の方が `rejected`、再起動後も拒む、保持期間は journal と同じ = 削除しない）。発行済みの challenge は既存の quote の台帳（journal）から復元する。
-- SR-8 **鍵の境界**: 受信に署名鍵は無い（HMAC の秘密だけ。既存の注入）。送信の署名は `SvmSigningCapability` の形（bytes の写しにだけ署名、鍵の文字列を保持しない）。`src/` は process の env から秘密を読まない（注入値の解析は既存のまま）。
-- SR-9 **fee payer の隔離**（pull）: `feePayerKey` は運用者の集合に無く、Router の鍵・ATA と違い、`recipient` と違う。Router の署名は [1] だけで、[0]（fee payer）は空のまま送る。wire の再検査で [0] が空・[1] が自分の署名・message が予約と一致。
-- SR-10 **固定の失敗**: Provider／RPC／payer の文言を転送しない（既存の規則）。
-- SR-11 **依存の向き**: `@solana/pay-kit` は `src/`・`tools/` から import しない（`@x402/svm` と同じ。fixture と試験だけ）。`mppx` の version は Router 側で 1 つ（D-25）。
+- SR-M1 **RPC の上限**: 受信の verify は `getTransaction` 1 回、送信は `getLatestBlockhash` 1 回・`getTokenAccountBalance` 1 回・（push）`getBalance` 1 回・`sendTransaction` 1 回・（pull の領収）`getTransaction` 1 回、起動時／purchase ごとの宛先 ATA の `getAccountInfo` 1 回。方法はこれだけ。応答は 64 KiB・10 秒。すべて guarded transport（設定の RPC だけ、loopback 拒否）。`sendTransaction` は **再試行 0**（`maxRetries: 0`、preflight あり）。`npm run sign` の方法は `getLatestBlockhash` 1 回・`sendTransaction` 1 回・`getSignatureStatuses` を **2 秒間隔で最大 15 回（30 秒）**（確定を待つ。待ち切れなくても再送しない）。
+- SR-M2 **二重払いと replay の永続化**: 送信は message hash の予約（FR-37。静的・動的で**同じ台帳**、署名の前に原子的に永続化、並行の 2 件は後の方が `collision`、process の中断後の再起動で予約が残り `unknown` として確定、再送信 0）。受信は **消費済み署名の集合を journal に永続化**（`source_settled` の行の `txRef`。同じ署名の並行 2 件は後の方が `rejected`、再起動後も拒む、保持期間は journal と同じ = 削除しない）。発行済みの challenge は既存の quote の台帳（journal）から復元する。再起動時に `source_settled` で止まっていた intent は既存どおり `paid_undelivered`（`interrupted_at_restart`）で終端し、**送信を再開しない**。
+- SR-M3 **鍵の境界**: 受信に署名鍵は無い（HMAC の秘密だけ。既存の注入）。送信の署名は `SvmSigningCapability` の形（bytes の写しにだけ署名、鍵の文字列を保持しない）。`src/` は process の env から秘密を読まない（注入値の解析は既存のまま）。
+- SR-M4 **fee payer の隔離**（pull。FR-35 の除外をすべて引き継ぐ）: `feePayerKey` は運用者の集合に無く、Router の鍵・Router の ATA・`recipient`・宛先 ATA・mint・Token program・System program・compute-budget program・Memo program のどれとも違う。Router の署名は [1] だけで、[0]（fee payer）は空のまま送る。wire の再検査で [0] が空・[1] が自分の署名・message が予約と一致。
+- SR-M5 **固定の失敗**: Provider／RPC／payer の文言を転送しない（既存の規則）。
+- SR-M6 **依存の向き**: `@solana/pay-kit` は `src/`・`tools/` から import しない（`@x402/svm` と同じ。fixture と試験だけ）。`mppx` の version は Router 側で 1 つ（D-25）。
 
 ## 6. 受け入れ条件（どれも**配備・faucet・署名・送金を許可するものではない**。資金が動くのは §8 の gate だけ）
 
-- AC-15（受信、fixture。Linux）: pay-kit の **client**（参照実装）で組んだ credential を Router が受け、`source_settled` → 既存の送信 4 本で `delivered`（行列 §7 の I-1〜I-4 を静的・動的で）。FR-48 の各行（preflight の 5 点 + `type`・署名の形、RPC 不達、`null`、`err`、構造違反（宛先 ATA・額・mint・余分な命令・署名 2 つ・Memo 無し／違い・lookup table・version 1）、期限外、replay（並行 2 件・再起動後）、journal の失敗）が表どおり。**同じ USDC の区分**: x402 Solana 受信との通算、MPP Solana 受信 → x402 Solana 送信で 1 件の上限が両レグ分で効くこと。既存の Tempo 受信の wire 試験が 1 つも変わらない。
-- AC-16（送信、fixture。Linux）: pay-kit の **server**（参照実装。pull と push、`feePayer` の両値）を fixture の Provider にし、Router の送信が `delivered`（O-7〜O-9 を静的・動的で）。FR-53 の各行（送出前の各理由、push の送出不明、領収なしの 4xx／5xx、領収の形違い、pull で `reference` の transaction が読めない／message 不一致、整合した領収の非 200）が表どおり。fixture の server が受けた tx が仕様の検証（`transferChecked`・ATA・memo・fee payer）を通ること。fee payer が運用者・`recipient`・Router の鍵と同じ → `not_sent`。`feePayer: true` で `feePayerKey` 無し → 候補外。`recentBlockhash` の期限（取得〜署名の上限、送出直前の再検査）。SOL 不足（push）→ `operator_funds_unavailable`。能力と network の不一致・無効なレールへの要求 → 起動時の拒否／`not_sent`。
-- AC-17（結合、手元。資金が動く。§8 の承認の後）: pay-kit の server を **devnet** で動かす Provider（Provider D。owner が配備。D-26）に対し、受け入れ用の起動で I-1〜I-4 と O-7〜O-9 から**少なくとも各レールの静的 1 件・動的 1 件**を `delivered`。証拠は先行の G-3 と同じ: 受信・送信の両方の transaction（署名・slot・`confirmed`/`finalized`・転送の内容）、宛先 ATA の増分、Provider の応答の本文、client の結果、`status` の再読取（再起動の後も）。
+- AC-15（受信、fixture。Linux）: pay-kit の **client**（参照実装）で組んだ credential を Router が受け、`source_settled` → 既存の送信 4 本で `delivered`（行列 §7 の I-1・I-2 は静的と動的、I-3・I-4 は動的）。FR-48 の各行（preflight の 5 点 + `type`・署名の形、RPC 不達、`null`、`err`、構造違反（宛先 ATA・額・mint・余分な命令・署名 2 つ・Memo 無し／違い・lookup table・version 1）、期限外、replay（並行 2 件・再起動後）、journal の失敗）が表どおり。**同じ USDC の区分**: x402 Solana 受信との通算、MPP Solana 受信 → x402 Solana 送信で 1 件の上限が両レグ分で効くこと。既存の Tempo 受信の wire 試験が 1 つも変わらない。
+- AC-16（送信、fixture。Linux）: pay-kit の **server**（参照実装。`feePayer: true` = pull。push は D-23 の第 2 段で `feePayer: false`）を fixture の Provider にし、Router の送信が `delivered`（O-7・O-8 は静的と動的、O-9・O-10 は動的）。FR-53 の各行（送出前の各理由、push の送出不明、領収なしの 4xx／5xx、領収の形違い、pull で `reference` の transaction が読めない／message 不一致、整合した領収の非 200）が表どおり。fixture の server が受けた tx が仕様の検証（`transferChecked`・ATA・memo・fee payer）を通ること。fee payer が運用者・`recipient`・Router の鍵と同じ → `not_sent`。`feePayer: true` で `feePayerKey` 無し → 候補外。`recentBlockhash` の期限（取得〜署名の上限、送出直前の再検査）。SOL 不足（push）→ `operator_funds_unavailable`。能力と network の不一致・無効なレールへの要求 → 起動時の拒否／`not_sent`。**有効化の組み合わせ**: `solanaMpp` の各方向と既存の `solana`・`arc` の各方向の組で、出る route／プロファイルと子に渡る env が表どおり（`solanaMpp.outbound` も `solana.outbound` も無効なら Solana の送信鍵は子に渡らない。片方だけ有効なら渡る = D-19 の共有）。既存の 4 レールの wire 試験が 1 つも変わらない。
+- AC-17（結合、手元。資金が動く。§8 の承認の後）: pay-kit の server を **devnet** で動かす Provider（Provider D。owner が配備。D-26）に対し、受け入れ用の起動で I-1〜I-4 と O-7〜O-9 から**少なくとも各レールの静的 1 件・動的 1 件**を `delivered`。証拠は先行の G-3 と同じ: 受信・送信の両方の transaction（署名・slot・**`finalized` まで確認**・転送の内容）、宛先 ATA の増分、Provider の応答の本文、client が受け取った結果、**保存した結果を開き直したもの**（`status` の再読取。受け入れ用の Router の再起動の後も同じ結果）。
 - AC-18（公開、G-4″）: 公開 MCP の一覧に新しい route／プロファイルが出て、各組 1 回の quote（支払わない）。
 - AC-19（agent の手順）: `npm run sign` が MPP Solana の offer で `SOLANA_PAYER_PRIVATE_KEY` から credential を作れる（devnet SOL あり）、署名前の拒否（network・資産・期限・額・`feePayer: true`）、送出の応答を失った後の再実行で**送らずに同じ署名**を出す、鍵を出さない。
-- AC-20（中断）: 受信は settle の記録の前後、送信は予約の後・署名の後・送出の前で SIGKILL → 再起動で表どおり（受信: 記録前なら `unknown`、記録後なら `settled` から送信へ。送信: `unknown`、再送信 0、同じ message は `collision`）。
-- AC-21（sabotage と独立レビュー）: 先行文書と同じく、各 PR に変異の表と Codex のレビュー。SR-3 と同じ署名の境界の独立レビューを送信の adapter に 1 回。
+- AC-20（中断）: 受信は `source_settled` の行の前後、送信は予約の後・署名の後・送出の前で SIGKILL → 再起動で表どおり（受信: 行の前なら `unknown`（`interrupted_at_restart`）、行の後なら既存どおり **`paid_undelivered`**（送信は再開しない）、どちらでも同じ署名の再提示は `rejected`。送信: `unknown`、再送信 0、同じ message は `collision`）。
+- AC-21（sabotage と独立レビュー）: 先行文書と同じく、各 PR に変異の表と Codex のレビュー。SR-3 と同じ署名の境界の独立レビューを **2 回**（送信の adapter の PR と、統合の PR で実ソース全体）。
 
 ## 7. 行列（追加分。同レール同チェーン MPP Solana → MPP Solana は範囲外）
 
@@ -133,9 +138,10 @@
 | I-2 | MPP Solana（S-5） | MPP Tempo（Provider B） | ✓ `md-mpp-eth-snapshot-solmpp` | ✓ `dyn-solmpp-to-mpp` | — |
 | I-3 | MPP Solana（S-5） | x402 Arc | —（D-27） | ✓ `dyn-solmpp-to-arc` | — |
 | I-4 | MPP Solana（S-5） | x402 Solana | —（D-27） | ✓ `dyn-solmpp-to-sol`（同じ USDC の区分を両レグで使う） | — |
-| O-7 | x402 Base | MPP Solana（S-6） | ✓ `md-solmpp-eth-snapshot` | ✓ `dyn-x402-to-solmpp` | pull・push |
-| O-8 | MPP Tempo | MPP Solana（S-6） | ✓ `md-solmpp-eth-snapshot-mpp` | ✓ `dyn-mpp-to-solmpp` | pull・push |
-| O-9 | x402 Arc / x402 Solana | MPP Solana（S-6） | — | ✓ `dyn-arc-to-solmpp` / `dyn-sol-to-solmpp`（後者は同じ USDC の区分を両レグで） | pull・push |
+| O-7 | x402 Base | MPP Solana（S-6） | ✓ `md-solmpp-eth-snapshot` | ✓ `dyn-x402-to-solmpp` | pull（push は D-23 の第 2 段） |
+| O-8 | MPP Tempo | MPP Solana（S-6） | ✓ `md-solmpp-eth-snapshot-mpp` | ✓ `dyn-mpp-to-solmpp` | pull（push は D-23 の第 2 段） |
+| O-9 | x402 Arc | MPP Solana（S-6） | — | ✓ `dyn-arc-to-solmpp` | pull（push は D-23 の第 2 段） |
+| O-10 | x402 Solana | MPP Solana（S-6） | — | ✓ `dyn-sol-to-solmpp`（同じ USDC の区分を両レグで） | pull（push は D-23 の第 2 段） |
 
 ## 8. gate（owner。資金が動くのはここだけ）
 
@@ -167,4 +173,5 @@
 
 | 回 | 日付 | モデル | 判定 |
 |---|---|---|---|
+| 2 | 2026-10-08 | `gpt-6-astra`（readback。第 2 版 `b724c89`） | **REJECT**（残り: 手数料を両 mode で core の価格づけから外す、署名の検証と compute budget、`verify_failed`、送信の表の 3 行、埋め込み challenge の HMAC と `source_settled` との原子性、pull の成功の証拠、FR-35 の除外、polling と再試行、記録の排他・永続、O-9 の分離と AC の整合、FR-25・SR の番号・secret の transport）。第 3 版で反映 |
 | 1 | 2026-10-08 | `gpt-6-astra`（read-only。第 1 版 `ce01a28`） | **REJECT**（8 項目: SOL の手数料の方針と予算、SVM 検査の再利用の範囲、mode 別の結果の表と層の分離、承認値への束縛と永続の replay、pull の領収の対応づけ、blockhash・RPC・ATA・fee payer の規則、payer の鍵名と道具の要件、行列と gate の明示。加えて先行文書の読み替え・番号・`SR` の慣例・env の表現の訂正、外部の事実は未確認と明示）。第 2 版で反映 |
