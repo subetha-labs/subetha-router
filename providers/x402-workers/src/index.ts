@@ -8,7 +8,7 @@ import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from "@x402
 import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { configOf, isEvmKey, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
+import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
 import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS, type Stage } from "./deadline.js";
 import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
@@ -16,9 +16,8 @@ import { createRequirementsBuilder, type RequirementsBuilder } from "./requireme
 import type { SellerProofSigner } from "./seller-proof.js";
 import { DataUnavailableError, fetchSnapshot, serializeSnapshot } from "./snapshot.js";
 
+// この module の export は handler と関数だけ（workerd は entry の export に値があると起動しない: AC-P2 で判明）。定数は config.ts。
 const ENCODER = new TextEncoder();
-/** `PAYMENT-SIGNATURE` の長さの上限（Workers のヘッダの上限の内側。正しい payload は数 KiB）。 */
-export const MAX_PAYMENT_HEADER_CHARS = 16 * 1024;
 
 /** 固定文の応答。`content-length` を明示し、本文は 1 つの文字列。 */
 function respond(status: number, text: string, headers: Record<string, string> = {}): Response {
@@ -113,7 +112,9 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   const initStage = stages("supported");
   try {
     await runtime.builder.ready(initStage.signal, () => stages("supported"));
-  } catch {
+  } catch (error) {
+    // 運用者向けの固定文（分類だけ。facilitator の文言・URL は出さない）。
+    console.error(`provider: facilitator not ready (${error instanceof FacilitatorUnavailableError ? error.kind : error instanceof Error ? error.name : "unknown"})`);
     return json(503, { error: "facilitator_unavailable" });
   } finally {
     initStage.dispose();

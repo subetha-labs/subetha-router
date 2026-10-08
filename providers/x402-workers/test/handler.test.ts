@@ -8,7 +8,8 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader, encodePayment
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { RequestDeadline } from "../src/deadline.js";
-import { handle, MAX_PAYMENT_HEADER_CHARS, runtimeOf } from "../src/index.js";
+import { MAX_PAYMENT_HEADER_CHARS } from "../src/config.js";
+import { handle, runtimeOf } from "../src/index.js";
 import { decodeProof, recoverProof, SOL_FEE_PAYER, SOL_SIGNATURE, solanaTransaction } from "./helpers.js";
 
 const ARC_KEY = generatePrivateKey();

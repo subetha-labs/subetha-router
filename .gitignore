@@ -13,3 +13,7 @@ coverage/
 .claude_workflow/active-writer.json
 runtime/
 .env.local
+
+# Cloudflare Workers の Provider（providers/x402-workers）: wrangler の作業領域と手元の secret
+providers/x402-workers/.wrangler/
+providers/x402-workers/.dev.vars
