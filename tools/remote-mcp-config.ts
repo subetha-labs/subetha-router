@@ -107,10 +107,12 @@ export const ROUTE_SOL_OUT = "md-sol-eth-snapshot-mpp";
 /* ------------------------------------------------------------------ Solana の MPP（受信・送信。`docs/mpp-solana-design.md` §6、タスク M6） */
 
 /**
- * Solana の MPP の Provider D（pay-kit の server。`solana/charge`、pull、**`feePayer: true`** = Provider の fee payer が送出する。Router が発行する受信の challenge は `feePayer: false`）の URL。**Provider D が立つまで空**（D-26。空なら静的の送信 route は
- * 生成しない。動的プロファイルは生成する）。受取 owner は env `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`（`solanaMpp.outbound` ∧ URL ≠ "" のときだけ読む。D-10 と同じ規則）。
+ * Solana の MPP の Provider D（pay-kit の server。`solana/charge`、pull、**`feePayer: true`** = Provider の fee payer が送出する。Router が発行する受信の challenge は `feePayer: false`）の URL。
+ * **G-1″（2026-10-08）**: owner が `providers/mpp-solana-workers/` を Cloudflare Workers に配備（`docs/provider-mpp-solana-workers.md` §9・§10、`docs/DEPLOY.md` §2d）。
+ * 空なら静的の送信 route は生成しない（動的プロファイルは生成する）。受取 owner は env `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`（`solanaMpp.outbound` ∧ URL ≠ "" のときだけ読む。D-10 と同じ規則）。
+ * 送信の有効化（`RAILS_ACTIVATION.solanaMpp.outbound`）は G-4″ まで `false` のまま。
  */
-export const UPSTREAM_SOL_MPP = "";
+export const UPSTREAM_SOL_MPP = "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot";
 /** 静的 route（設計 §6.3）: Solana USDC（MPP）で払って Provider A（x402）に届く。 */
 export const ROUTE_SOLMPP_TO_X402 = "md-x402-eth-snapshot-solmpp";
 /** 静的 route（設計 §6.3）: Solana USDC（MPP）で払って Provider B（MPP）に届く。 */

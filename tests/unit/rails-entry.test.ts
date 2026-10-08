@@ -674,9 +674,13 @@ describe("Solana の MPP の有効化（solanaMpp）: token・受取 owner・鍵
       Object.defineProperty(target, SOLANA_PROVIDER_ENV, { enumerable: true, get: () => { reads.push(SOLANA_PROVIDER_ENV); return "x402-provider"; } });
       return target;
     };
-    expect(RAIL_UPSTREAMS.solanaMpp).toBe("");
-    // 本番の定数（URL が空）: solana-mpp-out でも読まない。x402 の Provider の欄も読まない（solana-out ではない）。
-    expect(railsProvidersOf(MPP_OUT, observed())).toEqual({});
+    expect(RAIL_UPSTREAMS.solanaMpp).toBe("https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot");
+    // 本番の定数（G-1″ で URL が入った）: solana-mpp-out なら読む（1 回）。x402 の Provider の欄は読まない（solana-out ではない）。
+    expect(railsProvidersOf(MPP_OUT, observed())).toEqual({ solanaMpp: SOL_MPP_PROVIDER });
+    expect(reads).toEqual([SOLANA_MPP_PROVIDER_ENV]);
+    reads.length = 0;
+    // URL が空（試験の差し替え）なら solana-mpp-out でも読まない。
+    expect(railsProvidersOf(MPP_OUT, observed(), { arc: "", solana: "", solanaMpp: "" })).toEqual({});
     // URL があっても送信が無効なら読まない。
     expect(railsProvidersOf(MPP_IN, observed(), { arc: "", solana: "", solanaMpp: SOL_MPP_URL })).toEqual({});
     expect(railsProvidersOf(X402_OUT, observed(), { arc: "", solana: "", solanaMpp: SOL_MPP_URL })).toEqual({});
@@ -756,13 +760,18 @@ describe("Solana の MPP の有効化（solanaMpp）: token・受取 owner・鍵
     const config = loadAsProduction(plan.config);
     expect(Object.keys(config.router.routes).sort()).toEqual(["md-mpp-eth-snapshot", "md-mpp-eth-snapshot-solmpp", "md-x402-eth-snapshot", "md-x402-eth-snapshot-solmpp"]);
     expect(Object.keys(config.router.dynamic!.profiles).sort()).toEqual(["dyn-mpp-to-x402", "dyn-solmpp-to-mpp", "dyn-solmpp-to-x402", "dyn-x402-to-mpp"]);
-    // 送信（Provider D の URL は空 → 静的 route 無し、受取 owner は読まない）: Solana の鍵が渡る。
+    // 送信（G-1″ で Provider D の URL が定数に入った → 受取 owner を読み、静的 route 2 本が出る）: Solana の鍵が渡る。受取 owner が壊れていれば config の固定文で止まる。
     const seed = SOL_SEED();
-    const outPlan = hostPlanOf({ ...options, activation: MPP_OUT }, { ...baseEnv, SUBETHA_MPP_INBOUND_SECRET: secret, [SOLANA_OUTBOUND_KEY_ENV]: seed, [SOLANA_MPP_PROVIDER_ENV]: "broken" });
+    const outPlan = hostPlanOf({ ...options, activation: MPP_OUT }, { ...baseEnv, SUBETHA_MPP_INBOUND_SECRET: secret, [SOLANA_OUTBOUND_KEY_ENV]: seed, [SOLANA_MPP_PROVIDER_ENV]: SOL_MPP_PROVIDER });
     expect(outPlan.childEnv).toMatchObject({ [RAILS_ACTIVATION_ENV]: "solana-mpp-out", [SOLANA_OUTBOUND_KEY_ENV]: seed, SUBETHA_OUTBOUND_X402_KEY: baseEnv.SUBETHA_OUTBOUND_PRIVATE_KEY });
     const outConfig = loadAsProduction(outPlan.config);
     expect(Object.keys(outConfig.router.dynamic!.profiles).sort()).toEqual(["dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-x402-to-mpp", "dyn-x402-to-solmpp"]);
-    expect(JSON.stringify(outPlan.config)).not.toContain("broken");
+    expect(Object.keys(outConfig.router.routes).sort()).toEqual(["md-mpp-eth-snapshot", "md-solmpp-eth-snapshot", "md-solmpp-eth-snapshot-mpp", "md-x402-eth-snapshot"]);
+    expect(outConfig.router.routes["md-solmpp-eth-snapshot"]?.destination.payTo).toBe(SOL_MPP_PROVIDER);
+    expect(outConfig.real?.upstreams["md-solmpp-eth-snapshot"]).toBe("https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot");
+    let brokenCaught: unknown;
+    try { hostPlanOf({ ...options, activation: MPP_OUT }, { ...baseEnv, SUBETHA_MPP_INBOUND_SECRET: secret, [SOLANA_OUTBOUND_KEY_ENV]: seed, [SOLANA_MPP_PROVIDER_ENV]: "broken" }); } catch (error) { brokenCaught = error; }
+    expect((brokenCaught as HostPlanError).code).toBe("config");
     // 受け入れ用の起動は同じ語で選べる。
     expect(acceptanceOptionsOf({}, ["--rails", "solana-mpp-in"]).activation).toEqual(MPP_IN);
     expect(acceptanceOptionsOf({}, ["--rails", "arc-in,solana-in,solana-mpp-in,solana-mpp-out"]).activation).toEqual({ arc: { inbound: true, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: true, outbound: true } });

@@ -291,7 +291,7 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
 
   test("静的 route md-arc-eth-snapshot は Provider の URL（定数）と受取先（env）がそろったときだけ。定数は配備した Provider の URL（G-1′、2026-10-08）", () => {
     expect(UPSTREAM_ARC).toBe("https://provider-x402-arc.subethalabs.com/v1/eth/snapshot");
-    expect(RAIL_UPSTREAMS).toEqual({ arc: UPSTREAM_ARC, solana: "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot", solanaMpp: "" });
+    expect(RAIL_UPSTREAMS).toEqual({ arc: UPSTREAM_ARC, solana: "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot", solanaMpp: "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot" });
     // 本番の定数 + 受取先 → route が出て、上流はその URL。
     const document = routerConfigOf({}, RECEIVER, true, OUT_ONLY);
     expect(routerOf(document).routes[ROUTE_ARC_OUT]).toBeDefined();
@@ -445,12 +445,12 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
   const SOL_MPP_URL = "https://provider-solmpp.test/v1/eth/snapshot";
   const SOLMPP_DEST = { scheme: "solana/charge", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: 6, tokenProgram: OUTBOUND_SOL.tokenProgram };
 
-  test("公開の定数: solanaMpp は両方 false（M6。G-4″ まで無効）、UPSTREAM_SOL_MPP は空（Provider D まで）。railActive は solanaMpp だけでも true。公開の設定は今までどおり route 6・プロファイル 10", () => {
+  test("公開の定数: solanaMpp は両方 false（M6。G-4″ まで無効）、UPSTREAM_SOL_MPP は配備した Provider D の URL（G-1″、2026-10-08）。railActive は solanaMpp だけでも true。公開の設定は今までどおり route 6・プロファイル 10", () => {
     expect(RAILS_ACTIVATION.solanaMpp).toEqual(OFF);
     expect(Object.isFrozen(RAILS_ACTIVATION.solanaMpp)).toBe(true);
     expect(RAILS_NONE.solanaMpp).toEqual(OFF);
-    expect(UPSTREAM_SOL_MPP).toBe("");
-    expect(RAIL_UPSTREAMS.solanaMpp).toBe("");
+    expect(UPSTREAM_SOL_MPP).toBe("https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot");
+    expect(RAIL_UPSTREAMS.solanaMpp).toBe(UPSTREAM_SOL_MPP);
     expect(railActive({ arc: OFF, solana: OFF, solanaMpp: IN })).toBe(true);
     expect(railActive({ arc: OFF, solana: OFF, solanaMpp: OUT })).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
@@ -528,7 +528,8 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
   });
 
   test("solanaMpp.outbound だけ: dyn-x402-to-solmpp と（MPP 受信があれば）dyn-mpp-to-solmpp。宛先は solana/charge・表の mint・桁・token program、feeAsset・maxFee・feeMargin は無い。手数料は MPP 送信の規則。静的 route は URL が空（定数）なので出ず、受取 owner は読まれない。Solana USDC の区分が出る", () => {
-    const rails: RailsOptions = { activation: { arc: OFF, solana: OFF, solanaMpp: OUT }, receivers: {}, providers: { solanaMpp: SOL_MPP_PROVIDER } };
+    // URL は空にして動的プロファイルだけを見る（本番の定数は G-1″ で Provider D の URL に入ったので、既定のままだと静的 route も出る: 次の行）。
+    const rails: RailsOptions = { activation: { arc: OFF, solana: OFF, solanaMpp: OUT }, receivers: {}, providers: { solanaMpp: SOL_MPP_PROVIDER }, upstreams: { arc: "", solana: "", solanaMpp: "" } };
     const document = routerConfigOf({}, RECEIVER, true, rails);
     const router = loadAsProduction(document).router;
     expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN].sort());
@@ -616,10 +617,11 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     const buckets = bucketsOf(router);
     expect(buckets.static.filter((b) => b.startsWith(OUTBOUND_SOL.network))).toHaveLength(1);
     expect(buckets.dynamic.filter((b) => b.startsWith(OUTBOUND_SOL.network))).toHaveLength(1);
-    // 公開の定数の URL（Provider D まで空）では静的の送信 2 本は出ない（受取 owner も読まれない）。
-    const production = routerOf(routerConfigOf({}, RECEIVER, true, { ...all, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER }, upstreams: RAIL_UPSTREAMS }));
-    expect(Object.keys(production.routes)).toHaveLength(8);
-    expect(production.routes[ROUTE_SOLMPP_OUT]).toBeUndefined();
+    // 公開の定数の URL（G-1″ で Provider D の URL が入った）: 受取 owner があれば静的の送信 2 本も出て 10 本、無ければ起動しない。
+    const production = routerOf(routerConfigOf({}, RECEIVER, true, { ...all, upstreams: RAIL_UPSTREAMS }));
+    expect(Object.keys(production.routes)).toHaveLength(10);
+    expect(production.routes[ROUTE_SOLMPP_OUT]?.destination.payTo).toBe(SOL_MPP_PROVIDER);
     expect(Object.keys(production.dynamic!.profiles)).toHaveLength(18);
+    expect(() => routerConfigOf({}, RECEIVER, true, { ...all, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER }, upstreams: RAIL_UPSTREAMS })).toThrow(/solana mpp outbound rail is activated with an upstream URL/);
   });
 });
