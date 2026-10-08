@@ -294,6 +294,16 @@ block・slot・finalized・転送の内容・残高は私が explorer / RPC を�
 - 終了: 04:42:01Z 受け入れを stop（exit 1 = SIGTERM、残プロセス無し）→ 公開を start → `/healthz` 200 → egress check 合格 → caddy start → 公開 `/healthz` 200 → 受け入れコンテナを rm。**公開の停止は約 7 分**。ホスト側ログは `~/g3p-acceptance-host.log`、受け入れの journal は `/var/lib/subetha-router/acceptance/journal.ndjson`。
 - AC-11 の前提（UG-A・UG-S の G-3′）は両レールとも満たした。次は G-4′（`RAILS_ACTIVATION` の `outbound` を `true` にする PR と入れ替え。owner の判断）。
 
+**G-4′ の記録（2026-10-08 05:04Z。owner の決定「進めて良いです」）**: PR #92（`24bae1a`。Codex のレビュー APPROVE WITH CHANGES の文書の訂正を反映、Linux の full suite 1773 passed）で
+`RAILS_ACTIVATION` を `{ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true } }` に。イメージ `b-24bae1a` は手元（arm64）で build して `docker save`/`load`（14 層の内容ハッシュ一致）。
+`swap-image.sh` で入れ替え: 05:04:06Z 開始、05:04:15Z 終了、exit 0、journal の先頭 95,716 バイトは不変、`subetha-egress check` 合格、子の listening 行あり、`could not start` 0 行。rollback は
+`subetha-router-prev-20261008T050406Z`（`b-f0c9f0e`。それより古い prev `b-ce7de77`・`b-4d2c925` も残っている）。起動時の検査（受信の `/supported`・ATA、送信の Provider の ATA、Tempo の probe）は本番 env で通り、
+子プロセスの env は `SUBETHA_RAILS_ACTIVATION=arc-in,arc-out,solana-in,solana-out` で Solana の送信鍵が渡っている（受取先は設定に入る。`/proc` の名前だけを見た）。
+**AC-11**: 公開 MCP を HTTPS で呼び、一覧は **route 6 本**（従来の 4 + `md-arc-eth-snapshot`・`md-sol-eth-snapshot-mpp`）・**プロファイル 10 本**（従来の 6 + `dyn-x402-to-arc`・`dyn-mpp-to-arc`・`dyn-x402-to-sol`・`dyn-mpp-to-sol`）。
+新しい 6 組は各 1 回 quote を取り（支払わない）、`subject` の network・asset・decimals・額（静的 10,000、動的は上流 10,000 + 手数料 1,000 = 11,000）、宛先の受取先（Arc `0x719e…`、Solana `4LrB…`）と `disclosures`
+（MPP の組は `fundsMoveOnCredential: true`・`awaitingPaymentDoesNotMeanUnpaid: true`）が設定どおり。動的の 4 件目の quote は入口の `rate_limited` に 1 回当たり、20 秒後の再試行で成立。
+**これで多レールの送信の rollout は完了**（Arc・Solana の受信と送信がすべて公開）。残高の運用: Router の送信資金は Arc 20 USDC・Solana 19.97 USDC（1 件 0.01 USDC。尽きれば `operator_funds_unavailable` で受信の verify の前に止まる）。
+
 **実施の記録（G-4、2026-10-07 11:03Z。owner の決定「進めて良いです」）**: PR #68（`ce7de77`）で `RAILS_ACTIVATION = { arc: true, solana: true }`。
 イメージ `b-ce7de77` は手元で作った（§6。製品のファイルは PR の最初の試験済みの commit から変えていないことを `git diff` で確かめ、読み込み済みのイメージに tag を付け直した）。
 入れ替えは `deploy/swap-image.sh`（Codex のレビュー 7 回: #1 は有効化の変更に APPROVE WITH CHANGES、#2〜#6 は script の失敗時の扱いに REJECT、#7 で APPROVE WITH CHANGES を反映。
