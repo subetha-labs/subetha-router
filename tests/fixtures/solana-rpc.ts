@@ -67,7 +67,7 @@ export interface SolanaRpcState {
    * `getTransaction` の **base64** の読み（MPP Solana 送信の領収の照合。pay-kit の server は jsonParsed で読むので影響しない）:
    * `ok`、`null`（無い）、`err`（`meta.err` あり）、`no-slot`（`slot` 無し）、`other`（登録済みの**別の**取引を返す。無ければ null）。
    */
-  transactionBase64Reply: "ok" | "null" | "err" | "no-slot" | "other";
+  transactionBase64Reply: "ok" | "null" | "err" | "no-slot" | "other" | "tamper-message" | "tamper-sig0" | "tamper-sig1";
   /** 受けた `sendTransaction` の base64（順）。 */
   sent: string[];
   /** `getTransaction` が返す transaction（署名 → 内容）。`sendTransaction` の `ok`／`already-processed` が登録し、試験が直接も置ける。 */
@@ -276,7 +276,15 @@ export async function startSolanaRpc(accounts: SolanaRpcAccounts): Promise<Solan
           reply(null, id);
           return;
         }
-        const transaction = encoding === "base64" ? [known.base64, "base64"] : parsedTransactionOf(known.base64);
+        let base64 = known.base64;
+        if (encoding === "base64" && state.transactionBase64Reply.startsWith("tamper-")) {
+          // 1 バイトだけ変える: message の末尾 / 署名 [0] の先頭 / 署名 [1] の先頭（他は同じ = その 1 点の照合だけを観測する）。
+          const bytes = Buffer.from(base64, "base64");
+          const at = state.transactionBase64Reply === "tamper-message" ? bytes.length - 1 : state.transactionBase64Reply === "tamper-sig0" ? 1 : 65;
+          bytes[at] = (bytes[at] ?? 0) ^ 0x01;
+          base64 = bytes.toString("base64");
+        }
+        const transaction = encoding === "base64" ? [base64, "base64"] : parsedTransactionOf(known.base64);
         const err = encoding === "base64" && state.transactionBase64Reply === "err" ? { InstructionError: [2, "Custom"] } : known.err;
         const result: Record<string, unknown> = { slot: known.slot, blockTime: known.blockTime, version: 0, transaction, meta: { err, fee: 5000, preBalances: [], postBalances: [], innerInstructions: [], logMessages: [], preTokenBalances: [], postTokenBalances: [], rewards: [], computeUnitsConsumed: 1 } };
         if (encoding === "base64" && state.transactionBase64Reply === "no-slot") delete result["slot"];

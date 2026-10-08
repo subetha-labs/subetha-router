@@ -417,8 +417,8 @@ describe("送出後の結果（要件 FR-53 の表。pull の列）", () => {
     }
   });
 
-  test("領収は chain の取引と照合する: getTransaction が null／err／slot 無し／別の取引 → destination_receipt_unverified（領収は正しい形でも）", async () => {
-    for (const reply of ["null", "err", "no-slot", "other"] as const) {
+  test("領収は chain の取引と照合する: getTransaction が null／err／slot 無し／別の取引／message・[0]・[1] のどれか 1 バイト違い → destination_receipt_unverified（領収は正しい形でも）", async () => {
+    for (const reply of ["null", "err", "no-slot", "other", "tamper-message", "tamper-sig0", "tamper-sig1"] as const) {
       const h = await harness();
       if (reply === "other") {
         // chain に別の取引（別の Router・別の受取人の購入）を置いておく。
