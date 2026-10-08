@@ -236,6 +236,7 @@ describe("静的 route（組み直しの署名器）", () => {
     const started = Date.now();
     expect(await pay(slow, ROUTE, (await slow.rail.readChallenge(ROUTE))[0]!)).toMatchObject({ outcome: "paid", body: { price: 1 } });
     expect(Date.now() - started).toBeGreaterThanOrEqual(5_500);
+    expect(slow.upstream.seen.payments).toHaveLength(1);
     const short = await harness({ rebuild: false, paidTimeoutMs: 300 });
     short.upstream.state.pay = () => ({ ...paidOk(short.address, { price: 1 }, ARC), delayMs: 1_000 });
     expect(await pay(short, ROUTE, (await short.rail.readChallenge(ROUTE))[0]!)).toEqual({ outcome: "unknown", reason: "destination_pay_unknown" });
