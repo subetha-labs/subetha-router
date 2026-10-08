@@ -322,7 +322,7 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
 確定を追い、確定すれば `delivered` に進む（設計 §5.8、D-9。診断 `svm_settle_followed_up` も Router の process の stderr にしか出ない。**journal では追跡で確定した settle と facilitator が直接成功を返した settle を
 区別できない**（どちらも `source_settled`）ので、hosted の Router で追跡が働いた回数は分からない。数えられるのは、受け入れ用の起動のように stderr が読める起動だけ）。
 
-### 2c-2. Arc x402 ↔ Solana x402 の組（O-5・O-6。動的プロファイルだけ）— **本番で両方向が有効（2026-10-08 の G-4⁗ から。下の記録）**
+### 2c-2. Arc x402 ↔ Solana x402 の組（O-5・O-6。動的プロファイルだけ）— **この commit で `pairs` 両方 `true`（公開に出るのは G-4⁗ の入れ替えから。入れ替えと hosted の実購入の記録は下に足す）**
 
 D-17 の決定（owner、2026-10-09 JST）: Arc USDC ↔ Solana USDC は testnet では par、公開は動的プロファイル **`dyn-arc-to-sol`**（Arc USDC/x402 で払って Solana の x402 Provider の URL へ）と
 **`dyn-sol-to-arc`**（Solana USDC/x402 で払って Arc の x402 Provider の URL へ）だけ（要件 `multirail-outbound-requirements.md` §11、設計 `multirail-outbound-design.md` §13、タスク U10・UG-P）。
