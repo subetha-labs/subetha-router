@@ -363,6 +363,15 @@ hosted では journal の `unknown` と呼び出し側への `url` の拒否と�
    公開 MCP の一覧で route +4（送信の静的 2 本は Provider D の URL と受取 owner があるとき）・プロファイル +8 を確かめ、各 1 回 quote を取る（支払わない）。
    `subject` の `fundsMoveOnCredential` は受信の MPP Solana でも `true`（別の client が `signature` 型を出せば credential の時点で動く。CLAUDE.md の開示のとおり）
 
+**G-1″ の記録（2026-10-08）**: Provider D は `providers/mpp-solana-workers/`（Cloudflare Workers。pay-kit の server を包む。設計・試験・配備は `docs/provider-mpp-solana-workers.md`、実装 PR #108、値 PR #109）。
+owner が script で鍵を作り（fee payer の seed は Worker の secret `FEE_PAYER_KEY` にだけ、受取 owner の seed は owner の file にだけ、HMAC の秘密は secret `MPP_SECRET`）、`wrangler deploy`（version `fc901ca8-521e-4be8-ba2b-82be78f3227a`、
+upload 3,051 KiB / gzip 518 KiB、起動 55 ms、custom domain `provider-mpp-sol.subethalabs.com`）。受取 owner `26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc`、fee payer `DAmvTYsraoup88EJvs3KK3gFYfofULevXVGjz2wXM5gS`（devnet SOL 1.0）、
+受取 ATA `MUbNoZ9cjg2vtwEJxbnChk315fhj1daMYEumWKDCR4S`（owner が devnet で作成、signature `3M1VCrCwHV43ATzimfzMZYApE5WL3xEz3YtWuwxedVzgo5gPp6Gk7S2TQBjHxRPAV7YvVuHwvGCmUSLDwLVgD4qm`。`getAccountInfo`（finalized）で owner・mint・Token program・`initialized` を確認）。
+**AC-PD3**: 公開 URL の未払い GET を 2 回（0.59 秒・0.67 秒）: どちらも 402、`cache-control: no-store`、`content-type: application/json`、`WWW-Authenticate` は `method="solana"`・`intent="charge"`・`realm="subetha-provider-mpp-sol"`、
+`request = { amount: "10000", currency: <devnet USDC>, recipient: 26jZd9…, methodDetails: { decimals: 6, feePayer: true, feePayerKey: DAmvTY…, network: "devnet", tokenProgram: Tokenkeg… } }`（`externalId`・`opaque` 無し）、`expires` は約 300 秒、2 回で変わるのは `id` と `expires` だけ。
+Router の候補の検査（`checkMppSolanaChallenge` に本番の運用者の集合 = Solana の受取 owner・送信鍵とその ATA・x402 Provider の受取先とその ATA）を手元で掛けて**候補**、ATA の不等式も通る。別のパス・HEAD は 404。
+この PR で `UPSTREAM_SOL_MPP` を定数に入れた（`solanaMpp.outbound` は `false` のままなので公開の経路は変わらない）。**残る owner の作業**: ホストの env に `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO=26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc` を足す（G-2″ の配備の前）。
+
 **rollback**: 定数を `false` に戻してイメージを作り直す（§2c と同じ。env は残してよい——無効なら読まれない）。
 
 **有効にした後に見るもの**（§2c の注と同じく、hosted の入口は Router の process の stderr を転送しない）: 受信の `transaction` 型で Router が送出した後に確定を観測できなかった purchase は

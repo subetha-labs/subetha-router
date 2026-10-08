@@ -175,5 +175,11 @@ pay-kit の RPC は素の `fetch`（redirect は既定、上限なし、1 回の
   送出の RPC error → Worker 402（領収なし）→ Router `unknown`、送出の後に Router が去る（期限 2 秒）→ Router `unknown`・Worker は続行して 200 + 領収（資金は動く）、
   **確定待ちの timeout（workerd の中の pay-kit、30 秒）→ 402 → Router `unknown`（45 秒の内側）**、**RPC が 45 秒超黙る → Router は 45 秒で `unknown`、chain への送出 0**、生の log に seed・秘密なし。
   外に出ない根拠: fixture・proxy・front は 127.0.0.1、wrangler の telemetry・error report・banner・Miniflare の `cf.json` の取得（`CLOUDFLARE_CF_FETCH_ENABLED=false`）は env で止め、npm の registry は閉じた loopback、子の env は親を継がない。
-- 変異: §4 の表の 21 件（`provider-d-mutations.py`。各 1 件ずつ当てて該当の suite を走らせ、commit から戻す）。結果は PR に記録。
+- 変異: §4 の表の 21 件（`provider-d-mutations.py`。各 1 件ずつ当てて該当の suite を走らせ、commit から戻す）。21 件すべて検出（PR #108）。
+- **配備と AC-PD3（2026-10-08。owner の作業）**: `npm ci` → `wrangler login` 済みの端末で `scripts/keygen-fee-payer.mjs`（secret `FEE_PAYER_KEY`。公開鍵 `DAmvTYsraoup88EJvs3KK3gFYfofULevXVGjz2wXM5gS`）、
+  `scripts/keygen-recipient.mjs`（owner の file。公開鍵 `26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc`）、`scripts/secret-new.mjs`（`MPP_SECRET`）。`wrangler.toml` の 2 値は PR #109。受取 ATA `MUbNoZ9cjg2vtwEJxbnChk315fhj1daMYEumWKDCR4S` は owner が
+  `spl-token create-account … --fee-payer ~/.config/solana/id.json`（この版の CLI は `--owner` に公開鍵を渡すと既定の signer を fee payer に拾わないので明示が要る）で作成（signature `3M1VCr…`）、fee payer に devnet SOL 1.0。
+  `wrangler deploy`: version `fc901ca8-521e-4be8-ba2b-82be78f3227a`、upload 3,051 KiB / gzip 518 KiB、起動 55 ms、custom domain `provider-mpp-sol.subethalabs.com`。
+  AC-PD3: 公開 URL の未払い GET 2 回（0.59 秒・0.67 秒）は 402・`no-store`・`application/json`、`WWW-Authenticate` の `request` は §2.1 のとおり（`externalId`・`opaque` 無し、`expires` ≈ 300 秒）、2 回で変わるのは `id` と `expires` だけ。
+  Router の候補の検査（本番の運用者の集合）で候補、ATA の不等式も通る。別のパス・HEAD は 404。`getAccountInfo`（finalized）で ATA の owner・mint・program・`initialized` を確認。Router 側は `UPSTREAM_SOL_MPP` を定数に入れた（G-2″ 以降は `docs/DEPLOY.md` §2d）。
 - 独立レビュー（実装）: §8 の表。

@@ -149,7 +149,8 @@ that (`md-solmpp-eth-snapshot`, `md-solmpp-eth-snapshot-mpp`, `dyn-*-to-solmpp`)
 approved values, reserving the message hash before signing and verifying the provider's receipt against the chain; the provider's fee payer
 broadcasts, so the Router pays no chain fee on that leg. Covered by fixture tests (real `@solana/pay-kit` client and server in the fixtures,
 in-process and child-process interruption tests) and by independent reviews per task; **no testnet purchase has been made yet** (G-3″), and the
-operator's Solana MPP provider is not deployed (`UPSTREAM_SOL_MPP` is empty).
+operator's Solana MPP provider (`providers/mpp-solana-workers/`, a Cloudflare Worker wrapping `@solana/pay-kit`'s server, `docs/provider-mpp-solana-workers.md`) was deployed on 2026-10-08 at
+`provider-mpp-sol.subethalabs.com`; its unpaid 402 passes the Router's candidate check, and `UPSTREAM_SOL_MPP` names it, but the Router's switch for the Solana MPP rails stays off.
 
 What is verified for them: fixture tests of the whole path (in-process, no chain), **one live `/verify` each** against Circle and
 x402.org with disposable keys, and the **G-3 acceptance purchases of 2026-10-07** with disposable payers in the production environment
