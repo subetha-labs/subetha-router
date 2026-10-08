@@ -347,7 +347,7 @@ export interface MppSolanaInboundOptions {
   /** RPC の 1 要求の期限（既定 10,000）。 */
   readonly rpcTimeoutMs?: number;
   readonly onDiagnostic?: (code: string) => void;
-  /** 時刻（ms。offer の期限と `signature` 型の `blockTime` の窓に）。既定 `Date.now`。 */
+  /** 時刻（ms。verify の証拠の保持の期限の掃除に）。既定 `Date.now`。 */
   readonly now?: () => number;
 }
 
@@ -356,8 +356,11 @@ export type MppSolanaInbound = InboundRail & { startup(): Promise<void> };
 export const MPP_SOLANA_SETTLE_DEADLINE_MS = 50_000;
 export const MPP_SOLANA_FOLLOW_UP_DEFAULTS = Object.freeze({ totalMs: 30_000, intervalMs: 2_000, maxPolls: 15 });
 export const MPP_SOLANA_RPC_TIMEOUT_MS = 10_000;
-/** verify が残す証拠の上限（offer の寿命より多い数。超えたら古い順に捨てる）。 */
-export const MPP_SOLANA_EVIDENCE_MAX = 1024;
+/**
+ * verify が残す証拠の保持: offer の期限の後、さらにこの猶予（core の purchase の予算 180 秒）まで。**数では捨てない**（進行中の purchase の証拠を
+ * 他の purchase の verify が押し出してはいけない。数は発行済みの offer の寿命で自然に有界）。
+ */
+export const MPP_SOLANA_EVIDENCE_GRACE_MS = 180_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -410,21 +413,20 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
    * （`signature` 型の payer は送金済み: settle での RPC の失敗や期限の経過を `rejected` = 未払いに写してはいけない。FR-47・SR-M1）。
    * 証拠が無い settle: `transaction` 型は RPC 無しの同じ検査（送出前なので `rejected` は正しい）、`signature` 型は throw（core は `unknown`）。
    */
-  type Evidence = { readonly kind: "transaction" | "signature"; readonly check: Extract<MppSolanaCheck, { ok: true }>; readonly bytes: Uint8Array };
+  type Evidence = { readonly kind: "transaction" | "signature"; readonly check: Extract<MppSolanaCheck, { ok: true }>; readonly bytes: Uint8Array; readonly keepUntilMs: number };
   const evidence = new Map<string, Evidence>();
+  /** 鍵は **offer 全体**（`stableJson`。nonce だけでなく額・externalId・routeBinding も）と wire の hash。同じ nonce で欄を変えた offer には使われない。 */
   function evidenceKeyOf(offer: InboundOffer, credential: PaymentCredential): string | undefined {
     const wire = credential.payload["credential"];
     if (typeof wire !== "string" || wire === "") return undefined;
-    return `${offer.extra.challengeNonce}|${createHash("sha256").update(wire).digest("base64")}`;
+    const hash = createHash("sha256").update(stableJson(offer)).update("\0").update(wire).digest("base64");
+    return `${offer.extra.challengeNonce}|${hash}`;
   }
-  function remember(key: string, held: Evidence): void {
-    evidence.delete(key);
-    evidence.set(key, held);
-    while (evidence.size > MPP_SOLANA_EVIDENCE_MAX) {
-      const oldest = evidence.keys().next().value;
-      if (oldest === undefined) break;
-      evidence.delete(oldest);
-    }
+  function remember(key: string, offer: InboundOffer, held: Omit<Evidence, "keepUntilMs">): void {
+    const nowMs = now();
+    // 期限の過ぎた証拠だけ捨てる（offer の期限 + 猶予）。進行中の purchase の証拠は数に関わらず残る。
+    for (const [k, v] of evidence) if (v.keepUntilMs <= nowMs) evidence.delete(k);
+    evidence.set(key, { ...held, keepUntilMs: offer.extra.expiresAt * 1000 + MPP_SOLANA_EVIDENCE_GRACE_MS });
   }
 
   /** `startup()` が埋める（受取 owner の ATA。存在・owner・mint を RPC で確かめた値）。 */
@@ -655,7 +657,7 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
       const checked = await checkCredential(offer, credential, context);
       if (!checked.ok) return { isValid: false };
       const key = evidenceKeyOf(offer, credential);
-      if (key !== undefined) remember(key, { kind: checked.kind, check: checked.check, bytes: checked.bytes });
+      if (key !== undefined) remember(key, offer, { kind: checked.kind, check: checked.check, bytes: checked.bytes });
       return { isValid: true };
     },
 
@@ -668,7 +670,9 @@ export function createMppSolanaInbound(options: MppSolanaInboundOptions): MppSol
       // `signature` 型（§3.5）: 消費済みの検査が先（RPC も証拠も要らない。再起動後の replay はここで止まる）。
       if (payload.type === "signature" && options.consumed.has(payload.signature)) return { outcome: "rejected", reason: "source_rejected" };
       const key = evidenceKeyOf(offer, credential);
-      let held = key === undefined ? undefined : evidence.get(key);
+      let held: Omit<Evidence, "keepUntilMs"> | undefined = key === undefined ? undefined : evidence.get(key);
+      // 証拠は 1 回の settle で使い切る（同じ purchase の settle は core の lock で 1 回）。
+      if (key !== undefined) evidence.delete(key);
       if (held === undefined) {
         if (payload.type === "signature") {
           // verify の証拠が無い `signature` 型は判定しない（payer は送金済みかもしれない。core は `unknown` に写す）。

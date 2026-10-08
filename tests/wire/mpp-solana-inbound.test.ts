@@ -23,6 +23,7 @@ import { Challenge, Credential } from "mppx";
 import {
   ConsumedSignaturesHolder,
   createMppSolanaInbound,
+  MPP_SOLANA_EVIDENCE_GRACE_MS,
   MPP_SOLANA_FOLLOW_UP_DEFAULTS,
   MPP_SOLANA_RPC_TIMEOUT_MS,
   MPP_SOLANA_SCHEME,
@@ -183,6 +184,7 @@ describe("MPP Solana 受信: 起動時の検査（設計 §3.1）", () => {
     expect(MPP_SOLANA_SETTLE_DEADLINE_MS).toBe(50_000);
     expect(MPP_SOLANA_FOLLOW_UP_DEFAULTS).toEqual({ totalMs: 30_000, intervalMs: 2_000, maxPolls: 15 });
     expect(MPP_SOLANA_RPC_TIMEOUT_MS).toBe(10_000);
+    expect(MPP_SOLANA_EVIDENCE_GRACE_MS).toBe(180_000);
   });
 });
 
@@ -290,14 +292,24 @@ describe("MPP Solana 受信: transaction 型（pay-kit の client の既定）�
     expect(b.since(mark2).map((c) => c.method)).toEqual(["sendTransaction", "getSignatureStatuses"]);
   });
 
-  it("verify の証拠は offer の nonce と wire に束縛される: 別 offer の nonce の下では使われない（RPC 無しの再検査で rejected）", async () => {
+  it("verify の証拠は offer 全体と wire に束縛される: 別 offer の nonce の下でも、同じ nonce で額・externalId・routeBinding を変えた写しの下でも使われない（RPC 無しの再検査で rejected）", async () => {
     const b = await boot();
     const offer = await issue(b.rail);
     const credential = await b.payer.credentialFor(offer);
     expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
     const other = await issue(b.rail);
     expect(await b.rail.settle(other, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    for (const copy of [{ ...offer, amount: "1" }, { ...offer, extra: { ...offer.extra, externalId: "x" } }, { ...offer, extra: { ...offer.extra, routeBinding: "other%7CGET%7C%2Fx" } }] as InboundOffer[]) {
+      expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+      expect(await b.rail.settle(copy, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    }
     expect(b.rpc.state.sent).toEqual([]);
+    // 証拠は 1 回の settle で使い切る: 同じ credential の 2 回目の settle（transaction 型）は RPC 無しの再検査を経てもう一度送出できる（重複の防御は core の journal）。
+    b.rpc.state.signatureStatuses = ["confirmed"];
+    expect(await b.rail.verify(offer, credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    expect(await b.rail.settle(offer, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: signatureOfCredential(credential) });
+    expect(await b.rail.settle(offer, credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: signatureOfCredential(credential) });
+    expect(b.rpc.state.sent).toHaveLength(2);
   });
 });
 
@@ -491,6 +503,33 @@ describe("MPP Solana 受信: signature 型（payer が送出済み。push）", (
     expect(await short.rail.verify(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
     await new Promise((resolve) => setTimeout(resolve, 1_100));
     expect(await short.rail.settle(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: q.signature });
+  });
+
+  it("証拠は数では押し出されない: verify の後に他の purchase の verify が多数あっても、その signature 型の settle は RPC 無しで settled。同じ nonce で欄を変えた写しの下では throw", async () => {
+    const b = await boot({ bound: new Set() });
+    const p = await pushed(b);
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    for (let i = 0; i < 40; i += 1) {
+      const other = await issue(b.rail);
+      expect(await b.rail.verify(other, await b.payer.credentialFor(other), { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    }
+    await b.rpc.close();
+    await expect(b.rail.settle({ ...p.offer, amount: "1" }, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
+    const mark = b.mark();
+    expect(await b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: p.signature });
+    expect(b.since(mark)).toEqual([]);
+    // 使い切った証拠: もう一度は判定しない。
+    await expect(b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
+  }, 30_000);
+
+  it("期限の過ぎた証拠は捨てられる（offer の期限 + 猶予）: 猶予の後の settle は throw。猶予の中なら settled", async () => {
+    const b = await boot({ bound: new Set(), extra: { maxTimeoutSeconds: 1, now: () => Date.now() + 1_000 + MPP_SOLANA_EVIDENCE_GRACE_MS + 1_000 } });
+    // adapter の `now` を offer の期限 + 猶予の先に置く（verify の時点で既に保持の期限を過ぎている → 次の verify の掃除で消える）。
+    const p = await pushed(b);
+    expect(await b.rail.verify(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    const other = await issue(b.rail);
+    expect(await b.rail.verify(other, await b.payer.credentialFor(other), { routeId: ROUTE_ID })).toEqual({ isValid: true });
+    await expect(b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).rejects.toThrow(/without a prior verify/);
   });
 
   it("verify の証拠の無い settle（signature 型）は判定しない → throw（core は source_settle_unknown）。消費済みなら証拠が無くても rejected（RPC 無し）", async () => {
