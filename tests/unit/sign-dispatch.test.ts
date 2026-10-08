@@ -88,10 +88,13 @@ describe("classifyOffer: MPP（Tempo）の nonce は mppx の challenge の id�
     expect(classifyOffer(reissue({}, { id: MPP_ID }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge id is not the offer's challengeNonce/) });
     expect(classifyOffer(reissue({}, { expires: new Date(NOW - 1).toISOString() }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challenge has expired/) });
     expect(classifyOffer(reissue({ splits: [{ recipient: RECEIVER, amount: "1" }] }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/splits/) });
+    // SDK が読む置き場は `methodDetails.splits`（readback 1 の指摘）。
+    expect(classifyOffer(reissue({ methodDetails: { ...(decoded.request["methodDetails"] as Record<string, unknown>), splits: [{ recipient: RECEIVER, amount: "1" }] } }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/splits/) });
     // 同じ判定を payer（`tools/mpp-payer.ts`）が送金の直前にも行う: 中身が違えば client を作る前に throw（RPC には触れない）。
     const payer = createMppPayer(`0x${"11".repeat(32)}`, { chainId: 42431, asset: PATHUSD, payTo: RECEIVER, maxAmount: 20_000n }, { rpcUrl: "http://127.0.0.1:1" });
     await expect(payer.payAndCredential(reissue({ amount: "20000" }) as never)).rejects.toThrow(/challenge amount differs/);
     await expect(payer.payAndCredential(reissue({ recipient: "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2" }) as never)).rejects.toThrow(/challenge recipient differs/);
+    await expect(payer.payAndCredential(reissue({ methodDetails: { ...(decoded.request["methodDetails"] as Record<string, unknown>), splits: [{ recipient: RECEIVER, amount: "1" }] } }) as never)).rejects.toThrow(/splits/);
     expect(classifyOffer(evm({}, { challengeNonce: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challengeNonce/) });
     expect(classifyOffer(svm({}, { challengeNonce: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0", memo: "M8hhq4HKvRwjmpWVozQ7ueKf2WIvNJdUw7PSyZ4nTU0" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/challengeNonce/) });
   });
@@ -205,6 +208,7 @@ describe("classifyOffer: MPP の Solana（solana/charge → mpp-svm）", () => {
     ["challenge の feePayer が true（push）", solmpp({}, {}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: true } }), /feePayer must be false/],
     ["challenge の feePayer 無し", solmpp({}, {}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" } }), /feePayer must be false/],
     ["challenge に splits", solmpp({}, {}, { splits: [{ recipient: OWNER, amount: "1" }] }), /splits/],
+    ["challenge の methodDetails に splits", solmpp({}, {}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: false, splits: [{ recipient: OWNER, amount: "1" }] } }), /splits/],
     ["challenge に feePayerKey", solmpp({}, {}, { feePayerKey: OWNER }), /fee payer key or a blockhash/],
     ["challenge に recentBlockhash", solmpp({}, {}, { recentBlockhash: "7DAVM6c3cj1Y1a2vZkYRgTqZEQezrgQVymKZx8oarbrD" }), /fee payer key or a blockhash/],
     ["challenge の methodDetails に feePayerKey（mppx の置き場）", solmpp({}, {}, { methodDetails: { network: "devnet", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", feePayer: false, feePayerKey: OWNER } }), /fee payer key or a blockhash/],

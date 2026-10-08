@@ -59,9 +59,10 @@ export function checkTempoChallenge(serialized: string, offer: { amount: string;
   if (request["amount"] !== offer.amount) return { ok: false, reason: "the challenge amount differs from the offer" };
   if (typeof request["currency"] !== "string" || request["currency"].toLowerCase() !== offer.asset.toLowerCase()) return { ok: false, reason: "the challenge currency differs from the offer's asset" };
   if (typeof request["recipient"] !== "string" || request["recipient"].toLowerCase() !== offer.payTo.toLowerCase()) return { ok: false, reason: "the challenge recipient differs from the offer's payTo" };
-  if ("splits" in request) return { ok: false, reason: "the challenge carries splits (not supported)" };
   const details = request["methodDetails"];
   if (!isRecord(details) || details["chainId"] !== chainId) return { ok: false, reason: "the challenge chain differs from the offer's network" };
+  // `splits` は mppx の形では `methodDetails` の下（SDK はそこを読む）。request の直下にあっても拒む。
+  if ("splits" in request || "splits" in details) return { ok: false, reason: "the challenge carries splits (not supported)" };
   return { ok: true };
 }
 

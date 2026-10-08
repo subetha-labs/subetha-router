@@ -73,9 +73,10 @@ export function checkSvmMppChallenge(serialized: string, offer: { amount: string
     return { ok: false, reason: "the challenge has no usable externalId (the Memo)" };
   }
   if (externalId !== offer.extra["externalId"]) return { ok: false, reason: "the challenge externalId differs from the offer" };
-  if ("splits" in request) return { ok: false, reason: "the challenge carries splits (not supported)" };
   const details = request["methodDetails"];
   if (!isRecord(details)) return { ok: false, reason: "the challenge has no methodDetails" };
+  // `splits` は request の直下でも `methodDetails` の下（pay-kit / mppx の置き場）でも拒む。
+  if ("splits" in request || "splits" in details) return { ok: false, reason: "the challenge carries splits (not supported)" };
   // protocol の欄は request の直下にも methodDetails にも置かれ得る（mppx の形は後者）。どちらにあっても拒む（この builder は読まないが、約束した拒否は完全に）。
   if ("feePayerKey" in request || "recentBlockhash" in request || "feePayerKey" in details || "recentBlockhash" in details) {
     return { ok: false, reason: "the challenge names a fee payer key or a blockhash (not a pull charge)" };
