@@ -106,6 +106,7 @@ M2 → M3-a の後は **M3-b と M4-a** が並行できる（M4-a は M3-a の s
 - **G-2″**（親）: `solanaMpp` 無効のまま配備（イメージの入れ替えの手順は `docs/DEPLOY.md` §2c のとおり）
 - **G-3″**（親。資金が動く = 両レグの testnet の資産。owner の確認は不要 = 2026-10-08 の決定）: 公開を止めて受け入れ用の起動で、受信 S-5 は I-1 の静的と動的・I-3 か I-4 の動的を各 1 件、送信 S-6 は O-7 の静的と動的・O-9 か O-10 の動的を各 1 件。証拠は要件 AC-17（両レグの tx・finalized・ATA の増分・Provider の本文・client の結果・`status` の再読取・再起動後も同じ）。**D-30 の 45 秒の実測**（U-13）。固定した commit・イメージに対して 1 度。途中で入口・文書の PR を取り込んだら G-2″ からやり直す
 - **G-4″**（親）: 方向別に `true` の PR → 配備（`startup` の検査が通ること）→ AC-18（公開 MCP の一覧と各組 1 回の quote。支払わない）。CLAUDE.md の表と一致。G-3″ の後に入口を変える PR が入っていれば、G-4″ の前に受け入れ用の起動の `startup` と有効化した組の quote を繰り返す（購入は繰り返さない）
+- **記録（2026-10-08）**: G-1″（Provider D = `providers/mpp-solana-workers/`、Cloudflare Workers、PR #107〜#111）、G-2″（`b-c73936d` → 修正後 `b-8c36c82`）、G-3″（2 回目で 6 件 delivered、AC-17 を満たす）は完了。1 回目で見つかった本番だけの差 2 つ（公開 devnet RPC が Cloudflare を拒む、pay-kit の `recentBlockhash` の hint が `terms` に入っていた）は `docs/DEPLOY.md` §2d と設計 §13。残るは G-4″（owner の判断）
 - **記録**: `docs/DEPLOY.md` §2d。鍵・URL は書かない
 
 ## 3. 要件・設計との対応（**1 項目 1 主担当**。補助は別の層の試験）

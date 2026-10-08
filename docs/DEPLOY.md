@@ -383,7 +383,28 @@ Router の候補の検査（`checkMppSolanaChallenge` に本番の運用者の�
 送信 S-6 の 1 件目 `md-solmpp-eth-snapshot` は **`unknown`（`destination_pay_unknown`）**: 受信の Base の支払い（`0x09d3…`）は settle、Provider D は 402（領収なし）を返し、送信レグの資金は動いていない。
 原因は 2 つ（どちらも Router・Provider のコードの検証では見えなかった本番の差）: (1) Provider D の Worker から公開 devnet RPC への要求が遮断されていた（`docs/provider-mpp-solana-workers.md` §7 U-P3。owner が Alchemy の RPC を secret に入れて解決）、
 (2) RPC が答えると pay-kit の 402 は **`recentBlockhash` の hint を 402 ごとに新しく**入れ、Router の `terms` がそれを含んでいたため購入時の読み直しが一致せず `destination_offer_changed`（not_sent）になる（設計 §13。Router の修正 PR の番号はこの下の記録）。
-公開の停止は約 6 分（15:01:00Z〜15:06:57Z）。固定した commit・イメージに対して 1 度、の規則どおり、修正を含むイメージで G-2″ から繰り返す。
+公開の停止は約 6 分（15:01:00Z〜15:06:57Z）。固定した commit・イメージに対して 1 度、の規則どおり、修正を含むイメージで G-2″ から繰り返した（下）。Router の修正は PR #113（Codex APPROVE、Linux 2017 pass、workerd の受け入れ 8/8）。
+
+**G-2″ の 2 回目（2026-10-08 15:23Z）**: main `8c36c82`（PR #113 まで。`solanaMpp` は両方 `false` のまま）のイメージ `b-8c36c82`（手元で build、14 層の内容ハッシュ一致）を `swap-image.sh` で入れ替え: 15:23:37Z 開始、15:23:47Z 終了、exit 0、
+journal の先頭不変、`subetha-egress check` 合格、公開 `/healthz` ok、子の listening 行あり、`could not start` 0 行。rollback は `subetha-router-prev-20261008T152337Z`（`b-c73936d`）。コンテナは healthy、公開の一覧は route 6・プロファイル 10 のまま、
+子の env は `arc-in,arc-out,solana-in,solana-out` で `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO` は渡っていない。
+
+**G-3″ の 2 回目（2026-10-08 15:25Z〜15:27Z。owner の決定「進めてください」）— AC-17 を満たした**: 公開の Router を止め、受け入れ用の起動（`b-8c36c82`、`--rails` 6 語。起動 11 秒、一覧は route 10・プロファイル 18）で **6 件すべて delivered**。
+credential は受信 3 件・送信 3 件とも `tools/sign-run.ts`（= `npm run sign` の本体）で作成（MPP Solana は全署名だけ、Tempo MPP は送金、Base x402 は署名だけ）:
+
+| # | 行 | 経路 | 受信の tx | Router → Provider の tx | 所要 |
+|---|---|---|---|---|---|
+| 1 | I-1 静的 | `md-x402-eth-snapshot-solmpp`（Solana USDC/MPP 10,000 → Provider A/x402） | Solana `3BWahhq…`（finalized、slot 508861249、受取 ATA へ 10,000） | Base `0xb37a00…` | 4.7 秒 |
+| 2 | I-1 動的 | `dyn-solmpp-to-x402`（11,000 → Provider A の URL） | Solana `59ZL3tk…`（finalized） | Base `0xd550e7…` | 4.6 秒 |
+| 3 | I-3 動的 | `dyn-solmpp-to-mpp`（11,000 → Provider B の URL） | Solana `4Dz35xx…`（finalized） | Tempo `0x784374…` | 5.1 秒 |
+| 4 | O-7 静的 | `md-solmpp-eth-snapshot`（Base USDC 10,000 → Provider D/MPP） | Base `0x7c7734…` | Solana `5Ghsrjy…`（finalized、slot 508861361、Provider D の ATA へ 10,000。領収の `reference` と一致） | 8.3 秒 |
+| 5 | O-7 動的 | `dyn-x402-to-solmpp`（11,000 → Provider D の URL） | Base `0xf4ef06…` | Solana `4xWce26…`（finalized） | 4.8 秒 |
+| 6 | O-9 動的 | `dyn-mpp-to-solmpp`（Tempo pathUSD 11,000 → Provider D の URL） | Tempo `0x1f5d8d…` | Solana `2xNuA9h…`（finalized） | 4.2 秒 |
+
+証拠: 6 件の Solana の取引は `getSignatureStatuses(searchTransactionHistory)` で **finalized・err なし**、`getTransaction` の `transferChecked` は額・mint・宛先 ATA が設定どおり。ATA の増分: Router の受取 ATA `Hnuscu…` 0 → **0.03** USDC（受信 3 件）、Provider D の受取 ATA `MUbNo…` 0 → **0.03**（送信 3 件）、Router の送信 ATA `2mpw…` 19.97 → **19.94**。
+Provider の本文は 6 件とも契約の形（Provider D は `payment.protocol: "mpp"`）。`proof.upstreamReceipt: "claimed"`・`onChainFinality: "not_checked"`。`status` の再読取は 6 件とも purchase と同じ、**受け入れ用の Router を再起動した後も同じ**（journal の復元）。
+U-13: Provider D の確定待ちを含む送信の所要は 4.2〜8.3 秒（45 秒の内側。pay-kit の 30 秒の確定待ちは一度も尽きていない）。公開の停止は約 2.5 分（15:25:06Z〜15:27:32Z）。終了後は公開の Router を戻し、`/healthz`・`subetha-egress check`・公開の一覧（route 6・プロファイル 10）を確認。
+`wrangler tail` を owner が流していたので Provider D の 3 件の受け付けは Worker の log でも見えた。**次は G-4″（owner の判断）**。
 
 **rollback**: 定数を `false` に戻してイメージを作り直す（§2c と同じ。env は残してよい——無効なら読まれない）。
 

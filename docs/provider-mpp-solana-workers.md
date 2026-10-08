@@ -182,4 +182,7 @@ pay-kit の RPC は素の `fetch`（redirect は既定、上限なし、1 回の
   `wrangler deploy`: version `fc901ca8-521e-4be8-ba2b-82be78f3227a`、upload 3,051 KiB / gzip 518 KiB、起動 55 ms、custom domain `provider-mpp-sol.subethalabs.com`。
   AC-PD3: 公開 URL の未払い GET 2 回（0.59 秒・0.67 秒）は 402・`no-store`・`application/json`、`WWW-Authenticate` の `request` は §2.1 のとおり（`externalId`・`opaque` 無し、`expires` ≈ 300 秒）、2 回で変わるのは `id` と `expires` だけ。
   Router の候補の検査（本番の運用者の集合）で候補、ATA の不等式も通る。別のパス・HEAD は 404。`getAccountInfo`（finalized）で ATA の owner・mint・program・`initialized` を確認。Router 側は `UPSTREAM_SOL_MPP` を定数に入れた（G-2″ 以降は `docs/DEPLOY.md` §2d）。
+- **本番の有料要求（G-3″、2026-10-08）**: 1 回目は 2 つの本番だけの差で 402（§7 U-P3 の RPC の遮断 → owner が Alchemy の RPC を secret に。Router 側の `terms` が pay-kit の `recentBlockhash` の hint を含んでいた → PR #113）。
+  2 回目（15:25Z〜15:27Z）は Router からの **3 件がすべて 200 + `Payment-Receipt`**（静的 `md-solmpp-eth-snapshot`、動的 `dyn-x402-to-solmpp`、動的 `dyn-mpp-to-solmpp`。Worker の fee payer が共同署名して送出した取引 `5Ghsrjy…`・`4xWce26…`・`2xNuA9h…` は devnet で finalized、
+  受取 ATA は 0 → 0.03 USDC、Router は領収の `reference` を chain で照合して `paid`）。Router 側の所要は 4.2〜8.3 秒（pay-kit の確定待ちは 30 秒に達していない）。AC-PD3 の有料要求の部分はこれで満たした。
 - 独立レビュー（実装）: §8 の表。
