@@ -7,7 +7,7 @@
  * **gate**: `PROVIDER_WORKER_AC=1` のときだけ走る（`providers/x402-workers/node_modules` の wrangler が要る。Linux の suite では skip）。
  * 外には出ない: fixture は全部 127.0.0.1。Worker（平文 http）と TLS の fixture の間は、この試験が立てる proxy が結ぶ:
  *   Router ──TLS(arc.provider.test)──▶ front ──http──▶ wrangler dev ──http──▶ proxy ──TLS──▶ Circle fixture
- * wrangler 自身の外向きの通信（telemetry・error report・banner の npm の更新確認）は env で止める。
+ * wrangler 自身の外向きの通信（telemetry・error report・banner の npm の更新確認）は env で止め、残る更新確認の経路のために npm の registry を閉じた loopback に向ける。
  * 鍵: Arc の売り手鍵は試験が乱数で作り、0600 の一時ファイル（`--env-file`）で渡して終わりに消す。何も出力しない。
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -174,13 +174,16 @@ interface Worker {
 async function startWorker(env: "arc" | "sol", publicHost: string, vars: Record<string, string>, envFile: string | undefined, secrets: string[], closers: Array<() => Promise<void>>): Promise<Worker> {
   const port = await freePort();
   const inspectorPort = await freePort();
+  const deadPort = await freePort(); // 誰も listen していない（接続は拒否される）
   // `--local-upstream` + `--upstream-protocol https`: Worker が見る `request.url` の origin を本番と同じ形（https://<host>）にする。
   // Router は 402 の `resource.url` を canonical URL と完全一致で束縛するので、ここが違えば候補にならない。
   const args = ["dev", "--env", env, "--port", String(port), "--ip", "127.0.0.1", "--inspector-port", String(inspectorPort), "--local-upstream", publicHost, "--upstream-protocol", "https", "--show-interactive-dev-session=false", "--log-level", "log"];
   for (const [key, value] of Object.entries(vars)) args.push("--var", `${key}:${value}`);
   if (envFile !== undefined) args.push("--env-file", envFile);
-  // wrangler 自身の外向きの通信を止める: telemetry、error report、banner（npm の更新確認はここから出る）。
-  const childEnv = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true" };
+  // wrangler 自身の外向きの通信を止める: telemetry、error report、banner（通常の経路の npm の更新確認はここから出る）。
+  // 警告・エラーの経路に残る更新確認（設定の未知の欄、compatibility date の fallback、起動の失敗）も外に出ないように、
+  // npm の registry を**閉じた loopback のポート**に向ける（wrangler の update-check は `rc("npm")` 経由で `npm_config_registry` を読む）。
+  const childEnv = { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_SEND_ERROR_REPORTS: "false", WRANGLER_HIDE_BANNER: "true", CI: "true", npm_config_registry: `http://127.0.0.1:${deadPort}/` };
   const child: ChildProcess = spawn(WRANGLER, args, { cwd: PACKAGE_DIR, detached: true, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
   let raw = "";
   let spawnError: Error | undefined;
@@ -188,8 +191,9 @@ async function startWorker(env: "arc" | "sol", publicHost: string, vars: Record<
   child.stdout?.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
   child.stderr?.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
   const stop = async (): Promise<void> => {
-    if (child.pid === undefined || child.exitCode !== null) return;
-    try { process.kill(-child.pid, "SIGTERM"); } catch { /* 既に終わっている */ }
+    // leader が終わっていても process group（workerd 等の子孫）が残りうるので、pid があれば必ず group ごと止める。
+    if (child.pid === undefined) return;
+    try { process.kill(-child.pid, "SIGTERM"); } catch { /* group が既に無い */ }
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     try { process.kill(-child.pid, "SIGKILL"); } catch { /* 既に終わっている */ }
   };
