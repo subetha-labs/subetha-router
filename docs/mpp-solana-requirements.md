@@ -154,7 +154,7 @@
 - G-2″ 無効のまま配備 → G-3″ 受け入れの購入（公開を止めて単独起動。owner の承認。AC-17）→ G-4″ 方向別に `true`（AC-18）。
 - Provider D（devnet の MPP Solana の Provider。pay-kit の server。Workers の fetch handler か Node かは設計で決め、owner が配備）。
 
-## 9. owner に決めてもらうこと（推奨つき）
+## 9. owner の決定（2026-10-08「推奨する形で進めるで良いです」= D-18〜D-27 をすべて推奨のとおり採用）
 
 | # | 問い | 推奨 |
 |---|---|---|
