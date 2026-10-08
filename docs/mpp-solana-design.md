@@ -7,6 +7,8 @@
 > 追跡の予算は SR-M1 のまま（follow-up の開始から 30 秒・15 回）、`blockTime` の窓は FR-47 のまま、store の bind は `createRouterCore` の callback、受信の `startup()` の登録、送信は SDK が選んだ `prepared.challenge` を承認値と照合し**hook が返した credential を復号して再検査**、送出の直前に blockhash の経過時間、`challengeId` は必須、
 > `assertDynamicMppCapability` にも絞ったプロファイル、purchase の cap の検査は残して見積りだけ飛ばす、受取 owner の述語を x402 と MPP で分ける、`z` は `mppx` の export、pay-kit の `mppx` は `overrides` で 0.13.x に固定。
 >
+> **owner の承認**: 2026-10-08「どちらも勧めて良いです」（PR #96）。
+>
 > 第 3 版（readback #1、§12）: `source_settled` の追記の失敗は core が捕まえて `unknown`（`source_settle_unknown`）を返す（§2.3。FR-48 の表のとおり。静的・動的）、§3.5 の verify は型別に署名者を得てから ATA を導く、§3.6 の preflight の行に `signature` 型の既払を明記、§5.2 の helper の回数の上限、simulate の応答は JSON-RPC の `result` の中。
 > 本書の中で「x402 SVM 送信」は `src/adapters/outbound/x402-svm.ts`、「x402 SVM 受信」は `src/adapters/inbound/x402-svm.ts`、「Tempo 受信」は `src/adapters/inbound/mpp.ts`、「Tempo 送信」は `src/adapters/outbound/mpp.ts`。
 
