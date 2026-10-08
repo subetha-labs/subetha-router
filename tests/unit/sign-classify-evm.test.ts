@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import ts from "typescript";
 import { describe, expect, test } from "vitest";
 
 import { KNOWN_NETWORKS, type KnownNetwork } from "../../src/shared/networks.js";
@@ -88,26 +89,38 @@ describe("classifyEvmOffer: x402 の EVM だけ", () => {
 });
 
 /**
- * 1 つの TypeScript の source から module の指定子を全部取り出す（静的 import / re-export、副作用 import、`import()`、`require()`。
- * 引用符は `"`・`'`・backtick）。コメントは先に落とす。**リテラルでない `import(`・`require(` は検査できないので例外**にする（動的な読み込みは拒む）。
- * 型だけの import も数える（実行時には消えるが、保守的に「依存」とみなす）。
+ * 1 つの TypeScript の source から module の指定子を全部取り出す（TypeScript の compiler API で AST を辿る。コメント・文字列の中は構文上の import ではないので拾わない）。
+ * 拾うもの: `import … from`、副作用の `import "x"`、`export … from`、`import x = require("x")`、`import("x")`、`require("x")`（どの引用符でも。補間の無い backtick も）。
+ * **指定子がリテラルでない `import(…)` / `require(…)`（識別子・補間つきテンプレート）は検査できないので例外**にする。型だけの import も数える（保守的）。
  */
 export function specifiersOf(source: string): string[] {
-  const text = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
-  const found: string[] = [];
-  const quoted = String.raw`(["'\`])([^"'\`\n]+)\1`;
-  const patterns = [
-    new RegExp(String.raw`\b(?:import|export)\b[^;'"\`]*?\bfrom\s*` + quoted, "g"),
-    new RegExp(String.raw`\bimport\s*` + quoted, "g"),
-    new RegExp(String.raw`\bimport\s*\(\s*` + quoted + String.raw`\s*\)`, "g"),
-    new RegExp(String.raw`\brequire\s*\(\s*` + quoted + String.raw`\s*\)`, "g"),
-  ];
-  for (const pattern of patterns) for (const match of text.matchAll(pattern)) found.push(match[2]!);
-  for (const match of text.matchAll(/\b(?:import|require)\s*\(\s*([^)]*)\)/g)) {
-    const argument = match[1]!.trim();
-    if (!/^(["'\`])[^"'\`\n]+\1$/.test(argument)) throw new Error(`dynamic module loading with a non-literal specifier is not allowed: ${match[0]}`);
-  }
-  return [...new Set(found)];
+  const sourceFile = ts.createSourceFile("probe.ts", source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const found = new Set<string>();
+  const literalOf = (node: ts.Node | undefined): string | undefined =>
+    node !== undefined && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) ? node.text : undefined;
+  const visit = (node: ts.Node): void => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined) {
+      const spec = literalOf(node.moduleSpecifier);
+      if (spec === undefined) throw new Error(`module specifier is not a string literal: ${node.getText(sourceFile)}`);
+      found.add(spec);
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      const spec = literalOf(node.moduleReference.expression);
+      if (spec === undefined) throw new Error(`dynamic module loading with a non-literal specifier is not allowed: ${node.getText(sourceFile)}`);
+      found.add(spec);
+    } else if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(callee) && callee.text === "require";
+      if (isDynamicImport || isRequire) {
+        const spec = literalOf(node.arguments[0]);
+        if (spec === undefined) throw new Error(`dynamic module loading with a non-literal specifier is not allowed: ${node.getText(sourceFile)}`);
+        found.add(spec);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return [...found];
 }
 
 /** 相対 import を辿って、module の集合に外部パッケージ `mppx`・`@solana/*` が無いことを見る（静的な import graph の検査）。 */
@@ -144,28 +157,34 @@ describe("P-0: import graph", () => {
     expect(graph.files.map((f) => path.relative(path.resolve(import.meta.dirname, "../.."), f)).sort()).toEqual(["src/shared/networks.ts", "tools/sign-classify-evm.ts"]);
   });
 
-  test("specifiersOf: 二重引用符・一重引用符・backtick、副作用 import、import()、require()、re-export、型だけの import、コメントの中は無視、サブパス", () => {
+  test("specifiersOf（AST）: 二重引用符・一重引用符・backtick、副作用 import、import()、require()、import = require、re-export、型だけの import、コメントの中は拾わない、文字列の中のコメント記号は import を隠さない", () => {
     const source = [
       'import { a } from "./a.js";',
       "import b from './b.js';",
+      "import c from `./c.js`;",
       "import 'side-effect';",
-      'export { c } from "pkg-c";',
-      "export * from 'pkg-d';",
-      "const e = await import('mppx/client');",
-      'const f = require("@solana/kit");',
-      'import type { G } from "type-only";',
+      'export { d } from "pkg-d";',
+      "export * from 'pkg-e';",
+      "const f = await import('mppx/client');",
+      'const g = require("@solana/kit");',
+      "const h = require(`@solana-program/token`);",
+      'import i = require("pkg-i");',
+      'import type { J } from "type-only";',
       '// import { x } from "commented-out";',
       '/* import { y } from "block-commented"; */',
-      "const text = 'not an import';",
+      'const text = "not an import";',
+      'const open = "/*"; import "mppx"; const close = "*/";',
     ].join("\n");
-    expect(specifiersOf(source).sort()).toEqual(["./a.js", "./b.js", "@solana/kit", "mppx/client", "pkg-c", "pkg-d", "side-effect", "type-only"].sort());
+    expect(specifiersOf(source).sort()).toEqual(["./a.js", "./b.js", "./c.js", "@solana-program/token", "@solana/kit", "mppx", "mppx/client", "pkg-d", "pkg-e", "pkg-i", "side-effect", "type-only"].sort());
     expect(["mppx", "mppx/client", "@solana/kit", "@solana-program/token"].every(isForbidden)).toBe(true);
     expect(["viem", "mppxish", "@solanaX/y"].some(isForbidden)).toBe(false);
   });
 
-  test("specifiersOf: リテラルでない import()・require() は検査できないので拒む", () => {
+  test("specifiersOf: リテラルでない import()・require()（識別子・補間つきテンプレート）は検査できないので拒む", () => {
     expect(() => specifiersOf("const m = await import(name);")).toThrow(/non-literal/);
     expect(() => specifiersOf("const m = require(process.env.X);")).toThrow(/non-literal/);
+    expect(() => specifiersOf("const n = 'mppx'; const m = await import(`${n}`);")).toThrow(/non-literal/);
+    expect(() => specifiersOf("const m = require(`@solana/${'kit'}`);")).toThrow(/non-literal/);
   });
 
   test("sign-dispatch.ts（全レール）は今までどおり mppx と Solana の検査を持つ", () => {
