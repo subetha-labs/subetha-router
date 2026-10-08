@@ -8,7 +8,8 @@
  * seed の形は Router の `wallet:new:solana` と同じ（base58 の 32 バイト）。Provider は受け取るだけなので、この鍵を Worker に置かない。
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { ed25519 } from "@noble/curves/ed25519";
 import { getAddressDecoder, getBase58Decoder } from "@solana/kit";
 
@@ -21,6 +22,8 @@ if (existsSync(target)) {
   process.stderr.write("refusing to overwrite an existing file\n");
   process.exit(1);
 }
+// 親ディレクトリが無ければ owner だけが読める mode で作る（無いまま書こうとして ENOENT で落ちていた）。
+mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
 const seed = new Uint8Array(randomBytes(32));
 const publicKey = getAddressDecoder().decode(ed25519.getPublicKey(seed));
 writeFileSync(target, `${getBase58Decoder().decode(seed)}\n`, { mode: 0o600, flag: "wx" });
