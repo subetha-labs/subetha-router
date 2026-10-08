@@ -37,7 +37,9 @@ try {
       ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required\n"
       : code === "rails"
         ? "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)\n"
-        : "router process capabilities could not be created\n",
+        : code === "solana_key"
+          ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail is activated\n"
+          : "router process capabilities could not be created\n",
   );
   process.exit(2);
 }

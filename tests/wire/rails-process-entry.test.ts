@@ -13,7 +13,8 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { runToExit } from "../fixtures/loopback.js";
-import { RAILS_ACTIVATION_ENV } from "../../tools/rails-entry.js";
+import { RAILS_ACTIVATION_ENV, SOLANA_OUTBOUND_KEY_ENV } from "../../tools/rails-entry.js";
+import { getBase58Decoder } from "@solana/kit";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
 import { INBOUND, ROUTE, ROUTE_ARC, ROUTE_MPP_IN, routerConfigOf } from "../../tools/remote-mcp-config.js";
 
@@ -99,6 +100,27 @@ describe("Router の process: 有効化の値は内部の env から、能力は
     expect(result.stderr).not.toMatch(PROBE_FAILED);
     expect(result.stdout + result.stderr).not.toContain(secret.slice(2));
   }, 30_000);
+});
+
+describe("Router の process: Solana の送信の鍵（U9）", () => {
+  test("solana-out で鍵が無い → 固定文 solana_key で止まる（listen しない、probe に進まない、鍵は出ない）。鍵があれば多レールの段を通り Tempo の probe で止まる", async () => {
+    const dir = workDir("t8b-process-solout-");
+    const configPath = path.join(dir, "router.config.json");
+    writeFileSync(configPath, JSON.stringify(routerConfigOf({}, RECEIVER, true, { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true } }, receivers: {}, providers: {} })));
+    const missing = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-out" }));
+    expect(missing.code).not.toBe(0);
+    expect(missing.stderr).toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed/);
+    expect(missing.stdout).not.toContain("listening");
+    expect(missing.stderr).not.toMatch(PROBE_FAILED);
+    const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
+    const broken = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-out", [SOLANA_OUTBOUND_KEY_ENV]: "not-a-seed" }));
+    expect(broken.stderr).toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed/);
+    const withKey = await runToExit("tools/remote-router-process.ts", [], processEnv(dir, configPath, { [RAILS_ACTIVATION_ENV]: "solana-out", [SOLANA_OUTBOUND_KEY_ENV]: seed }));
+    expect(withKey.code).not.toBe(0);
+    expect(withKey.stderr).not.toMatch(/SUBETHA_OUTBOUND_SOLANA_KEY/);
+    expect(withKey.stderr).toMatch(PROBE_FAILED);
+    expect(withKey.stdout + withKey.stderr).not.toContain(seed);
+  }, 60_000);
 });
 
 describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {

@@ -133,7 +133,11 @@ not an env, and setting them back to `false` removes them from the listing again
 
 **Outbound rails** (paying providers that accept only Arc or Solana) are being added behind the same one-constant switch, now per direction
 (`RAILS_ACTIVATION = { arc: { inbound, outbound }, solana: { inbound, outbound } }`; outbound is `false` on the hosted Router until its own gate). The Arc outbound routes
-(`md-arc-eth-snapshot`, `dyn-x402-to-arc`, `dyn-mpp-to-arc`) appear in the listing only after enablement.
+(`md-arc-eth-snapshot`, `dyn-x402-to-arc`, `dyn-mpp-to-arc`) and the Solana outbound routes (`md-sol-eth-snapshot-mpp`: Tempo pathUSD in, Solana devnet USDC out through the x402
+SVM `exact` scheme signed by the Router's own ed25519 key; `dyn-x402-to-sol`, `dyn-mpp-to-sol`) appear in the listing only after enablement. The Solana path builds the transfer
+transaction itself (fixed shape: compute budget, SPL `TransferChecked`, memo), checks the compiled message independently of the builder, reserves its hash in the journal before
+signing so the same message is never signed twice (also across a crash and restart), verifies the signature and the wire before the single send, and keeps a per-purchase balance
+pre-check; all of this is covered by fixture tests including child-process SIGKILL interruption tests, and by two independent signing-boundary reviews.
 
 What is verified for them: fixture tests of the whole path (in-process, no chain), **one live `/verify` each** against Circle and
 x402.org with disposable keys, and the **G-3 acceptance purchases of 2026-10-07** with disposable payers in the production environment
