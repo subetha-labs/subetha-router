@@ -314,6 +314,16 @@ describe("MPP Solana 受信: transaction 型の settle の分岐（設計 §3.5 
     expect(b.diagnostics).toEqual(["mpp_solana_send_rejected", "mpp_solana_tx_failed_on_chain"]);
   });
 
+  it("送出が error → 1 回の status が processed + err は終端ではない（errTerminalAt: confirmed）→ 追跡へ → confirmed で settled", async () => {
+    const b = await boot();
+    const p = await paid(b);
+    b.rpc.state.sendReply = "rpc-error";
+    b.rpc.state.signatureStatuses = ["err", "confirmed"];
+    expect(await b.rail.settle(p.offer, p.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "settled", txRef: p.signature });
+    expect(b.since(p.mark).map((c) => c.method)).toEqual(["sendTransaction", "getSignatureStatuses", "getSignatureStatuses"]);
+    expect(b.diagnostics).toEqual(["mpp_solana_send_rejected"]);
+  });
+
   it("送出が error → status が null → 追跡へ: 高々 15 回・経過 30 秒（間隔 2 秒）、見えなければ unknown（source_settle_unknown）。status の要求は 1 + 15", async () => {
     const b = await boot();
     const p = await paid(b);
@@ -351,6 +361,13 @@ describe("MPP Solana 受信: transaction 型の settle の分岐（設計 §3.5 
     few.rpc.state.signatureStatuses = ["processed"];
     expect(await few.rail.settle(q.offer, q.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
     expect(few.since(q.mark).filter((c) => c.method === "getSignatureStatuses")).toHaveLength(3);
+    // 回数の上限を大きくしても経過 30 秒で止まる（t = 0, 2, …, 28 の 15 回。追跡の窓は 30 秒で、全体の 50 秒ではない）。
+    const many = await boot({ extra: { followUp: { maxPolls: 100 } } });
+    const s = await paid(many);
+    many.rpc.state.signatureStatuses = ["processed"];
+    expect(await many.rail.settle(s.offer, s.credential, { routeId: ROUTE_ID })).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(many.since(s.mark).filter((c) => c.method === "getSignatureStatuses")).toHaveLength(15);
+    expect(many.time.sleeps).toEqual(Array(15).fill(2_000));
     // 遅い RPC（clock を読むたびに 5 秒進む）: 経過 30 秒が先に尽きる → 15 回に満たない。
     const slow = await boot({ jumpOnReadMs: 5_000 });
     const r = await paid(slow);
