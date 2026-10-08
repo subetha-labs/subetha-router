@@ -357,7 +357,7 @@ D-17 の決定（owner、2026-10-09 JST）: Arc USDC ↔ Solana USDC は testnet
 終了後: 受け入れコンテナを停止（残プロセス無し）→ `docker start subetha-router` → healthy → `/healthz` ok → `subetha-egress check` exit 0 → caddy start → 公開 HTTPS の `/healthz` ok。公開の journal は seq 177 のまま。公開の停止は約 2 分。
 
 **G-4⁗ の記録（2026-10-08 18:52Z。owner の決定「G-4⁗ を進める」）— AC-21 を満たした**: PR #128（`pairs` 両方 `true`。Codex `gpt-6-astra` APPROVE WITH CHANGES（文言 1 件、反映済み）、Linux 全試験 2033 pass・失敗 0、
-macOS は既知の 4 件のみ）の branch head `d162524`（親は配備中の `10f251c`。**並行して main に入った PR #126（hosted MCP の改善）はこのイメージに含めていない**: 別の gate）のイメージ `b-d162524`（手元 arm64 で build、`docker save`/`load`、14 層の内容ハッシュ一致）を
+macOS は既知の 4 件のみ）の branch head `d162524`（配備中の `10f251c` を基点とするブランチ: `10f251c` → `e2f79f2` → `d162524`。**並行して main に入った PR #126（hosted MCP の改善）はこのイメージに含めていない**: 別の gate）のイメージ `b-d162524`（手元 arm64 で build、`docker save`/`load`、14 層の内容ハッシュ一致）を
 `swap-image.sh` で入れ替え: 18:52:46Z 開始、18:52:56Z 終了、exit 0、journal の先頭 146,394 バイト不変、egress check ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。rollback は `subetha-router-prev-20261008T185246Z`（`b-10f251c`。それより古い prev は削除）。
 コンテナは healthy。公開 MCP の一覧は **route 10・プロファイル 20**（`dyn-arc-to-sol`・`dyn-sol-to-arc` が加わった。source・destination・手数料・`disclosures`（`fundsMoveOnCredential: false`）は設定どおり）。各 1 回の quote は ok（18:53Z。上流 10,000 + 手数料 1,000、`destinationPayTo` は各 Worker の受取）。
 
@@ -369,7 +369,7 @@ macOS は既知の 4 件のみ）の branch head `d162524`（親は配備中の 
 | O-6 | `dyn-sol-to-arc`（Solana USDC/x402 11,000 → Arc Worker の URL） | Solana `JZ7k3M…Ce2P`（slot 508913765、finalized、`HTaz…` の ATA → `7pjZ…` 11,000、memo = quoteId） | Arc `0x9eee18…a2b6`（block 66181452、`success`、`0x5d78…` → `0x719e…` 10,000） | 4.7 秒 |
 
 証拠（`.claude_workflow/local/g5-h-o5-arc-to-sol*.json`・`g5-h-o6-sol-to-arc*.json`・`g5-h-o56-status-reread.json`・`g5-balances-after-h-o56.json`）: 2 件とも `delivered`、本文は契約の 6 鍵、`proof` は `claimed`／`not_checked`（上の確定は独立の読取）。
-本番 journal seq 178〜188（`created → source_pending → source_settled → destination_pending → (destination_message_reserved) → delivered`）。保存した `paymentId`＋`ownerKey` の再読取は 2 件とも purchase 時と同じ、`ownerKey` 無しは 404。
+本番 journal seq 178〜188（`created → source_pending → source_settled → destination_pending → delivered`。Solana 宛の O-5 だけ `destination_pending` の後に `destination_message_reserved`）。保存した `paymentId`＋`ownerKey` の再読取は 2 件とも purchase 時と同じ、`ownerKey` 無しは 404。
 残高の差分（18:44Z → 18:55Z）: Arc payer −11,000、Router の Arc 受取 +11,000、Router の Arc 送信 −10,000、Arc Worker +10,000、Solana payer −11,000、Router の Solana 受取 ATA +11,000、Router の Solana 送信 ATA −10,000、Solana Worker の ATA +10,000。
 これで **5 レールの cross-rail 20 組すべてが公開され、すべてに hosted Router での実購入の記録がある**（§2e の 18 組 + この 2 組）。**UG-P（G-2⁗〜G-4⁗）はこれで完了**。
 
