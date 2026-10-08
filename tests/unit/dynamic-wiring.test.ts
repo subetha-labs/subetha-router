@@ -23,6 +23,7 @@ import { TEST_NETWORKS } from "../fixtures/known-networks.js";
 import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 import { createPayerSpy } from "../fixtures/mpp-payer-spy.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
+import { createSvmSignerFixture } from "../fixtures/svm-signer-fixture.js";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 
 const runtimeRoot = path.resolve(import.meta.dirname, "../../runtime");
@@ -407,22 +408,41 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
  * Solana の MPP: 送信は M4-b で配線する。それまで設定に現れたら起動を止める（Tempo の adapter に落とさない。`docs/mpp-solana-design.md`、タスク M1）。
  * 受信は M3-b で配線済み: 設定に現れれば `createMppSolanaInbound` が組まれ、`startup`（ATA の検査）の前は offer を出さない（fail closed。試験は `tests/wire/mpp-solana-inbound.test.ts`）。
  */
-describe("Solana の MPP: 送信はまだ配線しない（M1 の guard）、受信は配線済み（M3-b）", () => {
-  test("送信（rail mpp ∧ solana:）のプロファイルがあれば起動しない", () => {
-    expect(() => compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/dynamic\.profiles\.dyn-x402-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+describe("Solana の MPP: 受信（M3-b）・送信（M4-b）の配線", () => {
+  test("送信（rail mpp ∧ solana:）のプロファイル: Solana の署名能力が無ければ起動しない。あれば組まれ、startup の前は読まない・払わない", async () => {
+    expect(() => compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/signer|authorized/i);
+    const { rails } = compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), svmSigning: { [SOL]: createSvmSignerFixture(SOL).capability }, ...DEPENDENCIES });
+    expect(rails.startup).toBeDefined();
+    await expect(rails.outbound.readChallenge("dyn-x402-to-solmpp", { url: "https://provider.test/v1/x" })).rejects.toThrow(/startup\(\) has not completed/);
   });
   test("受信（sourceRail mpp ∧ solana:）のプロファイルは組まれる: startup が要り、その前は offer を出さない", async () => {
     const { rails } = compose(envFor({ solanaMpp: "inbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES });
     expect(rails.startup).toBeDefined();
     await expect(rails.inbound.createOffer({ routeId: "dyn-solmpp-to-x402", amount: "10000", asset: SOL_USDC, network: SOL, routeBinding: "dynamic|dyn-solmpp-to-x402|GET|https%3A%2F%2Fprovider.test%2F", nowMs: Date.now() })).rejects.toThrow(/startup\(\) has not completed/);
   });
-  test("送信（rail mpp ∧ solana:）の静的 route があれば起動しない。guard は adapter を作る前に効く（fixture の署名器の loopback の検査より先）", () => {
-    expect(() => compose(envFor({ solanaMpp: "outbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
+  test("送信（rail mpp ∧ solana:）の静的 route: 署名能力が無ければ起動しない。あれば組まれ、startup の前は読まない", async () => {
+    expect(() => compose(envFor({ solanaMpp: "outbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/signer|authorized/i);
+    const { rails } = compose(envFor({ solanaMpp: "outbound-route" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), svmSigning: { [SOL]: createSvmSignerFixture(SOL).capability }, ...DEPENDENCIES });
+    expect(rails.startup).toBeDefined();
+    await expect(rails.outbound.readChallenge("r-to-solmpp")).rejects.toThrow(/startup\(\) has not completed/);
   });
-  test("合成レール（synthetic）でも送信の guard が先に効く（合成の adapter を作らない）。受信の route は合成レールでは他の受信レールと同じく無視される", () => {
-    expect(() => compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "outbound-route" }), {})).toThrow(/routes\.r-to-solmpp: the Solana MPP outbound adapter is not wired yet/);
-    const { rails } = compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp: "inbound-route" }), {});
-    expect(rails.startup).toBeUndefined();
+  test("合成レール（synthetic）は Solana の MPP の route も他のレールと同じく無視する（合成の adapter に落ちる）", () => {
+    for (const solanaMpp of ["outbound-route", "inbound-route"] as const) {
+      const { rails } = compose(envFor({ mode: "synthetic", dynamic: false, solanaMpp }), {});
+      expect(rails.startup).toBeUndefined();
+    }
+  });
+  test("Tempo 宛と Solana 宛の MPP プロファイルが混在する構成: dynamic.verify は Tempo 宛だけを能力の確認と RPC の probe に渡す（Solana 宛で chainId を読まない）", async () => {
+    const dialed: string[] = [];
+    const rpc = await startTempoRpc();
+    try {
+      const { rails } = compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp("http", "http://rpc.test"), svmSigning: { [SOL]: createSvmSignerFixture(SOL).capability }, dynamicTransportHooksForTest: hooks(dialed, { "rpc.test": rpc.port }), ...DEPENDENCIES });
+      await expect(rails.dynamic!.verify()).resolves.toBeUndefined();
+      expect(rpc.methods).toEqual(["eth_getBlockByNumber", "eth_fillTransaction"]);
+      expect(rpc.sentRaw).toEqual([]);
+    } finally {
+      await rpc.close();
+    }
   });
   test("受信（sourceRail mpp ∧ solana:）の静的 route は組まれる（送信の x402 は実鍵の能力）: startup の前は offer を出さない", async () => {
     const { rails } = compose(envFor({ solanaMpp: "inbound-route" }), { evmSigning: createRealEvmCapability(generatePrivateKey()).capability("eip155:84532"), mppTempo: realMpp(), ...DEPENDENCIES });
