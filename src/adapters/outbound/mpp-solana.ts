@@ -282,8 +282,13 @@ export type MppSolanaOutbound = OutboundRail & {
 export const MPP_SOLANA_OUTBOUND_UNPAID_TIMEOUT_MS = 10_000;
 export const MPP_SOLANA_OUTBOUND_PAID_TIMEOUT_MS = 45_000;
 export const MPP_SOLANA_OUTBOUND_SEND_WITHIN_MS = 10_000;
-/** 動的の quote で確かめた宛先 ATA の存在を覚える時間（SR-M1: purchase の中の 402 の読み直しで存在を読み直さない。送る直前の再確認は別途、必ず読む）。 */
-export const MPP_SOLANA_ATA_EXISTENCE_TTL_MS = 60_000;
+/**
+ * 動的の quote で確かめた宛先 ATA の存在の証拠（SR-M1: purchase の中の 402 の読み直しで存在を読み直さない。送る直前の再確認は別途、必ず読む）。
+ * 保持は **quote の寿命に合わせる**: その challenge の `expires`（無ければ 1 時間）+ 猶予 1 時間。quote は challenge の期限を超えて購入できない
+ * （§4.3 の 2 で `destination_offer_expired`）ので、購入の中の読み直しは常に証拠の中にある。数は 4,096 まで（超えたら古い順に捨てる）。
+ */
+export const MPP_SOLANA_ATA_EVIDENCE_GRACE_MS = 3_600_000;
+export const MPP_SOLANA_ATA_EVIDENCE_MAX = 4_096;
 
 class MppSolanaChallengeError extends Error {
   constructor(readonly reason: "url" | "status" | "unreadable") {
@@ -387,13 +392,21 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
     staticScheme: MPP_SOLANA_SCHEME,
   });
   const { ready, ataOf, rpcResult, ataExists, blockhashOf } = common;
-  /** quote で読んだ宛先 ATA の存在（ATA → 期限）。`readChallenge` だけが使う（`pay` の 3 は常に読む）。 */
+  /** quote で読んだ宛先 ATA の存在（ATA → 保持の期限）。`readChallenge` だけが使う（`pay` の 3 は常に読む）。 */
   const knownAtas = new Map<string, number>();
-  async function ataExistsForQuote(ata: string, owner: string, operation: string, routeId: string): Promise<boolean> {
+  async function ataExistsForQuote(ata: string, owner: string, operation: string, routeId: string, challengeExpiresAt: number | undefined): Promise<boolean> {
     const until = knownAtas.get(ata);
     if (until !== undefined && until > now()) return true;
     const exists = await ataExists(ata, owner, operation, routeId);
-    if (exists) knownAtas.set(ata, now() + MPP_SOLANA_ATA_EXISTENCE_TTL_MS);
+    if (exists) {
+      for (const [k, v] of knownAtas) if (v <= now()) knownAtas.delete(k);
+      while (knownAtas.size >= MPP_SOLANA_ATA_EVIDENCE_MAX) {
+        const oldest = knownAtas.keys().next().value;
+        if (oldest === undefined) break;
+        knownAtas.delete(oldest);
+      }
+      knownAtas.set(ata, (challengeExpiresAt ?? now() + MPP_SOLANA_ATA_EVIDENCE_GRACE_MS) + MPP_SOLANA_ATA_EVIDENCE_GRACE_MS);
+    }
     return exists;
   }
 
@@ -485,7 +498,7 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
       return undefined;
     }
     if (checkMppSolanaChallengeAtas(view, policy, ata) !== undefined) return undefined;
-    if (checkExistence && !(await ataExistsForQuote(ata, offer.payTo, operation, routeId))) return undefined;
+    if (checkExistence && !(await ataExistsForQuote(ata, offer.payTo, operation, routeId, view.expiresAt))) return undefined;
     return ata;
   }
 

@@ -1313,8 +1313,10 @@ describe("送信: 予算（FR-29・D-14）。受信と送信は同じ (network, 
     const outboundQuote = await staticQuote(router, ROUTES.tempoSol, "g2");
     expect(await purchase(router, outboundQuote, await credentialFor(fixtures, outboundQuote), "g2")).toMatchObject({ outcome: "delivered" });
     // 3 件目は購入で区分の上限（どちらの向きでも）。受信の verify は呼ばれるが settle は無い（既存の予算の試験と同じ）。
+    // Tempo の受信は push（credential の時点で payer が送金済み = `fundsMoveOnCredential`）: verify の後に予約が通らない失敗は未払いの公言（bucket_limit）にせず、
+    // 耐久的な unknown（source_paid_unsettled）。x402 の受信（g4）はまだ資金が動いていないので bucket_limit のまま。
     const q3 = await staticQuote(router, ROUTES.tempoSol, "g3");
-    expect(await purchase(router, q3, await credentialFor(fixtures, q3), "g3")).toMatchObject({ outcome: "rejected", error: "bucket_limit", status: 429 });
+    expect(await purchase(router, q3, await credentialFor(fixtures, q3), "g3")).toMatchObject({ outcome: "unknown", reason: "source_paid_unsettled" });
     const q4 = await staticQuote(router, ROUTES.solX402, "g4");
     expect(await purchase(router, q4, await credentialFor(fixtures, q4), "g4")).toMatchObject({ outcome: "rejected", error: "bucket_limit", status: 429 });
     expect(fixtures.solProvider.seen.paid).toHaveLength(1);
@@ -1361,7 +1363,8 @@ describe("送信: 予算（FR-29・D-14）。受信と送信は同じ (network, 
     const q1 = await staticQuote(router, ROUTES.tempoSol, "h1");
     expect(await purchase(router, q1, await credentialFor(fixtures, q1), "h1")).toMatchObject({ outcome: "delivered" });
     const q2 = await staticQuote(router, ROUTES.tempoSol, "h2");
-    expect(await purchase(router, q2, await credentialFor(fixtures, q2), "h2")).toMatchObject({ outcome: "rejected", error: "bucket_limit", status: 429 });
+    // Tempo の受信は push: 予約の失敗は unknown（source_paid_unsettled）。予約は取られていないので動的の送信（h3）は通る。
+    expect(await purchase(router, q2, await credentialFor(fixtures, q2), "h2")).toMatchObject({ outcome: "unknown", reason: "source_paid_unsettled" });
     const q3 = await dynamicQuote(router, PROFILES.x402Sol, "h3");
     expect(await purchase(router, q3, await credentialFor(fixtures, q3), "h3")).toMatchObject({ outcome: "delivered" });
   });
@@ -1371,7 +1374,8 @@ describe("送信: 予算（FR-29・D-14）。受信と送信は同じ (network, 
     // 静的: Solana の区分の 1 件の上限を 9,999 に。tempo-sol の送信の 10,000 が超える → purchase で per_purchase_limit。
     let router = await startRouter(fixtures, { solMaxPerPurchase: "9999" });
     const q1 = await staticQuote(router, ROUTES.tempoSol, "i0");
-    expect(await purchase(router, q1, await credentialFor(fixtures, q1), "i0")).toMatchObject({ outcome: "rejected", error: "per_purchase_limit", status: 429 });
+    // Tempo の受信は push: verify の後の予約の失敗（1 件の上限）は unknown（source_paid_unsettled）。送信は始まらない。
+    expect(await purchase(router, q1, await credentialFor(fixtures, q1), "i0")).toMatchObject({ outcome: "unknown", reason: "source_paid_unsettled" });
     expect(fixtures.solProvider.seen.paid).toHaveLength(0);
     await router.close();
     closers.splice(closers.indexOf(router.close), 1);
@@ -1396,7 +1400,8 @@ describe("送信: 予算（FR-29・D-14）。受信と送信は同じ (network, 
     const noBucket = await startRouter(fixtures, { dropSolBucket: true });
     const paidBefore = fixtures.solProvider.seen.paid.length;
     const q5 = await staticQuote(noBucket, ROUTES.tempoSol, "i2");
-    expect(await purchase(noBucket, q5, await credentialFor(fixtures, q5), "i2")).toMatchObject({ outcome: "rejected", error: "bucket_not_allowed" });
+    // Tempo の受信は push: verify の後に区分が無くて予約できない失敗も unknown（source_paid_unsettled）。
+    expect(await purchase(noBucket, q5, await credentialFor(fixtures, q5), "i2")).toMatchObject({ outcome: "unknown", reason: "source_paid_unsettled" });
     // 動的は quote の段で不成立（client には一般の quote_failed として見える。core の理由は `bucket_not_allowed`: dynamic.ts）。
     expect(await noBucket.client().quoteUrl({ profileId: PROFILES.x402Sol, url: SOL_URL, requestId: "i3" })).toMatchObject({ ok: false });
     expect(fixtures.solProvider.seen.paid).toHaveLength(paidBefore);

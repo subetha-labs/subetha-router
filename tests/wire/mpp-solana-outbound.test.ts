@@ -269,6 +269,29 @@ describe("成功: 静的と動的が delivered（pull。pay-kit の server が�
     await expect(denied.rail.readChallenge(PROFILE_ID, { url: URL_A })).rejects.toThrow(/rejected: url/);
   });
 
+  test("動的の宛先 ATA の存在は quote で 1 回読み、その quote の寿命（challenge の期限 + 猶予）の中の 402 の読み直しでは読まない。送る直前の再確認は必ず読む（SR-M1: purchase ごとに getAccountInfo は quote 1 + 送る直前 1）", async () => {
+    const h = await harness();
+    const after = h.mark();
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    expect(h.since(after)).toEqual(["getAccountInfo"]);
+    // purchase の中の読み直し（core は settle の前と後に 402 を読み直す）: 時計が 45 秒進んでも（challenge の期限の内側 = quote の寿命の内側）読まない。
+    h.clock.now += 45_000;
+    await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    expect(h.since(after)).toEqual(["getAccountInfo"]);
+    // 送る直前は必ず読む。
+    const result = await h.rail.pay(requestOf(h, offers[0]!, { routeId: PROFILE_ID, target: { url: URL_A } }));
+    expect(result, JSON.stringify(result)).toMatchObject({ outcome: "paid" });
+    expect(h.since(after).filter((m) => m === "getAccountInfo")).toHaveLength(2);
+    // 別の宛先（別の Provider D = 別の受取 ATA）の quote は読む（証拠は ATA ごと）。
+    const other = await startMppSolanaUpstream({ rpcUrl: h.payKitRpc.url, feePayer: true, tls: TLS });
+    closers.push(other.close);
+    h.rpc.state.atas = [...h.rpc.state.atas, { address: await ataOf(other.recipient), owner: other.recipient }];
+    h.routes[PROVIDER_HOST] = other.port;
+    await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    expect(h.since(after).filter((m) => m === "getAccountInfo")).toHaveLength(3);
+  });
+
   test("feePayer: false の上流（push）は候補外（pull だけ。D-23）: readChallenge は空、pay は destination_offer_not_allowed", async () => {
     const h = await harness({ upstream: { feePayer: false } });
     expect(await h.rail.readChallenge(ROUTE)).toEqual([]);
