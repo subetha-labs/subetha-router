@@ -1,0 +1,5 @@
+#!/bin/sh
+# subetha-payer launcher. `exec` replaces this shell with node, so no inspector-enabled parent process shares the terminal
+# (design docs/agent-payer-design.md §3.1). `--disable-sigusr1` closes the SIGUSR1 inspector channel that any same-user process could open.
+# dist/bin.js refuses to run without the flag, so `node dist/bin.js` cannot bypass this launcher.
+exec node --disable-sigusr1 "$(dirname "$0")/../dist/bin.js" "$@"
