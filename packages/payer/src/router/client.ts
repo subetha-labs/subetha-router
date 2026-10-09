@@ -48,15 +48,20 @@ export function statusOf(value: unknown): RouterStatus {
   return { kind: "unreadable", reason: knownCodeOf(value["reason"] ?? value["error"] ?? "projection_malformed") };
 }
 
+export interface PurchaseInput { quoteId: string; requestId: string; approval: string; credential: string; quote: unknown }
+
 export interface Router {
+  purchase(input: PurchaseInput): Promise<Record<string, unknown>>;
   listRoutes(): Promise<Record<string, unknown>>;
   quote(routeId: string, requestId: string): Promise<Record<string, unknown>>;
   status(paymentId: string): Promise<RouterStatus>;
 }
 
-/** One SDK client/transport per request, including initialization in the absolute deadline. No payment method in P-3a. */
+/** One SDK client/transport per request, including initialization in the absolute deadline. No automatic retries. */
 export class RouterClient implements Router {
-  constructor(private readonly url: URL) {
+  private readonly url: URL;
+  constructor(url: URL) {
+    this.url = new URL(url.href);
     if (url.username || url.password || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)))) {
       throw new Error("router_config_invalid");
     }
@@ -91,6 +96,9 @@ export class RouterClient implements Router {
   quote(routeId: string, requestId: string): Promise<Record<string, unknown>> {
     if (routeId !== STATIC_ROUTE) return Promise.resolve({ ok: false, error: "unknown_route" });
     return this.call("subetha_router_quote", { routeId, requestId });
+  }
+  purchase(input: PurchaseInput): Promise<Record<string, unknown>> {
+    return this.call("subetha_router_purchase", { ...input });
   }
   async status(paymentId: string): Promise<RouterStatus> {
     const value = statusOf(await this.call("subetha_router_status", { paymentId }));

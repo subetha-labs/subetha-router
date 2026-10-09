@@ -3,10 +3,11 @@ import path from "node:path";
 import { startDaemon } from "../../src/daemon/startup.js";
 import { startupMessage } from "../../src/daemon/run.js";
 import { SocketListenError } from "../../src/daemon/server.js";
+import { purchaseHandler } from "./purchase.js";
 import { fixtureHooks } from "./daemon.js";
 import type { FixtureStore } from "./store.js";
 
-interface Bootstrap { home: string; installRoot: string; passphrase: string; phrase: string; point?: string; wrong?: boolean; noUi?: boolean }
+interface Bootstrap { home: string; installRoot: string; passphrase: string; phrase: string; point?: string; wrong?: boolean; noUi?: boolean; purchase?: boolean; cancel?: boolean }
 // This entire entry is excluded from the package. Fixture secrets travel over owned IPC, never production flags/env.
 const watchdog = setTimeout(() => process.exit(3), 45_000);
 process.once("disconnect", () => process.exit(3));
@@ -23,6 +24,7 @@ process.once("message", async (input: Bootstrap) => {
     const daemon = await startDaemon({
       env: process.env, execArgv: ["--disable-sigusr1"], installRoot: store.installRoot,
       hooks: { ...hooks,
+        ...(input.purchase ? { handler: (context) => purchaseHandler(context, event, input.cancel) } : {}),
         ...(input.noUi ? { ui: { available: async () => false } } : {}),
         ...(input.wrong ? { tty: { available: true, read: async () => { event("Passphrase"); return "incorrect-fixture-passphrase"; } } } : {}),
         faults: { hit: async (point) => { event(point); if (point === input.point) await new Promise<void>(() => undefined); } },

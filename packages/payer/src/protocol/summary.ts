@@ -115,8 +115,8 @@ export const SubjectSummary = z
   .strict();
 export type SubjectSummary = z.infer<typeof SubjectSummary>;
 
-/** 購入の参照（`p_` + base32 の 11 文字 = 13 文字）。 */
-export const PurchaseRef = z.string().regex(/^p_[a-z2-7]{11}$/);
+/** 購入の参照（`p_` + RFC 4648 lowercase unpadded base32 の 13 文字 = 15 文字、64 bit）。 */
+export const PurchaseRef = z.string().length(15).regex(/^p_[a-z2-7]{12}[acegikmoqsuwy246]$/);
 
 export const QuoteSummary = z
   .object({

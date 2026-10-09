@@ -82,13 +82,13 @@ CLI（`subetha-payer wallet|status|inspect|config|envelope`）は、daemon が�
 
 ### 3.4 購入の状態機械・台帳・回復（FR-A19〜A22）
 
-**参照と requestId**: `ref = "p_" + base32(randomBytes(8))`（13 文字）。台帳に同じ `ref` があれば作り直す。`requestId = randomUUID()`。両方を `quoted` の行に記録。agent からは受け取らない。
+**参照と requestId**: `ref = "p_" + lowercase_unpadded_base32(randomBytes(8))`（RFC 4648、suffix 13 文字・全長 15 文字、64 bit 全てを保持）。canonical schema は `^p_[a-z2-7]{12}[acegikmoqsuwy246]$`（末尾の未使用 1 bit はゼロ、全長も検査）。台帳・同時処理中の予約に同じ `ref` があれば作り直す。旧全長 13 文字・大文字・padding・非 canonical 末尾は拒否し、永続 ID の補完・切詰め・正規化はしない。既存の未公開 fixture 台帳・receipt は元の bytes を保持する。P-3c までは非空 store の production 回復拒否を維持する。`requestId = randomUUID()`。両方を `quoted` の行に記録。agent からは受け取らない。
 
 **承認の記録（FR-A14。不変）**: `quote` の応答（hosted の `quote` tool の `quote` と `subject`）から、daemon が次を作る。
 
 ```
 ApprovalRecord = {
-  routerUrl, wallet: { rail, network, address },
+  routerUrl, resource: { url, method }, wallet: { rail, network, address },
   ref, requestId, paymentId, quoteId, routeId, upstreamUrl?,
   source:      { rail, scheme, network, asset, amount, decimals, payTo, expiresAt, challengeNonce, routeBinding, fundsMoveOnCredential },
   destination: { rail, network, asset, quoted, decimals?, payTo?, quoteFingerprint },
@@ -97,6 +97,7 @@ ApprovalRecord = {
 }
 ```
 
+- **接続先と canonical resource の区別（tasks §0 による controller 指示の P-3b 補正）**: `routerUrl` は MCP transport、`resource` は承認対象の静的 resource。既存 hosted pair は `https://router.subethalabs.com/mcp` と `GET http://127.0.0.1:8500/v1/routes/md-mpp-eth-snapshot/resource`。同 origin を要求しない。daemon 起動時の信頼された `router.canonicalResource: { url, method: "GET" }` を固定し、既定 hosted URL のみ省略時にこの pair を使う。custom/local transport は明示設定が必須。応答・caller・env から推測／上書きしない。resource の URL・method・固定 path・routeBinding を完全一致で照合し、credentials・query・fragment・別名を拒む。期待 resource を不変 record/hash と await 後の guard に含める。hosted backend の canonical base は変えない。ローカル fixture は別 origin のまま信頼設定を移行する。
 - `subject`（hosted が返す人間向けの射影）は **記録と照合する**（欄が一致しなければ `quote_inconsistent` で quote を捨てる）。UI に出す文は**記録から**決定的に描画する（`render(record)`。別の経路で作らない）。
 - 静的 quote の `destination` には今 `payTo` と `decimals` が無い（`src/http/projection.ts`）。§6 の H-1 で**加算**して出す（Router の route 設定にある）。それまでは `payTo?` が無い記録として描画し、UI に「宛先は運用者が固定（route の表）」と出す。
 - **署名の直前の照合**: 署名に渡す `offer`（quote 文書の `source.offer`）の欄 `{ scheme, network, asset, amount, payTo, extra.expiresAt, extra.challengeNonce, extra.routeBinding, extra.fundsMoveOnCredential }` が記録の `source` と等しいこと、`approvalDeadlineMs > now`、session が `unlocked`、UI の承認が**この記録の hash**に対して得られたこと、を確かめる。違えば `approval_mismatch`。**Router の URL・wallet・requestId・宛先・手数料は offer から復元できないので、記録の方が正**で、offer はその中の「署名する部分」と比べる（レビュー #1 の指摘のとおり）。

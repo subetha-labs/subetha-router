@@ -1,31 +1,18 @@
-import { randomUUID } from "node:crypto";
+import { createPurchaseCore } from "./purchase.js";
 import { failure } from "../protocol/summary.js";
 import { record, routerFailure, STATIC_ROUTE } from "../router/client.js";
 import type { DaemonContext } from "./interfaces.js";
-import { RefMutex, type Handler } from "./server.js";
+import type { Handler } from "./server.js";
 
 /** P-3b owns durable quote/ApprovalRecord creation; P-3c owns status reconciliation. */
 export interface ReadModels {
+  purchase?(ref: string): Promise<unknown>;
   hasRef(ref: string): boolean;
   quote(): Promise<unknown>;
   status(ref: string, includeBody: boolean): Promise<unknown>;
 }
 
-function pendingRecords(context: DaemonContext): ReadModels {
-  return {
-    hasRef: (ref) => context.ledger.rows.some((row) => row.ref === ref),
-    async quote() {
-      context.assertHeld();
-      const response = await context.router.quote(STATIC_ROUTE, randomUUID());
-      // No provisional refs/approval claims: the durable record and its binding belong to P-3b.
-      return response["ok"] === false ? routerFailure(response) : failure("approval_unavailable");
-    },
-    async status() { return failure("approval_unavailable"); },
-  };
-}
-
-export function createDaemonHandler(context: DaemonContext, reads: ReadModels = pendingRecords(context)): Handler {
-  const mutex = new RefMutex();
+export function createDaemonHandler(context: DaemonContext, reads: ReadModels = createPurchaseCore(context)): Handler {
   return async (request) => {
     context.assertHeld();
     switch (request.method) {
@@ -48,13 +35,12 @@ export function createDaemonHandler(context: DaemonContext, reads: ReadModels = 
       }
       case "quote": return reads.quote();
       case "status": return reads.hasRef(request.params.ref) ? reads.status(request.params.ref, request.params.includeBody === true) : failure("unknown_ref");
-      case "purchase": return mutex.run(request.params.ref, async () => {
+      case "purchase": {
         context.assertHeld();
         if (!reads.hasRef(request.params.ref)) return failure("unknown_ref");
-        if (context.session.locked) return failure("locked");
-        // No UI approval, signer, credential or Router purchase exists in this bounded slice.
-        return failure("approval_unavailable");
-      });
+        if (!reads.purchase && context.session.locked) return failure("locked");
+        return reads.purchase ? reads.purchase(request.params.ref) : failure("approval_unavailable");
+      }
     }
   };
 }

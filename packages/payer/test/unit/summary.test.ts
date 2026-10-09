@@ -12,7 +12,7 @@ const CREDENTIAL = Buffer.from(JSON.stringify({ x402Version: 2, payload: { signa
 
 const quote = {
   ok: true,
-  ref: "p_abcdefghijk",
+  ref: "p_abcdefghijklm",
   subject: {
     amount: "10000",
     decimals: 6,
@@ -26,7 +26,7 @@ const quote = {
   nextStep: "approve_then_purchase",
 };
 
-const purchase = { ok: true, ref: "p_abcdefghijk", state: "result", outcome: "delivered", fundsMoved: "yes", paymentId: "de503f58-fbab-4a10-8ad5-b78f92a314eb", result: { untrusted: true, source: "upstream", contentType: "application/json", preview: "x".repeat(512), bytes: 2048 } };
+const purchase = { ok: true, ref: "p_abcdefghijklm", state: "result", outcome: "delivered", fundsMoved: "yes", paymentId: "de503f58-fbab-4a10-8ad5-b78f92a314eb", result: { untrusted: true, source: "upstream", contentType: "application/json", preview: "x".repeat(512), bytes: 2048 } };
 
 describe("Summary: strict output validation", () => {
   test("a well-formed quote summary passes unchanged", () => {
@@ -70,7 +70,7 @@ describe("Summary: strict output validation", () => {
   });
 
   test("the quote document itself (with offer, challenge, ownerKey) is not a summary", () => {
-    const document = { ok: true, ref: "p_abcdefghijk", quote: { source: { offer: { extra: { challenge: "Payment id=x" } } }, ownerKey: "k" }, subject: quote.subject, nextStep: "approve_then_purchase" };
+    const document = { ok: true, ref: "p_abcdefghijklm", quote: { source: { offer: { extra: { challenge: "Payment id=x" } } }, ownerKey: "k" }, subject: quote.subject, nextStep: "approve_then_purchase" };
     expect(toSummary(QuoteSummary, document)).toEqual({ ok: false, error: "internal_error" });
   });
 
