@@ -8,6 +8,8 @@
 
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { preflight } from "./daemon/startup.js";
+import { runDaemon, startupMessage } from "./daemon/run.js";
 
 const USAGE = [
   "usage: subetha-payer <command>",
@@ -23,14 +25,13 @@ export function refusesWithoutSigusr1Guard(execArgv: readonly string[]): boolean
 }
 
 export async function main(argv: readonly string[], execArgv: readonly string[] = process.execArgv): Promise<number> {
-  if (refusesWithoutSigusr1Guard(execArgv)) {
-    process.stderr.write("startup_refused: sigusr1_enabled (start subetha-payer through its launcher, not with node directly)\n");
-    return 2;
-  }
+  try { preflight(execArgv, process.env); }
+  catch (error) { process.stderr.write(startupMessage(error)); return 2; }
   const command = argv[0];
   switch (command) {
-    case "wallet":
     case "daemon":
+      return runDaemon(argv.slice(1), execArgv);
+    case "wallet":
     case "mcp":
     case "status":
     case "inspect":
