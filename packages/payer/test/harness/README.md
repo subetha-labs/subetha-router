@@ -71,3 +71,46 @@ Author validation on this P-4a source:
 ```sh
 ../../node_modules/.bin/vitest run test/unit/osascript-script.test.ts test/unit/parse.test.ts test/unit/render.test.ts test/unit/ui-wiring.test.ts test/wire/ui-spawn.test.ts test/unit/record.test.ts test/unit/purchase.test.ts test/unit/recovery.test.ts test/unit/startup-order.test.ts test/unit/startup-purchase.test.ts test/unit/summary.test.ts test/unit/keys.test.ts test/unit/result-secrets.test.ts test/unit/daemon.test.ts test/unit/secrecy-scan.test.ts
 ```
+# P-4b retained shim gate
+
+Author execution is pure/in-memory/file/process only. Parent runs the following after
+source readback and a fresh build on macOS and Docker (Linux is not product support):
+
+```sh
+npm run types
+npm run build
+npm test -- --run test/wire/shim.test.ts test/wire/approval-sabotage.test.ts test/wire/bytes.test.ts test/wire/startup.test.ts
+```
+
+`shim-wire.ts` connects the installed SDK Client to compiled `bin.js mcp`, a separate
+`daemon-test-entry.ts` child, the production Unix protocol and the existing local TCP
+Router fixture. Approval rows use `shim-observe-entry.ts`: it traps subprocess/UI
+attempts, then calls the real bin dispatch and production stdio shim. Its loader-only
+argv substitution is confined to `test/`; the compiled entry has no override.
+All keys/HOMEs are newly generated fixtures. UI and signer remain fake.
+
+Counters are durable files from the separate daemon and the instrumented shim;
+socket records contain actual validated requests. Rejection assertions require zero
+signer calls, no `sign_intent`, and independently counted daemon/shim UI calls.
+Wrong-display binding changes the displayed record amount and hashes it; it is not
+an unrelated schema failure. Raw `yes` and owned PTY rows run the same observed shim.
+The PTY fixture requires Python 3, opens only its child PTY, and never drives a GUI.
+AC-A2(e)/(i) reuse the exact P-3a compiled-bin/preload rows in `startup.test.ts`, including
+the distinct Darwin pre-main loader oracle; these rows must run with the new suite.
+
+Author measurement through actual SDK Client/InMemoryTransport + production handler/core
+and a real synthetic file ledger: **2691 UTF-8 bytes** (routes388 + quote521 + purchase891
++ status891), static route1/hold1 and serialized body2048. Count includes every text
+content entry and JSON structuredContent. `bytes.test.ts` measures the separate wire
+path independently; author has **not executed any wire test**.
+
+Timeout chain: optional SDK display5s → shim socket185s, daemon active request180s
+(UI120s + Router30s + margin), daemon idle35s only outside an active request.
+Fixture Client allows195s. Other clients must configure their own timeout; a shorter
+client timeout neither cancels daemon payment nor proves unpaid. Router timeout/retry,
+approval expiry, session/lock guards and durable unknown recovery remain unchanged.
+
+The four checkpoint-first production mutation gates remain parent-owned: forward an
+elicitation response, remove metadata, expose a full quote, loosen purchase input.
+Strict subject validation and actual byte measurement are separate assertions.
+No native consent, live signature, settlement/finality or owner acceptance is claimed.
