@@ -44,3 +44,30 @@ The P-3c purchase fixture configures UI/signing before startup creates its singl
 `recovery.test.ts` retains status failure classifications, valid-different identities with positive controls, terminal/progress states, expiry, durable unknown across another real restart, saved-body reopen with Router failure, and socket requests racing startup readiness. The internal operator-close API has file/unit coverage only; no production socket or environment option authorizes closing. EROFS/EIO are injected into real file ledger operations in unit coverage and retained separate-daemon wire rows; these are not actual read-only-filesystem evidence.
 
 `secrecy.test.ts` keeps each random throwaway key in test memory for boolean-only absence assertions, plus passphrase, phrase, credential and complete challenge, including plaintext/base64/hex. It inspects replies, errors, both processes' output and plaintext ledger projection excluding sealed blobs. These fixtures do not exercise owner consent, native UI, real wire signatures, settlement or finality. Parent macOS/Docker execution, packaging regression, checkpoint/sabotage and NEW independent cumulative review remain required.
+
+P-4a confirmation UI implementation (supersedes the historical unavailable-entry notes above):
+
+`runDaemon` now composes the macOS adapter for both the pre-secret availability probe and purchases. Startup binds its verifier callback to the already parsed/unlocked keys document, re-derives and wipes temporary keys for each confirmation, and preserves `configurePurchase` for owned fixtures. The production bin has no helper/platform/auth override. Existing purchase-core guards still run before and after both UI awaits; rejection cannot append `approved` or call the signer. Native stdout is bounded to 4 KiB, stderr is discarded, and process failure/timeout is resolved at child close. Mutable I/O and derived-key buffers are wiped; V8 strings and OS/runtime copies cannot be promised erased.
+
+File/process-only checks (no real osascript, System Events, GUI, socket, TCP, process inventory or live signing):
+
+```sh
+../../node_modules/.bin/vitest run test/unit/osascript-script.test.ts test/unit/parse.test.ts test/unit/render.test.ts test/unit/ui-wiring.test.ts test/wire/ui-spawn.test.ts
+```
+
+`ui-spawn` executes an owned fake helper and records synthetic argv/env/stdin. macOS's Node runtime adds `__CF_USER_TEXT_ENCODING` after exec, so a tiny test-owned C launcher records the exact environment before Node starts; it uses the already installed `/usr/bin/cc`, writes only under its temporary fixture directory, and has no product/runtime role. Non-macOS fixtures use Node directly without a compiler. The environment assertion stays an exact allowlist comparison. System path owner/mode/symlink/type checks use an injected filesystem, not changes to system files. All helper responses/passphrases/keys are synthetic.
+
+`ui-check-entry.ts` runs the production composition root in an owned `node --import import.meta.resolve("tsx")` subprocess, supplying only trusted in-process dependencies. The former stub-dependent `check-ui` row moved from `startup.test.ts` here: unavailable remains exact exit 2 / `no_confirmation_ui`, available returns exit 0, neither reads secrets/prompts nor mutates the store. Every other compiled-bin SECURITY row is unchanged and still belongs to parent execution. This is **fake-helper composition-root evidence**, not installed native-bin evidence. `ui-wiring` also executes real startup/core/ledger with fake UI executable, fake signing and in-process Router responses; it covers wrong passphrase, cancellation, session/expiry after await, and verifier binding despite replacement of the persisted keys document.
+
+Native/manual acceptance remains **UNRUN** for all five cases: correct passphrase approval, wrong passphrase rejection, Cancel, 120-second timeout, and quote/backslash/newline display. Owner passphrase/dialog interaction is still a separate gate; `ui-check` CLI is assigned to P-5a. Fake helper tests do not establish macOS dialog appearance, owner consent, real signature wiring, settlement/finality, Linux product support, or publish readiness. Whole socket/TCP/crash suites, Docker, NEW separate read-only review, checkpoint-first sabotage and commits remain parent follow-ups; no sabotage or commit was performed in this author run.
+
+Author validation on this P-4a source:
+
+- RED with behavior stubs: `vitest run test/unit/osascript-script.test.ts test/unit/parse.test.ts test/unit/render.test.ts`: 9 failed / 20 total, exit 1. `vitest run test/wire/ui-spawn.test.ts`: 11 failed / 15 total, exit 1. `vitest run test/unit/ui-wiring.test.ts`: 1 failed / 1 total, exit 1. Each used `../../node_modules/.bin/vitest` from this package.
+- After implementation the first four focused files passed 35/35; with production wiring, five files passed 45/45. The exact-environment test first detected Node's macOS-added variable; the owned C launcher fixes the observation point without loosening its assertion.
+- Final expanded command below: 15 files, 278 passed, zero failed/skipped, exit 0. This includes the additional UTF-8/BOM and default-path cases (48 final P-4a tests plus 230 existing regressions).
+- `../../node_modules/.bin/tsc --noEmit -p tsconfig.json` and `../../node_modules/.bin/tsc -p tsconfig.build.json`: exit 0. `git diff --check`: exit 0. Offline pack was not needed/run; its isolated build fixture and all remaining compiled-bin tripwire rows are unchanged.
+
+```sh
+../../node_modules/.bin/vitest run test/unit/osascript-script.test.ts test/unit/parse.test.ts test/unit/render.test.ts test/unit/ui-wiring.test.ts test/wire/ui-spawn.test.ts test/unit/record.test.ts test/unit/purchase.test.ts test/unit/recovery.test.ts test/unit/startup-order.test.ts test/unit/startup-purchase.test.ts test/unit/summary.test.ts test/unit/keys.test.ts test/unit/result-secrets.test.ts test/unit/daemon.test.ts test/unit/secrecy-scan.test.ts
+```
