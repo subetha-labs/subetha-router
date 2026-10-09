@@ -7,6 +7,8 @@
  * - 保持者は副作用の前に `stillHeld()`（path の inode と中身の token が自分のもの）を確かめる。
  * - `reclaim`: 人間の CLI だけが呼ぶ。**回収は専用の lock（`daemon.lock.reclaim`）で直列化**し、取った後にもう一度検査してから `unlink` する
  *   （2 人の回収者が同じ stale を見て、片方が消した後に新しい daemon が取り、もう片方が新しい lock を消す交錯を防ぐ）。生きている pid は拒む。
+ *   guard が既にあれば、死んだ回収者のものでも fail closed。portable な link/unlink には compare-and-unlink が無いため、guard 自体は回収しない。
+ *   普通の daemon crash は reclaim で回復できる。回収者の crash が guard を残した場合は、全 contender を止めた人間による offline の復旧を要する。
  */
 
 import { execFileSync } from "node:child_process";
@@ -196,7 +198,7 @@ export function acquireLock(dir: string, deps: LockDeps): LockHandle {
 
 /**
  * 人間の回収（CLI `lock reclaim`）。回収の lock を取って直列化し、取った後にもう一度検査してから消す。生きている pid は拒む。
- * 同時にもう 1 人が回収中なら `reclaim_busy`。確認（y/N）は呼び出し側の TTY。
+ * guard が残っていれば（死んだ・読めない場合も）`reclaim_busy`。確認（y/N）は呼び出し側の TTY。
  */
 export function reclaimLock(dir: string, deps: LockDeps): { readonly removed: boolean; readonly content?: LockContent } {
   const fs = deps.fs;
@@ -206,25 +208,34 @@ export function reclaimLock(dir: string, deps: LockDeps): { readonly removed: bo
     linkFresh(fs, dir, reclaimPath, guard);
   } catch (error) {
     if (error instanceof StoreError && error.code === "lock_exists") {
-      // 回収の lock が残っている: 回収者が生きていれば busy、死んでいれば（回収の途中で落ちた）その lock だけを片づけて続ける。
-      const holder = readLock(fs, reclaimPath);
-      const isAlive = deps.isAlive ?? defaultIsAlive;
-      if (holder !== undefined && isAlive(holder.pid)) throw new StoreError("reclaim_busy");
-      fs.unlinkSync(reclaimPath);
-      linkFresh(fs, dir, reclaimPath, guard);
-    } else {
-      throw error;
+      // inode/token を確認してから unlink しても、その間に別の guard に替わり得る。
+      // 既存の guard を決して消さないことで、保持者の終了まで他の回収者を入れない。
+      throw new StoreError("reclaim_busy");
     }
+    throw error;
   }
   try {
     const state = inspectLock(dir, deps);
     if (state.state === "free") return { removed: false };
     if (state.state === "held") throw new StoreError("daemon_already_running");
-    // stale か unreadable: ここから unlink までの間に lock を作れるのは daemon の取得だけだが、それは file が存在する間は EEXIST で失敗する。
-    fs.unlinkSync(path.join(dir, LOCK_FILE));
+    if (state.state === "unreadable") throw new StoreError("lock_unreadable");
+    // 最初の read と死亡確認の間に A が release/終了し、B が取得しているかもしれない。
+    // stale と判定した記録と現在の identity/token が一致しなければ、B を stale と扱わず拒む。
+    const lockPath = path.join(dir, LOCK_FILE);
+    const recorded = state.content;
+    const current = readLock(fs, lockPath);
+    if (recorded === undefined || current === undefined || current.pid !== recorded.pid ||
+      current.startedAt !== recorded.startedAt || current.hostname !== recorded.hostname || current.token !== recorded.token) {
+      throw new StoreError("lock_unreadable");
+    }
+    // 死亡確認済みの保持者はこの一致した lock をもう release できず、guard が他の回収者を止める。
+    // cooperative な利用では、ここから unlink まで置き換わらない。
+    fs.unlinkSync(lockPath);
     return { removed: true, ...(state.content === undefined ? {} : { content: state.content }) };
   } finally {
     try {
+      // この link に成功した保持者だけがここへ来る。他の回収者は既存の guard を消せないので、
+      // cooperative な利用では検査と unlink の race も無い。外からの削除は全 contender の停止を要する。
       fs.unlinkSync(reclaimPath);
     } catch {
       // 既に無い。

@@ -21,11 +21,25 @@ export function isPlainJson(value: unknown, depth = 0): value is JsonValue {
   if (depth > 64) return false;
   if (value === null || typeof value === "boolean" || typeof value === "string") return true;
   if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every((item) => isPlainJson(item, depth + 1));
+  if (Array.isArray(value)) {
+    // every/map は穴を飛ばすが JSON.stringify は null を書く。継承した要素もデータとして認めない。
+    // toJSON は列挙不可・継承したものも拒み、hash と保存時の表現が変わることを防ぐ。
+    if ("toJSON" in value) return false;
+    for (let i = 0; i < value.length; i++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, i);
+      if (descriptor === undefined || !("value" in descriptor) || !isPlainJson(descriptor.value, depth + 1)) return false;
+    }
+    return true;
+  }
   if (typeof value === "object") {
     const proto = Object.getPrototypeOf(value) as unknown;
     if (proto !== Object.prototype && proto !== null) return false;
-    return Object.keys(value as object).every((key) => key !== "__proto__" && key !== "toJSON" && isPlainJson((value as Record<string, unknown>)[key], depth + 1));
+    if ("toJSON" in value) return false;
+    // getter を一度も実行せず拒む。検査・hash・保存の各 read で値が変わるものは JSON のデータではない。
+    return Object.getOwnPropertyNames(value).every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      return "value" in descriptor && (!descriptor.enumerable || (key !== "__proto__" && isPlainJson(descriptor.value, depth + 1)));
+    });
   }
   return false;
 }
@@ -161,13 +175,16 @@ export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
     append(input) {
       if (closed) throw new StoreError("store_closed");
       if (writeFailed) throw new StoreError("store_write_failed");
-      if (!isPlainJson(input.data)) throw new StoreError("ledger_data_invalid");
-      if (!/^[A-Za-z0-9_-]{1,64}$/.test(input.ref) || !/^[a-z_]{1,32}$/.test(input.state)) throw new StoreError("ledger_data_invalid");
+      const { data, ref, state } = input;
+      const ts = input.ts ?? Date.now();
+      if (!isPlainJson(data)) throw new StoreError("ledger_data_invalid");
+      if (typeof ref !== "string" || typeof state !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(ref) || !/^[a-z_]{1,32}$/.test(state)) throw new StoreError("ledger_data_invalid");
+      if (!Number.isSafeInteger(ts) || ts < 0) throw new StoreError("ledger_data_invalid");
       // head の検査: file の最後の完全な行を**中身まで検証して**、メモリの head と違えば巻き戻り（別 process の書き込み・複製の差し戻し）。
       const current = fs.readFileSync(path);
       if (lastRowHashOf(current, rows.length === 0 ? GENESIS_HASH : rows[rows.length - 2]?.hash ?? GENESIS_HASH, rows.length) !== head) throw new StoreError("store_rollback");
-      const sealed = input.sealedPlain === undefined ? undefined : seal(lek, input.sealedPlain, `${input.ref}:${input.state}`);
-      const partial = { v: LEDGER_VERSION, seq: rows.length + 1, prev: head, ts: input.ts ?? Date.now(), ref: input.ref, state: input.state, data: input.data, ...(sealed === undefined ? {} : { sealed }) };
+      const sealed = input.sealedPlain === undefined ? undefined : seal(lek, input.sealedPlain, `${ref}:${state}`);
+      const partial = { v: LEDGER_VERSION, seq: rows.length + 1, prev: head, ts, ref, state, data, ...(sealed === undefined ? {} : { sealed }) };
       const row: LedgerRow = { ...partial, hash: rowHash(partial) };
       const line = Buffer.from(`${JSON.stringify(row)}\n`, "utf8");
       try {

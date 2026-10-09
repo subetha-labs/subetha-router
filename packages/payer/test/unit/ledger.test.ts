@@ -6,10 +6,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { realFs, type StoreFs } from "../../src/store/fs.js";
-import { canonicalJson, GENESIS_HASH, isPlainJson, openLedger, rowHash } from "../../src/store/ledger.js";
+import { canonicalJson, GENESIS_HASH, isPlainJson, openLedger, rowHash, type JsonValue, type Ledger } from "../../src/store/ledger.js";
 
 const LEK = Buffer.alloc(32, 3);
 const REF = "p_abcdefghijk";
@@ -30,7 +30,158 @@ function twoRows(file: string): string {
   return readFileSync(file, "utf8");
 }
 
+// Each rejected input must leave an existing durable chain usable, including after reopen.
+function rejectsWithoutChange(input: Parameters<Ledger["append"]>[0]): void {
+  const file = fresh();
+  const ledger = openLedger(file, LEK, realFs);
+  try {
+    ledger.append({ ref: REF, state: "quoted", data: { n: 1 }, ts: 0 });
+    const before = readFileSync(file);
+    const head = ledger.head;
+    expect.soft(() => ledger.append(input)).toThrow(/ledger_data_invalid/);
+    expect.soft(readFileSync(file)).toEqual(before);
+    expect.soft(ledger.head).toBe(head);
+    expect.soft(ledger.rows.length).toBe(1);
+    expect.soft(ledger.writeFailed).toBe(false);
+    ledger.append({ ref: REF, state: "approved", data: { n: 2 }, ts: 2 });
+  } finally {
+    ledger.close();
+  }
+  const reopened = openLedger(file, LEK, realFs);
+  try {
+    expect(reopened.rows.map((row) => row.data)).toEqual([{ n: 1 }, { n: 2 }]);
+  } finally {
+    reopened.close();
+  }
+}
+
 describe("ledger", () => {
+  test.each([false, true])("rejects non-enumerable object toJSON (nested in array: %s)", (nested) => {
+    const object = Object.defineProperty({ n: 1 }, "toJSON", { value: () => ({ n: 2 }) });
+    const data = nested ? [object] : object;
+    expect.soft(isPlainJson(data)).toBe(false);
+    rejectsWithoutChange({ ref: REF, state: "quoted", data, ts: 1 });
+  });
+
+  test.each([false, true])("rejects inherited object toJSON regardless of enumerability (%s), including in an array", (enumerable) => {
+    const file = fresh();
+    const ledger = openLedger(file, LEK, realFs);
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+    let calls = 0;
+    try {
+      ledger.append({ ref: REF, state: "quoted", data: {}, ts: 0 });
+      const before = readFileSync(file);
+      const head = ledger.head;
+      Object.defineProperty(Object.prototype, "toJSON", { configurable: true, enumerable, value: () => { calls++; return { changed: true }; } });
+      // Ordinary objects still have Object.prototype; a custom prototype would
+      // already be rejected and would not discriminate this regression.
+      let plainObject: boolean;
+      let plainArray: boolean;
+      let error: unknown;
+      try {
+        plainObject = isPlainJson({ n: 1 });
+        plainArray = isPlainJson([{ n: 1 }]);
+        try { ledger.append({ ref: REF, state: "approved", data: { n: 1 }, ts: 1 }); } catch (caught) { error = caught; }
+      } finally {
+        if (previous === undefined) Reflect.deleteProperty(Object.prototype, "toJSON");
+        else Object.defineProperty(Object.prototype, "toJSON", previous);
+      }
+      expect.soft(plainObject).toBe(false);
+      expect.soft(plainArray).toBe(false);
+      expect.soft(error).toMatchObject({ code: "ledger_data_invalid" });
+      expect.soft(calls).toBe(0);
+      expect.soft(readFileSync(file)).toEqual(before);
+      expect.soft(ledger.head).toBe(head);
+      expect.soft(ledger.rows.length).toBe(1);
+      expect.soft(ledger.writeFailed).toBe(false);
+      ledger.append({ ref: REF, state: "approved", data: [{ n: 2 }], ts: 2 });
+    } finally {
+      ledger.close();
+    }
+    const reopened = openLedger(file, LEK, realFs);
+    try { expect(reopened.rows.map((row) => row.data)).toEqual([{}, [{ n: 2 }]]); } finally { reopened.close(); }
+  });
+
+  test.each(["object", "hidden object", "object in array", "array index", "setter only"])("rejects accessor data without executing it: %s", (kind) => {
+    let reads = 0;
+    const descriptor = kind === "setter only"
+      ? { enumerable: true, set: (_value: unknown) => { reads++; } }
+      : { enumerable: kind !== "hidden object", get: () => ++reads };
+    const object = Object.defineProperty({}, "n", descriptor);
+    const data = kind === "array index" ? Object.defineProperty([0], "0", descriptor) : kind === "object in array" ? [object] : object;
+    expect.soft(isPlainJson(data)).toBe(false);
+    rejectsWithoutChange({ ref: REF, state: "quoted", data, ts: 1 });
+    expect(reads).toBe(0);
+  });
+
+  test.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])("rejects timestamp %s without changing bytes/head", (ts) => {
+    rejectsWithoutChange({ ref: REF, state: "quoted", data: {}, ts });
+  });
+
+  test.each([
+    { ref: 123, state: "quoted" },
+    { ref: null, state: "quoted" },
+    { ref: [REF], state: "quoted" },
+    { ref: REF, state: true },
+    { ref: REF, state: null },
+    { ref: REF, state: ["quoted"] },
+  ])("rejects coercible non-string ids: %j", (ids) => {
+    rejectsWithoutChange({ ...ids, data: {}, ts: 1 } as unknown as Parameters<Ledger["append"]>[0]);
+  });
+
+  test("zero and default timestamps survive reopen; timestamp input and default clock are each read once", () => {
+    const file = fresh();
+    const ledger = openLedger(file, LEK, realFs);
+    let reads = 0;
+    const now = vi.spyOn(Date, "now").mockReturnValue(123456789);
+    try {
+      expect(ledger.append({ ref: REF, state: "quoted", data: {}, get ts() { reads++; return reads === 1 ? 0 : -1; } }).ts).toBe(0);
+      expect(reads).toBe(1);
+      expect(now).not.toHaveBeenCalled();
+      expect(ledger.append({ ref: REF, state: "approved", data: {} }).ts).toBe(123456789);
+      expect(now).toHaveBeenCalledTimes(1);
+    } finally {
+      now.mockRestore();
+      ledger.close();
+    }
+    const reopened = openLedger(file, LEK, realFs);
+    try { expect(reopened.rows.map((row) => row.ts)).toEqual([0, 123456789]); } finally { reopened.close(); }
+  });
+
+  test("the existing depth limit accepts depth 64 and refuses depth 65 without durable changes", () => {
+    let data: JsonValue = null;
+    for (let i = 0; i < 64; i++) data = [data];
+    expect(isPlainJson(data)).toBe(true);
+    expect(isPlainJson([data])).toBe(false);
+    rejectsWithoutChange({ ref: REF, state: "quoted", data: [data], ts: 1 });
+  });
+
+  test.each([
+    ["one hole", () => Array(1)],
+    ["interior hole", () => [1, , 3]],
+    ["inherited element instead of an own element", () => Object.setPrototypeOf(Array(1), { 0: 1, __proto__: Array.prototype })],
+    ["array toJSON", () => Object.assign([1], { toJSON: () => [] })],
+    ["non-enumerable array toJSON", () => Object.defineProperty([1], "toJSON", { value: () => [] })],
+    ["inherited array toJSON", () => Object.setPrototypeOf([1], { toJSON: () => [], __proto__: Array.prototype })],
+  ])("rejects %s before append; subsequent valid data survives reopen", (_name, makeData) => {
+    const data = { nested: makeData() };
+    const file = fresh();
+    const ledger = openLedger(file, LEK, realFs);
+    try {
+      expect.soft(isPlainJson(data)).toBe(false);
+      expect(() => ledger.append({ ref: REF, state: "quoted", data, ts: 1 })).toThrow(/ledger_data_invalid/);
+      expect(readFileSync(file, "utf8")).toBe("");
+      expect(ledger.head).toBe(GENESIS_HASH);
+      expect(ledger.writeFailed).toBe(false);
+      ledger.append({ ref: REF, state: "quoted", data: { nested: [null, 1, []] }, ts: 2 });
+    } finally {
+      ledger.close();
+    }
+    const reopened = openLedger(file, LEK, realFs);
+    expect(reopened.rows.map((row) => row.data)).toEqual([{ nested: [null, 1, []] }]);
+    reopened.close();
+  });
+
   test("canonicalJson sorts keys at every level; rowHash chains prev; isPlainJson rejects NaN, Date, toJSON", () => {
     expect(canonicalJson({ b: 1, a: { d: [1, { z: 0, y: null }], c: "x" } })).toBe('{"a":{"c":"x","d":[1,{"y":null,"z":0}]},"b":1}');
     const h1 = rowHash({ v: 1, seq: 1, prev: GENESIS_HASH, ts: 1, ref: REF, state: "quoted", data: { a: 1 } });
