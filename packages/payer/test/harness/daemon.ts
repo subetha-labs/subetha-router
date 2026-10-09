@@ -8,7 +8,7 @@ import type { DaemonContext, DaemonHooks } from "../../src/daemon/interfaces.js"
 import { record, routerFailure, STATIC_ROUTE } from "../../src/router/client.js";
 import { fixtureStore, type FixtureStore } from "./store.js";
 
-export const FIXTURE_REF = "p_aaaaaaaaaaa";
+export const FIXTURE_REF = "p_aaaaaaaaaaaaa";
 
 /** Read-model fixture only. Purchase uses the production handler and always refuses. No signer or approval fake. */
 export function fixtureReads(context: DaemonContext): ReadModels {
@@ -18,7 +18,7 @@ export function fixtureReads(context: DaemonContext): ReadModels {
     async quote() {
       const response = await context.router.quote(STATIC_ROUTE, randomUUID());
       if (response["ok"] !== true) return routerFailure(response);
-      // Fixed fixture ref, deliberately not an implementation of P-3b's disputed ref generator or durable records.
+      // Fixed fixture ref, deliberately not an implementation of P-3b's production ref generator or durable records.
       const quote = response["quote"];
       if (!record(quote) || !record(quote["source"]) || !record(quote["destination"]) || !record(quote["approval"])) throw new Error("fixture_quote_malformed");
       const source = quote["source"];

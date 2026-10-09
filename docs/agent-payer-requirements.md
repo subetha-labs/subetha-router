@@ -102,7 +102,7 @@
 ### 4.4 購入の流れ（検討 F-2・F-7、B-2）
 
 - FR-A18 **MCP tool**（shim。名前は設計で確定。接頭辞 `subetha_payer_*`）: `find_routes`（持っている資産で絞った一覧。適合だけ。SOL の要否は属性）、`quote`（静的 route / 動的 profile + URL）、`purchase`（承認 → 署名 → 送出 → status を daemon の 1 操作で）、`status`、`wallet`（address と残高。秘密なし）。
-- FR-A19 **短い参照と requestId**: `quote` は agent に**短い購入参照**（例 `p_<12 文字>`）と `subject` の要約だけを返す。quote 全体・`ownerKey`・credential・challenge は daemon が保持し、tool の応答・ログ・エラーに出さない。`requestId` は daemon が UUID で作り記録し、agent からは受け取らない。同じ参照への `purchase` の繰り返しは**同じ操作（同じ結果か進行中）を返し**、新しい承認・署名・送金を作らない。
+- FR-A19 **短い参照と requestId**: `quote` は agent に**短い購入参照**（例 `p_aaaaaaaaaaaaa`）と `subject` の要約だけを返す。quote 全体・`ownerKey`・credential・challenge は daemon が保持し、tool の応答・ログ・エラーに出さない。`requestId` は daemon が UUID で作り記録し、agent からは受け取らない。同じ参照への `purchase` の繰り返しは**同じ操作（同じ結果か進行中）を返し**、新しい承認・署名・送金を作らない。
 
 ### 4.5 二重払いの禁止: 状態機械と耐久的な記録（検討 F-13、B-4。第 2 版で具体化）
 

@@ -72,7 +72,7 @@ test("JSON boundary rejects additional request/output fields and hides exception
   for (const run of [async () => ({ ok: true, state: "locked", version: "0.1.0", secret: "hidden" }), async () => { throw new Error("hidden"); }]) {
     expect(await dispatchLine(line, run)).toEqual({ id: 1, ok: false, error: { code: "internal_error" } });
   }
-  expect(await dispatchLine('{"id":2,"method":"purchase","params":{"ref":"p_aaaaaaaaaaa","approved":true}}', handler)).toMatchObject({ ok: false });
+  expect(await dispatchLine('{"id":2,"method":"purchase","params":{"ref":"p_aaaaaaaaaaaaa","approved":true}}', handler)).toMatchObject({ ok: false });
 });
 
 test("ref mutex serializes same ref and releases after exceptions", async () => {

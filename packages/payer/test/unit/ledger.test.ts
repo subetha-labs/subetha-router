@@ -12,7 +12,7 @@ import { realFs, type StoreFs } from "../../src/store/fs.js";
 import { canonicalJson, GENESIS_HASH, isPlainJson, openLedger, rowHash, type JsonValue, type Ledger } from "../../src/store/ledger.js";
 
 const LEK = Buffer.alloc(32, 3);
-const REF = "p_abcdefghijk";
+const REF = "p_abcdefghijklm";
 const temps: string[] = [];
 afterEach(() => {
   while (temps.length > 0) rmSync(temps.pop()!, { recursive: true, force: true });

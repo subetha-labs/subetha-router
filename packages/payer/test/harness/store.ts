@@ -21,7 +21,7 @@ export function fixtureStore(routerUrl = "http://127.0.0.1:1/mcp", ttlMs = 3_600
     const document = createKeysDocument(passphrase, { eip155: { address: `0x${randomBytes(20).toString("hex")}`, secret: key } });
     writeFileSync(path.join(dir, "keys.json"), JSON.stringify(document), { mode: 0o600 });
   } finally { key.fill(0); }
-  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ version: 1, router: { url: routerUrl }, session: { ttlMs } }), { mode: 0o600 });
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ version: 1, router: { url: routerUrl, canonicalResource: { url: "http://127.0.0.1:8500/v1/routes/md-mpp-eth-snapshot/resource", method: "GET" } }, session: { ttlMs } }), { mode: 0o600 });
   return { home, dir, installRoot, passphrase, phrase, cleanup: () => rmSync(home, { recursive: true, force: true }) };
 }
 export type FixtureStore = ReturnType<typeof fixtureStore>;

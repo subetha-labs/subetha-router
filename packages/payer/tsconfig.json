@@ -15,5 +15,6 @@
     "rootDir": ".",
     "outDir": "dist-check"
   },
-  "include": ["src", "test", "scripts"]
+  "include": ["src", "test", "scripts"],
+  "exclude": ["test/unit/hosted-contract.test.ts"]
 }

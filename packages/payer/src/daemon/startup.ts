@@ -1,4 +1,7 @@
 import path from "node:path";
+import { HOSTED_ROUTER_URL, routerIdentity } from "../router/identity.js";
+import { generateRef } from "./ref.js";
+import { sign } from "../sign/index.js";
 import { z } from "zod";
 import { realFs, StoreError, type StoreFs } from "../store/fs.js";
 import { acquireLock, type LockDeps } from "../store/lock.js";
@@ -27,7 +30,7 @@ export function preflight(argv: readonly string[], env: NodeJS.ProcessEnv): void
 
 const Config = z.object({
   version: z.literal(1),
-  router: z.object({ url: z.string().url() }).strict(),
+  router: z.object({ url: z.string().url(), canonicalResource: z.object({ url: z.string().url(), method: z.literal("GET") }).strict().optional() }).strict(),
   session: z.object({ ttlMs: z.number().int().min(1).max(MAX_TTL_MS) }).strict().optional(),
 }).strict();
 
@@ -85,7 +88,7 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     assertHeld();
     if (!options.hooks.tty.available) throw new StoreError("no_tty");
     const configPath = path.join(dir, "config.json");
-    let rawConfig: unknown = { version: 1, router: { url: "https://router.subethalabs.com/mcp" } };
+    let rawConfig: unknown = { version: 1, router: { url: HOSTED_ROUTER_URL } };
     if (fs.existsSync(configPath)) {
       try { rawConfig = JSON.parse(fs.readFileSync(configPath).toString("utf8")); }
       catch { throw new StoreError("store_corrupt"); }
@@ -93,7 +96,8 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     if (typeof rawConfig === "object" && rawConfig !== null && "version" in rawConfig && rawConfig.version !== 1) throw new StoreError("store_unsupported_version");
     const parsed = Config.safeParse(rawConfig);
     if (!parsed.success) throw new StoreError("config_invalid");
-    const router = new RouterClient(new URL(parsed.data.router.url));
+    const identity = routerIdentity(parsed.data.router.url, parsed.data.router.canonicalResource);
+    const router = new RouterClient(new URL(identity.routerUrl));
     const doc = parseKeysDocument(fs.readFileSync(path.join(dir, "keys.json")).toString("utf8"));
     for (let attempt = 0; attempt < 3; attempt++) {
       assertHeld();
@@ -119,7 +123,19 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     session = new Session(key, parsed.data.session?.ttlMs ?? MAX_TTL_MS, startedAt);
     assertHeld();
     ledger = openLedger(path.join(dir, "ledger.ndjson"), keys.lek, fs);
-    const context: DaemonContext = { session, ledger, router, address: doc.wallets["eip155"]!.address, get phrase() { return phrase; }, assertHeld };
+    const context: DaemonContext = {
+      session, ledger, router, address: doc.wallets["eip155"]!.address,
+      get phrase() { return phrase; }, assertHeld,
+      purchase: {
+        routerUrl: identity.routerUrl, canonicalResource: identity.resource, generateRef, ui: options.hooks.ui,
+        signer: { sign: (offer) => {
+          assertHeld();
+          if (session!.locked) throw new StoreError("locked");
+          return sign(offer, key);
+        } },
+        ...(options.hooks.faults ? { faults: options.hooks.faults } : {}),
+      },
+    };
     const handler = options.hooks.handler(context);
     let ready = false;
     // Restricts the socket from creation, not only after chmod. Never restore a permissive mask in this daemon.

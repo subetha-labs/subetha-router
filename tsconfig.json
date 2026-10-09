@@ -15,5 +15,5 @@
     "rootDir": ".",
     "outDir": "dist"
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "packages/payer/test/unit/hosted-contract.test.ts"]
 }

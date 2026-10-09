@@ -8,6 +8,8 @@ export default defineConfig({
       // P-2 source equality and dependency/signing gates belong to root verification.
       "packages/payer/test/unit/sign.test.ts",
       "packages/payer/test/unit/vendor.test.ts",
+      // P-3b real producer contract imports root sources only in tests.
+      "packages/payer/test/unit/hosted-contract.test.ts",
     ],
   },
 });
