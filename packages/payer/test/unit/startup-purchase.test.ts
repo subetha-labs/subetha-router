@@ -66,11 +66,37 @@ test("disposable legacy ledger keeps exact bytes; protocol purchase and actual p
     const handler = createDaemonHandler(daemon!.context);
     expect(await dispatchLine(JSON.stringify({ id: 1, method: "purchase", params: { ref: legacy } }), handler)).toMatchObject({ error: { code: "invalid_request" } });
     expect(await handler({ id: 2, method: "purchase", params: { ref: legacy } })).toMatchObject({ error: "unknown_ref" });
-    await expect(recover(daemon!.context)).rejects.toThrow("recovery_unavailable");
+    await expect(recover({ ...daemon!.context })).rejects.toThrow("store_corrupt");
     await daemon!.close();
     const purchase = vi.spyOn(RouterClient.prototype, "purchase"); const quote = vi.spyOn(RouterClient.prototype, "quote");
-    await expect(startup.startDaemon({ ...options, hooks: { ...options.hooks, recover } })).rejects.toThrow("recovery_unavailable");
+    await expect(startup.startDaemon({ ...options, hooks: { ...options.hooks, recover } })).rejects.toThrow("store_corrupt");
     expect(readFileSync(path.join(store.dir, "ledger.ndjson"))).toEqual(bytes);
     expect(purchase).not.toHaveBeenCalled(); expect(quote).not.toHaveBeenCalled();
+  } finally { await daemon?.close(); vi.restoreAllMocks(); process.umask(oldUmask); store.cleanup(); }
+});
+
+test("actual startup and handler reuse one recovered core across encrypted store reopen", async () => {
+  const { createPurchaseCore } = await import("../../src/daemon/purchase.js");
+  const { recordHash } = await import("../../src/daemon/record.js");
+  const store = fixtureStore(), raw = h1Quote(), oldUmask = process.umask();
+  const quote = vi.spyOn(RouterClient.prototype, "quote").mockResolvedValue(raw);
+  const purchase = vi.spyOn(RouterClient.prototype, "purchase").mockResolvedValue({ ok: true, outcome: "delivered", paymentId: raw.quote.paymentId, snapshot: { durable: true }, contentType: "application/json" });
+  const status = vi.spyOn(RouterClient.prototype, "status").mockResolvedValue({ kind: "unreadable", reason: "router_unavailable" });
+  const sign = vi.fn(async () => "fixture-credential");
+  const confirm = vi.fn(async (r: Parameters<typeof recordHash>[0]) => ({ approved: true as const, recordHash: recordHash(r), uiKind: "native" as const }));
+  let listenerHandler: any;
+  const h: DaemonHooks = { ...hooks(store), configurePurchase: base => ({ ...base, signer: { sign }, ui: { available: async () => true, confirm } }), listen: async (_path, handler) => { listenerHandler = handler; return { close: async () => undefined }; }, recover: async context => { await createPurchaseCore(context).recover(); expect(await listenerHandler({ id: 0, method: "ping", params: {} })).toMatchObject({ error: "daemon_unavailable" }); } };
+  const options = { env: { HOME: store.home }, execArgv: ["--disable-sigusr1"], installRoot: store.installRoot, lockDeps, hooks: h };
+  let daemon = await startup.startDaemon(options);
+  try {
+    const q = await listenerHandler({ id: 1, method: "quote", params: { routeId: "md-mpp-eth-snapshot" } });
+    expect(await listenerHandler({ id: 2, method: "purchase", params: { ref: q.ref } })).toMatchObject({ outcome: "delivered" });
+    const seal = readFileSync(path.join(store.dir, "install.seal"));
+    await daemon!.close(); daemon = await startup.startDaemon(options);
+    expect(readFileSync(path.join(store.dir, "install.seal"))).toEqual(seal);
+    expect(await listenerHandler({ id: 3, method: "status", params: { ref: q.ref, includeBody: true } })).toMatchObject({ outcome: "delivered", result: { body: { durable: true } } });
+    expect(createPurchaseCore(daemon!.context)).toBe(createPurchaseCore(daemon!.context));
+    await listenerHandler({ id: 4, method: "purchase", params: { ref: q.ref } });
+    expect(sign).toHaveBeenCalledTimes(1); expect(confirm).toHaveBeenCalledTimes(1); expect(purchase).toHaveBeenCalledTimes(1); expect(quote).toHaveBeenCalledTimes(1); expect(status).not.toHaveBeenCalled();
   } finally { await daemon?.close(); vi.restoreAllMocks(); process.umask(oldUmask); store.cleanup(); }
 });

@@ -86,6 +86,8 @@ export interface Ledger {
   append(input: { readonly ref: string; readonly state: string; readonly data: JsonValue; readonly sealedPlain?: Buffer; readonly ts?: number }): LedgerRow;
   /** 封印した欄を開く。 */
   openSealed(row: LedgerRow): Buffer | undefined;
+  /** Reuse the append head check after awaits and immediately before external effects. */
+  assertCurrent(): void;
   readonly writeFailed: boolean;
   close(): void;
 }
@@ -172,6 +174,12 @@ export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
     get writeFailed() {
       return writeFailed;
     },
+    assertCurrent() {
+      if (closed) throw new StoreError("store_closed");
+      if (writeFailed) throw new StoreError("store_write_failed");
+      const current = fs.readFileSync(path);
+      if (lastRowHashOf(current, rows.length === 0 ? GENESIS_HASH : rows[rows.length - 2]?.hash ?? GENESIS_HASH, rows.length) !== head) throw new StoreError("store_rollback");
+    },
     append(input) {
       if (closed) throw new StoreError("store_closed");
       if (writeFailed) throw new StoreError("store_write_failed");
@@ -181,8 +189,7 @@ export function openLedger(path: string, lek: Buffer, fs: StoreFs): Ledger {
       if (typeof ref !== "string" || typeof state !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(ref) || !/^[a-z_]{1,32}$/.test(state)) throw new StoreError("ledger_data_invalid");
       if (!Number.isSafeInteger(ts) || ts < 0) throw new StoreError("ledger_data_invalid");
       // head の検査: file の最後の完全な行を**中身まで検証して**、メモリの head と違えば巻き戻り（別 process の書き込み・複製の差し戻し）。
-      const current = fs.readFileSync(path);
-      if (lastRowHashOf(current, rows.length === 0 ? GENESIS_HASH : rows[rows.length - 2]?.hash ?? GENESIS_HASH, rows.length) !== head) throw new StoreError("store_rollback");
+      ledger.assertCurrent();
       const sealed = input.sealedPlain === undefined ? undefined : seal(lek, input.sealedPlain, `${ref}:${state}`);
       const partial = { v: LEDGER_VERSION, seq: rows.length + 1, prev: head, ts, ref, state, data, ...(sealed === undefined ? {} : { sealed }) };
       const row: LedgerRow = { ...partial, hash: rowHash(partial) };

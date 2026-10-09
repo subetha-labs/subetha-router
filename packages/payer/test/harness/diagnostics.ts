@@ -5,6 +5,8 @@ const STDERR_MARKERS = [
   "startup_refused: bad_passphrase", "startup_refused: install_changed", "startup_refused: daemon_lock_stale",
   "dyld", "Library not loaded", "Reason: tried", "no such file", "image not found",
   "Debugger listening", "Passphrase:", "Security phrase:",
+  "SyntaxError", "ERR_MODULE_NOT_FOUND", "does not provide an export named",
+  "Unexpected end of input", "Unexpected EOF", "bad option:",
   "socket_errno: ENAMETOOLONG", "socket_errno: EINVAL", "socket_errno: EPERM", "socket_errno: EACCES",
   "socket_errno: EADDRINUSE", "socket_errno: ENOENT", "socket_errno: ENOTDIR", "socket_errno: EROFS",
   "socket_errno: EMFILE", "socket_errno: ENFILE", "socket_errno: ENOBUFS", "socket_errno: ENOMEM",

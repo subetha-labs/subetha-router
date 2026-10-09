@@ -3,18 +3,55 @@
  * `dist/` のどの file も `test/` を import しない。`bin` の launcher は `exec node --disable-sigusr1` で `dist/bin.js` を起動する。
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import ts from "typescript";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const temps: string[] = [];
-afterEach(() => {
-  while (temps.length > 0) rmSync(temps.pop()!, { recursive: true, force: true });
+const tsc = createRequire(import.meta.url).resolve("typescript/bin/tsc");
+let workspace: string;
+let packageRoot: string;
+let packEnv: NodeJS.ProcessEnv;
+function sharedDistSnapshot() {
+  return walk(path.join(root, "dist")).sort().map((file) => {
+    const st = statSync(file);
+    return { file: path.relative(root, file), sha256: createHash("sha256").update(readFileSync(file)).digest("hex"),
+      ino: st.ino, size: st.size, mtime: st.mtimeMs, ctime: st.ctimeMs };
+  });
+}
+let sharedDistBefore: ReturnType<typeof sharedDistSnapshot>;
+beforeAll(() => {
+  sharedDistBefore = sharedDistSnapshot();
+  workspace = mkdtempSync(path.join(root, ".npm-pack-fixture-"));
+  packageRoot = path.join(workspace, "package");
+  mkdirSync(packageRoot);
+  // Copy current package inputs, including tests/scripts so exclusion checks are real.
+  // Never copy an existing dist: every reader below uses this one fresh build.
+  for (const entry of ["src", "test", "scripts", "bin", "package.json", "npm-shrinkwrap.json", "tsconfig.json", "tsconfig.build.json"]) {
+    cpSync(path.join(root, entry), path.join(packageRoot, entry), { recursive: true });
+  }
+  for (const entry of ["README.md", "LICENSE", ".npmignore", ".gitignore", "package-lock.json"]) {
+    if (existsSync(path.join(root, entry))) cpSync(path.join(root, entry), path.join(packageRoot, entry));
+  }
+  // Resolve the existing pinned dependencies normally; no install or registry access.
+  symlinkSync(path.join(root, "node_modules"), path.join(packageRoot, "node_modules"), "dir");
+  packEnv = { ...process.env, npm_config_cache: path.join(workspace, "cache"), npm_config_offline: "true" };
+  expect(existsSync(path.join(packageRoot, "dist"))).toBe(false);
+  execFileSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], { cwd: packageRoot, env: packEnv, stdio: "pipe" });
+  expect(existsSync(path.join(packageRoot, "dist/bin.js"))).toBe(true);
+});
+afterAll(() => {
+  try {
+    // Metadata catches same-byte rewrites too; atime is deliberately excluded.
+    expect(sharedDistSnapshot()).toEqual(sharedDistBefore);
+  } finally {
+    if (workspace !== undefined) rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 /** JS の source から module の指定子を AST で取り出す（static / re-export / import() / require()）。リテラルでない指定子は例外。 */
@@ -49,12 +86,7 @@ function walk(dir: string): string[] {
 describe("P-1a: packaging boundary", () => {
   test("npm pack lists bin and dist only (no test/, no scripts/, no fixtures)", () => {
     // Keep npm's temporary writes inside this workspace, without registry access.
-    const cache = mkdtempSync(path.join(root, ".npm-pack-cache-"));
-    temps.push(cache);
-    const env = { ...process.env, npm_config_cache: cache, npm_config_offline: "true" };
-    // build so that dist exists for the listing
-    execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: root, env, stdio: "pipe" });
-    const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: packageRoot, env: packEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const files = (JSON.parse(output) as { files: { path: string }[] }[])[0]!.files.map((f) => f.path);
     expect(files).toContain("bin/subetha-payer");
     expect(files).toContain("dist/bin.js");
@@ -67,7 +99,7 @@ describe("P-1a: packaging boundary", () => {
   });
 
   test("dist/ never imports test/ (AST over every import form) and never contains a test-only entry", () => {
-    const distFiles = walk(path.join(root, "dist")).filter((f) => f.endsWith(".js"));
+    const distFiles = walk(path.join(packageRoot, "dist")).filter((f) => f.endsWith(".js"));
     expect(distFiles.length).toBeGreaterThan(0);
     for (const file of distFiles) {
       const specs = specifiersOf(readFileSync(file, "utf8"), file);
@@ -77,15 +109,14 @@ describe("P-1a: packaging boundary", () => {
   });
 
   test("installed layout: the launcher works through a symlink (as npm installs it) and from a directory whose name has # and %", () => {
-    const base = mkdtempSync(path.join(tmpdir(), "payer-pack-"));
-    temps.push(base);
+    const base = path.join(workspace, "installed");
     const pkg = path.join(base, "lib", "node_modules", "@subetha", "pay#er %1");
-    cpSync(path.join(root, "bin"), path.join(pkg, "bin"), { recursive: true });
-    cpSync(path.join(root, "dist"), path.join(pkg, "dist"), { recursive: true });
+    cpSync(path.join(packageRoot, "bin"), path.join(pkg, "bin"), { recursive: true });
+    cpSync(path.join(packageRoot, "dist"), path.join(pkg, "dist"), { recursive: true });
     cpSync(path.join(root, "node_modules"), path.join(pkg, "node_modules"), { recursive: true });
-    cpSync(path.join(root, "package.json"), path.join(pkg, "package.json"));
+    cpSync(path.join(packageRoot, "package.json"), path.join(pkg, "package.json"));
     const binDir = path.join(base, "bin");
-    cpSync(path.join(root, "bin"), binDir, { recursive: true }); // placeholder so the dir exists
+    cpSync(path.join(packageRoot, "bin"), binDir, { recursive: true }); // placeholder so the dir exists
     rmSync(path.join(binDir, "subetha-payer"));
     symlinkSync(path.relative(binDir, path.join(pkg, "bin", "subetha-payer")), path.join(binDir, "subetha-payer"));
     const viaSymlink = spawnSync("sh", [path.join(binDir, "subetha-payer"), "help"], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
@@ -105,15 +136,15 @@ describe("P-1a: packaging boundary", () => {
   });
 
   test("the launcher execs node with --disable-sigusr1 and points at dist/bin.js", () => {
-    const launcher = readFileSync(path.join(root, "bin/subetha-payer"), "utf8");
+    const launcher = readFileSync(path.join(packageRoot, "bin/subetha-payer"), "utf8");
     expect(launcher.startsWith("#!/bin/sh\n")).toBe(true);
     expect(launcher).toMatch(/^exec node --disable-sigusr1 "\$here\/\.\.\/dist\/bin\.js" "\$@"$/m);
     expect(launcher).toMatch(/while \[ -L "\$self" \]; do/); // symlink の解決
-    expect((statSync(path.join(root, "bin/subetha-payer")).mode & 0o111) !== 0).toBe(true);
+    expect((statSync(path.join(packageRoot, "bin/subetha-payer")).mode & 0o111) !== 0).toBe(true);
   });
 
   test("package.json: files, bin, engines, pinned dependencies (no ranges)", () => {
-    const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as { files: string[]; bin: Record<string, string>; engines: { node: string }; dependencies: Record<string, string>; devDependencies: Record<string, string> };
+    const pkg = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { files: string[]; bin: Record<string, string>; engines: { node: string }; dependencies: Record<string, string>; devDependencies: Record<string, string> };
     expect(pkg.files).toEqual(["bin", "dist", "npm-shrinkwrap.json"]);
     expect(pkg.bin).toEqual({ "subetha-payer": "bin/subetha-payer" });
     expect(pkg.engines.node).toBe(">=22");
@@ -124,7 +155,7 @@ describe("P-1a: packaging boundary", () => {
   });
 
   test("node dist/bin.js is refused without the launcher's flag (exit 2, sigusr1_enabled); through the launcher the skeleton answers (exit 2, not implemented)", () => {
-    const run = (file: string, args: string[]) => spawnSync(file, args, { cwd: root, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    const run = (file: string, args: string[]) => spawnSync(file, args, { cwd: packageRoot, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
     const direct = run("node", ["dist/bin.js", "wallet", "address"]);
     expect(direct.status).toBe(2);
     expect(direct.stderr).toMatch(/startup_refused: sigusr1_enabled/);
@@ -135,5 +166,9 @@ describe("P-1a: packaging boundary", () => {
     const help = run("sh", ["bin/subetha-payer", "help"]);
     expect(help.status).toBe(0);
     expect(help.stderr).toMatch(/usage: subetha-payer/);
+  });
+
+  test("building and packing leave the shared dist bytes and write metadata unchanged", () => {
+    expect(JSON.stringify(sharedDistSnapshot()) === JSON.stringify(sharedDistBefore), "shared dist bytes or write metadata changed").toBe(true);
   });
 });

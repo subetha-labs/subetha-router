@@ -17,6 +17,7 @@ import { hostname as osHostname } from "node:os";
 import path from "node:path";
 
 import { StoreError, type StoreFs } from "./fs.js";
+import { STORE_FILES } from "./paths.js";
 
 export const LOCK_FILE = "daemon.lock";
 export const RECLAIM_LOCK_FILE = "daemon.lock.reclaim";
@@ -39,7 +40,7 @@ export interface LockHandle {
 
 export interface LockDeps {
   readonly fs: StoreFs;
-  /** pid が生きているか（既定は `process.kill(pid, 0)`。EPERM も生きている扱い）。 */
+  /** pid が生きているか（既定は `process.kill(pid, 0)`。ESRCH だけを死亡とし、他の失敗は生きている扱い）。 */
   readonly isAlive?: (pid: number) => boolean;
   /** pid の起動時刻の文字列（既定は `ps -o lstart=`、locale と TZ を固定。取れなければ undefined = pid だけで判定）。 */
   readonly startedAtOf?: (pid: number) => string | undefined;
@@ -52,7 +53,8 @@ function defaultIsAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    // Only ESRCH positively establishes death; an unexpected probe failure is not authority to reclaim.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -97,24 +99,60 @@ function writeAll(fs: StoreFs, fd: number, data: Buffer): void {
 
 /** lock の状態を読む（取得も回収もしない）。読めない・壊れている → `unreadable`。 */
 export function inspectLock(dir: string, deps: LockDeps): { readonly state: "free" | "held" | "stale" | "unreadable"; readonly content?: LockContent } {
+  const { identity: _identity, ...state } = inspectLockWithIdentity(dir, deps);
+  return state;
+}
+
+type FileIdentity = ReturnType<StoreFs["lstatSync"]>;
+function inspectLockWithIdentity(dir: string, deps: LockDeps): { readonly state: "free" | "held" | "stale" | "unreadable"; readonly content?: LockContent; readonly identity?: FileIdentity } {
   const lockPath = path.join(dir, LOCK_FILE);
-  let exists: boolean;
+  let identity: FileIdentity;
   try {
-    deps.fs.lstatSync(lockPath);
-    exists = true;
+    identity = deps.fs.lstatSync(lockPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") exists = false;
-    else return { state: "unreadable" };
+    return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "free" : "unreadable" };
   }
-  if (!exists) return { state: "free" };
+  if (identity.isSymbolicLink() || !identity.isFile()) return { state: "unreadable" };
   const content = readLock(deps.fs, lockPath);
   if (content === undefined) return { state: "unreadable" };
   const isAlive = deps.isAlive ?? defaultIsAlive;
-  if (!isAlive(content.pid)) return { state: "stale", content };
+  if (!isAlive(content.pid)) return { state: "stale", content, identity };
   const startedAtOf = deps.startedAtOf ?? psStartedAtOf;
   const now = startedAtOf(content.pid);
-  if (now !== undefined && content.startedAt !== "" && now !== content.startedAt) return { state: "stale", content };
-  return { state: "held", content };
+  if (now !== undefined && content.startedAt !== "" && now !== content.startedAt) return { state: "stale", content, identity };
+  return { state: "held", content, identity };
+}
+
+function sameFile(a: FileIdentity, b: FileIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.uid === b.uid && a.mode === b.mode;
+}
+
+/** Only HUMAN reclaim may remove this fixed socket, while the matched dead lock still excludes acquisition.
+ * The caller validates the store's home containment (as for all store operations). Recheck the directory,
+ * lock and socket here without following their symlinks. Same-uid malicious path swaps cannot be made
+ * atomic with portable lstat/unlink; cooperative owners cannot replace these paths while the lock remains.
+ */
+function reclaimSocket(dir: string, deps: LockDeps, recorded: LockContent, lockIdentity: FileIdentity, assertLock: () => void): void {
+  const fs = deps.fs;
+  const socketPath = path.join(dir, STORE_FILES.socket);
+  try {
+    const directory = fs.lstatSync(dir);
+    let socket: FileIdentity;
+    try { socket = fs.lstatSync(socketPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    const uid = process.getuid?.();
+    const owned = (stat: FileIdentity, mode: number) => uid !== undefined && stat.uid === uid && !stat.isSymbolicLink() && (stat.mode & 0o7777) === mode;
+    if (!path.isAbsolute(dir) || !directory.isDirectory() || !owned(directory, 0o700) ||
+      !lockIdentity.isFile() || !owned(lockIdentity, 0o600) || !socket.isSocket() || !owned(socket, 0o600) ||
+      recorded.hostname !== (deps.hostname ?? osHostname())) throw new StoreError("socket_reclaim_refused");
+    // Fail closed even on a reused live pid: no uncertain process owner authorizes socket deletion.
+    if ((deps.isAlive ?? defaultIsAlive)(recorded.pid)) throw new StoreError("daemon_already_running");
+    assertLock();
+    if (!sameFile(directory, fs.lstatSync(dir)) || !sameFile(socket, fs.lstatSync(socketPath))) throw new StoreError("socket_reclaim_refused");
+    fs.unlinkSync(socketPath);
+  } catch (error) {
+    throw error instanceof StoreError ? error : new StoreError("socket_reclaim_refused");
+  }
 }
 
 /** 自分だけの一時ファイルを書いて `link` で `target` を作る。identity（inode・token）を返す。 */
@@ -215,7 +253,7 @@ export function reclaimLock(dir: string, deps: LockDeps): { readonly removed: bo
     throw error;
   }
   try {
-    const state = inspectLock(dir, deps);
+    const state = inspectLockWithIdentity(dir, deps);
     if (state.state === "free") return { removed: false };
     if (state.state === "held") throw new StoreError("daemon_already_running");
     if (state.state === "unreadable") throw new StoreError("lock_unreadable");
@@ -223,13 +261,22 @@ export function reclaimLock(dir: string, deps: LockDeps): { readonly removed: bo
     // stale と判定した記録と現在の identity/token が一致しなければ、B を stale と扱わず拒む。
     const lockPath = path.join(dir, LOCK_FILE);
     const recorded = state.content;
-    const current = readLock(fs, lockPath);
-    if (recorded === undefined || current === undefined || current.pid !== recorded.pid ||
-      current.startedAt !== recorded.startedAt || current.hostname !== recorded.hostname || current.token !== recorded.token) {
-      throw new StoreError("lock_unreadable");
-    }
+    const assertLock = () => {
+      const current = readLock(fs, lockPath);
+      if (recorded === undefined || current === undefined || current.pid !== recorded.pid ||
+        current.startedAt !== recorded.startedAt || current.hostname !== recorded.hostname || current.token !== recorded.token) {
+        throw new StoreError("lock_unreadable");
+      }
+      try {
+        if (state.identity === undefined || !sameFile(state.identity, fs.lstatSync(lockPath))) throw new StoreError("lock_unreadable");
+      } catch { throw new StoreError("lock_unreadable"); }
+    };
+    assertLock();
+    if (recorded === undefined || state.identity === undefined) throw new StoreError("lock_unreadable");
+    reclaimSocket(dir, deps, recorded, state.identity, assertLock);
     // 死亡確認済みの保持者はこの一致した lock をもう release できず、guard が他の回収者を止める。
     // cooperative な利用では、ここから unlink まで置き換わらない。
+    assertLock();
     fs.unlinkSync(lockPath);
     return { removed: true, ...(state.content === undefined ? {} : { content: state.content }) };
   } finally {

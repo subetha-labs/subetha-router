@@ -1,6 +1,23 @@
 import { expect, test } from "vitest";
 import { fixtureExitDiagnostic } from "../harness/diagnostics.js";
 
+test.each([
+  ["SyntaxError: Unexpected token 'secret-token'", "SyntaxError"],
+  ["Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/private/secret-module.js'", "ERR_MODULE_NOT_FOUND"],
+  ["SyntaxError: The requested module '/private/secret-module.js' does not provide an export named 'secret-export'", "SyntaxError; does not provide an export named"],
+  ["SyntaxError: Unexpected end of input", "SyntaxError; Unexpected end of input"],
+  ["SyntaxError: Unexpected EOF", "SyntaxError; Unexpected EOF"],
+  ["/private/node: bad option: --secret-option=secret-value", "bad option:"],
+])("Node diagnostic projects fixed markers only: %s", (stderr, expected) => {
+  const diagnostic = fixtureExitDiagnostic("compiled-bin", { code: 1, signal: null },
+    `${stderr}\n/private/secret-path\nTOKEN=secret-env\nsecret-passphrase\u001b[31m`,
+    ["--disable-sigusr1", "/private/secret-bin.js", "--secret-argv"]);
+  expect(JSON.parse(diagnostic)).toEqual({ row: "compiled-bin", code: 1, signal: null,
+    argv: ["--disable-sigusr1", "<fixture-path-or-redacted>", "<fixture-path-or-redacted>"],
+    stderr: expected, truncated: false });
+  expect(diagnostic).not.toMatch(/private|secret|TOKEN|\u001b/);
+});
+
 test("fixture exit diagnostics retain row/code/signal and known stderr markers, never paths or secrets", () => {
   const diagnostic = fixtureExitDiagnostic("dyld-insert-libraries", { code: null, signal: "SIGABRT" },
     "dyld[123]: Library not loaded: /private/fixture.dylib\nReason: tried: /private/path (no such file)\nsecret-fixture-value\u001b[31m",

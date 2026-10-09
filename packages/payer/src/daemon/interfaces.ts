@@ -38,6 +38,7 @@ export interface DaemonHooks {
   readonly ui: ConfirmUi;
   readonly tty: SecretTty;
   readonly faults?: FaultPoints;
+  readonly configurePurchase?: (purchase: PurchaseContext) => PurchaseContext;
   readonly recover: (context: DaemonContext) => Promise<void>;
   readonly handler: (context: DaemonContext) => Handler;
   readonly listen: (path: string, handler: Handler) => Promise<Listener>;

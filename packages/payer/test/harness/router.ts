@@ -26,7 +26,7 @@ export function h1Quote() {
   return { ok: true, approvalRequired: true, quote, subject, nextStep: "Explicit human approval is required.", evidence: { label: "P-3a-fixture", source: "fixture", verified: false }, adapterMode: "synthetic" };
 }
 
-export async function fakeRouter() {
+export async function fakeRouter(options: { observed?: (input: Record<string, unknown>) => void; beforeResponse?: () => Promise<void> } = {}) {
   const response = h1Quote();
   const state = {
     quote: response as Record<string, unknown>,
@@ -35,6 +35,7 @@ export async function fakeRouter() {
     calls: { initialize: 0, listRoutes: 0, quote: 0, status: 0, purchase: 0 },
     requestIds: [] as string[],
     purchases: [] as Record<string, unknown>[],
+    body: { value: "x".repeat(2048) } as Record<string, unknown>,
   };
   const connections = new Set<Socket>();
   const transports = new Set<StreamableHTTPServerTransport>();
@@ -63,9 +64,11 @@ export async function fakeRouter() {
     });
     mcp.registerTool("subetha_router_status", { inputSchema: { paymentId: z.string() } }, async () => { state.calls.status++; return result(state.status); });
     mcp.registerTool("subetha_router_purchase", { inputSchema: { quoteId: z.string(), requestId: z.string(), approval: z.string(), credential: z.string(), quote: z.record(z.unknown()) } }, async (input) => {
+      options.observed?.(input);
       state.calls.purchase++; state.purchases.push(input);
+      await options.beforeResponse?.();
       if (!state.requestIds.includes(input.requestId) || input.approval !== input.quoteId || input.quoteId !== input.quote["quoteId"] || input.credential !== "fixture-credential") return result({ ok: false, error: "approval_mismatch" });
-      return result({ ok: true, outcome: "delivered", paymentId: input.quote["paymentId"], snapshot: { value: "x".repeat(2048) }, contentType: "application/json" });
+      return result({ ok: true, outcome: "delivered", paymentId: input.quote["paymentId"], snapshot: state.body, contentType: "application/json" });
     });
     const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
     transports.add(transport);

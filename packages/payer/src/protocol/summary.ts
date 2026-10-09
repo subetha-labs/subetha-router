@@ -128,7 +128,7 @@ export const QuoteSummary = z
   .strict();
 export type QuoteSummary = z.infer<typeof QuoteSummary>;
 
-export const PurchaseState = z.enum(["quoted", "approved", "sign_intent", "signed", "submit_intent", "submitted", "result", "unknown"]);
+export const PurchaseState = z.enum(["quoted", "approved", "sign_intent", "signed", "submit_intent", "submitted", "result", "unknown", "expired", "expired_after_sign", "closed_by_operator"]);
 
 /**
  * 呼び出し側（受信レグ）の資金が動いたかの**証拠に基づく**3 値。送信レグ（Router → Provider）のことではない。
