@@ -76,6 +76,8 @@ G-A2  testnet の購入（AC-A1・AC-A10 の最終）                           
 - **focused**: `npx vitest run test/unit/keys.test.ts test/unit/ledger.test.ts test/unit/lock.test.ts test/unit/paths.test.ts`。
 - **sabotage**: hash の検証を外す → 改変の試験が落ちる／切り詰めを外す → 続きの append の試験が落ちる／`link` を `writeFile` に → 同時取得の試験が落ちる／`verifier` の照合を外す → 誤 passphrase の試験が落ちる／symlink の検査を外す → paths の試験が落ちる。
 
+- **実装・検証記録（2026-10-09）**: Claude の利用上限停止後、owner 承認により Codex `gpt-6-astra` へ引継ぎ。store の独立レビュー指摘（reclaim guard の競合、live owner の交代、台帳の sparse array / `toJSON` / accessor / timestamp）を回帰試験付きで修正。親側 macOS と Docker Linux Node 22 で payer 全 **80/80 tests**、types/build 成功。別セッションの最終レビュー **APPROVE**。この完了は store/package-shell の範囲であり、signer・daemon・UI・配布・実決済の完了ではない。通常の dead-daemon reclaim は可能だが、回収者が落として残った guard は fail closed とし、全 contender を停止した人間の offline 復旧を要する（P-5a/P-5b の手順へ反映）。原証跡は git ignored の `.claude_workflow/local/p1b-round3/` と `takeover-p1b-review3-result.md`。
+
 ### P-2 — vendor と `src/sign`（EVM だけ）（設計 §3.8、SR-A7 の署名の検査、AC-A8 の移植の行）
 
 - **範囲**: `packages/payer/scripts/vendor.ts`（**`src/shared/networks.ts`・`tools/sign-classify-evm.ts`・`tools/x402-payer.ts` の 3 つだけ**を `src/vendor/` にコピーし import path を書き換える。`src/shared/svm-message.ts` と `src/net/*` は第 1 slice では含めない = 設計 §3.8 の一覧）、`src/sign/index.ts`（`sign(offer, key)`: `classifyEvmOffer` → `chainId === 84532` の gate → `createX402Payer(key).credentialFor`。他は `rail_not_enabled`。**FR-A14 の 3 者の照合は P-3b**）、CI の検査（vendor と source の一致、`packages/payer` の依存に `mppx`・`@solana/*` が無い）。
