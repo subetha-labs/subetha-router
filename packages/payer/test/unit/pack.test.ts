@@ -125,7 +125,7 @@ describe("P-1a: packaging boundary", () => {
     expect(viaSymlink.stderr).toMatch(/usage: subetha-payer/);
     const viaOddPath = spawnSync("sh", [path.join(pkg, "bin", "subetha-payer"), "wallet", "address"], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
     expect(viaOddPath.status).toBe(2);
-    expect(viaOddPath.stderr).toMatch(/not implemented/);
+    expect(viaOddPath.stderr).toMatch(/cli_refused: home_unavailable/);
     // Resolve the packaged signer's runtime dependencies; never invoke signing.
     const signerUrl = pathToFileURL(path.join(pkg, "dist/sign/index.js")).href;
     const signerImport = spawnSync(process.execPath, ["--input-type=module", "--eval",
@@ -154,14 +154,14 @@ describe("P-1a: packaging boundary", () => {
     expect(Object.keys(pkg.dependencies).some((d) => d === "mppx" || d.startsWith("@solana/") || d.startsWith("@solana-program/"))).toBe(false);
   });
 
-  test("node dist/bin.js is refused without the launcher's flag (exit 2, sigusr1_enabled); through the launcher the skeleton answers (exit 2, not implemented)", () => {
+  test("node dist/bin.js is refused without the launcher's flag (exit 2, sigusr1_enabled); through the launcher the CLI requires a fixed HOME (exit 2, home_unavailable)", () => {
     const run = (file: string, args: string[]) => spawnSync(file, args, { cwd: packageRoot, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
     const direct = run("node", ["dist/bin.js", "wallet", "address"]);
     expect(direct.status).toBe(2);
     expect(direct.stderr).toMatch(/startup_refused: sigusr1_enabled/);
     const launched = run("sh", ["bin/subetha-payer", "wallet", "address"]);
     expect(launched.status).toBe(2);
-    expect(launched.stderr).toMatch(/not implemented/);
+    expect(launched.stderr).toMatch(/cli_refused: home_unavailable/);
     expect(launched.stderr).not.toMatch(/sigusr1_enabled/);
     const help = run("sh", ["bin/subetha-payer", "help"]);
     expect(help.status).toBe(0);

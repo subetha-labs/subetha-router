@@ -16,27 +16,36 @@ export function ownedChild(args: string[], home: string, extraEnv: Record<string
     env: { PATH: "/usr/bin:/bin", HOME: home, XDG_CONFIG_HOME: `${home}/.config`, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
-  const originalStart = child.pid === undefined ? undefined : psStartedAtOf(child.pid);
   let stdout = "";
   let stderr = "";
-  child.stdout!.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-  child.stderr!.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  let outputOverflow = false;
+  const bounded = (previous: string, chunk: string) => {
+    if (previous.length + chunk.length > 1_048_576) outputOverflow = true;
+    return (previous + chunk).slice(0, 1_048_576);
+  };
+  child.stdout!.setEncoding("utf8").on("data", (chunk: string) => { stdout = bounded(stdout, chunk); });
+  child.stderr!.setEncoding("utf8").on("data", (chunk: string) => { stderr = bounded(stderr, chunk); });
   const messages: unknown[] = [];
   const subscribers = new Set<() => void>();
-  child.on("message", (message) => { messages.push(message); for (const notify of subscribers) notify(); });
+  child.on("message", (message) => {
+    if (messages.length < 4096) messages.push(message); else outputOverflow = true;
+    for (const notify of subscribers) notify();
+  });
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
   // Attach a handler immediately; callers still receive the rejection through exited.
   void exited.catch(() => undefined);
+  // All stream/exit observers are attached before the synchronous identity lookup.
+  const originalStart = child.pid === undefined ? undefined : psStartedAtOf(child.pid);
   function signal(signal: NodeJS.Signals): void {
     if (child.exitCode !== null || child.signalCode !== null) return;
     if (child.pid === undefined || originalStart === undefined || psStartedAtOf(child.pid) !== originalStart) throw new Error("fixture_child_identity_unverified");
     child.kill(signal);
   }
   return {
-    child, exited, messages, get stdout() { return stdout; }, get stderr() { return stderr; }, signal,
+    child, exited, messages, get stdout() { return stdout; }, get stderr() { return stderr; }, get outputOverflow() { return outputOverflow; }, signal,
     async waitFor(event: string) {
       const matches = () => messages.find((value) => typeof value === "object" && value !== null && "event" in value && value.event === event);
       if (matches()) return;

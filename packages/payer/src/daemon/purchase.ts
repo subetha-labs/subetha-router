@@ -1,7 +1,7 @@
 import { generateRef } from "./ref.js";
 import { routerIdentity } from "../router/identity.js";
 import { randomUUID } from "node:crypto";
-import { failure, knownCodeOf, PurchaseRef, QuoteSummary, PurchaseSummary, PurchaseBodySummary } from "../protocol/summary.js";
+import { InspectionSummary, failure, knownCodeOf, PurchaseRef, QuoteSummary, PurchaseSummary, PurchaseBodySummary } from "../protocol/summary.js";
 import { StoreError } from "../store/fs.js";
 import type { JsonValue } from "../store/ledger.js";
 import { record, routerFailure, STATIC_ROUTE } from "../router/client.js";
@@ -110,19 +110,25 @@ function newPurchaseCore(context: DaemonContext) {
       return current(e);
   }
   let initialization: Promise<void> | undefined;
-  function recover(): Promise<void> {
-    // A rejected initialization stays rejected. Never expose a partially validated map.
+  function load(): Promise<void> {
+    // Validate ALL retained evidence before exposing any ref, without submission.
     return initialization ??= (async () => {
       held();
       if (context.ledger.rows.length) {
         if (!identity) throw new StoreError("store_corrupt");
         const retained = rehydrate(context.ledger, { routerUrl: identity.routerUrl, canonicalResource: identity.resource, address: wallet }, context.phrase, projectResult);
         for (const [ref, e] of retained) entries.set(ref, e);
-        for (const [ref, e] of entries) await mutex.run(ref, () => reconcile(e));
       }
     })();
   }
-  async function reconcile(e: Entry): Promise<unknown> {
+  let recovery: Promise<void> | undefined;
+  function recover(): Promise<void> {
+    return recovery ??= (async () => {
+      await load();
+      for (const [ref, e] of entries) await mutex.run(ref, () => reconcile(e));
+    })();
+  }
+  async function reconcile(e: Entry, allowSubmit = true): Promise<unknown> {
     held();
     if (["result", "expired", "expired_after_sign", "closed_by_operator"].includes(e.state)) return current(e);
     if (["quoted", "approved"].includes(e.state)) {
@@ -146,6 +152,7 @@ function newPurchaseCore(context: DaemonContext) {
         if (e.record.approvalDeadlineMs <= Date.now() || e.record.source.expiresAt * 1000 <= Date.now()) {
           await append(e, "expired_after_sign", { recordHash: e.hash }); return current(e);
         }
+        if (!allowSubmit) return unknown(e);
         guard(e);
         if (!e.credential) throw new StoreError("store_corrupt");
         return await submit(e, e.credential);
@@ -158,8 +165,20 @@ function newPurchaseCore(context: DaemonContext) {
   }
   return {
     recover,
+    async inspect(ref?: string): Promise<unknown> {
+      await load();
+      if (ref !== undefined && !entries.has(ref)) return failure("unknown_ref");
+      const selected = ref === undefined ? [...entries.keys()] : [ref];
+      const inspections = [];
+      for (const key of selected) inspections.push(await mutex.run(key, async () => {
+        const e = entries.get(key)!;
+        await reconcile(e, false);
+        return { summary: current(e), rows: context.ledger.rows.filter(row => row.ref === key).map(row => ({ seq: row.seq, ts: row.ts, state: row.state })) };
+      }));
+      return InspectionSummary.parse({ ok: true, inspections });
+    },
     async closeByOperator(ref: string, reason: string): Promise<unknown> {
-      await recover();
+      await load();
       return mutex.run(ref, async () => {
         held(); const e = entries.get(ref);
         if (!e || e.state !== "unknown" || typeof reason !== "string" || !reason.trim() || reason.length > 512) throw new StoreError("approval_mismatch");

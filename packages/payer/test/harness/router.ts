@@ -34,6 +34,7 @@ export async function fakeRouter(options: { observed?: (input: Record<string, un
     delayMs: 0, textOnly: false, hang: false,
     calls: { initialize: 0, listRoutes: 0, quote: 0, status: 0, purchase: 0 },
     requestIds: [] as string[],
+    statusPaymentIds: [] as string[],
     purchases: [] as Record<string, unknown>[],
     body: { value: "x".repeat(2048) } as Record<string, unknown>,
   };
@@ -62,7 +63,7 @@ export async function fakeRouter(options: { observed?: (input: Record<string, un
       state.requestIds.push(requestId);
       return result(routeId === STATIC_ROUTE ? state.quote : { ok: false, error: "unknown_route", httpStatus: 404 });
     });
-    mcp.registerTool("subetha_router_status", { inputSchema: { paymentId: z.string() } }, async () => { state.calls.status++; return result(state.status); });
+    mcp.registerTool("subetha_router_status", { inputSchema: { paymentId: z.string() } }, async ({ paymentId }) => { state.calls.status++; state.statusPaymentIds.push(paymentId); return result(state.status); });
     mcp.registerTool("subetha_router_purchase", { inputSchema: { quoteId: z.string(), requestId: z.string(), approval: z.string(), credential: z.string(), quote: z.record(z.unknown()) } }, async (input) => {
       options.observed?.(input);
       state.calls.purchase++; state.purchases.push(input);

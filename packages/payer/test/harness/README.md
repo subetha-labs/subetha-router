@@ -114,3 +114,191 @@ The four checkpoint-first production mutation gates remain parent-owned: forward
 elicitation response, remove metadata, expose a full quote, loosen purchase input.
 Strict subject validation and actual byte measurement are separate assertions.
 No native consent, live signature, settlement/finality or owner acceptance is claimed.
+
+### P-5a CLI (bounded author / parent handoff)
+
+`src/bin.ts` now dispatches `wallet new|address|balance`, `status [ref]`,
+`inspect <ref> [--close]`, `config get|set`, `lock reclaim`, and `ui-check`.
+Wallet creation requires two protected TTY passphrase entries; stdout is the
+address only. Balance stdout is Base Sepolia USDC base units (6 decimals).
+Offline inspection asks for the passphrase to authenticate/decrypt the ledger
+and check the install seal, without opening the wallet secret. Online inspection
+uses the daemon's strict read-only `inspect` socket Summary. This socket method
+has no close/approval input and does not add an MCP tool (the five remain fixed).
+Inspection may append reconciliation evidence but never signs or submits a
+saved credential. `inspect --close` requires the daemon to be stopped, takes the
+same store lock, shows safe evidence, reads a reason and requires literal `y`
+from the protected TTY. The reason is sealed; it is not echoed in the Summary.
+
+Human configuration syntax:
+
+- `config get`
+- `config set session.ttlMs 60000` (positive integer, maximum 3600000)
+- `config set rails '["x402"]'` (the only enabled rail)
+- `config set rpc.eip155:84532 https://sepolia.base.org/` (public HTTPS endpoint;
+  production checks `eth_chainId` before the fixed USDC `balanceOf` call)
+- `config set router.canonicalResource.url <canonical-resource-url>` followed by
+  `config set router.url <transport-url>` when configuring another Router.
+  The canonical path and GET method remain pinned; a nondefault transport
+  cannot be saved without an explicit canonical resource. No response supplies it.
+
+Every set requires a TTY, refuses live/stale/uncertain daemon locks, and applies
+at the next daemon startup. `lock reclaim` asks for TTY confirmation and then
+uses the production dead-owner/socket-before-lock checks. A leftover reclaim
+guard is never automatically removed: stop **ALL contenders**, then human
+**offline recovery** is required. Never touch the controller's worker.lock.
+`ui-check` uses a temporary TTY passphrase and an in-memory synthetic verifier,
+with fixed quote/backslash/newline text; only classification is printed. It has
+no purchase/signature path. The five real native manual cases remain owner gates.
+
+Author verification (owned files/in-memory only): initial `test/unit/cli.test.ts`
+ran against the skeleton and genuinely failed all six fixed-code assertions;
+the first shell setup attempt used a wrong relative path and is not counted as
+RED. The added CLI tests inject process identity, TTY, RPC, daemon and helper
+ports. No process inventory, sockets, GUI or external queries are used by them.
+The only obsolete assertion migration is in `test/unit/pack.test.ts`: the two
+launcher checks formerly expected `not implemented`; they now expect
+`cli_refused: home_unavailable` under the same deliberately HOME-less environment.
+The flag refusal, pack exclusions and signer dependency checks remain intact.
+The pack test itself is retained for the parent, not run by this author.
+
+Parent-only retained gate: after fresh build, run
+`../../node_modules/.bin/vitest run test/wire/cli.test.ts` from `packages/payer`.
+It contains real compiled-bin non-TTY checks, known-random encrypted wallet
+subprocesses, an owned real PTY wallet creation, loopback RPC protocol and the
+actual daemon/client socket path. `cli-entry.ts` and `cli-pty.py` are test-only;
+the subprocess uses `process.execPath --import <resolved tsx>`, never the tsx CLI.
+They are excluded by existing pack files/tsconfig rules. This wire gate and all
+native GUI/manual, clean-install, macOS/Docker and owner-funded gates are **UNRUN**
+by the bounded author. No acceptance is implied by the unit results.
+
+Future checkpoint-first causal mutation oracles (do not mutate without the
+controller's checkpoint/restore procedure):
+
+- `cli-owned.test.ts`, `wallet exact address-only secrecy oracle`: successful
+  creation must print exactly the computed address and no plaintext/base64/hex
+  secret. Changing the address output to the key reaches this assertion.
+- `cli-owned.test.ts`, `reclaim live-owner causal oracle`: synthetic same-start
+  live owner, no socket, valid TTY `y`; requires `daemon_already_running` and
+  byte-identical lock. Removing reclaimLock's `state.state === "held"` refusal
+  reaches this protection oracle (the stale/reused-PID check is a separate case).
+- `cli-owned.test.ts`, `inspect-close non-TTY causal oracle`: valid saved unknown
+  evidence, valid ref, injected passphrase/reason/`y` reader with available=false;
+  asserts no TTY read, Router read, closure or file mutation. Removing the
+  runInspect `requireTty(tty)` guard reaches these assertions; no secondary
+  synthetic-TTY check or invalid parser input masks it.
+
+Next: parent source/diff/caller review, fresh macOS/Docker fixtures, NEW independent
+read-only review and corrections, checkpoint-before-three-mutations with exact
+restore, then P-5b. The earlier controller milestone/checkpoint evidence is not
+relabelled as this author's test execution.
+
+Lock API note: the production CLI calls `reclaimLock(dir, deps, true)` to require
+positive dead-owner identity even without a leftover socket. This trusted module
+argument is not accepted from argv/env/socket. Existing low-level reclamation
+fixtures retain their historical default; socket reclamation keeps its existing
+mandatory checks. CLI writes and daemon startup independently refuse a leftover
+reclaim guard before acquiring a new owner lock. The existing two-contender
+interleaving tests remain unchanged.
+
+Recorded author command results (all from `packages/payer`; exit 0 unless RED):
+
+- Initial RED: `../../node_modules/.bin/vitest run test/unit/cli.test.ts`:
+  6/6 failed on the skeleton response, exit 1. Later added guard-diagnostic
+  test also genuinely failed with `internal_error` before its implementation.
+- CLI: `../../node_modules/.bin/vitest run test/unit/cli.test.ts test/unit/cli-owned.test.ts`:
+  final sources contain 50 tests, all included in the final 96-test GREEN below.
+- Focused regression: `../../node_modules/.bin/vitest run test/unit/recovery.test.ts test/unit/purchase.test.ts test/unit/summary.test.ts test/unit/handler.test.ts test/unit/shim.test.ts test/unit/reclaim-socket.test.ts test/unit/startup-order.test.ts test/unit/parse.test.ts test/unit/osascript-script.test.ts`:
+  9 files / 213 PASS.
+- Pure lock selection: `../../node_modules/.bin/vitest run test/unit/lock.test.ts -t '^(?!.*two processes racing)(?!.*psStartedAtOf).*'`:
+  18 PASS; the actual process race and ps tests are deliberately UNRUN, not new skips.
+- Final affected regression: `../../node_modules/.bin/vitest run test/unit/cli.test.ts test/unit/cli-owned.test.ts test/unit/startup-order.test.ts test/unit/reclaim-socket.test.ts`:
+  4 files / 96 PASS (includes CLI 50). `npm run types`, `npm run build`, and
+  root `git diff --check`: PASS. These runs overlap; do not add their counts.
+
+No new tool/provider/sandbox refusal occurred. An initial relative-path setup
+error and one TypeScript ProcessEnv/PathsEnv mismatch were corrected. No existing
+wallet, auth file, paid API, remote service, real GUI, process inventory or
+controller-owned state was used. No commit or acceptance claim was made.
+
+P-5a FIX1 (test-only): `cli-pty.py` now tracks PTY EOF/drain separately from
+owned-child reap, with the original monotonic 20-second deadline. EOF/EIO waits
+for that child; observed exit still drains final output. Cleanup never signals
+a reaped/lost child and closes the descriptor once. Helper failures emit fixed
+codes; `cli-pty-result.ts` adds only fixed classification/code/signal to the
+wire assertion, retaining exit 0, two prompts, one address and secret exclusion.
+
+New test-only snapshot sources: `test/fixtures/cli-pty-lifecycle.py`,
+`test/harness/cli-pty-result.ts`, `test/unit/cli-pty.test.ts`. The Python harness
+injects fork/exec/select/read/write/waitpid/kill/close/clock; it opens no actual
+PTY and forks no child. Vitest runs that pure harness in an owned Python process.
+From the repository root, `python3 packages/payer/test/fixtures/cli-pty-lifecycle.py`
+genuinely failed 3/3 against the unchanged original helper (exit 1): premature
+EOF/EIO deadline and lost final address after exit. After correction, those
+three passed; expanded lifecycle/cleanup/secrecy coverage passed 7/7 (exit 0).
+From `packages/payer`, `../../node_modules/.bin/vitest run test/unit/cli-pty.test.ts`
+passed 2/2 (exit 0), including the same seven Python cases; counts overlap.
+Payer `npm run types` and `npm run build`, and root `git diff --check`, all
+exited 0. Comparing all 449 round1 source hashes found only the helper, wire
+test and this README changed; production sources remain byte-identical.
+
+This is pure causal evidence, not wire evidence. Parent source readback, fresh
+immutable round2 macOS/Docker execution, a NEW separate independent read-only
+review and substantive corrections remain required before the checkpoint,
+three mutations/exact restore and P-5b. Real PTY/wire, live/dead reclaim and
+durable inspect-close controls, native/manual and owner gates remain UNRUN by
+this author; no acceptance is claimed.
+
+P-5a FIX2 retained rows (author wire execution **UNRUN**):
+
+- Saved authenticated `unknown` → compiled `status`/`inspect` child → real Unix
+  socket → production handler/core → fakeRouter TCP, for matching terminal,
+  valid-but-different fingerprint, unreadable and true `not_found`. Startup
+  reconciliation remains enabled and must account for exactly one status read;
+  each CLI then adds one read with the saved paymentId and zero purchases.
+- A separate OFFLINE compiled CLI/PTY opens seeded `signed` evidence, observes
+  true `not_found`, saves `unknown`, then a NEW CLI reopens it. No daemon boot or
+  signature is used. The legitimately absent seal is created by the actual CLI
+  using its installation hashes and must remain unchanged on reopen.
+- Compiled CLI/PTY rejects live-owner `y` and stale-owner `n`, preserving file
+  bytes/inodes and socket. Only the fixture-owned daemon is killed, with its
+  original PID/start identity, and actual exit/stdio close is awaited. Confirmed
+  stale reclaim uses `cli-lock-entry.ts`: it imports real `runLock`, real TTY,
+  production liveness and realFs, observing successful socket-before-lock
+  unlinks with the matched owner/inodes. Other store files and a disposable
+  worker.lock sentinel survive; the actual workflow lock is never accessed.
+- Compiled CLI/PTY `config set router.url` (explicit canonical resource, valid
+  alternate loopback URL) and retained `session.ttlMs` both require exact active
+  daemon refusal, unchanged config/lock and continued ping. After that daemon
+  closes, the same URL succeeds offline without any Router request.
+- OFFLINE compiled `inspect --close` with synthetic PTY answers checks cancel,
+  confirmed sealed reason, durable closure and a NEW CLI reopening. Purchase
+  count stays zero. This is fixture consent, not owner consent or native UI.
+
+`cli-evidence.ts` seeds only disposable authenticated ledger evidence using the
+existing owned store/ledger/record helpers. The CLI outputs/errors and validated
+plaintext ledger projections use the existing plaintext/base64/hex AC-A9 scan,
+including known key/passphrase/phrase/credential/ownerKey/full challenge; the
+ownerKey is synthetic metadata, not a claim of dynamic-route support. The
+existing encrypted-envelope authentication exemption is unchanged. All test
+entries remain outside published files/build output.
+
+`cli-pty.py` retains independent EOF/drain/reap and monotonic deadlines, now
+accepting fixed prompt/answer scripts and returning only parsed, secret-scanned
+JSON/fixed refusals. Output is bounded; cleanup preserves the primary failure
+and never signals after reap/ECHILD. `children.ts` attaches observers before
+start-identity lookup and bounds output/messages. These shared harness changes
+require the parent's fresh full process gate, not just CLI wire execution.
+
+FIX2 author checks: the allowed three CLI unit files passed 52/52 (including
+the expanded 10-case pure Python lifecycle harness); owned-file-only
+`npm test -- test/harness/cli-evidence.test.ts` passed 2/2. The latter validates
+fixture rehydration and causal secret scanning only, not CLI acceptance.
+An initial type check found a fixture GET literal typing error, corrected only
+in the test helper. Final payer `npm run types`, `npm run build` and root
+`git diff --check` exited 0. After the final cleanup change,
+`npm test -- test/unit/cli-pty.test.ts` again passed 2/2 (overlapping count).
+No production source changed; no real PTY/socket/TCP/process inventory, Docker,
+GUI, mutation, commit or publication was executed by this author. Parent fresh
+round3 macOS/Docker, NEW independent review, checkpoint, three mutations/exact
+restoration and P-5b remain required. No P-5a acceptance is claimed.

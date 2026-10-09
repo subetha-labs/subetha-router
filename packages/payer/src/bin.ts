@@ -3,7 +3,7 @@
  *
  * - 起動は `bin/subetha-payer`（`exec node --disable-sigusr1 …`）経由だけを認める。`node dist/bin.js` は `--disable-sigusr1` が無いので拒む
  *   （同じ利用者の別 process が `SIGUSR1` で inspector を開き、メモリの鍵を読める。設計 §1 U-A1）。
- * - 各サブコマンドの実装は P-3〜P-5 で足す。P-1a では振り分けと拒否だけ。
+ * - CLI は既存 daemon/client/core/store に振り分ける。
  */
 
 import { realpathSync } from "node:fs";
@@ -16,7 +16,7 @@ const USAGE = [
   "  wallet new|address|balance   create or inspect the key (never prints secrets)",
   "  daemon                       run the payer in this terminal (asks for the passphrase and the security phrase here)",
   "  mcp                          stdio MCP shim for an agent (no key, no UI; talks to the daemon)",
-  "  status [ref] | inspect <ref> | config get|set | lock reclaim",
+  "  status [ref] | inspect <ref> [--close] | config get|set | lock reclaim | ui-check",
 ].join("\n");
 
 /** 起動の不変条件: inspector の signal 経路が閉じていること（launcher 以外からの起動は拒む）。 */
@@ -36,13 +36,12 @@ export async function main(argv: readonly string[], execArgv: readonly string[] 
       return (await import("./daemon/run.js")).runDaemon(argv.slice(1), execArgv);
     case "mcp":
       return (await import("./shim/run.js")).runShim(argv.slice(1));
-    case "wallet":
-    case "status":
-    case "inspect":
-    case "config":
-    case "lock":
-      process.stderr.write(`${command}: not implemented yet (P-1a skeleton)\n`);
-      return 2;
+    case "wallet": return (await import("./cli/wallet.js")).runWallet(argv.slice(1));
+    case "status": return (await import("./cli/status.js")).runStatus(argv.slice(1));
+    case "inspect": return (await import("./cli/inspect.js")).runInspect(argv.slice(1));
+    case "config": return (await import("./cli/config.js")).runConfig(argv.slice(1));
+    case "lock": return (await import("./cli/lock.js")).runLock(argv.slice(1));
+    case "ui-check": return (await import("./cli/ui-check.js")).runUiCheck(argv.slice(1));
     default:
       process.stderr.write(`${USAGE}\n`);
       return command === undefined || command === "help" || command === "--help" ? 0 : 2;
