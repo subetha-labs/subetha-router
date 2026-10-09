@@ -5,7 +5,7 @@ import path from "node:path";
 import { createKeysDocument } from "../../src/store/keys.js";
 
 /** Every invocation creates throwaway material. Never reads the invoking user's HOME/store. */
-export function fixtureStore(routerUrl = "http://127.0.0.1:1/mcp", ttlMs = 3_600_000) {
+export function fixtureStore(routerUrl = "http://127.0.0.1:1/mcp", ttlMs = 3_600_000, observeKey?: (key: Buffer) => void) {
   const home = realpathSync(mkdtempSync(path.join(tmpdir(), "p3a-")));
   const dir = path.join(home, ".config", "subetha-payer");
   const installRoot = path.join(home, "install");
@@ -18,6 +18,7 @@ export function fixtureStore(routerUrl = "http://127.0.0.1:1/mcp", ttlMs = 3_600
   const phrase = randomBytes(16).toString("hex");
   const key = randomBytes(32);
   try {
+    observeKey?.(key);
     const document = createKeysDocument(passphrase, { eip155: { address: `0x${randomBytes(20).toString("hex")}`, secret: key } });
     writeFileSync(path.join(dir, "keys.json"), JSON.stringify(document), { mode: 0o600 });
   } finally { key.fill(0); }

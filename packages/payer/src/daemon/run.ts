@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { StoreError } from "../store/fs.js";
 import { InstallChanged } from "./seal.js";
+import { createPurchaseCore } from "./purchase.js";
 import { createDaemonHandler } from "./handler.js";
 import { listenSocket } from "./server.js";
 import { startDaemon } from "./startup.js";
@@ -30,11 +31,7 @@ export async function runDaemon(args: readonly string[], execArgv: readonly stri
         tty: new TerminalSecrets(),
         listen: listenSocket,
         handler: createDaemonHandler,
-        recover: async (context) => {
-          context.assertHeld();
-          // Nonempty stores require P-3c reconciliation; do not claim recovery here.
-          if (context.ledger.rows.length) throw new StoreError("recovery_unavailable");
-        },
+        recover: (context) => createPurchaseCore(context).recover(),
       },
     });
     if (!daemon) return 0;

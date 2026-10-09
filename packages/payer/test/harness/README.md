@@ -28,3 +28,19 @@ P-3b controller correction:
 - `test/wire/purchase.test.ts` retains actual daemon/socket/local MCP success, cancellation, concurrent purchase counters and successful NF-A2 timing. It uses fake UI/signing. P-3a `latency.test.ts` remains the refusal-only transport measurement. These wire paths require fresh parent execution after the correction; earlier 270-test receipts do not verify this source.
 
 Source review, macOS/Docker actual wire execution, packaging/process regressions, sabotage, and any commit remain parent follow-ups. The full suite must not be reported green from pure unit results.
+
+P-3c retained execution (author did not run sockets, children, TCP, Docker or packaging):
+
+```sh
+npm run types
+npm run build
+npm test -- test/wire/crash-matrix.test.ts test/wire/recovery.test.ts test/wire/secrecy.test.ts
+```
+
+The P-3c purchase fixture configures UI/signing before startup creates its single production core. Startup, production handler, recovery, purchase and status reuse that core. Native UI remains unavailable in the shipped run entry. Pure file tests are not process-crash evidence.
+
+`crash-matrix.test.ts` retains the ten required stopping points, a separate `before:submitted` row, and before/after result. Counters are fsynced outside the crashing daemon before their observations. The before-response barrier waits for the Router's actual received-request counter and the Router withholds its response. Credential equality is asserted by digest without printing its value. Each SIGKILL targets only the owned daemon after PID/start verification, awaits exact SIGKILL exit/stdio closure, and invokes existing reclaim only in that positively exited child's isolated disposable store. The install tree and seal stay unchanged between boots. The older P-3a stale-lock tests continue to refuse without reclaim.
+
+`recovery.test.ts` retains status failure classifications, valid-different identities with positive controls, terminal/progress states, expiry, durable unknown across another real restart, saved-body reopen with Router failure, and socket requests racing startup readiness. The internal operator-close API has file/unit coverage only; no production socket or environment option authorizes closing. EROFS/EIO are injected into real file ledger operations in unit coverage and retained separate-daemon wire rows; these are not actual read-only-filesystem evidence.
+
+`secrecy.test.ts` keeps each random throwaway key in test memory for boolean-only absence assertions, plus passphrase, phrase, credential and complete challenge, including plaintext/base64/hex. It inspects replies, errors, both processes' output and plaintext ledger projection excluding sealed blobs. These fixtures do not exercise owner consent, native UI, real wire signatures, settlement or finality. Parent macOS/Docker execution, packaging regression, checkpoint/sabotage and NEW independent cumulative review remain required.

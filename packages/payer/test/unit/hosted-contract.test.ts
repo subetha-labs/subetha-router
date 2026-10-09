@@ -7,12 +7,12 @@ import { expect, test, vi } from "vitest";
 import { hostPlanOf } from "../../../../tools/remote-mcp.js";
 import { RAILS_NONE } from "../../../../tools/remote-mcp-config.js";
 import { parseRouterConfig, routeBindingOf } from "../../../../src/config.js";
-import { quoteBody } from "../../../../src/http/projection.js";
+import { quoteBody, projectionBody } from "../../../../src/http/projection.js";
 import { createRouterClient } from "../../../../src/client/index.js";
 import { createToolHandlers } from "../../../../src/mcp/tools.js";
 import type { QuoteDocument } from "../../../../src/core/orchestrator.js";
 import { HOSTED_ROUTER_URL, HOSTED_RESOURCE_URL, routerIdentity } from "../../src/router/identity.js";
-import { STATIC_ROUTE } from "../../src/router/client.js";
+import { STATIC_ROUTE, statusOf } from "../../src/router/client.js";
 import { createPurchaseCore } from "../../src/daemon/purchase.js";
 import { buildRecord, recordHash, render } from "../../src/daemon/record.js";
 import { Session } from "../../src/daemon/session.js";
@@ -122,4 +122,21 @@ test("real producer quote reaches durable core purchase with omitted optional de
     expect(ledger.rows.map(row => row.state)).toEqual(["quoted", "approved", "sign_intent", "signed", "submit_intent", "submitted", "result"]);
     expect(confirm).toHaveBeenCalledTimes(1); expect(sign).toHaveBeenCalledTimes(1); expect(purchase).toHaveBeenCalledTimes(1);
   } finally { session.close(); ledger.close(); key.fill(0); rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("actual projectionBody → client → MCP status preserves recovery identity and learned txRef", async () => {
+  const response: any = await produced(); const q = response.quote, r = buildRecord(response, identity());
+  const body = projectionBody({ paymentId: q.paymentId, routeId: q.routeId, status: "delivered", source: { amount: q.source.amount, asset: q.source.asset, network: q.source.network, txRef: "learned-after-settlement" }, destination: { quoted: q.destination.quoted, asset: q.destination.asset, network: q.destination.network, attempt: 1, outcome: "paid" }, quoteFingerprint: q.destination.quoteFingerprint, updatedAt: new Date().toISOString(), result: { synthetic: true } });
+  const client = createRouterClient({ baseUrl: "http://127.0.0.1:8500", principalId: "fixture", token: "fixture", fetch: async () => new Response(JSON.stringify(body), { status: 200 }) });
+  const tools = createToolHandlers({ client, mode: "synthetic", evidence: { label: "local-only", source: "operator_asserted", verified: false } });
+  const status = statusOf(await tools.status({ paymentId: q.paymentId }));
+  expect(status.kind).toBe("found");
+  if (status.kind !== "found") throw new Error("fixture_status");
+  const { matchingProjection } = await import("../../src/daemon/recover.js");
+  expect(matchingProjection(r, status.projection)).toBe(true);
+  expect(status.projection["quoteFingerprint"]).toBe(r.destination.quoteFingerprint);
+  expect((status.projection["source"] as any).txRef).toBe("learned-after-settlement");
+  expect(status.projection["result"]).toEqual({ synthetic: true });
+  expect(status.projection["quoteId"]).toBeUndefined(); expect(status.projection["requestId"]).toBeUndefined();
 });

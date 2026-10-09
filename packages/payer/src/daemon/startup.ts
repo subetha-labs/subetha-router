@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createPurchaseCore } from "./purchase.js";
 import { HOSTED_ROUTER_URL, routerIdentity } from "../router/identity.js";
 import { generateRef } from "./ref.js";
 import { sign } from "../sign/index.js";
@@ -126,7 +127,7 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     const context: DaemonContext = {
       session, ledger, router, address: doc.wallets["eip155"]!.address,
       get phrase() { return phrase; }, assertHeld,
-      purchase: {
+      purchase: (options.hooks.configurePurchase ?? (value => value))({
         routerUrl: identity.routerUrl, canonicalResource: identity.resource, generateRef, ui: options.hooks.ui,
         signer: { sign: (offer) => {
           assertHeld();
@@ -134,7 +135,7 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
           return sign(offer, key);
         } },
         ...(options.hooks.faults ? { faults: options.hooks.faults } : {}),
-      },
+      }),
     };
     const handler = options.hooks.handler(context);
     let ready = false;
@@ -154,6 +155,7 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
       }
     });
     assertHeld();
+    await createPurchaseCore(context).recover();
     await options.hooks.recover(context);
     assertHeld();
     ready = true;

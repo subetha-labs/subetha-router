@@ -11,13 +11,14 @@ import { recordHash } from "../../src/daemon/record.js";
 import { createPurchaseCore } from "../../src/daemon/purchase.js";
 import type { DaemonContext } from "../../src/daemon/interfaces.js";
 import { h1Quote } from "../harness/router.js";
+import { containsSecret, encodeSecret, encodings, secretBody } from "../harness/secret-cases.js";
 
-function fixture(fs: StoreFs = realFs) {
+function fixture(fs: StoreFs = realFs, phrase = "fixture-only") {
   const dir = mkdtempSync(path.join(tmpdir(), "p3b-")); const key = randomBytes(32);
   const ledger = openLedger(path.join(dir, "ledger.ndjson"), key, fs);
   const session = new Session(randomBytes(32)); const response = h1Quote();
   const counts = { ui: 0, sign: 0, purchase: 0 }; let approve = true;
-  const context: DaemonContext = { session, ledger, address: `0x${"33".repeat(20)}`, phrase: "fixture-only", assertHeld() {},
+  const context: DaemonContext = { session, ledger, address: `0x${"33".repeat(20)}`, phrase, assertHeld() {},
     purchase: { routerUrl: "https://fixture.invalid/mcp", canonicalResource: { url: "http://127.0.0.1:8500/v1/routes/md-mpp-eth-snapshot/resource", method: "GET" as const }, generateRef: () => "p_aaaaaaaaaaaaa",
       ui: { available: async () => true, confirm: async (r) => { counts.ui++; expect(ledger.rows.map(x => x.state)).toEqual(["quoted"]); return approve ? { approved: true, recordHash: recordHash(r), uiKind: "native" } : { approved: false }; } },
       signer: { sign: async () => { counts.sign++; expect(ledger.rows.at(-1)?.state).toBe("sign_intent"); return "fixture-credential"; } } },
@@ -26,6 +27,26 @@ function fixture(fs: StoreFs = realFs) {
   };
   return { context, response, counts, reopen() { ledger.close(); return openLedger(path.join(dir, "ledger.ndjson"), key, realFs); }, cancel() { approve = false; }, close() { session.close(); ledger.close(); key.fill(0); rmSync(dir, { recursive: true, force: true }); } };
 }
+for (const source of ["challenge", "quoted-phrase", "backslash-phrase"] as const)
+for (const encoding of encodings)
+for (const location of ["key", "value"] as const) test(`initial body refuses ${source}/${encoding}/${location}, including restart`, async () => {
+  const f = fixture(realFs, source === "quoted-phrase" ? 'alpha"beta' : "alpha\\beta"); let reopened;
+  try {
+    const secret = source === "challenge" ? JSON.stringify(f.response.quote.source.offer) : f.context.phrase;
+    const encoded = encodeSecret(secret, encoding);
+    if (source === "challenge" && encoding === "base64") expect(encoded.includes(Buffer.from(f.response.quote.source.offer.extra.challengeNonce).toString("base64"))).toBe(false);
+    f.context.router.purchase = async () => { f.counts.purchase++; return { ok: true, outcome: "delivered", paymentId: f.response.quote.paymentId, contentType: "application/json", snapshot: secretBody(encoded, location) }; };
+    const core = createPurchaseCore(f.context); await core.quote();
+    const reply = await core.purchase("p_aaaaaaaaaaaaa");
+    expect(containsSecret(reply, secret)).toBe(false);
+    expect(reply).toMatchObject({ state: "unknown" });
+    reopened = f.reopen();
+    const next = createPurchaseCore({ ...f.context, ledger: reopened });
+    const replay = await next.status("p_aaaaaaaaaaaaa", true);
+    expect(containsSecret(replay, secret)).toBe(false); expect(replay).toMatchObject({ state: "unknown" });
+    await next.purchase("p_aaaaaaaaaaaaa"); expect(f.counts.purchase).toBe(1);
+  } finally { reopened?.close(); f.close(); }
+});
 test("actual handler connects durable seven states; concurrent duplicate signs and purchases once", async () => {
   const f = fixture(); try {
     const h = createDaemonHandler(f.context);
@@ -117,7 +138,8 @@ test("ledger write failure before sign has zero subsequent side effects", async 
 });
 test("ref reservation checks ledger and concurrent requests, requestId is daemon UUID", async () => {
   const f = fixture(); try {
-    f.context.ledger.append({ ref: "p_aaaaaaaaaaaaa", state: "quoted", data: {} });
+    // Retain an actual durable quote; malformed placeholder records now correctly refuse startup.
+    expect(await createPurchaseCore(f.context).quote()).toMatchObject({ ref: "p_aaaaaaaaaaaaa" });
     const refs = ["p_aaaaaaaaaaaaa", "p_bbbbbbbbbbbba", "p_bbbbbbbbbbbba", "p_cccccccccccca"];
     const requestIds: string[] = [];
     f.context.router.quote = async (_, requestId) => { requestIds.push(requestId); await Promise.resolve(); return h1Quote(); };
