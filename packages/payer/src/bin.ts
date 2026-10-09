@@ -8,8 +8,8 @@
 
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { preflight } from "./daemon/startup.js";
-import { runDaemon, startupMessage } from "./daemon/run.js";
+import { preflight } from "./daemon/preflight.js";
+import { StoreError } from "./store/fs.js";
 
 const USAGE = [
   "usage: subetha-payer <command>",
@@ -26,13 +26,17 @@ export function refusesWithoutSigusr1Guard(execArgv: readonly string[]): boolean
 
 export async function main(argv: readonly string[], execArgv: readonly string[] = process.execArgv): Promise<number> {
   try { preflight(execArgv, process.env); }
-  catch (error) { process.stderr.write(startupMessage(error)); return 2; }
+  catch (error) {
+    const code = error instanceof StoreError && ["sigusr1_enabled", "forbidden_env", "forbidden_flag"].includes(error.code) ? error.code : "internal_error";
+    process.stderr.write(`startup_refused: ${code}\n`); return 2;
+  }
   const command = argv[0];
   switch (command) {
     case "daemon":
-      return runDaemon(argv.slice(1), execArgv);
-    case "wallet":
+      return (await import("./daemon/run.js")).runDaemon(argv.slice(1), execArgv);
     case "mcp":
+      return (await import("./shim/run.js")).runShim(argv.slice(1));
+    case "wallet":
     case "status":
     case "inspect":
     case "config":

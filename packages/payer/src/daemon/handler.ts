@@ -31,7 +31,8 @@ export function createDaemonHandler(context: DaemonContext, reads: ReadModels = 
           // not a generic inference that other EVM routes also use x402.
           return { routeId: STATIC_ROUTE, kind: "static", pays: { rail: "x402", network: source["network"], asset: source["asset"], amount: source["amount"], decimals: source["decimals"] }, reaches: { rail: destination["rail"], network: destination["network"], asset: destination["asset"] }, fundsMoveOnCredential: false, needsSol: false };
         });
-        return { ok: true, routes };
+        const hold = request.params.hold;
+        return { ok: true, routes: hold === undefined ? routes : routes.filter(route => hold.some(h => h.network === route.pays.network && h.asset.toLowerCase() === String(route.pays.asset).toLowerCase())) };
       }
       case "quote": return reads.quote();
       case "status": return reads.hasRef(request.params.ref) ? reads.status(request.params.ref, request.params.includeBody === true) : failure("unknown_ref");
