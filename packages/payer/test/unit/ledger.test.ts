@@ -127,6 +127,10 @@ describe("ledger", () => {
     // 保存された hash を書き換えても中身から再計算するので通らない。
     writeFileSync(file, full.replace(/"hash":"[0-9a-f]{64}"\}\n$/, `"hash":"${"f".repeat(64)}"}\n`));
     expect(() => ledger.append({ ref: REF, state: "sign_intent", data: {}, ts: 3 })).toThrow(/store_rollback/);
+    // 逆に、中身だけ変えて保存された hash（= head）を据え置いても、再計算が合わないので通らない（hash を信じる実装はここで落ちる）。
+    expect(full).toContain('"ts":2');
+    writeFileSync(file, full.replace('"ts":2', '"ts":3'));
+    expect(() => ledger.append({ ref: REF, state: "sign_intent", data: {}, ts: 3 })).toThrow(/store_rollback/);
     ledger.close();
   });
 
