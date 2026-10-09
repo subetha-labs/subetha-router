@@ -16,6 +16,16 @@ class HelperFailure(Exception):
     pass
 
 
+def launch_spec(cfg):
+    if "installedBin" in cfg:
+        # Execute the npm-installed shell launcher unchanged, not node/source/test entry.
+        return cfg["installedBin"], [cfg["installedBin"], "wallet", "new"], cfg["env"]
+    prefix = ["--import", cfg["loader"]] if "loader" in cfg else []
+    return (cfg["node"], [cfg["node"], "--disable-sigusr1", *prefix, cfg["bin"],
+                         *cfg.get("args", ["wallet", "new"])],
+            {"PATH": "/usr/bin:/bin", "HOME": cfg["home"]})
+
+
 def run(cfg):
     try:
         pid, fd = pty.fork()
@@ -23,9 +33,14 @@ def run(cfg):
         raise HelperFailure("owned_pty_launch_error") from None
     if pid == 0:
         try:
-            prefix = ["--import", cfg["loader"]] if "loader" in cfg else []
-            os.execve(cfg["node"], [cfg["node"], "--disable-sigusr1", *prefix, cfg["bin"], *cfg.get("args", ["wallet", "new"])],
-                      {"PATH": "/usr/bin:/bin", "HOME": cfg["home"]})
+            if "installedBin" in cfg:
+                # stdout is separate from the controlling terminal/stderr prompts.
+                # Parent owns this fresh file and checks exact bytes after child close.
+                out = os.open(cfg["stdoutFile"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.dup2(out, 1)
+                os.close(out)
+            command, args, env = launch_spec(cfg)
+            os.execve(command, args, env)
         except Exception:
             # Do not print exec exceptions into the PTY transcript.
             os._exit(127)
@@ -100,6 +115,10 @@ def run(cfg):
             raise HelperFailure("owned_pty_launch_error")
         addresses = [line for line in text.split("\n") if len(line) == 42 and line.startswith("0x")]
         result = {"exit": os.waitstatus_to_exitcode(status), "prompts": sent, "addresses": addresses}
+        if "installedBin" in cfg:
+            # Never return a raw terminal transcript. No extra diagnostic text is allowed.
+            if text != "Passphrase: \nRepeat passphrase: \n":
+                raise HelperFailure("owned_pty_error")
         if "args" in cfg:
             # Return only parsed output and fixed refusals, never the terminal transcript.
             for prompt in prompts:

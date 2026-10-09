@@ -14,7 +14,49 @@ Parent controller owns state, locking and commits. Writer must not launch worker
 
 Each phase: minimal artifact, independent review, parent readback. No repeated whole-plan reviews for a small correction. Retain author/test/review evidence. Defer nonblocking polish. Stop for wrong/duplicate payments, secret exposure, ownership conflicts, unsupported permissions, real quota or an actual unresolved prerequisite.
 
-## Using the Router from this repository (for agents)
+## Using the local payer (first slice)
+
+See [the payer onboarding guide](packages/payer/README.md). `@subetha/payer` is
+private/unpublished; npm installation is only after owner publication. Authorized
+developers can install a locally built tarball. This is macOS 14+ / Node 22,
+Base Sepolia USDC, static `md-mpp-eth-snapshot` only; it is not the hosted Router's
+full rail/profile interface.
+
+The human starts `subetha-payer daemon` in their own terminal, then registers
+`claude mcp add --scope user subetha-payer -- subetha-payer mcp`.
+Use exactly these five MCP tools:
+
+- `subetha_payer_find_routes` (`{}` or an optional `hold` network/asset filter).
+- `subetha_payer_wallet` (`{}`).
+- `subetha_payer_quote` (`{"routeId":"md-mpp-eth-snapshot"}`).
+- `subetha_payer_purchase` (`{"ref":"<returned ref>"}`).
+- `subetha_payer_status` (`{"ref":"<returned ref>"}`, optional `includeBody: true`).
+
+Show the quote subject before requesting purchase. The human must check their
+security phrase and exact terms in the daemon's native dialog, enter the
+passphrase there and select Approve. Never ask for secrets in chat, arguments,
+env, files or piped stdin. Never start/unlock the daemon or automate the dialog
+for them. Elicitation is display-only; neither its response nor tool arguments
+approve payment. No unattended purchase or client-interaction bypass is allowed.
+Allow 195 seconds for purchase; timeout does not cancel payment or prove unpaid.
+
+Keep the ref and read saved status. `unknown` is not proof unpaid; do not retry,
+re-sign or create a replacement purchase on your own. Human `inspect` never
+resubmits and does not certify chain finality. `inspect --close` is protected
+TTY-only with a reason and confirmation; `closed_by_operator` is not evidence of
+refund/nonpayment. For a dead reclaim guard, stop ALL contenders (daemon, CLI,
+recovery attempts) for human offline assessment; never delete it automatically
+or remove the controller's stable worker.lock. Integrity of install/Node/helper
+is a condition: same-user pre-start tampering remains outside the guarantee.
+Native/manual, real-signature and funded acceptance are separate owner gates.
+
+## Using the hosted low-level Router from this repository (developers)
+
+The following credential workflow is separate from the local payer. Do not call
+`npm run sign`, handle credentials or pass `approval` fields for payer tools.
+Repository signing permissions below do not authorize native dialog automation,
+publication or funded payer acceptance.
+
 
 `subetha_router_purchase` on the hosted Router (`https://router.subethalabs.com/mcp`)
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.

@@ -4,7 +4,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -40,9 +40,13 @@ beforeAll(() => {
   }
   // Resolve the existing pinned dependencies normally; no install or registry access.
   symlinkSync(path.join(root, "node_modules"), path.join(packageRoot, "node_modules"), "dir");
-  packEnv = { ...process.env, npm_config_cache: path.join(workspace, "cache"), npm_config_offline: "true" };
+  mkdirSync(path.join(workspace, "home"));
+  for (const name of ["user.npmrc", "global.npmrc"]) writeFileSync(path.join(workspace, name), "");
+  packEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: path.join(workspace, "home"),
+    npm_config_userconfig: path.join(workspace, "user.npmrc"), npm_config_globalconfig: path.join(workspace, "global.npmrc"),
+    npm_config_cache: path.join(workspace, "cache"), npm_config_offline: "true", npm_config_update_notifier: "false" };
   expect(existsSync(path.join(packageRoot, "dist"))).toBe(false);
-  execFileSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], { cwd: packageRoot, env: packEnv, stdio: "pipe" });
+  execFileSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], { cwd: packageRoot, env: packEnv, timeout: 60_000, stdio: "pipe" });
   expect(existsSync(path.join(packageRoot, "dist/bin.js"))).toBe(true);
 });
 afterAll(() => {
@@ -86,11 +90,13 @@ function walk(dir: string): string[] {
 describe("P-1a: packaging boundary", () => {
   test("npm pack lists bin and dist only (no test/, no scripts/, no fixtures)", () => {
     // Keep npm's temporary writes inside this workspace, without registry access.
-    const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: packageRoot, env: packEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: packageRoot, env: packEnv, timeout: 60_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     const files = (JSON.parse(output) as { files: { path: string }[] }[])[0]!.files.map((f) => f.path);
     expect(files).toContain("bin/subetha-payer");
     expect(files).toContain("dist/bin.js");
     expect(files).toContain("package.json");
+    expect(files).toContain("README.md");
+    expect(files.filter(file => !/^(?:bin\/subetha-payer|dist\/.+|package\.json|npm-shrinkwrap\.json|README\.md)$/.test(file))).toEqual([]);
     // 利用者側で依存を固定するのは npm-shrinkwrap.json（package-lock.json は pack に入らない）。
     expect(files).toContain("npm-shrinkwrap.json");
     expect(files).not.toContain("package-lock.json");
@@ -119,18 +125,18 @@ describe("P-1a: packaging boundary", () => {
     cpSync(path.join(packageRoot, "bin"), binDir, { recursive: true }); // placeholder so the dir exists
     rmSync(path.join(binDir, "subetha-payer"));
     symlinkSync(path.relative(binDir, path.join(pkg, "bin", "subetha-payer")), path.join(binDir, "subetha-payer"));
-    const viaSymlink = spawnSync("sh", [path.join(binDir, "subetha-payer"), "help"], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    const viaSymlink = spawnSync("sh", [path.join(binDir, "subetha-payer"), "help"], { encoding: "utf8", timeout: 30_000, env: { PATH: process.env["PATH"] ?? "" } });
     expect(viaSymlink.stderr).not.toMatch(/Cannot find module/);
     expect(viaSymlink.status).toBe(0);
     expect(viaSymlink.stderr).toMatch(/usage: subetha-payer/);
-    const viaOddPath = spawnSync("sh", [path.join(pkg, "bin", "subetha-payer"), "wallet", "address"], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    const viaOddPath = spawnSync("sh", [path.join(pkg, "bin", "subetha-payer"), "wallet", "address"], { encoding: "utf8", timeout: 30_000, env: { PATH: process.env["PATH"] ?? "" } });
     expect(viaOddPath.status).toBe(2);
     expect(viaOddPath.stderr).toMatch(/cli_refused: home_unavailable/);
     // Resolve the packaged signer's runtime dependencies; never invoke signing.
     const signerUrl = pathToFileURL(path.join(pkg, "dist/sign/index.js")).href;
     const signerImport = spawnSync(process.execPath, ["--input-type=module", "--eval",
       `const { sign } = await import(${JSON.stringify(signerUrl)}); if (typeof sign !== "function") throw new Error("missing sign export");`,
-    ], { cwd: base, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    ], { cwd: base, encoding: "utf8", timeout: 30_000, env: { PATH: process.env["PATH"] ?? "" } });
     expect(signerImport.stderr).toBe("");
     expect(signerImport.status).toBe(0);
   });
@@ -155,7 +161,7 @@ describe("P-1a: packaging boundary", () => {
   });
 
   test("node dist/bin.js is refused without the launcher's flag (exit 2, sigusr1_enabled); through the launcher the CLI requires a fixed HOME (exit 2, home_unavailable)", () => {
-    const run = (file: string, args: string[]) => spawnSync(file, args, { cwd: packageRoot, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "" } });
+    const run = (file: string, args: string[]) => spawnSync(file, args, { cwd: packageRoot, encoding: "utf8", timeout: 30_000, env: { PATH: process.env["PATH"] ?? "" } });
     const direct = run("node", ["dist/bin.js", "wallet", "address"]);
     expect(direct.status).toBe(2);
     expect(direct.stderr).toMatch(/startup_refused: sigusr1_enabled/);

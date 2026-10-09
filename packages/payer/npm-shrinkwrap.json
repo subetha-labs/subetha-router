@@ -10,7 +10,7 @@
       "license": "MIT",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.32.1",
-        "viem": "2.54.0",
+        "viem": "2.54.2",
         "zod": "3.25.76"
       },
       "bin": {
@@ -1322,9 +1322,9 @@
       }
     },
     "node_modules/viem": {
-      "version": "2.54.0",
-      "resolved": "https://registry.npmjs.org/viem/-/viem-2.54.0.tgz",
-      "integrity": "sha512-DW6KW3m89+3MLozFNPuI9Nhz2hJw375hUo1bpbo3qXipBvjdjF26B/d3U5adVyLGKOfqK4XeA1wPDWQTFQ/ltA==",
+      "version": "2.54.2",
+      "resolved": "https://registry.npmjs.org/viem/-/viem-2.54.2.tgz",
+      "integrity": "sha512-o0+5dEAUekBMTbixXy2mKbSDPnwsCJ+8+mOeMBDjkuS9iM4fcr3yKUWb2zlOy2NKInkg3anl1W11sxYspLiXig==",
       "funding": [
         {
           "type": "github",
@@ -1340,7 +1340,7 @@
         "abitype": "1.2.3",
         "isows": "1.0.7",
         "ox": "0.14.29",
-        "ws": "8.20.1"
+        "ws": "8.21.0"
       },
       "peerDependencies": {
         "typescript": ">=5.0.4"
@@ -1373,9 +1373,9 @@
       "license": "ISC"
     },
     "node_modules/ws": {
-      "version": "8.20.1",
-      "resolved": "https://registry.npmjs.org/ws/-/ws-8.20.1.tgz",
-      "integrity": "sha512-It4dO0K5v//JtTXuPkfEOaI3uUN87iYPnqo/ZzqCoG3g8uhA66QUMs/SrM0YK7/NAu+r4LMh/9dq2A7k+rHs+w==",
+      "version": "8.21.0",
+      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.0.tgz",
+      "integrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==",
       "license": "MIT",
       "engines": {
         "node": ">=10.0.0"

@@ -13,7 +13,38 @@ The 2 legs are **independent payments, not an exchange and not a bridge**. There
 
 ## Try it now
 
-Pay **with your own key** and use the remote Router.
+The recommended agent payment path is the [local SubEtha Payer](packages/payer/README.md):
+install → encrypted wallet → owner faucet funding → human-started daemon → user-scope
+Claude registration → quote → native human approval → purchase → saved status/recovery.
+Its first slice is **macOS 14+ / Node 22 / Base Sepolia USDC / static
+`md-mpp-eth-snapshot` only**.
+
+**Release gate: `@subetha/payer` is currently private and unpublished.**
+`npm i -g @subetha/payer` is an instruction **after owner publication (G-A1)**,
+not a working public install today. The payer README also gives an authorized
+developer's locally built tarball path. Native manual acceptance and funded
+owner testing (G-A2) remain separate gates; the Router results below are not
+payer acceptance results. This source repository is **private**.
+
+### Wallet-free hosted discovery
+
+The existing hosted MCP endpoint can be registered without a clone or wallet:
+
+```sh
+claude mcp add --scope user --transport http subetha-router https://router.subethalabs.com/mcp
+```
+
+Ask for `subetha_router_list_routes` to discover the hosted Router's ten static
+routes and twenty dynamic profiles (trust the current listing). Discovery does
+not pay, fund a wallet or authorize purchase. This hosted low-level API is
+separate from the local payer's five tools and native confirmation flow.
+
+### Developer-only clone and signing path
+
+Developers with access to the private repository can use the existing low-level
+signing workflow below. This is not an anonymous public trial, and its plaintext
+key handling is not the payer onboarding path. It requires a separate disposable
+wallet and explicit human approval; do not use payer secrets here.
 
 ```sh
 git clone https://github.com/subetha-labs/subetha-router.git
@@ -21,17 +52,12 @@ cd subetha-router
 npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 npm rebuild fs-ext --foreground-scripts --no-audit --no-fund
 
-# 1) Create a disposable wallet
-npm run wallet:new
-#    -> Save the displayed key to .env.local, and fund the address with Base Sepolia USDC
-#      https://faucet.circle.com (network: Base Sepolia / token: USDC)
-#      **No gas (ETH) needed** - with EIP-3009 the facilitator submits and pays the gas
-
-npm run wallet:balance   # 10000 base units (0.01 USDC) per run is enough
-
-# 2) Register the remote Router
-claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp
+# Register the low-level remote Router
+claude mcp add --scope user --transport http subetha-router https://router.subethalabs.com/mcp
 ```
+
+The developer signing tools require separately provisioned disposable credentials;
+never reuse payer secrets here. Credential provisioning is outside this guide.
 
 Permission to run `npm run sign` is in `.claude/settings.json` (included in the clone).
 **Without it the agent stops at the signing step**, so do not delete it.
@@ -42,7 +68,7 @@ Then start Claude Code **in this directory** and ask it something like:
 
 **Say what you hold, not which tool to use.** The agent reads the routes and works out that
 the provider it needs takes only pathUSD on Tempo, which you do not have — and that the
-Router will bridge it. Naming the tool works too, but then you have made the interesting
+Router will pay the independent outbound leg. Naming the tool works too, but then you have made the interesting
 decision for it.
 
 The agent takes a quote, **asks for approval**, creates a signature from your local key with
@@ -52,7 +78,7 @@ The agent takes a quote, **asks for approval**, creates a signature from your lo
 The Router does not hold the caller's key, so the signing capability has to be local.
 **The key does not go out over the network** (only the signed `credential` does).
 
-**Measured** (results of running this procedure against the production endpoint):
+**Measured** (historical developer signing procedure against the production endpoint):
 
 | Leg | Real tx |
 |---|---|
