@@ -124,11 +124,22 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     session = new Session(key, parsed.data.session?.ttlMs ?? MAX_TTL_MS, startedAt);
     assertHeld();
     ledger = openLedger(path.join(dir, "ledger.ndjson"), keys.lek, fs);
+    const ui = options.hooks.createConfirmUi?.((passphrase) => {
+      // Re-derive only for this validated document. Never retain the startup input,
+      // reopen a wallet, or use any credential supplied by a socket/CLI/environment.
+      assertHeld();
+      if (session!.locked) return false;
+      try {
+        const checked = unlockKeys(doc, passphrase);
+        zero(checked.kek, checked.lek);
+        return true;
+      } catch { return false; }
+    }) ?? options.hooks.ui;
     const context: DaemonContext = {
       session, ledger, router, address: doc.wallets["eip155"]!.address,
       get phrase() { return phrase; }, assertHeld,
       purchase: (options.hooks.configurePurchase ?? (value => value))({
-        routerUrl: identity.routerUrl, canonicalResource: identity.resource, generateRef, ui: options.hooks.ui,
+        routerUrl: identity.routerUrl, canonicalResource: identity.resource, generateRef, ui,
         signer: { sign: (offer) => {
           assertHeld();
           if (session!.locked) throw new StoreError("locked");

@@ -36,6 +36,8 @@ export interface DaemonContext {
 /** Implementation dependencies, never CLI/env switches. Test implementations belong under test/. */
 export interface DaemonHooks {
   readonly ui: ConfirmUi;
+  /** Trusted composition hook: verifier is bound to this startup's validated keys document. */
+  readonly createConfirmUi?: (verify: (passphrase: string) => boolean) => ConfirmUi;
   readonly tty: SecretTty;
   readonly faults?: FaultPoints;
   readonly configurePurchase?: (purchase: PurchaseContext) => PurchaseContext;

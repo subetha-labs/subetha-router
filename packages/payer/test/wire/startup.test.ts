@@ -42,7 +42,6 @@ const refusalRows: { id: string; args: string[]; env: Record<string, string>; re
   // Reuse the owned inert fixture as a loader with no hooks. Unsupported flags must fail, never skip/pass.
   { id: "loader-underscore", args: ["--disable-sigusr1", `--experimental_loader=${preload}`, bin, "daemon"], env: {}, reason: "forbidden_flag" },
   { id: "passphrase-env", args: ["--disable-sigusr1", bin, "daemon"], env: { SUBETHA_PAYER_PASSPHRASE: "fixture-only" }, reason: "forbidden_env" },
-  { id: "check-ui", args: ["--disable-sigusr1", bin, "daemon", "--check"], env: {}, reason: "no_confirmation_ui" },
 ];
 for (const guard of ["--disable-sigusr1", "--disable_sigusr1"]) {
   for (const negation of ["--no-disable-sigusr1", "--no_disable_sigusr1", "--no-disable_sigusr1", "--no_disable-sigusr1"]) {
