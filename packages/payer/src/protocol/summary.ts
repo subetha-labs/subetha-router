@@ -248,3 +248,9 @@ export function failure(error: string, extra: { reason?: string; retryAfterMs?: 
   const parsed = FailureSummary.safeParse({ ok: false, error, ...extra });
   return parsed.success ? parsed.data : { ok: false, error: "internal_error" };
 }
+
+/** Read-only CLI socket projection; no raw data/sealed fields, no consent inlet. */
+export const InspectionSummary = z.object({ ok: z.literal(true), inspections: z.array(z.object({
+  summary: PurchaseSummary,
+  rows: z.array(z.object({ seq: z.number().int().positive(), ts: epochMs, state: PurchaseState }).strict()).max(10000),
+}).strict()).max(1000) }).strict();

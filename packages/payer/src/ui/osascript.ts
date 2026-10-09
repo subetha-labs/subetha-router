@@ -47,7 +47,7 @@ function safeHelper(executable: string, fs: UiFilesystem): boolean {
   } catch { return false; }
 }
 
-export function createOsascriptUi(verify?: (pass: string) => boolean, deps: OsascriptDependencies = {}): ConfirmUi {
+export function createOsascriptUi(verify?: (pass: string) => boolean, deps: OsascriptDependencies = {}): ConfirmUi & { check(text: string): Promise<Parsed> } {
   const executable = deps.executable ?? "/usr/bin/osascript";
   const platform = deps.platform ?? process.platform;
   const fs = deps.filesystem ?? { lstatSync, realpathSync };
@@ -94,6 +94,11 @@ export function createOsascriptUi(verify?: (pass: string) => boolean, deps: Osas
     });
   }
   return {
+    async check(text) {
+      if (!verify || !safe()) return { approved: false, reason: "approval_unavailable" };
+      const result = await execute(confirmationScript(text), value => parseConfirmation(value, verify), deps.timeoutMs ?? 125_000);
+      return result.ok ? result.value : { approved: false, reason: result.reason };
+    },
     async available() {
       if (!safe()) return false;
       const result = await execute(PROBE, text => text === "1\n" || text === "1", deps.timeoutMs ?? 5000);

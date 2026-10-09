@@ -10,12 +10,12 @@ import { createOsascriptUi, type OsascriptDependencies } from "../ui/osascript.j
 import type { DaemonHooks, SecretTty } from "./interfaces.js";
 import type { StartupOptions } from "./startup.js";
 
-const STARTUP_CODES = new Set(["sigusr1_enabled", "forbidden_env", "forbidden_flag", "path_invalid", "no_confirmation_ui", "no_tty", "bad_passphrase", "install_changed", "install_unreadable", "install_seal_corrupt", "store_corrupt", "store_unsupported_version", "lock_lost", "daemon_already_running", "daemon_lock_stale", "lock_unreadable", "lock_failed", "home_unavailable", "path_unreadable", "config_invalid", "wallet_invalid", "wallet_missing", "phrase_invalid", "tty_cancelled"]);
+const STARTUP_CODES = new Set(["sigusr1_enabled", "forbidden_env", "forbidden_flag", "path_invalid", "no_confirmation_ui", "no_tty", "bad_passphrase", "install_changed", "install_unreadable", "install_seal_corrupt", "store_corrupt", "store_unsupported_version", "lock_lost", "daemon_already_running", "daemon_lock_stale", "lock_unreadable", "lock_failed", "reclaim_busy", "home_unavailable", "path_unreadable", "config_invalid", "wallet_invalid", "wallet_missing", "phrase_invalid", "tty_cancelled"]);
 export function startupMessage(error: unknown): string {
   const code = error instanceof StoreError && STARTUP_CODES.has(error.code) ? error.code : "internal_error";
   // JSON escaping prevents filename control characters from acting as terminal commands.
   const files = error instanceof InstallChanged ? ` ${JSON.stringify(error.files)}` : "";
-  return `startup_refused: ${code}${files}\n`;
+  return `startup_refused: ${code}${files}\n` + (code === "reclaim_busy" ? "Stop ALL contenders. Human offline recovery is required for the leftover reclaim guard. It is never automatically deleted.\n" : "");
 }
 
 /** Private composition seams for owned fixtures; bin.ts never accepts them. */

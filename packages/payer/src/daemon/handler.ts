@@ -16,6 +16,7 @@ export function createDaemonHandler(context: DaemonContext, reads: ReadModels = 
   return async (request) => {
     context.assertHeld();
     switch (request.method) {
+      case "inspect": return createPurchaseCore(context).inspect(request.params.ref);
       case "ping": return { ok: true, state: context.session.locked ? "locked" : "unlocked", version: "0.1.0" };
       case "wallet": return { ok: true, wallets: [{ rail: "x402", network: "eip155:84532", address: context.address }] };
       case "find_routes": {

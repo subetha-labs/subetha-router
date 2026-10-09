@@ -238,7 +238,7 @@ export function acquireLock(dir: string, deps: LockDeps): LockHandle {
  * 人間の回収（CLI `lock reclaim`）。回収の lock を取って直列化し、取った後にもう一度検査してから消す。生きている pid は拒む。
  * guard が残っていれば（死んだ・読めない場合も）`reclaim_busy`。確認（y/N）は呼び出し側の TTY。
  */
-export function reclaimLock(dir: string, deps: LockDeps): { readonly removed: boolean; readonly content?: LockContent } {
+export function reclaimLock(dir: string, deps: LockDeps, requireDeadOwner = false): { readonly removed: boolean; readonly content?: LockContent } {
   const fs = deps.fs;
   const reclaimPath = path.join(dir, RECLAIM_LOCK_FILE);
   const guard = contentOf(deps);
@@ -273,6 +273,10 @@ export function reclaimLock(dir: string, deps: LockDeps): { readonly removed: bo
     };
     assertLock();
     if (recorded === undefined || state.identity === undefined) throw new StoreError("lock_unreadable");
+    // The human CLI always requests positive death on this host, including when no socket
+    // remains. Keep the low-level legacy reclamation fixtures/API compatible.
+    if (requireDeadOwner && recorded.hostname !== (deps.hostname ?? osHostname())) throw new StoreError("lock_unreadable");
+    if (requireDeadOwner && state.state === "stale" && (deps.isAlive ?? defaultIsAlive)(recorded.pid)) throw new StoreError("daemon_already_running");
     reclaimSocket(dir, deps, recorded, state.identity, assertLock);
     // 死亡確認済みの保持者はこの一致した lock をもう release できず、guard が他の回収者を止める。
     // cooperative な利用では、ここから unlink まで置き換わらない。

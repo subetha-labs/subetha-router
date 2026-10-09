@@ -1,9 +1,9 @@
 import path from "node:path";
 import { createPurchaseCore } from "./purchase.js";
-import { HOSTED_ROUTER_URL, routerIdentity } from "../router/identity.js";
+import { routerIdentity } from "../router/identity.js";
 import { generateRef } from "./ref.js";
 import { sign } from "../sign/index.js";
-import { z } from "zod";
+import { readConfig } from "../config.js";
 import { realFs, StoreError, type StoreFs } from "../store/fs.js";
 import { acquireLock, type LockDeps } from "../store/lock.js";
 import { ensureStoreDir, storeDirOf } from "../store/paths.js";
@@ -18,12 +18,6 @@ import type { Listener } from "./server.js";
 
 import { preflight } from "./preflight.js";
 export { preflight } from "./preflight.js";
-
-const Config = z.object({
-  version: z.literal(1),
-  router: z.object({ url: z.string().url(), canonicalResource: z.object({ url: z.string().url(), method: z.literal("GET") }).strict().optional() }).strict(),
-  session: z.object({ ttlMs: z.number().int().min(1).max(MAX_TTL_MS) }).strict().optional(),
-}).strict();
 
 export interface StartupOptions {
   readonly env: NodeJS.ProcessEnv;
@@ -45,6 +39,8 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
   if (ensureStoreDir(dir, options.env.HOME!, process.getuid!(), fs).length) throw new StoreError("path_invalid");
   if (!await options.hooks.ui.available()) throw new StoreError("no_confirmation_ui");
   if (options.checkOnly) return undefined;
+  try { fs.lstatSync(path.join(dir, "daemon.lock.reclaim")); throw new StoreError("reclaim_busy"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const lock = acquireLock(dir, { fs, ...options.lockDeps });
   let session: Session | undefined;
   let keys: ReturnType<typeof unlockKeys> | undefined;
@@ -78,16 +74,8 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     await options.hooks.faults?.hit("after:lock");
     assertHeld();
     if (!options.hooks.tty.available) throw new StoreError("no_tty");
-    const configPath = path.join(dir, "config.json");
-    let rawConfig: unknown = { version: 1, router: { url: HOSTED_ROUTER_URL } };
-    if (fs.existsSync(configPath)) {
-      try { rawConfig = JSON.parse(fs.readFileSync(configPath).toString("utf8")); }
-      catch { throw new StoreError("store_corrupt"); }
-    }
-    if (typeof rawConfig === "object" && rawConfig !== null && "version" in rawConfig && rawConfig.version !== 1) throw new StoreError("store_unsupported_version");
-    const parsed = Config.safeParse(rawConfig);
-    if (!parsed.success) throw new StoreError("config_invalid");
-    const identity = routerIdentity(parsed.data.router.url, parsed.data.router.canonicalResource);
+    const config = readConfig(dir, fs);
+    const identity = routerIdentity(config.router.url, config.router.canonicalResource);
     const router = new RouterClient(new URL(identity.routerUrl));
     const doc = parseKeysDocument(fs.readFileSync(path.join(dir, "keys.json")).toString("utf8"));
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -111,7 +99,7 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     const key = openWallet(doc, "eip155", keys.kek);
     zero(keys.kek);
     if (key.length !== 32) { zero(key); throw new StoreError("wallet_invalid"); }
-    session = new Session(key, parsed.data.session?.ttlMs ?? MAX_TTL_MS, startedAt);
+    session = new Session(key, config.session?.ttlMs ?? MAX_TTL_MS, startedAt);
     assertHeld();
     ledger = openLedger(path.join(dir, "ledger.ndjson"), keys.lek, fs);
     const ui = options.hooks.createConfirmUi?.((passphrase) => {

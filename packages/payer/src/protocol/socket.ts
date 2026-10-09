@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { FailureSummary, PingSummary, PurchaseBodySummary, PurchaseRef, PurchaseSummary, QuoteSummary, RouteSummary, RoutesSummary, WalletSummary } from "./summary.js";
+import { InspectionSummary, FailureSummary, PingSummary, PurchaseBodySummary, PurchaseRef, PurchaseSummary, QuoteSummary, RouteSummary, RoutesSummary, WalletSummary } from "./summary.js";
 
 const empty = z.object({}).strict();
 export const inputs = {
   ping: empty, wallet: empty,
+  inspect: z.object({ ref: PurchaseRef.optional() }).strict(),
   find_routes: z.object({ hold: z.array(RouteSummary.shape.pays.pick({ network: true, asset: true }).strict()).max(200).optional() }).strict(),
   quote: z.object({ routeId: z.literal("md-mpp-eth-snapshot") }).strict(),
   purchase: z.object({ ref: PurchaseRef }).strict(),
@@ -11,6 +12,7 @@ export const inputs = {
 };
 const id = z.union([z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)]);
 export const Request = z.discriminatedUnion("method", [
+  z.object({ id, method: z.literal("inspect"), params: inputs.inspect }).strict(),
   z.object({ id, method: z.literal("ping"), params: inputs.ping }).strict(),
   z.object({ id, method: z.literal("wallet"), params: inputs.wallet }).strict(),
   z.object({ id, method: z.literal("find_routes"), params: inputs.find_routes }).strict(),
@@ -19,7 +21,7 @@ export const Request = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("status"), params: inputs.status }).strict(),
 ]);
 export type Request = z.infer<typeof Request>;
-export const summaries = { ping: PingSummary, wallet: WalletSummary, find_routes: RoutesSummary, quote: QuoteSummary, purchase: PurchaseSummary, status: PurchaseSummary };
+export const summaries = { inspect: InspectionSummary, ping: PingSummary, wallet: WalletSummary, find_routes: RoutesSummary, quote: QuoteSummary, purchase: PurchaseSummary, status: PurchaseSummary };
 export function summaryFor(method: Request["method"], params: Record<string, unknown>) {
   return method === "status" && params["includeBody"] === true ? PurchaseBodySummary : summaries[method];
 }
