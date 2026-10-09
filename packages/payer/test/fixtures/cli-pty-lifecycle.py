@@ -96,6 +96,32 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(world.writes), 2)
         self.assertLess(world.now, 20)
 
+    def test_installed_launcher_is_executed_without_node_flags_or_source_entry(self):
+        namespace = {"__name__": "fixture_import"}
+        exec(compile(SOURCE, "cli-pty.py", "exec"), namespace)
+        cfg = {"installedBin": "/owned/prefix/bin/subetha-payer", "env": {"HOME": "/owned/home", "PATH": "/owned/tools:/usr/bin:/bin"}}
+        command, argv, env = namespace["launch_spec"](cfg)
+        self.assertEqual(command, cfg["installedBin"])
+        self.assertEqual(argv, [cfg["installedBin"], "wallet", "new"])
+        self.assertEqual(env, cfg["env"])
+
+    def test_installed_wallet_terminal_has_only_two_prompts(self):
+        cfg = {**CFG, "installedBin": "/owned/bin"}
+        world = World([b"Passphrase: ", b"\nRepeat passphrase: ", b"\n", b""], [False, False, True])
+        stdout, stderr, failure = world.run(cfg)
+        self.assertIsNone(failure)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout), {"exit": 0, "prompts": 2, "addresses": []})
+        self.assertTrue(world.reaped and world.eof)
+
+    def test_installed_wallet_rejects_extra_terminal_output(self):
+        cfg = {**CFG, "installedBin": "/owned/bin"}
+        world = World([b"Passphrase: ", b"\nRepeat passphrase: ", b"\nunexpected\n", b""], [False, False, True])
+        stdout, stderr, failure = world.run(cfg)
+        self.assertEqual(failure, "SystemExit")
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "owned_pty_error\n")
+
     def test_eof_before_reap(self):
         self.success(World([b"Passphrase: ", b"Repeat passphrase: ",
                             ("\n" + ADDRESS + "\n").encode(), b""],

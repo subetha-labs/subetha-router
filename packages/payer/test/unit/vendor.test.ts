@@ -44,9 +44,12 @@ describe("P-2: vendor and dependency boundary", () => {
     const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
     const lock = JSON.parse(readFileSync(path.join(root, "npm-shrinkwrap.json"), "utf8"));
     expect(pkg.private).toBe(true);
-    expect(pkg.dependencies.viem).toBe("2.54.0");
+    expect(pkg.dependencies.viem).toBe("2.54.2");
     expect(lock.packages[""].dependencies).toEqual(pkg.dependencies);
-    expect(lock.packages["node_modules/viem"].version).toBe("2.54.0");
+    expect(lock.packages["node_modules/viem"].version).toBe("2.54.2");
+    // Authentic published metadata; no dependency on parent-local receipts.
+    expect(lock.packages["node_modules/viem"].resolved).toBe("https://registry.npmjs.org/viem/-/viem-2.54.2.tgz");
+    expect(lock.packages["node_modules/viem"].integrity).toBe("sha512-o0+5dEAUekBMTbixXy2mKbSDPnwsCJ+8+mOeMBDjkuS9iM4fcr3yKUWb2zlOy2NKInkg3anl1W11sxYspLiXig==");
     const forbidden = /(?:^|[/"\s])(?:mppx|@solana|@solana-program|@zerc20)(?:[/"\s]|$)/;
     for (const file of ["package.json", "npm-shrinkwrap.json"]) expect(readFileSync(path.join(root, file), "utf8"), file).not.toMatch(forbidden);
     for (const [name, version] of Object.entries(pkg.dependencies)) {

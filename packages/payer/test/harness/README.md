@@ -302,3 +302,306 @@ No production source changed; no real PTY/socket/TCP/process inventory, Docker,
 GUI, mutation, commit or publication was executed by this author. Parent fresh
 round3 macOS/Docker, NEW independent review, checkpoint, three mutations/exact
 restoration and P-5b remain required. No P-5a acceptance is claimed.
+
+### P-5b onboarding and clean-install gates
+
+This is the controller-directed permission reconciliation for P-5b, not a new
+owner approval or a claim that P-5b is accepted. P-5a prerequisite evidence belongs
+to the parent: review2 APPROVE; source-bound macOS/Docker focused115/fullpayer691/
+root-focused50/types/build, then exact455source checkpoint before the three guard
+mutations, exact restoration and macOS full GREEN. Those are not author results.
+
+The public-facing payer README describes only macOS 14+, Node 22, Base Sepolia
+USDC and static `md-mpp-eth-snapshot`. The package remains private/unpublished.
+Native manual5, real-signature wiring, G-A1/npm and G-A2 funded owner-dialog
+acceptance remain **UNRUN**. A Linux refusal is not Linux product support.
+
+Author-safe focused command, from `packages/payer` (explicit files only):
+
+```sh
+../../node_modules/.bin/vitest run test/wire/readme-commands.test.ts test/unit/deps.test.ts test/unit/cli-pty.test.ts test/unit/install-harness.test.ts test/unit/pack.test.ts
+npm run types
+npm run build
+```
+
+`readme-commands` reads fenced commands and the real dispatcher AST; it never
+executes Claude or the payer. The installed `claude mcp add --help` was read only
+to confirm `--scope user`; no registration/auth/model command was executed.
+`pack` retains its AST exclusions, signer transitive import boundary (with the
+existing `vendor.test.ts`), exact file allowlist and isolated-build/shared-dist
+metadata invariants. Test helpers stay outside the tarball. Dependency pins are
+compared with the payer shrinkwrap and matching root-lock entries. The audit
+case is gated and a skip is not a zero-vulnerability result.
+
+After source readback, the controller's registry/PTY/SDK installation gate is:
+
+```sh
+PAYER_CLEAN_INSTALL=1 ../../node_modules/.bin/vitest run test/wire/clean-install.test.ts -t '^clean install:'
+PAYER_AUDIT=1 ../../node_modules/.bin/vitest run test/unit/deps.test.ts
+```
+
+Clean install builds a **copy of current source**, never shared `dist`, then
+packs it and installs the tarball into the global layout with registry dependencies.
+**Install method (owner decision 2026-10-10):** `npm install --global <tarball>`
+ignores the tarball's npm-shrinkwrap.json (arborist only honours a shrinkwrap when the
+manifest carries `_hasShrinkwrap`, which the registry sets on publication), so it
+resolved express 5.3.0 instead of the locked 5.2.1 once 5.3.0 was published.
+`installLocked` therefore extracts the tarball into `<prefix>/lib/node_modules/@subetha/payer`,
+runs `npm ci --omit=dev` there (the shrinkwrap is the lockfile) and links
+`<prefix>/bin/subetha-payer` relatively, as npm does. The registry path is checked
+against the shrinkwrap at G-A2 after publication. Each run
+has a fresh HOME, cache, prefix, temporary directory and empty user/global npm
+config, an explicit environment, no inherited npm auth/config, no host HOME
+mount, no retries and bounded owned subprocesses. The install uses normal scripts
+and fails on `node-gyp`, `prebuild`, `binding.gyp` or any installed `.node` file.
+It compares the installed shrinkwrap, every transitive package identity and the
+packed runtime bytes. Its SDK Client communicates with the **installed
+prefix/bin/subetha-payer mcp** over SDK stdio framing and checks exactly five
+schemas, purchase metadata and daemon_unavailable for all five tools. No daemon
+or external Router is started. There are no product mocks, spies, hooks, source
+entry substitutes or environment approval bypasses.
+
+`cli-pty.py` reuses its owned PTY lifecycle but executes the installed shell
+launcher directly. Only synthetic random passphrases pass through the fixture's
+private stdin; the product receives them via its owned TTY. stdout is captured
+separately in an owned 0600 file and must contain exactly one address. The terminal
+must contain only two prompts. The fresh encrypted keys document is independently
+authenticated in the test; known secret bytes/base64/hex are excluded from output
+and disk plaintext. No secret is emitted in assertion diagnostics. The synthetic
+HOME and stdout file are removed; private tarball path/hash, phase results,
+source copy, prefix and cache remain under ignored `.claude_workflow/local/p5b-install/`
+for controller readback and checkpoint-first mutations. Do not publish these raw
+receipts. Subprocess cleanup awaits exit and stdio close and preserves the primary
+failure. The pure Python lifecycle cases do not execute a real PTY.
+
+The audit command contacts the registry using a separate fresh isolated config
+and cache, auditing **the payer's own production shrinkwrap** with
+`--package-lock-only --omit=dev --audit-level=high --json`. Only an actual complete
+result with high + critical = 0 can pass; unavailable/malformed/failed audit is
+reported as failure, never zero. It never audits the host/root project tree.
+
+**Native measurement split:** On macOS, clean install runs wallet/MCP/pack but
+**does not run `daemon --check`**, because even its availability probe calls
+osascript/System Events. On Linux the unmodified installed artifact may run that
+command and must return exactly exit2 / `startup_refused: no_confirmation_ui`,
+because the platform gate precedes helper execution. This is non-native refusal
+evidence only. After separate explicit owner permission, the retained native row
+can target a baseline installed bin:
+
+```sh
+PAYER_OWNER_NATIVE_CHECK=1 PAYER_INSTALLED_BIN="$payer_installed_bin" ../../node_modules/.bin/vitest run test/wire/clean-install.test.ts -t '^OWNER ONLY:'
+```
+
+Set `PAYER_OWNER_NATIVE_EXPECT=no_confirmation_ui` only when that is the declared
+expected environment; default expects real availability success. A gate switch
+is not permission. This row is **UNRUN/owner-only** and does not replace the five
+P-4a manual dialog cases or funded G-A2 approval.
+
+After NEW cumulative independent read-only review, fixes/retests and a local
+checkpoint **before any mutation**, the controller can copy the retained
+`package/` into a separate candidate directory. Change just the copied launcher
+exec line (remove `--disable-sigusr1`) or just the copied manifest (remove `dist`
+from `files`). Do not change the baseline or shared source. Then run:
+
+```sh
+PAYER_MUTATION_EXPECT=sigusr1_enabled PAYER_MUTATION_SOURCE="$payer_candidate" PAYER_BASELINE_RECEIPT="$payer_baseline_receipt" ../../node_modules/.bin/vitest run test/wire/clean-install.test.ts -t '^checkpoint-only'
+PAYER_MUTATION_EXPECT=missing_dist PAYER_MUTATION_SOURCE="$payer_candidate" PAYER_BASELINE_RECEIPT="$payer_baseline_receipt" ../../node_modules/.bin/vitest run test/wire/clean-install.test.ts -t '^checkpoint-only'
+```
+
+Use a separate fresh candidate for each row. The harness checks that all other
+runtime bytes match the baseline, repacks and installs to a fresh prefix **offline
+using only that baseline's clean cache**, then executes the installed launcher.
+The first oracle requires exact exit2/sigusr1_enabled before native helper access;
+the second requires an actually absent installed dist and the launcher's real
+exit1/MODULE_NOT_FOUND. Normal baseline checks must fail for these changes; these
+negative rows establish the cause without starting a macOS native probe. For the
+third mutation, change the README registration bin and run `readme-commands`:
+its parsed bin/argv assertion must fail. Restore exact checkpoint bytes and rerun
+the appropriate baseline checks. No mutation was executed by this author.
+
+Parent follow-up order remains source/diff readback → actual isolated clean
+install + macOS/Docker gates → NEW cumulative review of P-4a/b, P-5a/b and retained
+safety callers → corrections/retests → local checkpoint → three mutations →
+exact restore. No publication, payment or final native acceptance is claimed.
+
+P-5b author execution record (counts overlap; do not add them):
+
+- Genuine initial RED: `../../node_modules/.bin/vitest run test/wire/readme-commands.test.ts`
+  failed **2/2**, exit 1, because the required payer README did not exist.
+- First GREEN selection: README/deps/CLI-PTY, **5 pass / 1 audit skip**, exit 0.
+  Adding the existing offline pack rows gave **12 pass / 1 audit skip**, exit 0.
+- After npm-environment/allowlist hardening and owned-process helper tests:
+  **15 pass / 1 audit skip**, exit 0.
+- Final expanded argv:
+  `../../node_modules/.bin/vitest run test/wire/readme-commands.test.ts test/unit/deps.test.ts test/unit/cli-pty.test.ts test/unit/install-harness.test.ts test/unit/pack.test.ts test/unit/vendor.test.ts`:
+  **6 files / 20 pass / 0 fail / 1 skip (audit gate)**, exit 0. Includes the
+  13-case pure Python lifecycle harness (no actual PTY), new isolated build/pack,
+  owned-process closure/deadline checks and existing transitive signer graph.
+- `../../node_modules/.bin/vitest run test/wire/clean-install.test.ts` with all
+  execution gates unset: **3 skipped**, exit 0. Collection only; clean install,
+  native and mutation runtime checks remain UNRUN, not successful wire results.
+- Payer `npm run types`, `npm run build`, root `git diff --check`: exit 0.
+  Shared build ran only after the isolated pack tests finished.
+- Three shell file-writing setup attempts used a package-relative cwd with a
+  repository-relative filename and failed before writing; all were corrected.
+  They are not RED behavior tests. No network install/audit or native probe ran.
+  The first existing offline pack execution preceded the npm-environment
+  tightening; the final pack execution used fresh HOME and empty npm configs.
+
+Production sources, package version/private flag and dependency versions were
+unchanged. No new provider/tool refusal, quota retry, worker, commit, publication,
+funding, signing, broadcast, external Router/RPC or controller lock mutation was
+performed. Historical held refusals remain held. Actual clean-install/audit,
+macOS/Docker wire and owner native/funded evidence are still parent/owner work.
+
+### P-5b FIX1: ws dependency correction (author-only, acceptance pending)
+
+The following parent evidence applies to the original P-5b inputs, before FIX1;
+it is not this author's execution or evidence for the corrected tarball. Parent
+macOS types/build and focused checks passed (20 PASS / 1 audit SKIP). The fresh
+registry install in `.claude_workflow/local/p5b-install/clean-fNobGi/receipt.json`
+passed with 107 physical transitive identities and unchanged installed wallet/SDK
+MCP checks. Its tarball SHA-256 was
+`84970921575d81cfd00c7361d310d27efc0d381af9e082bb80d2dab54836b31a`.
+Native and mutation rows were skipped; no owner UI or payment was tested.
+
+The parent's real audit **FAILED**, exit 1, high 2 / critical 0, recorded in
+`.claude_workflow/local/p5b-install/audit-Yw9UER/receipt.json` and
+`.claude_workflow/local/p5b-parent-round1/macos-audit.log`. Fail-fast stopped the
+full payer/root/Docker gates. The separate retained diagnostic in
+`.claude_workflow/local/p5b-audit-diagnostic1/{audit.json,receipt.json}` identified
+`GHSA-96hv-2xvq-fx4p`: ws memory-exhaustion DoS, affected `>=8.0.0 <8.21.0`.
+The locked ws 8.20.1 and its dependent viem 2.54.0 account for high 2: one advisory
+plus dependent impact, not two independent advisories. Historical receipts/logs
+remain unchanged. P-5b was not accepted.
+
+FIX1 adds only payer `overrides.ws: "8.22.0"` and replaces its shrinkwrap
+`packages["node_modules/ws"]` with the **entire existing root package-lock entry**.
+The version, resolved URL (`https://registry.npmjs.org/ws/-/ws-8.22.0.tgz`),
+integrity and remaining metadata come from that local root entry, whose policy
+is already `overrides.ws: "8.22.0"`. No integrity was invented and these are
+**copied bytes/metadata, not an npm-generated or registry-normalized lock**.
+The copied integrity is
+`sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==`.
+Root manifest/lock, every other payer lock entry, viem 2.54.0 (including its
+upstream `dependencies.ws: "8.20.1"` declaration), private/version and production
+source remain unchanged. The new file-only test requires the exact root policy,
+full ws metadata identity and no additional nested ws node. All original audit
+assertions and the zero-high/critical gate remain unchanged.
+
+FIX1 author results (cwd `packages/payer`; overlapping counts):
+
+```sh
+../../node_modules/.bin/vitest run test/unit/deps.test.ts -t '^payer ws safety pin'
+env -u PAYER_AUDIT ../../node_modules/.bin/vitest run test/wire/readme-commands.test.ts test/unit/deps.test.ts test/unit/cli-pty.test.ts test/unit/install-harness.test.ts test/unit/pack.test.ts test/unit/vendor.test.ts
+../../node_modules/.bin/tsc --noEmit -p tsconfig.json
+../../node_modules/.bin/tsc -p tsconfig.build.json
+```
+
+- Genuine RED, before manifest/lock correction: first command **1 failed / 2
+  skipped, exit 1**, detecting the absent override, old ws version and old
+  metadata. The identical command after correction: **1 passed / 2 skipped,
+  exit 0**. The name filter excludes the existing direct-pin and audit rows.
+- Expanded second command: **6 files / 21 passed / 1 audit skipped, exit 0**.
+  Only allowed file/offline-pack/owned-process checks ran; CLI-PTY uses the pure
+  injected Python lifecycle harness, not a real PTY.
+- Both TypeScript commands: **exit 0**, after offline pack checks completed.
+  No registry request, install, audit, lock generation, native probe, wire gate,
+  payment, mutation, additional worker, commit or publication ran in FIX1.
+
+**Parent normalization and actual verification remain mandatory.** After source
+readback, copy the corrected manifest/shrinkwrap into a fresh isolated directory
+with fresh HOME/cache/prefix and empty user/global npm config, without inherited
+auth or existing node_modules. Resolve through the registry using
+`npm install --package-lock-only --ignore-scripts --omit=dev --no-audit --no-fund`
+there, preserving the original copy for a full comparison. Record npm version,
+exit and any normalized differences; verify the resolved ws metadata, unchanged
+viem declaration and all other package entries before accepting the lock. Do not
+silently copy unexpected resolution changes back into the shared source.
+
+An override in a dependent package is not equivalent to an install-root override.
+Therefore normalization alone is insufficient: repack the corrected source,
+actually install the unchanged tarball using the retained clean-install gate,
+and verify its shrinkwrap bytes and **entire installed physical tree**, including
+ws 8.22.0 and absence of a nested vulnerable copy. Then run the real isolated
+payer audit with the original zero-high/critical assertions. FIX1 does not claim
+high 0 or corrected-install success. Fresh corrected-source macOS/full payer/root
+and Docker evidence remains pending as well.
+
+Required order: parent readback → isolated corrected lock normalization/install/
+audit/macOS/Docker verification → **NEW separate cumulative read-only P-4/P-5
+review** → substantive fixes/retests → checkpoint **before** the three mutations
+→ exact restore and baseline checks. P-4a manual five, P-5b native check, G-A1/npm
+and G-A2 remain owner gates; no release or native/funded acceptance is claimed.
+
+## P-5b FIX2 — consumer-compatible upstream patch (2026-10-09)
+
+The FIX1 section above is historical, not the current dependency contract.
+Parent npm 10.9.8 COPY normalization was byte-identical (exit 0;
+`.claude_workflow/local/p5b-normalization1/receipt.json`), but round2 global
+installation exposed physical ws **8.20.1** while the packed lock said 8.22.0.
+Install itself exited 0; the unchanged physical identity oracle failed at
+`install.ts:118` (`p5b-parent-round2/results.json` and
+`p5b-install/clean-szKipt/receipt.json`, under the same local directory).
+Installed wallet/MCP were not reached; full payer/audit/root/Docker stopped
+fail-fast. A dependent package's override did not enforce the consumer tree.
+
+Parent candidate1 retained top ws 8.22.0 plus nested viem/ws 8.21.0; candidate2
+installed as a single top ws 8.21.0 and failed exact tree equality. Candidate3
+instead started from the original pre-FIX1 `clean-fNobGi/package` manifest/lock,
+changed only viem 2.54.0 → **2.54.2**, and used isolated npm lock generation.
+Saved registry metadata establishes that 2.54.1 still declares ws 8.20.1;
+2.54.2 declares **8.21.0**, with all other viem dependencies unchanged.
+
+Parent candidate3 normalization/pack/global install/107-package physical identity,
+installed shrinkwrap byte equality and registry audit passed (all severities 0,
+each command exit 0; `p5b-viem-candidate3/receipt.json`, Unix
+1791547854.4738219–1791547859.5990021). This is candidate evidence only: no
+wallet, SDK, UI, real signature or current new-source full-suite acceptance.
+
+FIX2 adopts exactly candidate3's `package/package.json` and
+`package/npm-shrinkwrap.json`, with no override and one ws 8.21.0 node. Author
+readback SHA-256 matches the parent:
+
+- manifest: `26d167b36bf00f6ea6ccd932ae40e02df4ecae5054e8085198794deb4eff30f6`
+- shrinkwrap: `25c2ea34778685d3239a4877bd18b17edec038befbe2be3d0f7ae2e578ca74dc`
+
+The actual lock delta matches `lock-delta.json`: root entry, viem and ws only
+versus pre-FIX1; all other nodes and top-level lock metadata are unchanged.
+Root manifest/lock, payer production/vendor bytes and private/version remain
+unchanged. Retained tests embed the authentic published version/URL/integrity,
+require manifest/lock consistency and preserve root version/integrity equality
+for every other shared direct dependency. Only viem has the explicit 2.54.2
+exception. Vendor byte/import-graph exclusions, physical-tree identity and
+high + critical = 0 audit assertions are unchanged. No ignored receipt is needed
+by the retained tests in a fresh checkout or Docker.
+
+FIX2 author results (cwd `packages/payer`; counts overlap):
+
+```sh
+env -u PAYER_AUDIT ../../node_modules/.bin/vitest run test/unit/deps.test.ts test/unit/vendor.test.ts -t 'payer direct dependencies|payer consumer-compatible|package stays private'
+env -u PAYER_AUDIT ../../node_modules/.bin/vitest run test/wire/readme-commands.test.ts test/unit/deps.test.ts test/unit/cli-pty.test.ts test/unit/install-harness.test.ts test/unit/pack.test.ts test/unit/vendor.test.ts
+../../node_modules/.bin/tsc --noEmit -p tsconfig.json
+../../node_modules/.bin/tsc -p tsconfig.build.json
+```
+
+- First command, genuine file-only RED before adopting candidate3: **3 failed /
+  4 skipped, exit 1** (old viem pin/integrity/declaration and override/ws policy).
+  Identical command after adoption: **3 passed / 4 skipped, exit 0**; the filter
+  excludes three unrelated vendor rows and the registry audit.
+- Second command: **6 files / 21 passed / 1 audit skipped, exit 0**. Pack uses
+  fresh copied source and offline isolated npm; CLI-PTY uses injected Python OS
+  operations, not an actual PTY. Both TypeScript commands exited **0**.
+- Author node_modules still contains **viem 2.54.0** and was not updated.
+  Build/import checks therefore do **not** prove 2.54.2 runtime compatibility.
+  No registry install/audit, native/socket/PTY test, additional worker, mutation,
+  commit or publication ran in FIX2.
+
+After author exit, Hermes must provision payer dependencies using isolated npm
+config/cache, verify actual viem resolution, then run fresh current-source round3
+macOS clean-install/audit/full payer/root and Docker gates. Correction acceptance
+still requires a **NEW separate Codex cumulative read-only P-4/P-5 review**,
+substantive fixes/retests and a checkpoint **before all three mutations**, followed
+by exact restore and baseline checks. Native manual5, P-5b macOS native check,
+G-A1/npm and G-A2 funded dialog remain owner-only. No release, native acceptance,
+real-signature wire or settlement claim follows from these author results.
