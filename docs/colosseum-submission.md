@@ -37,26 +37,26 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: round 3 approved the unhedged 3-minute draft; round 4 requested corrections to the 2-minute cut, subsequently applied; round 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; round 6 found no further correction to the spoken script and corrected this history line; round 7 reviews the owner's second rewrite (name, Solana share, zERC20 as the existing first piece, payer sentence removed, "dynamic" dropped from the fee statement, provider ask replaced, new close); it found no false spoken sentence and three note/translation corrections, applied. Round 8 reviews the owner's third pass (Solana share softened, mainnet sentence generalized, "use on-chain services", value sentence before the close); it passed the spoken facts and required the value sentence to carry an explicit vision cue plus two translation fixes, applied. The 3-minute draft is in this file's history (commit 87b1185).
 
-### 2b. Candidate B: value-first (267 spoken words: 2:03 at 130 wpm, 1:47 at 150 wpm; segment times at 150 wpm, rounded up)
+### 2b. Candidate B: value-first (256 spoken words: 1:58 at 130 wpm, 1:42 at 150 wpm; segment times at 150 wpm, rounded up)
 
-Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording.
+Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording. Codex round 9 (2026-10-11) reviewed candidate B and required five corrections (strategy "clues" not "read", directory scope, keys not funds, no "stop competing", the Japanese promise line), applied.
 
-**[0:00–0:22] Who I am, and what holds agents back.**
-"I'm Takuya Fujita, building SubEtha, after years building chains and cross-chain protocols. Two things hold AI agents back today. An agent finds the service it needs and cannot buy it, because the two sides have no shared way to pay. And every payment it does make is public, so anyone watching can read its strategy."
+**[0:00–0:20] Who I am, and what holds agents back.**
+"I'm Takuya Fujita, building SubEtha, after years building chains and cross-chain protocols. Two things hold AI agents back today. An agent finds the service it needs and cannot buy it, because the two sides have no shared way to pay. And public on-chain payments can reveal clues about its strategy."
 
-**[0:22–0:33] The promise.**
+**[0:20–0:31] The promise.**
 "That is what SubEtha is for: the agent pays with what it holds, the provider receives what it accepts, and the agent's intent stays its own."
 
-**[0:33–0:49] A large market, split in two.**
-"x402 passed 100 million transactions on Base, and Solana has grown into a major x402 chain. Stripe's MPP on Tempo lists 129 services, and 118 of them advertise MPP only. Most providers can be reached from one side only."
+**[0:31–0:47] A large market, split in two.**
+"x402 passed 100 million transactions on Base, and Solana has grown into a major x402 chain. Stripe's MPP on Tempo lists 129 services, and 118 of them advertise MPP only. Most services in that directory advertise only MPP."
 
-**[0:49–1:14] What changes.**
-"With SubEtha Router, an agent on either side pays the way the provider accepts, and a compatible provider changes nothing to gain buyers from the other side. Funds and keys stay with the agent. The ecosystems stop competing for the same wallets and become each other's buyers. Every pair of supported rails settles on testnets, and the Router is proven on mainnet."
+**[0:47–1:10] What changes.**
+"With SubEtha Router, an agent on either side pays the way the provider accepts, and a compatible provider changes nothing to gain buyers from the other side. The agent keeps its keys. Each ecosystem's providers gain access to buyers from the other. Every pair of supported rails settles on testnets, and the Router is proven on mainnet."
 
-**[1:14–1:31] Intent stays private.**
+**[1:10–1:27] Intent stays private.**
 "SubEtha already has confidential payments for AI agents: an agent uses on-chain services without revealing what it does or why. The Router is the second piece. Bring the two together, and agents whose strategy must stay private get every rail at once."
 
-**[1:31–1:49] Business and close.**
+**[1:27–1:45] Business and close.**
 "The Router takes a routing fee on the purchases it carries. Our vision is a payment layer that lets AI pay freely, on any rail, with no third party learning its intent: the infrastructure agentic commerce will need as it grows. Thank you."
 
 ---
@@ -164,26 +164,26 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 
 ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版を承認。第 4 回は 2 分版に修正を求め、その後反映済み。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付ける」ではなく「掲げている」）を求め、反映済み。第 6 回は話し言葉のスクリプトに追加の修正なし、この履歴の記述を訂正。第 7 回はオーナーの二度目の書き直し（名前、Solana の割合、既存の最初のピースとしての zERC20、payer の文を削除、手数料の文から「dynamic」を削除、プロバイダー募集の文を差し替え、新しい締め）をレビューし、話し言葉に虚偽なし、注記と訳の修正 3 件を反映。第 8 回はオーナーの三度目の手直し（Solana の割合を和らげる、メインネットの文を一般化、「サービスを利用できる」、締めの前の価値の一文）をレビューし、話し言葉の事実関係は通過、価値の一文に「目指す」の明示と訳の修正 2 件を求め、反映。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
-### A.2b 候補 B: 価値中心（§2b の訳。267 語。130 wpm で 2:03、150 wpm で 1:47。区間時間は 150 wpm、切り上げ）
+### A.2b 候補 B: 価値中心（§2b の訳。256 語。130 wpm で 1:58、150 wpm で 1:42。区間時間は 150 wpm、切り上げ）
 
-2026-10-11 にオーナーの依頼で、上のスクリプト（候補 A）の代案として追加した。候補 A はそのまま残す。事実関係と「言わないこと」は同じ。仕組みの説明（MCP、Router 自身の残高、スワップと鍵の預かり、20 ペアのマトリクス、zERC20、レール名）は技術デモ動画に任せ、話し言葉は価値を伝える。持っているもので払い、受け取りたいもので受け取り、意図は秘密のまま。収録前にオーナーがどちらかを選ぶ。
+2026-10-11 にオーナーの依頼で、上のスクリプト（候補 A）の代案として追加した。候補 A はそのまま残す。事実関係と「言わないこと」は同じ。仕組みの説明（MCP、Router 自身の残高、スワップと鍵の預かり、20 ペアのマトリクス、zERC20、レール名）は技術デモ動画に任せ、話し言葉は価値を伝える。持っているもので払い、対応する決済手段で受け取り、意図は秘密のまま。収録前にオーナーがどちらかを選ぶ。Codex 第 9 回（2026-10-11）が候補 B をレビューし、5 件の修正（戦略を「読める」ではなく「手掛かり」、ディレクトリの範囲、資金ではなく鍵、「奪い合いをやめる」の削除、約束の訳文）を求め、反映済み。
 
-**[0:00–0:22] 自己紹介と、エージェントを縛っているもの。**
-「SubEtha を開発している Takuya Fujita です。チェーンやクロスチェーンのプロトコルを何年も作ってきました。今日、AI エージェントを縛っているものが二つあります。エージェントは必要なサービスを見つけても、買えない。両者に共通の支払い方がないからです。そして、実際に行う支払いはすべて公開されるので、見ている人なら誰でもその戦略を読み取れてしまいます。」
+**[0:00–0:20] 自己紹介と、エージェントを縛っているもの。**
+「SubEtha を開発している Takuya Fujita です。チェーンやクロスチェーンのプロトコルを何年も作ってきました。今日、AI エージェントを縛っているものが二つあります。エージェントは必要なサービスを見つけても、買えない。両者に共通の支払い方がないからです。そして、公開されるオンチェーン決済は、エージェントの戦略を推測する手掛かりになります。」
 
-**[0:22–0:33] 約束。**
-「SubEtha はそのためにあります。エージェントは持っているもので払い、提供者は受け取りたいもので受け取り、エージェントの意図はエージェントのものにとどまります。」
+**[0:20–0:31] 約束。**
+「SubEtha が目指すのは、エージェントが持っているもので支払い、提供者が対応する決済手段で代金を受け取り、エージェントの意図が外部に知られないことです。」
 
-**[0:33–0:49] 大きな市場が、二つに割れている。**
-「x402 は Base 上で 1 億トランザクションを超え、Solana も x402 の主要なチェーンへと成長しています。Stripe の MPP は Tempo 上で 129 のサービスを掲載し、そのうち 118 は決済方法として MPP だけを掲げています。提供者の大半には、片側からしか届きません。」
+**[0:31–0:47] 大きな市場が、二つに割れている。**
+「x402 は Base 上で 1 億トランザクションを超え、Solana も x402 の主要なチェーンへと成長しています。Stripe の MPP は Tempo 上で 129 のサービスを掲載し、そのうち 118 は決済方法として MPP だけを掲げています。そのディレクトリでは、大半のサービスが決済方法として MPP だけを掲げています。」
 
-**[0:49–1:14] 何が変わるか。**
-「SubEtha Router があれば、どちら側のエージェントも提供者が受け取れる形で払えます。互換性のある提供者は何も変えずに、もう片側の買い手を得ます。資金と鍵はエージェントの手元のままです。エコシステム同士は同じウォレットを奪い合うのをやめ、互いの買い手になります。対応レールのすべての組み合わせがテストネットで決済され、Router はメインネットでも検証済みです。」
+**[0:47–1:10] 何が変わるか。**
+「SubEtha Router があれば、どちら側のエージェントも提供者が受け取れる形で払えます。互換性のある提供者は何も変えずに、もう片側の買い手を得ます。エージェントは鍵を自分で管理します。それぞれのエコシステムの提供者が、もう一方の買い手にもサービスを販売できるようになります。対応レールのすべての組み合わせがテストネットで決済され、Router はメインネットでも検証済みです。」
 
-**[1:14–1:31] 意図は秘密のまま。**
+**[1:10–1:27] 意図は秘密のまま。**
 「SubEtha にはすでに AI エージェント向けの秘匿決済があります。エージェントは何を、なぜしているのかを明かさずにオンチェーンのサービスを利用できます。Router は二つ目のピースです。この二つを組み合わせれば、戦略を秘密にしておく必要があるエージェントがすべてのレールを一度に使えるようになります。」
 
-**[1:31–1:49] ビジネスと締め。**
+**[1:27–1:45] ビジネスと締め。**
 「Router は、仲介する購入に対してルーティング手数料を得ます。目指すのは、AI が第三者に意図を知られることなく、どのレールでも自由に決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
