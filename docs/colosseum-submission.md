@@ -2,7 +2,7 @@
 
 Owner decisions (2026-10-10): tracks **Tempo, Base, Solana**; the owner narrates both videos in English; the repository becomes public under MIT; the pitch should quantify what providers gain (reach they did not have) with sourced numbers; the spoken pitch is confident hackathon language, and the qualifications live in §4/§5, not in the script (owner, 2026-10-10 evening).
 
-Deadline: 2026-10-12 23:59 PT = **2026-10-13 15:59 JST**. Pitch video ≤ 3 min. Technical demo video 2–3 min. All content in English.
+Deadline: 2026-10-12 23:59 PT = **2026-10-13 15:59 JST**. Pitch video ≤ 2 min (form, read 2026-10-10: "introduce yourselves, tell us what you're building, and tell us why you're the people to build it. Nothing fancy required. We're interested in how you think and communicate. YouTube, Loom, or Vimeo. Up to 2 minutes."). Technical demo video 2–3 min. All content in English.
 
 Everything below is honest to the repository's records. Numbers carry a source in §5; the matrix marks what is measured by us, what is third-party, and what is a forecast.
 
@@ -18,27 +18,24 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (406 spoken words in the quoted paragraphs: 3:07 at 130 wpm, 2:42 at 150 wpm; segment times below assume 150 wpm, rounded up — the owner must time a read-through before recording and cut until the measured length is ≤ 2:50; "why", not a demo)
+## 2. Pitch video script (281 spoken words in the quoted paragraphs: 2:10 at 130 wpm, 1:52 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
 
-**[0:00–0:15] Founder and problem.**
+**[0:00–0:15] Who I am.**
 "I'm Fujita, solo builder of SubEtha, after years building chains and cross-chain protocols. The problem I keep hitting: an agent finds the right paid API and still cannot pay, because the two sides speak different payment protocols."
 
-**[0:15–0:45] Two ecosystems that cannot pay each other.**
-"x402, started by Coinbase, passed 100 million transactions on Base in the first quarter of 2026; by August Solana carried about 70 percent of monthly x402 volume. MPP, Stripe's protocol on Tempo, launched in March with over 100 paid services. On October 10th I crawled its directory: 118 of 129 services advertise MPP as their only payment interface, one an x402 client does not speak. Pick one rail, and the other side cannot see you."
+**[0:15–0:39] The gap.**
+"x402 passed 100 million transactions on Base in the first quarter of 2026; by August Solana carried about 70 percent of monthly x402 volume. MPP, Stripe's protocol on Tempo, launched in March, and 118 of the 129 services in its directory advertise MPP as their only payment interface. Pick one rail, and the other side cannot see you."
 
-**[0:45–1:11] Product.**
-"SubEtha Router is the bridge, a hosted MCP server. The agent takes a quote; with the local payer a human approves it in a native dialog; the agent pays the Router on its rail, the Router pays the provider on the provider's rail from its own balance and returns the response. Two independent payments. No swap, no key custody. A compatible provider changes nothing."
+**[0:39–1:14] What I'm building.**
+"SubEtha Router is the bridge, a hosted MCP server. The agent pays the Router on its rail; the Router pays the provider on the provider's rail from its own balance. Two independent payments, no swap, no key custody, and with the local payer a human approves every purchase in a native dialog. On testnets all 20 cross-rail pairs settle end to end. On October 10th I made the first mainnet purchase: an MPP wallet on Tempo bought from an API that accepts only x402 on Base."
 
-**[1:11–1:39] Evidence.**
-"On testnets, all 20 cross-rail pairs, x402 on Base, Arc and Solana, MPP on Tempo and Solana, settle end to end, both legs on chain. On October 10th I made the first mainnet purchase: an MPP wallet on Tempo bought from an API that accepts only x402 on Base. The local payer is on npm; its first route, Base Sepolia to Tempo testnet, works in Claude Code today."
+**[1:14–1:34] Why me, and how I work.**
+"I have built both sides of this gap, chains and the protocols between them, and I ship alone with a method: requirements, design, tasks, independent model review and a test that proves it, for every feature, all in the public repository. Dogfooding and those reviews found fourteen agent-side issues."
 
-**[1:39–2:21] What providers gain, and the business.**
-"For providers the value is reach. Today an MPP-only provider on Tempo is paid only by agents holding Tempo stablecoins. Through the Router the x402 side can pay it too, an ecosystem past 100 million transactions. Those 118 MPP-only services are a market the x402 side cannot buy from today, and the Router is built to open it, one provider at a time. On dynamic routes the Router earns a routing fee on every purchase, from 0.001 in the agent's stablecoin. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail."
+**[1:34–1:55] Business and ask.**
+"Providers gain reach: an MPP-only provider on Tempo becomes payable from the x402 side, and the Router earns a routing fee on every dynamic purchase. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail. Thank you."
 
-**[2:21–2:44] Validation and ask.**
-"Every feature has a design-to-test trail and independent model reviews, and dogfooding and those reviews found fourteen agent-side issues, all documented. I'm looking for design partners: paid-API providers and agent developers who will run real purchases with me. All twenty pairs run on testnets, mainnet is proven, and the path to public mainnet is documented. Thank you."
-
-Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, so the script stays true, only unqualified (checked by the Codex review of 2026-10-10, round 3).
+Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, so the script stays true, only unqualified (checked by the Codex review of 2026-10-10, round 3; the 2-minute cut is round 4). The 3-minute draft is in this file's history (commit 87b1185).
 
 ---
 
@@ -107,7 +104,7 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 1. Freeze the two scripts above (after Codex review and the owner's edits). Split each into numbered units (one sentence or two per unit) in a `script.en.json` for a new `production/colosseum-v1/` (pitch) and `production/colosseum-demo-v1/` (demo).
 2. The owner records each unit as a separate WAV/M4A in a quiet room (phone or Mac mic is fine), naming files by unit id. For the demo, the screen capture is recorded first (QuickTime), then narration is recorded while watching it, per unit.
 3. The earlier `mix_range.py` expects Fish Audio synthesis receipts and cache keys, so it is not reused as is: a small new mixer for the new directories takes human-recorded stems by unit id, records each stem's hash and duration, normalizes to −16 LUFS, aligns to the timeline, and writes a truthful provenance record (owner recording, no synthesis). Old artifacts stay untouched. Subtitles come from the canonical script.
-4. Final checks as before: full decode, duration ≤ 3:00 / 2:50, stem alignment, captions match the script, stills reviewed. The owner watches the whole film once before upload.
+4. Final checks as before: full decode, duration ≤ 2:00 / 2:50, stem alignment, captions match the script, stills reviewed. The owner watches the whole film once before upload.
 
 ---
 
@@ -125,27 +122,24 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 
 ### A.2 ピッチ動画スクリプト（§2 の訳）
 
-見出しの注記: 引用段落の話し言葉は 406 語。130 wpm で 3:07、150 wpm で 2:42。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。オーナーは収録前に一度通し読みして時間を計り、実測が 2:50 以下になるまで削ること。「なぜ」を語る動画であり、デモではない。
+見出しの注記: 引用段落の話し言葉は 281 語。130 wpm で 2:10、150 wpm で 1:52。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。フォームの上限は 2 分なので、オーナーは収録前に一度通し読みして時間を計り、実測が 1:55 以下になるまで削ること。フォームは自己紹介、何を作っているか、なぜ自分たちがそれを作るべき人なのかを求めており、「凝ったものは不要」としている。
 
-**[0:00–0:15] 創業者と課題。**
-「私は Fujita、SubEtha を一人で作っています。チェーンやクロスチェーンのプロトコルを何年も作ってきました。繰り返しぶつかる問題はこれです。エージェントが必要な有料 API を見つけても、支払えない。両者が話す決済プロトコルが違うからです。」
+**[0:00–0:15] 自己紹介。**
+「私は Fujita、SubEtha を一人で作っています。チェーンとクロスチェーンのプロトコルを何年も作ってきました。繰り返しぶつかる問題はこれです。エージェントが必要な有料 API を見つけても、支払えない。両者が話す決済プロトコルが違うからです。」
 
-**[0:15–0:45] 互いに支払えない二つのエコシステム。**
-「Coinbase が始めた x402 は、2026 年第 1 四半期に Base 上で 1 億トランザクションを超えました。8 月の時点では、月間 x402 取引量の約 70 パーセントを Solana が占めていました。Stripe のプロトコルである MPP は、3 月に Tempo 上で 100 を超える有料サービスとともにローンチしました。10 月 10 日にそのディレクトリをクロールしたところ、129 サービス中 118 が MPP を唯一の決済インターフェースとして掲げていました。x402 クライアントには話せないインターフェースです。どちらか一方のレールを選ぶと、もう一方の側からはあなたが見えません。」
+**[0:15–0:39] ギャップ。**
+「x402 は 2026 年第 1 四半期に Base 上で 1 億トランザクションを超えました。8 月の時点では、月間 x402 取引量の約 70 パーセントを Solana が占めていました。Stripe のプロトコルである MPP は 3 月に Tempo 上でローンチし、そのディレクトリの 129 サービス中 118 が MPP を唯一の決済インターフェースとして掲げています。どちらか一方のレールを選ぶと、もう一方の側からはあなたが見えません。」
 
-**[0:45–1:11] プロダクト。**
-「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは見積もり（quote）を取ります。ローカル payer を使えば、人間がネイティブダイアログでそれを承認します。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払い、レスポンスを返します。二つの独立した支払いです。スワップなし、鍵の預かりなし。互換性のあるプロバイダーは何も変える必要がありません。」
+**[0:39–1:14] 何を作っているか。**
+「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払います。二つの独立した支払い、スワップなし、鍵の預かりなし。ローカル payer を使えば、人間がすべての購入をネイティブダイアログで承認します。テストネットでは、クロスレール 20 ペアすべてがエンドツーエンドに決済されています。10 月 10 日、初のメインネット購入を行いました。Tempo 上の MPP ウォレットで、Base 上の x402 しか受け付けない API から購入したのです。」
 
-**[1:11–1:39] 実証。**
-「テストネットでは、クロスレール 20 ペアすべて、つまり Base・Arc・Solana 上の x402 と Tempo・Solana 上の MPP の組み合わせが、両脚ともオンチェーンで、エンドツーエンドに決済されています。10 月 10 日、初のメインネット購入を行いました。Tempo 上の MPP ウォレットで、Base 上の x402 しか受け付けない API から購入したのです。ローカル payer は npm に公開済みです。その最初のルートである Base Sepolia から Tempo テストネットへの経路は、今日の時点で Claude Code で動きます。」
+**[1:14–1:34] なぜ私か、そしてどう仕事をするか。**
+「私はこのギャップの両側、つまりチェーンとその間のプロトコルを作ってきました。そして一人で、方法論をもって出荷しています。要件、設計、タスク化、独立したモデルによるレビュー、そしてそれを証明するテスト。これをすべての機能について行い、すべて公開リポジトリにあります。ドッグフーディングとそのレビューでエージェント側の問題を 14 件見つけました。」
 
-**[1:39–2:21] プロバイダーが得るもの、そしてビジネス。**
-「プロバイダーにとっての価値はリーチです。今日、Tempo 上の MPP 専用プロバイダーは、Tempo のステーブルコインを持つエージェントからしか支払われていません。Router を通せば、x402 側、つまり 1 億トランザクションを超えたエコシステムからも支払えるようになります。あの 118 の MPP 専用サービスは、x402 側が今日買えない市場です。Router はそれをプロバイダーごとに開くために作られています。動的ルートでは、Router はすべての購入でルーティング手数料を得ます。エージェントのステーブルコインで 0.001 からです。Juniper はエージェント型コマースが 2030 年までに 1.5 兆ドルに達すると予測しています。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。」
+**[1:34–1:55] ビジネスとお願い。**
+「プロバイダーはリーチを得ます。Tempo 上の MPP 専用プロバイダーが x402 側から支払えるようになり、Router は動的な購入ごとにルーティング手数料を得ます。Juniper はエージェント型コマースが 2030 年までに 1.5 兆ドルに達すると予測しています。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。ありがとうございました。」
 
-**[2:21–2:44] 検証とお願い。**
-「すべての機能に設計からテストまでの記録と独立したモデルによるレビューがあり、ドッグフーディングとそのレビューでエージェント側の問題を 14 件見つけ、すべて文書化しています。デザインパートナーを探しています。私と一緒に実際の購入を行ってくれる有料 API プロバイダーとエージェント開発者です。20 ペアすべてがテストネットで動き、メインネットは実証済み、公開メインネットへの道筋は文書化済みです。ありがとうございました。」
-
-ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけである（2026-10-10 の Codex レビュー第 3 回で確認）。
+ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけである（2026-10-10 の Codex レビュー第 3 回で確認。2 分版は第 4 回）。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
 
