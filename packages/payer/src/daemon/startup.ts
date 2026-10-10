@@ -31,6 +31,26 @@ export interface StartupOptions {
 export interface RunningDaemon { readonly context: DaemonContext; readonly closed: Promise<void>; close(): Promise<void> }
 
 /** Common production/test entry. All pre-secret checks precede the first TTY read. */
+export const PHRASE_NOTICE = "The security phrase is shown at the top of every approval dialog so you can tell the dialog comes from this daemon. Anyone who can see your screen can read it. It must NOT be your passphrase and must not contain it.";
+const PHRASE_SAME = "Security phrase rejected: it must differ from the passphrase and not contain it.";
+const PHRASE_SHAPE = "Security phrase rejected: empty, too long or contains control characters.";
+const normalize = (text: string): string => text.normalize("NFKC").trim();
+
+/** FR-F1: up to three phrase attempts; the wallet passphrase is never re-read. Values and lengths are never printed. */
+async function readSecurityPhrase(tty: StartupOptions["hooks"]["tty"], passphrase: string, assertHeld: () => void): Promise<string> {
+  tty.notice?.(PHRASE_NOTICE);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assertHeld();
+    let candidate = await tty.read("Security phrase");
+    if (!candidate.trim() || candidate.length > 256 || /[\x00-\x1f\x7f]/.test(candidate)) { candidate = ""; tty.notice?.(PHRASE_SHAPE); continue; }
+    const pass = normalize(passphrase);
+    // An empty normalized passphrase cannot pass isValidPassphrase; refuse rather than skip the check.
+    if (pass === "" || normalize(candidate).includes(pass)) { candidate = ""; tty.notice?.(PHRASE_SAME); continue; }
+    return candidate;
+  }
+  throw new StoreError("phrase_invalid");
+}
+
 export async function startDaemon(options: StartupOptions): Promise<RunningDaemon | undefined> {
   const startedAt = Date.now();
   preflight(options.execArgv, options.env);
@@ -78,16 +98,19 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     const identity = routerIdentity(config.router.url, config.router.canonicalResource);
     const router = new RouterClient(new URL(identity.routerUrl));
     const doc = parseKeysDocument(fs.readFileSync(path.join(dir, "keys.json")).toString("utf8"));
-    for (let attempt = 0; attempt < 3; attempt++) {
-      assertHeld();
-      let pass = await options.hooks.tty.read("Passphrase");
-      try { assertHeld(); keys = unlockKeys(doc, pass); break; }
-      catch (error) { if (!(error instanceof StoreError) || error.code !== "bad_passphrase" || attempt === 2) throw error; }
-      finally { pass = ""; }
-    }
-    if (!keys) throw new StoreError("bad_passphrase");
-    phrase = await options.hooks.tty.read("Security phrase");
-    if (!phrase.trim() || phrase.length > 256 || /[\x00-\x1f\x7f]/.test(phrase)) throw new StoreError("phrase_invalid");
+    // The accepted passphrase is kept only until the security phrase is accepted or refused (FR-F1), then dropped.
+    let accepted = "";
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        assertHeld();
+        let pass = await options.hooks.tty.read("Passphrase");
+        try { assertHeld(); keys = unlockKeys(doc, pass); accepted = pass; break; }
+        catch (error) { if (!(error instanceof StoreError) || error.code !== "bad_passphrase" || attempt === 2) throw error; }
+        finally { pass = ""; }
+      }
+      if (!keys) throw new StoreError("bad_passphrase");
+      phrase = await readSecurityPhrase(options.hooks.tty, accepted, assertHeld);
+    } finally { accepted = ""; }
     assertHeld();
     await options.hooks.faults?.hit("before:seal");
     assertHeld();

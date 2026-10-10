@@ -91,3 +91,27 @@ for (const key of ["rail", "network", "asset", "quoted", "decimals", "payTo", "q
   const input: any = structuredClone(h1Quote()); input.quote.destination[key] = null;
   expect(() => buildRecord(input, identity())).toThrow("quote_inconsistent");
 });
+// FR-F3 / AC-F3: changing only the approved record's resource is still a mismatch against the original approval hash.
+test("resource binding: a record whose resource changed after approval fails with approval_mismatch", () => {
+  const input = structuredClone(h1Quote()); const r = buildRecord(input, identity()); const approved = recordHash(r);
+  const changed = { ...r, resource: { ...r.resource, url: "http://127.0.0.1:8501/v1/routes/md-mpp-eth-snapshot/resource" } };
+  expect(() => assertApproval(r, input.quote.source.offer, approved, false)).not.toThrow();
+  expect(() => assertApproval(changed, input.quote.source.offer, approved, false)).toThrow("approval_mismatch");
+});
+// FR-F4 / AC-F4: destination decimals.
+test("omitted destination decimals become pathUSD's 6 in the immutable record; 6 is kept", () => {
+  const omitted = structuredClone(h1Quote()); delete (omitted.quote.destination as { decimals?: number }).decimals;
+  expect(buildRecord(omitted, identity()).destination.decimals).toBe(6);
+  expect(render(buildRecord(omitted, identity()))).toContain("(decimals 6)");
+  const six = structuredClone(h1Quote()); (six.quote.destination as { decimals?: number }).decimals = 6;
+  expect(buildRecord(six, identity()).destination.decimals).toBe(6);
+});
+test("destination decimals other than 6 are quote_inconsistent", () => {
+  const input = structuredClone(h1Quote()); (input.quote.destination as { decimals?: number }).decimals = 18;
+  expect(() => buildRecord(input, identity())).toThrow("quote_inconsistent");
+});
+test("changing the recorded destination decimals after approval is approval_mismatch", () => {
+  const input = structuredClone(h1Quote()); const r = buildRecord(input, identity()); const approved = recordHash(r);
+  const changed = { ...r, destination: { ...r.destination, decimals: 18 } } as unknown as typeof r;
+  expect(() => assertApproval(changed, input.quote.source.offer, approved, false)).toThrow("approval_mismatch");
+});

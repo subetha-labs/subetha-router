@@ -4,6 +4,7 @@ import type { SecretTty } from "./interfaces.js";
 /** Raw terminal input: no echo, readline history, subprocess, file, argument or environment secret inlet. */
 export class TerminalSecrets implements SecretTty {
   get available(): boolean { return process.stdin.isTTY === true && process.stderr.isTTY === true; }
+  notice(text: string): void { process.stderr.write(`${text}\n`); }
   async read(label: string): Promise<string> {
     if (!this.available) throw new StoreError("no_tty");
     const input = process.stdin;

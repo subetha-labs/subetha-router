@@ -18,3 +18,18 @@ test("sanitize phrase/values; ignore upstream bodies, labels and free text; miss
   expect(text.split("\n")[0]).toBe("phrase"); expect(text).toContain("decimals not supplied");
   expect(text).not.toMatch(/UPSTREAM_BODY|AGENT_TEXT|URL_LABEL|[\u202e\u001b\t\u200b]/);
 });
+// FR-F3 / AC-F3: the Resource line shows the fixed path, never the Router-internal host; the Router line stays the real URL.
+test("hosted Resource line shows the route path and the Router-internal note, not the loopback host", () => {
+  const r = { ...uiRecord(), routerUrl: "https://router.subethalabs.com/mcp", resource: { url: "http://127.0.0.1:8500/v1/routes/md-mpp-eth-snapshot/resource", method: "GET" as const } };
+  const lines = renderRecord(r).split("\n");
+  const resource = lines.find(line => line.startsWith("Resource:"))!;
+  expect(resource).toBe("Resource: GET /v1/routes/md-mpp-eth-snapshot/resource (Router-internal, fixed by this payer)");
+  expect(resource).not.toContain("127.0.0.1");
+  expect(lines.find(line => line.startsWith("Router:"))).toBe("Router: https://router.subethalabs.com/mcp");
+});
+test("a configured local Router is still shown on the Router line", () => {
+  const r = { ...uiRecord(), routerUrl: "http://127.0.0.1:8787/mcp", resource: { url: "http://127.0.0.1:8787/v1/routes/md-mpp-eth-snapshot/resource", method: "GET" as const } };
+  const lines = renderRecord(r).split("\n");
+  expect(lines.find(line => line.startsWith("Router:"))).toBe("Router: http://127.0.0.1:8787/mcp");
+  expect(lines.find(line => line.startsWith("Resource:"))).not.toContain("127.0.0.1");
+});

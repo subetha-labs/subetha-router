@@ -22,6 +22,8 @@ export interface PurchaseContext {
 export interface SecretTty {
   readonly available: boolean;
   read(label: "Passphrase" | "Security phrase"): Promise<string>;
+  /** Fixed, secret-free guidance written to the terminal (stderr). */
+  notice?(text: string): void;
 }
 export interface FaultPoints { hit(point: "after:lock" | "before:seal" | "after:seal" | "before:key-decrypt" | `before:${string}` | `after:${string}` | "transport:before-response" | "transport:after-response"): Promise<void> }
 export interface DaemonContext {

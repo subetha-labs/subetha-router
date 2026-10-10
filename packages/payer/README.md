@@ -88,8 +88,12 @@ In a terminal you opened yourself, type:
 subetha-payer daemon
 ```
 
-Enter the wallet passphrase and choose a private security phrase at the terminal
-prompts. Leave this terminal open. The daemon uses macOS's native confirmation UI;
+Enter the wallet passphrase and choose a security phrase at the terminal prompts.
+The security phrase is shown at the top of every approval dialog, so you can tell
+the dialog comes from this daemon; if it is missing or wrong, press Cancel. Anyone
+who can see your screen can read it, so it must **not** be your passphrase and must
+not contain it (the daemon refuses such a phrase and asks again, up to three
+times). Leave this terminal open. The daemon uses macOS's native confirmation UI;
 SSH/headless sessions without it fail closed. The session lasts at most one hour.
 After it locks, stop it and start it again yourself to unlock. Session unlocking
 never removes the confirmation required for each purchase.
