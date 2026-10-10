@@ -18,8 +18,10 @@ export function confirmationScript(text: string): string {
 export function parseConfirmation(text: string, verify: (pass: string) => boolean): Parsed {
   const fields = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
   try {
-    if (fields.length !== 3 || !["Cancel", "Approve"].includes(fields[0]!) || !["false", "true"].includes(fields[1]!)) return { approved: false, reason: "malformed_response" };
-    if (fields[1] === "true") return { approved: false, reason: "timeout" };
+    // macOS reports a give-up as an empty button name with gave-up "true" (observed 2026-10-10, P-4a manual check).
+    if (fields.length !== 3 || !["false", "true"].includes(fields[1]!)) return { approved: false, reason: "malformed_response" };
+    if (fields[1] === "true") return ["", "Cancel", "Approve"].includes(fields[0]!) ? { approved: false, reason: "timeout" } : { approved: false, reason: "malformed_response" };
+    if (!["Cancel", "Approve"].includes(fields[0]!)) return { approved: false, reason: "malformed_response" };
     if (fields[0] === "Cancel") return { approved: false, reason: "cancelled" };
     if (!isValidPassphrase(fields[2]!)) return { approved: false, reason: "malformed_response" };
     try { return verify(fields[2]!) ? { approved: true } : { approved: false, reason: "bad_passphrase" }; }

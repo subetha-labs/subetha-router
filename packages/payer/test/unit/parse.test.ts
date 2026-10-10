@@ -9,13 +9,13 @@ test.each(["", "\n"])("exact three fields, optional single terminal LF: %j", suf
 test.each([
   "", "Approve\nfalse", `Approve\nfalse\n${pass}\n\n`, `Approve\nfalse\n${pass}\nextra`,
   `Approve\nfalse\n${pass}\nextra\n`, `Approve\r\nfalse\r\n${pass}`, "Approve\nfalse\n", "Approve\nfalse\nshort",
-  `Approve\nfalse\n${pass}\r`, `Approve\nFALSE\n${pass}`, `Other\nfalse\n${pass}`,
+  `Approve\nfalse\n${pass}\r`, `Approve\nFALSE\n${pass}`, `Other\nfalse\n${pass}`, `\nfalse\n${pass}`, `Other\ntrue\n`,
 ])("malformed shape rejects without consulting verifier: %j", text => {
   const verify = vi.fn(() => true);
   expect(parseConfirmation(text, verify)).toEqual({ approved: false, reason: "malformed_response" });
   expect(verify).not.toHaveBeenCalled();
 });
-test.each([[`Cancel\nfalse\n${pass}`, "cancelled"], [`Approve\ntrue\n${pass}`, "timeout"]])("cancel/gave-up rejects", (text, reason) => {
+test.each([[`Cancel\nfalse\n${pass}`, "cancelled"], [`Approve\ntrue\n${pass}`, "timeout"], ["\ntrue\n\n", "timeout"], [`\ntrue\n${pass}`, "timeout"]])("cancel/gave-up rejects", (text, reason) => {
   const verify = vi.fn(() => true);
   expect(parseConfirmation(text!, verify)).toEqual({ approved: false, reason }); expect(verify).not.toHaveBeenCalled();
 });
