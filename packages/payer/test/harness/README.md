@@ -313,8 +313,9 @@ mutations, exact restoration and macOS full GREEN. Those are not author results.
 
 The public-facing payer README describes only macOS 14+, Node 22, Base Sepolia
 USDC and static `md-mpp-eth-snapshot`. The package was published as 0.1.0 on 2026-10-10 (G-A1).
-Native manual5, real-signature wiring, G-A1/npm and G-A2 funded owner-dialog
-acceptance remain **UNRUN**. A Linux refusal is not Linux product support.
+Native manual5 passed on 2026-10-10 (after the give-up fix in PR #142) and G-A1/npm
+publication is done. Real-signature wiring and G-A2 funded owner-dialog acceptance
+remain **UNRUN**. A Linux refusal is not Linux product support.
 
 Author-safe focused command, from `packages/payer` (explicit files only):
 

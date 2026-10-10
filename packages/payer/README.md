@@ -201,6 +201,7 @@ Mutable key buffers are cleared on lock/exit, but JavaScript strings, OS copies,
 swap, core dumps and crash reports can retain material. macOS defaults are not
 changed by this package. Keep the terminal's Node and helper installation trusted.
 There is no unattended purchase, envelope delegation, mainnet, dynamic-route or
-other-rail support in this slice. Native manual confirmation, real signature
-wiring, npm publication and funded end-to-end acceptance remain separate owner
-gates; these onboarding instructions do not claim those results.
+other-rail support in this slice. The native manual confirmation checks passed
+and npm publication (G-A1) is done, both on 2026-10-10. Real signature wiring and
+funded end-to-end acceptance (G-A2) remain separate owner gates; these onboarding
+instructions do not claim those results.
