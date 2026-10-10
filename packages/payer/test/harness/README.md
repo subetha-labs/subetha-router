@@ -312,7 +312,7 @@ root-focused50/types/build, then exact455source checkpoint before the three guar
 mutations, exact restoration and macOS full GREEN. Those are not author results.
 
 The public-facing payer README describes only macOS 14+, Node 22, Base Sepolia
-USDC and static `md-mpp-eth-snapshot`. The package remains private/unpublished.
+USDC and static `md-mpp-eth-snapshot`. The package was published as 0.1.0 on 2026-10-10 (G-A1).
 Native manual5, real-signature wiring, G-A1/npm and G-A2 funded owner-dialog
 acceptance remain **UNRUN**. A Linux refusal is not Linux product support.
 

@@ -177,6 +177,7 @@ G-A2  testnet の購入（AC-A1・AC-A10 の最終）                           
 ### G-A1 — owner の `npm publish`（要件 §8）
 
 - owner が `packages/payer` から `npm publish --access public`（scope `@subetha`）。親は `npm view @subetha/payer version dist.integrity` と手元の `npm pack` の integrity の一致、公開した commit を記録。
+- **記録（2026-10-10）**: owner が main `960562d`（PR #143 で `private` を外し `publishConfig.access: public`）から親が build・`npm pack` した tarball を `npm publish <tarball> --access public` で公開。`@subetha/payer@0.1.0`。registry の `dist.integrity` `sha512-AvTyQXureAXI60JSxbYKx7+O9s978w7IanG4Dju4NcbbwR5mv13KnumMJomvDd6zrBP4wjH1I9APCox5nBWKcw==` と `dist.shasum` `c7d70aef73464b6247eea4c3a1cb930470887313` が手元の pack と一致（46 files）、`_hasShrinkwrap: true`。G-A2 の依存の固定の確認も実施: 隔離した prefix・cache・HOME で `npm i -g @subetha/payer@0.1.0` → install した木が同梱 shrinkwrap と一致（非 dev 107 件、版の不一致 0、余分 0、express 5.2.1）。
 
 ### G-A2 — testnet の購入（要件 AC-A1・AC-A10、§8）
 
