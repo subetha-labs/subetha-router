@@ -1,0 +1,1948 @@
+{
+ "source": "https://mpp.dev/api/services",
+ "fetchedAt": "2026-10-10T07:3xZ (UTC)",
+ "method": "GET of the catalog JSON; a service is counted as MPP-only when its `methods` object lists only the `tempo` method. This is what the directory advertises, not a test that the service refuses other payment methods.",
+ "count": 129,
+ "tempoOnly": 118,
+ "rows": [
+  {
+   "id": "laso-finance",
+   "name": "Laso Finance",
+   "serviceUrl": "https://laso.finance",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "evm"
+   ],
+   "tempoIntents": null,
+   "getEndpoints": 7,
+   "endpoints": 7
+  },
+  {
+   "id": "apex-db",
+   "name": "Apex DB",
+   "serviceUrl": "https://api.apex-db.org",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 3
+  },
+  {
+   "id": "rxatlas",
+   "name": "RxAtlas",
+   "serviceUrl": "https://api.rxatlas.dev",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 3
+  },
+  {
+   "id": "trialbase-db",
+   "name": "TrialBase DB",
+   "serviceUrl": "https://api.trialbase-db.org",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 3
+  },
+  {
+   "id": "recallradar",
+   "name": "RecallRadar",
+   "serviceUrl": "https://api.recallradar.dev",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 3
+  },
+  {
+   "id": "agentfax",
+   "name": "agentfax",
+   "serviceUrl": "https://agentfax.val.run",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "agentmail",
+   "name": "AgentMail",
+   "serviceUrl": "https://mpp.api.agentmail.to",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 44,
+   "endpoints": 81
+  },
+  {
+   "id": "allium",
+   "name": "Allium",
+   "serviceUrl": "https://agents.allium.so",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 4,
+   "endpoints": 15
+  },
+  {
+   "id": "anthropic",
+   "name": "Anthropic",
+   "serviceUrl": "https://anthropic.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "session"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "browserbase",
+   "name": "Browserbase",
+   "serviceUrl": "https://mpp.browserbase.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 6
+  },
+  {
+   "id": "buildwithlocus",
+   "name": "Build With Locus",
+   "serviceUrl": "https://mpp.buildwithlocus.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 18,
+   "endpoints": 46
+  },
+  {
+   "id": "codex",
+   "name": "Codex",
+   "serviceUrl": "https://graph.codex.io",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "doma",
+   "name": "Doma",
+   "serviceUrl": "https://mpp.doma.xyz",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "dripstack",
+   "name": "DripStack",
+   "serviceUrl": "https://dripstack.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 3
+  },
+  {
+   "id": "dune",
+   "name": "Dune",
+   "serviceUrl": "https://api.dune.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "session"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 3
+  },
+  {
+   "id": "exa",
+   "name": "Exa",
+   "serviceUrl": "https://api.exa.ai",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "fal",
+   "name": "fal.ai",
+   "serviceUrl": "https://fal.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 17
+  },
+  {
+   "id": "firecrawl",
+   "name": "Firecrawl",
+   "serviceUrl": "https://firecrawl.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 5
+  },
+  {
+   "id": "govlaws",
+   "name": "GovLaws",
+   "serviceUrl": "https://govlaws.ai",
+   "integration": "first-party",
+   "status": "maintenance",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 3
+  },
+  {
+   "id": "modal",
+   "name": "Modal",
+   "serviceUrl": "https://modal.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "moltycash",
+   "name": "molty.cash",
+   "serviceUrl": "https://api.molty.cash",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "nansen",
+   "name": "Nansen",
+   "serviceUrl": "https://api.nansen.ai",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 52
+  },
+  {
+   "id": "openai",
+   "name": "OpenAI",
+   "serviceUrl": "https://openai.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge",
+    "session"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 6
+  },
+  {
+   "id": "openrouter",
+   "name": "OpenRouter",
+   "serviceUrl": "https://openrouter.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "session"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "parallel",
+   "name": "Parallel",
+   "serviceUrl": "https://parallelmpp.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 5
+  },
+  {
+   "id": "alchemy",
+   "name": "Alchemy",
+   "serviceUrl": "https://mpp.alchemy.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 3
+  },
+  {
+   "id": "conduit",
+   "name": "Conduit",
+   "serviceUrl": "https://mpp.conduit.xyz",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "session"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "tempo-api",
+   "name": "Tempo API",
+   "serviceUrl": "https://api.tempo.xyz",
+   "integration": "first-party",
+   "status": "beta",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "session"
+   ],
+   "getEndpoints": 46,
+   "endpoints": 48
+  },
+  {
+   "id": "rpc",
+   "name": "Tempo RPC",
+   "serviceUrl": "https://rpc.mpp.tempo.xyz",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "session"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "quicknode",
+   "name": "Quicknode",
+   "serviceUrl": "https://mpp.quicknode.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "storage",
+   "name": "Object Storage",
+   "serviceUrl": "https://storage.mpp.tempo.xyz",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 5
+  },
+  {
+   "id": "pinata",
+   "name": "Pinata IPFS",
+   "serviceUrl": "https://mpp.pinata.cloud",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 2
+  },
+  {
+   "id": "stableemail",
+   "name": "StableEmail",
+   "serviceUrl": "https://stableemail.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 24
+  },
+  {
+   "id": "stableenrich",
+   "name": "StableEnrich",
+   "serviceUrl": "https://stableenrich.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 27
+  },
+  {
+   "id": "stabletravel",
+   "name": "StableTravel",
+   "serviceUrl": "https://stabletravel.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 44,
+   "endpoints": 45
+  },
+  {
+   "id": "stablephone",
+   "name": "StablePhone",
+   "serviceUrl": "https://stablephone.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 7
+  },
+  {
+   "id": "stablesocial",
+   "name": "StableSocial",
+   "serviceUrl": "https://stablesocial.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 37
+  },
+  {
+   "id": "stablestudio",
+   "name": "StableStudio",
+   "serviceUrl": "https://stablestudio.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 28
+  },
+  {
+   "id": "stableupload",
+   "name": "StableUpload",
+   "serviceUrl": "https://stableupload.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 7
+  },
+  {
+   "id": "codestorage",
+   "name": "Code Storage",
+   "serviceUrl": "https://codestorage.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 2
+  },
+  {
+   "id": "goflightlabs",
+   "name": "GoFlightLabs",
+   "serviceUrl": "https://goflightlabs.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 15,
+   "endpoints": 15
+  },
+  {
+   "id": "kicksdb",
+   "name": "KicksDB",
+   "serviceUrl": "https://kicksdb.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 28,
+   "endpoints": 29
+  },
+  {
+   "id": "twocaptcha",
+   "name": "2Captcha",
+   "serviceUrl": "https://twocaptcha.mpp.tempo.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "postalform",
+   "name": "PostalForm",
+   "serviceUrl": "https://postalform.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 3
+  },
+  {
+   "id": "prospect-butcher",
+   "name": "Prospect Butcher",
+   "serviceUrl": "https://agents.prospectbutcher.shop",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "stripe"
+   ],
+   "tempoIntents": null,
+   "getEndpoints": 1,
+   "endpoints": 1
+  },
+  {
+   "id": "martin-estate",
+   "name": "Martin Estate Winery",
+   "serviceUrl": "https://agents.martinestate.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 4,
+   "endpoints": 5
+  },
+  {
+   "id": "sayer-and-stone",
+   "name": "Sayer & Stone",
+   "serviceUrl": "https://agents.sayerandstone.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 4,
+   "endpoints": 5
+  },
+  {
+   "id": "megapot",
+   "name": "Megapot",
+   "serviceUrl": "https://megapot.mpp.paysponge.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "alphavantage",
+   "name": "Alpha Vantage",
+   "serviceUrl": "https://alphavantage.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 26
+  },
+  {
+   "id": "apollo",
+   "name": "Apollo",
+   "serviceUrl": "https://apollo.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 8
+  },
+  {
+   "id": "autoexchange",
+   "name": "Auto.exchange",
+   "serviceUrl": "https://api.auto.exchange",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 4
+  },
+  {
+   "id": "billboard",
+   "name": "Billboard",
+   "serviceUrl": "https://billboard.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "brave",
+   "name": "Brave Search",
+   "serviceUrl": "https://brave.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 6
+  },
+  {
+   "id": "builtwith",
+   "name": "BuiltWith",
+   "serviceUrl": "https://builtwith.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 12
+  },
+  {
+   "id": "clado",
+   "name": "Clado",
+   "serviceUrl": "https://clado.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 11
+  },
+  {
+   "id": "coingecko",
+   "name": "CoinGecko",
+   "serviceUrl": "https://coingecko.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 15
+  },
+  {
+   "id": "deepgram",
+   "name": "Deepgram",
+   "serviceUrl": "https://deepgram.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "deepl",
+   "name": "DeepL",
+   "serviceUrl": "https://deepl.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 3
+  },
+  {
+   "id": "deepseek",
+   "name": "DeepSeek",
+   "serviceUrl": "https://deepseek.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 3
+  },
+  {
+   "id": "diffbot",
+   "name": "Diffbot",
+   "serviceUrl": "https://diffbot.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 9
+  },
+  {
+   "id": "diffbot-kg",
+   "name": "Diffbot KG",
+   "serviceUrl": "https://diffbot-kg.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "diffbot-nl",
+   "name": "Diffbot NL",
+   "serviceUrl": "https://diffbot-nl.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "edgar",
+   "name": "EDGAR (SEC)",
+   "serviceUrl": "https://edgar.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 3
+  },
+  {
+   "id": "edgar-search",
+   "name": "EDGAR Full-Text Search",
+   "serviceUrl": "https://edgar-search.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "grok",
+   "name": "Grok",
+   "serviceUrl": "https://grok.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 7
+  },
+  {
+   "id": "groq",
+   "name": "Groq",
+   "serviceUrl": "https://groq.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "hunter",
+   "name": "Hunter",
+   "serviceUrl": "https://hunter.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 8
+  },
+  {
+   "id": "ipinfo",
+   "name": "IPinfo",
+   "serviceUrl": "https://ipinfo.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "judge0",
+   "name": "Judge0",
+   "serviceUrl": "https://judge0.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 5
+  },
+  {
+   "id": "mapbox",
+   "name": "Mapbox",
+   "serviceUrl": "https://mapbox.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 8
+  },
+  {
+   "id": "mathpix",
+   "name": "Mathpix",
+   "serviceUrl": "https://mathpix.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "mistral",
+   "name": "Mistral AI",
+   "serviceUrl": "https://mistral.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "openweather",
+   "name": "OpenWeather",
+   "serviceUrl": "https://openweather.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 7
+  },
+  {
+   "id": "perplexity",
+   "name": "Perplexity",
+   "serviceUrl": "https://perplexity.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "rentcast",
+   "name": "RentCast",
+   "serviceUrl": "https://rentcast.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 10
+  },
+  {
+   "id": "replicate",
+   "name": "Replicate",
+   "serviceUrl": "https://replicate.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "screenshotone",
+   "name": "ScreenshotOne",
+   "serviceUrl": "https://screenshotone.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "stability-ai",
+   "name": "Stability AI",
+   "serviceUrl": "https://stability-ai.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 23
+  },
+  {
+   "id": "suno",
+   "name": "Suno",
+   "serviceUrl": "https://suno.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "tako",
+   "name": "Tako",
+   "serviceUrl": "https://tako.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 9
+  },
+  {
+   "id": "tavily",
+   "name": "Tavily",
+   "serviceUrl": "https://tavily.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "wolframalpha",
+   "name": "Wolfram|Alpha",
+   "serviceUrl": "https://wolframalpha.mpp.paywithlocus.com",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "stripe-climate",
+   "name": "Stripe Climate",
+   "serviceUrl": "https://climate.stripe.dev",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "stripe",
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "papercut",
+   "name": "Papercut",
+   "serviceUrl": "https://papercut.lol",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo",
+    "stripe"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-fantastic-jobs",
+   "name": "Fantastic Jobs",
+   "serviceUrl": "https://mpp.orthogonal.com/fantastic-jobs",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 5,
+   "endpoints": 5
+  },
+  {
+   "id": "orth-sixtyfour",
+   "name": "Sixtyfour API",
+   "serviceUrl": "https://mpp.orthogonal.com/sixtyfour",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "orth-fiber",
+   "name": "Fiber AI API",
+   "serviceUrl": "https://mpp.orthogonal.com/fiber",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 82
+  },
+  {
+   "id": "orth-openmart",
+   "name": "Openmart",
+   "serviceUrl": "https://mpp.orthogonal.com/openmart",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 4
+  },
+  {
+   "id": "orth-edges",
+   "name": "Edges",
+   "serviceUrl": "https://mpp.orthogonal.com/edges",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 42
+  },
+  {
+   "id": "orth-captaindata",
+   "name": "CaptainData",
+   "serviceUrl": "https://mpp.orthogonal.com/captaindata",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 7,
+   "endpoints": 7
+  },
+  {
+   "id": "orth-baseten",
+   "name": "Baseten Model APIs",
+   "serviceUrl": "https://mpp.orthogonal.com/baseten",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-seltz",
+   "name": "Seltz",
+   "serviceUrl": "https://mpp.orthogonal.com/seltz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-scrapegraphai",
+   "name": "ScrapeGraphAI",
+   "serviceUrl": "https://mpp.orthogonal.com/scrapegraphai",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 5
+  },
+  {
+   "id": "orth-openfunnel",
+   "name": "OpenFunnel",
+   "serviceUrl": "https://mpp.orthogonal.com/openfunnel",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 9
+  },
+  {
+   "id": "orth-contactout",
+   "name": "ContactOut",
+   "serviceUrl": "https://mpp.orthogonal.com/contactout",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 6
+  },
+  {
+   "id": "orth-tavily",
+   "name": "Tavily API",
+   "serviceUrl": "https://mpp.orthogonal.com/tavily",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 5
+  },
+  {
+   "id": "orth-serper-scrape",
+   "name": "Serper Scrape",
+   "serviceUrl": "https://mpp.orthogonal.com/serper-scrape",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-peopledatalabs",
+   "name": "People Data Labs",
+   "serviceUrl": "https://mpp.orthogonal.com/peopledatalabs",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 4,
+   "endpoints": 6
+  },
+  {
+   "id": "orth-olostep",
+   "name": "Olostep API",
+   "serviceUrl": "https://mpp.orthogonal.com/olostep",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 5
+  },
+  {
+   "id": "orth-riveter",
+   "name": "Riveter API",
+   "serviceUrl": "https://mpp.orthogonal.com/riveter",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "orth-happenstance",
+   "name": "Happenstance",
+   "serviceUrl": "https://mpp.orthogonal.com/happenstance",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-apollo",
+   "name": "Apollo API",
+   "serviceUrl": "https://mpp.orthogonal.com/apollo",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 8
+  },
+  {
+   "id": "orth-context-dev",
+   "name": "Context.dev",
+   "serviceUrl": "https://mpp.orthogonal.com/context-dev",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 15,
+   "endpoints": 22
+  },
+  {
+   "id": "orth-precip",
+   "name": "Precip AI - Hyperlocal Weather Data API",
+   "serviceUrl": "https://mpp.orthogonal.com/precip",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 17,
+   "endpoints": 17
+  },
+  {
+   "id": "orth-nyne",
+   "name": "Nyne.ai",
+   "serviceUrl": "https://mpp.orthogonal.com/nyne",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 14
+  },
+  {
+   "id": "orth-company-enrich",
+   "name": "Company Enrich",
+   "serviceUrl": "https://mpp.orthogonal.com/company-enrich",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 5,
+   "endpoints": 14
+  },
+  {
+   "id": "orth-fundable",
+   "name": "Fundable",
+   "serviceUrl": "https://mpp.orthogonal.com/fundable",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 8,
+   "endpoints": 11
+  },
+  {
+   "id": "orth-didit",
+   "name": "Didit API",
+   "serviceUrl": "https://mpp.orthogonal.com/didit",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 4
+  },
+  {
+   "id": "orth-influencers-club",
+   "name": "Influencers Club",
+   "serviceUrl": "https://mpp.orthogonal.com/influencers-club",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 9
+  },
+  {
+   "id": "orth-bytemine",
+   "name": "Bytemine",
+   "serviceUrl": "https://mpp.orthogonal.com/bytemine",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 23
+  },
+  {
+   "id": "orth-brand-dev",
+   "name": "Brand.dev API",
+   "serviceUrl": "https://mpp.orthogonal.com/brand-dev",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 11,
+   "endpoints": 13
+  },
+  {
+   "id": "orth-notte",
+   "name": "Notte",
+   "serviceUrl": "https://mpp.orthogonal.com/notte",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 9
+  },
+  {
+   "id": "orth-coresignal",
+   "name": "Coresignal",
+   "serviceUrl": "https://mpp.orthogonal.com/coresignal",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 14,
+   "endpoints": 21
+  },
+  {
+   "id": "orth-linkup",
+   "name": "Linkup API",
+   "serviceUrl": "https://mpp.orthogonal.com/linkup",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 2
+  },
+  {
+   "id": "orth-scrapecreators",
+   "name": "Scrape Creators",
+   "serviceUrl": "https://mpp.orthogonal.com/scrapecreators",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 106,
+   "endpoints": 107
+  },
+  {
+   "id": "orth-tako",
+   "name": "Tako via Orthogonal",
+   "serviceUrl": "https://mpp.orthogonal.com/tako",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 3,
+   "endpoints": 6
+  },
+  {
+   "id": "orth-andi",
+   "name": "Andi Search API",
+   "serviceUrl": "https://mpp.orthogonal.com/andi",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 1,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-voygr",
+   "name": "Voygr",
+   "serviceUrl": "https://mpp.orthogonal.com/voygr",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "orth-ocean-io",
+   "name": "Ocean.io",
+   "serviceUrl": "https://mpp.orthogonal.com/ocean-io",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 6
+  },
+  {
+   "id": "orth-tomba",
+   "name": "Tomba API",
+   "serviceUrl": "https://mpp.orthogonal.com/tomba",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 19,
+   "endpoints": 20
+  },
+  {
+   "id": "orth-crustdata",
+   "name": "Crustdata",
+   "serviceUrl": "https://mpp.orthogonal.com/crustdata",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 7
+  },
+  {
+   "id": "orth-agentmail",
+   "name": "AgentMail via Orthogonal",
+   "serviceUrl": "https://mpp.orthogonal.com/agentmail",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 6
+  },
+  {
+   "id": "orth-predictleads",
+   "name": "PredictLeads",
+   "serviceUrl": "https://mpp.orthogonal.com/predictleads",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 23,
+   "endpoints": 23
+  },
+  {
+   "id": "orth-serper",
+   "name": "Serper",
+   "serviceUrl": "https://mpp.orthogonal.com/serper",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 12
+  },
+  {
+   "id": "orth-aviato",
+   "name": "Aviato",
+   "serviceUrl": "https://mpp.orthogonal.com/aviato",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 22,
+   "endpoints": 25
+  },
+  {
+   "id": "tempvpn",
+   "name": "TempVPN",
+   "serviceUrl": "https://registry.tempvpn.xyz",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge",
+    "session"
+   ],
+   "getEndpoints": 2,
+   "endpoints": 7
+  },
+  {
+   "id": "orth-agentphone",
+   "name": "AgentPhone",
+   "serviceUrl": "https://mpp.orthogonal.com/agentphone",
+   "integration": "third-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 8,
+   "endpoints": 20
+  },
+  {
+   "id": "kernel",
+   "name": "KERNEL",
+   "serviceUrl": "https://api.onkernel.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "stripe"
+   ],
+   "tempoIntents": null,
+   "getEndpoints": 0,
+   "endpoints": 1
+  },
+  {
+   "id": "apify",
+   "name": "Apify",
+   "serviceUrl": "https://agi.apify.com",
+   "integration": "first-party",
+   "status": "active",
+   "methods": [
+    "tempo"
+   ],
+   "tempoIntents": [
+    "charge"
+   ],
+   "getEndpoints": 0,
+   "endpoints": 1
+  }
+ ]
+}
