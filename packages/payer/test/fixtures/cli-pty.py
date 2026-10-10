@@ -127,8 +127,11 @@ def run(cfg):
             for line in text.split("\n"):
                 if not line:
                     continue
-                if line in ["cli_refused: daemon_already_running", "cli_refused: operator_cancelled"]:
+                if line in ["cli_refused: daemon_already_running", "cli_refused: operator_cancelled", "cli_refused: bad_passphrase"]:
                     refusals.append(line)
+                elif line in cfg.get("fixedLines", []):
+                    # Exact, caller-declared secret-free guidance lines (e.g. install accept); never a pattern.
+                    continue
                 else:
                     try:
                         outputs.append(json.loads(line))

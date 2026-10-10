@@ -25,7 +25,7 @@ export interface SecretTty {
   /** Fixed, secret-free guidance written to the terminal (stderr). */
   notice?(text: string): void;
 }
-export interface FaultPoints { hit(point: "after:lock" | "before:seal" | "after:seal" | "before:key-decrypt" | `before:${string}` | `after:${string}` | "transport:before-response" | "transport:after-response"): Promise<void> }
+export interface FaultPoints { hit(point: "after:lock" | "before:seal" | "after:seal" | "before:key-decrypt" | `before:${string}` | `after:${string}` | `during:${string}` | "transport:before-response" | "transport:after-response"): Promise<void> }
 export interface DaemonContext {
   readonly session: Session;
   readonly purchase?: PurchaseContext;

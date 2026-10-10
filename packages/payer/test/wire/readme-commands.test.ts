@@ -23,7 +23,8 @@ function entryCommands(): Set<string> {
 test("README install and user-scope registration parse to the actual package bin and MCP entry", () => {
   const text = readme(), lines = shellLines(text);
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-  expect(lines.filter(line => line.startsWith("npm i -g "))).toEqual([`npm i -g ${pkg.name}`]);
+  // The first install, and the Upgrading section's explicit version (follow-up FR-F2).
+  expect(lines.filter(line => line.startsWith("npm i -g "))).toEqual([`npm i -g ${pkg.name}`, `npm i -g ${pkg.name}@<version>`]);
   const registrations = lines.filter(line => line.startsWith("claude mcp add "));
   expect(registrations).toHaveLength(1);
   const argv = registrations[0]!.split(/\s+/);
@@ -38,6 +39,7 @@ test("README install and user-scope registration parse to the actual package bin
     expect(entryCommands().has(command!)).toBe(true);
   }
   expect(commands).toContain("subetha-payer wallet new");
+  expect(commands).toContain("subetha-payer install accept");
   expect(commands).toContain("subetha-payer daemon");
   expect(commands).toContain("subetha-payer inspect p_aaaaaaaaaaaaa --close");
   expect(pkg.private).toBeUndefined();

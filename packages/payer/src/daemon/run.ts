@@ -11,11 +11,12 @@ import type { DaemonHooks, SecretTty } from "./interfaces.js";
 import type { StartupOptions } from "./startup.js";
 
 const STARTUP_CODES = new Set(["sigusr1_enabled", "forbidden_env", "forbidden_flag", "path_invalid", "no_confirmation_ui", "no_tty", "bad_passphrase", "install_changed", "install_unreadable", "install_seal_corrupt", "store_corrupt", "store_unsupported_version", "lock_lost", "daemon_already_running", "daemon_lock_stale", "lock_unreadable", "lock_failed", "reclaim_busy", "home_unavailable", "path_unreadable", "config_invalid", "wallet_invalid", "wallet_missing", "phrase_invalid", "tty_cancelled"]);
+export const INSTALL_CHANGED_GUIDANCE = "If you just upgraded @subetha/payer, verify it (README: Upgrading) and run: subetha-payer install accept. If you did not upgrade, do not run it; stop and assess.";
 export function startupMessage(error: unknown): string {
   const code = error instanceof StoreError && STARTUP_CODES.has(error.code) ? error.code : "internal_error";
   // JSON escaping prevents filename control characters from acting as terminal commands.
   const files = error instanceof InstallChanged ? ` ${JSON.stringify(error.files)}` : "";
-  return `startup_refused: ${code}${files}\n` + (code === "reclaim_busy" ? "Stop ALL contenders. Human offline recovery is required for the leftover reclaim guard. It is never automatically deleted.\n" : "");
+  return `startup_refused: ${code}${files}\n` + (code === "install_changed" ? `${INSTALL_CHANGED_GUIDANCE}\n` : "") + (code === "reclaim_busy" ? "Stop ALL contenders. Human offline recovery is required for the leftover reclaim guard. It is never automatically deleted.\n" : "");
 }
 
 /** Private composition seams for owned fixtures; bin.ts never accepts them. */

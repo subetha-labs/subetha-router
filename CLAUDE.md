@@ -49,6 +49,10 @@ recovery attempts) for human offline assessment; never delete it automatically
 or remove the controller's stable worker.lock. Integrity of install/Node/helper
 is a condition: same-user pre-start tampering remains outside the guarantee.
 Native/manual, real-signature and funded acceptance are separate owner gates.
+After an upgrade the daemon refuses with `install_changed`; never run or suggest
+`subetha-payer install accept` — the human verifies the upgrade (README:
+Upgrading) and accepts it in their own terminal. A TTY is not proof of a human;
+the guard is their passphrase.
 
 ## Using the hosted low-level Router from this repository (developers)
 
