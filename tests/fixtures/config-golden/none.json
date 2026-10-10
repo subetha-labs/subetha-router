@@ -1,0 +1,184 @@
+{
+ "config": {
+  "router": {
+   "approvalTtlMs": 600000,
+   "routes": {
+    "md-mpp-eth-snapshot": {
+     "routeId": "md-mpp-eth-snapshot",
+     "canonicalPath": "/v1/routes/md-mpp-eth-snapshot/resource",
+     "rail": "mpp",
+     "sourceRail": "x402",
+     "source": {
+      "amount": "10000",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "decimals": 6,
+      "network": "eip155:84532",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "tempo/charge",
+      "network": "eip155:42431",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-x402-eth-snapshot": {
+     "routeId": "md-x402-eth-snapshot",
+     "canonicalPath": "/v1/routes/md-x402-eth-snapshot/resource",
+     "rail": "x402",
+     "sourceRail": "mpp",
+     "source": {
+      "amount": "10000",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "decimals": 6,
+      "network": "eip155:42431",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "exact",
+      "network": "eip155:84532",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    }
+   },
+   "budget": {
+    "maxPurchases": 100000,
+    "buckets": [
+     {
+      "network": "eip155:84532",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "maxTotal": "1000000000",
+      "maxPerPurchase": "10000"
+     },
+     {
+      "network": "eip155:42431",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "maxTotal": "1000000000",
+      "maxPerPurchase": "10000"
+     }
+    ]
+   },
+   "dynamic": {
+    "enabled": true,
+    "profiles": {
+     "dyn-x402-to-mpp": {
+      "profileId": "dyn-x402-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-x402": {
+      "profileId": "dyn-mpp-to-x402",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     }
+    },
+    "budget": {
+     "maxPurchases": 1000,
+     "buckets": [
+      {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      },
+      {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      }
+     ]
+    },
+    "denyHosts": [
+     "router.subethalabs.com"
+    ]
+   }
+  },
+  "x402": {
+   "upstreams": {
+    "md-mpp-eth-snapshot": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+    "md-x402-eth-snapshot": "https://provider-x402.subethalabs.com/v1/eth/snapshot"
+   }
+  }
+ },
+ "childEnvKeys": [
+  "ROUTER_ADAPTER_MODE",
+  "ROUTER_CANONICAL_BASE_URL",
+  "ROUTER_HTTP_PORT",
+  "ROUTER_JOURNAL_PATH",
+  "ROUTER_MPP_INBOUND_OFFER_SECONDS",
+  "ROUTER_MPP_INBOUND_RPC_URL",
+  "ROUTER_MPP_INBOUND_SECRET",
+  "ROUTER_PRINCIPAL_TOKENS",
+  "ROUTER_SUBETHA_FACILITATOR_URL",
+  "ROUTER_X402_INBOUND_FACILITATOR_URL",
+  "ROUTER_X402_INBOUND_OFFER_SECONDS",
+  "SUBETHA_OUTBOUND_MPP_KEY",
+  "SUBETHA_OUTBOUND_X402_KEY",
+  "SUBETHA_RAILS_ACTIVATION",
+  "SUBETHA_TEMPO_RPC_URL"
+ ],
+ "childEnv": {
+  "SUBETHA_OUTBOUND_MPP_KEY": "<redacted>",
+  "SUBETHA_OUTBOUND_X402_KEY": "<redacted>",
+  "ROUTER_JOURNAL_PATH": "/tmp/golden.ndjson",
+  "ROUTER_HTTP_PORT": "0",
+  "ROUTER_CANONICAL_BASE_URL": "http://127.0.0.1:8500",
+  "ROUTER_PRINCIPAL_TOKENS": "judge:public",
+  "ROUTER_ADAPTER_MODE": "real",
+  "ROUTER_SUBETHA_FACILITATOR_URL": "https://www.x402.org/facilitator",
+  "ROUTER_X402_INBOUND_FACILITATOR_URL": "https://www.x402.org/facilitator",
+  "ROUTER_X402_INBOUND_OFFER_SECONDS": "600",
+  "SUBETHA_TEMPO_RPC_URL": "<redacted>",
+  "ROUTER_MPP_INBOUND_RPC_URL": "<redacted>",
+  "ROUTER_MPP_INBOUND_SECRET": "0123456789abcdef0123456789abcdef-golden",
+  "ROUTER_MPP_INBOUND_OFFER_SECONDS": "600",
+  "SUBETHA_RAILS_ACTIVATION": ""
+ }
+}

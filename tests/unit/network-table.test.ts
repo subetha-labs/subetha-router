@@ -107,6 +107,18 @@ describe("表の照合は networks を渡したときだけ", () => {
     expect(Object.keys(parsed.dynamic?.profiles ?? {})).toEqual(["p", "q"]);
   });
 
+  test("mainnet の最初の 1 経路（docs/mainnet-first-route.md）: Base mainnet USDC の x402 受信 → Tempo mainnet USDC.e の MPP 送信が本番の表で通る。向きが違えば拒む", () => {
+    const BASE_MAINNET_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", TEMPO_USDCE = "0x20C000000000000000000000b9537d11c60E8b50";
+    const parsed = parseRouterConfig(
+      config([route()], [profile({ profileId: "m" }, { network: "eip155:8453", asset: BASE_MAINNET_USDC }, { network: "eip155:4217", asset: TEMPO_USDCE, feeAsset: TEMPO_USDCE })]),
+      { networks: KNOWN_NETWORKS },
+    );
+    expect(Object.keys(parsed.dynamic?.profiles ?? {})).toEqual(["m"]);
+    // Tempo mainnet で x402 受信、Base mainnet へ MPP 送信はどちらも表に無い。
+    expectInvalid(config([route()], [profile({ profileId: "m" }, { network: "eip155:4217", asset: TEMPO_USDCE }, { network: "eip155:4217", asset: TEMPO_USDCE, feeAsset: TEMPO_USDCE })]), /inbound rail "x402" is not allowed/);
+    expectInvalid(config([route()], [profile({ profileId: "m", rail: "x402" }, { network: "eip155:8453", asset: BASE_MAINNET_USDC }, { scheme: "exact", network: "eip155:8453", asset: BASE_MAINNET_USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" }, feeAsset: undefined, maxFee: undefined })]), /tokenDomain does not match|domain/);
+  });
+
   test("subetha 受信（既定）と rail 未指定は照合しない", () => {
     const parsed = parseRouterConfig(config([route({ rail: undefined, sourceRail: undefined }, { network: "eip155:1", asset: "0x000000000000000000000000000000000000beef", payTo: undefined }, { network: "eip155:1", asset: "0x000000000000000000000000000000000000beef" })]), { networks: KNOWN_NETWORKS });
     expect(parsed.routes["r"]?.sourceRail).toBeUndefined();

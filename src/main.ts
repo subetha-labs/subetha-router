@@ -928,6 +928,24 @@ export function composeRails(
 
   // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。
   startupChecks.push(...svmStartups);
+  // Tempo の能力の chain（`docs/mainnet-first-route.md` FR-M4）: 実鍵の能力は、その RPC が名乗る chain id（読取 1 回）が能力の chain id と
+  // 一致しなければ起動しない（testnet と mainnet の取り違え。fixture の能力は対象外）。
+  if (capabilities.mppTempo !== undefined && capabilities.mppTempo.kind === "real-key") {
+    const capability = capabilities.mppTempo;
+    startupChecks.push(async () => {
+      const client = await capability.getClient({ chainId: capability.chainId });
+      let reported: unknown;
+      try {
+        reported = await (client as { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }).request({ method: "eth_chainId", params: [] });
+      } catch {
+        throw new ConfigError("the Tempo RPC did not answer eth_chainId at startup");
+      }
+      const chainId = typeof reported === "string" && /^0x[0-9a-fA-F]+$/.test(reported) ? Number.parseInt(reported, 16) : undefined;
+      if (chainId !== capability.chainId) {
+        throw new ConfigError(`the Tempo RPC reports chain ${chainId ?? "?"}, but the MPP capability is for chain ${capability.chainId}`);
+      }
+    });
+  }
 
   return {
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),

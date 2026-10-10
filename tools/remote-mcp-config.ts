@@ -696,3 +696,84 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
   };
 }
 
+
+/* ------------------------------------------------------------------ mainnet の最初の 1 経路（`docs/mainnet-first-route.md`、2026-10-10） */
+
+/**
+ * owner の Mac で loopback 限定で起動する **mainnet 専用**の生成。公開の生成（`routerConfigOf`）には触れない（golden 比較で不変を証明する）。
+ * - 受信: Base mainnet USDC を x402（facilitator は PayAI、kind `x402`）。受取先は owner の受信 wallet
+ * - 送信: Tempo mainnet USDC.e を MPP（push。手数料も USDC.e）で Pinata（MPP 専用の IPFS の pay-per-download）へ
+ * - 静的 route 1 本だけ。動的は無し。予算は小さく（$0.03）
+ * 値（Pinata の受取先・価格）は 2026-10-10 に Pinata の 402 と公式資料から読んだ。受取先が 402 と違えば Router が従来どおり拒む。
+ */
+export const MAINNET_FIRST_ROUTE = Object.freeze({
+  /** 静的 route（`router.routes` は空にできない）。Pinata の challenge は `_mppx_scope` を持たないので静的の送信では使えない（quote で拒まれ、資金は動かない）。実証は動的プロファイルで行う。 */
+  routeId: "md-pinata-json",
+  profileId: "dyn-x402-to-mpp-mainnet",
+  inbound: Object.freeze({ network: "eip155:8453", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", amount: "10000", facilitator: Object.freeze({ kind: "x402", url: "https://facilitator.payai.network" }) }),
+  outbound: Object.freeze({ network: "eip155:4217", asset: "0x20C000000000000000000000b9537d11c60E8b50", payTo: "0x1b67d66894a53a0ed85fe894d1c03b135b893f60", scheme: "tempo/charge" }),
+  upstreamBase: "https://mpp.pinata.cloud/v1/pin/public/",
+  chainId: 4217,
+  rpcUrl: "https://rpc.tempo.xyz",
+  maxPerPurchase: "10000",
+  maxTotal: "30000",
+  /** 動的の予算: 1 件の予約は上流額 + 手数料（受信側）と、上流額 + gas の上限（送信側）。既存の動的と同じ `DYNAMIC_MAX_PER_PURCHASE`、`maxTotal` は 1〜2 件分。 */
+  dynamicMaxTotal: "60000",
+});
+/** IPFS の CID（base32 の CIDv1 か base58 の CIDv0）。URL に素で埋めるので字種を限る。 */
+const CID_PATTERN = /^(bafy[a-z2-7]{50,}|bafk[a-z2-7]{50,}|Qm[1-9A-HJ-NP-Za-km-z]{44})$/;
+export function mainnetFirstRouteConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, cid: string): Record<string, unknown> {
+  if (!CID_PATTERN.test(cid)) throw new Error("mainnet first route: cid must be a bare CIDv1 (base32) or CIDv0");
+  const m = MAINNET_FIRST_ROUTE;
+  return {
+    router: {
+      approvalTtlMs: Number(env["SUBETHA_APPROVAL_TTL_SECONDS"] ?? "600") * 1000,
+      routes: {
+        [m.routeId]: {
+          routeId: m.routeId,
+          canonicalPath: `/v1/routes/${m.routeId}/resource`,
+          rail: "mpp",
+          sourceRail: "x402",
+          source: { amount: m.inbound.amount, asset: m.inbound.asset, decimals: 6, network: m.inbound.network, payTo: receiver },
+          destination: { scheme: m.outbound.scheme, network: m.outbound.network, asset: m.outbound.asset, payTo: m.outbound.payTo },
+        },
+      },
+      budget: {
+        maxPurchases: Number(env["SUBETHA_MAX_PURCHASES"] ?? "10"),
+        buckets: [
+          { network: m.inbound.network, asset: m.inbound.asset, maxTotal: m.maxTotal, maxPerPurchase: m.maxPerPurchase },
+          { network: m.outbound.network, asset: m.outbound.asset, maxTotal: m.maxTotal, maxPerPurchase: m.maxPerPurchase },
+        ],
+      },
+      // 動的プロファイル（`dyn-x402-to-mpp` と同じ形で network だけ mainnet）。上流は caller が URL で指定する（Pinata の CID の URL）。
+      dynamic: {
+        enabled: true,
+        profiles: {
+          [m.profileId]: {
+            profileId: m.profileId,
+            sourceRail: "x402",
+            source: { network: m.inbound.network, asset: m.inbound.asset, decimals: 6, payTo: receiver },
+            rail: "mpp",
+            destination: { scheme: m.outbound.scheme, network: m.outbound.network, asset: m.outbound.asset, decimals: 6, feeAsset: m.outbound.asset, maxFee: DYNAMIC_MAX_FEE_CEILING, feeMargin: DYNAMIC_FEE_MARGIN_BPS },
+            par: true,
+            fee: DYNAMIC_FEE_MPP_OUT,
+            maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+          },
+        },
+        budget: {
+          maxPurchases: Number(env["SUBETHA_MAX_PURCHASES"] ?? "10"),
+          buckets: [
+            { network: m.inbound.network, asset: m.inbound.asset, maxTotal: m.dynamicMaxTotal, maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE },
+            { network: m.outbound.network, asset: m.outbound.asset, maxTotal: m.dynamicMaxTotal, maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE },
+          ],
+        },
+        // loopback 限定の起動なので公開ホスト名は無い。運用者が足すものだけ。
+        denyHosts: (env["SUBETHA_DENY_HOSTS"] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter((host) => host !== ""),
+      },
+    },
+    x402: {
+      upstreams: { [m.routeId]: `${m.upstreamBase}${cid}` },
+      inboundFacilitators: { [m.inbound.network]: m.inbound.facilitator },
+    },
+  };
+}

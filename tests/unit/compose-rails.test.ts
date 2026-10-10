@@ -153,3 +153,24 @@ describe("composeRails transport allowances (T-A15)", () => {
     expect(await outcomeOf(rails.outbound.readChallenge("r-mpp"))).toBe("destination_blocked");
   });
 });
+
+describe("Tempo の能力の chain id の検査（docs/mainnet-first-route.md FR-M4）", () => {
+  const capabilityReporting = (reported: unknown, chainId = 42431): MppTempoCapability => ({
+    chainId,
+    account: { address: "0x0000000000000000000000000000000000000502" } as unknown as MppTempoCapability["account"],
+    getClient: () => ({ request: async (args: { method: string }) => { if (args.method === "eth_chainId") return reported; throw new Error("unexpected rpc"); } }) as unknown as ReturnType<MppTempoCapability["getClient"]>,
+    kind: "real-key",
+  });
+  it("実鍵の能力: RPC の eth_chainId が能力の chain と一致すれば起動の検査が通る", async () => {
+    const { rails } = compose("real", { evmSigning: REAL_EVM, mppTempo: capabilityReporting("0xa5bf") });
+    await expect(rails.startup!()).resolves.toBeUndefined();
+  });
+  it.each([["mainnet の RPC を testnet の能力に", "0x1079"], ["数値でない応答", "nope"], ["応答なし", undefined]])("実鍵の能力: %s → 起動しない", async (_name, reported) => {
+    const { rails } = compose("real", { evmSigning: REAL_EVM, mppTempo: capabilityReporting(reported) });
+    await expect(rails.startup!()).rejects.toThrow(/Tempo RPC/);
+  });
+  it("fixture の能力（non-signing-fixture）は検査の対象外", async () => {
+    const { rails } = compose("real", { evmSigning: REAL_EVM, mppTempo: createPayerSpy().capability() });
+    expect(rails.startup).toBeUndefined();
+  });
+});

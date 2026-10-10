@@ -11,13 +11,15 @@
  */
 import { DEFAULT_SOLANA_RPC_URL, type RouterCapabilities } from "../src/main.js";
 import { createRealEvmCapability } from "./real-evm-capability.js";
-import { createRealMppCapability, TEMPO_MODERATO_RPC } from "./real-mpp-capability.js";
+import { createRealMppCapability, defaultTempoRpcUrl, TEMPO_MODERATO_CHAIN_ID } from "./real-mpp-capability.js";
 import { createRealSvmCapability } from "./real-svm-capability.js";
 import { INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
 /** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out"` の部分集合。空 = すべて無効）。 */
 export const RAILS_ACTIVATION_ENV = "SUBETHA_RAILS_ACTIVATION";
+/** Tempo の能力の chain id（`docs/mainnet-first-route.md` FR-M3）。省略時は testnet（42431）。 */
+export const TEMPO_CHAIN_ID_ENV = "SUBETHA_TEMPO_CHAIN_ID";
 /** Arc の Provider の受取先（送信が有効で静的 route を出すときだけ。D-10）。 */
 export const ARC_PROVIDER_ENV = "SUBETHA_ARC_PROVIDER_PAYTO";
 /** Solana の Provider の受取先（owner の公開鍵。送信が有効で静的 route を出すときだけ。D-10）。 */
@@ -161,14 +163,16 @@ export function railsCapabilitiesOf(activation: RailsActivation, env: Readonly<R
 
 /** Router の process の起動が止まる理由（固定文は入口が選ぶ。鍵・URL の値は持たない）。 */
 export class ProcessEntryError extends Error {
-  readonly code: "outbound_keys" | "rails" | "solana_key";
-  constructor(code: "outbound_keys" | "rails" | "solana_key") {
+  readonly code: "outbound_keys" | "rails" | "solana_key" | "tempo_chain";
+  constructor(code: "outbound_keys" | "rails" | "solana_key" | "tempo_chain") {
     super(
       code === "outbound_keys"
         ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required"
         : code === "solana_key"
           ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail (x402 or MPP) is activated"
-          : "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)",
+          : code === "tempo_chain"
+            ? "SUBETHA_TEMPO_CHAIN_ID must be a positive integer chain id when set"
+            : "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)",
     );
     this.name = "ProcessEntryError";
     this.code = code;
@@ -187,6 +191,14 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
   if ((evmKey === undefined || evmKey === "") && (mppKey === undefined || mppKey === "")) {
     throw new ProcessEntryError("outbound_keys");
   }
+  // Tempo の chain（`docs/mainnet-first-route.md` FR-M3）: 省略時は testnet（42431）。整数でなければ起動しない（値は出さない）。
+  const chainIdRaw = env[TEMPO_CHAIN_ID_ENV];
+  const chainIdText = chainIdRaw === undefined || chainIdRaw === "" ? undefined : chainIdRaw;
+  if (chainIdText !== undefined && !/^[1-9][0-9]{0,9}$/.test(chainIdText)) {
+    throw new ProcessEntryError("tempo_chain");
+  }
+  const tempoChainId = chainIdText === undefined ? TEMPO_MODERATO_CHAIN_ID : Number(chainIdText);
+  const tempoRpcUrl = mppRpcUrl === undefined || mppRpcUrl === "" ? defaultTempoRpcUrl(tempoChainId) : mppRpcUrl;
   let activation: RailsActivation;
   let rails: Pick<RouterCapabilities, "sellerProofs" | "dependencyUrls">;
   try {
@@ -213,12 +225,12 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
   }
   return {
     // 動的上流 URL の拒否ホスト（設計 §7.4）: 送信 MPP の RPC と、Solana の起動時の検査の RPC。URL は値ごと渡すが、使うのはホスト名だけ（ログには出ない）。
-    dependencyUrls: [mppRpcUrl === undefined || mppRpcUrl === "" ? TEMPO_MODERATO_RPC : mppRpcUrl, ...(rails.dependencyUrls ?? [])],
+    dependencyUrls: [tempoRpcUrl, ...(rails.dependencyUrls ?? [])],
     ...(rails.sellerProofs === undefined ? {} : { sellerProofs: rails.sellerProofs }),
     ...(evm === undefined ? {} : { evmSigning: evm.capability("eip155:84532") }),
     ...(evm !== undefined && activation.arc.outbound ? { evmSigningByNetwork: { [OUTBOUND_ARC.network]: evm.capability(OUTBOUND_ARC.network) } } : {}),
     ...(svm === undefined ? {} : { svmSigning: { [OUTBOUND_SOL.network]: svm.capability(OUTBOUND_SOL.network) } }),
-    ...(mppKey === undefined || mppKey === "" ? {} : { mppTempo: createRealMppCapability(mppKey, { ...(mppRpcUrl === undefined || mppRpcUrl === "" ? {} : { rpcUrl: mppRpcUrl }) }).capability() }),
+    ...(mppKey === undefined || mppKey === "" ? {} : { mppTempo: createRealMppCapability(mppKey, { chainId: tempoChainId, rpcUrl: tempoRpcUrl }).capability() }),
   };
 }
 

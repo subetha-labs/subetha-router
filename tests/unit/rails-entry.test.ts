@@ -150,7 +150,8 @@ describe("能力と受取先は 1 つの有効化の値から（設定生成と�
     expect(config.router.dynamic?.profiles["dyn-arc-to-x402"]?.source.payTo).toBe(expected);
     // 配線は route とプロファイルの両方に束縛する（起動時の照合が通り、offer の payTo は能力の address）。Solana は無効なので起動時の検査は無い。
     const composed = composeRails(config, capabilities, () => {}, () => {});
-    expect(composed.startup).toBeUndefined();
+    // 実鍵の Tempo の能力は起動時の chain id の検査（`docs/mainnet-first-route.md` FR-M4）を持つので startup はある。
+    expect(composed.startup).toBeDefined();
     const route = config.router.routes[ROUTE_ARC]!;
     const offer = await composed.inbound.createOffer({ routeId: ROUTE_ARC, amount: route.source.amount, asset: route.source.asset, network: route.source.network, routeBinding: routeBindingOf(route), nowMs: Date.now() });
     expect(offer.payTo).toBe(expected);

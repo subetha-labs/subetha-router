@@ -37,6 +37,8 @@ try {
       ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required\n"
       : code === "rails"
         ? "rails capabilities could not be created (check SUBETHA_RAILS_ACTIVATION / SUBETHA_ARC_RECEIVER_KEY)\n"
+        : code === "tempo_chain"
+          ? "SUBETHA_TEMPO_CHAIN_ID must be a positive integer chain id when set\n"
         : code === "solana_key"
           ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail (x402 or MPP) is activated\n"
           : "router process capabilities could not be created\n",
@@ -48,7 +50,7 @@ try {
 const mppRpcUrl = process.env["SUBETHA_TEMPO_RPC_URL"];
 if (capabilities.mppTempo !== undefined) {
   process.stderr.write(
-    `tempo rpc: ${mppRpcUrl === undefined || mppRpcUrl === "" ? "public (rate-limited from shared egress IPs)" : "configured"}\n`,
+    `tempo chain: ${capabilities.mppTempo.chainId}; rpc: ${mppRpcUrl === undefined || mppRpcUrl === "" ? "public (rate-limited from shared egress IPs)" : "configured"}\n`,
   );
 }
 
