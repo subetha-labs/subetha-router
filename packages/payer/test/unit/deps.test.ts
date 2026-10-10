@@ -14,7 +14,8 @@ test("payer direct dependencies are exact pins matching its production shrinkwra
   expect(lock.packages[""].dependencies).toEqual(pkg.dependencies);
   expect(lock.packages[""].version).toBe(pkg.version);
   expect(lock.packages[""].bin).toEqual(pkg.bin);
-  expect(pkg.private).toBe(true);
+  expect(pkg.private).toBeUndefined();
+  expect(pkg.publishConfig).toEqual({ access: "public" });
   for (const [name, version] of Object.entries({ ...pkg.dependencies, ...pkg.devDependencies })) {
     expect(version, name).toMatch(/^\d+\.\d+\.\d+$/);
     expect(lock.packages[`node_modules/${name}`].version).toBe(version);
