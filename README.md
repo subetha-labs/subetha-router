@@ -21,7 +21,7 @@ claude mcp add --scope user --transport http subetha-router https://router.subet
 
 Ask for `subetha_router_list_routes`: ten static routes and twenty dynamic profiles, each a pair of
 "what you pay with" and "what the provider accepts" across x402 (Base Sepolia, Arc testnet, Solana
-devnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with any fresh
+devnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with a listed `routeId` and any fresh
 `requestId`) pays nothing and shows the human-readable `subject` an agent must present before a
 purchase. Then read [`docs/public-brief-2026-10-08.md`](docs/public-brief-2026-10-08.md) (all 20
 cross-rail pairs settled on testnets, with transaction hashes) and
@@ -170,7 +170,7 @@ submits and pays the gas. **Look at the Transfer log for the address that actual
 (for the outbound leg above, `0x5d78cbd6…` -> Provider A). Looking only at `tx.from` makes it look
 like someone else's payment.
 
-The hosted version has 4 routes. The original two:
+The hosted Router lists **ten static routes and twenty dynamic profiles** (since 2026-10-08; trust the current listing). The original two:
 
 | routeId | Inbound | Outbound |
 |---|---|---|
@@ -240,8 +240,8 @@ adapter's offer.
 **Not verified yet**:
 
 - **Real settlement of the SubEtha inbound leg** (still the synthetic facilitator). -> **AC-4 is not met**
-- Same-rail: x402 -> x402 is covered by the Solana -> Base acceptance purchases (G-3, 2026-10-07); **MPP -> MPP is not verified**
-- **MPP on Solana (both directions): only the six acceptance purchases of 2026-10-08** (static and dynamic in each direction, testnets); no sustained operation yet
+- Same-protocol, different chain: x402 -> x402 is covered by the Solana -> Base acceptance purchases (G-3, 2026-10-07) and MPP -> MPP by the Solana devnet <-> Tempo MPP acceptance purchases (2026-10-08); **same-protocol on the same chain (e.g. MPP Tempo -> MPP Tempo) is not a route and is not verified**
+- **MPP on Solana (both directions): only the acceptance purchases recorded on 2026-10-08** (static and dynamic in each direction, testnets; `docs/public-brief-2026-10-08.md` has the full list); no sustained operation yet
 - **Arc and Solana inbound: only the four acceptance cases** (static and dynamic on each rail, testnets, 2026-10-07; six attempts in
   total, five delivered and one `unknown` whose payment settled on chain without delivery, which led to the SVM follow-up in
   `docs/DEPLOY.md` §2c); no sustained operation yet, and the hosted entry does not forward the child Router's stderr (§2c says what to look at instead)
@@ -251,14 +251,14 @@ adapter's offer.
   of another quote's credential; the check keeps no state, so it does not depend on the process surviving.
   Replay across a restart has not been exercised end to end with real receipts or real funds, and the SDK
   binds a transfer to its challenge through a 56-bit memo tag, not the full challenge id
-- finality (the mined/canonical determination)
+- finality is not determined by the Router itself (results report `onChainFinality: not_checked`); the acceptance records and `docs/mainnet-first-route.md` verified finality afterwards by reading the chains
 - **Real UI integration** with the existing chat (integration with the execution layer is confirmed. T5)
 
 Payments on the hosted Router are **testnet only**. One owner-run mainnet purchase (Tempo mainnet USDC.e over MPP → an x402-only API on Base mainnet, 2026-10-10) was made with the same code bound to loopback; see `docs/mainnet-first-route.md`. The market data reads mainnet reference values, but **these are not
 tradable quotes**. Providers A/B are **hosted by us**, and this is not a claim that Hyperliquid or
 Uniswap support these payment methods.
 
-## Dynamic upstream URLs (enabled on the hosted Router for one direction)
+## Dynamic upstream URLs (twenty profiles enabled on the hosted Router)
 
 A caller can name **its own upstream URL** (a third-party x402 or MPP provider) and pay for it over the
 other rail: pay in Base Sepolia USDC (x402) for an MPP upstream, or in Tempo pathUSD (MPP) for an x402
@@ -295,8 +295,9 @@ The design and the task record live in `docs/dynamic-upstream-*.md`.
 ## Not verified yet
 
 **Real settlement is reached for all four legs in use** -- x402 inbound, MPP inbound, x402 outbound and MPP
-outbound -- and each has been verified independently on chain (see the txs above). However, it is
-**testnet only**, and the following remain behind separate gates, **not done**.
+outbound -- and each has been verified independently on chain (see the txs above). However, the hosted Router is
+**testnet only** (the one mainnet purchase of 2026-10-10 was made on the owner's machine, `docs/mainnet-first-route.md`),
+and the following remain behind separate gates, **not done**.
 
 - **Real settlement of the SubEtha inbound leg.** The inbound side is still the synthetic facilitator, and the
   real facilitator is only in a state where it can be run locally (anvil chainId 31337). -> **AC-4 is not met.**
@@ -306,7 +307,7 @@ outbound -- and each has been verified independently on chain (see the txs above
   Real TCP integration with the chat's **execution layer** (`createRouterChatExecution`), and R4 re-fetch and
   reopen through it, are confirmed (T5). Causality on the real UI is a separate gate.
   Note that the chat contract requires `rail === 'subetha'`, so **the x402 inbound route cannot be used from chat**.
-- **Confirmation of finality** (the mined / canonical determination).
+- **Confirmation of finality by the Router itself** (it reports `not_checked`); the acceptance records verified finality afterwards by reading the chains.
 - **Reproduction from a clean install.** clone -> build -> startup on EC2 has been done, but other environments
   (non-Linux, different architectures) are not verified.
 - MPP's `pull` mode (server-side broadcast) is **not verified**. The adapter refuses before credential generation
