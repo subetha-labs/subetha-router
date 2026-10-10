@@ -74,24 +74,6 @@ export interface KnownNetwork {
 
 export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
   {
-    // Base mainnet（`docs/mainnet-first-route.md` §2.1。2026-10-10）。USDC の EIP-712 domain は `USD Coin` / `2`（CoinGecko の 402 と公式の値）。
-    // 受信は x402（facilitator kind `x402`: PayAI）、送信は x402（EIP-3009。同じ鍵）。設定生成の既定ではどの route・profile もこの network を使わない。
-    network: "eip155:8453",
-    family: "evm",
-    inbound: ["x402"],
-    outbound: ["x402"],
-    x402Facilitator: "x402",
-    assets: [{ id: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6, domain: { name: "USD Coin", version: "2" } }],
-  },
-  {
-    // Tempo mainnet（同上）。USDC.e（Stargate の bridged USDC）。MPP の受信・送信。設定生成の既定では使わない。
-    network: "eip155:4217",
-    family: "evm",
-    inbound: ["mpp"],
-    outbound: ["mpp"],
-    assets: [{ id: "0x20C000000000000000000000b9537d11c60E8b50", decimals: 6 }],
-  },
-  {
     network: "eip155:84532",
     family: "evm",
     inbound: ["x402"],
@@ -123,6 +105,24 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
     outbound: ["x402", "mpp"],
     x402Facilitator: "x402",
     assets: [{ id: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6, tokenProgram: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }],
+  },
+  {
+    // Base mainnet（`docs/mainnet-first-route.md` §2.1。2026-10-10）。USDC の EIP-712 domain は `USD Coin` / `2`（CoinGecko の 402 と公式の値）。
+    // 受信は x402（facilitator kind `x402`: PayAI）、送信は x402（EIP-3009。同じ鍵）。設定生成の既定ではどの route・profile もこの network を使わない。
+    network: "eip155:8453",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: ["x402"],
+    x402Facilitator: "x402",
+    assets: [{ id: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6, domain: { name: "USD Coin", version: "2" } }],
+  },
+  {
+    // Tempo mainnet（同上）。USDC.e（Stargate の bridged USDC）。MPP の受信・送信。設定生成の既定では使わない。
+    network: "eip155:4217",
+    family: "evm",
+    inbound: ["mpp"],
+    outbound: ["mpp"],
+    assets: [{ id: "0x20C000000000000000000000b9537d11c60E8b50", decimals: 6 }],
   },
 ]);
 

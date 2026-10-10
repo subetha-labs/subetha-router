@@ -23,7 +23,7 @@ describe("P-0: shared extraction re-exports the same objects", () => {
     expect(config.isCaip2Network).toBe(networks.isCaip2Network);
     expect(config.MPP_SOLANA_SCHEME).toBe(networks.MPP_SOLANA_SCHEME);
     expect(Object.isFrozen(networks.KNOWN_NETWORKS)).toBe(true);
-    expect(networks.KNOWN_NETWORKS.map((n) => n.network)).toEqual(["eip155:84532", "eip155:42431", "eip155:5042002", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"]);
+    expect(networks.KNOWN_NETWORKS.map((n) => n.network)).toEqual(["eip155:84532", "eip155:42431", "eip155:5042002", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "eip155:8453", "eip155:4217"]);
   });
 
   test("base58DecodedLength agrees with @solana/kit's decoder (32-byte keys, shorter and longer values, leading ones, invalid characters)", () => {

@@ -412,7 +412,7 @@ async function startRouter(fixtures: Fixtures, options: RouterOptions = {}): Pro
   const rails = composeRails(config, capabilities, (event) => events.push(event), (message) => notes.push(message));
   const dialedBefore = fixtures.dialed.length;
   // 起動時の検査（SVM の `/supported`・ATA）は `startRouter` と同じ順: core を作る前に待つ。
-  if (legacy) expect(rails.startup).toBeUndefined();
+  if (legacy) expect(rails.startup).toBeDefined(); // 実鍵の Tempo の能力は chain id の検査（docs/mainnet-first-route.md FR-M4）を持つ
   else expect(rails.startup).toBeDefined();
   await rails.startup?.();
   await rails.dynamic!.verify();

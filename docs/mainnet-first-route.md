@@ -78,6 +78,7 @@ Base mainnet（`USD Coin`/`2`）と Tempo mainnet（USDC.e）の 2 件。試験:
 
 - 2026-10-10: PayAI `/verify` に Router と同じ形の credential（Base Sepolia、使い捨ての鍵）を送り `isValid: true`。x402.org でも同じ。送金なし。
 - 2026-10-10: Tempo mainnet RPC（`rpc.tempo.xyz`）の `eth_chainId` は `0x1079`（4217）、`eth_fillTransaction` は応答する（残高 0 で revert = method は存在）。Pinata の 402 を 3 つの CID で読取: `methodDetails` は `chainId` だけ、`recipient` は CID ごとに違う。Tempo 運営の proxy（`*.mpp.tempo.xyz`）は通貨が pathUSD で `machineTokenEnabled` を持ち Router の許可リストに合わないので除外。
+- 2026-10-10 FR-M6: ローカルの Router（testnet の公開構成、loopback、`SUBETHA_X402_INBOUND_FACILITATOR_URL=https://facilitator.payai.network`、送信は新しい testnet の鍵に faucet の pathUSD、受取先は新しいアドレス）で `md-mpp-eth-snapshot` を使い捨ての Sepolia の鍵で購入: `delivered`（5.6 秒）、受信 tx `0xbfbdfe3e…4166`（Base Sepolia、PayAI が settle）、送信 tx `0xd21ef1d2…9f80`（Tempo testnet、Provider B へ）、`status` の読み直しも `delivered` / `paid`。PayAI の `/settle` は Router の wire と互換。
 - 2026-10-10: owner が caller の wallet（`0x5cb0…DC3D`）に Base mainnet USDC 1.00、Router の送信用 wallet（`0x4460…9515`、本実証のために新しく作った鍵）に Tempo mainnet USDC.e 2.00（Stargate）を入金。読取で確認。
 
 ## 4. 独立レビューの記録

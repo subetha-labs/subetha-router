@@ -933,16 +933,19 @@ export function composeRails(
   if (capabilities.mppTempo !== undefined && capabilities.mppTempo.kind === "real-key") {
     const capability = capabilities.mppTempo;
     startupChecks.push(async () => {
-      const client = await capability.getClient({ chainId: capability.chainId });
+      // 答えが無い・形が違う RPC はここでは止めない（生存は動的の fee の probe が確かめ、静的は購入時に失敗する）。
+      // **明確な不一致だけ**を起動の失敗にする（取り違えの検出が目的）。
       let reported: unknown;
       try {
+        const client = await capability.getClient({ chainId: capability.chainId });
         reported = await (client as { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }).request({ method: "eth_chainId", params: [] });
       } catch {
-        throw new ConfigError("the Tempo RPC did not answer eth_chainId at startup");
+        return;
       }
-      const chainId = typeof reported === "string" && /^0x[0-9a-fA-F]+$/.test(reported) ? Number.parseInt(reported, 16) : undefined;
+      if (typeof reported !== "string" || !/^0x[0-9a-fA-F]{1,16}$/.test(reported)) return;
+      const chainId = Number.parseInt(reported, 16);
       if (chainId !== capability.chainId) {
-        throw new ConfigError(`the Tempo RPC reports chain ${chainId ?? "?"}, but the MPP capability is for chain ${capability.chainId}`);
+        throw new ConfigError(`the Tempo RPC reports chain ${chainId}, but the MPP capability is for chain ${capability.chainId}`);
       }
     });
   }
