@@ -9,7 +9,8 @@ import { afterEach, expect, test } from "vitest";
 import { checkInstallSeal, installHashes, readSealManifest } from "../../src/daemon/seal.js";
 import { parseKeysDocument, unlockKeys, zero } from "../../src/store/keys.js";
 import { realFs } from "../../src/store/fs.js";
-import { tsxLoader } from "../harness/children.js";
+import { ownedChild, tsxLoader, within } from "../harness/children.js";
+import { INSTALL_CHANGED_GUIDANCE } from "../../src/daemon/run.js";
 import { fixtureStore, type FixtureStore } from "../harness/store.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -90,3 +91,27 @@ test("real PTY: a wrong passphrase is bad_passphrase and nothing is written", as
   expect(value.exit).toBe(2); expect(value.refusals).toEqual(["cli_refused: bad_passphrase"]);
   expect(readSealManifest(path.join(s.dir, "install.seal"), lek(s), realFs)).toEqual(oldManifest);
 }, 60_000);
+
+// AC-F2 lifecycle with real processes: daemon refuses the upgrade with the file list and guidance, the human accepts,
+// and the daemon then reaches `listening`.
+test("actual daemon child: install_changed with guidance → install accept → daemon listening", async () => {
+  const s = fixtureStore(); stores.push(s);
+  writeFileSync(path.join(s.installRoot, "package.json"), JSON.stringify({ version: "0.1.2" }));
+  const daemonEntry = fileURLToPath(new URL("../harness/daemon-test-entry.ts", import.meta.url));
+  const daemon = () => { const c = ownedChild(["--disable-sigusr1", "--import", tsxLoader, daemonEntry], s.home);
+    c.child.send({ home: s.home, installRoot: s.installRoot, passphrase: s.passphrase, phrase: s.phrase }); return c; };
+  const first = daemon();
+  try { await first.waitFor("listening"); } finally { await first.close(); }
+  writeFileSync(path.join(s.installRoot, "dist", "entry.js"), "upgraded bytes\n");
+  const refused = daemon();
+  try {
+    expect((await within(refused.exited)).code).toBe(2);
+    expect(refused.stderr).toContain('startup_refused: install_changed ["dist/entry.js"]');
+    expect(refused.stderr).toContain(INSTALL_CHANGED_GUIDANCE);
+  } finally { await refused.close(); }
+  const accepted = await entry(s, "install", [s.passphrase, "ACCEPT"]);
+  expect(accepted.code, accepted.stderr).toBe(0);
+  expect(JSON.parse(accepted.stdout)).toEqual({ ok: true, changed: 1, version: "0.1.2" });
+  const third = daemon();
+  try { await third.waitFor("listening"); } finally { await third.close(); }
+}, 90_000);

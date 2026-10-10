@@ -221,15 +221,15 @@ one; the guard is your wallet passphrase.
 
    ```sh
    cd "$(mktemp -d)"
-   npm pack @subetha/payer@<version>
-   npm view @subetha/payer@<version> dist.integrity
+   packed="$(npm pack --json @subetha/payer@<version> | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8"))[0].integrity')"
+   test "$packed" = "$(npm view @subetha/payer@<version> dist.integrity)" && echo integrity-ok
    mkdir x && tar -xzf subetha-payer-<version>.tgz -C x --strip-components=1
    installed="$(npm root -g)/@subetha/payer"
    diff -r x/dist "$installed/dist" && diff -r x/bin "$installed/bin" && cmp x/package.json "$installed/package.json" && cmp x/npm-shrinkwrap.json "$installed/npm-shrinkwrap.json"
    ```
 
-   The integrity printed by `npm pack` must equal the one from `npm view`, and
-   every `diff`/`cmp` must be silent.
+   It must print `integrity-ok` (the full integrity of the downloaded tarball equals
+   the registry's), and every `diff`/`cmp` must be silent.
 5. Seal the verified installation, then start the daemon again:
 
    ```sh
