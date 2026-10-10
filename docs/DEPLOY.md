@@ -624,6 +624,8 @@ rollback は `subetha-router-prev-20261008T195406Z`（`b-d162524`）。コンテ
 
 **G-A1（2026-10-10）**: `@subetha/payer@0.1.0` を npm に公開（owner の `npm publish`。tarball は main `960562d` から build）。registry の integrity・shasum が手元の pack と一致、`_hasShrinkwrap: true`、registry からの install が shrinkwrap と一致。詳細は `docs/agent-payer-tasks.md` の G-A1。P-4a の手動 5 例と owner の native `daemon --check` も同日に合格（同書 P-4a）。
 
+**G-A2（2026-10-10）**: 公開版の payer から hosted Router（`b-3b60355`）へ実購入 1 件（`delivered`、Base Sepolia と Tempo の両レグとも receipt `status: 1` で finalized）、Cancel 2 件（署名なし・資金移動なし）。途中で見つかった shim の表示の不具合を 0.1.1 で修正・公開。詳細・事故（合言葉と passphrase の同一）・後続の修正は `docs/agent-payer-tasks.md` の G-A2 の記録。
+
 ## 3. 動作確認
 
 ```sh
