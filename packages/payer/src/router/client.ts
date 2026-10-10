@@ -68,7 +68,7 @@ export class RouterClient implements Router {
   }
   private async call(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const controller = new AbortController();
-    const client = new Client({ name: "subetha-payer", version: "0.1.0" });
+    const client = new Client({ name: "subetha-payer", version: "0.1.1" });
     const transport = new StreamableHTTPClientTransport(this.url, {
       requestInit: { redirect: "error" },
       reconnectionOptions: { maxRetries: 0, initialReconnectionDelay: 0, maxReconnectionDelay: 0, reconnectionDelayGrowFactor: 1 },

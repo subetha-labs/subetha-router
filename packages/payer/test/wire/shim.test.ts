@@ -15,6 +15,7 @@ test("compiled bin mcp: missing daemon still initializes/lists tool5 and gives s
     expect(f.client.getInstructions()).toMatch(/own terminal/); expect(f.client.getInstructions()).toMatch(/unknown means possibly paid/);
     for (const [name, args] of [["find_routes", {}], ["quote", { routeId: "md-mpp-eth-snapshot" }], ["purchase", { ref: "p_aaaaaaaaaaaaa" }], ["status", { ref: "p_aaaaaaaaaaaaa" }], ["wallet", {}]] as const) {
       const r = await f.call(name, args); expect(r.structuredContent).toEqual({ ok: false, error: "daemon_unavailable", nextStep: "daemon_unavailable" });
+      expect((r.content as { text: string }[])[0]!.text).toMatch(/ Payer summary: \{"ok":false,"error":"daemon_unavailable","nextStep":"daemon_unavailable"\}$/);
       expect(JSON.stringify(r.content)).toContain("own terminal"); expect(JSON.stringify(r)).not.toContain(home);
     }
     expect(readdirSync(home)).toEqual([]); expect(f.stderr).toBe("");
