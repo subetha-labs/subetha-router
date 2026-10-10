@@ -35,7 +35,7 @@ Submission description (form; 590 characters, confirm the form's limit):
 **[1:38–1:54] Business and ask.**
 "Providers gain reach: an MPP-only provider on Tempo becomes payable from x402, and the Router earns a routing fee on every dynamic purchase. I need the first fifty providers who want buyers from the other rail. Thank you."
 
-Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: 3 approved the unhedged 3-minute draft, 4 the 2-minute cut, 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; the round 6 readback is recorded in PR #163. The 3-minute draft is in this file's history (commit 87b1185).
+Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: round 3 approved the unhedged 3-minute draft; round 4 requested corrections to the 2-minute cut, subsequently applied; round 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; round 6 found no further correction to the spoken script and corrected this history line. The 3-minute draft is in this file's history (commit 87b1185).
 
 ---
 
@@ -140,7 +140,7 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 **[1:38–1:54] ビジネスとお願い。**
 「プロバイダーは、これまで届かなかった買い手にもサービスを提供できます。Tempo 上の MPP 専用プロバイダーが x402 から支払いを受けられるようになり、Router は動的な購入ごとにルーティング手数料を得ます。別の決済レールの買い手にもサービスを届けたい、最初の 50 のプロバイダーを探しています。ありがとうございました。」
 
-ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版、第 4 回で 2 分版を承認。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付けない」ではなく「掲げている」）を求め、反映済み。第 6 回の読み戻しは PR #163 に記録。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
+ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版を承認。第 4 回は 2 分版に修正を求め、その後反映済み。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付けない」ではなく「掲げている」）を求め、反映済み。第 6 回は話し言葉のスクリプトに追加の修正なし、この履歴の記述を訂正。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
 
