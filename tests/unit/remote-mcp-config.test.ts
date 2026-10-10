@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { ConfigError, KNOWN_NETWORKS, loadRuntimeConfig, parseRouterConfig, type RouterConfig, type RuntimeConfig } from "../../src/config.js";
 import { perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
-import { routeListBody } from "../../src/http/projection.js";
+import { quoteBody, routeListBody } from "../../src/http/projection.js";
 import {
   dynamicProfilesOf,
   INBOUND,
@@ -754,5 +754,27 @@ describe("O-5・O-6: 組の切り替え pairs と dyn-arc-to-sol・dyn-sol-to-ar
       expect(perPurchaseLimitOf(router, reservation), profile.profileId).toBeUndefined();
     }
     expect(bucketsOf(router).dynamic).toHaveLength(4);
+  });
+});
+
+// Payer follow-up FR-F4 / AC-F4 (Router side): the production load path fills static destination decimals from the
+// table, and the quote projection carries them (the payer dialog showed "decimals not supplied" on b-3b60355).
+describe("静的 route の宛先の桁（本番の読み込みの経路）", () => {
+  test("loadRuntimeConfig（real）で md-mpp-eth-snapshot の宛先に decimals 6 が入り、quote の射影に出る", () => {
+    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
+    const config = loadAsProduction(document);
+    const route = config.router.routes[ROUTE]!;
+    expect(route.destination.network).toBe("eip155:42431");
+    expect(route.destination.decimals).toBe(6);
+    // Every static route whose destination asset is in the table gets its decimals (none is left undefined).
+    for (const r of Object.values(config.router.routes)) expect(r.destination.decimals, r.routeId).toEqual(expect.any(Number));
+    const nonce = `0x${"ab".repeat(32)}`;
+    const body = quoteBody({ quoteId: nonce, paymentId: "00000000-0000-4000-8000-000000000000", routeId: ROUTE,
+      source: { amount: route.source.amount, asset: route.source.asset, network: route.source.network,
+        offer: { scheme: "exact", network: route.source.network, asset: route.source.asset, amount: route.source.amount, payTo: route.source.payTo!, maxTimeoutSeconds: 120,
+          extra: { name: "USDC", version: "2", challengeNonce: nonce, expiresAt: 2_000_000_000, routeBinding: "fixture", fundsMoveOnCredential: false } } },
+      destination: { quoted: "10000", asset: route.destination.asset, network: route.destination.network, payTo: route.destination.payTo, quoteFingerprint: `sha256:${"cd".repeat(32)}` },
+      approval: { required: true, boundTo: nonce, deadlineMs: 2_000_000_000_000 } } as Parameters<typeof quoteBody>[0], route, "https://router.test") as { destination: { decimals?: number } };
+    expect(body.destination.decimals).toBe(6);
   });
 });

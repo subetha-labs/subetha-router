@@ -1210,9 +1210,12 @@ export function loadRuntimeConfig(
   if (networks !== undefined) {
     validateRouterConfigAgainstTable(router, networks);
   }
+  // Payer follow-up FR-F4: the production (real) path must also copy destination decimals from the table, as
+  // `parseRouterConfig(…, { networks })` does (H-1). Display only; validation above is unchanged.
+  const tabled = networks === undefined ? router : withDestinationDecimals(router, networks);
 
   return {
-    router,
+    router: tabled,
     http: {
       host: env["ROUTER_HTTP_HOST"] ?? "127.0.0.1",
       port: parsePort(env["ROUTER_HTTP_PORT"], 8500),
