@@ -1,6 +1,6 @@
 # Colosseum Crypto World's Fair — submission kit (draft 1, 2026-10-10)
 
-Owner decisions (2026-10-10): tracks **Tempo, Base, Solana**; the owner narrates both videos in English; the repository becomes public under MIT; the pitch should quantify what providers gain (reach they did not have) with sourced numbers; the spoken pitch is confident hackathon language, and the qualifications live in §4/§5, not in the script (owner, 2026-10-10 evening).
+Owner decisions (2026-10-10): tracks **Tempo, Base, Solana**; the owner narrates both videos in English; the repository becomes public under MIT; the pitch should quantify what providers gain (reach they did not have) with sourced numbers; the spoken pitch is confident hackathon language, and the qualifications live in §4/§5, not in the script; the pitch names SubEtha's confidential-payments roadmap as a plan (owner, 2026-10-10 evening).
 
 Deadline: 2026-10-12 23:59 PT = **2026-10-13 15:59 JST**. Pitch video ≤ 2 min (form, read 2026-10-10: "introduce yourselves, tell us what you're building, and tell us why you're the people to build it. Nothing fancy required. We're interested in how you think and communicate. YouTube, Loom, or Vimeo. Up to 2 minutes."). Technical demo video 2–3 min. All content in English.
 
@@ -18,24 +18,24 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (288 spoken words in the quoted paragraphs: 2:13 at 130 wpm, 1:55 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; Codex round 4 suggests a planning budget of 220–230 words for an unrehearsed non-native read at 120 wpm; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
+## 2. Pitch video script (276 spoken words in the quoted paragraphs: 2:07 at 130 wpm, 1:50 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; Codex round 4 suggests a planning budget of 220–230 words for an unrehearsed non-native read at 120 wpm; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
 
 **[0:00–0:17] Who I am.**
 "I'm Fujita, building SubEtha, after years building chains and cross-chain protocols. The problem I ran into: an agent finds the right paid API and still cannot pay, because the two sides share no payment protocol, no chain, not even a currency."
 
 **[0:17–0:38] The gap.**
-"x402 passed 100 million transactions on Base by the first quarter of 2026. MPP, Stripe's protocol on Tempo: 118 of the 129 services in its directory accept MPP only. An agent holding USDC on Base cannot buy from a Tempo service priced in pathUSD; each side is invisible to the other."
+"x402 passed 100 million transactions on Base by the first quarter of 2026. MPP, Stripe's protocol on Tempo: 118 of the 129 services in its directory advertise MPP only. An agent holding USDC on Base cannot buy from a Tempo service priced in pathUSD; each side is invisible to the other."
 
 **[0:38–1:16] What I'm building.**
 "SubEtha Router is the bridge, a hosted MCP server. The agent pays the Router on its rail; the Router pays the provider on the provider's rail from its own balance. No swap, no key custody, and with the local payer a human approves each purchase in a native dialog. All 20 cross-rail pairs settle on testnets: buyers on Base, Solana, Arc and Tempo reach providers on the other side, and the ecosystems grow each other. On October 10th a Tempo MPP wallet made the first mainnet purchase from an x402-only API on Base."
 
-**[1:16–1:42] Why me, and where this goes.**
-"Everything here is designed, independently reviewed, tested and public. The Router is SubEtha's first piece. The second is confidential payments for agents: built into the Router, an agent pays on chain without revealing what it does or why. Agents whose strategy must stay private cannot use public chains today; with SubEtha they can, and that expands the on-chain agent market far beyond any single rail."
+**[1:16–1:38] Why me, and where this goes.**
+"The Router is SubEtha's first piece. Next I plan to build the second piece into it: confidential payments, so an agent can pay on chain without revealing what it does or why. Public payments can expose an agent's strategy. Remove that barrier, and the on-chain agent market grows far beyond any single rail."
 
-**[1:42–1:58] Business and ask.**
+**[1:38–1:54] Business and ask.**
 "Providers gain reach: an MPP-only provider on Tempo becomes payable from x402, and the Router earns a routing fee on every dynamic purchase. I need the first fifty providers who want buyers from the other rail. Thank you."
 
-Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, so the script stays true, only unqualified (checked by the Codex review of 2026-10-10, round 3; the 2-minute cut is round 4, the owner's rewrite with the confidential-payments roadmap is round 5). The 3-minute draft is in this file's history (commit 87b1185).
+Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: 3 approved the unhedged 3-minute draft, 4 the 2-minute cut, 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; the round 6 readback is recorded in PR #163. The 3-minute draft is in this file's history (commit 87b1185).
 
 ---
 
@@ -123,24 +123,24 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 
 ### A.2 ピッチ動画スクリプト（§2 の訳）
 
-見出しの注記: 引用段落の話し言葉は 288 語。130 wpm で 2:13、150 wpm で 1:55。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。フォームの上限は 2 分なので、オーナーは収録前に一度通し読みして時間を計り、実測が 1:55 以下になるまで削ること。Codex 第 4 回は、リハーサルなしの非ネイティブの読みを 120 wpm と見て、220〜230 語を計画上の目安として提案している。フォームは自己紹介、何を作っているか、なぜ自分たちがそれを作るべき人なのかを求めており、「凝ったものは不要」としている。
+見出しの注記: 引用段落の話し言葉は 276 語。130 wpm で 2:07、150 wpm で 1:50。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。フォームの上限は 2 分なので、オーナーは収録前に一度通し読みして時間を計り、実測が 1:55 以下になるまで削ること。Codex 第 4 回は、リハーサルなしの非ネイティブの読みを 120 wpm と見て、220〜230 語を計画上の目安として提案している。フォームは自己紹介、何を作っているか、なぜ自分たちがそれを作るべき人なのかを求めており、「凝ったものは不要」としている。
 
 **[0:00–0:17] 自己紹介。**
-「私は Fujita、SubEtha を作っています。チェーンやクロスチェーンのプロトコルを何年も作ってきて、この問題にぶつかりました。エージェントが必要な有料 API を見つけても、支払えない。決済プロトコルも、チェーンも、通貨さえも、両者で揃っていないからです。」
+「SubEtha を開発している Fujita です。チェーンやクロスチェーンのプロトコルを何年も作ってきて、この問題にぶつかりました。エージェントが必要な有料 API を見つけても、支払えない。決済プロトコルも、チェーンも、通貨さえも、両者で揃っていないからです。」
 
 **[0:17–0:38] ギャップ。**
-「x402 は 2026 年第 1 四半期までに Base 上で 1 億トランザクションを超えました。Stripe のプロトコルである Tempo 上の MPP は、ディレクトリの 129 サービス中 118 が MPP しか受け付けません。Base に USDC を持つエージェントは、pathUSD 建ての Tempo のサービスを買えません。互いに相手が見えないのです。」
+「x402 は 2026 年第 1 四半期までに Base 上で 1 億トランザクションを超えました。MPP は Tempo 上で使われる Stripe の決済プロトコルです。そのディレクトリに掲載された 129 サービスのうち、118 は決済方法として MPP だけを掲げています。Base に USDC を持つエージェントは、pathUSD 建ての Tempo のサービスを買えません。どちらの側からも、相手が見えないのです。」
 
 **[0:38–1:16] 何を作っているか。**
-「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払います。スワップなし、鍵の預かりなし。ローカル payer を使えば、人間が各購入をネイティブダイアログで承認します。クロスレール 20 ペアすべてがテストネットで決済されています。Base・Solana・Arc・Tempo の買い手が反対側のプロバイダーに届き、エコシステム同士が互いを育てるのです。10 月 10 日、Tempo の MPP ウォレットが、Base 上の x402 専用 API から初のメインネット購入を行いました。」
+「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払います。スワップなし、鍵の預かりなし。ローカル payer を使えば、人間が各購入をネイティブダイアログで承認します。クロスレール 20 ペアすべてがテストネットで決済されています。Base・Solana・Arc・Tempo の買い手が別のレールのプロバイダーも利用でき、互いのエコシステムの成長につながります。10 月 10 日、Tempo の MPP ウォレットが、Base 上の x402 専用 API から初のメインネット購入を行いました。」
 
-**[1:16–1:42] なぜ私か、そしてこの先。**
-「ここにあるものはすべて、設計し、独立にレビューし、テストし、公開しています。Router は SubEtha の最初のピースです。二つ目はエージェント向けの秘匿決済です。Router に組み込めば、エージェントは何を、なぜしているかを明かさずにオンチェーンで支払えます。戦略を秘密にしなければならないエージェントは、今日のパブリックチェーンを使えません。SubEtha なら使えます。それはエージェントのオンチェーン市場を、単一のレールの範囲をはるかに超えて広げます。」
+**[1:16–1:38] なぜ私か、そしてこの先。**
+「Router は SubEtha の最初のピースです。次は二つ目のピースである秘匿決済を Router に組み込む計画です。エージェントが何を、なぜしているのかを明かさずに、オンチェーンで支払えるようにします。公開される決済情報から、エージェントの戦略が知られてしまうことがあります。その障壁を取り除けば、エージェントのオンチェーン市場は、一つのレールの枠をはるかに超えて広がります。」
 
-**[1:42–1:58] ビジネスとお願い。**
-「プロバイダーはリーチを得ます。Tempo 上の MPP 専用プロバイダーが x402 から支払いを受けられるようになり、Router は動的な購入ごとにルーティング手数料を得ます。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。ありがとうございました。」
+**[1:38–1:54] ビジネスとお願い。**
+「プロバイダーは、これまで届かなかった買い手にもサービスを提供できます。Tempo 上の MPP 専用プロバイダーが x402 から支払いを受けられるようになり、Router は動的な購入ごとにルーティング手数料を得ます。別の決済レールの買い手にもサービスを届けたい、最初の 50 のプロバイダーを探しています。ありがとうございました。」
 
-ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけである（2026-10-10 の Codex レビュー第 3 回で確認。2 分版は第 4 回、秘匿決済のロードマップを入れたオーナーの書き直しは第 5 回）。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
+ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版、第 4 回で 2 分版を承認。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付けない」ではなく「掲げている」）を求め、反映済み。第 6 回の読み戻しは PR #163 に記録。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
 
