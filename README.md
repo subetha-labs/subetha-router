@@ -19,11 +19,10 @@ Claude registration → quote → native human approval → purchase → saved s
 Its first slice is **macOS 14+ / Node 22 / Base Sepolia USDC / static
 `md-mpp-eth-snapshot` only**.
 
-**Release gate: `@subetha/payer` is currently private and unpublished.**
-`npm i -g @subetha/payer` is an instruction **after owner publication (G-A1)**,
-not a working public install today. The payer README also gives an authorized
-developer's locally built tarball path. Native manual acceptance and funded
-owner testing (G-A2) remain separate gates; the Router results below are not
+**Release gate: `@subetha/payer@0.1.0` is published on npm (G-A1, 2026-10-10).**
+Install it with `npm i -g @subetha/payer`. The payer README also gives an authorized
+developer's locally built tarball path. Native manual acceptance passed
+(2026-10-10); funded owner testing (G-A2) remains a separate gate; the Router results below are not
 payer acceptance results. This source repository is **private**.
 
 ### Wallet-free hosted discovery

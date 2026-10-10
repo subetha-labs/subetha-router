@@ -622,6 +622,8 @@ rollback は `subetha-router-prev-20261008T195406Z`（`b-d162524`）。コンテ
 公開の MCP を client から確認（読取だけ）: initialize の `instructions` 13 行（手順・資金が動く時点・never・回復の規則）、5 tool すべてに `outputSchema`、`subetha_router_purchase` に `_meta["anthropic/requiresUserInteraction"]: true`、
 存在しない `paymentId` の `status` が `{ found: false, status: 404, reason: "not_found" }`。既存の tool 名・引数・出力の形は変わっていない（AC-A7 の公開側）。**G-A2 の前提の配備はこれ**（以後の Router の変更があれば記録を足す）。
 
+**G-A1（2026-10-10）**: `@subetha/payer@0.1.0` を npm に公開（owner の `npm publish`。tarball は main `960562d` から build）。registry の integrity・shasum が手元の pack と一致、`_hasShrinkwrap: true`、registry からの install が shrinkwrap と一致。詳細は `docs/agent-payer-tasks.md` の G-A1。P-4a の手動 5 例と owner の native `daemon --check` も同日に合格（同書 P-4a）。
+
 ## 3. 動作確認
 
 ```sh

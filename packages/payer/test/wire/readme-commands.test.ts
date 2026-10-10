@@ -42,8 +42,8 @@ test("README install and user-scope registration parse to the actual package bin
   expect(commands).toContain("subetha-payer inspect p_aaaaaaaaaaaaa --close");
   expect(pkg.private).toBeUndefined();
   expect(pkg.publishConfig).toEqual({ access: "public" });
-  expect(text).toMatch(/AFTER owner publication/);
-  expect(text).toMatch(/unpublished/);
+  expect(text).toMatch(/published \(G-A1/);
+  expect(text).not.toMatch(/unpublished|AFTER owner publication/);
 });
 
 test("README names exactly the five production tools with first-slice inputs", () => {

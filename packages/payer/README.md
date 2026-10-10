@@ -3,11 +3,10 @@
 A local wallet and payer daemon for an agent using the SubEtha Router. Your key
 stays on your machine; the human confirms each purchase in the daemon's dialog.
 
-**Release gate: unpublished.** This package is not yet published to npm; the
-source repository is private. The npm command below is **AFTER owner publication**
-(G-A1), not a working public distribution today. Clean installation, native manual
-acceptance and the funded owner flow are separate gates; these instructions are
-not evidence that they passed or permission for an agent to perform them.
+**Release gate: published (G-A1, 2026-10-10).** `@subetha/payer@0.1.0` is on npm;
+the source repository stays private. The funded owner flow (G-A2) is a separate
+gate; these instructions are not evidence that it passed or permission for an
+agent to perform it.
 
 The first slice targets **macOS 14+, Node 22**, testnets only, paying **Base Sepolia
 USDC** over x402 for the static `md-mpp-eth-snapshot` route. It does not expose the
@@ -16,7 +15,7 @@ supported payer platforms in this slice.
 
 ## Install
 
-After the owner publishes and records the approved version:
+Install the published version (the registry honours the bundled shrinkwrap):
 
 ```sh
 npm i -g @subetha/payer
@@ -202,6 +201,7 @@ Mutable key buffers are cleared on lock/exit, but JavaScript strings, OS copies,
 swap, core dumps and crash reports can retain material. macOS defaults are not
 changed by this package. Keep the terminal's Node and helper installation trusted.
 There is no unattended purchase, envelope delegation, mainnet, dynamic-route or
-other-rail support in this slice. Native manual confirmation, real signature
-wiring, npm publication and funded end-to-end acceptance remain separate owner
-gates; these onboarding instructions do not claim those results.
+other-rail support in this slice. The native manual confirmation checks passed
+and npm publication (G-A1) is done, both on 2026-10-10. Real signature wiring and
+funded end-to-end acceptance (G-A2) remain separate owner gates; these onboarding
+instructions do not claim those results.
