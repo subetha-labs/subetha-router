@@ -18,7 +18,7 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (394 spoken words in the quoted paragraphs: 3:02 at 130 wpm, 2:38 at 150 wpm; segment times below assume 150 wpm, rounded up — the owner must time a read-through before recording and cut until the measured length is ≤ 2:50; "why", not a demo)
+## 2. Pitch video script (406 spoken words in the quoted paragraphs: 3:07 at 130 wpm, 2:42 at 150 wpm; segment times below assume 150 wpm, rounded up — the owner must time a read-through before recording and cut until the measured length is ≤ 2:50; "why", not a demo)
 
 **[0:00–0:15] Founder and problem.**
 "I'm Fujita, solo builder of SubEtha, after years building chains and cross-chain protocols. The problem I keep hitting: an agent finds the right paid API and still cannot pay, because the two sides speak different payment protocols."
@@ -29,16 +29,16 @@ Submission description (form; 590 characters, confirm the form's limit):
 **[0:45–1:11] Product.**
 "SubEtha Router is the bridge, a hosted MCP server. The agent takes a quote; with the local payer a human approves it in a native dialog; the agent pays the Router on its rail, the Router pays the provider on the provider's rail from its own balance and returns the response. Two independent payments. No swap, no key custody. A compatible provider changes nothing."
 
-**[1:11–1:41] Evidence.**
+**[1:11–1:39] Evidence.**
 "On testnets, all 20 cross-rail pairs, x402 on Base, Arc and Solana, MPP on Tempo and Solana, settle end to end, both legs on chain. On October 10th I made the first mainnet purchase: an MPP wallet on Tempo bought from an API that accepts only x402 on Base. The local payer is on npm; its first route, Base Sepolia to Tempo testnet, works in Claude Code today."
 
-**[1:41–2:20] What providers gain, and the business.**
-"For providers the value is reach. Today a provider on Tempo is paid only by agents holding Tempo stablecoins. Through the Router the whole x402 side pays it too, an ecosystem past 100 million transactions. Those 118 MPP-only services are a market the x402 side cannot buy from today, and the Router opens it. The Router earns a routing fee on every purchase, from 0.001 in the agent's stablecoin. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail."
+**[1:39–2:21] What providers gain, and the business.**
+"For providers the value is reach. Today an MPP-only provider on Tempo is paid only by agents holding Tempo stablecoins. Through the Router the x402 side can pay it too, an ecosystem past 100 million transactions. Those 118 MPP-only services are a market the x402 side cannot buy from today, and the Router is built to open it, one provider at a time. On dynamic routes the Router earns a routing fee on every purchase, from 0.001 in the agent's stablecoin. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail."
 
-**[2:20–2:43] Validation and ask.**
+**[2:21–2:44] Validation and ask.**
 "Every feature has a design-to-test trail and independent model reviews, and dogfooding and those reviews found fourteen agent-side issues, all documented. I'm looking for design partners: paid-API providers and agent developers who will run real purchases with me. All twenty pairs run on testnets, mainnet is proven, and the path to public mainnet is documented. Thank you."
 
-Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, so nothing in the script is false, only unqualified.
+Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, so the script stays true, only unqualified (checked by the Codex review of 2026-10-10, round 3).
 
 ---
 
@@ -125,7 +125,7 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 
 ### A.2 ピッチ動画スクリプト（§2 の訳）
 
-見出しの注記: 引用段落の話し言葉は 394 語。130 wpm で 3:02、150 wpm で 2:38。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。オーナーは収録前に一度通し読みして時間を計り、実測が 2:50 以下になるまで削ること。「なぜ」を語る動画であり、デモではない。
+見出しの注記: 引用段落の話し言葉は 406 語。130 wpm で 3:07、150 wpm で 2:42。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。オーナーは収録前に一度通し読みして時間を計り、実測が 2:50 以下になるまで削ること。「なぜ」を語る動画であり、デモではない。
 
 **[0:00–0:15] 創業者と課題。**
 「私は Fujita、SubEtha を一人で作っています。チェーンやクロスチェーンのプロトコルを何年も作ってきました。繰り返しぶつかる問題はこれです。エージェントが必要な有料 API を見つけても、支払えない。両者が話す決済プロトコルが違うからです。」
@@ -136,16 +136,16 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 **[0:45–1:11] プロダクト。**
 「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは見積もり（quote）を取ります。ローカル payer を使えば、人間がネイティブダイアログでそれを承認します。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払い、レスポンスを返します。二つの独立した支払いです。スワップなし、鍵の預かりなし。互換性のあるプロバイダーは何も変える必要がありません。」
 
-**[1:11–1:41] 実証。**
+**[1:11–1:39] 実証。**
 「テストネットでは、クロスレール 20 ペアすべて、つまり Base・Arc・Solana 上の x402 と Tempo・Solana 上の MPP の組み合わせが、両脚ともオンチェーンで、エンドツーエンドに決済されています。10 月 10 日、初のメインネット購入を行いました。Tempo 上の MPP ウォレットで、Base 上の x402 しか受け付けない API から購入したのです。ローカル payer は npm に公開済みです。その最初のルートである Base Sepolia から Tempo テストネットへの経路は、今日の時点で Claude Code で動きます。」
 
-**[1:41–2:20] プロバイダーが得るもの、そしてビジネス。**
-「プロバイダーにとっての価値はリーチです。今日、Tempo 上のプロバイダーに支払えるのは、Tempo のステーブルコインを持つエージェントだけです。Router を通せば、x402 側全体、つまり 1 億トランザクションを超えたエコシステムからも支払われるようになります。あの 118 の MPP 専用サービスは、x402 側が今日買えない市場であり、Router がそれを開きます。Router はすべての購入でルーティング手数料を得ます。エージェントのステーブルコインで 0.001 からです。Juniper はエージェント型コマースが 2030 年までに 1.5 兆ドルに達すると予測しています。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。」
+**[1:39–2:21] プロバイダーが得るもの、そしてビジネス。**
+「プロバイダーにとっての価値はリーチです。今日、Tempo 上の MPP 専用プロバイダーは、Tempo のステーブルコインを持つエージェントからしか支払われていません。Router を通せば、x402 側、つまり 1 億トランザクションを超えたエコシステムからも支払えるようになります。あの 118 の MPP 専用サービスは、x402 側が今日買えない市場です。Router はそれをプロバイダーごとに開くために作られています。動的ルートでは、Router はすべての購入でルーティング手数料を得ます。エージェントのステーブルコインで 0.001 からです。Juniper はエージェント型コマースが 2030 年までに 1.5 兆ドルに達すると予測しています。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。」
 
-**[2:20–2:43] 検証とお願い。**
+**[2:21–2:44] 検証とお願い。**
 「すべての機能に設計からテストまでの記録と独立したモデルによるレビューがあり、ドッグフーディングとそのレビューでエージェント側の問題を 14 件見つけ、すべて文書化しています。デザインパートナーを探しています。私と一緒に実際の購入を行ってくれる有料 API プロバイダーとエージェント開発者です。20 ペアすべてがテストネットで動き、メインネットは実証済み、公開メインネットへの道筋は文書化済みです。ありがとうございました。」
 
-ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトに虚偽はなく、限定を付けていないだけである。
+ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけである（2026-10-10 の Codex レビュー第 3 回で確認）。
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
 
