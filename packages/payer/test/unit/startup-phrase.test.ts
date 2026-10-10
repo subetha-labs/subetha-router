@@ -47,6 +47,8 @@ function setup(phrases: (pass: string, store: FixtureStore) => (string | Error)[
         },
       },
       faults: { hit: async (point) => { events.push(point); } },
+      // Confirmation UI creation is observable: it must not happen before the phrase is accepted.
+      createConfirmUi: () => { events.push("create-ui"); return { available: async () => true }; },
       handler: () => async () => ({ ok: true, state: "unlocked", version: "0.1.2" }),
       listen: async () => { events.push("listen"); return { close: async () => { events.push("close"); } }; },
       recover: async () => { events.push("recover"); },
@@ -82,13 +84,14 @@ for (const [name, bad, notice] of rejected) test(`phrase rejected (${name}) then
   expect(events.indexOf(`notice:${PHRASE_NOTICE}`)).toBeLessThan(events.indexOf("Security phrase"));
   expect(events.indexOf(`notice:${notice}`)).toBeLessThan(events.lastIndexOf("Security phrase"));
   expect(events).toContain("listen");
+  expect(events.indexOf("create-ui")).toBeGreaterThan(events.lastIndexOf("Security phrase"));
   expect(daemon?.context.phrase).toBe(store.phrase);
   expectOnlyFixedNotices(events, [pass, bad(pass).trim()]);
   await daemon?.close();
 });
 
 function expectRefusedBeforeWallet(events: string[], store: FixtureStore) {
-  for (const effect of ["before:seal", "after:seal", "before:key-decrypt", "listen", "recover"]) expect(events).not.toContain(effect);
+  for (const effect of ["before:seal", "after:seal", "before:key-decrypt", "create-ui", "listen", "recover"]) expect(events).not.toContain(effect);
   expect(existsSync(path.join(store.dir, "install.seal"))).toBe(false);
   expect(existsSync(path.join(store.dir, "daemon.lock"))).toBe(false);
   // kek and lek (32 bytes each) were zeroed by close().
