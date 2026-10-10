@@ -36,6 +36,9 @@ test.each(["accept", "cancel", undefined] as const)("display %s never changes ex
   const f = await pair(answer); try {
     const result = await f.client.callTool({ name: "subetha_payer_purchase", arguments: { ref: "p_aaaaaaaaaaaaa" } });
     expect(result.structuredContent).toEqual({ ok: false, error: "approval_rejected" });
+    // An error result also carries its summary in content text: clients may show only content for errors.
+    expect(result.isError).toBe(true);
+    expect((result.content as { type: string; text: string }[])).toEqual([{ type: "text", text: 'Payer summary: {"ok":false,"error":"approval_rejected"}' }]);
     expect(f.calls).toEqual([{ method: "ping", params: {} }, { method: "purchase", params: { ref: "p_aaaaaaaaaaaaa" } }]);
     expect(f.displays).toBe(answer ? 1 : 0);
   } finally { await f.close(); }

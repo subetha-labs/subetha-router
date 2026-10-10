@@ -1,6 +1,6 @@
 {
   "name": "@subetha/payer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local payer for the SubEtha Router: holds your key, confirms every payment with you, and talks to the hosted Router for an AI agent (stdio MCP) and for you (CLI). Testnets only.",
   "license": "MIT",
   "type": "module",
