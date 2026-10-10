@@ -75,6 +75,14 @@ Record on the owner's Mac. One real purchase through the published payer (testne
 | Claim | Kind | Source |
 |---|---|---|
 | Founder background (chains, cross-chain protocols, AI-driven DeFi platform) | owner-attested (Onlab application, 2026-09) | owner |
+| Repository `github.com/subetha-labs/subetha-router` public under the MIT license since 2026-10-10 | measured by us | GitHub repository settings; `LICENSE`; README "Sources and license" |
+| Hosted Router MCP endpoint `https://router.subethalabs.com/mcp` (testnet only) | measured by us | `docs/DEPLOY.md`; README |
+| `@subetha/payer` on npm (`npm i -g @subetha/payer`) | measured by us | npm registry; `packages/payer/README.md` |
+| Payment architecture: two independent payments, the outbound leg from the Router's prefunded balance; no swap, no bridge, no key custody | measured by us (design and acceptance records) | README; `docs/ENGINEERING.md`; `docs/public-brief-2026-10-08.md` |
+| The demo's live provider is our reference Provider B (MPP on Tempo testnet), hosted by us | measured by us | `docs/public-brief-2026-10-08.md`; README "Providers A/B are hosted by us" |
+| Approval guarantee of the payer rests on its trust assumptions (unmodified install/runtime, OS isolation of the daemon and its dialog, secret security phrase) | measured by us (documented threat model) | `docs/agent-payer-requirements.md` T1–T4′; `packages/payer/README.md` "Limits of this trust model" |
+| Design-to-test trail and independent model reviews for every feature | measured by us | review tables in `docs/*-tasks.md`; `docs/agent-usability-study.md` |
+| "First fifty providers" and "design partners" | owner's intent (ask), not a claim about the market | this document §4 |
 | x402: "well over 100 million cumulative transactions" on Base through Q1 2026 | third-party (Chainalysis) | https://www.chainalysis.com/blog/x402-agentic-payments-adoption/ |
 | Base: 3.1M x402 transactions, $1.2M in 30 days (as of 2026-05-29) | third-party, secondary (CryptoBriefing attributes it to Base; given, returned 403 during review, not independently verified) | https://cryptobriefing.com/agent-payments-growth-x402/ |
 | Solana ~70% of monthly x402 volume (reported 2026-08-24), 35M+ cumulative x402 transactions on Solana | third-party | https://solanacompass.com/news/solana-claims-top-spot-on-x402-as-ai-agents-settle-33m-usdc-in-a-single-week ; https://cryptobriefing.com/solana-x402-market-share-dominance/ (given; returned 403 during review, not independently verified) |
