@@ -48,7 +48,7 @@ Added 2026-10-11 at the owner's request as an alternative to the script above (c
 "That is what SubEtha is for: the agent pays with what it holds, the provider receives what it accepts, and the agent's intent stays its own."
 
 **[0:31–0:47] A large market, split in two.**
-"x402 passed 100 million transactions on Base, and Solana has grown into a major x402 chain. Stripe's MPP on Tempo lists 129 services, and 118 of them advertise MPP only. Most services in that directory advertise only MPP."
+"x402 passed 100 million transactions on Base, and Solana has grown into a major x402 chain. Stripe's MPP on Tempo lists 129 services, and 118 of them advertise MPP only. And the two sides cannot pay each other."
 
 **[0:47–1:10] What changes.**
 "With SubEtha Router, an agent on either side pays the way the provider accepts, and a compatible provider changes nothing to gain buyers from the other side. The agent keeps its keys. Each ecosystem's providers gain access to buyers from the other. Every pair of supported rails settles on testnets, and the Router is proven on mainnet."
@@ -175,7 +175,7 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 「SubEtha が目指すのは、エージェントが持っているもので支払い、提供者が対応する決済手段で代金を受け取り、エージェントの意図が外部に知られないことです。」
 
 **[0:31–0:47] 大きな市場が、二つに割れている。**
-「x402 は Base 上で 1 億トランザクションを超え、Solana も x402 の主要なチェーンへと成長しています。Stripe の MPP は Tempo 上で 129 のサービスを掲載し、そのうち 118 は決済方法として MPP だけを掲げています。そのディレクトリでは、大半のサービスが決済方法として MPP だけを掲げています。」
+「x402 は Base 上で 1 億トランザクションを超え、Solana も x402 の主要なチェーンへと成長しています。Stripe の MPP は Tempo 上で 129 のサービスを掲載し、そのうち 118 は決済方法として MPP だけを掲げています。そして、二つの側は互いに支払えません。」
 
 **[0:47–1:10] 何が変わるか。**
 「SubEtha Router があれば、どちら側のエージェントも提供者が受け取れる形で払えます。互換性のある提供者は何も変えずに、もう片側の買い手を得ます。エージェントは鍵を自分で管理します。それぞれのエコシステムの提供者が、もう一方の買い手にもサービスを販売できるようになります。対応レールのすべての組み合わせがテストネットで決済され、Router はメインネットでも検証済みです。」
