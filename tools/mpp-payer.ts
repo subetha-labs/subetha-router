@@ -127,6 +127,8 @@ export function createMppPayer(
             // **push 固定**: 自分で broadcast して hash を渡す。
             // 既定は local account だと `pull` なので、明示しないと未検証の経路に落ちる。
             mode: "push",
+            // 手数料は転送する資産と同じトークンで払う（mainnet の USDC.e だけを持つ wallet でも払える。testnet の pathUSD は従来と同じ）。
+            feeToken: scope.asset as `0x${string}`,
             /**
              * SDK が読むのは `getClient`（`client` という欄は無く、渡しても**黙って無視され**、SDK の既定の RPC が使われる）。
              * 以前は `client` で渡していたため、`rpcUrl` の指定が効いていなかった（既定の RPC が同じ testnet なので動いてはいた）。

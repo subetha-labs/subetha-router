@@ -63,7 +63,7 @@ export interface HostOptions {
    * mainnet の最初の 1 経路（`docs/mainnet-first-route.md`）: owner の Mac で loopback 限定で起動する mainnet 専用の生成。
    * 指定すると公開の生成は使わず `mainnetFirstRouteConfigOf` の設定と mainnet 用の env になる。公開の入口は渡さない。
    */
-  readonly mainnetFirstRoute?: { readonly cid: string };
+  readonly mainnetFirstRoute?: true;
 }
 
 /** 起動の計画（純粋。process に触らない）: Router に渡す設定と、子プロセスの env（`ROUTER_CONFIG_PATH` は起動側が足す）。 */
@@ -97,25 +97,30 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
   const receiver = required(env, "SUBETHA_ROUTER_RECEIVER");
   if (options.mainnetFirstRoute !== undefined) {
     if (options.bind !== "127.0.0.1") throw new HostPlanError("config");
+    // MPP 受信（Tempo mainnet）には challenge の HMAC の秘密が要る（公開の起動と同じ env）。
+    const mainnetSecret = env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
+    if (mainnetSecret === "") throw new HostPlanError("env");
     let config: Record<string, unknown>;
     try {
-      config = mainnetFirstRouteConfigOf(env, receiver, options.mainnetFirstRoute.cid);
+      config = mainnetFirstRouteConfigOf(env, receiver);
     } catch {
       throw new HostPlanError("config");
     }
+    const mainnetRpc = env["SUBETHA_TEMPO_MAINNET_RPC_URL"] === undefined || env["SUBETHA_TEMPO_MAINNET_RPC_URL"] === "" ? MAINNET_FIRST_ROUTE.tempoRpcUrl : env["SUBETHA_TEMPO_MAINNET_RPC_URL"];
     const childEnv: Record<string, string> = {
-      SUBETHA_OUTBOUND_MPP_KEY: outboundKey,
+      // x402 送信（Base mainnet）の鍵だけ。MPP 送信は無いので `SUBETHA_OUTBOUND_MPP_KEY` は渡さない。
+      SUBETHA_OUTBOUND_X402_KEY: env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey,
+      SUBETHA_X402_OUTBOUND_NETWORK: MAINNET_FIRST_ROUTE.outbound.network,
       ROUTER_JOURNAL_PATH: options.journalPath,
       ROUTER_HTTP_PORT: "0",
       ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
       ROUTER_PRINCIPAL_TOKENS: "judge:public",
       ROUTER_ADAPTER_MODE: "real",
       ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
-      ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
-      ROUTER_X402_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
-      // Tempo mainnet の能力（`tools/rails-entry.ts` が chain id と RPC を読む）。MPP 受信は無いので `ROUTER_MPP_INBOUND_RPC_URL` は渡さない。
-      SUBETHA_TEMPO_CHAIN_ID: String(MAINNET_FIRST_ROUTE.chainId),
-      SUBETHA_TEMPO_RPC_URL: env["SUBETHA_TEMPO_MAINNET_RPC_URL"] === undefined || env["SUBETHA_TEMPO_MAINNET_RPC_URL"] === "" ? MAINNET_FIRST_ROUTE.rpcUrl : env["SUBETHA_TEMPO_MAINNET_RPC_URL"],
+      // MPP 受信（Tempo mainnet）: 秘密、照合の RPC、offer の有効期間。
+      ROUTER_MPP_INBOUND_SECRET: mainnetSecret,
+      ROUTER_MPP_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
+      ROUTER_MPP_INBOUND_RPC_URL: mainnetRpc,
       ...railsChildEnvOf(RAILS_NONE, env),
     };
     return { config, childEnv, journalPath: options.journalPath };
@@ -170,8 +175,7 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ROUTER_PRINCIPAL_TOKENS: "judge:public",
       ROUTER_ADAPTER_MODE: "real",
       ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
-      // `SUBETHA_X402_INBOUND_FACILITATOR_URL` は受け入れ用（PayAI の settle を Base Sepolia で確かめる。`docs/mainnet-first-route.md` FR-M6）。公開の起動では設定しない。
-      ROUTER_X402_INBOUND_FACILITATOR_URL: env["SUBETHA_X402_INBOUND_FACILITATOR_URL"] === undefined || env["SUBETHA_X402_INBOUND_FACILITATOR_URL"] === "" ? INBOUND.facilitator : env["SUBETHA_X402_INBOUND_FACILITATOR_URL"],
+      ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
       // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
       // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
       ROUTER_X402_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
@@ -308,14 +312,13 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
 /** 公開の入口: 多レールは定数 `RAILS_ACTIVATION`（G-4 で両方 true）、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
 async function start(): Promise<void> {
   // mainnet の最初の 1 経路（`docs/mainnet-first-route.md`）: env に CID があれば loopback 限定・mainnet 専用で起動する。公開の起動とは排他。
-  const mainnetCid = process.env["SUBETHA_MAINNET_FIRST_ROUTE_CID"];
-  if (mainnetCid !== undefined && mainnetCid !== "") {
+  if (process.env["SUBETHA_MAINNET_FIRST_ROUTE"] === "1") {
     await startHost({
       activation: RAILS_NONE,
       bind: "127.0.0.1",
       port: Number(process.env["PORT"] ?? "8787"),
       journalPath: process.env["SUBETHA_MAINNET_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "mainnet-first-route.ndjson"),
-      mainnetFirstRoute: { cid: mainnetCid },
+      mainnetFirstRoute: true,
     });
     return;
   }
