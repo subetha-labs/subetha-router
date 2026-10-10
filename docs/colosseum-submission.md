@@ -18,7 +18,7 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (399 spoken words in the quoted paragraphs: 3:04 at 130 wpm, 2:39 at 150 wpm; segment times below assume 150 wpm — the owner must time a read-through before recording and cut until the measured length is ≤ 2:50; "why", not a demo)
+## 2. Pitch video script (404 spoken words in the quoted paragraphs: 3:07 at 130 wpm, 2:42 at 150 wpm; segment times below assume 150 wpm, rounded up — the owner must time a read-through before recording and cut until the measured length is ≤ 2:50; "why", not a demo)
 
 **[0:00–0:15] Founder and problem.**
 "I'm Fujita, solo builder of SubEtha, after years building chains and cross-chain protocols. The problem I keep hitting: an agent finds the right paid API and still cannot pay, because the two sides speak different payment protocols."
@@ -32,10 +32,10 @@ Submission description (form; 590 characters, confirm the form's limit):
 **[1:11–1:41] Evidence.**
 "On testnets, all 20 cross-rail pairs, x402 on Base, Arc and Solana, MPP on Tempo and Solana, settle end to end, both legs on chain. On October 10th, running the Router on my own machine, I made one bounded mainnet purchase: an MPP wallet on Tempo bought from an API that accepts only x402 on Base. The local payer is on npm; its first route, Base Sepolia to Tempo testnet, works in Claude Code today."
 
-**[1:41–2:18] What providers gain, and the business.**
-"For providers the value is reach. A Tempo-only provider is paid only by agents holding Tempo stablecoins. Through the Router the x402 side could pay it too, an ecosystem past 100 million transactions, once its challenge is compatible and the mainnet prerequisites are met. Potential reach, not measured customers. The Router earns a routing fee per purchase: 0.001 in the agent's stablecoin on dynamic routes to x402 providers. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail."
+**[1:41–2:20] What providers gain, and the business.**
+"For providers the value is reach. Through its advertised Tempo interface, a provider is paid directly only by agents holding Tempo stablecoins. Through the Router the x402 side could pay it too, an ecosystem past 100 million transactions, once its challenge is compatible and the mainnet prerequisites are met. Potential reach, not measured customers. The Router earns a routing fee per purchase: 0.001 in the agent's stablecoin on dynamic routes to x402 providers. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail."
 
-**[2:18–2:40] Validation, honesty, ask.**
+**[2:20–2:43] Validation, honesty, ask.**
 "This is engineering validation, not customer validation: a design-to-test trail for every feature, independent model reviews, fourteen agent-side issues found by dogfooding and those reviews. I'm looking for design partners: paid-API providers and agent developers who will run real purchases and tell me where it breaks. Testnet today, one mainnet route proven, prerequisites documented. Thank you."
 
 Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification.
@@ -76,7 +76,7 @@ Record on the owner's Mac. One real purchase through the published payer (testne
 |---|---|---|
 | Founder background (chains, cross-chain protocols, AI-driven DeFi platform) | owner-attested (Onlab application, 2026-09) | owner |
 | x402: "well over 100 million cumulative transactions" on Base through Q1 2026 | third-party (Chainalysis) | https://www.chainalysis.com/blog/x402-agentic-payments-adoption/ |
-| Base: 3.1M x402 transactions, $1.2M in 30 days (as of 2026-05-29) | third-party (Base) | https://cryptobriefing.com/agent-payments-growth-x402/ |
+| Base: 3.1M x402 transactions, $1.2M in 30 days (as of 2026-05-29) | third-party, secondary (CryptoBriefing attributes it to Base; given, returned 403 during review, not independently verified) | https://cryptobriefing.com/agent-payments-growth-x402/ |
 | Solana ~70% of monthly x402 volume (reported 2026-08-24), 35M+ cumulative x402 transactions on Solana | third-party | https://solanacompass.com/news/solana-claims-top-spot-on-x402-as-ai-agents-settle-33m-usdc-in-a-single-week ; https://cryptobriefing.com/solana-x402-market-share-dominance/ (given; returned 403 during review, not independently verified) |
 | Tempo mainnet live 2026-03-18 with MPP; directory of 100+ providers at launch | third-party | https://www.coindesk.com/tech/2026/03/18/stripe-led-payments-blockchain-tempo-goes-live-with-protocol-for-ai-agents ; https://www.theblock.co/post/394131/tempo-mainnet-goes-live-with-machine-payments-protocol-for-agents |
 | mpp.dev catalog: 129 services, 118 advertise MPP only (`methods` lists only `tempo`); directory metadata, not a test that they refuse other methods | **measured by us, 2026-10-10** | `docs/evidence/mpp-catalog-2026-10-10.json`, `docs/mainnet-first-route.md` §3 |
