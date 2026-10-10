@@ -44,6 +44,7 @@
 - 2026-10-10 06:4xZ: PayAI `/verify` に Router と同じ形の credential（Base Sepolia、使い捨ての鍵）を送り `isValid: true`。x402.org でも同じ。送金なし。
 - 2026-10-10: Tempo mainnet RPC（`rpc.tempo.xyz`）の `eth_chainId` は `0x1079`（4217）、`eth_fillTransaction` は応答する。
 - 2026-10-10: owner が Base 用の wallet（`0x5cb0…DC3D`）に Base mainnet USDC 1.00、Tempo 用の wallet（`0x4460…9515`）に Tempo mainnet USDC.e 2.00（Stargate）を入金。読取で確認。
+- 2026-10-10 07:3xZ: MPP catalog（`https://mpp.dev/api/services`）を取得: 129 サービス、そのうち `methods` に `tempo` だけを載せるものが 118（directory の表示であって、他の決済方式を拒むことの確認ではない）。保存した抜粋は `docs/evidence/mpp-catalog-2026-10-10.json`。
 - 2026-10-10 07:1xZ（案 A・x402 → MPP 専用の検討。中止）: MPP catalog の Tempo 専用・GET・$0.01 以下のエンドポイント 55 件を 402 の読取で機械的に調べ、Router の条件（x402 を併用しない、受取先が安定、USDC.e、`methodDetails` に余計な項目が無い）を満たすものは **0 件**。Pinata は **402 ごとに受取先が変わる**（10 秒で 3 つ）ため、Router の「購入直前の読み直しで条件が 1 つでも違えば決済の前に止める」安全装置に必ず掛かる。Tempo 運営の proxy（`*.mpp.tempo.xyz`）は pathUSD と `machineTokenEnabled` で許可リストに合わない。StableTravel は適合するが x402 も受ける。
 - 2026-10-10 FR-M6（PayAI の settle、案 A の前提。参考記録）: ローカルの Router（testnet の公開構成、loopback、facilitator を PayAI に差し替え、送信は faucet の pathUSD を持つ新しい鍵、受取先は新しいアドレス）で `md-mpp-eth-snapshot` を使い捨ての Sepolia の鍵で購入: `delivered`（5.6 秒）、受信 tx `0xbfbdfe3e…4166`（Base Sepolia、settle は PayAI の口座 `0xc669…cb63` から）、送信 tx `0xd21ef1d2…9f80`（Tempo testnet）。PayAI の `/settle` は Router の wire と互換。
 - 2026-10-10 07:4xZ（案 A の Pinata の見積もり。購入せず）: mainnet 専用の Router を loopback で起動（当時の構成）、`quote_url`（Pinata の CID）で見積もりは取れた（上流 $0.001 + 手数料 $0.001、gas の上限 884）が、上記の受取先の問題で購入に進まず失効させた。資金は動いていない。
