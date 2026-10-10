@@ -518,7 +518,7 @@ Transfer／`transferChecked` の送り手・受取・額・mint を上の表の�
 - **journal**（本番ホストの `journal.ndjson` を SSH で読取のみ。seq 140〜177）: delivered の 6 件は `created → source_pending → source_settled(txRef) → destination_pending(attempt 1) → delivered(txRef)`、1 回目の #1 は `created → source_pending → source_settled(txRef) → destination_pending(attempt 1) → dest_failed(rejected, destination_rejected)`。
   Solana 宛の送信 3 件（#4 は x402、#5・#6 は MPP）は `destination_pending` の後に `destination_message_reserved` を挟む。txRef は status の projection と一致。
 - **再取得**: 保存した `paymentId`＋`ownerKey` で `subetha_router_status` を読み直すと 7 件とも purchase 時の projection と同じ（status・両レグの txRef）。`ownerKey` 無しは `found: false`（404）。
-- **Provider 側**: 各 Worker の `wrangler tail`（読取のみ）で、Router（egress `3.221.108.225`）からの 402 の読取と `payment-signature`／`Authorization` 付きの有料要求 200 を #1b・#3〜#6 で確認（#2 は tail の接続前で 402 の 2 件だけ）。
+- **Provider 側**: 各 Worker の `wrangler tail`（読取のみ）で、Router（egress `<egress IP>`）からの 402 の読取と `payment-signature`／`Authorization` 付きの有料要求 200 を #1b・#3〜#6 で確認（#2 は tail の接続前で 402 の 2 件だけ）。
 - 本文は delivered の 6 件とも契約の 6 鍵（`providerId`・`market`・`dataSource`・`payment`・`fetchedAt`・`data`）。1 回目の #1 に本文は無い（`paid_data_unavailable`）。`proof` は `upstreamReceipt: "claimed"`・`onChainFinality: "not_checked"` のまま（Router は確定を確かめない。上の finalized／`success` はこの記録のための独立の読取）。
 - **#1 の 1 回目の失敗**: 受信の Arc の settle は成立（11,000 は Router の受取先に入り、開示どおり返金しない）。送信の attempt 1 で Provider A が 2.1 秒で領収なしの応答を返し、Router は `rejected` で止めて再署名しなかった
   （`src/adapters/outbound/x402-dynamic.ts`: 領収が無く、2xx でも 5xx でもない応答は `rejected`。**実際の状態コードは記録されない**）。Router の送信の authorization はチェーンに出ていない（Provider A の残高 +0）。その 40 秒前には同じ profile の quote が 1 回 `quote_failed`（直後の再 quote は ok）。

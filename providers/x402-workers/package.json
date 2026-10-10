@@ -1,6 +1,7 @@
 {
   "name": "subetha-provider-x402-workers",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "description": "x402 v2 exact resource server for Arc testnet USDC (Circle facilitator) and Solana devnet USDC (x402.org facilitator), one Worker source, two wrangler environments",
   "type": "module",

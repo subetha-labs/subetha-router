@@ -1,6 +1,7 @@
 {
   "name": "subetha-provider-mpp-solana-workers",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "description": "MPP solana/charge (pull) resource server for Solana devnet USDC, wrapping @solana/pay-kit's server in one Cloudflare Worker (docs/provider-mpp-solana-workers.md). Tests run from the repository root's vitest (tests/wire/provider-mpp-solana-*.test.ts, tests/acceptance/provider-mpp-solana-workers.test.ts)",
   "type": "module",
