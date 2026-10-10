@@ -37,6 +37,10 @@ test.each([
   ['process.stdout.write("Approve\\nfalse\\nvalid-but-different\\n");', "bad_passphrase"],
   ['process.stdout.write("Cancel\\nfalse\\n\\n");', "cancelled"],
   ['process.stdout.write("Approve\\ntrue\\n\\n");', "timeout"],
+  // Real macOS give-up output: empty button name, gave up true, empty text.
+  ['process.stdout.write("\\ntrue\\n\\n");', "timeout"],
+  ['process.stdout.write("\\nfalse\\nsynthetic-passphrase\\n");', "malformed_response"],
+  ['process.stdout.write("Other\\ntrue\\n\\n");', "malformed_response"],
   ['process.stdout.write("x".repeat(100_000));', "helper_failed"],
   ['process.stdout.write(Buffer.from([255, 254]));', "helper_failed"],
   ['process.stdout.write("\\ufeffApprove\\nfalse\\nsynthetic-passphrase\\n");', "malformed_response"],
