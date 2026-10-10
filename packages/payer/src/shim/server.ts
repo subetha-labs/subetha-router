@@ -40,7 +40,7 @@ export function createShim(daemon: DaemonClient) {
     }
     const summary = value as Record<string, unknown>;
     // Clients may show only `content` for an error result (Claude Code did in G-A2, 2026-10-10), so an
-    // `ok: false` reply repeats its strict, body-free summary as JSON text. Success keeps the short pointer (AC-A6).
+    // `ok: false` reply repeats its strict summary (the same validated object as structuredContent) as JSON text. Success keeps the short pointer (AC-A6).
     const hint = summary["error"] === "daemon_unavailable" ? NEXT_STEPS.daemon_unavailable : summary["error"] === "transport_uncertain" ? NEXT_STEPS.unknown_inspect : undefined;
     const text = summary["ok"] === false ? `${hint ? `${hint} ` : ""}Payer summary: ${JSON.stringify(summary)}` : "Payer summary in structuredContent.";
     return { content: [{ type: "text" as const, text }], structuredContent: summary, ...(summary["ok"] === false ? { isError: true } : {}) };
