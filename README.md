@@ -11,6 +11,34 @@ caller ──(1) x402 / Base Sepolia USDC──> Router ──(2) MPP / Tempo pa
 
 The 2 legs are **independent payments, not an exchange and not a bridge**. There is no FX conversion.
 
+## For judges and reviewers: 5 minutes or 15 minutes
+
+**5 minutes, no wallet.** Register the hosted Router in Claude Code and look at what it offers:
+
+```sh
+claude mcp add --scope user --transport http subetha-router https://router.subethalabs.com/mcp
+```
+
+Ask for `subetha_router_list_routes`: ten static routes and twenty dynamic profiles, each a pair of
+"what you pay with" and "what the provider accepts" across x402 (Base Sepolia, Arc testnet, Solana
+devnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with any fresh
+`requestId`) pays nothing and shows the human-readable `subject` an agent must present before a
+purchase. Then read [`docs/public-brief-2026-10-08.md`](docs/public-brief-2026-10-08.md) (all 20
+cross-rail pairs settled on testnets, with transaction hashes) and
+[`docs/mainnet-first-route.md`](docs/mainnet-first-route.md) (one bounded mainnet purchase, 2026-10-10,
+Router run on the owner's machine). The hackathon claim/source matrix is
+[`docs/colosseum-submission.md`](docs/colosseum-submission.md) §5.
+
+**15 minutes, testnet funds (macOS 14+, Node 22).** Make one real cross-rail purchase through the
+published payer: `npm i -g @subetha/payer`, create a disposable wallet, fund it with a little Base
+Sepolia USDC from a faucet, start `subetha-payer daemon` in your own terminal, register the shim with
+`claude mcp add --scope user subetha-payer -- subetha-payer mcp`, and ask Claude Code for the ETH
+reference price while holding only Base Sepolia USDC. You approve the purchase in the daemon's native
+dialog (check your security phrase, enter your passphrase); the Router pays the MPP-only provider on
+Tempo from its own balance and the data comes back. Step-by-step:
+[`packages/payer/README.md`](packages/payer/README.md). The payer supports this one route; the hosted
+Router's other routes use the developer signing path below.
+
 ## Try it now
 
 The recommended agent payment path is the [local SubEtha Payer](packages/payer/README.md):
@@ -19,11 +47,12 @@ Claude registration → quote → native human approval → purchase → saved s
 Its first slice is **macOS 14+ / Node 22 / Base Sepolia USDC / static
 `md-mpp-eth-snapshot` only**.
 
-**Release gate: `@subetha/payer@0.1.0` is published on npm (G-A1, 2026-10-10).**
-Install it with `npm i -g @subetha/payer`. The payer README also gives an authorized
-developer's locally built tarball path. Native manual acceptance passed
-(2026-10-10); funded owner testing (G-A2) remains a separate gate; the Router results below are not
-payer acceptance results. This source repository is **private**.
+**Release gate: `@subetha/payer@0.1.2` is on npm** (0.1.0 published 2026-10-10, G-A1; a funded
+owner purchase through 0.1.0 was `delivered` the same day, G-A2; 0.1.2 was accepted by the owner
+with a cancel test, G-F — records in `docs/agent-payer-tasks.md` and
+`docs/agent-payer-followups-tasks.md`). Install it with `npm i -g @subetha/payer`. The payer README
+also gives a locally built tarball path. The Router results below are not payer acceptance results.
+This source repository is **public under the MIT license** (`LICENSE`; made public on 2026-10-10).
 
 ### Wallet-free hosted discovery
 
@@ -40,9 +69,9 @@ separate from the local payer's five tools and native confirmation flow.
 
 ### Developer-only clone and signing path
 
-Developers with access to the private repository can use the existing low-level
-signing workflow below. This is not an anonymous public trial, and its plaintext
-key handling is not the payer onboarding path. It requires a separate disposable
+Developers can clone the repository and use the existing low-level
+signing workflow below. Its plaintext key handling is a developer path, not the
+payer onboarding path. It requires a separate disposable
 wallet and explicit human approval; do not use payer secrets here.
 
 ```sh
@@ -308,4 +337,6 @@ This file is the entry point. The working records live next to it:
   copied. The PoC's results do not count as verification of this submission.
 - The official `@zerc20/sdk` and the BUSL sources are neither vendored nor redistributed.
 - `fs-ext` (MIT) is only fetched as an external dependency, and is not taken into the repository.
+- The Router and payer code in this repository is licensed under the MIT license ([`LICENSE`](LICENSE)).
+  Dependencies keep their own licenses.
 

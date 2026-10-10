@@ -3,10 +3,11 @@
 A local wallet and payer daemon for an agent using the SubEtha Router. Your key
 stays on your machine; the human confirms each purchase in the daemon's dialog.
 
-**Release gate: published (G-A1, 2026-10-10).** `@subetha/payer@0.1.0` is on npm;
-the source repository stays private. The funded owner flow (G-A2) is a separate
-gate; these instructions are not evidence that it passed or permission for an
-agent to perform it.
+**Release gate: published (G-A1, 2026-10-10).** `@subetha/payer@0.1.2` is on npm
+(0.1.0 first, then 0.1.2 the same day, F-b/G-F). The funded owner flow (G-A2) passed on
+2026-10-10 with 0.1.0 (`docs/agent-payer-tasks.md`); these instructions are not
+themselves evidence of that result or permission for an agent to perform it. The
+source repository is public under the MIT license.
 
 The first slice targets **macOS 14+, Node 22**, testnets only, paying **Base Sepolia
 USDC** over x402 for the static `md-mpp-eth-snapshot` route. It does not expose the
@@ -21,7 +22,7 @@ Install the published version (the registry honours the bundled shrinkwrap):
 npm i -g @subetha/payer
 ```
 
-Developers with authorized access to an already provisioned private checkout can
+Developers working from a checkout of the repository can
 instead build and install a local tarball. From the repository root, with the
 locked build dependencies already installed:
 
@@ -33,7 +34,7 @@ npm pack --ignore-scripts
 prefix="$(npm prefix -g)"
 dest="$prefix/lib/node_modules/@subetha/payer"
 mkdir -p "$dest" "$prefix/bin"
-tar -xzf subetha-payer-0.1.0.tgz -C "$dest" --strip-components=1
+tar -xzf subetha-payer-0.1.2.tgz -C "$dest" --strip-components=1
 npm ci --prefix "$dest" --omit=dev
 ln -sf ../lib/node_modules/@subetha/payer/bin/subetha-payer "$prefix/bin/subetha-payer"
 ```
@@ -265,7 +266,7 @@ Mutable key buffers are cleared on lock/exit, but JavaScript strings, OS copies,
 swap, core dumps and crash reports can retain material. macOS defaults are not
 changed by this package. Keep the terminal's Node and helper installation trusted.
 There is no unattended purchase, envelope delegation, mainnet, dynamic-route or
-other-rail support in this slice. The native manual confirmation checks passed
-and npm publication (G-A1) is done, both on 2026-10-10. Real signature wiring and
-funded end-to-end acceptance (G-A2) remain separate owner gates; these onboarding
-instructions do not claim those results.
+other-rail support in this slice. The native manual confirmation checks,
+npm publication (G-A1) and the funded end-to-end acceptance (G-A2, 0.1.0) passed on
+2026-10-10; 0.1.2 was accepted by the owner with a cancel test (G-F). These
+onboarding instructions are not themselves evidence of those results.

@@ -16,8 +16,8 @@ Each phase: minimal artifact, independent review, parent readback. No repeated w
 
 ## Using the local payer (first slice)
 
-See [the payer onboarding guide](packages/payer/README.md). `@subetha/payer@0.1.0` is
-published on npm (G-A1, 2026-10-10): `npm i -g @subetha/payer`. Authorized
+See [the payer onboarding guide](packages/payer/README.md). `@subetha/payer@0.1.2` is
+published on npm (0.1.0 and 0.1.2 on 2026-10-10): `npm i -g @subetha/payer`. Authorized
 developers can also install a locally built tarball. This is macOS 14+ / Node 22,
 Base Sepolia USDC, static `md-mpp-eth-snapshot` only; it is not the hosted Router's
 full rail/profile interface.
