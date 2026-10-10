@@ -626,6 +626,8 @@ rollback は `subetha-router-prev-20261008T195406Z`（`b-d162524`）。コンテ
 
 **G-A2（2026-10-10）**: 公開版の payer から hosted Router（`b-3b60355`）へ実購入 1 件（`delivered`、Base Sepolia と Tempo の両レグとも receipt `status: 1` で finalized）、Cancel 2 件（署名なし・資金移動なし）。途中で見つかった shim の表示の不具合を 0.1.1 で修正・公開。詳細・事故（合言葉と passphrase の同一）・後続の修正は `docs/agent-payer-tasks.md` の G-A2 の記録。
 
+**F-c の配備（2026-10-10 05:20Z。owner の決定「解決してしまいたいので、2で進めましょう」= 手元の Colima を作り直して build・配備）**: 手元の Colima は VM のディスクの I/O エラー（host の空きが 99% 使用）で壊れていたため、owner の同意で VM を削除して同じ設定（4 CPU・8 GiB・40 GiB・vz・virtiofs・docker）で作り直した（9 月の復旧用の控え `recovery-run312-20260917` は残した）。main `a89a979`（PR #152 = 静的 route の宛先の桁を本番の読み込みの経路で埋める）のイメージ `b-a89a979` を手元で `linux/arm64` に build し、host で load して layer の一致を確認、`swap-image.sh` で入れ替え: exit 0、journal の接頭辞は不変、egress ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行、healthy。rollback は `subetha-router-prev-20261010T052006Z`（`b-3b60355`）。それより古い停止中の rollback 2 つは既定の規則で削除。公開の `subetha_router_quote`（`md-mpp-eth-snapshot`、購入なし）の `quote.destination.decimals` が `6`。承認対象の `subject` の形は不変（0.1.x の payer と互換）。
+
 ## 3. 動作確認
 
 ```sh

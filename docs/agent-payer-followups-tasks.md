@@ -34,6 +34,7 @@
 - **試験**: 本番の起動経路（`loadConfig` の real モード + `KNOWN_NETWORKS` + 本番の構成ファイル）で `md-mpp-eth-snapshot` の宛先に `decimals: 6`、公開の quote の射影に出る。既存のエラーの文言と順序が変わらない（既存の試験）。
 - **sabotage**: `withDestinationDecimals` の呼び出しを外す。
 - **配備**: owner の確認で image の入れ替え（`docs/DEPLOY.md` の手順）。配備後に公開の `subetha_router_quote` で読む（読取だけ）。payer 0.1.2 の表示は配備の前後で同じ。
+- **記録（2026-10-10）**: PR #152 を merge、`b-a89a979` を 05:20Z に配備（`docs/DEPLOY.md` §2f）。公開の quote の `destination.decimals` が `6`。
 
 ## G-F — owner の受け入れ（AC-F6）
 
