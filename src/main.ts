@@ -928,7 +928,6 @@ export function composeRails(
 
   // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。
   startupChecks.push(...svmStartups);
-
   return {
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
     inbound: inboundByRoute(config.router.routes, inboundRails, profiles),

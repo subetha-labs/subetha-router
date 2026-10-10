@@ -44,6 +44,12 @@ describe("classifyEvmOffer: x402 の EVM だけ", () => {
     expect(classifyEvmOffer(arc, NOW)).toEqual(classifyOffer(arc, NOW));
   });
 
+  test("Base mainnet の x402（docs/mainnet-first-route.md）: domain は USD Coin/2（CoinGecko の 402 と同じ）。testnet の USDC/2 では拒む", () => {
+    const main = evm({ network: "eip155:8453", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }, { name: "USD Coin" });
+    expect(classifyEvmOffer(main, NOW)).toMatchObject({ kind: "x402-evm", chainId: 8453, domain: { name: "USD Coin", version: "2" } });
+    expect(classifyEvmOffer(evm({ network: "eip155:8453", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }), NOW)).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/EIP-712 domain does not match/) });
+  });
+
   test("上限は 20,000（ちょうどは通る、20,001 は拒む）", () => {
     expect(SIGN_MAX_AMOUNT).toBe(20_000n);
     expect(classifyEvmOffer(evm({ amount: "20000" }), NOW).kind).toBe("x402-evm");

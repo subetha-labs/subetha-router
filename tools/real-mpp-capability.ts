@@ -16,6 +16,7 @@
  * 秘密鍵は引数で受け取り、ログ・エラー・戻り値に出さない。
  */
 
+import { tempo as tempoMainnet } from "viem/tempo/chains";
 import { createWalletClient, http, publicActions, type Client } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -31,6 +32,12 @@ export interface RealMppCapability {
   capability(): MppTempoCapability;
 }
 
+/** chain ごとの公開 RPC の既定（mainnet は viem の `tempo` の定義から。`docs/mainnet-first-route.md` FR-M3）。 */
+export function defaultTempoRpcUrl(chainId: number): string {
+  if (chainId === tempoMainnet.id) return tempoMainnet.rpcUrls.default.http[0]!;
+  return TEMPO_MODERATO_RPC;
+}
+
 export function createRealMppCapability(
   privateKey: string,
   options: { readonly rpcUrl?: string; readonly chainId?: number } = {},
@@ -41,7 +48,7 @@ export function createRealMppCapability(
   }
   const account = privateKeyToAccount(privateKey as `0x${string}`);
   const chainId = options.chainId ?? TEMPO_MODERATO_CHAIN_ID;
-  const rpcUrl = options.rpcUrl ?? TEMPO_MODERATO_RPC;
+  const rpcUrl = options.rpcUrl ?? defaultTempoRpcUrl(chainId);
   let clients = 0;
 
   return {

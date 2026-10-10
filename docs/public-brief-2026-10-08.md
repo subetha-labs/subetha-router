@@ -69,6 +69,13 @@ The caller names a public `https` URL of a third-party x402 or MPP provider whos
 - Hosted as an MCP server over HTTPS, usable from Claude Code or any MCP client.
 - Safety properties that were designed and reviewed: explicit human approval before any payment, idempotent quotes per request id, fingerprinted quotes (the Router refuses if the provider's terms change), SSRF defences (application guard plus host egress control), per-purchase and cumulative budgets, no retries that could double-pay.
 
+### 3.1 One mainnet purchase (2026-10-10, owner-only, not on the hosted Router)
+
+- An agent holding **Tempo mainnet USDC.e** paid over **MPP** and received data from `crypto.apitoll.cloud/v1/crypto/price`, a third-party API that accepts **only x402** (Base mainnet USDC / Solana). The Router paid the provider over x402 on Base mainnet with its own key. Both legs are on chain: inbound Tempo `0x4ea7d6c2…a0b8` (2,000 base units = 0.002 USDC.e: provider price 0.001 + Router fee 0.001), outbound Base `0x699cd8f2…e71a` (1,000 base units = 0.001 USDC, settled by the provider's facilitator). The delivered body was a JSON object with BTC/ETH/SOL prices. Record: `docs/mainnet-first-route.md` §3.
+- Scope of that claim: the same Router code, run on the owner's machine bound to loopback with a mainnet-only configuration, owner-funded disposable wallets on both sides, a $0.06 budget cap, one dynamic profile, stopped afterwards. The hosted Router stayed testnet-only and unchanged. The mainnet prerequisites in `docs/dynamic-upstream-requirements.md` §7 (refund policy, asset pairing, compliance) remain open; this was a bounded exception, not a launch.
+- A first attempt the same day failed before settlement (`invalid_payment_header`) because the operator's script passed the MPP credential without the Router's envelope; the caller's 0.002 USDC.e (2,000 base units) went to the owner's own receiving wallet and nothing was paid to the provider. The second attempt delivered.
+- Two providers were tried first and refused by the Router's own safety checks, not by the providers: Pinata (MPP-only) rotates its recipient address on every challenge, which the pre-settlement re-read treats as a changed offer; CoinGecko's x402 `resource.url` omits the query string, which fails the exact resource binding. Neither check was relaxed.
+
 ## 4. Caveats to state alongside
 
 - Testnets only; proof of concept; the operator can switch any rail off with one constant (clients must trust the live listing).
@@ -99,6 +106,7 @@ Longer (three sentences for a site section):
 | 2026-10-07 | Inbound Arc testnet USDC and Solana devnet USDC (x402) enabled |
 | 2026-10-08 | Outbound Arc and Solana (x402) enabled (G-4′); MPP on Solana enabled inbound and outbound (G-4″); the shared-bucket cap fix (PR #116); production image `b-3606fb6` |
 | 2026-10-08 (17:41–17:52Z) | The remaining six dynamic pairs purchased end to end on the hosted Router (G-5); every offered pair now settled on testnets; one first attempt ended paid-no-data and was retried |
+| 2026-10-10 (08:05Z) | First mainnet purchase: Tempo mainnet USDC.e over MPP → Router (owner's machine, loopback) → x402 on Base mainnet to a third-party x402-only API; delivered, both legs on chain (`docs/mainnet-first-route.md`) |
 | 2026-10-08 (18:40–18:54Z) | Arc x402 ↔ Solana x402 added as dynamic profiles (D-17; G-2⁗ deploy, G-3⁗ acceptance purchases, G-4⁗ enable, image `b-d162524`); both purchased on the hosted Router; all 20 cross-rail pairs offered and settled |
 
 ## 7. Evidence pointers (repository)

@@ -225,7 +225,7 @@ adapter's offer.
 - finality (the mined/canonical determination)
 - **Real UI integration** with the existing chat (integration with the execution layer is confirmed. T5)
 
-Payments are **testnet only**. The market data reads mainnet reference values, but **these are not
+Payments on the hosted Router are **testnet only**. One owner-run mainnet purchase (Tempo mainnet USDC.e over MPP → an x402-only API on Base mainnet, 2026-10-10) was made with the same code bound to loopback; see `docs/mainnet-first-route.md`. The market data reads mainnet reference values, but **these are not
 tradable quotes**. Providers A/B are **hosted by us**, and this is not a claim that Hyperliquid or
 Uniswap support these payment methods.
 

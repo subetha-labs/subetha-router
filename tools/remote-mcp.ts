@@ -26,7 +26,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpIngress } from "../src/mcp/ingress.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
-import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation } from "./remote-mcp-config.js";
+import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf } from "./rails-entry.js";
 
 function note(message: string): void {
@@ -59,6 +59,11 @@ export interface HostOptions {
   readonly port: number;
   /** journal の固定パス（受け入れ用の起動は公開のものと別にする）。 */
   readonly journalPath: string;
+  /**
+   * mainnet の最初の 1 経路（`docs/mainnet-first-route.md`）: owner の Mac で loopback 限定で起動する mainnet 専用の生成。
+   * 指定すると公開の生成は使わず `mainnetFirstRouteConfigOf` の設定と mainnet 用の env になる。公開の入口は渡さない。
+   */
+  readonly mainnetFirstRoute?: true;
 }
 
 /** 起動の計画（純粋。process に触らない）: Router に渡す設定と、子プロセスの env（`ROUTER_CONFIG_PATH` は起動側が足す）。 */
@@ -90,6 +95,36 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
   // 送信レグ（Provider への支払い）は運営の資金。受信レグの鍵はここには無い。
   const outboundKey = required(env, "SUBETHA_OUTBOUND_PRIVATE_KEY");
   const receiver = required(env, "SUBETHA_ROUTER_RECEIVER");
+  if (options.mainnetFirstRoute !== undefined) {
+    if (options.bind !== "127.0.0.1") throw new HostPlanError("config");
+    // MPP 受信（Tempo mainnet）には challenge の HMAC の秘密が要る（公開の起動と同じ env）。
+    const mainnetSecret = env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
+    if (mainnetSecret === "") throw new HostPlanError("env");
+    let config: Record<string, unknown>;
+    try {
+      config = mainnetFirstRouteConfigOf(env, receiver);
+    } catch {
+      throw new HostPlanError("config");
+    }
+    const mainnetRpc = env["SUBETHA_TEMPO_MAINNET_RPC_URL"] === undefined || env["SUBETHA_TEMPO_MAINNET_RPC_URL"] === "" ? MAINNET_FIRST_ROUTE.tempoRpcUrl : env["SUBETHA_TEMPO_MAINNET_RPC_URL"];
+    const childEnv: Record<string, string> = {
+      // x402 送信（Base mainnet）の鍵だけ。MPP 送信は無いので `SUBETHA_OUTBOUND_MPP_KEY` は渡さない。
+      SUBETHA_OUTBOUND_X402_KEY: env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey,
+      SUBETHA_X402_OUTBOUND_NETWORK: MAINNET_FIRST_ROUTE.outbound.network,
+      ROUTER_JOURNAL_PATH: options.journalPath,
+      ROUTER_HTTP_PORT: "0",
+      ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
+      ROUTER_PRINCIPAL_TOKENS: "judge:public",
+      ROUTER_ADAPTER_MODE: "real",
+      ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
+      // MPP 受信（Tempo mainnet）: 秘密、照合の RPC、offer の有効期間。
+      ROUTER_MPP_INBOUND_SECRET: mainnetSecret,
+      ROUTER_MPP_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
+      ROUTER_MPP_INBOUND_RPC_URL: mainnetRpc,
+      ...railsChildEnvOf(RAILS_NONE, env),
+    };
+    return { config, childEnv, journalPath: options.journalPath };
+  }
   let rails;
   try {
     rails = railsOptionsOf(options.activation, env);
@@ -276,6 +311,17 @@ export async function startHost(options: HostOptions): Promise<RunningHost> {
 
 /** 公開の入口: 多レールは定数 `RAILS_ACTIVATION`（G-4 で両方 true）、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */
 async function start(): Promise<void> {
+  // mainnet の最初の 1 経路（`docs/mainnet-first-route.md`）: env に CID があれば loopback 限定・mainnet 専用で起動する。公開の起動とは排他。
+  if (process.env["SUBETHA_MAINNET_FIRST_ROUTE"] === "1") {
+    await startHost({
+      activation: RAILS_NONE,
+      bind: "127.0.0.1",
+      port: Number(process.env["PORT"] ?? "8787"),
+      journalPath: process.env["SUBETHA_MAINNET_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "mainnet-first-route.ndjson"),
+      mainnetFirstRoute: true,
+    });
+    return;
+  }
   await startHost({
     activation: RAILS_ACTIVATION,
     bind: "0.0.0.0",
