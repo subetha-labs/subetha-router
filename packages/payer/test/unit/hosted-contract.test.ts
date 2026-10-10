@@ -59,7 +59,12 @@ test("actual hostPlan → quoteBody → client → MCP subject accepts HTTPS tra
   expect(r.resource).toEqual({ url: HOSTED_RESOURCE_URL, method: "GET" });
   expect(new URL(r.routerUrl).origin).not.toBe(new URL(r.resource.url).origin);
   expect(Object.isFrozen(r.resource)).toBe(true);
-  expect(render(r)).toContain("decimals not supplied");
+  // FR-F4: the producer still omits destination decimals (until the Router fix is deployed); new records carry pathUSD's 6.
+  expect(r.destination.decimals).toBe(6);
+  expect(render(r)).toContain("Destination amount: 10000 base units (decimals 6)");
+  // Legacy 0.1.0/0.1.1 records without destination decimals keep their display.
+  const { decimals: _legacy, ...legacyDestination } = r.destination;
+  expect(render({ ...r, destination: legacyDestination })).toContain("decimals not supplied");
   expect(recordHash({ ...r, resource: { ...r.resource, url: `https://hostile.invalid${new URL(r.resource.url).pathname}` } })).not.toBe(recordHash(r));
 });
 
@@ -116,7 +121,8 @@ test("real producer quote reaches durable core purchase with omitted optional de
       purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: async () => true, confirm }, signer: { sign } },
       router: { quote: async () => response, purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
     const q: any = await core.quote(); expect(q.ok).toBe(true);
-    expect(q.subject.reaches.decimals).toBeUndefined();
+    expect(response.quote.destination.decimals).toBeUndefined();
+    expect(q.subject.reaches.decimals).toBe(6);
     const result = await core.purchase(q.ref); expect(result).toMatchObject({ state: "result", outcome: "delivered" });
     expect(await core.purchase(q.ref)).toEqual(result);
     expect(ledger.rows.map(row => row.state)).toEqual(["quoted", "approved", "sign_intent", "signed", "submit_intent", "submitted", "result"]);

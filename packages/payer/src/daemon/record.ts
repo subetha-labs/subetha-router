@@ -3,10 +3,16 @@ import { z } from "zod";
 import { PurchaseRef, SubjectSummary } from "../protocol/summary.js";
 import { canonicalJson, isPlainJson, type JsonValue } from "../store/ledger.js";
 import { StoreError } from "../store/fs.js";
-import { routerIdentity, ROUTE_BINDING, type ResourceIdentity } from "../router/identity.js";
+import { RESOURCE_PATH, routerIdentity, ROUTE_BINDING, type ResourceIdentity } from "../router/identity.js";
 import { STATIC_ROUTE } from "../router/client.js";
 import { classifyEvmOffer } from "../vendor/sign-classify-evm.js";
 
+/**
+ * The only destination this payer accepts is pathUSD on Tempo testnet (`eip155:42431`, schema below), which has 6 decimals.
+ * The hosted static quote may omit `decimals` (follow-up FR-F4); new records carry this value. A Router value other than 6 is
+ * still refused by the schema (`quote_inconsistent`). Records written by 0.1.0/0.1.1 keep their shape.
+ */
+export const PATHUSD_DECIMALS = 6;
 const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 const amount = z.string().regex(/^[1-9][0-9]{0,29}$/);
 const nonce = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
@@ -72,7 +78,7 @@ export function buildRecord(response: unknown, identity: RecordIdentity, now = D
     return frozenCopy({ routerUrl: trusted.routerUrl, resource: trusted.resource, wallet: { rail: "x402", network: "eip155:84532", address: address.parse(identity.address) },
       ref: PurchaseRef.parse(identity.ref), requestId: z.string().uuid().parse(identity.requestId), paymentId: q.paymentId, quoteId: q.quoteId, routeId: q.routeId,
       source: { ...source, scheme: o.scheme, challengeNonce: o.extra.challengeNonce, routeBinding: o.extra.routeBinding, fundsMoveOnCredential: false },
-      destination: d, approvalDeadlineMs: a.deadlineMs });
+      destination: { ...d, decimals: d.decimals ?? PATHUSD_DECIMALS }, approvalDeadlineMs: a.deadlineMs });
   } catch { throw new StoreError("quote_inconsistent"); }
 }
 export function assertApproval(r: ApprovalRecord, offer: unknown, approvedHash: string, locked: boolean, now = Date.now()): void {
@@ -94,7 +100,7 @@ export function sanitize(text: string): string { return text.replace(/[^\S\n]|[\
 export function render(r: ApprovalRecord): string {
   const s = r.source; const d = r.destination;
   return [
-    `Router: ${sanitize(r.routerUrl)}`, `Resource: ${r.resource.method} ${sanitize(r.resource.url)}`, `Wallet: ${sanitize(r.wallet.address)}`, `Route: ${sanitize(r.routeId)}`,
+    `Router: ${sanitize(r.routerUrl)}`, `Resource: ${r.resource.method} ${RESOURCE_PATH} (Router-internal, fixed by this payer)`, `Wallet: ${sanitize(r.wallet.address)}`, `Route: ${sanitize(r.routeId)}`,
     `Pay: ${sanitize(s.amount)} base units (decimals ${s.decimals}) ${sanitize(s.asset)} on ${sanitize(s.network)}`,
     `Recipient: ${sanitize(s.payTo)}`, `Destination (operator fixed): ${sanitize(d.rail)} ${sanitize(d.network)} ${sanitize(d.asset)}`,
     `Destination amount: ${sanitize(d.quoted)} base units (decimals ${d.decimals ?? "not supplied"}); recipient: ${sanitize(d.payTo)}`,
