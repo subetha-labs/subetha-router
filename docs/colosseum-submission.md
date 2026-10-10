@@ -18,21 +18,21 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (281 spoken words in the quoted paragraphs: 2:10 at 130 wpm, 1:52 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
+## 2. Pitch video script (274 spoken words in the quoted paragraphs: 2:06 at 130 wpm, 1:50 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; Codex round 4 suggests a planning budget of 220–230 words for an unrehearsed non-native read at 120 wpm; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
 
 **[0:00–0:15] Who I am.**
 "I'm Fujita, solo builder of SubEtha, after years building chains and cross-chain protocols. The problem I keep hitting: an agent finds the right paid API and still cannot pay, because the two sides speak different payment protocols."
 
 **[0:15–0:39] The gap.**
-"x402 passed 100 million transactions on Base in the first quarter of 2026; by August Solana carried about 70 percent of monthly x402 volume. MPP, Stripe's protocol on Tempo, launched in March, and 118 of the 129 services in its directory advertise MPP as their only payment interface. Pick one rail, and the other side cannot see you."
+"x402 passed 100 million transactions on Base by the first quarter of 2026; by August Solana carried about 70 percent of monthly x402 volume. MPP, Stripe's protocol on Tempo, launched in March, and 118 of the 129 services in its directory advertise MPP as their only payment interface. Pick one rail, and the other side cannot see you."
 
 **[0:39–1:14] What I'm building.**
 "SubEtha Router is the bridge, a hosted MCP server. The agent pays the Router on its rail; the Router pays the provider on the provider's rail from its own balance. Two independent payments, no swap, no key custody, and with the local payer a human approves every purchase in a native dialog. On testnets all 20 cross-rail pairs settle end to end. On October 10th I made the first mainnet purchase: an MPP wallet on Tempo bought from an API that accepts only x402 on Base."
 
-**[1:14–1:34] Why me, and how I work.**
-"I have built both sides of this gap, chains and the protocols between them, and I ship alone with a method: requirements, design, tasks, independent model review and a test that proves it, for every feature, all in the public repository. Dogfooding and those reviews found fourteen agent-side issues."
+**[1:14–1:31] Why me, and how I work.**
+"I have built chains and cross-chain protocols, and I ship alone with a method: requirements, design, tasks, independent model review and a test that proves it, for every feature, all in the public repository. Dogfooding and those reviews found fourteen agent-side issues."
 
-**[1:34–1:55] Business and ask.**
+**[1:31–1:52] Business and ask.**
 "Providers gain reach: an MPP-only provider on Tempo becomes payable from the x402 side, and the Router earns a routing fee on every dynamic purchase. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail. Thank you."
 
 Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, so the script stays true, only unqualified (checked by the Codex review of 2026-10-10, round 3; the 2-minute cut is round 4). The 3-minute draft is in this file's history (commit 87b1185).
@@ -122,22 +122,22 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 
 ### A.2 ピッチ動画スクリプト（§2 の訳）
 
-見出しの注記: 引用段落の話し言葉は 281 語。130 wpm で 2:10、150 wpm で 1:52。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。フォームの上限は 2 分なので、オーナーは収録前に一度通し読みして時間を計り、実測が 1:55 以下になるまで削ること。フォームは自己紹介、何を作っているか、なぜ自分たちがそれを作るべき人なのかを求めており、「凝ったものは不要」としている。
+見出しの注記: 引用段落の話し言葉は 274 語。130 wpm で 2:06、150 wpm で 1:50。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。フォームの上限は 2 分なので、オーナーは収録前に一度通し読みして時間を計り、実測が 1:55 以下になるまで削ること。Codex 第 4 回は、リハーサルなしの非ネイティブの読みを 120 wpm と見て、220〜230 語を計画上の目安として提案している。フォームは自己紹介、何を作っているか、なぜ自分たちがそれを作るべき人なのかを求めており、「凝ったものは不要」としている。
 
 **[0:00–0:15] 自己紹介。**
 「私は Fujita、SubEtha を一人で作っています。チェーンとクロスチェーンのプロトコルを何年も作ってきました。繰り返しぶつかる問題はこれです。エージェントが必要な有料 API を見つけても、支払えない。両者が話す決済プロトコルが違うからです。」
 
 **[0:15–0:39] ギャップ。**
-「x402 は 2026 年第 1 四半期に Base 上で 1 億トランザクションを超えました。8 月の時点では、月間 x402 取引量の約 70 パーセントを Solana が占めていました。Stripe のプロトコルである MPP は 3 月に Tempo 上でローンチし、そのディレクトリの 129 サービス中 118 が MPP を唯一の決済インターフェースとして掲げています。どちらか一方のレールを選ぶと、もう一方の側からはあなたが見えません。」
+「x402 は 2026 年第 1 四半期までに Base 上で 1 億トランザクションを超えました。8 月の時点では、月間 x402 取引量の約 70 パーセントを Solana が占めていました。Stripe のプロトコルである MPP は 3 月に Tempo 上でローンチし、そのディレクトリの 129 サービス中 118 が MPP を唯一の決済インターフェースとして掲げています。どちらか一方のレールを選ぶと、もう一方の側からはあなたが見えません。」
 
 **[0:39–1:14] 何を作っているか。**
 「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払います。二つの独立した支払い、スワップなし、鍵の預かりなし。ローカル payer を使えば、人間がすべての購入をネイティブダイアログで承認します。テストネットでは、クロスレール 20 ペアすべてがエンドツーエンドに決済されています。10 月 10 日、初のメインネット購入を行いました。Tempo 上の MPP ウォレットで、Base 上の x402 しか受け付けない API から購入したのです。」
 
-**[1:14–1:34] なぜ私か、そしてどう仕事をするか。**
-「私はこのギャップの両側、つまりチェーンとその間のプロトコルを作ってきました。そして一人で、方法論をもって出荷しています。要件、設計、タスク化、独立したモデルによるレビュー、そしてそれを証明するテスト。これをすべての機能について行い、すべて公開リポジトリにあります。ドッグフーディングとそのレビューでエージェント側の問題を 14 件見つけました。」
+**[1:14–1:31] なぜ私か、そしてどう仕事をするか。**
+「私はチェーンとクロスチェーンのプロトコルを作ってきました。そして一人で、方法論をもって出荷しています。要件、設計、タスク化、独立したモデルによるレビュー、そしてそれを証明するテスト。これをすべての機能について行い、すべて公開リポジトリにあります。ドッグフーディングとそのレビューでエージェント側の問題を 14 件見つけました。」
 
-**[1:34–1:55] ビジネスとお願い。**
-「プロバイダーはリーチを得ます。Tempo 上の MPP 専用プロバイダーが x402 側から支払えるようになり、Router は動的な購入ごとにルーティング手数料を得ます。Juniper はエージェント型コマースが 2030 年までに 1.5 兆ドルに達すると予測しています。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。ありがとうございました。」
+**[1:31–1:52] ビジネスとお願い。**
+「プロバイダーはリーチを得ます。Tempo 上の MPP 専用プロバイダーが x402 側から支払いを受けられるようになり、Router は動的な購入ごとにルーティング手数料を得ます。Juniper はエージェント型コマースが 2030 年までに 1.5 兆ドルに達すると予測しています。私が必要としているのは、もう一方のレールの買い手を求める最初の 50 のプロバイダーです。ありがとうございました。」
 
 ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけである（2026-10-10 の Codex レビュー第 3 回で確認。2 分版は第 4 回）。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
