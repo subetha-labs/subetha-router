@@ -19,6 +19,8 @@ export interface CliDeps {
   installRoot?: string;
   randomKey?: () => Buffer;
   balance?: (rpc: string, address: string) => Promise<string>;
+  /** Owned crash fixtures only (install accept); bin.ts never supplies it. */
+  faults?: { hit(point: string): Promise<void> };
   uiCheck?: (verify: (pass: string) => boolean) => { available(): Promise<boolean>; check(text: string): Promise<unknown> };
 }
 export function resources(deps: CliDeps) {
@@ -49,7 +51,7 @@ export async function daemonRead(deps: CliDeps, method: "wallet" | "inspect", pa
   const client = deps.client?.() ?? createDaemonClient({ HOME: r.env.HOME, XDG_CONFIG_HOME: r.env.XDG_CONFIG_HOME });
   try { return await client.request(method, params); } finally { await client.close(); }
 }
-const SAFE_CODES = new Set([...KNOWN_CODES, "invalid_arguments", "path_invalid", "path_unreadable", "home_unavailable", "wallet_invalid", "wallet_missing", "wallet_exists", "passphrase_invalid", "passphrase_mismatch", "tty_cancelled", "config_invalid", "lock_unreadable", "lock_failed", "reclaim_busy", "socket_reclaim_refused", "operator_cancelled", "reason_invalid", "rpc_failed", "install_unreadable", "install_seal_corrupt"]);
+const SAFE_CODES = new Set([...KNOWN_CODES, "invalid_arguments", "path_invalid", "path_unreadable", "home_unavailable", "wallet_invalid", "wallet_missing", "wallet_exists", "passphrase_invalid", "passphrase_mismatch", "tty_cancelled", "config_invalid", "lock_unreadable", "lock_failed", "reclaim_busy", "socket_reclaim_refused", "operator_cancelled", "reason_invalid", "rpc_failed", "install_unreadable", "install_seal_corrupt", "install_seal_missing"]);
 export async function cliRun(action: () => Promise<void>): Promise<number> {
   try { await action(); return 0; }
   catch (error) {

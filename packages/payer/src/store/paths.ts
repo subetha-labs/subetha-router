@@ -11,7 +11,7 @@ import path from "node:path";
 
 import { StoreError, type StoreFs } from "./fs.js";
 
-export const STORE_FILES = Object.freeze({ keys: "keys.json", ledger: "ledger.ndjson", installSeal: "install.seal", config: "config.json", lock: "daemon.lock", socket: "daemon.sock" });
+export const STORE_FILES = Object.freeze({ keys: "keys.json", ledger: "ledger.ndjson", installSeal: "install.seal", installSealPrev: "install.seal.prev", config: "config.json", lock: "daemon.lock", socket: "daemon.sock" });
 
 export interface PathsEnv {
   readonly XDG_CONFIG_HOME?: string | undefined;

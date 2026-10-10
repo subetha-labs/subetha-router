@@ -17,6 +17,7 @@ const USAGE = [
   "  daemon                       run the payer in this terminal (asks for the passphrase and the security phrase here)",
   "  mcp                          stdio MCP shim for an agent (no key, no UI; talks to the daemon)",
   "  status [ref] | inspect <ref> [--close] | config get|set | lock reclaim | ui-check",
+  "  install accept               after a verified upgrade only: seal the new installation (human, in this terminal)",
 ].join("\n");
 
 /** 起動の不変条件: inspector の signal 経路が閉じていること（launcher 以外からの起動は拒む）。 */
@@ -41,6 +42,7 @@ export async function main(argv: readonly string[], execArgv: readonly string[] 
     case "inspect": return (await import("./cli/inspect.js")).runInspect(argv.slice(1));
     case "config": return (await import("./cli/config.js")).runConfig(argv.slice(1));
     case "lock": return (await import("./cli/lock.js")).runLock(argv.slice(1));
+    case "install": return (await import("./cli/install.js")).runInstall(argv.slice(1));
     case "ui-check": return (await import("./cli/ui-check.js")).runUiCheck(argv.slice(1));
     default:
       process.stderr.write(`${USAGE}\n`);

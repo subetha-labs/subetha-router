@@ -190,6 +190,66 @@ owner identity and retained evidence offline before any recovery. There is no
 automatic guard deletion and no blanket removal command. Do not repeatedly run
 reclaim against the guard. Never remove the controller's stable `worker.lock`.
 
+## Upgrading
+
+The daemon seals the files of the installation it first ran with. After an
+upgrade it refuses to start with `startup_refused: install_changed` and a list
+of changed files. That refusal is correct: accept the new installation only after
+you verify it yourself. **Agents must not run or suggest `install accept`.** A
+terminal (TTY) is not proof that a human is typing, since an agent can create
+one; the guard is your wallet passphrase.
+
+1. Stop the daemon (Ctrl-C in its terminal).
+2. Remove the old installation completely, so no modified dependency is reused,
+   and check that it is gone:
+
+   ```sh
+   npm uninstall -g @subetha/payer
+   ls "$(npm root -g)/@subetha/payer"
+   ```
+
+   The `ls` must report that the directory does not exist.
+3. Install the new version from the registry and check that the registry
+   honours the bundled lockfile (it must print `true`):
+
+   ```sh
+   npm i -g @subetha/payer@<version>
+   npm view @subetha/payer@<version> _hasShrinkwrap
+   ```
+
+4. Compare the installed package with the registry tarball:
+
+   ```sh
+   cd "$(mktemp -d)"
+   packed="$(npm pack --json @subetha/payer@<version> | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8"))[0].integrity')"
+   test "$packed" = "$(npm view @subetha/payer@<version> dist.integrity)" && echo integrity-ok
+   mkdir x && tar -xzf subetha-payer-<version>.tgz -C x --strip-components=1
+   installed="$(npm root -g)/@subetha/payer"
+   diff -r x/dist "$installed/dist" && diff -r x/bin "$installed/bin" && cmp x/package.json "$installed/package.json" && cmp x/npm-shrinkwrap.json "$installed/npm-shrinkwrap.json"
+   ```
+
+   It must print `integrity-ok` (the full integrity of the downloaded tarball equals
+   the registry's), and every `diff`/`cmp` must be silent.
+5. Seal the verified installation, then start the daemon again:
+
+   ```sh
+   subetha-payer install accept
+   subetha-payer daemon
+   ```
+
+   `install accept` asks for your wallet passphrase, lists the added, removed and
+   changed files with the installed version, and seals only after you type
+   `ACCEPT`. It keeps the previous seal as `install.seal.prev` in the store. If
+   you did not upgrade, do not run it: stop and assess.
+
+If `install accept` is interrupted (for example by a crash), the seal is left
+either old or new, never corrupt. The interrupted process may leave its lock;
+the next run reports `daemon_lock_stale`, and you reclaim it yourself with
+`subetha-payer lock reclaim` before running `install accept` again.
+
+These steps do not detect or prevent same-user tampering after the clean install
+(see below); they only let you accept an upgrade you verified.
+
 ## Limits of this trust model
 
 The approval guarantee is conditional on the installation, dependencies, Node
