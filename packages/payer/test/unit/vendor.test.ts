@@ -40,10 +40,11 @@ describe("P-2: vendor and dependency boundary", () => {
     for (const source of sources) expect(readFileSync(path.join(vendor, path.basename(source))).equals(expected(source)), source).toBe(true);
   });
 
-  test("package stays private, with pinned viem and no second-slice or zERC20 dependencies in manifest or lock", () => {
+  test("package is publishable (G-A1), with pinned viem and no second-slice or zERC20 dependencies in manifest or lock", () => {
     const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
     const lock = JSON.parse(readFileSync(path.join(root, "npm-shrinkwrap.json"), "utf8"));
-    expect(pkg.private).toBe(true);
+    expect(pkg.private).toBeUndefined();
+    expect(pkg.publishConfig).toEqual({ access: "public" });
     expect(pkg.dependencies.viem).toBe("2.54.2");
     expect(lock.packages[""].dependencies).toEqual(pkg.dependencies);
     expect(lock.packages["node_modules/viem"].version).toBe("2.54.2");

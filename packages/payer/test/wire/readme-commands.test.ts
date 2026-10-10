@@ -40,7 +40,8 @@ test("README install and user-scope registration parse to the actual package bin
   expect(commands).toContain("subetha-payer wallet new");
   expect(commands).toContain("subetha-payer daemon");
   expect(commands).toContain("subetha-payer inspect p_aaaaaaaaaaaaa --close");
-  expect(pkg.private).toBe(true);
+  expect(pkg.private).toBeUndefined();
+  expect(pkg.publishConfig).toEqual({ access: "public" });
   expect(text).toMatch(/AFTER owner publication/);
   expect(text).toMatch(/unpublished/);
 });

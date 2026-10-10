@@ -3,8 +3,8 @@
 A local wallet and payer daemon for an agent using the SubEtha Router. Your key
 stays on your machine; the human confirms each purchase in the daemon's dialog.
 
-**Release gate: unpublished.** This package is currently `private: true`; the
-source repository is private too. The npm command below is **AFTER owner publication**
+**Release gate: unpublished.** This package is not yet published to npm; the
+source repository is private. The npm command below is **AFTER owner publication**
 (G-A1), not a working public distribution today. Clean installation, native manual
 acceptance and the funded owner flow are separate gates; these instructions are
 not evidence that they passed or permission for an agent to perform them.
