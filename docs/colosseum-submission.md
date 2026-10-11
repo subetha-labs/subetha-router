@@ -37,26 +37,26 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: round 3 approved the unhedged 3-minute draft; round 4 requested corrections to the 2-minute cut, subsequently applied; round 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; round 6 found no further correction to the spoken script and corrected this history line; round 7 reviews the owner's second rewrite (name, Solana share, zERC20 as the existing first piece, payer sentence removed, "dynamic" dropped from the fee statement, provider ask replaced, new close); it found no false spoken sentence and three note/translation corrections, applied. Round 8 reviews the owner's third pass (Solana share softened, mainnet sentence generalized, "use on-chain services", value sentence before the close); it passed the spoken facts and required the value sentence to carry an explicit vision cue plus two translation fixes, applied. The 3-minute draft is in this file's history (commit 87b1185).
 
-### 2b. Candidate B: value-first (230 spoken words: 1:47 at 130 wpm, 1:32 at 150 wpm; segment times at 150 wpm, rounded up)
+### 2b. Candidate B: value-first (237 spoken words: 1:50 at 130 wpm, 1:35 at 150 wpm; segment times at 150 wpm, rounded up)
 
-Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording. The owner (2026-10-11) replaced 'pay freely' with 'pay without friction' in the vision sentence (here and in candidate A) so it cannot be heard as 'free of charge'. The owner (2026-10-11) also asked the opening to mention AI-driven crypto products (kit §5 founder background: AI-driven DeFi platform; earlier projects include HiveFi and Flovia). The owner (2026-10-11) asked that the first problem name all three layers of the mismatch, so 'no shared way to pay' became 'share no payment protocol, no chain, not even a currency' (the same wording as candidate A). Codex round 9 (2026-10-11) reviewed candidate B and required five corrections (strategy "clues" not "read", directory scope, keys not funds, no "stop competing", the Japanese promise line), applied. Codex brush-up review (2026-10-12, gpt-6-astra, read-only) proposed eight script changes; the owner adopted six — open with the blocked purchase (the founder's name is spoken second; the segment is still the form's introduction), one provider-reach sentence, a future-facing integration sentence ('Next, we'll combine them …'), 'a mainnet purchase is verified' (owner's wording; kit §5: one purchase, 2026-10-10), a market passage that answers 'why now' ('Adoption is growing' is editorial synthesis of the dated third-party figures, not Router traction), and 'charges a routing fee on purchases it handles' — and declined two (a GitHub ask at the close; framing the promise as a vision). 264 → 230 words; the first problem now reads 'The barrier: no shared payment protocol, no chain, not even a currency.'
+Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording. The owner (2026-10-11) replaced 'pay freely' with 'pay without friction' in the vision sentence (here and in candidate A) so it cannot be heard as 'free of charge'. The owner (2026-10-11) also asked the opening to mention AI-driven crypto products (kit §5 founder background: AI-driven DeFi platform; earlier projects include HiveFi and Flovia). The owner (2026-10-11) asked that the first problem name all three layers of the mismatch, so 'no shared way to pay' became 'share no payment protocol, no chain, not even a currency' (the same wording as candidate A). Codex round 9 (2026-10-11) reviewed candidate B and required five corrections (strategy "clues" not "read", directory scope, keys not funds, no "stop competing", the Japanese promise line), applied. Codex brush-up review (2026-10-12, gpt-6-astra, read-only) proposed eight script changes; the owner adopted six — open with the blocked purchase (the founder's name is spoken second; the segment is still the form's introduction), one provider-reach sentence, a future-facing integration sentence ('Next, we'll combine them …'), 'a mainnet purchase is verified' (owner's wording; kit §5: one purchase, 2026-10-10), a market passage that answers 'why now' ('Adoption is growing' is editorial synthesis of the dated third-party figures, not Router traction), and 'charges a routing fee on purchases it handles' — and declined two (a GitHub ask at the close; framing the promise as a vision). 264 → 230 words; the first problem now reads 'The barrier: no shared payment protocol, no chain, not even a currency.' The owner (2026-10-12, after watching the sample) restored the bridge sentence 'Two things hold AI agents back today.' between the background and the barrier, because the jump from the introduction to 'The barrier:' was abrupt and the two-card screen it names had lost its spoken cue: 237 words.
 
-**[0:00–0:19] An agent that cannot pay, and who I am.**
-"An AI agent finds the right service and cannot pay. I'm Takuya Fujita, building SubEtha. I've built chains, cross-chain protocols and AI-driven crypto products. The barrier: no shared payment protocol, no chain, not even a currency. And public on-chain payments can reveal clues about its strategy."
+**[0:00–0:22] An agent that cannot pay, and who I am.**
+"An AI agent finds the right service and cannot pay. I'm Takuya Fujita, building SubEtha. I've built chains, cross-chain protocols and AI-driven crypto products. Two things hold AI agents back today. The barrier: no shared payment protocol, no chain, not even a currency. And public on-chain payments can reveal clues about its strategy."
 
-**[0:19–0:30] The promise.**
+**[0:22–0:33] The promise.**
 "That is what SubEtha is for: the agent pays with what it holds, the provider receives what it accepts, and the agent's intent stays its own."
 
-**[0:30–0:45] A large market, split in two.**
+**[0:33–0:48] A large market, split in two.**
 "x402 passed 100 million transactions on Base, with Solana another major chain. Stripe's MPP directory on Tempo lists 129 services; 118 advertise MPP only. Adoption is growing, but the payment systems cannot pay each other directly."
 
-**[0:45–1:01] What changes.**
+**[0:48–1:04] What changes.**
 "With SubEtha Router, agents pay with what they hold. Compatible providers reach buyers across payment systems without changing their setup. The agent keeps its keys. Every supported rail pair settled on testnets, and a mainnet purchase is verified."
 
-**[1:01–1:18] Intent stays private.**
+**[1:04–1:21] Intent stays private.**
 "SubEtha already has confidential payments for AI agents: an agent uses on-chain services without revealing what it does or why. The Router is the second piece. Next, we'll combine them so agents can reach supported rails while keeping their strategy private."
 
-**[1:18–1:36] Business and close.**
+**[1:21–1:39] Business and close.**
 "The Router charges a routing fee on purchases it handles. Our vision is a payment layer that lets AI pay without friction, on any rail, with no third party learning its intent: the infrastructure agentic commerce will need as it grows. Thank you."
 
 ---
@@ -164,26 +164,26 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 
 ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版を承認。第 4 回は 2 分版に修正を求め、その後反映済み。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付ける」ではなく「掲げている」）を求め、反映済み。第 6 回は話し言葉のスクリプトに追加の修正なし、この履歴の記述を訂正。第 7 回はオーナーの二度目の書き直し（名前、Solana の割合、既存の最初のピースとしての zERC20、payer の文を削除、手数料の文から「dynamic」を削除、プロバイダー募集の文を差し替え、新しい締め）をレビューし、話し言葉に虚偽なし、注記と訳の修正 3 件を反映。第 8 回はオーナーの三度目の手直し（Solana の割合を和らげる、メインネットの文を一般化、「サービスを利用できる」、締めの前の価値の一文）をレビューし、話し言葉の事実関係は通過、価値の一文に「目指す」の明示と訳の修正 2 件を求め、反映。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
-### A.2b 候補 B: 価値中心（§2b の訳。230 語。130 wpm で 1:47、150 wpm で 1:32。区間時間は 150 wpm、切り上げ）
+### A.2b 候補 B: 価値中心（§2b の訳。237 語。130 wpm で 1:50、150 wpm で 1:35。区間時間は 150 wpm、切り上げ）
 
-2026-10-11 にオーナーの依頼で、上のスクリプト（候補 A）の代案として追加した。候補 A はそのまま残す。事実関係と「言わないこと」は同じ。仕組みの説明（MCP、Router 自身の残高、スワップと鍵の預かり、20 ペアのマトリクス、zERC20、レール名）は技術デモ動画に任せ、話し言葉は価値を伝える。持っているもので払い、対応する決済手段で受け取り、意図は秘密のまま。収録前にオーナーがどちらかを選ぶ。Codex 第 9 回（2026-10-11）が候補 B をレビューし、5 件の修正（戦略を「読める」ではなく「手掛かり」、ディレクトリの範囲、資金ではなく鍵、「奪い合いをやめる」の削除、約束の訳文）を求め、反映済み。Codex のブラッシュアップレビュー（2026-10-12）の脚本提案 8 件のうち 6 件をオーナーが採用し、264 語から 230 語になった（冒頭を「買えない瞬間」から始める、提供者の到達は 1 文に、統合は将来形に、メインネットの購入は「検証済み」、市場の段落に「今なぜ」、手数料の文を自然に）。採用しなかったのは GitHub への誘導と、約束を「ビジョン」として語ること。
+2026-10-11 にオーナーの依頼で、上のスクリプト（候補 A）の代案として追加した。候補 A はそのまま残す。事実関係と「言わないこと」は同じ。仕組みの説明（MCP、Router 自身の残高、スワップと鍵の預かり、20 ペアのマトリクス、zERC20、レール名）は技術デモ動画に任せ、話し言葉は価値を伝える。持っているもので払い、対応する決済手段で受け取り、意図は秘密のまま。収録前にオーナーがどちらかを選ぶ。Codex 第 9 回（2026-10-11）が候補 B をレビューし、5 件の修正（戦略を「読める」ではなく「手掛かり」、ディレクトリの範囲、資金ではなく鍵、「奪い合いをやめる」の削除、約束の訳文）を求め、反映済み。Codex のブラッシュアップレビュー（2026-10-12）の脚本提案 8 件のうち 6 件をオーナーが採用し、264 語から 230 語になった（冒頭を「買えない瞬間」から始める、提供者の到達は 1 文に、統合は将来形に、メインネットの購入は「検証済み」、市場の段落に「今なぜ」、手数料の文を自然に）。採用しなかったのは GitHub への誘導と、約束を「ビジョン」として語ること。オーナーはサンプル視聴後（2026-10-12）、自己紹介から「壁」への飛躍が唐突だったため、つなぎの一文「今日、AI エージェントを縛っているものが二つあります。」を戻した（237 語）。
 
-**[0:00–0:19] エージェントが支払えない瞬間と、自己紹介。**
-「AI エージェントが必要なサービスを見つけても、支払えない。SubEtha を開発している Takuya Fujita です。チェーン、クロスチェーンのプロトコル、そして AI とクリプトを組み合わせたプロダクトを作ってきました。壁になっているのは、共通する決済プロトコルも、チェーンも、通貨さえもないことです。そして、公開されるオンチェーン決済は、エージェントの戦略を推測する手掛かりになります。」
+**[0:00–0:22] エージェントが支払えない瞬間と、自己紹介。**
+「AI エージェントが必要なサービスを見つけても、支払えない。SubEtha を開発している Takuya Fujita です。チェーン、クロスチェーンのプロトコル、そして AI とクリプトを組み合わせたプロダクトを作ってきました。今日、AI エージェントを縛っているものが二つあります。壁になっているのは、共通する決済プロトコルも、チェーンも、通貨さえもないことです。そして、公開されるオンチェーン決済は、エージェントの戦略を推測する手掛かりになります。」
 
-**[0:19–0:30] 約束。**
+**[0:22–0:33] 約束。**
 「SubEtha が目指すのは、エージェントが持っているもので支払い、提供者が対応する決済手段で代金を受け取り、エージェントの意図が外部に知られないことです。」
 
-**[0:30–0:45] 大きな市場が、二つに割れている。**
+**[0:33–0:48] 大きな市場が、二つに割れている。**
 「x402 は Base 上で 1 億トランザクションを超え、Solana ももう一つの主要なチェーンです。Stripe の MPP ディレクトリは Tempo 上に 129 のサービスを掲載し、そのうち 118 は MPP だけを掲げています。利用は広がっていますが、二つの決済方式は互いに直接支払えません。」
 
-**[0:45–1:01] 何が変わるか。**
+**[0:48–1:04] 何が変わるか。**
 「SubEtha Router があれば、エージェントは持っているもので支払えます。互換性のある提供者は、設定を何も変えずに、別の決済方式の買い手に届きます。エージェントは鍵を自分で管理します。対応レールのすべての組み合わせがテストネットで決済され、メインネットでの購入も検証済みです。」
 
-**[1:01–1:18] 意図は秘密のまま。**
+**[1:04–1:21] 意図は秘密のまま。**
 「SubEtha にはすでに AI エージェント向けの秘匿決済があります。エージェントは何を、なぜしているのかを明かさずにオンチェーンのサービスを利用できます。Router は二つ目のピースです。次に、この二つを組み合わせ、戦略を秘密にしたままのエージェントが対応レールに届くようにします。」
 
-**[1:18–1:36] ビジネスと締め。**
+**[1:21–1:39] ビジネスと締め。**
 「Router は、取り扱う購入に対してルーティング手数料を課します。目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
