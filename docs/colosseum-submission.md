@@ -18,7 +18,7 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (294 spoken words in the quoted paragraphs: 2:16 at 130 wpm, 1:58 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; Codex round 4 suggests a planning budget of 220–230 words for an unrehearsed non-native read at 120 wpm; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
+## 2. Pitch video script (295 spoken words in the quoted paragraphs: 2:16 at 130 wpm, 1:58 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; Codex round 4 suggests a planning budget of 220–230 words for an unrehearsed non-native read at 120 wpm; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
 
 **[0:00–0:17] Who I am.**
 "I'm Takuya Fujita, building SubEtha, after years building chains and cross-chain protocols. The problem I ran into: an agent finds the right paid API and still cannot pay, because the two sides share no payment protocol, no chain, not even a currency."
@@ -33,13 +33,13 @@ Submission description (form; 590 characters, confirm the form's limit):
 "SubEtha already has its first piece: confidential payments for AI agents, built on zERC20, so an agent can use on-chain services without revealing what it does or why. The Router is the second piece. Bring the two together, and agents whose strategy must stay private get every rail at once; that expands the on-chain agent market far beyond any single rail."
 
 **[1:35–1:59] Business and close.**
-"Providers gain reach: a provider on a supported route gets buyers from the other rail at once, and the Router takes a routing fee. Our vision for SubEtha is a payment layer that lets AI pay freely, on any rail, with no third party learning its intent. This is the infrastructure agentic commerce will need as it grows. Thank you."
+"Providers gain reach: a provider on a supported route gets buyers from the other rail at once, and the Router takes a routing fee. Our vision for SubEtha is a payment layer that lets AI pay without friction, on any rail, with no third party learning its intent. This is the infrastructure agentic commerce will need as it grows. Thank you."
 
 Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: round 3 approved the unhedged 3-minute draft; round 4 requested corrections to the 2-minute cut, subsequently applied; round 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; round 6 found no further correction to the spoken script and corrected this history line; round 7 reviews the owner's second rewrite (name, Solana share, zERC20 as the existing first piece, payer sentence removed, "dynamic" dropped from the fee statement, provider ask replaced, new close); it found no false spoken sentence and three note/translation corrections, applied. Round 8 reviews the owner's third pass (Solana share softened, mainnet sentence generalized, "use on-chain services", value sentence before the close); it passed the spoken facts and required the value sentence to carry an explicit vision cue plus two translation fixes, applied. The 3-minute draft is in this file's history (commit 87b1185).
 
-### 2b. Candidate B: value-first (263 spoken words: 2:01 at 130 wpm, 1:45 at 150 wpm; segment times at 150 wpm, rounded up)
+### 2b. Candidate B: value-first (264 spoken words: 2:01 at 130 wpm, 1:45 at 150 wpm; segment times at 150 wpm, rounded up)
 
-Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording. The owner (2026-10-11) also asked the opening to mention AI-driven crypto products (kit §5 founder background: AI-driven DeFi platform; earlier projects include HiveFi and Flovia). The owner (2026-10-11) asked that the first problem name all three layers of the mismatch, so 'no shared way to pay' became 'share no payment protocol, no chain, not even a currency' (the same wording as candidate A). Codex round 9 (2026-10-11) reviewed candidate B and required five corrections (strategy "clues" not "read", directory scope, keys not funds, no "stop competing", the Japanese promise line), applied.
+Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording. The owner (2026-10-11) replaced 'pay freely' with 'pay without friction' in the vision sentence (here and in candidate A) so it cannot be heard as 'free of charge'. The owner (2026-10-11) also asked the opening to mention AI-driven crypto products (kit §5 founder background: AI-driven DeFi platform; earlier projects include HiveFi and Flovia). The owner (2026-10-11) asked that the first problem name all three layers of the mismatch, so 'no shared way to pay' became 'share no payment protocol, no chain, not even a currency' (the same wording as candidate A). Codex round 9 (2026-10-11) reviewed candidate B and required five corrections (strategy "clues" not "read", directory scope, keys not funds, no "stop competing", the Japanese promise line), applied.
 
 **[0:00–0:23] Who I am, and what holds agents back.**
 "I'm Takuya Fujita, building SubEtha, after years building chains, cross-chain protocols and AI-driven crypto products. Two things hold AI agents back today. An agent finds the service it needs and cannot buy it, because the two sides share no payment protocol, no chain, not even a currency. And public on-chain payments can reveal clues about its strategy."
@@ -57,7 +57,7 @@ Added 2026-10-11 at the owner's request as an alternative to the script above (c
 "SubEtha already has confidential payments for AI agents: an agent uses on-chain services without revealing what it does or why. The Router is the second piece. Bring the two together, and agents whose strategy must stay private get every rail at once."
 
 **[1:30–1:48] Business and close.**
-"The Router takes a routing fee on the purchases it carries. Our vision is a payment layer that lets AI pay freely, on any rail, with no third party learning its intent: the infrastructure agentic commerce will need as it grows. Thank you."
+"The Router takes a routing fee on the purchases it carries. Our vision is a payment layer that lets AI pay without friction, on any rail, with no third party learning its intent: the infrastructure agentic commerce will need as it grows. Thank you."
 
 ---
 
@@ -160,11 +160,11 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 「SubEtha にはすでに最初のピースがあります。zERC20 を用いた AI エージェント向けの秘匿決済で、エージェントは何を、なぜしているのかを明かさずにオンチェーンのサービスを利用できます。Router は二つ目のピースです。この二つを組み合わせれば、戦略を秘密にしておく必要があるエージェントがすべてのレールを一度に使えるようになり、エージェントのオンチェーン市場は一つのレールの枠をはるかに超えて広がります。」
 
 **[1:35–1:59] ビジネスと締め。**
-「プロバイダーは、これまで届かなかった買い手にもサービスを提供できます。対応ルート上のプロバイダーは、もう一方のレールの買い手にも、すぐにサービスを提供でき、Router はルーティング手数料を得ます。SubEtha が目指すのは、AI が第三者に意図を知られることなく、どのレールでも自由に決済できる決済基盤です。これは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
+「プロバイダーは、これまで届かなかった買い手にもサービスを提供できます。対応ルート上のプロバイダーは、もう一方のレールの買い手にも、すぐにサービスを提供でき、Router はルーティング手数料を得ます。SubEtha が目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。これは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
 
 ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版を承認。第 4 回は 2 分版に修正を求め、その後反映済み。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付ける」ではなく「掲げている」）を求め、反映済み。第 6 回は話し言葉のスクリプトに追加の修正なし、この履歴の記述を訂正。第 7 回はオーナーの二度目の書き直し（名前、Solana の割合、既存の最初のピースとしての zERC20、payer の文を削除、手数料の文から「dynamic」を削除、プロバイダー募集の文を差し替え、新しい締め）をレビューし、話し言葉に虚偽なし、注記と訳の修正 3 件を反映。第 8 回はオーナーの三度目の手直し（Solana の割合を和らげる、メインネットの文を一般化、「サービスを利用できる」、締めの前の価値の一文）をレビューし、話し言葉の事実関係は通過、価値の一文に「目指す」の明示と訳の修正 2 件を求め、反映。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
 
-### A.2b 候補 B: 価値中心（§2b の訳。263 語。130 wpm で 2:01、150 wpm で 1:45。区間時間は 150 wpm、切り上げ）
+### A.2b 候補 B: 価値中心（§2b の訳。264 語。130 wpm で 2:01、150 wpm で 1:45。区間時間は 150 wpm、切り上げ）
 
 2026-10-11 にオーナーの依頼で、上のスクリプト（候補 A）の代案として追加した。候補 A はそのまま残す。事実関係と「言わないこと」は同じ。仕組みの説明（MCP、Router 自身の残高、スワップと鍵の預かり、20 ペアのマトリクス、zERC20、レール名）は技術デモ動画に任せ、話し言葉は価値を伝える。持っているもので払い、対応する決済手段で受け取り、意図は秘密のまま。収録前にオーナーがどちらかを選ぶ。Codex 第 9 回（2026-10-11）が候補 B をレビューし、5 件の修正（戦略を「読める」ではなく「手掛かり」、ディレクトリの範囲、資金ではなく鍵、「奪い合いをやめる」の削除、約束の訳文）を求め、反映済み。
 
@@ -184,7 +184,7 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 「SubEtha にはすでに AI エージェント向けの秘匿決済があります。エージェントは何を、なぜしているのかを明かさずにオンチェーンのサービスを利用できます。Router は二つ目のピースです。この二つを組み合わせれば、戦略を秘密にしておく必要があるエージェントがすべてのレールを一度に使えるようになります。」
 
 **[1:30–1:48] ビジネスと締め。**
-「Router は、仲介する購入に対してルーティング手数料を得ます。目指すのは、AI が第三者に意図を知られることなく、どのレールでも自由に決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
+「Router は、仲介する購入に対してルーティング手数料を得ます。目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
 
 ### A.3 技術デモ動画（§3 の訳。目標 2:50、「どのように」）
 
