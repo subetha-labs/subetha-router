@@ -33,7 +33,7 @@ interface Fake {
   readonly calls: { url: string; method: string; body: string | undefined; headers: Record<string, string>; signal: AbortSignal | undefined }[];
   readonly state: {
     supported: "ok" | "slow" | "down" | "other-network" | "no-feepayer";
-    data: "ok" | "down" | "malformed" | "huge" | "huge-price" | "stall";
+    data: "ok" | "down" | "malformed" | "huge" | "huge-price" | "stall" | "eth-only";
     verify: "ok" | "invalid" | "down" | "registration" | "malformed" | "huge";
     settle: { kind: "ok" | "pending" | "failed" | "down" | "registration" | "malformed" | "wrong-network" | "wrong-payer" };
     payer: string;
@@ -65,6 +65,7 @@ function fakeFetch(network: "arc" | "solana"): Fake {
     if (url === DATA) {
       if (state.data === "down") throw new Error(SECRET_TEXT);
       if (state.data === "malformed") return json(200, { oops: SECRET_TEXT });
+      if (state.data === "eth-only") return json(200, [{ universe: [{ name: "BTC" }, { name: "ETH" }] }, [BTC_ROW, ETH_ROW]]);
       if (state.data === "huge") {
         // 契約どおりの ETH の行を含むが、全体が 256 KiB を超える応答（content-length 無し）。
         const extra = Array.from({ length: 6_000 }, (_, i) => ({ markPx: "1", prevDayPx: "1", dayNtlVlm: "1", pad: `${i}${"p".repeat(40)}` }));
@@ -439,13 +440,19 @@ describe("支払いつきの GET（solana）", () => {
     const ethPaid = await handle(solPaidRequest(eth.required.accepts[0]), runtime, { fetch: fake.fetch });
     expect(ethPaid.status).toBe(200);
     expect((await ethPaid.json()) as Record<string, unknown>).toMatchObject({ market: { symbol: "ETH" }, data: { markPx: "2572.5", assetIndex: 1 } });
-    // SOL の行が無い応答 → 502（facilitator を呼ばない）。ETH の資源は影響を受けない。
-    fake.state.data = "malformed";
+    // 契約どおりだが SOL の行が無い応答（ETH はある）→ SOL は 502 で verify も settle も呼ばない。同じ応答で ETH の資源は 200 のまま。
+    fake.state.data = "eth-only";
     const verifies = facilitatorCalls(fake, "verify").length;
+    const settles = facilitatorCalls(fake, "settle").length;
     const noData = await handle(solPaidRequest(sol.required.accepts[0], SOL_RESOURCE), runtime, { fetch: fake.fetch });
     expect(noData.status).toBe(502);
     expect(await noData.json()).toEqual({ error: "data_unavailable" });
     expect(facilitatorCalls(fake, "verify")).toHaveLength(verifies);
+    expect(facilitatorCalls(fake, "settle")).toHaveLength(settles);
+    const ethStill = await handle(solPaidRequest(eth.required.accepts[0]), runtime, { fetch: fake.fetch });
+    expect(ethStill.status).toBe(200);
+    expect((await ethStill.json()) as Record<string, unknown>).toMatchObject({ market: { symbol: "ETH" }, data: { markPx: "2572.5", assetIndex: 1 } });
+    expect(facilitatorCalls(fake, "settle")).toHaveLength(settles + 1);
     // path の完全一致だけ。
     for (const url of [`${SOL_RESOURCE}/`, `${SOL_RESOURCE}?x=1`, "https://provider-x402-sol.subethalabs.com/v1/btc/snapshot"]) expect((await handle(new Request(url), runtime, { fetch: fake.fetch })).status, url).toBe(404);
   });

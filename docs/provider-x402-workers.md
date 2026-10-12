@@ -232,7 +232,7 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
 Router の静的ルート（`UPSTREAM_ARC` / `UPSTREAM_SOL`）が使うので**そのまま**（本文・説明・path を変えない）。
 
 **設計**: `config.ts` の資源表 `RESOURCES`（path → `symbol`・`description`。完全一致だけ: 末尾 `/`・大文字・クエリは 404 のまま）。
-`index.ts` は path で資源を引き、canonical URL と説明をその資源から取り、`fetchSnapshot(..., symbol)` に銘柄を渡す。`snapshotOf` は
+`index.ts` は path で資源を引き、canonical URL と説明をその資源から取り、`fetchSnapshot(..., symbol)` に銘柄を渡す。path の検査は従来のまま（既知の path 以外は 404、既知の path の GET 以外は 405、`url.search` が空でなければ 404。`?` だけの URL は `search` が空なので従来どおり通る。§3.1 の「以外は 404」はこの意味）。`snapshotOf` は
 `symbol` の行を探す（既定 ETH）。§2.2 の順序・各段の期限・上限・`accepted` の完全一致・settle 1 回・領収の検査は変えない（資源によらず同じ
 `requirements()`）。契約（§2.3）は `market.symbol` が `"SOL"` になる以外は同じ鍵の集合で、数値の制約も同じ。universe に SOL が無ければ段 1 で
 502（facilitator を呼ばない。ETH の資源は影響を受けない）。
@@ -247,4 +247,9 @@ path の不一致は 404。実装の `symbol` と canonical の取り違えを�
 `https://provider-x402-sol.subethalabs.com/v1/sol/snapshot` を渡す（Router は 402 の `accepts` を表の Solana の範囲で検査し、本文は
 `application/json` の object として配達する）。配備後の確認: 未払い GET が 402 で `resource.url` が `…/v1/sol/snapshot`、`description` が SOL、
 `accepts` が `/v1/eth/snapshot` と同一であること。
+
+**独立レビュー（Codex `gpt-6-astra`、2026-10-13、`.claude_workflow/local/provider-sol-review1.md`）**: APPROVE WITH CHANGES、blocking 無し。nonblocking 2 件を反映した:
+handler の「SOL の行が無い応答」の試験を ETH だけの契約どおりの応答に変え、verify も settle も増えないことと同じ応答で ETH が 200 のままを確かめる;
+path の検査（405・`?` だけの URL）の既存の振る舞いを上に明記。`accepted` の一致は `payload.resource.url` を見ない（ETH 向けに作った支払いは SOL でも
+通る）: 条件が同一で facilitator が検証するのは送金なので設計どおりだが、資源への束縛ではない（従来からの性質。資源ごとの価格を分けるなら要変更）。
 
