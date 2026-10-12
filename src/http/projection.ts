@@ -6,6 +6,7 @@
 import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig, usesGasIndexedFee } from "../config.js";
 import type { Projection, QuoteDocument } from "../core/orchestrator.js";
 import type { InboundOffer } from "../ports/inbound.js";
+import { networkFamilyOf } from "../shared/networks.js";
 
 export function canonicalUrlOf(canonicalBaseUrl: string, route: RouteConfig): string {
   return `${canonicalBaseUrl}${route.canonicalPath}`;
@@ -58,6 +59,9 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): u
         network: route.source.network,
         // x402／mpp 受信の受取先（subetha 受信は facilitator が決めるので無い）。
         ...(route.source.payTo === undefined ? {} : { payTo: route.source.payTo }),
+        // 受信レールと offer の scheme（加算。payer の `find_routes` が Solana の x402 と MPP を区別するため。`docs/payer-rails-design.md` FR-R13）。
+        // `subetha` 受信（既定）は欄を出さない（レールの名前が wire の scheme に対応しない）。
+        ...sourceRailListingOf(route),
       },
       destination: {
         rail: route.rail ?? route.destination.scheme,
@@ -67,6 +71,13 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): u
       },
     })),
   };
+}
+
+/** 静的 route の受信レールと scheme（x402 → `exact`、mpp → network の family で `tempo/charge` / `solana/charge`）。 */
+export function sourceRailListingOf(route: RouteConfig): { rail: "x402" | "mpp"; scheme: "exact" | "tempo/charge" | "solana/charge" } | Record<string, never> {
+  if (route.sourceRail === "x402") return { rail: "x402", scheme: "exact" };
+  if (route.sourceRail === "mpp") return { rail: "mpp", scheme: networkFamilyOf(route.source.network) === "svm" ? "solana/charge" : "tempo/charge" };
+  return {};
 }
 
 /** R2: quote 文書（`quoteId` は受信 offer の idempotency key）。 */

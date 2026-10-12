@@ -66,7 +66,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function createMppPayer(
   privateKey: string,
   scope: MppPayerScope,
-  options: { readonly rpcUrl?: string } = {},
+  /** `fetchFn`: RPC の HTTP を差し替える（payer の daemon は Router と同じ guarded transport を渡す。`docs/payer-rails-design.md` SR-R5）。省略時は viem の既定の fetch。 */
+  options: { readonly rpcUrl?: string; readonly fetchFn?: typeof fetch } = {},
 ): MppPayer {
   if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
     throw new Error("payer private key must be a 0x-prefixed 32-byte hex string");
@@ -117,7 +118,7 @@ export function createMppPayer(
         account,
         // chain を持たせる（SDK は client の chain と challenge の chain を突き合わせる）。
         chain,
-        transport: http(rpcUrl, { retryCount: 0 }),
+        transport: http(rpcUrl, { retryCount: 0, ...(options.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }) }),
       }).extend(publicActions);
 
       const mppx = Mppx.create({
