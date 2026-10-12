@@ -14,31 +14,42 @@ Parent controller owns state, locking and commits. Writer must not launch worker
 
 Each phase: minimal artifact, independent review, parent readback. No repeated whole-plan reviews for a small correction. Retain author/test/review evidence. Defer nonblocking polish. Stop for wrong/duplicate payments, secret exposure, ownership conflicts, unsupported permissions, real quota or an actual unresolved prerequisite.
 
-## Using the local payer (first slice)
+## Using the local payer
 
-See [the payer onboarding guide](packages/payer/README.md). `@subetha/payer@0.1.2` is
-published on npm (0.1.0 and 0.1.2 on 2026-10-10): `npm i -g @subetha/payer`. Authorized
-developers can also install a locally built tarball. This is macOS 14+ / Node 22,
-Base Sepolia USDC, static `md-mpp-eth-snapshot` only; it is not the hosted Router's
-full rail/profile interface.
+See [the payer onboarding guide](packages/payer/README.md). `@subetha/payer` is
+published on npm (`npm i -g @subetha/payer`; 0.1.0/0.1.2 on 2026-10-10, 0.2.0 pending the
+owner's publish, G-R1 in `docs/payer-rails-design.md`). Authorized developers can also
+install a locally built tarball. macOS 14+ / Node 22, testnets only. **0.2.0 pays on every
+inbound rail** (Base Sepolia USDC and Arc testnet USDC over x402, Solana devnet USDC over x402
+or MPP, Tempo testnet pathUSD over MPP) for **every static route and every dynamic profile**
+the hosted Router lists; 0.1.x paid only Base Sepolia USDC on `md-mpp-eth-snapshot`.
 
-The human starts `subetha-payer daemon` in their own terminal, then registers
-`claude mcp add --scope user subetha-payer -- subetha-payer mcp`.
-Use exactly these five MCP tools:
+The human runs `subetha-payer wallet new` (two keys, EVM and Solana, one passphrase; a
+0.1.x store adds the Solana key with `subetha-payer wallet add solana`), funds the printed
+addresses from the testnet faucets the command names, starts `subetha-payer daemon` in their
+own terminal, then registers `claude mcp add --scope user subetha-payer -- subetha-payer mcp`
+(Codex: `codex mcp add subetha-payer -- subetha-payer mcp`; Grok Build:
+`grok mcp add subetha-payer subetha-payer -- mcp`). Use exactly these five MCP tools:
 
-- `subetha_payer_find_routes` (`{}` or an optional `hold` network/asset filter).
+- `subetha_payer_find_routes` (`{}` or an optional `hold` network/asset filter): every
+  static route and dynamic profile the payer can pay, with `kind`, `fundsMoveOnCredential`
+  and `needsSol`.
 - `subetha_payer_wallet` (`{}`).
-- `subetha_payer_quote` (`{"routeId":"md-mpp-eth-snapshot"}`).
+- `subetha_payer_quote` (`{"routeId":"<static route>"}` or
+  `{"profileId":"dyn-<pay>-to-<accept>","url":"https://…"}` for a provider URL).
 - `subetha_payer_purchase` (`{"ref":"<returned ref>"}`).
 - `subetha_payer_status` (`{"ref":"<returned ref>"}`, optional `includeBody: true`).
 
-Show the quote subject before requesting purchase. The human must check their
-security phrase and exact terms in the daemon's native dialog, enter the
-passphrase there and select Approve. Never ask for secrets in chat, arguments,
-env, files or piped stdin. Never start/unlock the daemon or automate the dialog
-for them. Elicitation is display-only; neither its response nor tool arguments
-approve payment. No unattended purchase or client-interaction bypass is allowed.
-Allow 195 seconds for purchase; timeout does not cancel payment or prove unpaid.
+Show the whole quote subject before requesting purchase (for a dynamic quote also the
+upstream URL, the recipient and the price breakdown). The human must check their
+security phrase, the rail line that says when funds move, and the exact terms in the
+daemon's native dialog, enter the passphrase there and select Approve. **Over MPP on
+Tempo, Approve sends the transfer** (the summary then carries `txRef`); over MPP on Solana
+the human's key pays the devnet SOL fee and the Router broadcasts at purchase. Never ask
+for secrets in chat, arguments, env, files or piped stdin. Never start/unlock the daemon
+or automate the dialog for them. Elicitation is display-only; neither its response nor
+tool arguments approve payment. No unattended purchase or client-interaction bypass is
+allowed. Allow 195 seconds for purchase; timeout does not cancel payment or prove unpaid.
 
 Keep the ref and read saved status. `unknown` is not proof unpaid; do not retry,
 re-sign or create a replacement purchase on your own. Human `inspect` never
