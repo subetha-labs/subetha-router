@@ -30,7 +30,7 @@ export const KNOWN_CODES = new Set([
   "credential_required", "transport_uncertain", "response_unreadable", "resource_not_approved_canonical", "quote_not_issued_by_client", "quote_binding_changed", "request_id_changed",
   "inbound_credential_unavailable", "inbound_payer_not_configured", "wallet_missing",
   // Router `paid_undelivered` reasons (dynamic upstreams; observed on the hosted Router 2026-10-12 with x402.org's demo endpoint)
-  "unsupported_response", "upstream_failed", "upstream_timeout", "upstream_too_large",
+  "unsupported_response", "upstream_failed", "upstream_timeout", "upstream_too_large", "destination_rejected", "destination_failed",
   // payer（設計 §3・§4）
   "daemon_unavailable", "locked", "approval_unavailable", "approval_mismatch", "approval_rejected", "approval_expired_during_dialog", "quote_inconsistent", "rail_not_enabled", "unknown_ref",
   "store_corrupt", "store_rollback", "store_write_failed", "store_unsupported_version", "lock_lost", "daemon_already_running", "daemon_lock_stale", "startup_refused", "bad_passphrase",

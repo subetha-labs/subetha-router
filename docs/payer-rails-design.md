@@ -249,6 +249,16 @@ PR はこの順。R-1 と R-2 は同じ worktree（`task/payer-rails`）で続�
 | 5a | 動的: Solana devnet USDC → x402.org demo | `dyn-sol-to-x402` + `https://x402.vercel.app/protected` | `p_mhkjrovck5s7y` | `3af1113e-4c36-47dd-b4db-b34b761774d7` | **`paid_data_unavailable`**（Router journal: `source_settled` Solana tx `5cZvVFdk…r1bs`、`paid_undelivered` reason `unsupported_response`: 上流が JSON object を返さない。開示どおり。payer は `fundsMoved: yes`、再試行なし） |
 | 5b | 動的: Solana devnet USDC → 当方 Provider A | `dyn-sol-to-x402` + `https://provider-x402.subethalabs.com/v1/eth/snapshot` | `p_og22qppqsncfa` | `a20ff6e2-d790-412c-842f-297b19fc629b` | `delivered`、`upstreamReceipt: claimed` |
 
+- **他の agent CLI からの購入（2026-10-12 13:10–13:15Z、同じ payer 0.2.0 と daemon、owner がダイアログで承認。両 CLI の設定に `tool_timeout_sec = 200` を足した上で）**:
+
+| CLI | route | ref | paymentId | 結果 |
+|---|---|---|---|---|
+| OpenAI Codex CLI 0.157.1（`codex exec`、payer の MCP tools だけ） | `md-mpp-eth-snapshot` | `p_5iwp7yapkb5ym` | `75586c40-9ab9-4c8d-b060-ca7c5fda6615` | `delivered` |
+| Grok Build 1.0.50（`grok -p`、payer の MCP tools だけ）1 回目 | `md-x402-eth-snapshot-sol` | `p_24mnczg6g4s3s` | `158a635c-c76e-46c4-a6ae-87761ab5992b` | `paid_data_unavailable`: Router journal `source_settled`（Solana tx `X5WEgaPf…DSUL`）→ `dest_failed` reason `destination_rejected`（送信レグの Provider A 側が拒否。同 route は 12:30Z に `delivered`。同種の拒否は 10/5・10/8 ×2 にも各 1 回） |
+| Grok Build 2 回目 | `md-mpp-eth-snapshot` | `p_unsv3ivasfx5o` | — | `delivered` |
+
+Grok は shim の表示専用 elicitation を閉じて tool call を「中断」と報告したが、daemon は完了し `status` で結果が読めた（llms.txt に明記）。payer の `KNOWN_CODES` に `destination_rejected` が無く `unknown_code` と出た → 次版で追加。
+
 学び: (1) 一度 Cancel した ref は記憶され、同じ ref への再要求は即座に同じ答え（設計どおり。新しい quote が要る）→ README に明記。(2) ダイアログの既定ボタンは Cancel なので Enter は Cancel → README に「Approve はクリック」。(3) Router の `paid_undelivered` の reason（`unsupported_response` など）が payer の `KNOWN_CODES` に無く `unknown_code` に写っていた → 追加。(4) x402.org の demo endpoint は購入すると「払って無データ」になる（quote のデモには使えるが購入には当方の Provider を使う）。
 
 ## 5. 独立レビューの記録
