@@ -71,3 +71,8 @@ against the inbound offer's `routeBinding` when that binding has the dynamic for
 bindings are left to the inbound adapter's own verification) and marks inconsistent records invalid; a real-adapter refusal test (MPP dynamic path with a
 POST target: rejection and zero connections). Not done today: the composed quote → reopen → purchase test through `main.ts`
 (recorded as follow-up).
+
+**Run record (2026-10-13 20:36Z, owner-approved)**: `docs/mainnet-first-route.md` §3 — Exa `POST /search` bought through `dyn-mpp-to-x402-mainnet`
+on the loopback mainnet Router: inbound Tempo tx `0x7ab25ff5…46d7` (8,000 USDC.e base units), outbound Base tx `0x3ab9b229…4558`
+(7,000 USDC to Exa), `delivered` with three JSON search results; the status projection carries `upstream.method`, `body` and `bodySha256`.
+
