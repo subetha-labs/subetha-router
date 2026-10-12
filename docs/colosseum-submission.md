@@ -69,7 +69,7 @@ The right panel in B is one persistent flow diagram, vertical: **AI agent (Claud
 
 | Time | On screen | Sentences (owner) |
 |---|---|---|
-| 0:00–0:22 | **A.** Full-screen: the problem card "the agent holds one rail · the provider accepts another" over the official page; then a three-step plan card "1 the agent sets it up itself · 2 a price API on another rail, by URL · 3 I approve, the Router pays"; the on-screen line "Left: Claude Code as it runs. Right: what happens behind it." is shown, not read | 1. Different payment rails block an agent's purchases; SubEtha Router pays across them. [payment architecture row] 2. Here is the plan: an agent sets up the Router itself, buys data on another rail, and I approve at the end. [official page row; dynamic upstream row; payer architecture row] |
+| 0:00–0:22 | **A.** Full-screen: the problem card "the agent holds one rail · the provider accepts another" (no page backdrop — owner 2026-10-13); then a three-step plan card "1 the agent sets it up itself · 2 a price API on another rail, by URL · 3 I approve, the Router pays"; the on-screen line "Left: Claude Code as it runs. Right: what happens behind it." is shown, not read | 1. Different payment rails block an agent's purchases; SubEtha Router pays across them. [payment architecture row] 2. Here is the plan: an agent sets up the Router itself, buys data on another rail, and I approve at the end. [official page row; dynamic upstream row; payer architecture row] |
 | 0:22–0:46 | **B.** Split screen from here. Left: Claude Code (fresh session, nothing registered); the owner types only "Make SubEtha Router usable from here."; the agent finds the official page on its own (verified 2026-10-12 for Claude Code, Codex CLI and Grok Build with no URL given), reads its llms.txt, runs `claude mcp add --scope user --transport http subetha-router https://router.subethalabs.com/mcp` itself and asks for a restart; cut ("Waits cut"); the restarted session lists the routes. Right: page → llms.txt → "register MCP" steps light up; on sentence 5 three pills "Claude Code · Codex CLI · Grok Build" and "Recorded testnet purchases · 2026-10-12" | 3. I just ask Claude Code to make SubEtha Router usable. [official page row] 4. It finds the official page and registers the Router itself; I only restart. [official page row] 5. Today it is Claude Code; Codex CLI and Grok Build are verified too, so pick whichever you use. [three agent CLIs row] |
 | 0:46–1:02 | Left: the route listing with the dynamic profiles visible. Right: the provider box appears, "SOL/USD price API · accepts USDC on Solana devnet only (x402)" with the URL `provider-x402-sol.subethalabs.com/v1/sol/snapshot`; then my rail tag "USDC · Base Sepolia (x402)" on the agent's side | 6. Its dynamic routes take a provider's URL; today, a SOL price API we run that accepts only USDC on Solana devnet. [dynamic upstream row; demo provider row] 7. I hold USDC on Base Sepolia, a different rail. [payment architecture row] |
 | 1:02–1:10 | Left: the payer's terminal running (daemon). Right: the payer box on the This Mac side, "holds the key · native dialog" | 8. To pay, I run the payer on this Mac; it asks me before every payment. [payer architecture row; payer npm row] |
@@ -197,9 +197,9 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 **[1:21–1:39] ビジネスと締め。**
 「Router は、取り扱う購入に対してルーティング手数料を課します。目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
 
-### A.3 技術デモ動画（§3 v4 の訳、20 文＋画面のみ 1 行。目標 2:40〜2:50、上限 3:00、「どのように」）
+### A.3 技術デモ動画（§3 v5 の訳、20 文＋画面のみ 1 行。目標 2:40〜2:50、上限 3:00、「どのように」）
 
-2026-10-12 改訂（Codex レビューの後、オーナーの指示: 導入は公式ページ、主役は動的ルート＝URL さえあればどの x402／MPP 提供者にも届くこと、オープンソースには触れない）。順序: 公式ページ → Router が見たことのない提供者への動的見積もり（資金は動かない）→ payer での本物の購入（ネイティブ承認）→ 2 つのオンチェーン支払い → アーキテクチャ（人間向けアプリは無い）→ 20 ペアの実績 → メインネット証拠（これ自体が第三者 API を URL 指定で買った動的購入）→ 公式ページで締め。260 語・28 文（最長 17 語）。先に画面（動的見積もりと payer の購入）を収録し、その映像に合わせてナレーションを 1 本通しで収録する。常時表示: TESTNET（ライブ部分と実績）、MAINNET · OWNER-RUN · LOOPBACK と「Recorded evidence · 2026-10-10」（メインネット証拠）。
+2026-10-13 改訂 v5（オーナーの指示: 先に「何をやるか」を説明してから、裏で何が起きているかを右側のアニメーションで示しつつデモを動かす。提供者は内部名で呼ばず「何を売り、何を受け取るか」で説明する。Solana 中心の審査員向けに、提供者は私たちの Solana x402 Provider の SOL 価格 API（Solana devnet の USDC しか受け取らない）に変更。オープンソースには触れない）。構成: A 導入（全画面: 問題と段取り）→ B デモ（分割画面: 左は実際の Claude Code、右は常駐の流れ図。エージェントが自分でセットアップ → URL で見積もり → ネイティブダイアログで承認 → 2 つの支払い → データ到着）→ C まとめ（鍵の所在、人間向けアプリは無い、20 ペア、メインネット証拠、エンドカード）。導入の背景に公式ページは出さない（オーナー 2026-10-13）→ 公式ページで締め。260 語・28 文（最長 17 語）。先に画面（動的見積もりと payer の購入）を収録し、その映像に合わせてナレーションを 1 本通しで収録する。常時表示: TESTNET（ライブ部分と実績）、MAINNET · OWNER-RUN · LOOPBACK と「Recorded evidence · 2026-10-10」（メインネット証拠）。
 
 1. 決済レールの違いがエージェントの購入を阻みます。SubEtha Router はレールをまたいで支払います。
 2. 段取りはこうです: エージェントが Router を自分でセットアップし、別のレールでデータを買い、最後に私が承認します。
@@ -207,15 +207,15 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 3. Claude Code に「SubEtha Router を使えるようにして」と頼むだけです。
 4. エージェントが自分で公式ページを見つけ、Router を登録します。私は再起動するだけです。
 5. 今日は Claude Code ですが、Codex CLI と Grok Build でも検証済みなので、お好きなものでどうぞ。
-6. 動的ルートは提供者の URL を受け取ります。今日の相手は、私たちが運用する価格 API で、Tempo テストネットの MPP でしか支払いを受け付けません。
+6. 動的ルートは提供者の URL を受け取ります。今日の相手は、私たちが運用する SOL 価格 API で、Solana devnet の USDC でしか支払いを受け付けません。
 7. 私が持っているのは Base Sepolia の USDC、別のレールです。
 8. 支払いには、この Mac で payer を動かします。支払いのたびに、まず私に確認します。
 9. Claude Code に URL を渡し、見積もりを求めます。
 10. Router が提供者の価格を読み取り、少額の手数料を足して見積もります。
 11. ネイティブのダイアログで条件と合言葉を確認し、承認します。
 12. 支払い 1: 私のウォレットが Base Sepolia で Router に払います。
-13. 支払い 2: Router が自分の残高から Tempo テストネットで提供者に払います。
-14. これが届いた応答、ETH の価格の JSON です。
+13. 支払い 2: Router が自分の残高から Solana devnet で提供者に払います。
+14. これが届いた応答、SOL の価格の JSON です。
 15. 鍵はこの Mac の payer が持ち、ホストされた Router は決して持ちません。
 16. 人間向けのアプリはありません。Router は MCP サーバで、エージェントが直接呼びます。
 17. 対応する 20 のクロスレールの組み合わせすべてが、テストネットで決済済みです。
