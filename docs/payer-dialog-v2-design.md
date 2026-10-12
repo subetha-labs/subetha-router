@@ -81,3 +81,8 @@ Nonblocking applied: tests assert labelled lines and use legs with distinct amou
 say 0.2.1; own-property lookups in the name table; EVM asset ids compare case-insensitively, Solana mints exactly; `GET` methods sanitized
 like every other field; "returns the data" → "passes the provider's response"; the formatter comment says string placement, not bigint.
 
+**Review 2** (`.claude_workflow/local/payer-dialog-v2-review2.md`): APPROVE WITH CHANGES, no blocking; both round-1 blockers verified fixed.
+Applied: a mixed-decimals test (destination 8 decimals / source 6, upstream 1000000 ≠ converted 10000) that fails on either wrong-leg
+formatting or an `upstreamAmount`/`converted` swap; the price line separates the conversion from the sum ("provider … , equivalent to …;
+total … + Router fee … = …") so it never reads as "provider amount = fee-inclusive total".
+

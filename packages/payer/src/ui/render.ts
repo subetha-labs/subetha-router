@@ -42,7 +42,9 @@ export function renderConfirmation(record: ApprovalRecord, phrase: string): stri
   if (kind === "dynamic" && r.pricing) {
     const p = r.pricing;
     // The provider's amount is in the destination's units; `converted` is its source-currency equivalent (Codex dialog review #1).
-    let price = `Price: provider ${money(p.upstreamAmount, p.destinationDecimals, d.network, d.asset)} (${sanitize(p.upstreamAmount)} base units, ${p.destinationDecimals} decimals) = ${money(p.converted, s.decimals, s.network, s.asset)} (${sanitize(p.converted)} base units) + Router fee ${money(p.fee, s.decimals, s.network, s.asset)} (${sanitize(p.fee)} base units) = ${money(p.total, s.decimals, s.network, s.asset)} (${sanitize(p.total)} base units, ${s.decimals} decimals)`;
+    // Conversion and sum on separate clauses so the line never reads "provider amount = fee-inclusive total" (Codex dialog review #2).
+    const src = (v: string) => money(v, s.decimals, s.network, s.asset);
+    let price = `Price: provider ${money(p.upstreamAmount, p.destinationDecimals, d.network, d.asset)} (${sanitize(p.upstreamAmount)} base units, ${p.destinationDecimals} decimals), equivalent to ${src(p.converted)} (${sanitize(p.converted)} base units); total ${src(p.converted)} + Router fee ${src(p.fee)} (${sanitize(p.fee)} base units) = ${src(p.total)} (${sanitize(p.total)} base units, ${s.decimals} decimals)`;
     if (p.maxFee !== undefined) price += `; chain-fee cap ${sanitize(p.maxFee)} base units${p.estimate ? ` (estimated ${new Date(p.estimate.atMs).toISOString()})` : ""}`;
     lines.push(price);
   } else {

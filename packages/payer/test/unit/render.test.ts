@@ -51,7 +51,15 @@ test("dynamic record: provider URL, price breakdown in asset units, profile, no-
   const dyn = renderConfirmation(buildRecord(railQuote("dyn-x402-to-mpp"), identity()), "phrase");
   expect(dyn).toContain("Provider URL: GET https://provider-mpp.subethalabs.com/v1/eth/snapshot");
   // the provider's amount is in the destination's units (pathUSD, 6), the equation in the source's (USDC); every term also in base units
-  expect(dyn).toContain("Price: provider 0.01 pathUSD (10000 base units, 6 decimals) = 0.01 USDC (10000 base units) + Router fee 0.001 USDC (1000 base units) = 0.011 USDC (11000 base units, 6 decimals); chain-fee cap 158 base units (estimated ");
+  expect(dyn).toContain("Price: provider 0.01 pathUSD (10000 base units, 6 decimals), equivalent to 0.01 USDC (10000 base units); total 0.01 USDC + Router fee 0.001 USDC (1000 base units) = 0.011 USDC (11000 base units, 6 decimals); chain-fee cap 158 base units (estimated ");
+  // mixed decimals (Codex round 2 #1): the provider's amount is formatted with the DESTINATION's decimals, the equation with `converted`, not `upstreamAmount`
+  const base = buildRecord(railQuote("dyn-x402-to-mpp"), identity());
+  const mixed = { ...base, destination: { ...base.destination, decimals: 8, quoted: "1000000" }, pricing: { ...base.pricing!, upstreamAmount: "1000000", destinationDecimals: 8, converted: "10000" } };
+  const mixedText = renderConfirmation(mixed, "phrase");
+  expect(mixedText).toContain("Price: provider 0.01 pathUSD (1000000 base units, 8 decimals), equivalent to 0.01 USDC (10000 base units); total 0.01 USDC + Router fee 0.001 USDC (1000 base units) = 0.011 USDC (11000 base units, 6 decimals)");
+  expect(mixedText).toContain("- The Router pays the provider 0.01 pathUSD on Tempo testnet");
+  expect(mixedText).toContain("Provider receives: 0.01 pathUSD (1000000 base units, decimals 8)");
+  expect(mixedText).not.toContain("1 pathUSD +"); expect(mixedText).not.toContain("provider 1 pathUSD");
   expect(dyn).toContain("Only an application/json object of 256 KiB or less is delivered.");
   expect(dyn).toContain("Pay with: USDC on Base Sepolia (testnet), x402 (exact)");
   expect(dyn).toContain("Profile: dyn-x402-to-mpp");
