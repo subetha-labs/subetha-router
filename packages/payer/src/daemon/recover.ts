@@ -28,17 +28,9 @@ function same(a: unknown, b: unknown): boolean { return canonicalJson(jsonCopy(a
  */
 export function sameUpToLearnedCodes(stored: unknown, projected: unknown): boolean {
   if (same(stored, projected)) return true;
-  const a = jsonCopy(stored), b = jsonCopy(projected);
-  const walk = (x: unknown, y: unknown): void => {
-    if (record(x) && record(y)) {
-      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) {
-        if (k === "reason" && x[k] === "unknown_code" && typeof y[k] === "string") { y[k] = "unknown_code"; continue; }
-        walk(x[k], y[k]);
-      }
-    } else if (Array.isArray(x) && Array.isArray(y)) x.forEach((v, i) => walk(v, y[i]));
-  };
-  walk(a, b);
-  return same(a, b);
+  // Only the summary's TOP-LEVEL `reason` passes through `knownCodeOf`; nothing nested (bodies, previews) is tolerated (Codex 0.2.2 review).
+  if (!record(stored) || !record(projected) || stored["reason"] !== "unknown_code" || typeof projected["reason"] !== "string") return false;
+  return same(stored, { ...jsonCopy(projected) as Record<string, unknown>, reason: "unknown_code" });
 }
 /** What the Router may claim about the upstream for this record's kind (static: nothing; dynamic: the upstream's own receipt). */
 export function upstreamReceiptOf(r: ApprovalRecord): "none" | "claimed" { return kindOf(r) === "dynamic" ? "claimed" : "none"; }

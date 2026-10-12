@@ -100,3 +100,5 @@ the code; every other difference is still corruption; the stored summary stays a
 code or the reverse direction still refuse; the ledger is untouched) and a direct unit of the comparator. 0.2.1 is superseded by 0.2.2;
 the lesson for every future allowlist change: run recovery over a ledger written by the previously published build before publishing.
 
+**Review (Codex `gpt-6-astra`, `.claude_workflow/local/payer-0.2.2-review1.md`)**: APPROVE WITH CHANGES, no blocking. Applied: the tolerance is limited to the summary's top-level `reason` (the only field `knownCodeOf` feeds); nested keys, bodies and arrays are compared strictly, with negative tests for a nested `reason`, a differing body and another key holding the sentinel.
+

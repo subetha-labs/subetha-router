@@ -91,14 +91,16 @@ test("a reason code learned after the record was written does not corrupt the st
     } finally { f.close(); }
   }
 });
-test("sameUpToLearnedCodes: only stored unknown_code → projected named code is tolerated; nested reasons too; everything else must match", () => {
+test("sameUpToLearnedCodes: only the top-level stored unknown_code → projected named code is tolerated; nothing nested; everything else must match", () => {
   expect(sameUpToLearnedCodes({ a: 1, reason: "unknown_code" }, { a: 1, reason: "upstream_failed" })).toBe(true);
-  expect(sameUpToLearnedCodes({ a: 1, inner: { reason: "unknown_code" } }, { a: 1, inner: { reason: "upstream_failed" } })).toBe(true);
+  expect(sameUpToLearnedCodes({ a: 1, inner: { reason: "unknown_code" } }, { a: 1, inner: { reason: "upstream_failed" } })).toBe(false); // nested: not tolerated
+  expect(sameUpToLearnedCodes({ reason: "unknown_code", result: { body: { reason: "unknown_code" } } }, { reason: "x", result: { body: { reason: "y" } } })).toBe(false); // body differs
+  expect(sameUpToLearnedCodes({ reason: "unknown_code", nextStep: "unknown_code" }, { reason: "x", nextStep: "x" })).toBe(false); // another key holding the sentinel
   expect(sameUpToLearnedCodes({ a: 1, reason: "upstream_failed" }, { a: 1, reason: "unknown_code" })).toBe(false);
   expect(sameUpToLearnedCodes({ a: 1, reason: "unknown_code" }, { a: 2, reason: "upstream_failed" })).toBe(false);
   expect(sameUpToLearnedCodes({ a: 1, reason: "unknown_code" }, { a: 1, reason: 5 })).toBe(false);
   expect(sameUpToLearnedCodes({ a: 1 }, { a: 1 })).toBe(true);
-  expect(sameUpToLearnedCodes([{ reason: "unknown_code" }], [{ reason: "x" }])).toBe(true);
+  expect(sameUpToLearnedCodes([{ reason: "unknown_code" }], [{ reason: "x" }])).toBe(false); // arrays: not tolerated
   expect(sameUpToLearnedCodes({ reason: "unknown_code", extra: 1 }, { reason: "x" })).toBe(false);
 });
 
