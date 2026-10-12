@@ -1057,13 +1057,27 @@ describe("I-1 #3: 新しく作った journal のディレクトリの項目を f
   test("ファイルと 2 段のディレクトリを作る: ファイルを fsync し、その親・作った各ディレクトリの親を fsync してから load が終わる", async () => {
     const { fs, calls } = fakeFs(["/", "/x"]);
     await createFileJournal("/x/a/b/journal.ndjson", fs).load();
-    expect(calls).toEqual(["mkdir /x/a", "mkdir /x/a/b", "open /x/a/b/journal.ndjson", "sync /x/a/b/journal.ndjson", "fsyncDir /x/a/b", "fsyncDir /x/a", "fsyncDir /x"]);
+    expect(calls).toEqual(["mkdir /x/a", "mkdir /x/a/b", "open /x/a/b/journal.ndjson", "sync /x/a/b/journal.ndjson", "fsyncDir /x/a/b", "fsyncDir /x/a", "fsyncDir /x", "fsyncDir /"]);
   });
 
-  test("既にあるファイルなら何も作らず、ディレクトリの fsync も無い", async () => {
+  test("既にあるファイルでも何も作らないが、ファイルと root までのディレクトリは毎回 fsync する（I-2 #5）", async () => {
     const { fs, calls } = fakeFs(["/", "/x", "/x/journal.ndjson"]);
     await createFileJournal("/x/journal.ndjson", fs).load();
-    expect(calls).toEqual(["open /x/journal.ndjson"]);
+    expect(calls).toEqual(["open /x/journal.ndjson", "sync /x/journal.ndjson", "fsyncDir /x", "fsyncDir /"]);
+  });
+
+  test("前回の起動がディレクトリの fsync で失敗した後の再起動でも、ディレクトリを fsync してから使う（I-2 #5）", async () => {
+    const { fs, calls } = fakeFs(["/", "/x"]);
+    const ok = fs.fsyncDir;
+    fs.fsyncDir = async () => {
+      throw new Error("EIO");
+    };
+    await expect(createFileJournal("/x/a/journal.ndjson", fs).load()).rejects.toThrow();
+    // 1 回目でディレクトリとファイルは作られた（存在する）。2 回目は「既にある」が、fsync を省かない。
+    fs.fsyncDir = ok;
+    calls.length = 0;
+    await createFileJournal("/x/a/journal.ndjson", fs).load();
+    expect(calls).toEqual(["open /x/a/journal.ndjson", "sync /x/a/journal.ndjson", "fsyncDir /x/a", "fsyncDir /x", "fsyncDir /"]);
   });
 
   test("ディレクトリの fsync が失敗すれば load は失敗する（journal を使わない）", async () => {

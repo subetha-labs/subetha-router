@@ -130,12 +130,27 @@ function jsonText(value: unknown): string {
 }
 
 /** directory の fsync（rename・作成を永続にする）。 */
-function fsyncDir(dir: string): void {
+function fsyncDirNode(dir: string): void {
   const fd = openSync(dir, "r");
   try {
     fsyncSync(fd);
   } finally {
     closeSync(fd);
+  }
+}
+/** ディレクトリの fsync（試験だけ差し替える。`setDirSyncForTest`）。 */
+let fsyncDir: (dir: string) => void = fsyncDirNode;
+export function setDirSyncForTest(fn: ((dir: string) => void) | undefined): void {
+  fsyncDir = fn ?? fsyncDirNode;
+}
+/**
+ * `dir` から root までの全ディレクトリを深い方から fsync する（Codex I-2 #3）。新しく作った祖先（`attempts` など）の項目も
+ * 電源断で失われないように、作ったかどうかによらず毎回。失敗は例外（呼び出し側は購入を始めない）。
+ */
+function fsyncAncestors(dir: string): void {
+  for (let d = path.resolve(dir); ; d = path.dirname(d)) {
+    fsyncDir(d);
+    if (path.dirname(d) === d) break;
   }
 }
 
@@ -156,7 +171,7 @@ function writePrivate(file: string, value: unknown, secrets: Secrets): void {
     closeSync(fd);
   }
   renameSync(tmp, file);
-  fsyncDir(dir);
+  fsyncAncestors(dir);
 }
 
 /**
@@ -170,7 +185,7 @@ export function createAttemptMarker(evidenceDir: string, planSha: string, routeI
   const file = attemptMarkerPathOf(evidenceDir, planSha, routeId);
   const dir = path.dirname(file);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fsyncDir(path.dirname(dir));
+  fsyncAncestors(dir);
   let fd: number;
   try {
     fd = openSync(file, "wx", 0o600);
@@ -184,7 +199,7 @@ export function createAttemptMarker(evidenceDir: string, planSha: string, routeI
   } finally {
     closeSync(fd);
   }
-  fsyncDir(dir);
+  fsyncAncestors(dir);
   return true;
 }
 

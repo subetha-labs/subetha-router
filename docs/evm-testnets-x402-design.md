@@ -276,3 +276,14 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
   - 6: allowlist 外の loopback の受信 facilitator が普通の transport に落ち、起動時に拒まれない — 確認、§3.5 に起動時の拒否。
   - 2・N1: 期限の表が起点の違う長さを比べている。送出の直前の再確認が無い — 確認、§3.6 を残り時間で組み直し、§3.3 手順 9。
   - Provider の結果の写像（facilitator の 400/5xx → Provider 502 → Router `unknown`）は正しいと確認された（§3.6 に記録）。
+
+### 6.1 実装の独立レビュー（Codex `gpt-6-astra`、CLI read-only）
+
+- **I-1（`git diff bf85544..1780824`、2026-10-13）: REJECT、6 件**（`review-i1.md`）。親がコードで確認し全件を修正:
+  1. （blocking）facilitator: verify の成功の後の手数料・gas 上限・期限の 400 が直前の `authorizationState` を読み直さない → 全ての手順 4 以後の 400 の前に読み直し（使用済みは照合、読めなければ 5xx）。`000fb6d`。
+  2. （blocking）driver: 照合した `subject.source.offer` と署名する `quote.source.offer` が別 → 照合した凍結済みの quote 文書そのものを署名と購入に渡し、2 つの offer の正準一致を必須に。`b8e3df6`。
+  3. driver: 証跡の上書きでクラッシュ時に試みの印が消え得る → O_EXCL の不変の印を quote の前に、証跡は原子的な書き込み、読めない印・証跡は保留。`b8e3df6`。
+  4. facilitator: journal の書き込みに期限が無い → facilitator の締め切りで打ち切り、network を保留、遅れて終わっても送出しない。`000fb6d`。
+  5. facilitator: journal の新規作成でディレクトリを fsync しない → 修正。`000fb6d`。
+  6. facilitator: 起動の失敗で RPC の URL（鍵を含み得る）を出す → 固定の code だけ。`000fb6d`。
+- **I-2（readback、2026-10-13）: REJECT、残り 2 件**（`review-i2.md`）。1・2・4・6 は解決。残り: #3 印・証跡の新しい祖先（`attempts` を持つ証跡のディレクトリ）を fsync しない、#5 前回の起動がディレクトリの fsync で失敗した後の再起動では「既にある」として fsync を省く。どちらも親が確認し、**ファイルの親から root までの全ディレクトリを毎回 fsync** に変更（それぞれ失敗→再起動・新しい祖先の試験を追加し、元に戻すと落ちることを確認）。小さな修正なので全体の再レビューはせず親の readback（CLAUDE.md）。

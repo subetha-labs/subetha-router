@@ -1269,7 +1269,7 @@ export const nodeJournalFs: JournalFs = {
 
 /**
  * ndjson の journal。`load` が終わるまで使わない（`start` の前、server の listen の前に呼ばれる）。
- * 新しく作ったファイル・ディレクトリは、その項目を持つディレクトリを fsync してから受け入れる（Codex I-1 #3）:
+ * ファイルと、その親から root までのディレクトリを（新しく作ったかによらず）fsync してから受け入れる（Codex I-1 #3・I-2 #5）:
  * 電源断でファイルの中身だけ fsync され、ディレクトリの項目が消えて journal ごと無くなることを防ぐ。
  */
 export function createFileJournal(file: string, fs: JournalFs = nodeJournalFs): FacilitatorJournal & { close(): Promise<void> } {
@@ -1288,7 +1288,6 @@ export function createFileJournal(file: string, fs: JournalFs = nodeJournalFs): 
         current = parent;
       }
       for (const d of created) fs.mkdir(d);
-      const fileExisted = fs.exists(target);
       const records = (fs.readText(target) ?? "")
         .split("\n")
         .map((line, index) => ({ line, index }))
@@ -1296,14 +1295,13 @@ export function createFileJournal(file: string, fs: JournalFs = nodeJournalFs): 
         .map(({ line, index }) => parseJournalLine(line, index + 1));
       const opened = await fs.openAppend(target);
       try {
-        // 新しい項目を持つディレクトリ（新しいファイルの親、作った各ディレクトリの親）を、深い方から fsync する。
-        const dirsToSync = new Set<string>();
-        if (!fileExisted) {
-          await opened.sync();
-          dirsToSync.add(dir);
+        // **起動のたびに**ファイルと、その親から root までの全ディレクトリを深い方から fsync する（Codex I-2 #5）。
+        // 「既にある」だけでは前回の起動がディレクトリの fsync の途中で失敗した場合を区別できないので、存在で省かない。
+        await opened.sync();
+        for (let d = dir; ; d = path.dirname(d)) {
+          await fs.fsyncDir(d);
+          if (path.dirname(d) === d) break;
         }
-        for (const d of [...created].reverse()) dirsToSync.add(path.dirname(d));
-        for (const d of dirsToSync) await fs.fsyncDir(d);
       } catch (error) {
         await opened.close().catch(() => {});
         throw error;

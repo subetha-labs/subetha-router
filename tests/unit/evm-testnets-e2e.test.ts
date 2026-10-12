@@ -11,6 +11,8 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import {
   attemptMarkerPathOf,
+  createAttemptMarker,
+  setDirSyncForTest,
   BASE_SEPOLIA,
   buildPlan,
   loadApprovedPlan,
@@ -555,5 +557,25 @@ describe("run", () => {
     const report = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir }, deps(h, realSigner()));
     expect(report.stopped).toMatchObject({ stage: "sign_refused" });
     expect(h.mcp.count("subetha_router_purchase")).toBe(0);
+  });
+});
+
+describe("I-2 #3: 印を作るとき、新しく作った祖先（attempts など）を含め root までのディレクトリを fsync する", () => {
+  afterEach(() => setDirSyncForTest(undefined));
+  test("createAttemptMarker は印の親から root までの全ディレクトリを fsync してから true を返す。fsync が失敗すれば例外（購入を始めない）", () => {
+    const evidenceDir = mkdtempSync(path.join(tmpdir(), "e2e-marker-"));
+    const synced: string[] = [];
+    setDirSyncForTest((dir) => void synced.push(dir));
+    expect(createAttemptMarker(evidenceDir, "a".repeat(64), "md-rh-eth-snapshot", { at: 1 })).toBe(true);
+    const markerDir = path.dirname(attemptMarkerPathOf(evidenceDir, "a".repeat(64), "md-rh-eth-snapshot"));
+    // 新しく作った `attempts` を持つ evidenceDir、さらにその上も含む
+    for (const d of [markerDir, path.dirname(markerDir), path.resolve(evidenceDir), path.dirname(path.resolve(evidenceDir)), path.parse(path.resolve(evidenceDir)).root]) {
+      expect(synced, d).toContain(d);
+    }
+    setDirSyncForTest(() => {
+      throw new Error("EIO");
+    });
+    expect(() => createAttemptMarker(evidenceDir, "b".repeat(64), "md-rh-eth-snapshot", { at: 2 })).toThrow();
+    rmSync(evidenceDir, { recursive: true, force: true });
   });
 });
