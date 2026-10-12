@@ -224,6 +224,12 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 - port: 入口 8610（MCP）／Router は使い捨て、facilitator 8611、Provider 8621（rh）・8622（arbsep）・8623（hyperevm）・8624（sepolia）。journal・log は `.claude_workflow/local/evm-testnets/run-<UTC>/`（ignored）。公開の journal とは別。
 - hosted Router・本番ホスト・Cloudflare には触れない。
 
+### 3.11 実装の記録（E-3・E-4a、2026-10-13）
+
+- E-3（`e3db4ca`）: Provider を family（evm/svm）と facilitator の種類で一般化。新しい 4 env は `workers_dev = false`（手元の `wrangler dev` 専用）。`wrangler dev --env rh` が自前 facilitator（loopback、token の path）に届き 402 を返すことを実測（token 違いは 503）。arc・solana の受け入れ（AC-P2）7/7 で不変。
+- E-4a: §3.5 のとおり。逸脱: (1) 起動時の拒否は能力があるときだけ（能力が無ければ何も変えない、を保つため。evm の子は必ず渡す）、(2) `startHost` に試験専用の第 2 引数（子の script と追加 env。本番の入口は渡さない。静的な検査で固定）、(3) 公開 journal の拒否は `evmTestnetsOptionsOf` で（受け入れの入口と同じ場所）、(4) 子は `http://127.0.0.1:<port>` の origin だけを allowlist に入れる（`localhost` の URL は起動しない）。
+- 既存の試験の不安定さ（E-4a の範囲外、申し送り）: `tests/wire/multirail-compose.test.ts` の「confirm の timeout の後…」は、追跡が 3 秒（名前解決の期限）+ 2 秒（間隔）を 3 回くり返すと完了の期限 15 秒にちょうど達し、タイマーの誤差で 4 回目が始まると、止まったままの名前解決が枠（4）を使い切って後半の settle が `unknown` になる。E-4a は Solana の追跡・名前解決の code に触れていない（`src/net`・`src/adapters` の差分なし）。E-4a の前のコミットでは全体 3 回とも通り、後では 3 回中 2 回落ちた（試験の数が増えて時間の並びが変わったと判断）。CPU の負荷だけでは単独で再現しなかった。修正（試験の間隔を期限の境界から外す）は別の小さな変更として owner に挙げる。
+
 ## 4. タスク
 
 | # | 内容 | 担当 | 依存 |

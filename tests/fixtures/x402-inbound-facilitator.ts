@@ -7,6 +7,9 @@
  * - 想定外の形には **500 + 内部例外文字列**（`--leak` で再現。Router が転送しないことの確認用）
  *
  * usage: x402-inbound-facilitator.ts [--verify ok|invalid] [--settle ok|reject|unknown] [--leak]
+ *        [--prefix /<token>] [--settle-delays <ms>,<ms>,...]
+ * - `--prefix`: `/verify`・`/settle` をこの path の接頭辞の下で受ける（自前の EVM facilitator の token と同じ形。`/calls` は接頭辞なし）
+ * - `--settle-delays`: n 回目の settle の応答を n 番目の値だけ遅らせる（最後の値を繰り返す。期限の試験用）
  */
 
 import http from "node:http";
@@ -27,6 +30,8 @@ let connections = 0;
 const verifyMode = arg("verify", "ok");
 const settleMode = arg("settle", "ok");
 const leak = process.argv.includes("--leak");
+const prefix = arg("prefix", "");
+const settleDelays = arg("settle-delays", "0").split(",").map((value) => Number(value));
 
 let verifyCalls = 0;
 let settleCalls = 0;
@@ -73,7 +78,8 @@ const server = http.createServer((request, response) => {
     lastRequirements = body["paymentRequirements"];
     lastPayload = body["paymentPayload"];
 
-    if (url.pathname === "/verify") {
+    const pathname = prefix !== "" && url.pathname.startsWith(`${prefix}/`) ? url.pathname.slice(prefix.length) : prefix === "" ? url.pathname : "";
+    if (pathname === "/verify") {
       verifyCalls += 1;
       if (leak) {
         // 実 facilitator が内部例外を漏らす挙動（Router が転送しないことの確認用）。
@@ -90,8 +96,10 @@ const server = http.createServer((request, response) => {
       return;
     }
 
-    if (url.pathname === "/settle") {
+    if (pathname === "/settle") {
       settleCalls += 1;
+      const delay = settleDelays[Math.min(settleCalls - 1, settleDelays.length - 1)] ?? 0;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       if (settleMode === "unknown") {
         send(response, 500, { error: "SECRET_INTERNAL_DETAIL" });
         return;

@@ -10,6 +10,8 @@
  *        [--settle-network <caip2>] [--change-after N]
  *        [--change-field amount|maxTimeoutSeconds|extra-unknown] [--amount 900]
  *        [--atm eip3009|permit2] [--payer ok|other|malformed|absent]
+ *        [--network <caip2>] [--pay-to <0x…>] [--domain-name <name>] [--domain-version <v>] [--payer-address <0x…>]
+ *        （後の 5 つは EVM testnet の試験用。既定は今までの値: Base Sepolia・合成の受取先・`synthetic-usd`/`2`・署名 spy の address）
  */
 
 import http from "node:http";
@@ -49,10 +51,12 @@ const changeField = arg("change-field", "amount");
 const assetTransferMethod = arg("atm", "eip3009");
 const settleNetworkOverride = arg("settle-network", "");
 
-const NETWORK = "eip155:84532";
+const NETWORK = arg("network", "eip155:84532");
 /** offer の資産。既定は合成のアドレス。表の資産で起動する試験は `--asset` で渡す。 */
 const ASSET = arg("asset", "0x000000000000000000000000000000000000de57");
-const PAY_TO = "0x0000000000000000000000000000000000000a11";
+const PAY_TO = arg("pay-to", "0x0000000000000000000000000000000000000a11");
+const DOMAIN_NAME = arg("domain-name", "synthetic-usd");
+const DOMAIN_VERSION = arg("domain-version", "2");
 const SNAPSHOT_PATH = "/v1/eth/snapshot";
 
 let challengeCalls = 0;
@@ -79,8 +83,8 @@ function currentMaxTimeoutSeconds(): number {
  */
 function currentExtra(): Record<string, unknown> {
   return {
-    name: "synthetic-usd",
-    version: "2",
+    name: DOMAIN_NAME,
+    version: DOMAIN_VERSION,
     assetTransferMethod,
     providerNote: changed() && changeField === "extra-unknown" ? "rotated" : "original",
   };
@@ -135,7 +139,7 @@ function send(
 }
 
 /** 既定は署名 spy の公開アドレス（`tests/fixtures/x402-signer-spy.ts` の既定値）。 */
-const SPY_PAYER = "0x0000000000000000000000000000000000000501";
+const SPY_PAYER = arg("payer-address", "0x0000000000000000000000000000000000000501");
 const payerMode = arg("payer", "ok");
 
 function currentPayer(): string | undefined {

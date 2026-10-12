@@ -773,3 +773,120 @@ export function mainnetFirstRouteConfigOf(env: Readonly<Record<string, string | 
     },
   };
 }
+
+/* ------------------------------------------------------------------ EVM testnet 4 つの x402 受信・送信（`docs/evm-testnets-x402-design.md` §3.5、2026-10-13） */
+
+/**
+ * 4 つの EVM testnet（短縮名 → network・資産・桁・EIP-712 domain）。値は表（`src/shared/networks.ts` の `KNOWN_NETWORKS`）と同じで、
+ * 試験が一致を確かめる（このファイルは Router に依存しないので写しを持つ）。資産の文字列は表の id と同じ表記（checksum の大文字小文字のまま。予算の区分の鍵）。
+ */
+export const EVM_TESTNETS = Object.freeze({
+  rh: Object.freeze({ network: "eip155:46630", asset: "0x7E955252E15c84f5768B83c41a71F9eba181802F", decimals: 6, domain: Object.freeze({ name: "Global Dollar", version: "1" }) }),
+  arbsep: Object.freeze({ network: "eip155:421614", asset: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", decimals: 6, domain: Object.freeze({ name: "USD Coin", version: "2" }) }),
+  hyperevm: Object.freeze({ network: "eip155:998", asset: "0x2B3370eE501B4a559b57D449569354196457D8Ab", decimals: 6, domain: Object.freeze({ name: "USDC", version: "2" }) }),
+  sepolia: Object.freeze({ network: "eip155:11155111", asset: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", decimals: 6, domain: Object.freeze({ name: "USDC", version: "2" }) }),
+});
+export type EvmTestnetChain = keyof typeof EVM_TESTNETS;
+export const EVM_TESTNET_CHAINS: readonly EvmTestnetChain[] = Object.freeze(["rh", "arbsep", "hyperevm", "sepolia"]);
+
+/** 専用の入口の env（設計 §3.5）。facilitator（自前、token は path の接頭辞）・C の Provider の URL・受取先・選んだ chain。 */
+export const EVM_FACILITATOR_URL_ENV = "SUBETHA_EVM_FACILITATOR_URL";
+export const EVM_PROVIDER_PAYTO_ENV = "SUBETHA_EVM_PROVIDER_PAYTO";
+export const EVM_CHAINS_ENV = "SUBETHA_EVM_CHAINS";
+/** C の Provider の URL の env 名（`SUBETHA_EVM_PROVIDER_URL_RH` など。短縮名の大文字）。 */
+export function evmProviderUrlEnvOf(chain: EvmTestnetChain): string {
+  return `SUBETHA_EVM_PROVIDER_URL_${chain.toUpperCase()}`;
+}
+
+/** `rh,arbsep` のような chain の一覧を読む。空・知らない語・重複は拒む（値は出さない）。順は表の順に揃える。 */
+export function evmTestnetChainsOf(text: string | undefined): EvmTestnetChain[] {
+  if (text === undefined || text.trim() === "") throw new Error("at least one EVM testnet chain is required");
+  const seen = new Set<EvmTestnetChain>();
+  for (const token of text.split(",")) {
+    const name = token.trim();
+    if (!(EVM_TESTNET_CHAINS as readonly string[]).includes(name) || seen.has(name as EvmTestnetChain)) {
+      throw new Error(`chains must be a comma-separated subset of "${EVM_TESTNET_CHAINS.join(",")}" without repeats`);
+    }
+    seen.add(name as EvmTestnetChain);
+  }
+  return EVM_TESTNET_CHAINS.filter((chain) => seen.has(chain));
+}
+
+/** 受信 route（C の通貨で払って Provider A に届く）と送信 route（Base Sepolia USDC で払って C の Provider に届く）の id。 */
+export function evmInboundRouteOf(chain: EvmTestnetChain): string {
+  return `md-x402-eth-snapshot-${chain}`;
+}
+export function evmOutboundRouteOf(chain: EvmTestnetChain): string {
+  return `md-${chain}-eth-snapshot`;
+}
+
+/** 予算（設計 §3.7）。 */
+export const EVM_TESTNETS_BUDGET = Object.freeze({ maxPurchases: 32, baseSepolia: Object.freeze({ maxPerPurchase: "10000", maxTotal: "200000" }), chain: Object.freeze({ maxPerPurchase: "10000", maxTotal: "50000" }) });
+
+/**
+ * EVM testnet の専用の設定生成（設計 §3.5・FR-E5）。公開の生成（`routerConfigOf`）・`RAILS_ACTIVATION` には触れない。各 C について:
+ * - 受信 `md-x402-eth-snapshot-<c>`: C の資産 10,000（x402、受取先 `receiver`）→ Provider A（Base Sepolia USDC 10,000、`UPSTREAM_X402`）
+ * - 送信 `md-<c>-eth-snapshot`: Base Sepolia USDC 10,000（x402、受取先 `receiver`。facilitator は env `ROUTER_X402_INBOUND_FACILITATOR_URL`）→ C の Provider（C の資産、
+ *   受取先 env `SUBETHA_EVM_PROVIDER_PAYTO`、URL env `SUBETHA_EVM_PROVIDER_URL_<C>`）
+ * - C の受信の facilitator は `{ kind: "x402", url: env SUBETHA_EVM_FACILITATOR_URL }`
+ * env が欠ければ例外（値は出さない）。
+ */
+export function evmTestnetsConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, chains: readonly EvmTestnetChain[]): Record<string, unknown> {
+  if (chains.length === 0 || new Set(chains).size !== chains.length || chains.some((chain) => !(EVM_TESTNET_CHAINS as readonly string[]).includes(chain))) {
+    throw new Error("chains must be a non-empty subset of the EVM testnets without repeats");
+  }
+  const facilitatorUrl = env[EVM_FACILITATOR_URL_ENV];
+  if (facilitatorUrl === undefined || facilitatorUrl === "") throw new Error(`${EVM_FACILITATOR_URL_ENV} is required`);
+  const providerPayTo = env[EVM_PROVIDER_PAYTO_ENV];
+  if (providerPayTo === undefined || !EVM_ADDRESS.test(providerPayTo)) throw new Error(`${EVM_PROVIDER_PAYTO_ENV} must be an EVM address`);
+  const providerUrls = Object.fromEntries(
+    chains.map((chain) => {
+      const url = env[evmProviderUrlEnvOf(chain)];
+      if (url === undefined || url === "") throw new Error(`${evmProviderUrlEnvOf(chain)} is required`);
+      return [chain, url];
+    }),
+  ) as Record<EvmTestnetChain, string>;
+  const routes: Record<string, unknown> = {};
+  const upstreams: Record<string, string> = {};
+  const inboundFacilitators: Record<string, unknown> = {};
+  for (const chain of chains) {
+    const c = EVM_TESTNETS[chain];
+    const inboundId = evmInboundRouteOf(chain);
+    const outboundId = evmOutboundRouteOf(chain);
+    routes[inboundId] = {
+      routeId: inboundId,
+      canonicalPath: `/v1/routes/${inboundId}/resource`,
+      rail: "x402",
+      sourceRail: "x402",
+      source: { amount: "10000", asset: c.asset, decimals: c.decimals, network: c.network, payTo: receiver },
+      destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
+    };
+    routes[outboundId] = {
+      routeId: outboundId,
+      canonicalPath: `/v1/routes/${outboundId}/resource`,
+      rail: "x402",
+      sourceRail: "x402",
+      source: { amount: INBOUND.amount, asset: INBOUND.asset, decimals: 6, network: INBOUND.network, payTo: receiver },
+      destination: { scheme: "exact", network: c.network, asset: c.asset, payTo: providerPayTo },
+    };
+    upstreams[inboundId] = UPSTREAM_X402;
+    upstreams[outboundId] = providerUrls[chain];
+    inboundFacilitators[c.network] = { kind: "x402", url: facilitatorUrl };
+  }
+  const budget = EVM_TESTNETS_BUDGET;
+  return {
+    router: {
+      // 公開の生成と同じ既定（承認期限は `min(approvalTtlMs, offerExpiry)`）。
+      approvalTtlMs: Number(env["SUBETHA_APPROVAL_TTL_SECONDS"] ?? "600") * 1000,
+      routes,
+      budget: {
+        maxPurchases: budget.maxPurchases,
+        buckets: [
+          { network: INBOUND.network, asset: INBOUND.asset, maxTotal: budget.baseSepolia.maxTotal, maxPerPurchase: budget.baseSepolia.maxPerPurchase },
+          ...chains.map((chain) => ({ network: EVM_TESTNETS[chain].network, asset: EVM_TESTNETS[chain].asset, maxTotal: budget.chain.maxTotal, maxPerPurchase: budget.chain.maxPerPurchase })),
+        ],
+      },
+    },
+    x402: { upstreams, inboundFacilitators },
+  };
+}

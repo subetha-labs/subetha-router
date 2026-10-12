@@ -25,7 +25,8 @@ import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outb
 import { createX402SvmOutbound, type X402SvmOutboundOptions } from "./adapters/outbound/x402-svm.js";
 import { createMppSolanaOutbound } from "./adapters/outbound/mpp-solana.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "./net/bounded-body.js";
-import { createGuardedTransport, formatTransportEvent, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
+import { createGuardedTransport, formatTransportEvent, TransportError, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
+import { classifyAddress, POLICY_VERSION } from "./net/destination-policy.js";
 import { denyHostsOf } from "./net/upstream-url.js";
 import {
   ConfigError,
@@ -41,7 +42,7 @@ import {
   type RouteConfig,
   type RouterConfig,
   type RuntimeConfig,
-  usesGasIndexedFee, MPP_SOLANA_SCHEME, evmTestnetDeadlinesOf } from "./config.js";
+  usesGasIndexedFee, MPP_SOLANA_SCHEME, evmTestnetDeadlinesOf, EVM_TESTNET_NETWORKS } from "./config.js";
 import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
@@ -127,6 +128,149 @@ export interface RouterCapabilities {
    * `tools/real-seller-proof-capability.ts` で作る。route／プロファイルの `source.payTo` と一致しなければ起動しない。
    */
   readonly sellerProofs?: Readonly<Record<string, SellerProofCapability>>;
+  /**
+   * loopback の相手（`docs/evm-testnets-x402-design.md` §3.5、SR-E2）。**専用の子 process**（`tools/evm-testnets-router-process.ts`）だけが渡す。
+   * 公開の入口・hosted は渡さない。origin は `http://127.0.0.1:<port>` の literal だけ（名前・path・ほかのアドレスは起動しない）。
+   * 効くのは EVM testnet 4 つ（`EVM_TESTNET_NETWORKS`）の**静的** route の受信 facilitator と送信（x402）の上流だけで、
+   * その transport は要求ごとに origin の完全一致を確かめる（不一致は送出前に拒否）。動的上流・Base Sepolia・ほかの network には効かない。
+   * 渡されたときは、該当の URL のうち host が loopback のものが allowlist に無ければ起動しない（fetch 時の拒否に任せない）。
+   */
+  readonly localCounterparties?: { readonly origins: readonly string[] };
+}
+
+/** `localCounterparties` の origin の形（`http://127.0.0.1:<port>`。port は 1..65535、前ゼロなし）。 */
+const LOCAL_COUNTERPARTY_ORIGIN = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/;
+
+/**
+ * `localCounterparties` の検査（起動時、fail closed）。各 origin は `http://127.0.0.1:<port>` の literal と完全に一致し、
+ * URL として解析した `origin` とも一致すること（既定の port・path・userinfo・別表記を受けない）。能力が無ければ `undefined`（何も変えない）。
+ * 純粋関数（試験で確かめる）。値はメッセージに出さない。
+ */
+export function localCounterpartyOriginsOf(capability: RouterCapabilities["localCounterparties"]): ReadonlySet<string> | undefined {
+  if (capability === undefined) return undefined;
+  if (!Array.isArray(capability.origins)) throw new ConfigError("localCounterparties.origins must be an array");
+  const origins = new Set<string>();
+  capability.origins.forEach((origin, index) => {
+    const match = typeof origin === "string" ? LOCAL_COUNTERPARTY_ORIGIN.exec(origin) : null;
+    let parsedOrigin: string | undefined;
+    try {
+      parsedOrigin = typeof origin === "string" ? new URL(origin).origin : undefined;
+    } catch {
+      parsedOrigin = undefined;
+    }
+    if (match === null || Number(match[1]) > 65_535 || parsedOrigin !== origin) {
+      throw new ConfigError(`localCounterparties.origins[#${index + 1}] must be exactly http://127.0.0.1:<port>`);
+    }
+    origins.add(origin as string);
+  });
+  return origins;
+}
+
+/**
+ * URL の host が loopback の literal か（`127.0.0.0/8`・`::1`・IPv4-mapped の loopback・`localhost`・`*.localhost`）。名前は解決しない（文字列だけ）。
+ * 解析できない URL は `false`（設定の検査が別途弾く）。純粋関数。
+ */
+export function isLoopbackUrl(raw: string): boolean {
+  let host: string;
+  try {
+    host = new URL(raw).hostname.toLowerCase().replace(/\.$/, "");
+  } catch {
+    return false;
+  }
+  const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  if (bare === "localhost" || bare.endsWith(".localhost")) return true;
+  const verdict = classifyAddress(bare, { allowLoopback: false, interfaces: () => [] });
+  return !verdict.allowed && verdict.reason === "loopback";
+}
+
+/**
+ * 要求ごとに origin の完全一致を確かめる包み（SR-E2）。`allowed` に無い origin（別の loopback の port を含む）・解析できない URL は
+ * **送出の前に** `destination_blocked` で拒む（接続を作らない）。一致すれば内側の transport（redirect の拒否・アドレスの pinning はそのまま）に渡す。
+ */
+export function originPinnedTransport(inner: GuardedTransport, allowed: ReadonlySet<string>, report: (event: TransportEvent) => void): GuardedTransport {
+  const pinned = new Set(allowed);
+  return {
+    fetch: async (input, init, context) => {
+      let origin: string | undefined;
+      try {
+        const url = input instanceof URL ? input : new URL(input);
+        origin = url.username === "" && url.password === "" ? url.origin : undefined;
+      } catch {
+        origin = undefined;
+      }
+      if (origin === undefined || !pinned.has(origin)) {
+        report({ code: "destination_blocked", operation: context.operation, policy: POLICY_VERSION, ...(context.routeId === undefined ? {} : { routeId: context.routeId }) });
+        throw new TransportError("destination_blocked", context);
+      }
+      return inner.fetch(input, init, context);
+    },
+    report: inner.report,
+    allowLoopback: inner.allowLoopback,
+    boundsDns: inner.boundsDns,
+  };
+}
+
+/**
+ * `localCounterparties` で loopback に届かせる静的の相手（設計 §3.5）。純粋関数（試験で確かめる）。起動時に決め、fetch 時には決めない:
+ * - 受信: `sourceRail: "x402"` で source の network が EVM testnet の route。facilitator の URL の host が loopback なら、その origin が allowlist に
+ *   無ければ起動しない。あれば `inbound[routeId]` にその origin 1 つ。loopback でない URL は今の transport（ここには載らない）
+ * - 送信: `(x402, network)` の組で network が EVM testnet。組の上流の URL の loopback のものは全部 allowlist にあること。loopback が 1 つでもあれば
+ *   **全部**が loopback（allowlist 済み）であること（一部だけなら起動しない）。全部なら `outbound[network]` にその origin の集合
+ * 能力が無ければ空（何も変えない）。
+ */
+export function localCounterpartyPlanOf(
+  routes: Readonly<Record<string, RouteConfig>>,
+  upstreams: Readonly<Record<string, string>>,
+  facilitatorUrlOf: (network: string) => string | undefined,
+  origins: ReadonlySet<string> | undefined,
+): { readonly inbound: ReadonlyMap<string, string>; readonly outbound: ReadonlyMap<string, ReadonlySet<string>> } {
+  const inbound = new Map<string, string>();
+  const outbound = new Map<string, Set<string>>();
+  if (origins === undefined) return { inbound, outbound };
+  const listed = (raw: string): string | undefined => {
+    try {
+      const origin = new URL(raw).origin;
+      return origins.has(origin) ? origin : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const groups = new Map<string, { loopback: number; total: number }>();
+  for (const route of Object.values(routes)) {
+    if (route.sourceRail === "x402" && EVM_TESTNET_NETWORKS.has(route.source.network)) {
+      const url = facilitatorUrlOf(route.source.network);
+      if (url !== undefined && isLoopbackUrl(url)) {
+        const origin = listed(url);
+        if (origin === undefined) {
+          throw new ConfigError(`routes.${route.routeId}: the inbound facilitator is a loopback address that RouterCapabilities.localCounterparties does not list`);
+        }
+        inbound.set(route.routeId, origin);
+      }
+    }
+    if ((route.rail ?? "x402") === "x402" && EVM_TESTNET_NETWORKS.has(route.destination.network)) {
+      const network = route.destination.network;
+      const group = groups.get(network) ?? { loopback: 0, total: 0 };
+      groups.set(network, group);
+      group.total += 1;
+      const url = upstreams[route.routeId];
+      if (url !== undefined && isLoopbackUrl(url)) {
+        const origin = listed(url);
+        if (origin === undefined) {
+          throw new ConfigError(`routes.${route.routeId}: the upstream is a loopback address that RouterCapabilities.localCounterparties does not list`);
+        }
+        group.loopback += 1;
+        const set = outbound.get(network) ?? new Set<string>();
+        set.add(origin);
+        outbound.set(network, set);
+      }
+    }
+  }
+  for (const [network, group] of groups) {
+    if (group.loopback > 0 && group.loopback !== group.total) {
+      throw new ConfigError(`outbound x402 ${network}: either every upstream of the group is a listed local counterparty or none is`);
+    }
+  }
+  return { inbound, outbound };
 }
 
 /** Solana の公開 devnet RPC（`ROUTER_SOLANA_RPC_URL` が無いときの既定）。 */
@@ -408,6 +552,8 @@ export function composeRails(
   report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
 ): ComposedRails {
+  // loopback の相手の allowlist（設計 §3.5）。形の検査は構成によらず起動時に（fail closed）。能力が無ければ `undefined`。
+  const localOrigins = localCounterpartyOriginsOf(capabilities.localCounterparties);
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
   if (config.adapterMode === "synthetic") {
     if (config.synthetic === undefined) {
@@ -429,6 +575,16 @@ export function composeRails(
     throw new SignerNotAuthorizedError();
   }
   const staticHooks = capabilities.transportHooksForTest ?? {};
+  /**
+   * EVM testnet 4 つの静的の相手のうち loopback に届かせるもの（設計 §3.5、SR-E2）。起動時に決める: allowlist に無い loopback の URL・一部だけの送信の組は
+   * ここで起動を止める。能力が無ければ空（以下の配線は今までどおり）。
+   */
+  const localPlan = localCounterpartyPlanOf(
+    config.router.routes,
+    real.upstreams,
+    (network) => (network === LEGACY_X402_INBOUND_NETWORK ? real.x402InboundFacilitatorUrl : real.x402InboundFacilitators?.[network]?.url),
+    localOrigins,
+  );
 
   /**
    * 動的上流 URL（設計 §3.1・§7.3）。transport は route 用とは別のインスタンスで、**loopback を許さず**、名前解決に期限、
@@ -536,11 +692,13 @@ export function composeRails(
       const rebuild = pair.network !== BASE_SEPOLIA_NETWORK;
       // EVM testnet 4 つだけ: 有料要求の期限をチェーン別に（`docs/evm-testnets-x402-design.md` §3.6）。ほかの network は既定（30 秒）のまま。
       const testnetDeadlines = evmTestnetDeadlinesOf(pair.network);
+      const localOutbound = localPlan.outbound.get(pair.network);
       rails[key] = createX402Outbound({
         ...(testnetDeadlines === undefined ? {} : { paidTimeoutMs: testnetDeadlines.outboundPaidMs }),
         upstreams: upstreamsFor(pair.rail, pair.network),
         capability,
-        transport: transportFor(capability.kind === "non-signing-fixture", report, staticHooks),
+        // EVM testnet の組の上流が全部 allowlist の loopback なら、loopback を許し要求ごとに origin を確かめる transport（設計 §3.5）。それ以外は今まで。
+        transport: localOutbound === undefined ? transportFor(capability.kind === "non-signing-fixture", report, staticHooks) : originPinnedTransport(transportFor(true, report, staticHooks), localOutbound, report),
         operatorAddresses,
         // Base 以外の EVM（Arc）は組み直しの署名器で（送信の設計 §3.2）。Base は従来の経路。
         rebuildSignatures: rebuild,
@@ -764,7 +922,14 @@ export function composeRails(
       const facilitator = facilitatorFor(route.source.network, at);
       const isLegacy = route.source.network === LEGACY_X402_INBOUND_NETWORK;
       // 既存の Base Sepolia は今までの transport。新しい静的 rail（Circle・SVM）は名前解決にも期限を置く（SR-2。止まった DNS が HTTP の期限を越えて待たない）。
-      const transport = isLegacy ? transportFor(inboundLoopback, report, staticHooks) : createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } });
+      // EVM testnet の受信で facilitator が allowlist の loopback なら、loopback を許し要求ごとにその origin だけを通す transport（設計 §3.5）。
+      const localOrigin = localPlan.inbound.get(route.routeId);
+      const transport =
+        localOrigin !== undefined
+          ? originPinnedTransport(createGuardedTransport({ ...staticHooks, allowLoopback: true, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }), new Set([localOrigin]), report)
+          : isLegacy
+            ? transportFor(inboundLoopback, report, staticHooks)
+            : createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } });
       // 受信 offer の有効期間。承認期限は `min(approvalTtlMs, offerExpiry)` で切られるので
       // ここが短いと **approvalTtlMs を伸ばしても効かない**（人間が承認する運用だと詰まる）。
       inboundRails[`x402:${route.routeId}`] =
