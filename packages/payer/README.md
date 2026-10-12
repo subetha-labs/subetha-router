@@ -159,9 +159,12 @@ purchasing." The five tools are:
 The example ref is a placeholder: use the exact ref returned by your quote.
 The agent shows the whole subject (for a dynamic quote also the upstream URL, the
 recipient and the price breakdown upstream + fee = total), then calls purchase for
-that ref. Only **you** can approve in the daemon's dialog: check your security
-phrase, Router, wallet, route or profile, both legs' networks/assets/amounts/recipients,
-the rail line that says when funds move, the upstream URL, deadline and disclosures,
+that ref. Only **you** can approve in the daemon's dialog. Since 0.2.1 the dialog
+says in plain words what approving does (which wallet pays what, on which chain and
+rail, to the Router; what the Router pays the provider; whether funds move at approval
+or at purchase; the provider URL, the price breakdown, the deadline and the no-refund
+disclosure), with the full addresses under "Details": check your security phrase on the
+first line, then the amounts, networks and recipients against what the agent showed,
 then enter your passphrase and **click Approve with the mouse**: the dialog's default
 button is Cancel, so pressing Enter cancels (this is deliberate). Enter nothing in a
 dialog without your security phrase; cancel if anything differs. Cancel, timeout, wrong

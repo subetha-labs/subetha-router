@@ -78,7 +78,7 @@ describe("R-1: vendor and dependency boundary", () => {
     const rootLock = JSON.parse(readFileSync(path.join(repo, "package-lock.json"), "utf8"));
     expect(pkg.private).toBeUndefined();
     expect(pkg.publishConfig).toEqual({ access: "public" });
-    expect(pkg.version).toBe("0.2.0");
+    expect(pkg.version).toBe("0.2.1");
     expect(pkg.dependencies.viem).toBe("2.54.2");
     expect(lock.packages[""].dependencies).toEqual(pkg.dependencies);
     expect(lock.packages["node_modules/viem"].version).toBe("2.54.2");
