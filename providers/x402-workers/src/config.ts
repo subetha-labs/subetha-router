@@ -41,8 +41,23 @@ export const TABLE: Readonly<Record<ProviderNetwork, NetworkTable>> = Object.fre
   }),
 });
 
-export const RESOURCE_PATH = "/v1/eth/snapshot";
-export const DESCRIPTION = "ETH perpetual snapshot (Hyperliquid mark price, 24h change)";
+/** 資源（§2.1・§11）。path ごとに Hyperliquid の銘柄と 402 の `resource.description`。鍵・受取先・価格は資源によらず同じ。 */
+export type MarketSymbol = "ETH" | "SOL";
+export interface Resource {
+  readonly path: string;
+  readonly symbol: MarketSymbol;
+  readonly description: string;
+}
+export const RESOURCES: readonly Resource[] = Object.freeze([
+  Object.freeze({ path: "/v1/eth/snapshot", symbol: "ETH", description: "ETH perpetual snapshot (Hyperliquid mark price, 24h change)" }),
+  Object.freeze({ path: "/v1/sol/snapshot", symbol: "SOL", description: "SOL perpetual snapshot (Hyperliquid mark price, 24h change)" }),
+]);
+/** path の完全一致だけ（末尾の `/`・大文字小文字・クエリは一致しない）。 */
+export function resourceOf(pathname: string): Resource | undefined {
+  return RESOURCES.find((resource) => resource.path === pathname);
+}
+export const RESOURCE_PATH = RESOURCES[0]!.path;
+export const DESCRIPTION = RESOURCES[0]!.description;
 /** wire の窓（Circle の窓と同じ 30 秒。設計 §2.1）。 */
 export const MAX_TIMEOUT_SECONDS = 30;
 /** `PAYMENT-SIGNATURE` の長さの上限（Workers のヘッダの上限の内側。正しい payload は数 KiB）。 */

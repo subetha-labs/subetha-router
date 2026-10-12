@@ -10,7 +10,7 @@ import type { PaymentPayload, PaymentRequired, PaymentRequirements, SupportedRes
 import { registerExactEvmScheme } from "@x402/evm/exact/server";
 import { registerExactSvmScheme } from "@x402/svm/exact/server";
 
-import { DESCRIPTION, MAX_TIMEOUT_SECONDS, type ProviderConfig } from "./config.js";
+import { MAX_TIMEOUT_SECONDS, type ProviderConfig } from "./config.js";
 import { DeadlineError, withSignal, type Stage } from "./deadline.js";
 import { supportedKindOf } from "./facilitator-client.js";
 
@@ -18,7 +18,8 @@ export interface RequirementsBuilder {
   /** 未初期化なら `/supported` を読む（**呼び出し側の段** の内側。並行は 1 本に束ね、後続は自分の signal で待つ）。 */
   ready(signal: AbortSignal, stageFor: () => Stage): Promise<void>;
   requirements(): Promise<PaymentRequirements[]>;
-  paymentRequired(url: string, error?: string): Promise<PaymentRequired>;
+  /** `url` は要求された資源の canonical URL、`description` はその資源の説明（§11: 資源ごとに違う）。 */
+  paymentRequired(url: string, description: string, error?: string): Promise<PaymentRequired>;
   /** 支払いの `accepted` が自分の requirements と一致する 1 件（無い・深すぎる → `undefined`。throw しない）。 */
   match(payload: PaymentPayload): Promise<PaymentRequirements | undefined>;
 }
@@ -107,9 +108,9 @@ export function createRequirementsBuilder(config: ProviderConfig, clientFor: (st
   return {
     ready,
     requirements,
-    async paymentRequired(url: string, error?: string): Promise<PaymentRequired> {
+    async paymentRequired(url: string, description: string, error?: string): Promise<PaymentRequired> {
       const accepts = await requirements();
-      return server.createPaymentRequiredResponse(accepts, { url, description: DESCRIPTION, mimeType: "application/json" }, error ?? "Payment required");
+      return server.createPaymentRequiredResponse(accepts, { url, description, mimeType: "application/json" }, error ?? "Payment required");
     },
     async match(payload: PaymentPayload): Promise<PaymentRequirements | undefined> {
       const accepts = await requirements();

@@ -12,7 +12,7 @@ owner の決定（2026-10-08）: 既存の Provider と同じ **Cloudflare Worke
 - 作るのは **x402 v2 の `exact` を受け取る HTTP の資源サーバ**を 2 つ（Arc testnet USDC、Solana devnet USDC）。1 つの Worker のソースを wrangler の環境（`--env arc` / `--env sol`）で切り替え、2 つの Worker として配備する。
 - 置き場は **この Router リポジトリの `providers/x402-workers/`**（独立した `package.json`・`wrangler.toml`。Router の `src/` は import しない。Circle の売り手証明は `src/adapters/inbound/seller-proof.ts` の純粋な部分を**写して**使う（§3.3）。Router の build・試験には影響しない）。
   既存の Provider のソースは手元に無い（Cloudflare にだけある）ので、**同じ 402 の形**（§2.1）と**同じ本文の契約**（§2.3）に合わせる。
-- 資源は 1 本: `GET /v1/eth/snapshot`。クエリは受けない。
+- 資源は 1 本: `GET /v1/eth/snapshot`。クエリは受けない。（2026-10-13 に §11 で `GET /v1/sol/snapshot` を足した。）
 - 範囲外: Base／Tempo の既存 Provider の変更、MPP の Provider、同一チェーンの組（Router の D-16）、Bazaar、動的価格、settle 後の追跡（§2.2 の `settlement_pending` は `unknown` で返す）。
 
 ## 1. 外部の事実（2026-10-08 に確認）
@@ -223,3 +223,33 @@ fetch handler の順序（§2.2）: `GET /v1/eth/snapshot` 以外は 404。`PAYM
   **AC-P3 / AC-P4（V-13）はこれで満たした**（AC-P3 は owner の承認のもとでの実 facilitator への有料要求、AC-P4 は上の V-6/V-7/V-12 にこの V-13 を足したもの）: 実 facilitator（Circle、x402.org）への有料要求が 6 件とも成功（Router が `paid`・領収あり。Worker の生の HTTP 状態は Router に残らない）、`PAYMENT-RESPONSE` は `{ success, transaction, network, payer }` で `payer` は Router の署名者、
   Circle の settle は Arc の tx（`transferWithAuthorization`、受取 `0x719e…` に 10,000 × 3）、x402.org の settle は devnet の signature（finalized、受取 ATA に 10,000 × 3）。purchase 全体（端から端）の所要は 2.6〜5.4 秒で、Router の有料要求 30 秒・Worker の 26 秒の内側。pending の結果は観測していない。
   本文は 6 件とも §2.3 の契約（`payment.network` は Arc / Solana の値）。
+
+## 11. 第 2 の資源 `GET /v1/sol/snapshot`（2026-10-13。Colosseum のデモ用）
+
+**要件**: 同じ Worker に、Hyperliquid の **SOL** の perpetual の行から組む資源を 1 本足す。鍵・受取先・価格（10,000）・facilitator・402 の `accepts` は
+`/v1/eth/snapshot` と**同一**で、違うのは path・`resource.description`（`SOL perpetual snapshot (Hyperliquid mark price, 24h change)`）・
+本文の `market.symbol`（`"SOL"`）・`assetIndex`（SOL の universe の index。2026-10-13 の実測は 5）だけ。既存の `/v1/eth/snapshot` は
+Router の静的ルート（`UPSTREAM_ARC` / `UPSTREAM_SOL`）が使うので**そのまま**（本文・説明・path を変えない）。
+
+**設計**: `config.ts` の資源表 `RESOURCES`（path → `symbol`・`description`。完全一致だけ: 末尾 `/`・大文字・クエリは 404 のまま）。
+`index.ts` は path で資源を引き、canonical URL と説明をその資源から取り、`fetchSnapshot(..., symbol)` に銘柄を渡す。path の検査は従来のまま（既知の path 以外は 404、既知の path の GET 以外は 405、`url.search` が空でなければ 404。`?` だけの URL は `search` が空なので従来どおり通る。§3.1 の「以外は 404」はこの意味）。`snapshotOf` は
+`symbol` の行を探す（既定 ETH）。§2.2 の順序・各段の期限・上限・`accepted` の完全一致・settle 1 回・領収の検査は変えない（資源によらず同じ
+`requirements()`）。契約（§2.3）は `market.symbol` が `"SOL"` になる以外は同じ鍵の集合で、数値の制約も同じ。universe に SOL が無ければ段 1 で
+502（facilitator を呼ばない。ETH の資源は影響を受けない）。
+
+**試験**（`test/unit.test.ts`・`test/handler.test.ts`）: 資源表の完全一致、SOL の行からの封筒（`assetIndex` は universe の index、既定は ETH のまま、
+SOL が無ければ `data_unavailable`）、handler で SOL の 402（`resource.url`・`description`、`accepts` は ETH と同じ、`/supported` は isolate で
+1 回）と支払いつきの 200（本文は SOL の行、`PAYMENT-RESPONSE` は同じ）、同じ isolate で ETH の資源が ETH のまま、SOL の行が無い応答は 502、
+path の不一致は 404。実装の `symbol` と canonical の取り違えを壊して試験が落ちることを確かめた（2026-10-13）。
+
+**配備（owner）**: `wrangler deploy --env sol`（`provider-x402-sol.subethalabs.com`）。Arc 版も同じコードなので `--env arc` も入れ替えてよい
+（入れ替えなければ Arc 版は `/v1/sol/snapshot` に 404 のまま）。Router 側の変更は無い: デモは動的プロファイル `dyn-x402-to-sol` に
+`https://provider-x402-sol.subethalabs.com/v1/sol/snapshot` を渡す（Router は 402 の `accepts` を表の Solana の範囲で検査し、本文は
+`application/json` の object として配達する）。配備後の確認: 未払い GET が 402 で `resource.url` が `…/v1/sol/snapshot`、`description` が SOL、
+`accepts` が `/v1/eth/snapshot` と同一であること。
+
+**独立レビュー（Codex `gpt-6-astra`、2026-10-13、`.claude_workflow/local/provider-sol-review1.md`）**: APPROVE WITH CHANGES、blocking 無し。nonblocking 2 件を反映した:
+handler の「SOL の行が無い応答」の試験を ETH だけの契約どおりの応答に変え、verify も settle も増えないことと同じ応答で ETH が 200 のままを確かめる;
+path の検査（405・`?` だけの URL）の既存の振る舞いを上に明記。`accepted` の一致は `payload.resource.url` を見ない（ETH 向けに作った支払いは SOL でも
+通る）: 条件が同一で facilitator が検証するのは送金なので設計どおりだが、資源への束縛ではない（従来からの性質。資源ごとの価格を分けるなら要変更）。
+

@@ -8,7 +8,7 @@ import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from "@x402
 import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, RESOURCE_PATH, type ProviderConfig, type ProviderEnv } from "./config.js";
+import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, resourceOf, type ProviderConfig, type ProviderEnv, type Resource } from "./config.js";
 import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS, type Stage } from "./deadline.js";
 import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
@@ -73,8 +73,8 @@ export function runtimeOf(env: ProviderEnv, hooks: Hooks = {}): Runtime {
   return { config, builder, facilitatorFor };
 }
 
-async function paymentRequired(runtime: Runtime, canonical: string, error?: string): Promise<Response> {
-  const required = await runtime.builder.paymentRequired(canonical, error);
+async function paymentRequired(runtime: Runtime, canonical: string, resource: Resource, error?: string): Promise<Response> {
+  const required = await runtime.builder.paymentRequired(canonical, resource.description, error);
   return json(402, error === undefined ? {} : { error: "payment_invalid" }, { "payment-required": encodePaymentRequiredHeader(required) });
 }
 
@@ -92,10 +92,11 @@ export async function handle(request: Request, runtime: Runtime, hooks: Hooks = 
   // 期限の timer はどの出口でも外す（404/405 も含む）。
   try {
     const url = new URL(request.url);
-    if (url.pathname !== RESOURCE_PATH) return json(404, { error: "not_found" });
+    const resource = resourceOf(url.pathname);
+    if (resource === undefined) return json(404, { error: "not_found" });
     if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
     if (url.search !== "") return json(404, { error: "not_found" });
-    return await handleWithin(request, url, runtime, hooks, deadline);
+    return await handleWithin(request, url, resource, runtime, hooks, deadline);
   } finally {
     deadline.release();
   }
@@ -105,8 +106,8 @@ function stageFor(deadline: RequestDeadline): (stage: "verify" | "settle" | "sup
   return (stage) => deadline.stage(stage === "verify" ? VERIFY_TIMEOUT_MS : stage === "settle" ? SETTLE_TIMEOUT_MS : INIT_TIMEOUT_MS);
 }
 
-async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks: Hooks, deadline: RequestDeadline): Promise<Response> {
-  const canonical = `${url.origin}${RESOURCE_PATH}`;
+async function handleWithin(request: Request, url: URL, resource: Resource, runtime: Runtime, hooks: Hooks, deadline: RequestDeadline): Promise<Response> {
+  const canonical = `${url.origin}${resource.path}`;
   const fetchImpl = hooks.fetch ?? fetch;
 
   // isolate の最初の要求: facilitator の `/supported`（上限 5 秒、要求の期限の内側。並行は 1 本）。
@@ -123,18 +124,18 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   }
 
   const header = request.headers.get("payment-signature");
-  if (header === null || header === "") return paymentRequired(runtime, canonical);
-  if (header.length > MAX_PAYMENT_HEADER_CHARS) return paymentRequired(runtime, canonical, "payment_invalid");
+  if (header === null || header === "") return paymentRequired(runtime, canonical, resource);
+  if (header.length > MAX_PAYMENT_HEADER_CHARS) return paymentRequired(runtime, canonical, resource, "payment_invalid");
 
   // 0. decode、形の検査、`accepted` の完全一致（どれも固定の 402。facilitator もデータ源も呼ばない）。
   let decoded: unknown;
   try {
     decoded = decodePaymentSignatureHeader(header);
   } catch {
-    return paymentRequired(runtime, canonical, "payment_invalid");
+    return paymentRequired(runtime, canonical, resource, "payment_invalid");
   }
   if (!isRecord(decoded) || decoded["x402Version"] !== 2 || !isRecord(decoded["accepted"]) || !isRecord(decoded["payload"])) {
-    return paymentRequired(runtime, canonical, "payment_invalid");
+    return paymentRequired(runtime, canonical, resource, "payment_invalid");
   }
   const payload = decoded as unknown as PaymentPayload;
   // `accepted` の一致（深すぎる入れ子は一致しない。ここで例外が出ても固定の 402）。
@@ -144,13 +145,13 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   } catch {
     requirements = undefined;
   }
-  if (requirements === undefined) return paymentRequired(runtime, canonical, "no_matching_requirements");
+  if (requirements === undefined) return paymentRequired(runtime, canonical, resource, "no_matching_requirements");
 
   // 1. データ（支払いの前。取れない・形が違う・直列化して 64 KiB を超える → facilitator を呼ばない）。
   let bodyText: string;
   const dataStage = deadline.stage(DATA_TIMEOUT_MS);
   try {
-    const snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, dataStage.signal, fetchImpl, hooks.now);
+    const snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, dataStage.signal, fetchImpl, hooks.now, resource.symbol);
     bodyText = serializeSnapshot(snapshot).text;
   } catch (error) {
     if (!(error instanceof DataUnavailableError) && !(error instanceof DeadlineError)) console.error("provider: data stage failed");
@@ -167,7 +168,7 @@ async function handleWithin(request: Request, url: URL, runtime: Runtime, hooks:
   } catch (error) {
     return facilitatorError("verify", error);
   }
-  if (!verified.isValid) return paymentRequired(runtime, canonical, "payment_invalid");
+  if (!verified.isValid) return paymentRequired(runtime, canonical, resource, "payment_invalid");
 
   // 3. settle（1 回だけ。残りが足りなければ呼ばない: 送出前なので資金は動かない）。
   if (!deadline.canSettle()) return json(503, { error: "provider_busy" });
