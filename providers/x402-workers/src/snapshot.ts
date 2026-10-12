@@ -3,6 +3,7 @@
  * 取得と形の検証は支払いの前（verify の前）。応答は **byte の上限まで**読み、組んだ本文は **直列化して 64 KiB 以内**であることを
  * verify の前に確かめる。満たさなければ `DataUnavailableError`（Provider は 502、facilitator は呼ばない）。
  */
+import type { MarketSymbol } from "./config.js";
 import { DeadlineError, withSignal } from "./deadline.js";
 
 /** Hyperliquid の応答（数十 KiB）の読取の上限。 */
@@ -13,7 +14,7 @@ const DECIMAL = /^-?\d+(?:\.\d+)?$/;
 
 export interface Snapshot {
   readonly providerId: "market-data-a";
-  readonly market: { readonly kind: "perpetual"; readonly symbol: "ETH"; readonly quote: "USD" };
+  readonly market: { readonly kind: "perpetual"; readonly symbol: MarketSymbol; readonly quote: "USD" };
   readonly dataSource: { readonly name: "hyperliquid"; readonly network: "hyperliquid-mainnet" };
   readonly payment: { readonly protocol: "x402"; readonly network: string };
   readonly fetchedAt: string;
@@ -100,12 +101,12 @@ export function percentOf(absolute: string, prev: string): string {
   return formatScaled(negative && truncated !== 0n ? -truncated : truncated, 2);
 }
 
-/** Hyperliquid の `metaAndAssetCtxs` の応答から ETH の行を取り出し、契約の形と制約を検証する。 */
-export function snapshotOf(json: unknown, paymentNetwork: string, now: () => number = Date.now): Snapshot {
+/** Hyperliquid の `metaAndAssetCtxs` の応答から `symbol`（既定 ETH。§11: SOL）の行を取り出し、契約の形と制約を検証する。 */
+export function snapshotOf(json: unknown, paymentNetwork: string, now: () => number = Date.now, symbol: MarketSymbol = "ETH"): Snapshot {
   if (!Array.isArray(json) || json.length !== 2 || !isRecord(json[0]) || !Array.isArray(json[0]["universe"]) || !Array.isArray(json[1])) throw new DataUnavailableError();
   const universe = json[0]["universe"] as unknown[];
   const contexts = json[1] as unknown[];
-  const assetIndex = universe.findIndex((asset) => isRecord(asset) && asset["name"] === "ETH");
+  const assetIndex = universe.findIndex((asset) => isRecord(asset) && asset["name"] === symbol);
   const context = contexts[assetIndex];
   if (assetIndex < 0 || !Number.isSafeInteger(assetIndex) || !isRecord(context)) throw new DataUnavailableError();
   const markPx = context["markPx"];
@@ -121,7 +122,7 @@ export function snapshotOf(json: unknown, paymentNetwork: string, now: () => num
   const fetchedAt = new Date(now()).toISOString();
   return {
     providerId: "market-data-a",
-    market: { kind: "perpetual", symbol: "ETH", quote: "USD" },
+    market: { kind: "perpetual", symbol, quote: "USD" },
     dataSource: { name: "hyperliquid", network: "hyperliquid-mainnet" },
     payment: { protocol: "x402", network: paymentNetwork },
     fetchedAt,
@@ -171,7 +172,7 @@ async function readBounded(response: Response, maxBytes: number, signal: AbortSi
   return bytes;
 }
 
-export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, signal: AbortSignal, doFetch: typeof fetch | undefined = undefined, now: () => number = Date.now): Promise<Snapshot> {
+export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, signal: AbortSignal, doFetch: typeof fetch | undefined = undefined, now: () => number = Date.now, symbol: MarketSymbol = "ETH"): Promise<Snapshot> {
   if (signal.aborted) throw new DeadlineError();
   let response: Response;
   try {
@@ -198,5 +199,5 @@ export async function fetchSnapshot(dataUrl: string, paymentNetwork: string, sig
   } catch {
     throw new DataUnavailableError();
   }
-  return snapshotOf(json, paymentNetwork, now);
+  return snapshotOf(json, paymentNetwork, now, symbol);
 }

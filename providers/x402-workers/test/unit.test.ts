@@ -5,7 +5,7 @@
 import { describe, expect, test } from "vitest";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
-import { configOf, isBase58PublicKey, TABLE } from "../src/config.js";
+import { configOf, DESCRIPTION, isBase58PublicKey, RESOURCE_PATH, resourceOf, RESOURCES, TABLE } from "../src/config.js";
 import { DeadlineError, MIN_REMAINING_BEFORE_SETTLE_MS, RequestDeadline, withSignal, type Stage } from "../src/deadline.js";
 import { BoundedFacilitatorClient, readBoundedJson, SettleCalledTwiceError, supportedKindOf } from "../src/facilitator-client.js";
 import { checkReceipt, payerOfPayload } from "../src/receipt.js";
@@ -81,6 +81,17 @@ describe("売り手証明（Router の fixture と同じ検証。期待値は te
   });
 });
 
+describe("resources（§11: path → 銘柄と説明）", () => {
+  test("2 本の資源。完全一致だけ（末尾 /・大文字・クエリは不一致）。既定の RESOURCE_PATH/DESCRIPTION は ETH", () => {
+    expect(RESOURCES.map((r) => r.path)).toEqual(["/v1/eth/snapshot", "/v1/sol/snapshot"]);
+    expect(resourceOf("/v1/sol/snapshot")).toEqual({ path: "/v1/sol/snapshot", symbol: "SOL", description: "SOL perpetual snapshot (Hyperliquid mark price, 24h change)" });
+    expect(resourceOf("/v1/eth/snapshot")?.symbol).toBe("ETH");
+    for (const p of ["/v1/sol/snapshot/", "/V1/SOL/SNAPSHOT", "/v1/sol/snapshot?x=1", "/v1/btc/snapshot", "", "/"]) expect(resourceOf(p), p).toBeUndefined();
+    expect(RESOURCE_PATH).toBe("/v1/eth/snapshot");
+    expect(DESCRIPTION).toBe("ETH perpetual snapshot (Hyperliquid mark price, 24h change)");
+  });
+});
+
 describe("snapshot（契約の形と制約）", () => {
   const hl = (eth: Record<string, unknown>, extra: unknown[] = []) => [{ universe: [{ name: "BTC" }, { name: "ETH" }, ...extra.map((_, i) => ({ name: `X${i}` }))] }, [{ markPx: "1", prevDayPx: "1", dayNtlVlm: "1" }, eth, ...extra]];
 
@@ -96,6 +107,17 @@ describe("snapshot（契約の形と制約）", () => {
     const serialized = serializeSnapshot(snapshot);
     expect(serialized.bytes).toBe(new TextEncoder().encode(serialized.text).byteLength);
     expect(JSON.parse(serialized.text)).toEqual(snapshot);
+  });
+
+  test("§11: symbol SOL は SOL の行から組み、ETH の行は見ない。universe に SOL が無ければ data_unavailable（ETH があっても）", () => {
+    const rows = [{ universe: [{ name: "BTC" }, { name: "ETH" }, { name: "SOL" }] }, [{ markPx: "1", prevDayPx: "1", dayNtlVlm: "1" }, { markPx: "2572.5", prevDayPx: "2693.6", dayNtlVlm: "1" }, { markPx: "107.94", prevDayPx: "111.91", dayNtlVlm: "98765.5" }]];
+    const snapshot = snapshotOf(rows, "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", () => 1_760_000_000_123, "SOL");
+    expect(snapshot.market).toEqual({ kind: "perpetual", symbol: "SOL", quote: "USD" });
+    expect(snapshot.data).toEqual({ markPx: "107.94", prevDayPx: "111.91", dayNtlVlm: "98765.5", change24h: { absolute: "-3.97", percent: "-3.54" }, assetIndex: 2 });
+    expect(Object.keys(snapshot).sort()).toEqual(["data", "dataSource", "fetchedAt", "market", "payment", "providerId"]);
+    expect(snapshotOf(rows, "x").market.symbol).toBe("ETH"); // 既定は ETH のまま
+    expect(() => snapshotOf(hl({ markPx: "1", prevDayPx: "1", dayNtlVlm: "1" }), "x", Date.now, "SOL")).toThrow(DataUnavailableError);
+    expect(() => snapshotOf([{ universe: [{ name: "SOL" }] }, [{ markPx: "1", prevDayPx: "1", dayNtlVlm: "1" }]], "x", Date.now, "ETH")).toThrow(DataUnavailableError);
   });
 
   test("制約: 正の価格、非負の出来高、ETH が無い・形違い・prev が 0 → data_unavailable", () => {
