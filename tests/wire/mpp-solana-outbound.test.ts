@@ -179,8 +179,8 @@ describe("本物の chain に近い RPC: blockhash が呼ぶたびに変わる�
     expect(hintOf(challenges[0]!)).not.toBe(hintOf(challenges[1]!));
     const result = await h.rail.pay(requestOf(h, first[0]!));
     expect(result.outcome, JSON.stringify(result)).toBe("paid");
-    const dynamicOffers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
-    const paid = await h.rail.pay(requestOf(h, dynamicOffers[0]!, { routeId: PROFILE_ID, target: { url: URL_A } } as never));
+    const dynamicOffers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
+    const paid = await h.rail.pay(requestOf(h, dynamicOffers[0]!, { routeId: PROFILE_ID, target: { url: URL_A, method: "GET" } } as never));
     expect(paid.outcome, JSON.stringify(paid)).toBe("paid");
   });
 });
@@ -276,32 +276,32 @@ describe("成功: 静的と動的が delivered（pull。pay-kit の server が�
   test("動的: プロファイル経由で delivered。quote は候補の宛先 ATA の存在を getAccountInfo 1 回で見る。URL の規則（拒否ホスト）は readChallenge で DynamicChallengeError(url)", async () => {
     const h = await harness();
     const after = h.mark();
-    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(offers).toHaveLength(1);
     expect(h.since(after)).toEqual(["getAccountInfo"]);
-    const request = requestOf(h, offers[0]!, { routeId: PROFILE_ID, target: { url: URL_A } });
+    const request = requestOf(h, offers[0]!, { routeId: PROFILE_ID, target: { url: URL_A, method: "GET" } });
     const result = await h.rail.pay(request);
     expect(result).toMatchObject({ outcome: "paid", body: { ok: true, source: "mpp-solana-provider" } });
     expect(h.upstream.seen.paths).toEqual(["/v1/price?symbol=ETH"]);
     expect(h.signer.signCount()).toBe(1);
     // 動的経路を持たない route id・静的 route に target を付けた要求は候補外。
-    await expect(h.rail.readChallenge("other", { url: URL_A })).rejects.toThrow(/no dynamic mpp solana profile/);
+    await expect(h.rail.readChallenge("other", { url: URL_A, method: "GET" })).rejects.toThrow(/no dynamic mpp solana profile/);
     const denied = await harness({ adapter: { dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: createGuardedTransport({ allowLoopback: false, report: () => {}, interfaces: () => [], lookup: publicLookup(), dialForTest: dialTo(h.routes), dns: { timeoutMs: 2_000, maxInFlight: 16 } }), denyHosts: [PROVIDER_HOST] } } });
-    await expect(denied.rail.readChallenge(PROFILE_ID, { url: URL_A })).rejects.toThrow(/rejected: url/);
+    await expect(denied.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).rejects.toThrow(/rejected: url/);
   });
 
   test("動的の宛先 ATA の存在は quote で 1 回読み、その quote の寿命（challenge の期限 + 猶予）の中の 402 の読み直しでは読まない。送る直前の再確認は必ず読む（SR-M1: purchase ごとに getAccountInfo は quote 1 + 送る直前 1）", async () => {
     const h = await harness();
     const after = h.mark();
-    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(h.since(after)).toEqual(["getAccountInfo"]);
     // purchase の中の読み直し（core は settle の前と後に 402 を読み直す）: 時計が 70 秒進んでも（challenge の期限の内側 = quote の寿命の内側）読まない。
     h.clock.now += 70_000;
-    await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
-    await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
+    await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(h.since(after)).toEqual(["getAccountInfo"]);
     // 送る直前は必ず読む。
-    const result = await h.rail.pay(requestOf(h, offers[0]!, { routeId: PROFILE_ID, target: { url: URL_A } }));
+    const result = await h.rail.pay(requestOf(h, offers[0]!, { routeId: PROFILE_ID, target: { url: URL_A, method: "GET" } }));
     expect(result, JSON.stringify(result)).toMatchObject({ outcome: "paid" });
     expect(h.since(after).filter((m) => m === "getAccountInfo")).toHaveLength(2);
     // 別の宛先（別の Provider D = 別の受取 ATA）の quote は読む（証拠は ATA ごと）。
@@ -309,7 +309,7 @@ describe("成功: 静的と動的が delivered（pull。pay-kit の server が�
     closers.push(other.close);
     h.rpc.state.atas = [...h.rpc.state.atas, { address: await ataOf(other.recipient), owner: other.recipient }];
     h.routes[PROVIDER_HOST] = other.port;
-    await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(h.since(after).filter((m) => m === "getAccountInfo")).toHaveLength(3);
   });
 
@@ -703,7 +703,7 @@ describe("合成: Solana 宛の MPP 送信（設計 §2.2、FR-54）", () => {
   test("動的プロファイルが core を通して delivered（quote_url → purchase）。動的の core でも残高の事前確認は受信の verify の前、不足 → operator_funds_unavailable", async () => {
     const h = await harness({ routerBalance: "1000000" });
     const { core, inbound, log } = await composed(h);
-    const quote = await core.quote({ principalId: "judge", requestId: "req-d1", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "judge" });
+    const quote = await core.quote({ principalId: "judge", requestId: "req-d1", routeId: PROFILE_ID, upstream: { url: URL_A, method: "GET" }, source: "judge" });
     expect(quote.ok, JSON.stringify(quote)).toBe(true);
     const q = quote as Extract<typeof quote, { ok: true }>;
     const before = h.mark();
@@ -713,7 +713,7 @@ describe("合成: Solana 宛の MPP 送信（設計 §2.2、FR-54）", () => {
     expect(h.since(before)[0]).toBe("getTokenAccountBalance");
     expect(h.upstream.seen.paths).toEqual(["/v1/price?symbol=ETH"]);
     h.rpc.state.atas = h.rpc.state.atas.map((a) => (a.address === h.routerAta ? { ...a, amount: "1" } : a));
-    const q2 = (await core.quote({ principalId: "judge", requestId: "req-d2", routeId: PROFILE_ID, upstream: { url: URL_A }, source: "judge" })) as Extract<typeof quote, { ok: true }>;
+    const q2 = (await core.quote({ principalId: "judge", requestId: "req-d2", routeId: PROFILE_ID, upstream: { url: URL_A, method: "GET" }, source: "judge" })) as Extract<typeof quote, { ok: true }>;
     expect(await core.purchase({ principalId: "judge", requestId: "req-d2", quoteId: q2.quoteId, approval: q2.quoteId, credential: inbound.credentialFor(q2.source.offer), ownerKey: q2.ownerKey!, source: "judge" })).toMatchObject({ status: "awaiting_payment", code: "operator_funds_unavailable" });
     expect(h.signer.signCount()).toBe(1);
   });

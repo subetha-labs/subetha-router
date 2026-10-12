@@ -15,7 +15,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { assetKeyOf, dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig, usesGasIndexedFee } from "../config.js";
 import { parseUpstreamUrl } from "../net/upstream-url.js";
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
-import type { DestinationOffer, FeeEstimate, OutboundRail } from "../ports/outbound.js";
+import { UpstreamMethodUnsupportedError, type DestinationOffer, type FeeEstimate, type OutboundRail, type UpstreamTarget } from "../ports/outbound.js";
 import type { Budget, DynamicReservation } from "./budget.js";
 import { PromotionNotWrittenError } from "./budget.js";
 import type { DynamicGate, GateLease } from "./dynamic-gate.js";
@@ -32,8 +32,55 @@ export interface DynamicQuoteRequest {
   /** プロファイル ID（`routeId` と同じ名前空間）。 */
   readonly profileId: string;
   readonly url: string;
+  /** 上流への要求の方法（省略時 GET）。POST は `body`（JSON object）を要する（`docs/dynamic-upstream-post-design.md` FR-P1）。 */
+  readonly method?: "GET" | "POST";
+  readonly body?: unknown;
   /** 送信元の識別（門の per-source の鍵）。 */
   readonly source: string;
+}
+
+/** 上流の本文の上限（canonical JSON の UTF-8 バイト数。FR-P1）。 */
+export const MAX_UPSTREAM_BODY_BYTES = 8192;
+
+/** 記録に載る上流の要求（FR-P2）。`body` は Router が送る canonical JSON の文字列そのもの、`bodySha256` はその sha256（hex）。 */
+export interface UpstreamRequestFields {
+  readonly url: string;
+  readonly method: "GET" | "POST";
+  readonly body?: string;
+  readonly bodySha256?: string;
+}
+
+export function bodySha256Of(body: string): string {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+/**
+ * caller の本文を正規化する: JSON の object だけ（配列・スカラー・null は拒否）、`stableJson` で鍵順を固定、UTF-8 で 8 KiB 以内。
+ * 失敗の理由は固定語（caller の値は含めない）。
+ */
+export function normalizeUpstreamBody(raw: unknown): { readonly ok: true; readonly body: string; readonly sha256: string } | { readonly ok: false; readonly reason: "body_required" | "body_not_object" | "body_too_large" | "body_not_json" } {
+  if (raw === undefined) return { ok: false, reason: "body_required" };
+  if (!isRecord(raw) || Array.isArray(raw)) return { ok: false, reason: "body_not_object" };
+  let text: string;
+  try {
+    text = stableJson(JSON.parse(JSON.stringify(raw)));
+  } catch {
+    return { ok: false, reason: "body_not_json" };
+  }
+  if (Buffer.byteLength(text, "utf8") > MAX_UPSTREAM_BODY_BYTES) return { ok: false, reason: "body_too_large" };
+  return { ok: true, body: text, sha256: bodySha256Of(text) };
+}
+
+/** 記録の `upstream` から adapter に渡す target を作る（記録が権威。GET には本文を付けない）。 */
+export function upstreamTargetOf(upstream: { readonly url: string; readonly method: "GET" | "POST"; readonly body?: string }): UpstreamTarget {
+  return upstream.method === "POST" ? { url: upstream.url, method: "POST", body: upstream.body ?? "" } : { url: upstream.url, method: "GET" };
+}
+
+/** 記録・応答に載せる形（本文は見せる: 人が承認する条件の一部。FR-P2）。 */
+export function upstreamFieldsOf(upstream: { readonly url: string; readonly method: "GET" | "POST"; readonly body?: string; readonly bodySha256?: string }): UpstreamRequestFields {
+  return upstream.method === "POST"
+    ? { url: upstream.url, method: "POST", body: upstream.body ?? "", bodySha256: upstream.bodySha256 ?? bodySha256Of(upstream.body ?? "") }
+    : { url: upstream.url, method: "GET" };
 }
 
 export interface DynamicPricing {
@@ -58,7 +105,7 @@ export function capOf(profile: DynamicProfile, bound: string): string | undefine
 
 /** 動的 quote の応答に足す欄。`ownerKey` は**この応答にしか載らない**。 */
 export interface DynamicQuoteFields {
-  readonly upstream: { readonly url: string; readonly method: "GET" };
+  readonly upstream: UpstreamRequestFields;
   readonly dynamic: {
     readonly profileId: string;
     readonly pricing: DynamicPricing;
@@ -166,8 +213,10 @@ export function priceOf(
 }
 
 /** 受信 offer の束縛（静的の `routeBindingOf` に対応）。プロファイルと URL を結ぶ。 */
-export function dynamicBindingOf(profileId: string, url: string): string {
-  return ["dynamic", profileId, "GET", url].map(encodeURIComponent).join("|");
+export function dynamicBindingOf(profileId: string, url: string, method: "GET" | "POST" = "GET", bodySha256?: string): string {
+  // GET は従来どおり 4 要素（既存の束縛と一致）。POST は本文の sha256 を 5 要素目に持つ（`docs/dynamic-upstream-post-design.md` FR-P2）。
+  const parts = method === "POST" ? ["dynamic", profileId, "POST", url, `sha256:${bodySha256 ?? ""}`] : ["dynamic", profileId, "GET", url];
+  return parts.map(encodeURIComponent).join("|");
 }
 
 /** 昇格のときに journal に書く予約（設計 §6.4）。 */
@@ -213,7 +262,7 @@ function fieldsOf(intent: Intent, ownerKey: string): DynamicQuoteFields {
   const dynamic = intent.dynamic!;
   const profile = dynamic.profile as unknown as DynamicProfile;
   return {
-    upstream: { url: intent.upstream!.url, method: "GET" },
+    upstream: upstreamFieldsOf(intent.upstream!),
     dynamic: {
       profileId: dynamic.profileId,
       pricing: dynamic.pricing,
@@ -251,11 +300,11 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
   }
 
   /** 上流を読む。**呼び出し側が宛先ホストの枠を持っていること。** */
-  async function readOffers(profileId: string, url: string): Promise<{ readonly ok: true; readonly offers: readonly DestinationOffer[] } | { readonly ok: false; readonly code: string }> {
+  async function readOffers(profileId: string, target: UpstreamTarget): Promise<{ readonly ok: true; readonly offers: readonly DestinationOffer[] } | { readonly ok: false; readonly code: string }> {
     try {
-      return { ok: true, offers: await outbound.readChallenge(profileId, { url }) };
-    } catch {
-      return { ok: false, code: "offer_unavailable" };
+      return { ok: true, offers: await outbound.readChallenge(profileId, target) };
+    } catch (error) {
+      return { ok: false, code: error instanceof UpstreamMethodUnsupportedError ? "method_not_supported" : "offer_unavailable" };
     }
   }
 
@@ -265,14 +314,14 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
   async function estimateFor(
     profile: DynamicProfile,
     offer: DestinationOffer,
-    url: string,
+    target: UpstreamTarget,
   ): Promise<{ ok: true; cap: NonNullable<Parameters<typeof priceOf>[2]>; estimate: FeeEstimate } | { ok: false; reason: string }> {
     if (typeof outbound.estimateFee !== "function" || profile.destination.maxFee === undefined) {
       return { ok: false, reason: "fee_estimate_unavailable" };
     }
     let estimate: FeeEstimate;
     try {
-      estimate = await outbound.estimateFee(profile.profileId, offer, { url });
+      estimate = await outbound.estimateFee(profile.profileId, offer, target);
     } catch {
       return { ok: false, reason: "fee_estimate_unavailable" };
     }
@@ -301,6 +350,22 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     if (!parsed.ok) {
       return { ok: false, code: "invalid_upstream_url", reason: parsed.reason };
     }
+    // 要求の方法と本文（FR-P1）。I/O の前に確定し、以後は記録のこの値だけを使う。
+    const method: "GET" | "POST" = request.method ?? "GET";
+    if (method !== "GET" && method !== "POST") {
+      return { ok: false, code: "invalid_upstream_body", reason: "method_not_allowed" };
+    }
+    let upstreamFields: UpstreamRequestFields = { url: parsed.url, method: "GET" };
+    if (method === "POST") {
+      const normalized = normalizeUpstreamBody(request.body);
+      if (!normalized.ok) {
+        return { ok: false, code: "invalid_upstream_body", reason: normalized.reason };
+      }
+      upstreamFields = { url: parsed.url, method: "POST", body: normalized.body, bodySha256: normalized.sha256 };
+    } else if (request.body !== undefined) {
+      return { ok: false, code: "invalid_upstream_body", reason: "body_without_post" };
+    }
+    const target = upstreamTargetOf(upstreamFields);
     // 動的 quote は冪等に再取得できない（持ち主の証明が要る）。使われている `(principal, requestId)` は衝突。
     if (store.quoteIdFor(request.principalId, request.requestId) !== undefined || ledger.byRequest(request.principalId, request.requestId) !== undefined) {
       return { ok: false, code: "request_id_conflict" };
@@ -318,7 +383,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       if (!host.ok) {
         return { ok: false, code: "rate_limited", reason: host.reason };
       }
-      const read = await withLease(host.lease, () => readOffers(profile.profileId, parsed.url));
+      const read = await withLease(host.lease, () => readOffers(profile.profileId, target));
       if (!read.ok) {
         return { ok: false, code: "quote_failed", reason: read.code };
       }
@@ -338,7 +403,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       // Solana 宛の MPP は cap を持たない（`usesGasIndexedFee` が false。`docs/mpp-solana-design.md` §1.4 (b)）: 規則の手数料だけ。
       let cap: Parameters<typeof priceOf>[2];
       if (usesGasIndexedFee(profile)) {
-        const estimated = await estimateFor(profile, selected, parsed.url);
+        const estimated = await estimateFor(profile, selected, target);
         if (!estimated.ok) {
           return { ok: false, code: "quote_failed", reason: estimated.reason };
         }
@@ -359,7 +424,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
 
       const ownerKey = randomBytes(32).toString("base64url");
       const ownerKeyHash = ownerKeyHashOf(ownerKey);
-      const binding = dynamicBindingOf(profile.profileId, parsed.url);
+      const binding = dynamicBindingOf(profile.profileId, parsed.url, upstreamFields.method, upstreamFields.bodySha256);
       const sourceOffer = await inbound.createOffer({
         routeId: profile.profileId,
         amount: pricing.total,
@@ -390,7 +455,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         quoteFingerprint: fingerprintOf(selected),
         routeFingerprint: fingerprintOf(dynamicAuthoritativeTermsOf(dynamic, profile)),
         approvalDeadlineMs,
-        upstream: { url: parsed.url, method: "GET" },
+        upstream: upstreamFields,
         dynamic: { profileId: profile.profileId, profile: profileCopyOf(profile), pricing, ownerKeyHash },
       };
       try {
@@ -517,18 +582,19 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     if (!host.ok) {
       return { paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: host.reason };
     }
-    return withLease(host.lease, () => purchaseWithHost(intent, profile, credential, isPromoted, url));
+    return withLease(host.lease, () => purchaseWithHost(intent, profile, credential, isPromoted, upstreamTargetOf(intent.upstream!)));
   }
 
-  async function purchaseWithHost(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, url: string): Promise<DynamicPurchaseOutcome> {
+  async function purchaseWithHost(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, target: UpstreamTarget): Promise<DynamicPurchaseOutcome> {
     const paymentId = intent.paymentId;
     const awaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
-    const read = await readOffers(profile.profileId, url);
+    // 読み直しは記録の要求（URL・方法・本文）そのもので行う（FR-P2）。
+    const read = await readOffers(profile.profileId, target);
     if (!read.ok) {
       return awaiting("offer_unavailable");
     }
-    const target = stableJson(intent.destination.selectedOffer);
-    if (!read.offers.some((offer) => stableJson(offer) === target)) {
+    const approvedJson = stableJson(intent.destination.selectedOffer);
+    if (!read.offers.some((offer) => stableJson(offer) === approvedJson)) {
       return awaiting("offer_changed");
     }
     if (profile.rail === "mpp") {
@@ -546,7 +612,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       // 再見積り（§1.4）: 今の bound が記録の cap を超えていれば verify に進まない。cap は上げない。記録にも書かない。
       // Solana 宛の MPP は cap を持たないので見積もらない（`docs/mpp-solana-design.md` §1.4 (b)。上の `capCoversFee` の検査は残す）。
       if (usesGasIndexedFee(profile)) {
-        const current = await estimateFor(profile, intent.destination.selectedOffer, url);
+        const current = await estimateFor(profile, intent.destination.selectedOffer, target);
         if (!current.ok) {
           return awaiting("fee_estimate_unavailable");
         }

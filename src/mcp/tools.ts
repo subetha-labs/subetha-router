@@ -299,7 +299,7 @@ export interface ToolHandlers {
   listRoutes(): Promise<Record<string, unknown>>;
   quote(input: { routeId: string; requestId: string }): Promise<Record<string, unknown>>;
   /** 動的上流 URL の quote（設計 §2.1）。 */
-  quoteUrl(input: { profileId: string; url: string; requestId: string }): Promise<Record<string, unknown>>;
+  quoteUrl(input: { profileId: string; url: string; requestId: string; method?: "GET" | "POST" | undefined; body?: Record<string, unknown> | undefined }): Promise<Record<string, unknown>>;
   purchase(input: {
     quoteId: string;
     requestId: string;
@@ -375,7 +375,7 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
     },
 
     async quoteUrl(input): Promise<Record<string, unknown>> {
-      const result = await deps.client.quoteUrl({ profileId: input.profileId, url: input.url, requestId: input.requestId });
+      const result = await deps.client.quoteUrl({ profileId: input.profileId, url: input.url, requestId: input.requestId, ...(input.method === undefined ? {} : { method: input.method }), ...(input.body === undefined ? {} : { body: input.body }) });
       if (!result.ok) {
         return withEvidence(deps, quoteFailureOf(result));
       }

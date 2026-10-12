@@ -32,7 +32,7 @@ vi.mock("../../src/adapters/outbound/x402-svm.js", async (importOriginal) => {
         ...rail,
         // startup は RPC に出る（fixture 無し）ので記録だけして呼ばない。合成が `startup` を束ねることはここで観測する。
         startup: async () => { record.startupCalls += 1; },
-        readChallenge: (routeId: string, target?: { url: string }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); },
+        readChallenge: (routeId: string, target?: { url: string, method: "GET" }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); },
       };
     },
   };
@@ -45,7 +45,7 @@ vi.mock("../../src/adapters/outbound/x402.js", async (importOriginal) => {
       const rail = actual.createX402Outbound(options);
       const record = { network: options.capability.network, upstreams: Object.keys(options.upstreams), profiles: Object.keys(options.dynamic?.profiles ?? {}), operatorAddresses: options.operatorAddresses, rebuild: options.rebuildSignatures, dispatched: [] as string[] };
       observed.x402.push(record);
-      const wrapped = { ...rail, readChallenge: (routeId: string, target?: { url: string }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); } };
+      const wrapped = { ...rail, readChallenge: (routeId: string, target?: { url: string, method: "GET" }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); } };
       return options.capability.network === "eip155:5042002" && observed.arcRailBalance !== undefined ? { ...wrapped, balanceOf: async () => observed.arcRailBalance! } : wrapped;
     },
   };
@@ -58,7 +58,7 @@ vi.mock("../../src/adapters/outbound/mpp.js", async (importOriginal) => {
       const rail = actual.createMppOutbound(options);
       const record = { upstreams: Object.keys(options.upstreams), profiles: Object.keys(options.dynamic?.profiles ?? {}), operatorAddresses: options.operatorAddresses, dispatched: [] as string[] };
       observed.mpp.push(record);
-      return { ...rail, readChallenge: (routeId: string, target?: { url: string }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); } };
+      return { ...rail, readChallenge: (routeId: string, target?: { url: string, method: "GET" }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); } };
     },
   };
 });
@@ -253,7 +253,7 @@ describe("composeRails: 組ごとの adapter と選択", () => {
     // 接続の結果は観測の副産物（Base = 実鍵は loopback を拒み、Arc = fixture は接続まで進む）。
     expect(await outcomeOf(rails.outbound.readChallenge("r-base"))).toBe("destination_blocked");
     expect(await outcomeOf(rails.outbound.readChallenge("r-arc"))).toBe("connect_failed");
-    await outcomeOf(rails.outbound.readChallenge("dyn-mpp-to-arc", { url: "https://provider.test/v1/x" }));
+    await outcomeOf(rails.outbound.readChallenge("dyn-mpp-to-arc", { url: "https://provider.test/v1/x", method: "GET" }));
     expect(observed.x402.find((record) => record.network === BASE)!.dispatched).toEqual(["r-base"]);
     expect(observed.x402.find((record) => record.network === ARC)!.dispatched).toEqual(["r-arc", "dyn-mpp-to-arc"]);
   });
@@ -306,7 +306,7 @@ describe("composeRails: 組ごとの adapter と選択", () => {
     expect(record.startupCalls).toBe(1);
     // 経路の振り分け: r-sol と dyn-x402-to-sol は SVM の adapter へ、r-arc は Arc の adapter へ。
     await outcomeOf(rails.outbound.readChallenge("r-sol"));
-    await outcomeOf(rails.outbound.readChallenge("dyn-x402-to-sol", { url: "https://sol.provider.test/v1" }));
+    await outcomeOf(rails.outbound.readChallenge("dyn-x402-to-sol", { url: "https://sol.provider.test/v1", method: "GET" }));
     expect(record.dispatched).toEqual(["r-sol", "dyn-x402-to-sol"]);
     expect(observed.x402.flatMap((r) => r.dispatched)).toEqual([]);
   });

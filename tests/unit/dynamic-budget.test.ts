@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * 動的購入の予算と、intent の動的な欄の復元（設計 `docs/dynamic-upstream-design.md` §2.4・§6.2・§6.4、タスク T5）。
  * 実 journal（一時ファイル）を使う。
@@ -335,7 +336,11 @@ test.each<[string, (patch: Record<string, unknown>) => void]>([
   ["upstream だけある", (p) => { delete p["dynamic"]; }],
   ["dynamic だけある", (p) => { delete p["upstream"]; }],
   ["url が空", (p) => { p["upstream"] = { url: "", method: "GET" }; }],
-  ["method が GET でない", (p) => { p["upstream"] = { url: "https://provider.test/", method: "POST" }; }],
+  ["method が GET でない（POST なのに本文が無い）", (p) => { p["upstream"] = { url: "https://provider.test/", method: "POST" }; }],
+  ["POST の本文と sha256 が合わない", (p) => { p["upstream"] = { url: "https://provider.test/", method: "POST", body: "{}", bodySha256: "0".repeat(64) }; }],
+  ["GET なのに本文がある", (p) => { p["upstream"] = { url: "https://provider.test/", method: "GET", body: "{}" }; }],
+  ["受信 offer の動的な束縛が upstream と違う（URL）", (p) => { p["source"] = { ...(p["source"] as object), offer: { extra: { routeBinding: "dynamic|dyn-x402-to-mpp|GET|https%3A%2F%2Felse.test%2F" } } }; }],
+  ["受信 offer の動的な束縛が upstream と違う（GET の記録に POST の束縛）", (p) => { p["source"] = { ...(p["source"] as object), offer: { extra: { routeBinding: "dynamic|dyn-x402-to-mpp|POST|https%3A%2F%2Fprovider.test%2F|sha256%3Aabc" } } }; }],
   ["profileId が無い", (p) => { delete (p["dynamic"] as Record<string, unknown>)["profileId"]; }],
   ["profile が配列", (p) => { (p["dynamic"] as Record<string, unknown>)["profile"] = []; }],
   ["pricing の額が数値", (p) => { (p["dynamic"] as Record<string, unknown>)["pricing"] = { upstreamAmount: 10000, converted: "1", fee: "1", total: "1" }; }],
@@ -349,6 +354,19 @@ test.each<[string, (patch: Record<string, unknown>) => void]>([
   const patch = dynamicCreated(1, reservation()).patch;
   mutate(patch);
   expect(dynamicFieldsOf(patch, { requireReservation: true })).toEqual({ dynamicInvalid: true });
+});
+
+test("POST の記録（docs/dynamic-upstream-post-design.md）: 本文・sha256・一致する動的な束縛があれば復元される。GET の束縛が一致していれば従来どおり", () => {
+  const sha = createHash("sha256").update("{}", "utf8").digest("hex");
+  const patch = dynamicCreated(1, reservation()).patch;
+  patch["upstream"] = { url: "https://provider.test/", method: "POST", body: "{}", bodySha256: sha };
+  patch["source"] = { ...(patch["source"] as object), offer: { extra: { routeBinding: `dynamic|dyn-x402-to-mpp|POST|https%3A%2F%2Fprovider.test%2F|sha256%3A${sha}` } } };
+  const fields = dynamicFieldsOf(patch, { requireReservation: true });
+  expect(fields.dynamicInvalid).toBeUndefined();
+  expect(fields.upstream).toEqual({ url: "https://provider.test/", method: "POST", body: "{}", bodySha256: sha });
+  const get = dynamicCreated(1, reservation()).patch;
+  get["source"] = { ...(get["source"] as object), offer: { extra: { routeBinding: "dynamic|dyn-x402-to-mpp|GET|https%3A%2F%2Fprovider.test%2Fv1%2F1" } } };
+  expect(dynamicFieldsOf(get, { requireReservation: true }).upstream).toEqual({ url: "https://provider.test/v1/1", method: "GET" });
 });
 
 test("控えの quote（昇格前）は予約を持たなくてよい。journal の行は予約が必須", () => {

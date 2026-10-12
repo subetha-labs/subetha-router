@@ -216,8 +216,8 @@ describe("能力と受取先は 1 つの有効化の値から（設定生成と�
     expect(config.real?.solanaRpcUrl).toBe(env[SOLANA_RPC_ENV]);
     const composed = composeRails(config, capabilitiesOf(activation, env), () => {}, () => {});
     expect(composed.startup).toBeDefined();
-    await expect(composed.outbound.readChallenge!("dyn-sol-to-x402", { url: "https://rpc.solana.example/v1/x" })).rejects.toMatchObject({ reason: "url" });
-    await expect(composed.outbound.readChallenge!("dyn-sol-to-x402", { url: "https://sub.rpc.solana.example/v1/x" })).rejects.toBeInstanceOf(DynamicChallengeError);
+    await expect(composed.outbound.readChallenge!("dyn-sol-to-x402", { url: "https://rpc.solana.example/v1/x", method: "GET" })).rejects.toMatchObject({ reason: "url" });
+    await expect(composed.outbound.readChallenge!("dyn-sol-to-x402", { url: "https://sub.rpc.solana.example/v1/x", method: "GET" })).rejects.toBeInstanceOf(DynamicChallengeError);
   });
 
   test("子プロセスの env: 有効化の値と、有効なレールの鍵・RPC だけ（無効なレールの値は渡らない）", () => {

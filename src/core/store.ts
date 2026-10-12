@@ -7,6 +7,7 @@ import type { InboundOffer } from "../ports/inbound.js";
 import { networkFamilyOf } from "../config.js";
 import type { MessageReservation } from "../ports/outbound.js";
 import type { DestinationOffer } from "../ports/outbound.js";
+import { createHash } from "node:crypto";
 import {
   isInterrupted,
   type DestinationOutcome,
@@ -96,7 +97,8 @@ export function dynamicFieldsOf(
   if (
     typeof rawUpstream["url"] !== "string" ||
     rawUpstream["url"] === "" ||
-    rawUpstream["method"] !== "GET" ||
+    !validUpstreamRequest(rawUpstream) ||
+    !upstreamMatchesBinding(rawUpstream, patch) ||
     typeof profileId !== "string" ||
     profileId === "" ||
     !isPlainRecord(profile) ||
@@ -174,10 +176,10 @@ export function dynamicFieldsOf(
     const rawClaimsCap = Object.hasOwn(pricing, "maxFee") || Object.hasOwn(pricing, "estimate");
     const svmWithCap = typeof copiedNetwork === "string" && networkFamilyOf(copiedNetwork) === "svm" && rawClaimsCap;
     if (svmWithCap || !capCoversFee(dynamic, bound)) {
-      return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic, dynamicCapInvalid: true };
+      return { upstream: upstreamRecordOf(rawUpstream), dynamic, dynamicCapInvalid: true };
     }
   }
-  return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic };
+  return { upstream: upstreamRecordOf(rawUpstream), dynamic };
 }
 
 /** `pricing.maxFee`・`pricing.estimate` を形どおりに読む。片方でも形が違えば `undefined`（両方無いのも `undefined`）。 */
@@ -595,3 +597,43 @@ export class IntentStore {
     return this.#intents.get(paymentId)?.status;
   }
 }
+
+/** 記録の `upstream`（`docs/dynamic-upstream-post-design.md` FR-P2）: GET は本文なし、POST は本文（文字列、8 KiB 以内）と一致する sha256。 */
+export function validUpstreamRequest(raw: Record<string, unknown>): boolean {
+  if (typeof raw["url"] !== "string" || raw["url"] === "") return false;
+  if (raw["method"] === "GET") return !Object.hasOwn(raw, "body") && !Object.hasOwn(raw, "bodySha256");
+  if (raw["method"] !== "POST") return false;
+  const body = raw["body"];
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > 8192) return false;
+  return raw["bodySha256"] === createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+function upstreamRecordOf(raw: Record<string, unknown>): { url: string; method: "GET" | "POST"; body?: string; bodySha256?: string } {
+  return raw["method"] === "POST"
+    ? { url: raw["url"] as string, method: "POST", body: raw["body"] as string, bodySha256: raw["bodySha256"] as string }
+    : { url: raw["url"] as string, method: "GET" };
+}
+
+/**
+ * 復元した `upstream`（url・method・本文の sha256）が、受信 offer の `routeBinding` の言う要求と一致すること（Codex PR #173 review #3）。
+ * 束縛は `dynamic|<profile>|<METHOD>|<url>[|sha256:<hex>]`（`dynamicBindingOf`）。束縛が読めない・違う記録は動的として扱わない（fail closed）。
+ */
+function upstreamMatchesBinding(rawUpstream: Record<string, unknown>, raw: Record<string, unknown>): boolean {
+  const source = raw["source"];
+  const offer = isPlainRecord(source) ? source["offer"] : undefined;
+  const extra = isPlainRecord(offer) ? offer["extra"] : undefined;
+  const binding = isPlainRecord(extra) ? extra["routeBinding"] : undefined;
+  // 束縛が無い・動的の形でない記録（合成の試験・旧形式）はここでは判定しない: 受信 offer の束縛そのものは受信 adapter が検証する。
+  // 動的の形（`dynamic|…`）のときだけ、復元した upstream と食い違えば fail closed。
+  if (typeof binding !== "string" || !binding.startsWith("dynamic|")) return true;
+  const parts = binding.split("|");
+  try {
+    const method = rawUpstream["method"];
+    if (method === "GET") return parts.length === 4 && parts[2] === "GET" && decodeURIComponent(parts[3]!) === rawUpstream["url"];
+    if (method !== "POST") return false;
+    return parts.length === 5 && parts[2] === "POST" && decodeURIComponent(parts[3]!) === rawUpstream["url"] && decodeURIComponent(parts[4]!) === `sha256:${String(rawUpstream["bodySha256"])}`;
+  } catch {
+    return false;
+  }
+}
+

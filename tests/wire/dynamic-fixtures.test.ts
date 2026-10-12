@@ -448,7 +448,7 @@ test("MPP の上流: scope を付ける設定では、要求された URL（ク�
 
 test("動的経路を持たない adapter は、上流の URL（target）を受け取ると例外にする。受け取らなければ従来どおり", async () => {
   const transport = createGuardedTransport({ allowLoopback: true, report: () => {} });
-  const target = { url: "https://provider.test/v1/price" };
+  const target = { url: "https://provider.test/v1/price", method: "GET" } as const;
   const offer = { scheme: "exact", network: FIXTURE_NETWORK, asset: FIXTURE_ASSET, amount: "1", payTo: FIXTURE_PAY_TO };
   const rails = [
     createX402Outbound({ transport, upstreams: { r: "http://127.0.0.1:1/x" }, capability: createSignerSpy().capability(FIXTURE_NETWORK) }),

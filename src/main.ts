@@ -162,7 +162,9 @@ export interface DynamicWiring {
 /** 受信 offer の束縛から動的プロファイルの ID を読む（`dynamicBindingOf` の逆）。動的でなければ `undefined`。 */
 function profileIdOfBinding(binding: string): string | undefined {
   const parts = binding.split("|");
-  if (parts.length !== 4 || parts[0] !== "dynamic" || parts[2] !== "GET") return undefined;
+  // GET は 4 要素、POST は本文の sha256 を足した 5 要素（`docs/dynamic-upstream-post-design.md` FR-P2）。
+  const shape = parts.length === 4 && parts[2] === "GET" ? "GET" : parts.length === 5 && parts[2] === "POST" ? "POST" : undefined;
+  if (shape === undefined || parts[0] !== "dynamic") return undefined;
   try {
     return decodeURIComponent(parts[1]!);
   } catch {
@@ -914,7 +916,7 @@ export function composeRails(
                 const probe = { scheme: profile.destination.scheme, network: profile.destination.network, asset: profile.destination.asset, amount: "1", payTo: capabilities.mppTempo.account.address };
                 let estimate;
                 try {
-                  estimate = await rails[outboundPairKeyOf("mpp", profile.destination.network)]!.estimateFee!(profile.profileId, probe, { url: "https://startup.invalid/" });
+                  estimate = await rails[outboundPairKeyOf("mpp", profile.destination.network)]!.estimateFee!(profile.profileId, probe, { url: "https://startup.invalid/", method: "GET" });
                 } catch {
                   throw new ConfigError(`dynamic profile ${profile.profileId}: the Tempo RPC did not answer a read-only fee estimate at startup`);
                 }

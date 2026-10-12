@@ -88,7 +88,7 @@ export interface QuoteView {
     readonly deadlineMs: number;
   };
   /** 動的 quote だけ（設計 §8）。 */
-  readonly upstream?: { readonly url: string; readonly method: string };
+  readonly upstream?: { readonly url: string; readonly method: string; readonly body?: string; readonly bodySha256?: string };
   readonly pricing?: Readonly<Record<string, unknown>>;
   readonly disclosures?: Readonly<Record<string, unknown>>;
   /** 動的 quote の持ち主の証明。purchase・status で Router に返す。**表示・保存の対象ではない。** */
@@ -184,7 +184,7 @@ export interface RouterClient {
   listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[]; readonly dynamic?: Readonly<Record<string, unknown>> }>;
   quote(input: { readonly routeId: string; readonly requestId: string }): Promise<QuoteResult>;
   /** 動的上流 URL の quote（設計 §2.1）。`profileId` はプロファイルの ID。 */
-  quoteUrl(input: { readonly profileId: string; readonly url: string; readonly requestId: string }): Promise<QuoteResult>;
+  quoteUrl(input: { readonly profileId: string; readonly url: string; readonly requestId: string; readonly method?: "GET" | "POST"; readonly body?: Record<string, unknown> }): Promise<QuoteResult>;
   /** 明示承認済みのときだけ R3 を 1 回呼ぶ（再試行・再 quote をしない）。 */
   execute(input: ExecuteInput): Promise<ExecutionResult>;
   /** 動的購入は持ち主の証明（`ownerKey`）が無いと読めない。 */

@@ -22,7 +22,7 @@ import { stableJson } from "../../core/intent.js";
 import { DYNAMIC_RESPONSE_LIMITS, readJsonObjectBody } from "../../net/bounded-body.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import { parseUpstreamUrl } from "../../net/upstream-url.js";
-import type { DestinationOffer, EvmSigningCapability, PayRequest, PayResult } from "../../ports/outbound.js";
+import type { DestinationOffer, EvmSigningCapability, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
 
 /** 領収の形（送信の設計 §5）。EVM は bytes32 の tx hash と `0x` のアドレス、SVM は base58 の 64 バイトの署名と base58 のアドレス。 */
 export interface ReceiptForm {
@@ -184,7 +184,8 @@ const REQUIRED_KEYS = ["scheme", "network", "asset", "amount", "payTo", "maxTime
 /** 説明だけの欄（署名の内容に影響しない。文字列に限る）。 */
 const DESCRIPTIVE_KEYS = ["description", "mimeType", "resource"] as const;
 const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([...REQUIRED_KEYS, ...DESCRIPTIVE_KEYS, "maxAmountRequired"]);
-const EXTRA_KEYS: ReadonlySet<string> = new Set(["name", "version", "bazaar", "decimals"]);
+// `breakdown`・`totalUsd`・`acceptId` は説明だけの欄（Exa などが付ける。値は読まない。`docs/dynamic-upstream-post-design.md` FR-P4）。
+const EXTRA_KEYS: ReadonlySet<string> = new Set(["name", "version", "bazaar", "decimals", "breakdown", "totalUsd", "acceptId"]);
 
 /** EIP-3009 の型定義。**上流と SDK のどちらが何を渡しても、署名に使うのはこれ。** */
 const TRANSFER_WITH_AUTHORIZATION = [
@@ -464,7 +465,8 @@ export class DynamicChallengeError extends Error {
       | "version"
       | "no_offers"
       | "too_many_offers"
-      | "resource_mismatch",
+      | "resource_mismatch"
+      | "method",
   ) {
     super(`dynamic x402 challenge rejected: ${reason}`);
     this.name = "DynamicChallengeError";
@@ -478,8 +480,8 @@ interface DynamicChallenge {
 }
 
 export interface X402DynamicPath {
-  readChallenge(profileId: string, url: string): Promise<readonly DestinationOffer[]>;
-  pay(request: PayRequest & { readonly target: { readonly url: string } }): Promise<PayResult>;
+  readChallenge(profileId: string, target: UpstreamTarget): Promise<readonly DestinationOffer[]>;
+  pay(request: PayRequest & { readonly target: UpstreamTarget }): Promise<PayResult>;
 }
 
 export function createX402DynamicPath(capability: EvmSigningCapability, options: X402DynamicOptions): X402DynamicPath {
@@ -520,17 +522,25 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
   }
   const receiptForm = EVM_RECEIPT_FORM(capability.signer.address);
 
-  /** 未払いの GET（支払いヘッダを付けない）。本文は読まずに捨てる。 */
-  async function getChallenge(url: string, ctx: { routeId: string; operation: string }): Promise<DynamicChallenge> {
+  /** 上流への要求の init（方法・本文・content-type）。POST の本文は target の文字列そのもの（記録が権威。FR-P2）。 */
+  function requestInitOf(target: UpstreamTarget, headers: Record<string, string>, timeoutMs: number): RequestInit {
+    if (target.method === "POST") {
+      if (typeof target.body !== "string") throw new DynamicChallengeError("method");
+      return { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: target.body, redirect: "error", signal: AbortSignal.timeout(timeoutMs) };
+    }
+    // `method` が無い target は GET（従来の呼び出し）。POST は明示したときだけ。GET に本文は付けない。
+    if ((target.method ?? "GET") !== "GET" || target.body !== undefined) throw new DynamicChallengeError("method");
+    return { method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(timeoutMs) };
+  }
+
+  /** 未払いの要求（支払いヘッダを付けない。GET、または記録どおりの本文の POST）。本文は読まずに捨てる。 */
+  async function getChallenge(target: UpstreamTarget, ctx: { routeId: string; operation: string }): Promise<DynamicChallenge> {
+    const url = target.url;
     const parsed = parseUpstreamUrl(url, { denyHosts });
     if (!parsed.ok) {
       throw new DynamicChallengeError("url");
     }
-    const response = await transport.fetch(url, {
-      method: "GET",
-      redirect: "error",
-      signal: AbortSignal.timeout(unpaidTimeoutMs),
-    }, ctx);
+    const response = await transport.fetch(url, requestInitOf(target, {}, unpaidTimeoutMs), ctx);
     const header = response.headers.get("PAYMENT-REQUIRED");
     // ヘッダが権威。本文の `accepts` は見ないので、本文は 1 バイトも読まない。
     discardBody(response);
@@ -578,9 +588,9 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
 
   return {
     /** 検査を通った offer だけを、**上流の順のまま**返す（先頭が §2.3 の「最初の 1 件」）。 */
-    async readChallenge(profileId: string, url: string): Promise<readonly DestinationOffer[]> {
+    async readChallenge(profileId: string, target: UpstreamTarget): Promise<readonly DestinationOffer[]> {
       const profile = profileFor(profileId);
-      const challenge = await getChallenge(url, { routeId: profileId, operation: "challenge" });
+      const challenge = await getChallenge(target, { routeId: profileId, operation: "challenge" });
       const operatorAddresses = operatorAddressesOf(profile);
       const offers: DestinationOffer[] = [];
       for (const entry of challenge.accepts) {
@@ -608,7 +618,7 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       let challenge: DynamicChallenge;
       try {
         // 送金直前に読み直す。
-        challenge = await getChallenge(url, { routeId: request.routeId, operation: "pay_challenge" });
+        challenge = await getChallenge(request.target, { routeId: request.routeId, operation: "pay_challenge" });
       } catch {
         return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
       }
@@ -662,12 +672,8 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       let response: Response;
       try {
         // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。
-        response = await transport.fetch(url, {
-          method: "GET",
-          headers: paymentHeaders,
-          redirect: "error",
-          signal: AbortSignal.timeout(paidTimeoutMs),
-        }, payCtx);
+        // 有料要求も記録の方法・本文そのもので（同じバイト列。FR-P2）。
+        response = await transport.fetch(url, requestInitOf(request.target, paymentHeaders, paidTimeoutMs), payCtx);
       } catch {
         // 送ったかどうか分からない（期限・ヘッダの上限超過・リダイレクトを含む）。自動再送しない。
         return { outcome: "unknown", reason: "destination_pay_unknown" };

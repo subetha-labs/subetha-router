@@ -103,7 +103,10 @@ export interface IntentResult {
 /** 動的購入の上流（設計 `docs/dynamic-upstream-design.md` §2.4）。検査済みの URL そのもの。 */
 export interface IntentUpstream {
   readonly url: string;
-  readonly method: "GET";
+  /** `docs/dynamic-upstream-post-design.md` FR-P2: POST は Router が送る本文（canonical JSON の文字列）とその sha256 を持つ。 */
+  readonly method: "GET" | "POST";
+  readonly body?: string;
+  readonly bodySha256?: string;
 }
 
 /** 動的購入の、quote 時に固定した条件。承認対象に出す値はすべてここから組む。 */

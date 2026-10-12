@@ -737,7 +737,7 @@ async function staticQuote(core: RouterCore, routeId: string, requestId: string)
 }
 
 async function dynamicQuote(core: RouterCore, profileId: string, requestId: string): Promise<OkQuote> {
-  const outcome = await core.quote({ principalId: "judge", requestId, routeId: profileId, upstream: { url: "https://provider.test/v1/price" }, source: "judge" });
+  const outcome = await core.quote({ principalId: "judge", requestId, routeId: profileId, upstream: { url: "https://provider.test/v1/price", method: "GET" }, source: "judge" });
   expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
   return outcome as OkQuote;
 }
@@ -967,7 +967,7 @@ describe("合成: Solana の MPP 受信（設計 §2.2・§2.3・§3.6）", () =
     // 拒否ホスト（動的の URL の規則）: Solana の RPC と Tempo の既知の公開 RPC。
     const { DynamicChallengeError } = await import("../../src/adapters/outbound/x402-dynamic.js");
     for (const url of ["https://sol-rpc.test/x", "https://rpc.moderato.tempo.xyz/"]) {
-      const error = await c.rails.outbound.readChallenge("dyn-mpp-to-x402", { url }).then(() => undefined, (e: unknown) => e);
+      const error = await c.rails.outbound.readChallenge("dyn-mpp-to-x402", { url, method: "GET" }).then(() => undefined, (e: unknown) => e);
       expect(error, url).toBeInstanceOf(DynamicChallengeError);
       expect((error as InstanceType<typeof DynamicChallengeError>).reason, url).toBe("url");
     }

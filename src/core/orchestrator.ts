@@ -16,7 +16,7 @@ import {
 import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
 import type { DestinationOffer, OutboundRail } from "../ports/outbound.js";
 import { Budget } from "./budget.js";
-import { createDynamicCore, ownerKeyMatches, type DynamicCore, type DynamicPricing, type DynamicQuoteFields } from "./dynamic.js";
+import { createDynamicCore, ownerKeyMatches, upstreamFieldsOf, upstreamTargetOf, type DynamicCore, type DynamicPricing, type DynamicQuoteFields } from "./dynamic.js";
 import { DynamicGate } from "./dynamic-gate.js";
 import { QuoteLedger } from "./quote-ledger.js";
 import {
@@ -37,7 +37,7 @@ export interface QuoteRequest {
   /** 静的 route の ID、または動的プロファイルの ID（`upstream` があるとき）。 */
   readonly routeId: string;
   /** 動的上流 URL（設計 `docs/dynamic-upstream-design.md` §2.1）。無ければ静的の処理。 */
-  readonly upstream?: { readonly url: string };
+  readonly upstream?: { readonly url: string; readonly method?: "GET" | "POST"; readonly body?: unknown };
   /** 送信元の識別（門の鍵）。無ければ principal。 */
   readonly source?: string;
 }
@@ -122,7 +122,7 @@ export interface Projection {
   readonly updatedAt: string;
   readonly result?: unknown;
   /** 動的購入だけ。 */
-  readonly upstream?: { readonly url: string; readonly method: "GET" };
+  readonly upstream?: { readonly url: string; readonly method: "GET" | "POST"; readonly body?: string; readonly bodySha256?: string };
   readonly dynamic?: { readonly profileId: string; readonly pricing: DynamicPricing; readonly fundsMoveOnCredential: boolean; readonly promoted: boolean };
 }
 
@@ -205,7 +205,7 @@ function projectionOf(intent: Intent): Projection {
     ...(intent.upstream === undefined || intent.dynamic === undefined
       ? {}
       : {
-          upstream: { url: intent.upstream.url, method: "GET" },
+          upstream: upstreamFieldsOf(intent.upstream),
           dynamic: {
             profileId: intent.dynamic.profileId,
             pricing: intent.dynamic.pricing,
@@ -841,7 +841,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         // 承認の期限（送信の設計 §2.4、FR-36）と、署名する message の hash の予約（§2.5、FR-37）。
         deadlineMs: intent.approvalDeadlineMs,
         reserveMessage: (messageHash) => store.reserveMessage(paymentId, messageHash),
-        ...(intent.upstream === undefined ? {} : { target: { url: intent.upstream.url } }),
+        ...(intent.upstream === undefined ? {} : { target: upstreamTargetOf(intent.upstream) }),
         // 動的 MPP 送信: quote が決めた署名時の上限（cap）。adapter は無ければ送らない。
         ...(intent.dynamic?.pricing.maxFee === undefined ? {} : { maxFee: intent.dynamic.pricing.maxFee }),
       });
@@ -914,7 +914,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
   /** 送金直前・settle 直前の再照合（凍結した accepts をそのまま使わない）。 */
   async function readAndMatchDestination(intent: Intent): Promise<boolean> {
-    const offers = await options.outbound.readChallenge(intent.routeId, intent.upstream === undefined ? undefined : { url: intent.upstream.url });
+    const offers = await options.outbound.readChallenge(intent.routeId, intent.upstream === undefined ? undefined : upstreamTargetOf(intent.upstream));
     const target = stableJson(intent.destination.selectedOffer);
     return offers.some((offer) => stableJson(offer) === target);
   }
@@ -957,6 +957,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       requestId: input.requestId,
       profileId: input.routeId,
       url: input.upstream.url,
+      ...(input.upstream.method === undefined ? {} : { method: input.upstream.method }),
+      ...(input.upstream.body === undefined ? {} : { body: input.upstream.body }),
       source: input.source ?? input.principalId,
     });
     if (!outcome.ok) {
