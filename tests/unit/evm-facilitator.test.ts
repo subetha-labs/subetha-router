@@ -15,7 +15,10 @@ import {
   createFileJournal,
   listenFacilitator,
   parseJournalLine,
+  runCli,
   TRANSFER_TOPIC,
+  type JournalFs,
+  type SetTimer,
   type AuthorizationUsedLog,
   type ChainIo,
   type EvmFacilitator,
@@ -193,12 +196,35 @@ interface Harness {
   sepolia: FakeChain;
   journal: FakeJournal;
   clock: { t: number; now(): number };
+  /** 偽の時計を進め、期限の来た timer を発火する。 */
+  advance(ms: number): Promise<void>;
   settle(b: unknown, headers?: Record<string, string>): Promise<FacilitatorResponse>;
   verify(b: unknown): Promise<FacilitatorResponse>;
 }
 
 async function harness(opts: { journal?: FakeJournal; rh?: FakeChain; sepolia?: FakeChain; start?: boolean } = {}): Promise<Harness> {
   const clock = { t: NOW_MS, now(): number { return this.t; } };
+  // 偽の timer: 時計が `at` を過ぎたときだけ発火する（実時間では発火しない）。
+  const timers: Array<{ at: number; fn: () => void }> = [];
+  const timer: SetTimer = (fn, ms) => {
+    const entry = { at: clock.t + ms, fn };
+    timers.push(entry);
+    return () => {
+      const i = timers.indexOf(entry);
+      if (i >= 0) timers.splice(i, 1);
+    };
+  };
+  const advance = async (ms: number): Promise<void> => {
+    clock.t += ms;
+    for (;;) {
+      const due = timers.filter((t) => t.at <= clock.t).sort((a, b) => a.at - b.at)[0];
+      if (due === undefined) break;
+      timers.splice(timers.indexOf(due), 1);
+      due.fn();
+      await flush();
+    }
+    await flush();
+  };
   const rh = opts.rh ?? fakeChain(USDG);
   const sepolia = opts.sepolia ?? fakeChain(SEPOLIA_USDC);
   const journal = opts.journal ?? fakeJournal();
@@ -211,12 +237,18 @@ async function harness(opts: { journal?: FakeJournal; rh?: FakeChain; sepolia?: 
     journal,
     payToAllowlist: [PAYTO],
     clock,
+    timer,
   });
   if (opts.start !== false) await f.start();
   const guard = { token: TOKEN, port: () => PORT };
   const call = (op: string, b: unknown, headers: Record<string, string> = {}) =>
     f.handle({ method: "POST", url: `/${TOKEN}/${op}`, headers: { host: `127.0.0.1:${PORT}`, "content-type": "application/json", ...headers }, body: JSON.stringify(b) }, guard);
-  return { f, rh, sepolia, journal, clock, settle: (b, h) => call("settle", b, h), verify: (b) => call("verify", b) };
+  return { f, rh, sepolia, journal, clock, advance, settle: (b, h) => call("settle", b, h), verify: (b) => call("verify", b) };
+}
+
+/** 保留中の promise の続きを走らせる。 */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) await new Promise<void>((r) => setImmediate(r));
 }
 
 function keyOf(network: string, asset: string, nonce: Hex): string {
@@ -812,5 +844,277 @@ describe("定数", () => {
   test("start の前の要求は 503", async () => {
     const h = await harness({ start: false });
     expect((await h.settle(body())).status).toBe(503);
+  });
+});
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * Codex I-1 の修正（#1 送出前の 400 は読み直してから、#2 journal の書き込みの締め切り、#3 ディレクトリの fsync、#4 起動の失敗の文言）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+function markUsedOn(chain: FakeChain, withTx: boolean): void {
+  const k = `${FROM.toLowerCase()}|${nonceOf(1)}`;
+  chain.used.add(k);
+  if (withTx) {
+    chain.usedLogs.set(k, [{ transactionHash: hashOf(42), blockNumber: LATEST - 2n }]);
+    chain.receipts.set(hashOf(42), okReceipt(USDG, PAYTO, 10_000n, LATEST - 2n));
+  }
+}
+
+/** 手順 4 の後の各 400 の経路で、await の間に他で使われる（state が used に変わる）。 */
+const RACE_PATHS: ReadonlyArray<readonly [string, (h: Harness, withTx: boolean) => void]> = [
+  [
+    "手数料の見積りの失敗（fee_estimate_unavailable）",
+    (h, withTx) => {
+      h.rh.io.reader.feesPerGas = async () => {
+        markUsedOn(h.rh, withTx);
+        throw new Error("rpc down");
+      };
+    },
+  ],
+  [
+    "手数料が上限超え（fee_too_high）",
+    (h, withTx) => {
+      h.rh.io.reader.feesPerGas = async () => {
+        markUsedOn(h.rh, withTx);
+        return { maxFeePerGas: 11n * GWEI, maxPriorityFeePerGas: 1n };
+      };
+    },
+  ],
+  [
+    "gas の累計の上限（gas_cap_reached）",
+    (h, withTx) => {
+      (h.rh.io as { gasCap: bigint }).gasCap = 1n;
+      h.rh.io.reader.feesPerGas = async () => {
+        markUsedOn(h.rh, withTx);
+        return { maxFeePerGas: GWEI, maxPriorityFeePerGas: 1n };
+      };
+    },
+  ],
+  [
+    "fsync の前の時間の検査（insufficient_time_before_broadcast）",
+    (h, withTx) => {
+      h.rh.io.reader.feesPerGas = async () => {
+        markUsedOn(h.rh, withTx);
+        h.clock.t += 5_000;
+        return { maxFeePerGas: GWEI, maxPriorityFeePerGas: 1n };
+      };
+    },
+  ],
+  [
+    "fsync の後の再検査（aborted_before_send）",
+    (h, withTx) => {
+      h.journal.before = (record) => {
+        if (record.type === "submit_intent") {
+          markUsedOn(h.rh, withTx);
+          h.clock.t += 5_000;
+        }
+      };
+    },
+  ],
+];
+
+describe("I-1 #1: 手順 4 の後の 400 は chain を読み直してから", () => {
+  test.each(RACE_PATHS)("%s: その間に一致する tx で使われた → 200 でその tx（送出なし）", async (_name, arrange) => {
+    const h = await harness();
+    arrange(h, true);
+    const res = await h.settle(body());
+    expect(res).toEqual({ status: 200, body: { success: true, transaction: hashOf(42), network: RH, payer: FROM } });
+    expect(h.rh.writes).toHaveLength(0);
+  });
+
+  test.each(RACE_PATHS)("%s: その間に使われたが一致する tx が無い → 5xx（400 にしない）", async (_name, arrange) => {
+    const h = await harness();
+    arrange(h, false);
+    const res = await h.settle(body());
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ errorReason: "authorization_used_unmatched" });
+    expect(h.rh.writes).toHaveLength(0);
+  });
+
+  test.each(RACE_PATHS)("%s: 読み直しができない → 5xx", async (_name, arrange) => {
+    const h = await harness();
+    arrange(h, false);
+    let reads = 0;
+    const original = h.rh.io.reader.authorizationState;
+    h.rh.io.reader.authorizationState = async (...args) => {
+      reads += 1;
+      // 手順 4 の 2 回（受付・待ち行列の後）は通し、その後の読み直しを落とす。
+      if (reads > 2) throw new Error("rpc down");
+      return await original(...args);
+    };
+    expect((await h.settle(body())).status).toBe(502);
+    expect(h.rh.writes).toHaveLength(0);
+  });
+
+  test("fsync の後の読み直しの失敗は network を保留する", async () => {
+    const h = await harness();
+    h.journal.before = (record) => {
+      if (record.type === "submit_intent") {
+        h.clock.t += 5_000;
+        h.rh.io.reader.authorizationState = async () => {
+          throw new Error("rpc down");
+        };
+      }
+    };
+    expect((await h.settle(body())).status).toBe(502);
+    expect(h.f.heldNetworks()).toEqual([RH]);
+    expect(h.journal.records.map((r) => r.type)).toEqual(["submit_intent", "aborted_before_send"]);
+  });
+});
+
+describe("I-1 #2: journal の書き込みは締め切りで打ち切る（偽の時計）", () => {
+  function stallOn(h: Harness, type: JournalRecord["type"]): { called: () => boolean; release: () => void } {
+    let called = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    h.journal.before = async (record) => {
+      if (record.type === type) {
+        called = true;
+        await gate;
+      }
+    };
+    return { called: () => called, release };
+  }
+
+  test("submit_intent が止まる: 締め切り（10 秒）で 5xx、送出しない、network は保留。後で書き込みが終わっても送出しない", async () => {
+    const h = await harness();
+    const stall = stallOn(h, "submit_intent");
+    let response: FacilitatorResponse | undefined;
+    void h.settle(body()).then((r) => (response = r));
+    await flush();
+    expect(stall.called()).toBe(true);
+    await h.advance(9_999);
+    expect(response).toBeUndefined();
+    await h.advance(1);
+    expect(response?.status).toBe(504);
+    expect(response?.body).toMatchObject({ errorReason: "journal_timeout" });
+    expect(h.f.heldNetworks()).toEqual([RH]);
+    stall.release();
+    await flush();
+    expect(h.journal.records.map((r) => r.type)).toEqual(["submit_intent"]);
+    expect(h.rh.writes).toHaveLength(0);
+    // 遅れて載った意図は未解決（再起動しても保留）。
+    const restarted = await harness({ journal: fakeJournal(h.journal.records) });
+    expect(restarted.f.heldNetworks()).toEqual([RH]);
+  });
+
+  test("送出の後に submitted が止まる: 締め切りで 5xx、network は保留（送出は 1 回だけ）", async () => {
+    const h = await harness();
+    const stall = stallOn(h, "submitted");
+    let response: FacilitatorResponse | undefined;
+    void h.settle(body()).then((r) => (response = r));
+    await flush();
+    expect(stall.called()).toBe(true);
+    expect(h.rh.writes).toHaveLength(1);
+    await h.advance(10_000);
+    expect(response?.status).toBe(504);
+    expect(h.f.heldNetworks()).toEqual([RH]);
+    expect(h.rh.calls).not.toContain("waitForReceipt");
+    // 次の settle は保留で 5xx、送出しない。
+    expect((await h.settle(body({ nonce: nonceOf(2) }))).status).toBe(503);
+    stall.release();
+    await flush();
+    expect(h.rh.writes).toHaveLength(1);
+  });
+
+  test("receipt の後に settled が止まる: 締め切りで 5xx、network は保留", async () => {
+    const h = await harness();
+    const stall = stallOn(h, "settled");
+    let response: FacilitatorResponse | undefined;
+    void h.settle(body()).then((r) => (response = r));
+    await flush();
+    expect(stall.called()).toBe(true);
+    await h.advance(10_000);
+    expect(response?.status).toBe(504);
+    expect(h.f.heldNetworks()).toEqual([RH]);
+    stall.release();
+    await flush();
+    expect(h.rh.writes).toHaveLength(1);
+  });
+});
+
+describe("I-1 #3: 新しく作った journal のディレクトリの項目を fsync する", () => {
+  function fakeFs(existing: string[]): { fs: JournalFs; calls: string[] } {
+    const present = new Set(existing);
+    const calls: string[] = [];
+    const fs: JournalFs = {
+      exists: (t) => present.has(t),
+      mkdir: (t) => {
+        calls.push(`mkdir ${t}`);
+        present.add(t);
+      },
+      readText: () => undefined,
+      openAppend: async (t) => {
+        calls.push(`open ${t}`);
+        present.add(t);
+        return { write: async () => {}, sync: async () => void calls.push(`sync ${t}`), close: async () => {} };
+      },
+      fsyncDir: async (t) => void calls.push(`fsyncDir ${t}`),
+    };
+    return { fs, calls };
+  }
+
+  test("ファイルと 2 段のディレクトリを作る: ファイルを fsync し、その親・作った各ディレクトリの親を fsync してから load が終わる", async () => {
+    const { fs, calls } = fakeFs(["/", "/x"]);
+    await createFileJournal("/x/a/b/journal.ndjson", fs).load();
+    expect(calls).toEqual(["mkdir /x/a", "mkdir /x/a/b", "open /x/a/b/journal.ndjson", "sync /x/a/b/journal.ndjson", "fsyncDir /x/a/b", "fsyncDir /x/a", "fsyncDir /x"]);
+  });
+
+  test("既にあるファイルなら何も作らず、ディレクトリの fsync も無い", async () => {
+    const { fs, calls } = fakeFs(["/", "/x", "/x/journal.ndjson"]);
+    await createFileJournal("/x/journal.ndjson", fs).load();
+    expect(calls).toEqual(["open /x/journal.ndjson"]);
+  });
+
+  test("ディレクトリの fsync が失敗すれば load は失敗する（journal を使わない）", async () => {
+    const { fs } = fakeFs(["/", "/x"]);
+    fs.fsyncDir = async () => {
+      throw new Error("EIO");
+    };
+    await expect(createFileJournal("/x/journal.ndjson", fs).load()).rejects.toThrow();
+  });
+});
+
+describe("I-1 #4: 起動の失敗は固定の文言だけ（RPC の URL・鍵・token・例外の文言を出さない）", () => {
+  const SECRET_KEY = `0x${"5a".repeat(32)}`;
+  const SECRET_TOKEN = `tok_${"Q".repeat(40)}`;
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function envOf(extra: Record<string, string>): NodeJS.ProcessEnv {
+    dir = mkdtempSync(path.join(tmpdir(), "evm-fac-cli-"));
+    return {
+      EVM_FACILITATOR_KEY: SECRET_KEY,
+      EVM_FACILITATOR_TOKEN: SECRET_TOKEN,
+      EVM_FACILITATOR_NETWORKS: RH,
+      EVM_FACILITATOR_PAYTO_ALLOWLIST: PAYTO,
+      EVM_FACILITATOR_GAS_CAP_46630: "1000000000000000",
+      EVM_FACILITATOR_JOURNAL: path.join(dir, "journal.ndjson"),
+      ...extra,
+    };
+  }
+
+  test("getChainId が失敗する RPC（URL の path・query に秘密）: 出力は固定の code だけ", async () => {
+    const out: string[] = [];
+    const code = await runCli(envOf({ EVM_FACILITATOR_RPC_46630: "https://127.0.0.1:1/v2/SECRETPATHKEY123?apikey=SECRETQUERY456" }), {
+      stdout: (t) => void out.push(t),
+      stderr: (t) => void out.push(t),
+    });
+    expect(code).toBe(1);
+    expect(out).toEqual(["evm-facilitator: rpc_check_failed:eip155:46630\n"]);
+    const all = out.join("");
+    for (const secret of ["SECRETPATHKEY123", "SECRETQUERY456", "127.0.0.1:1", SECRET_KEY, SECRET_TOKEN, "5a5a5a"]) expect(all).not.toContain(secret);
+  }, 30_000);
+
+  test("設定の誤りの値は出さない（network の値・RPC の URL）", async () => {
+    for (const extra of [{ EVM_FACILITATOR_NETWORKS: "eip155:SECRETNET999" }, { EVM_FACILITATOR_RPC_46630: "http://SECRETHOST.example/k=SECRET789" }]) {
+      const out: string[] = [];
+      expect(await runCli(envOf(extra), { stdout: (t) => void out.push(t), stderr: (t) => void out.push(t) })).toBe(1);
+      const all = out.join("");
+      expect(all).toMatch(/^evm-facilitator: EVM_FACILITATOR_[A-Z_0-9]+ must /);
+      for (const secret of ["SECRETNET999", "SECRETHOST", "SECRET789", SECRET_KEY, SECRET_TOKEN]) expect(all).not.toContain(secret);
+    }
   });
 });

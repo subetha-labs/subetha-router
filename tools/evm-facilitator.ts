@@ -18,7 +18,7 @@
  *        EVM_FACILITATOR_JOURNAL=.claude_workflow/local/evm-testnets/run-<UTC>/facilitator-journal.ndjson tsx tools/evm-facilitator.ts
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -236,6 +236,8 @@ export interface EvmFacilitatorOptions {
   /** 受取先の allowlist（EVM アドレス。小文字化で比較）。 */
   readonly payToAllowlist: readonly string[];
   readonly clock?: Clock;
+  /** 期限の timer（既定は `setTimeout`）。試験は偽の時計と組で渡す。 */
+  readonly timer?: SetTimer;
   readonly deadlinesOf?: (network: string) => NetworkDeadlines;
   readonly log?: Logger;
   /** 表（試験は自分の表を渡せる）。既定は `KNOWN_NETWORKS`。 */
@@ -384,11 +386,22 @@ interface Waiter {
   readonly resolve: (entered: boolean) => void;
 }
 
+/** 時計の timer（試験は偽の時計で進める）。返り値は取り消し。 */
+export type SetTimer = (fn: () => void, ms: number) => () => void;
+
+export const realTimer: SetTimer = (fn, ms) => {
+  const handle = setTimeout(fn, ms);
+  return () => clearTimeout(handle);
+};
+
 /** 処理中 1 件 + 待ち `maxWaiting` 件。満杯は `undefined`。 */
 export class SerialQueue {
   #busy = false;
   readonly #waiting: Waiter[] = [];
-  constructor(readonly maxWaiting: number) {}
+  constructor(
+    readonly maxWaiting: number,
+    readonly timer: SetTimer = realTimer,
+  ) {}
 
   get waiting(): number {
     return this.#waiting.length;
@@ -407,11 +420,11 @@ export class SerialQueue {
         resolve: (entered) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          cancel();
           resolve(entered);
         },
       };
-      const timer = setTimeout(() => {
+      const cancel = this.timer(() => {
         const index = this.#waiting.indexOf(waiter);
         if (index >= 0) this.#waiting.splice(index, 1);
         waiter.resolve(false);
@@ -442,21 +455,21 @@ class DeadlineExceeded extends Error {
 }
 
 /** `deadlineAt`（時計の ms）までに終わらなければ reject（下の呼び出しは止められないが、応答は期限の内に返す）。 */
-function withDeadline<T>(promise: Promise<T>, clock: Clock, deadlineAt: number): Promise<T> {
+function withDeadline<T>(promise: Promise<T>, clock: Clock, deadlineAt: number, timer: SetTimer = realTimer): Promise<T> {
   const remaining = deadlineAt - clock.now();
   if (remaining <= 0) {
     promise.catch(() => {});
     return Promise.reject(new DeadlineExceeded());
   }
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new DeadlineExceeded()), remaining);
+    const cancel = timer(() => reject(new DeadlineExceeded()), remaining);
     promise.then(
       (value) => {
-        clearTimeout(timer);
+        cancel();
         resolve(value);
       },
       (error: unknown) => {
-        clearTimeout(timer);
+        cancel();
         reject(error);
       },
     );
@@ -527,6 +540,8 @@ export interface EvmFacilitator {
 
 export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilitator {
   const clock = options.clock ?? { now: () => Date.now() };
+  const timer = options.timer ?? realTimer;
+  const within = <T>(promise: Promise<T>, deadlineAt: number): Promise<T> => withDeadline(promise, clock, deadlineAt, timer);
   const deadlinesOf = options.deadlinesOf ?? defaultDeadlinesOf;
   const log: Logger = options.log ?? (() => {});
   const table = options.knownNetworks ?? KNOWN_NETWORKS;
@@ -540,7 +555,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   for (const a of allowlist) if (!ADDRESS.test(a)) throw new Error("payTo allowlist has a malformed address");
 
   const queues = new Map<string, SerialQueue>();
-  for (const network of enabled) queues.set(network, new SerialQueue(MAX_WAITING_PER_NETWORK));
+  for (const network of enabled) queues.set(network, new SerialQueue(MAX_WAITING_PER_NETWORK, timer));
   const spent = new Map<string, bigint>();
   const keys = new Map<string, KeyState>();
   /** network → 未解決の鍵（処理中のものは含めない）。1 つでもあれば保留。 */
@@ -620,7 +635,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const io = chainOf(id.network);
     const r = io.reader;
     const auth = id.authorization;
-    const call = <T>(p: Promise<T>): Promise<T> => withDeadline(p, clock, deadlineAt);
+    const call = <T>(p: Promise<T>): Promise<T> => within(p, deadlineAt);
     const latest = await call(r.blockNumber());
     const latestTs = await call(r.blockTimestamp(latest));
     const validBefore = Number(auth.validBefore > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : auth.validBefore);
@@ -701,7 +716,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const io = chainOf(id.network);
     let used: boolean;
     try {
-      used = await withDeadline(io.reader.authorizationState(id.asset, id.authorization.from, id.authorization.nonce), clock, deadlineAt);
+      used = await within(io.reader.authorizationState(id.asset, id.authorization.from, id.authorization.nonce), deadlineAt);
     } catch {
       return failure(502, "rpc_unavailable", id.network);
     }
@@ -769,36 +784,44 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const usedAgain = await usedAnswer(id, deadlineAt);
     if (usedAgain !== undefined) return usedAgain;
 
-    // 手順 7: SDK の verify（simulate あり）。失敗したら state を読み直す。
-    let verified: VerifyResult | undefined;
-    try {
-      verified = await withDeadline(io.verify(id.paymentPayload, id.requirements), clock, deadlineAt);
-    } catch {
-      verified = undefined;
-    }
-    if (verified?.isValid !== true) {
+    /**
+     * 手順 4 の後の 400（未払いの断定）は、**その時点で** `authorizationState` を読み直して未使用を確かめてから返す（Codex I-1 #1）。
+     * 手順 4 の読み取りの後の await（verify・手数料の見積り・journal）の間に他で使われていれば照合（200 か 5xx）、読めなければ 5xx。
+     * `holdOnReadFailure`: 意図を journal に書いた後（`aborted_before_send` の後）の読み直しの失敗は network を保留する。
+     */
+    const refuseIfStillUnused = async (reason: string, holdOnReadFailure = false): Promise<FacilitatorResponse> => {
       let usedNow: boolean;
       try {
-        usedNow = await withDeadline(io.reader.authorizationState(id.asset, auth.from, auth.nonce), clock, deadlineAt);
+        usedNow = await within(io.reader.authorizationState(id.asset, auth.from, auth.nonce), deadlineAt);
       } catch {
+        if (holdOnReadFailure) hold(network, id.key, "state_unreadable_after_intent");
         return failure(502, "rpc_unavailable", network);
       }
       if (usedNow) return await reconcileAnswer(id, deadlineAt);
-      return failure(400, verified === undefined ? "verify_unavailable" : "invalid_payment", network);
+      return failure(400, reason, network);
+    };
+
+    // 手順 7: SDK の verify（simulate あり）。失敗したら state を読み直す。
+    let verified: VerifyResult | undefined;
+    try {
+      verified = await within(io.verify(id.paymentPayload, id.requirements), deadlineAt);
+    } catch {
+      verified = undefined;
     }
+    if (verified?.isValid !== true) return await refuseIfStillUnused(verified === undefined ? "verify_unavailable" : "invalid_payment");
 
     // 手順 8: gas の上限。
     let fees: { readonly maxFeePerGas: bigint; readonly maxPriorityFeePerGas: bigint };
     try {
-      fees = await withDeadline(io.reader.feesPerGas(), clock, deadlineAt);
+      fees = await within(io.reader.feesPerGas(), deadlineAt);
     } catch {
-      return failure(400, "fee_estimate_unavailable", network);
+      return await refuseIfStillUnused("fee_estimate_unavailable");
     }
-    if (fees.maxFeePerGas > io.maxFeePerGas) return failure(400, "fee_too_high", network);
+    if (fees.maxFeePerGas > io.maxFeePerGas) return await refuseIfStillUnused("fee_too_high");
     const worst = SETTLE_GAS_LIMIT * fees.maxFeePerGas;
     if ((spent.get(network) ?? 0n) + worst > io.gasCap) {
       log({ event: "gas_cap_reached", network, key: id.key, sent: false });
-      return failure(400, "gas_cap_reached", network);
+      return await refuseIfStillUnused("gas_cap_reached");
     }
 
     // 手順 9: 送出の直前の残り時間・validBefore・取り消し。
@@ -810,39 +833,45 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       return undefined;
     };
     const before = timeProblem();
-    if (before !== undefined) return failure(400, before, network);
+    if (before !== undefined) return await refuseIfStillUnused(before);
 
     // 手順 10: 送出の意図を fsync してから、もう一度検査して送出。
+    // journal の書き込みは締め切りで打ち切る（Codex I-1 #2）。打ち切った後に書き込みが終わっても、この続きは既に return しているので
+    // 送出には決して進まない（送出は下の `await` が成功したときの同じ続きの中だけ）。遅れて意図の行が載るかもしれないので保留する。
     try {
-      await append({
-        type: "submit_intent",
-        key: id.key,
-        fingerprint: id.fingerprint,
-        network,
-        asset: id.asset,
-        from: auth.from,
-        to: auth.to,
-        value: auth.value.toString(),
-        nonce: auth.nonce,
-        validAfter: auth.validAfter.toString(),
-        validBefore: auth.validBefore.toString(),
-        at: clock.now(),
-      });
-    } catch {
-      // 意図の行が途中まで残っているかもしれない（再起動後は未解決として保留）。送出はしていない。
-      hold(network, id.key, "journal_write_failed");
-      return failure(500, "journal_unavailable", network);
+      await within(
+        append({
+          type: "submit_intent",
+          key: id.key,
+          fingerprint: id.fingerprint,
+          network,
+          asset: id.asset,
+          from: auth.from,
+          to: auth.to,
+          value: auth.value.toString(),
+          nonce: auth.nonce,
+          validAfter: auth.validAfter.toString(),
+          validBefore: auth.validBefore.toString(),
+          at: clock.now(),
+        }),
+        deadlineAt,
+      );
+    } catch (error) {
+      // 意図の行が途中まで（または遅れて）残るかもしれない（再起動後は未解決として保留）。送出はしていない。
+      const timedOut = error instanceof DeadlineExceeded;
+      hold(network, id.key, timedOut ? "journal_intent_timeout" : "journal_write_failed");
+      return failure(timedOut ? 504 : 500, timedOut ? "journal_timeout" : "journal_unavailable", network);
     }
     const after = timeProblem();
     if (after !== undefined) {
       try {
-        await append({ type: "aborted_before_send", key: id.key, reason: after, at: clock.now() });
+        await within(append({ type: "aborted_before_send", key: id.key, reason: after, at: clock.now() }), deadlineAt);
       } catch {
         hold(network, id.key, "journal_write_failed");
         return failure(500, "journal_unavailable", network);
       }
       log({ event: "aborted_before_send", network, key: id.key, reason: after });
-      return failure(400, after, network);
+      return await refuseIfStillUnused(after, true);
     }
     // ここから先の失敗は全部 5xx（送出したかもしれない）。検査と送出の間に await を挟まない。
     const sending = io.writer.transferWithAuthorization({
@@ -860,7 +889,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     });
     let hash: Hex;
     try {
-      hash = await withDeadline(sending, clock, deadlineAt);
+      hash = await within(sending, deadlineAt);
     } catch {
       addSpent(network, worst);
       hold(network, id.key, "send_outcome_unknown");
@@ -873,8 +902,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     log({ event: "submitted", network, key: id.key, transaction: hash });
     try {
-      await append({ type: "submitted", key: id.key, hash, at: clock.now() });
-    } catch {
+      await within(append({ type: "submitted", key: id.key, hash, at: clock.now() }), deadlineAt);
+    } catch (error) {
+      if (error instanceof DeadlineExceeded) {
+        // 書き込みは裏で続く。応答は締め切りで返し、network を保留する。
+        addSpent(network, worst);
+        hold(network, id.key, "journal_submitted_timeout");
+        return failure(504, "journal_timeout", network);
+      }
       // hash は失われる（意図の行は残る）。結果の待ちは続ける。
       log({ event: "journal_write_failed", network, key: id.key, stage: "submitted" });
     }
@@ -882,7 +917,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     // 手順 11: receipt を締め切りまで待つ。
     let receipt: ReceiptView | undefined;
     try {
-      receipt = await withDeadline(io.reader.waitForReceipt(hash, Math.max(0, deadlineAt - clock.now())), clock, deadlineAt);
+      receipt = await within(io.reader.waitForReceipt(hash, Math.max(0, deadlineAt - clock.now())), deadlineAt);
     } catch {
       receipt = undefined;
     }
@@ -894,7 +929,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     addSpent(network, receipt.gasUsed * receipt.effectiveGasPrice);
     if (receipt.status === "reverted") {
       try {
-        await append({ type: "reverted", key: id.key, hash, via: "receipt", at: clock.now() });
+        await within(append({ type: "reverted", key: id.key, hash, via: "receipt", at: clock.now() }), deadlineAt);
       } catch {
         hold(network, id.key, "journal_write_failed");
       }
@@ -906,8 +941,13 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       return failure(502, "transfer_mismatch", network);
     }
     try {
-      await append({ type: "settled", key: id.key, hash, blockNumber: receipt.blockNumber.toString(), via: "receipt", at: clock.now() });
-    } catch {
+      await within(append({ type: "settled", key: id.key, hash, blockNumber: receipt.blockNumber.toString(), via: "receipt", at: clock.now() }), deadlineAt);
+    } catch (error) {
+      if (error instanceof DeadlineExceeded) {
+        // chain では確定しているが journal に載ったか分からない。締め切りで 5xx、保留（再起動の照合で解ける）。
+        hold(network, id.key, "journal_settled_timeout");
+        return failure(504, "journal_timeout", network);
+      }
       // chain では確定している。再起動の照合で解ける（意図と submitted が残る）。
       log({ event: "journal_write_failed", network, key: id.key, stage: "settled" });
       const s = keys.get(id.key);
@@ -970,7 +1010,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const binding = checkBinding(id, table, allowlist, clock.now(), deadlines.validBeforeMarginMs);
     if (!binding.ok) return { status: 400, body: { isValid: false, invalidReason: binding.reason } };
     try {
-      const result = await withDeadline(chainOf(id.network).verify(id.paymentPayload, id.requirements), clock, receivedAt + deadlines.facilitatorMs);
+      const result = await within(chainOf(id.network).verify(id.paymentPayload, id.requirements), receivedAt + deadlines.facilitatorMs);
       // 判定と固定の理由だけ返す（SDK の `invalidMessage` は RPC の生の文言を含み得るので出さない）。
       return {
         status: 200,
@@ -1016,7 +1056,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const startupDeadline = clock.now() + 60_000;
     let hash = state.hash as Hex | undefined;
     if (hash === undefined) {
-      const used = await withDeadline(io.reader.authorizationState(asset, from, intent.nonce as Hex), clock, startupDeadline);
+      const used = await within(io.reader.authorizationState(asset, from, intent.nonce as Hex), startupDeadline);
       if (!used) return false; // 送出中かもしれない（hash 無し）。運用者の判断。
       const found = await reconcile(
         {
@@ -1029,7 +1069,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       if (found === undefined) return false;
       hash = found.hash;
     }
-    const receipt = await withDeadline(io.reader.receipt(hash), clock, startupDeadline);
+    const receipt = await within(io.reader.receipt(hash), startupDeadline);
     if (receipt === undefined) return false;
     if (receipt.status === "reverted") {
       await append({ type: "reverted", key, hash, via: "startup", at: clock.now() });
@@ -1168,24 +1208,107 @@ export function parseJournalLine(line: string, lineNo: number): JournalRecord {
   return value as unknown as JournalRecord;
 }
 
-export function createFileJournal(file: string): FacilitatorJournal & { close(): Promise<void> } {
-  let handle: FileHandle | undefined;
+/** journal のファイル（追記と fsync）。 */
+export interface JournalFile {
+  write(text: string): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** journal が使うファイル系の操作（試験は差し替える）。 */
+export interface JournalFs {
+  exists(target: string): boolean;
+  /** 1 段だけ作る（0700）。既にあれば何もしない。 */
+  mkdir(target: string): void;
+  /** 無ければ `undefined`。 */
+  readText(target: string): string | undefined;
+  /** 追記で開く（無ければ 0600 で作る）。 */
+  openAppend(target: string): Promise<JournalFile>;
+  /** ディレクトリを開いて fsync する（中の項目の作成を永続にする）。 */
+  fsyncDir(target: string): Promise<void>;
+}
+
+export const nodeJournalFs: JournalFs = {
+  exists(target) {
+    return existsSync(target);
+  },
+  mkdir(target) {
+    try {
+      mkdirSync(target, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  },
+  readText(target) {
+    try {
+      return readFileSync(target, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  },
+  async openAppend(target) {
+    const handle: FileHandle = await open(target, "a", 0o600);
+    return {
+      write: async (text) => {
+        await handle.write(text);
+      },
+      sync: () => handle.sync(),
+      close: () => handle.close(),
+    };
+  },
+  async fsyncDir(target) {
+    const handle = await open(target, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  },
+};
+
+/**
+ * ndjson の journal。`load` が終わるまで使わない（`start` の前、server の listen の前に呼ばれる）。
+ * 新しく作ったファイル・ディレクトリは、その項目を持つディレクトリを fsync してから受け入れる（Codex I-1 #3）:
+ * 電源断でファイルの中身だけ fsync され、ディレクトリの項目が消えて journal ごと無くなることを防ぐ。
+ */
+export function createFileJournal(file: string, fs: JournalFs = nodeJournalFs): FacilitatorJournal & { close(): Promise<void> } {
+  const target = path.resolve(file);
+  let handle: JournalFile | undefined;
   let chain: Promise<void> = Promise.resolve();
   return {
     async load(): Promise<readonly JournalRecord[]> {
-      mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-      let text = "";
-      try {
-        text = readFileSync(file, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const dir = path.dirname(target);
+      // 無い祖先を上から作る。
+      const created: string[] = [];
+      for (let current = dir; !fs.exists(current); ) {
+        created.unshift(current);
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
       }
-      const records = text
+      for (const d of created) fs.mkdir(d);
+      const fileExisted = fs.exists(target);
+      const records = (fs.readText(target) ?? "")
         .split("\n")
         .map((line, index) => ({ line, index }))
         .filter(({ line }) => line.trim() !== "")
         .map(({ line, index }) => parseJournalLine(line, index + 1));
-      handle = await open(file, "a", 0o600);
+      const opened = await fs.openAppend(target);
+      try {
+        // 新しい項目を持つディレクトリ（新しいファイルの親、作った各ディレクトリの親）を、深い方から fsync する。
+        const dirsToSync = new Set<string>();
+        if (!fileExisted) {
+          await opened.sync();
+          dirsToSync.add(dir);
+        }
+        for (const d of [...created].reverse()) dirsToSync.add(path.dirname(d));
+        for (const d of dirsToSync) await fs.fsyncDir(d);
+      } catch (error) {
+        await opened.close().catch(() => {});
+        throw error;
+      }
+      handle = opened;
       return records;
     },
     append(record: JournalRecord): Promise<void> {
@@ -1223,39 +1346,60 @@ export interface CliConfig {
   readonly logFile?: string;
 }
 
-/** env を読む（値は出さない）。足りなければ例外。 */
+/**
+ * 起動の失敗。`message` は**このファイルで書いた固定の文言**だけ（env の名前・有効な network の CAIP-2 は可）。
+ * 下の層の例外の文言（viem は RPC の URL を、fs はパスを埋め込む。URL には API key が入り得る）・鍵・token は決して載せない（Codex I-1 #4）。
+ */
+export class StartupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StartupError";
+  }
+}
+
+/** 下の層の例外を固定の code に置き換える（元の文言は捨てる）。 */
+async function orStartupError<T>(code: string, work: () => Promise<T> | T): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof StartupError) throw error;
+    throw new StartupError(code);
+  }
+}
+
+/** env を読む（値は出さない）。足りなければ `StartupError`。 */
 export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
   const key = env["EVM_FACILITATOR_KEY"];
-  if (key === undefined || !/^0x[0-9a-fA-F]{64}$/.test(key)) throw new Error("EVM_FACILITATOR_KEY must be a 0x-prefixed 32-byte hex string");
+  if (key === undefined || !/^0x[0-9a-fA-F]{64}$/.test(key)) throw new StartupError("EVM_FACILITATOR_KEY must be a 0x-prefixed 32-byte hex string");
   const token = env["EVM_FACILITATOR_TOKEN"];
-  if (token === undefined || !TOKEN_PATTERN.test(token)) throw new Error("EVM_FACILITATOR_TOKEN must be set (32+ characters of [A-Za-z0-9_-])");
+  if (token === undefined || !TOKEN_PATTERN.test(token)) throw new StartupError("EVM_FACILITATOR_TOKEN must be set (32+ characters of [A-Za-z0-9_-])");
   const portText = env["EVM_FACILITATOR_PORT"] ?? String(DEFAULT_PORT);
-  if (!/^[1-9][0-9]{0,4}$/.test(portText) || Number(portText) > 65535) throw new Error("EVM_FACILITATOR_PORT must be a TCP port");
+  if (!/^[1-9][0-9]{0,4}$/.test(portText) || Number(portText) > 65535) throw new StartupError("EVM_FACILITATOR_PORT must be a TCP port");
   const networks = (env["EVM_FACILITATOR_NETWORKS"] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
-  if (networks.length === 0) throw new Error("EVM_FACILITATOR_NETWORKS must list at least one of the EVM testnets");
-  for (const n of networks) if (!EVM_TESTNET_NETWORKS.has(n)) throw new Error(`EVM_FACILITATOR_NETWORKS: ${n} is not one of ${[...EVM_TESTNET_NETWORKS].join(", ")}`);
+  if (networks.length === 0) throw new StartupError("EVM_FACILITATOR_NETWORKS must list at least one of the EVM testnets");
+  for (const n of networks) if (!EVM_TESTNET_NETWORKS.has(n)) throw new StartupError(`EVM_FACILITATOR_NETWORKS must list only ${[...EVM_TESTNET_NETWORKS].join(", ")}`);
   const payToAllowlist = (env["EVM_FACILITATOR_PAYTO_ALLOWLIST"] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
-  if (payToAllowlist.length === 0 || payToAllowlist.some((a) => !ADDRESS.test(a))) throw new Error("EVM_FACILITATOR_PAYTO_ALLOWLIST must list EVM addresses");
+  if (payToAllowlist.length === 0 || payToAllowlist.some((a) => !ADDRESS.test(a))) throw new StartupError("EVM_FACILITATOR_PAYTO_ALLOWLIST must list EVM addresses");
   const journal = env["EVM_FACILITATOR_JOURNAL"];
-  if (journal === undefined || journal === "") throw new Error("EVM_FACILITATOR_JOURNAL must be set");
+  if (journal === undefined || journal === "") throw new StartupError("EVM_FACILITATOR_JOURNAL must be set");
   const rpcUrls = new Map<string, string>();
   const gasCaps = new Map<string, bigint>();
   const maxFees = new Map<string, bigint>();
   const logRanges = new Map<string, bigint>();
   for (const network of networks) {
     const chainId = evmChainIdOf(network);
-    if (chainId === undefined) throw new Error(`no chain id for ${network}`);
+    if (chainId === undefined) throw new StartupError("EVM_FACILITATOR_NETWORKS has a network without a chain id");
     const rpc = env[`EVM_FACILITATOR_RPC_${chainId}`] ?? DEFAULT_RPC_URLS[network];
-    if (rpc === undefined || !/^https:\/\//.test(rpc)) throw new Error(`EVM_FACILITATOR_RPC_${chainId} must be an https URL`);
+    if (rpc === undefined || !/^https:\/\//.test(rpc)) throw new StartupError(`EVM_FACILITATOR_RPC_${chainId} must be an https URL`);
     rpcUrls.set(network, rpc);
     const cap = env[`EVM_FACILITATOR_GAS_CAP_${chainId}`];
-    if (cap === undefined || !/^[1-9][0-9]{0,30}$/.test(cap)) throw new Error(`EVM_FACILITATOR_GAS_CAP_${chainId} must be a positive wei amount`);
+    if (cap === undefined || !/^[1-9][0-9]{0,30}$/.test(cap)) throw new StartupError(`EVM_FACILITATOR_GAS_CAP_${chainId} must be a positive wei amount`);
     gasCaps.set(network, BigInt(cap));
     const fee = env[`EVM_FACILITATOR_MAX_FEE_PER_GAS_${chainId}`];
-    if (fee !== undefined && !/^[1-9][0-9]{0,30}$/.test(fee)) throw new Error(`EVM_FACILITATOR_MAX_FEE_PER_GAS_${chainId} must be a positive wei amount`);
+    if (fee !== undefined && !/^[1-9][0-9]{0,30}$/.test(fee)) throw new StartupError(`EVM_FACILITATOR_MAX_FEE_PER_GAS_${chainId} must be a positive wei amount`);
     maxFees.set(network, fee === undefined ? (DEFAULT_MAX_FEE_PER_GAS[network] ?? 1_000_000_000n) : BigInt(fee));
     const range = env[`EVM_FACILITATOR_LOG_RANGE_${chainId}`];
-    if (range !== undefined && !/^[1-9][0-9]{0,6}$/.test(range)) throw new Error(`EVM_FACILITATOR_LOG_RANGE_${chainId} must be a positive block count`);
+    if (range !== undefined && !/^[1-9][0-9]{0,6}$/.test(range)) throw new StartupError(`EVM_FACILITATOR_LOG_RANGE_${chainId} must be a positive block count`);
     logRanges.set(network, range === undefined ? (DEFAULT_LOG_RANGES[network] ?? 500n) : BigInt(range));
   }
   const logFile = env["EVM_FACILITATOR_LOG"];
@@ -1377,6 +1521,8 @@ function fileLogger(file: string | undefined): Logger {
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   let chain: Promise<void> = Promise.resolve();
   const handle = open(file, "a", 0o600);
+  // 開けなければ log は捨てる（未処理の reject でパスを含む文言を出さない）。
+  handle.catch(() => {});
   return (event) => {
     const line = `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`;
     chain = chain.then(async () => {
@@ -1385,11 +1531,18 @@ function fileLogger(file: string | undefined): Logger {
   };
 }
 
-export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+export interface CliOutput {
+  stdout(text: string): void;
+  stderr(text: string): void;
+}
+
+/** 起動の本体。失敗は `StartupError` だけを投げる（`runCli` が固定の文言で出す）。 */
+export async function main(env: NodeJS.ProcessEnv, out: CliOutput): Promise<void> {
   const config = cliConfigOf(env);
   const chains = new Map<string, ChainIo>();
-  for (const network of config.networks) chains.set(network, await viemChainIo(network, config));
-  const log = fileLogger(config.logFile);
+  // network は表の 4 つに確かめ済み（code に入れてよい）。RPC の URL・例外の文言は入れない。
+  for (const network of config.networks) chains.set(network, await orStartupError(`rpc_check_failed:${network}`, () => viemChainIo(network, config)));
+  const log = await orStartupError("log_unavailable", () => fileLogger(config.logFile));
   const facilitator = createEvmFacilitator({
     networks: config.networks,
     chains,
@@ -1397,17 +1550,34 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     payToAllowlist: config.payToAllowlist,
     log,
   });
-  await facilitator.start();
-  const { port } = await listenFacilitator(facilitator, config.token, config.port);
+  await orStartupError("journal_unavailable", () => facilitator.start());
+  const { port } = await orStartupError("listen_failed", () => listenFacilitator(facilitator, config.token, config.port));
   const signer = chains.values().next().value?.writer.address;
   // token は出さない。
-  process.stdout.write(`${JSON.stringify({ event: "listening", host: "127.0.0.1", port, networks: config.networks, signer, held: facilitator.heldNetworks() })}\n`);
+  out.stdout(`${JSON.stringify({ event: "listening", host: "127.0.0.1", port, networks: config.networks, signer, held: facilitator.heldNetworks() })}\n`);
+}
+
+/** CLI の入口。終了 code を返す（0 = listen 中）。失敗の出力は固定の文言だけ。 */
+export async function runCli(env: NodeJS.ProcessEnv, out: CliOutput): Promise<number> {
+  try {
+    await main(env, out);
+    return 0;
+  } catch (error) {
+    out.stderr(`evm-facilitator: ${error instanceof StartupError ? error.message : "startup_failed"}\n`);
+    return 1;
+  }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error: unknown) => {
-    // 鍵・token は例外の文言に入れていない。
-    process.stderr.write(`evm-facilitator: ${error instanceof Error ? error.message : String(error)}\n`);
+  const out: CliOutput = { stdout: (text) => process.stdout.write(text), stderr: (text) => process.stderr.write(text) };
+  // 下の層の想定外の例外も文言を出さない（Node の既定は例外の全文を出す）。
+  const fatal = (): void => {
+    process.stderr.write("evm-facilitator: internal_error\n");
     process.exit(1);
+  };
+  process.on("uncaughtException", fatal);
+  process.on("unhandledRejection", fatal);
+  void runCli(process.env, out).then((code) => {
+    if (code !== 0) process.exit(code);
   });
 }
