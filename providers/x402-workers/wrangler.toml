@@ -1,5 +1,5 @@
 # Arc・Solana の Provider（x402 v2 `exact` の資源サーバ。`docs/provider-x402-workers.md`）。
-# 1 つのソースを環境で切り替える: `wrangler deploy --env arc` / `--env sol`。secret は `wrangler secret put SELLER_PROOF_KEY --env arc`（Arc だけ）。
+# 1 つのソースを環境で切り替える: `wrangler deploy --env arc` / `--env sol`（EVM testnet 4 つの env は末尾。手元の `wrangler dev` だけ）。secret は `wrangler secret put SELLER_PROOF_KEY --env arc`（Arc だけ）。
 # `PAY_TO` は配備前に埋める（Arc: scripts/keygen.mjs が出す address、Solana: scripts/keygen-solana.mjs が出す公開鍵）。
 name = "provider-x402"
 main = "src/index.ts"
@@ -23,3 +23,39 @@ PROVIDER_NETWORK = "solana"
 # 2026-10-08 に owner が scripts/keygen-solana.mjs で作った受取 owner の公開鍵（seed は owner のファイルにだけ）。
 PAY_TO = "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc"
 FACILITATOR_URL = "https://www.x402.org/facilitator"
+
+# EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.4）。**手元の `wrangler dev` だけ**（配備しない: routes・custom domain・secret 無し）。
+# facilitator は自前（`tools/evm-facilitator.ts`）で既定が無いので `FACILITATOR_URL` は必須。token を含むので var に書かず、起動時に渡す:
+#   npx wrangler dev --env rh --port 8621 --var FACILITATOR_URL:http://127.0.0.1:8611/<token>
+# 受取 address は 4 つとも E-PROV（鍵は owner の手元。Worker には置かない: 売り手証明は Circle だけ）。
+[env.rh]
+# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+workers_dev = false
+name = "provider-x402-rh"
+[env.rh.vars]
+PROVIDER_NETWORK = "rh"
+PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+
+[env.arbsep]
+# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+workers_dev = false
+name = "provider-x402-arbsep"
+[env.arbsep.vars]
+PROVIDER_NETWORK = "arbsep"
+PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+
+[env.hyperevm]
+# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+workers_dev = false
+name = "provider-x402-hyperevm"
+[env.hyperevm.vars]
+PROVIDER_NETWORK = "hyperevm"
+PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+
+[env.sepolia]
+# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+workers_dev = false
+name = "provider-x402-sepolia"
+[env.sepolia.vars]
+PROVIDER_NETWORK = "sepolia"
+PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"

@@ -8,8 +8,8 @@ import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from "@x402
 import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, resourceOf, type ProviderConfig, type ProviderEnv, type Resource } from "./config.js";
-import { DATA_TIMEOUT_MS, DeadlineError, INIT_TIMEOUT_MS, RequestDeadline, SETTLE_TIMEOUT_MS, VERIFY_TIMEOUT_MS, type Stage } from "./deadline.js";
+import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, requestDeadlineMsOf, resourceOf, type NetworkDeadlines, type ProviderConfig, type ProviderEnv, type Resource } from "./config.js";
+import { DeadlineError, RequestDeadline, type Stage } from "./deadline.js";
 import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
 import { createRequirementsBuilder, type RequirementsBuilder } from "./requirements.js";
@@ -53,8 +53,8 @@ export interface Hooks {
 export function runtimeOf(env: ProviderEnv, hooks: Hooks = {}): Runtime {
   const config = configOf(env);
   let signer: SellerProofSigner | undefined;
-  if (config.network === "arc") {
-    // 鍵は env から 1 度だけ読み、account（署名の closure）にだけ渡す。config にも Runtime にも入れない。
+  if (config.table.facilitatorKind === "circle") {
+    // 売り手証明は Circle の facilitator（今は arc）だけ。鍵は env から 1 度だけ読み、account（署名の closure）にだけ渡す。config にも Runtime にも入れない。
     const key = env.SELLER_PROOF_KEY;
     if (!isEvmKey(key)) throw new Error("SELLER_PROOF_KEY is required for arc and must be a 0x-prefixed 32-byte hex key");
     const account = privateKeyToAccount(key);
@@ -88,7 +88,7 @@ function facilitatorError(stage: "verify" | "settle", error: unknown): Response 
 }
 
 export async function handle(request: Request, runtime: Runtime, hooks: Hooks = {}): Promise<Response> {
-  const deadline = hooks.deadline ?? new RequestDeadline(hooks.now ?? Date.now);
+  const deadline = hooks.deadline ?? new RequestDeadline(hooks.now ?? Date.now, runtime.config.table.deadlines.requestMs);
   // 期限の timer はどの出口でも外す（404/405 も含む）。
   try {
     const url = new URL(request.url);
@@ -102,8 +102,8 @@ export async function handle(request: Request, runtime: Runtime, hooks: Hooks = 
   }
 }
 
-function stageFor(deadline: RequestDeadline): (stage: "verify" | "settle" | "supported") => Stage {
-  return (stage) => deadline.stage(stage === "verify" ? VERIFY_TIMEOUT_MS : stage === "settle" ? SETTLE_TIMEOUT_MS : INIT_TIMEOUT_MS);
+function stageFor(deadline: RequestDeadline, limits: NetworkDeadlines): (stage: "verify" | "settle" | "supported") => Stage {
+  return (stage) => deadline.stage(stage === "verify" ? limits.verifyMs : stage === "settle" ? limits.settleMs : limits.initMs);
 }
 
 async function handleWithin(request: Request, url: URL, resource: Resource, runtime: Runtime, hooks: Hooks, deadline: RequestDeadline): Promise<Response> {
@@ -111,7 +111,8 @@ async function handleWithin(request: Request, url: URL, resource: Resource, runt
   const fetchImpl = hooks.fetch ?? fetch;
 
   // isolate の最初の要求: facilitator の `/supported`（上限 5 秒、要求の期限の内側。並行は 1 本）。
-  const stages = stageFor(deadline);
+  const limits = runtime.config.table.deadlines;
+  const stages = stageFor(deadline, limits);
   const initStage = stages("supported");
   try {
     await runtime.builder.ready(initStage.signal, () => stages("supported"));
@@ -149,7 +150,7 @@ async function handleWithin(request: Request, url: URL, resource: Resource, runt
 
   // 1. データ（支払いの前。取れない・形が違う・直列化して 64 KiB を超える → facilitator を呼ばない）。
   let bodyText: string;
-  const dataStage = deadline.stage(DATA_TIMEOUT_MS);
+  const dataStage = deadline.stage(limits.dataMs);
   try {
     const snapshot = await fetchSnapshot(runtime.config.dataUrl, runtime.config.table.network, dataStage.signal, fetchImpl, hooks.now, resource.symbol);
     bodyText = serializeSnapshot(snapshot).text;
@@ -171,7 +172,7 @@ async function handleWithin(request: Request, url: URL, resource: Resource, runt
   if (!verified.isValid) return paymentRequired(runtime, canonical, resource, "payment_invalid");
 
   // 3. settle（1 回だけ。残りが足りなければ呼ばない: 送出前なので資金は動かない）。
-  if (!deadline.canSettle()) return json(503, { error: "provider_busy" });
+  if (!deadline.canSettle(limits.minRemainingBeforeSettleMs)) return json(503, { error: "provider_busy" });
   let settled: unknown;
   try {
     settled = await facilitator.settle(payload, requirements);
@@ -192,7 +193,7 @@ let cachedError: string | undefined;
 export default {
   async fetch(request: Request, env: ProviderEnv): Promise<Response> {
     // 期限は入口で（isolate の最初の要求では runtime の構築も期限の内側）。
-    const deadline = new RequestDeadline();
+    const deadline = new RequestDeadline(Date.now, requestDeadlineMsOf(env.PROVIDER_NETWORK));
     if (cached === undefined && cachedError === undefined) {
       try {
         cached = runtimeOf(env);

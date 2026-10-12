@@ -2,6 +2,8 @@
  * 要求ごとの 1 つの期限（`docs/provider-x402-workers.md` §2.2）。各段の HTTP の期限は「段の上限」と「残り」の小さい方で、
  * **AbortSignal として配る**（待つのをやめるだけでなく、署名の後の送出・本文の読取も止める）。settle の前に残りが
  * `MIN_REMAINING_BEFORE_SETTLE_MS` 未満なら settle を呼ばない（送出前なので資金は動かない）。
+ * 下の定数は既存の network（arc・solana）の値で、既定値として残す。network ごとの値は `config.ts` の `TABLE[*].deadlines`
+ * （`docs/evm-testnets-x402-design.md` §3.6）で、handler はそちらを使う。
  */
 export const REQUEST_DEADLINE_MS = 26_000;
 export const INIT_TIMEOUT_MS = 5_000;
@@ -82,8 +84,8 @@ export class RequestDeadline {
     return this.stage(stageMaxMs).signal;
   }
 
-  canSettle(): boolean {
-    return !this.expired() && this.remainingMs() >= MIN_REMAINING_BEFORE_SETTLE_MS;
+  canSettle(minRemainingMs: number = MIN_REMAINING_BEFORE_SETTLE_MS): boolean {
+    return !this.expired() && this.remainingMs() >= minRemainingMs;
   }
 
   /** 要求の終わりに timer を外す（abort は呼ばない: 既に送った応答に影響しない）。 */
