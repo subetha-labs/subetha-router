@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, test } from "vitest";
-import { buildRecord, recordHash, assertApproval, render, sanitize } from "../../src/daemon/record.js";
+import { buildRecord, offerDigest, recordHash, assertApproval, render, sanitize } from "../../src/daemon/record.js";
 import { h1Quote } from "../harness/router.js";
 const identity = () => ({ routerUrl: "https://fixture.invalid/mcp", canonicalResource: { url: "http://127.0.0.1:8500/v1/routes/md-mpp-eth-snapshot/resource", method: "GET" as const }, address: `0x${"33".repeat(20)}`, ref: "p_aaaaaaaaaaaaa", requestId: randomUUID() });
 test("hosted HTTPS transport accepts its separately pinned loopback resource", () => {
@@ -29,7 +29,8 @@ for (const [field, value] of alternatives) test(`offer equality rejects valid di
   const input = h1Quote(); const r = buildRecord(input, identity());
   const offer: any = structuredClone(input.quote.source.offer);
   (field in offer ? offer : offer.extra)[field] = value;
-  const source = { ...r.source, [field]: value } as typeof r.source;
+  // v2 binds the whole offer by digest too (SR-R2), so the matching control carries the alternative offer's digest.
+  const source = { ...r.source, [field]: value, offerSha256: offerDigest(offer) } as typeof r.source;
   const matched = { ...r, source };
   // Positive control proves schema accepts the alternative, and only equality differs.
   expect(() => assertApproval(matched, offer, recordHash(matched), false)).not.toThrow();

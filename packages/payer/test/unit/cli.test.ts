@@ -17,6 +17,7 @@ test.each([
 // Dispatch wiring uses actual command implementations and an owned HOME via module seams.
 // No dependency override is accepted by bin argv or environment.
 import * as walletModule from "../../src/cli/wallet.js";
+import { FAUCET_NOTICE } from "../../src/cli/wallet.js";
 import * as configModule from "../../src/cli/config.js";
 import * as statusModule from "../../src/cli/status.js";
 import * as inspectModule from "../../src/cli/inspect.js";
@@ -38,8 +39,10 @@ test("bin dispatches real wallet new/address and config get, exact argv/exits", 
   const out = vi.spyOn(process.stdout, "write").mockReturnValue(true), err = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   try {
     expect(await main(["wallet", "new"], ["--disable-sigusr1"])).toBe(0);
-    const address = String(out.mock.calls[0]![0]); expect(address).toMatch(/^0x[0-9a-fA-F]{40}\n$/);
-    expect(await main(["wallet", "address"], ["--disable-sigusr1"])).toBe(0); expect(out.mock.calls[1]![0]).toBe(address);
+    const addresses = String(out.mock.calls[0]![0]); expect(addresses).toMatch(/^eip155 0x[0-9a-fA-F]{40}\nsolana [1-9A-HJ-NP-Za-km-z]{32,44}\n$/);
+    // stderr carries the fixed faucet notice only (no secret, no address).
+    expect(err.mock.calls.map(c => String(c[0])).join("")).toBe(FAUCET_NOTICE + "\n"); err.mockClear();
+    expect(await main(["wallet", "address"], ["--disable-sigusr1"])).toBe(0); expect(out.mock.calls[1]![0]).toBe(addresses);
     expect(await main(["config", "get"], ["--disable-sigusr1"])).toBe(0);
     expect(w.mock.calls).toEqual([[["new"]], [["address"]]]); expect(c.mock.calls).toEqual([[["get"]]]); expect(err).not.toHaveBeenCalled();
   } finally { rmSync(home, { recursive: true, force: true }); }

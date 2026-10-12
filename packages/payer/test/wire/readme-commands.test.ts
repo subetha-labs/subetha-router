@@ -48,11 +48,13 @@ test("README install and user-scope registration parse to the actual package bin
   expect(text).not.toMatch(/unpublished|AFTER owner publication/);
 });
 
-test("README names exactly the five production tools with first-slice inputs", () => {
+test("README names exactly the five production tools with the 0.2.0 inputs (static route and dynamic profile + URL)", () => {
   const text = readme();
   const tools = [...new Set(text.match(/subetha_payer_[a-z_]+/g))].sort();
   expect(tools).toEqual(["subetha_payer_find_routes", "subetha_payer_purchase", "subetha_payer_quote", "subetha_payer_status", "subetha_payer_wallet"]);
-  expect(text).toContain('"routeId":"md-mpp-eth-snapshot"');
+  expect(text).toContain('"routeId":"md-x402-eth-snapshot"');
+  expect(text).toContain('"profileId":"dyn-mpp-to-x402","url":"https://x402.vercel.app/protected"');
+  expect(text).toContain("subetha-payer wallet add solana");
   expect(text).toContain('"ref":"p_aaaaaaaaaaaaa"');
   expect(text).toMatch(/stop ALL contenders/i);
   expect(text).toMatch(/inspect.*never resubmits/i);

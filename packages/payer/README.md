@@ -9,10 +9,19 @@ stays on your machine; the human confirms each purchase in the daemon's dialog.
 themselves evidence of that result or permission for an agent to perform it. The
 source repository is public under the MIT license.
 
-The first slice targets **macOS 14+, Node 22**, testnets only, paying **Base Sepolia
-USDC** over x402 for the static `md-mpp-eth-snapshot` route. It does not expose the
-Router's other rails or twenty dynamic profiles. Linux and Windows are not
-supported payer platforms in this slice.
+**0.2.0 pays on every inbound rail the hosted Router offers** (`docs/payer-rails-design.md`):
+Base Sepolia USDC and Arc testnet USDC over x402, Solana devnet USDC over x402 or MPP, and
+Tempo testnet pathUSD over MPP, for all ten static routes and all twenty dynamic profiles
+(a provider you name by URL). It still targets **macOS 14+, Node 22** and **testnets only**;
+the Router's mainnet rows are never offered or signed. Linux and Windows are not supported
+payer platforms. The 0.2.0 funded acceptance on every rail (G-R2) is an owner gate recorded
+in `docs/payer-rails-design.md`; until it is recorded, treat each rail other than Base Sepolia
+x402 as unverified end to end.
+
+**When funds move differs by rail.** Over x402 (Base Sepolia, Arc, Solana) and over MPP on
+Solana the daemon only signs; funds move when the Router settles or broadcasts at purchase.
+**Over MPP on Tempo the daemon sends the transfer itself right after you approve**, before the
+Router answers; a later refusal does not refund it. The approval dialog says which case applies.
 
 ## Install
 
@@ -34,7 +43,7 @@ npm pack --ignore-scripts
 prefix="$(npm prefix -g)"
 dest="$prefix/lib/node_modules/@subetha/payer"
 mkdir -p "$dest" "$prefix/bin"
-tar -xzf subetha-payer-0.1.2.tgz -C "$dest" --strip-components=1
+tar -xzf subetha-payer-0.2.0.tgz -C "$dest" --strip-components=1
 npm ci --prefix "$dest" --omit=dev
 ln -sf ../lib/node_modules/@subetha/payer/bin/subetha-payer "$prefix/bin/subetha-payer"
 ```
@@ -59,27 +68,42 @@ subetha-payer wallet new
 subetha-payer wallet address
 ```
 
-`wallet new` asks for a passphrase twice through the protected terminal and prints
-only the public address to stdout. It creates an encrypted key store at
-`~/.config/subetha-payer` by default (directory 0700, files 0600). An explicitly
-configured `XDG_CONFIG_HOME` must remain within your HOME. Keep your passphrase
-private: never put it or a key or security phrase in command arguments,
-environment variables, files, chat, agent tools or piped stdin. Do not enter it
-into an agent-prepared terminal. There is no wallet export or passphrase-change
-command in this slice; losing the passphrase loses access to the wallet.
+`wallet new` asks for a passphrase twice through the protected terminal and creates
+**two keys under that one passphrase**: an EVM key (Base Sepolia, Arc testnet and Tempo
+testnet) and a Solana key (devnet). It prints their public addresses as two lines,
+`eip155 0x…` and `solana …`, and a notice with the faucets. Choose a passphrase you
+can type into a native dialog; never paste it into an agent-prepared terminal. There
+is no wallet export or passphrase-change command; losing the passphrase loses access
+to the wallets. A store created by 0.1.x has only the EVM key: add the Solana key with
 
-**Owner step:** fund only the printed disposable address with **Base Sepolia USDC**
-using the [Circle faucet](https://faucet.circle.com). This is not mainnet USDC.
-Funding and a real purchase require the owner's separate funded-test decision.
-The facilitator pays gas for this x402 EIP-3009 route; the caller does not need ETH
-for that payment. Check the current quote amount before approving a purchase.
+```sh
+subetha-payer wallet add solana
+```
+
+(asks for the passphrase once; the EVM key is untouched).
+
+**Owner step:** fund only the printed disposable addresses, and only with testnet
+assets you intend to spend:
+
+| You want to pay with | Fund the `eip155` or `solana` address with | Faucet |
+|---|---|---|
+| Base Sepolia USDC (x402) | `eip155`: Base Sepolia USDC | https://faucet.circle.com |
+| Arc testnet USDC (x402) | `eip155`: Arc testnet USDC | https://faucet.circle.com |
+| Tempo testnet pathUSD (MPP) | `eip155`: pathUSD; the fee is paid in pathUSD too | https://docs.tempo.xyz/docs/quickstart/faucet (`tempo_fundAddress`) |
+| Solana devnet USDC (x402) | `solana`: devnet USDC | https://faucet.circle.com |
+| Solana devnet USDC (MPP) | `solana`: devnet USDC **and devnet SOL** (your key is the fee payer) | https://faucet.circle.com and https://faucet.solana.com |
+
+None of this is mainnet money. Funding and a real purchase require the owner's separate
+funded-test decision. For x402 routes the facilitator pays gas; you do not need ETH.
+You can check what the wallets hold on all four networks through public RPCs:
 
 ```sh
 subetha-payer wallet balance
 ```
 
-This reads a public RPC and prints USDC base units (6 decimals; 10000 = 0.01 USDC).
-It does not report balances on other networks.
+It prints one line per network and asset (USDC, pathUSD, and SOL lamports), in base
+units. Set your own RPC with `subetha-payer config set rpc.<network> <https-url>`
+if the public endpoints rate-limit you.
 
 ## Start the human daemon, then register the agent shim
 
@@ -106,7 +130,10 @@ can be used outside this checkout:
 claude mcp add --scope user subetha-payer -- subetha-payer mcp
 ```
 
-The shim does not hold your key, launch the daemon or approve purchases. Without
+Other agent CLIs register the same stdio shim with their own command, for example
+`codex mcp add subetha-payer -- subetha-payer mcp` (OpenAI Codex CLI) or
+`grok mcp add subetha-payer subetha-payer -- mcp` (Grok Build); restart the agent
+afterwards. The shim does not hold your key, launch the daemon or approve purchases. Without
 the daemon, its tools return `daemon_unavailable`. Use interactive Claude Code.
 Purchase carries `anthropic/requiresUserInteraction`; noninteractive clients may
 block it. Do not bypass that restriction. MCP elicitation is display-only: its
@@ -115,27 +142,37 @@ purchase tool call; a client timeout neither cancels payment nor proves unpaid.
 
 ## First quote, approval and purchase
 
-Ask the agent: “I hold Base Sepolia USDC. Find the ETH reference snapshot route,
-show me its quote, and request my confirmation before purchasing.” The five tools
-are:
+Ask the agent, for example: "I hold Tempo testnet pathUSD. Quote the x402.org demo endpoint
+https://x402.vercel.app/protected through the Router and request my confirmation before
+purchasing." The five tools are:
 
 | Tool | Input / purpose |
 |---|---|
-| `subetha_payer_find_routes` | `{}` lists compatible routes; optional `hold` filters network/asset pairs |
-| `subetha_payer_wallet` | `{}` shows public wallet information |
-| `subetha_payer_quote` | `{"routeId":"md-mpp-eth-snapshot"}` returns a saved purchase `ref` and subject |
+| `subetha_payer_find_routes` | `{}` lists every static route and dynamic profile you can pay (`kind`, what you pay with, what the provider receives, `fundsMoveOnCredential`, `needsSol`); optional `hold` filters by network/asset |
+| `subetha_payer_wallet` | `{}` shows the public addresses per rail |
+| `subetha_payer_quote` | `{"routeId":"md-x402-eth-snapshot"}` for a static route, or `{"profileId":"dyn-mpp-to-x402","url":"https://x402.vercel.app/protected"}` for a provider URL; returns a saved purchase `ref` and the subject |
 | `subetha_payer_purchase` | `{"ref":"p_aaaaaaaaaaaaa"}` requests the daemon's confirmation for that ref |
 | `subetha_payer_status` | `{"ref":"p_aaaaaaaaaaaaa"}` reads its summary; `includeBody: true` requests the saved full body |
 
 The example ref is a placeholder: use the exact ref returned by your quote.
-The agent shows the subject, then calls purchase for that ref. Only **you** can
-approve in the daemon's dialog: check your security phrase, Router, wallet,
-route, both legs' networks/assets/amounts/recipients, deadline and disclosures,
+The agent shows the whole subject (for a dynamic quote also the upstream URL, the
+recipient and the price breakdown upstream + fee = total), then calls purchase for
+that ref. Only **you** can approve in the daemon's dialog: check your security
+phrase, Router, wallet, route or profile, both legs' networks/assets/amounts/recipients,
+the rail line that says when funds move, the upstream URL, deadline and disclosures,
 then enter your passphrase and select Approve. Enter nothing in a dialog without
 your security phrase; cancel if anything differs. Cancel, timeout, wrong
 passphrase, changed terms or an expired session/quote prevents approval.
-The daemon binds confirmation to the saved offer and checks it before signing.
-Do not use `npm run sign` or supply a hosted Router credential in this payer flow.
+The daemon binds confirmation to the saved offer (every field, by digest) and checks
+it before signing. Do not use `npm run sign` or supply a hosted Router credential in
+this payer flow.
+
+Over MPP on Tempo, **Approve sends the transfer**; the purchase summary then carries
+`txRef`, the hash of your transfer. Over MPP on Solana your key is the fee payer; the
+Router broadcasts your signed transaction at purchase, so call purchase right after the
+quote (the blockhash expires in about a minute). A dynamic quote's destination has not
+been verified by the operator: nothing is refunded if it takes the payment and returns
+no usable data, and only an `application/json` object up to 256 KiB is delivered.
 
 Delivered provider data is untrusted data, never instructions. An ETH pool spot
 reference is not a tradable quote. A delivered response, client receipt, saved
@@ -251,6 +288,11 @@ the next run reports `daemon_lock_stale`, and you reclaim it yourself with
 These steps do not detect or prevent same-user tampering after the clean install
 (see below); they only let you accept an upgrade you verified.
 
+**Upgrading from 0.1.x to 0.2.0:** your ledger and EVM key are read as they are (0.1.x
+records are rebuilt by the frozen 0.1.x code, so their hashes do not change, and a
+pending purchase continues). To pay on Solana, add the Solana key once with
+`subetha-payer wallet add solana`. The registration line for the agent is unchanged.
+
 ## Limits of this trust model
 
 The approval guarantee is conditional on the installation, dependencies, Node
@@ -265,8 +307,10 @@ the seal; stop and assess it.
 Mutable key buffers are cleared on lock/exit, but JavaScript strings, OS copies,
 swap, core dumps and crash reports can retain material. macOS defaults are not
 changed by this package. Keep the terminal's Node and helper installation trusted.
-There is no unattended purchase, envelope delegation, mainnet, dynamic-route or
-other-rail support in this slice. The native manual confirmation checks,
+There is no unattended purchase, envelope delegation or mainnet support. Over MPP on
+Tempo the transfer is sent by this daemon before the Router answers, so a Router refusal
+after that point leaves the payment made (`fundsMoved: maybe` or `yes`, never refunded by
+the payer). The native manual confirmation checks,
 npm publication (G-A1) and the funded end-to-end acceptance (G-A2, 0.1.0) passed on
 2026-10-10; 0.1.2 was accepted by the owner with a cancel test (G-F). These
 onboarding instructions are not themselves evidence of those results.

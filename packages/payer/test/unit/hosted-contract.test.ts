@@ -90,10 +90,10 @@ for (const [name, change] of substitutions) test(`producer hostile substitution 
   const ledger = openLedger(path.join(dir, "ledger.ndjson"), key, realFs); const session = new Session(randomBytes(32));
   const ui = vi.fn(); const sign = vi.fn(); const purchase = vi.fn(); const quote = vi.fn(async () => response);
   try {
-    const core = createPurchaseCore({ ledger, session, address: identity().address, phrase: "fixture", assertHeld() {},
+    const core = createPurchaseCore({ ledger, session, address: identity().address, wallets: { eip155: identity().address }, phrase: "fixture", assertHeld() {},
       purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: ui }, signer: { sign } },
       router: { quote, purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
-    expect(await core.quote()).toMatchObject({ error: "quote_inconsistent" });
+    expect(await core.quote({ routeId: STATIC_ROUTE })).toMatchObject({ error: "quote_inconsistent" });
     expect(quote).toHaveBeenCalledTimes(1); expect(ledger.rows).toHaveLength(0);
     expect(ui).not.toHaveBeenCalled(); expect(sign).not.toHaveBeenCalled(); expect(purchase).not.toHaveBeenCalled();
   } finally { session.close(); ledger.close(); key.fill(0); rmSync(dir, { recursive: true, force: true }); }
@@ -113,14 +113,14 @@ test("real producer quote reaches durable core purchase with omitted optional de
   const response: any = await produced();
   const dir = mkdtempSync(path.join(tmpdir(), "p3b-contract-")); const key = randomBytes(32);
   const ledger = openLedger(path.join(dir, "ledger.ndjson"), key, realFs); const session = new Session(randomBytes(32));
-  const sign = vi.fn(async () => "fixture-credential");
+  const sign = vi.fn(async () => ({ credential: "fixture-credential" }));
   const purchase = vi.fn(async () => ({ ok: true, paymentId: response.quote.paymentId, outcome: "delivered", snapshot: { synthetic: true }, contentType: "application/json" }));
   const confirm = vi.fn(async (r: Parameters<typeof recordHash>[0]) => ({ approved: true as const, recordHash: recordHash(r), uiKind: "native" as const }));
   try {
-    const core = createPurchaseCore({ ledger, session, address: identity().address, phrase: "fixture", assertHeld() {},
+    const core = createPurchaseCore({ ledger, session, address: identity().address, wallets: { eip155: identity().address }, phrase: "fixture", assertHeld() {},
       purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: async () => true, confirm }, signer: { sign } },
       router: { quote: async () => response, purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
-    const q: any = await core.quote(); expect(q.ok).toBe(true);
+    const q: any = await core.quote({ routeId: STATIC_ROUTE }); expect(q.ok).toBe(true);
     expect(response.quote.destination.decimals).toBeUndefined();
     expect(q.subject.reaches.decimals).toBe(6);
     const result = await core.purchase(q.ref); expect(result).toMatchObject({ state: "result", outcome: "delivered" });

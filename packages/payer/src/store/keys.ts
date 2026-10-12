@@ -199,6 +199,23 @@ export function unlockKeys(doc: KeysDocument, passphrase: string): { readonly ke
   return { kek: keys.kek, lek: keys.lek };
 }
 
+/**
+ * 既存の store に鍵を 1 本足す（`wallet add solana`。設計 `docs/payer-rails-design.md` §2.2）。passphrase で開けて（verifier の照合）、
+ * 同じ `kek` で新しい秘密を封印し、**既存の欄はそのまま**（byte-identical）の新しい文書を返す。rail が既にあれば `wallet_exists`
+ * （passphrase を確かめる前に拒む）。secret は呼び出し側が zero fill する。導いた鍵はこの中で zero fill する。
+ */
+export function addWallet(doc: KeysDocument, passphrase: string, rail: string, wallet: { readonly address: string; readonly secret: Buffer }): KeysDocument {
+  if (!RAIL_PATTERN.test(rail) || !ADDRESS_PATTERN.test(wallet.address) || wallet.secret.length === 0 || wallet.secret.length > 128) throw new StoreError("wallet_invalid");
+  if (doc.wallets[rail] !== undefined) throw new StoreError("wallet_exists");
+  const keys = unlockKeys(doc, passphrase);
+  try {
+    const entry: WalletEntry = { address: wallet.address, ...seal(keys.kek, wallet.secret, `wallet:${rail}:${wallet.address}`) };
+    return { ...doc, wallets: { ...doc.wallets, [rail]: entry } };
+  } finally {
+    zero(keys.kek, keys.lek);
+  }
+}
+
 /** 封印された秘密鍵を復号する（呼び出し側が zero fill する）。 */
 export function openWallet(doc: KeysDocument, rail: string, kek: Buffer): Buffer {
   const entry = doc.wallets[rail];

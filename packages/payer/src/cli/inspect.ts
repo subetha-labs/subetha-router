@@ -10,7 +10,7 @@ import { readConfig } from "../config.js";
 import { routerIdentity } from "../router/identity.js";
 import { RouterClient } from "../router/client.js";
 import { FailureSummary, InspectionSummary, PurchaseRef, PurchaseSummary } from "../protocol/summary.js";
-import { walletAddress } from "./wallet.js";
+import { walletAddress, walletAddresses } from "./wallet.js";
 import { cliRun, daemonRead, invalid, output, requireTty, withLock, type CliDeps } from "./common.js";
 
 /** No private wallet decryption, signer or automatic recovery. Only the ledger key is opened. */
@@ -26,7 +26,7 @@ async function offline<T>(deps: CliDeps, action: (core: PurchaseCore) => Promise
       held(); keys = unlockKeys(doc, pass); zero(keys.kek); pass = "";
       checkInstallSeal(path.join(r.dir, "install.seal"), installHashes(r.installRoot, r.fs), keys.lek, r.fs, held);
       held(); ledger = openLedger(path.join(r.dir, "ledger.ndjson"), keys.lek, r.fs);
-      const core = createPurchaseCore({ ledger, session, address, phrase: "", assertHeld: held,
+      const core = createPurchaseCore({ ledger, session, address, wallets: walletAddresses(text), phrase: "", assertHeld: held,
         router: deps.router ?? new RouterClient(new URL(identity.routerUrl)),
         purchase: { routerUrl: identity.routerUrl, canonicalResource: identity.resource,
           ui: { available: async () => false }, signer: { sign: async () => { throw new StoreError("approval_unavailable"); } } },

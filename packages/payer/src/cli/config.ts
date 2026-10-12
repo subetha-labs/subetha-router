@@ -1,7 +1,9 @@
 import { parseConfig, readConfig } from "../config.js";
 import { TerminalSecrets } from "../daemon/tty.js";
 import { cliRun, invalid, output, requireTty, resources, withLock, writeDocument, type CliDeps } from "./common.js";
-const fields = ["router.url", "router.canonicalResource.url", "session.ttlMs", "rails", "rpc.eip155:84532"];
+/** `rpc.<CAIP-2>`: the four payer networks (docs/payer-rails-design.md FR-R12). Public https only (`validRpc`). */
+const RPC_NETWORKS = ["eip155:84532", "eip155:42431", "eip155:5042002", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"] as const;
+const fields = ["router.url", "router.canonicalResource.url", "session.ttlMs", "rails", ...RPC_NETWORKS.map(network => `rpc.${network}`)];
 export function runConfig(args: readonly string[], deps: CliDeps = {}): Promise<number> {
   return cliRun(async () => {
     if (args[0] === "get" && args.length === 1) { const r = resources(deps); output(readConfig(r.dir, r.fs)); return; }
@@ -15,7 +17,11 @@ export function runConfig(args: readonly string[], deps: CliDeps = {}): Promise<
         case "router.canonicalResource.url": next.router.canonicalResource = { url: value, method: "GET" }; break;
         case "session.ttlMs": next.session = { ttlMs: /^\d+$/.test(value) ? Number(value) : NaN }; break;
         case "rails": next.rails = JSON.parse(value); break;
-        case "rpc.eip155:84532": next.rpc = { "eip155:84532": value }; break;
+        default: {
+          const network = RPC_NETWORKS.find(candidate => args[1] === `rpc.${candidate}`);
+          if (network === undefined) invalid();
+          next.rpc = { ...next.rpc, [network]: value };
+        }
       }
       writeDocument(r.dir, "config.json", parseConfig(next), r.fs, held, true);
       output({ ok: true, effective: "next_daemon_start" });

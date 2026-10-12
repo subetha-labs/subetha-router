@@ -26,7 +26,7 @@ test.each(["approved", "bad_passphrase", "cancelled", "locked", "expired", "docu
   const quote = h1Quote();
   vi.spyOn(RouterClient.prototype, "quote").mockResolvedValue(quote);
   const purchase = vi.spyOn(RouterClient.prototype, "purchase").mockResolvedValue({ ok: true, outcome: "delivered", paymentId: quote.quote.paymentId, snapshot: { synthetic: true }, contentType: "application/json" });
-  const sign = vi.fn(async () => "synthetic-credential");
+  const sign = vi.fn(async () => ({ credential: "synthetic-credential" }));
   // Observe the real startup result; the wrapper does not replace startup behavior.
   const original = startup.startDaemon;
   let resolve!: (daemon: startup.RunningDaemon) => void;

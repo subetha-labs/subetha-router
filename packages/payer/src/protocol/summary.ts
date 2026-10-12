@@ -28,7 +28,7 @@ export const KNOWN_CODES = new Set([
   "rate_source", "rate_global", "rate_host", "host_concurrency", "outstanding_quotes", "verify_failed", "preflight_failed",
   "source_paid_unsettled", "source_settle_unknown", "interrupted_at_restart", "destination_offer_changed", "destination_offer_expired", "destination_pay_unknown",
   "credential_required", "transport_uncertain", "response_unreadable", "resource_not_approved_canonical", "quote_not_issued_by_client", "quote_binding_changed", "request_id_changed",
-  "inbound_credential_unavailable", "inbound_payer_not_configured",
+  "inbound_credential_unavailable", "inbound_payer_not_configured", "wallet_missing",
   // payer（設計 §3・§4）
   "daemon_unavailable", "locked", "approval_unavailable", "approval_mismatch", "approval_rejected", "approval_expired_during_dialog", "quote_inconsistent", "rail_not_enabled", "unknown_ref",
   "store_corrupt", "store_rollback", "store_write_failed", "store_unsupported_version", "lock_lost", "daemon_already_running", "daemon_lock_stale", "startup_refused", "bad_passphrase",
@@ -50,6 +50,11 @@ const amount = z.string().regex(/^(0|[1-9][0-9]{0,29})$/);
 const network = z.string().regex(/^(eip155:[1-9][0-9]{0,19}|solana:[1-9A-HJ-NP-Za-km-z]{32})$/);
 const decimals = z.number().int().min(0).max(18);
 const rail = z.enum(["x402", "mpp"]);
+/** Inbound offer scheme (wire): x402 `exact`, MPP on Tempo `tempo/charge`, MPP on Solana `solana/charge`. */
+const scheme = z.enum(["exact", "tempo/charge", "solana/charge"]);
+const routeId = z.string().regex(/^(md|dyn)-[a-z0-9-]{1,60}$/);
+/** Transaction hash of a transfer this payer sent (MPP on Tempo). Evidence, not a secret. */
+const txRef = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
 const httpsUrl = z.string().max(2_048).url().refine((u) => u.startsWith("https://"), "https only");
 const epochMs = z.number().int().min(0).max(4_102_444_800_000);
 
@@ -98,6 +103,22 @@ export const RouteSummary = z
 export const RoutesSummary = z.object({ ok: z.literal(true), routes: z.array(RouteSummary).max(200) }).strict();
 export type RoutesSummary = z.infer<typeof RoutesSummary>;
 
+/** The Router's fixed disclosures of a dynamic quote (booleans and fixed code lists only; the same shape the hosted Router returns). */
+export const Disclosures = z
+  .object({
+    destinationVerifiedByOperator: z.literal(false),
+    refundOnFailure: z.literal(false),
+    fundsMoveOnCredential: z.boolean(),
+    awaitingPaymentDoesNotMeanUnpaid: z.boolean(),
+    unsupportedResponseIsPaidWithoutData: z.literal(true),
+    supportedResponse: z.literal("application/json object, <= 256 KiB"),
+    feeEstimateIsNotADeliveryGuarantee: z.literal(true).optional(),
+    routerMayRejectAfterFundsMoved: z.array(code).max(16).optional(),
+    routerMayRejectAfterSettle: z.array(code).max(16).optional(),
+  })
+  .strict();
+export type Disclosures = z.infer<typeof Disclosures>;
+
 /** 人間が承認する内容の要約（承認の記録 `ApprovalRecord` から描画。quote 文書そのものではない）。 */
 export const SubjectSummary = z
   .object({
@@ -111,6 +132,13 @@ export const SubjectSummary = z
     reaches: z.object({ rail, network, asset, quoted: amount, payTo: address.optional(), decimals: decimals.optional() }).strict(),
     upstreamUrl: httpsUrl.optional(),
     pricing: z.object({ upstreamAmount: amount, fee: amount, total: amount, maxFee: amount.optional() }).strict().optional(),
+    // 0.2.0 (docs/payer-rails-design.md §2.5): which route/profile, the inbound rail's scheme, and the Router's fixed disclosures.
+    routeId: routeId.optional(),
+    kind: z.enum(["static", "dynamic"]).optional(),
+    scheme: scheme.optional(),
+    /** Solana over MPP: the paying key is the transaction's fee payer (devnet SOL). */
+    needsSol: z.boolean().optional(),
+    disclosures: Disclosures.optional(),
   })
   .strict();
 export type SubjectSummary = z.infer<typeof SubjectSummary>;
@@ -165,6 +193,8 @@ export const PurchaseSummary = z
     result: ResultPreview.optional(),
     proof: z.object({ upstreamReceipt: z.enum(["claimed", "none"]), onChainFinality: z.enum(["not_checked", "finalized"]) }).strict().optional(),
     nextStep: NextStep.optional(),
+    /** MPP on Tempo: hash of the transfer this daemon sent (from `signed` on). Evidence of movement, not of delivery. */
+    txRef: txRef.optional(),
   })
   .strict();
 export type PurchaseSummary = z.infer<typeof PurchaseSummary>;

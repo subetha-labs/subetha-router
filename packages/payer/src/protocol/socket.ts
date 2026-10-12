@@ -1,12 +1,26 @@
 import { z } from "zod";
 import { InspectionSummary, FailureSummary, PingSummary, PurchaseBodySummary, PurchaseRef, PurchaseSummary, QuoteSummary, RouteSummary, RoutesSummary, WalletSummary } from "./summary.js";
+import { ROUTE_ID_PATTERN, validUpstreamUrl } from "../router/client.js";
 
 const empty = z.object({}).strict();
+const routeId = z.string().regex(ROUTE_ID_PATTERN);
+/**
+ * A static route (`{routeId}`) or a dynamic profile with the upstream URL (`{profileId, url}`; docs/payer-rails-design.md FR-R2).
+ * One object schema (MCP tool input schemas must be objects); exactly one of the two forms is accepted.
+ */
+export const QuoteInput = z.object({
+  routeId: routeId.optional(),
+  profileId: routeId.optional(),
+  url: z.string().max(2048).refine(validUpstreamUrl, "https URL without userinfo or fragment").optional(),
+}).strict().refine((v) => (v.routeId !== undefined && v.profileId === undefined && v.url === undefined) || (v.routeId === undefined && v.profileId !== undefined && v.url !== undefined),
+  "pass {routeId} for a static route or {profileId, url} for a dynamic provider URL");
+export type QuoteInput = z.infer<typeof QuoteInput>;
+export function isStaticQuoteInput(input: QuoteInput): input is QuoteInput & { routeId: string } { return input.routeId !== undefined; }
 export const inputs = {
   ping: empty, wallet: empty,
   inspect: z.object({ ref: PurchaseRef.optional() }).strict(),
   find_routes: z.object({ hold: z.array(RouteSummary.shape.pays.pick({ network: true, asset: true }).strict()).max(200).optional() }).strict(),
-  quote: z.object({ routeId: z.literal("md-mpp-eth-snapshot") }).strict(),
+  quote: QuoteInput,
   purchase: z.object({ ref: PurchaseRef }).strict(),
   status: z.object({ ref: PurchaseRef, includeBody: z.boolean().optional() }).strict(),
 };

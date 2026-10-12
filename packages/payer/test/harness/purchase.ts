@@ -9,6 +9,7 @@ export function fixturePurchase(base: PurchaseContext, event: (name: string) => 
     ui: { available: async () => true, confirm: async record => {
       event("confirm"); return cancel ? { approved: false } : { approved: true, recordHash: recordHash(record), uiKind: "native" };
     } },
-    signer: { sign: async () => { event("sign"); return "fixture-credential"; } },
+    // MPP on Tempo: the real signer sends the transfer and returns its hash; the fixture mirrors that shape only.
+    signer: { sign: async (offer) => { event("sign"); const scheme = typeof offer === "object" && offer !== null ? (offer as { scheme?: unknown }).scheme : undefined; return { credential: "fixture-credential", ...(scheme === "tempo/charge" ? { txRef: `0x${"ab".repeat(32)}` } : {}) }; } },
   };
 }

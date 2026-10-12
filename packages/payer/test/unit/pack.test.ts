@@ -157,7 +157,8 @@ describe("P-1a: packaging boundary", () => {
     for (const [name, version] of Object.entries({ ...pkg.dependencies, ...pkg.devDependencies })) {
       expect(version, name).toMatch(/^\d+\.\d+\.\d+$/);
     }
-    expect(Object.keys(pkg.dependencies).some((d) => d === "mppx" || d.startsWith("@solana/") || d.startsWith("@solana-program/"))).toBe(false);
+    // 0.2.0 pays every rail (docs/payer-rails-design.md §2.1): the Router's own payer dependencies, pinned.
+    expect(Object.keys(pkg.dependencies).sort()).toEqual(["@modelcontextprotocol/sdk", "@solana-program/compute-budget", "@solana-program/token", "@solana/kit", "mppx", "undici", "viem", "zod"]);
   });
 
   test("node dist/bin.js is refused without the launcher's flag (exit 2, sigusr1_enabled); through the launcher the CLI requires a fixed HOME (exit 2, home_unavailable)", () => {

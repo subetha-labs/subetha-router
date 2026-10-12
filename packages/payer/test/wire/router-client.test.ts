@@ -25,7 +25,7 @@ test("actual SDK MCP: one initialized connection/request; H-1 success, text fall
     expect(await client.status(paymentId)).toEqual({ kind: "unreadable", reason: "unauthorized" });
     fake.state.status = { found: false, reason: "projection_malformed", status: 200 };
     expect(await client.status(paymentId)).toEqual({ kind: "unreadable", reason: "projection_malformed" });
-    expect(fake.state.calls).toEqual({ initialize: 9, listRoutes: 1, quote: 4, status: 4, purchase: 0 });
+    expect(fake.state.calls).toEqual({ initialize: 9, listRoutes: 1, quote: 4, quoteUrl: 0, status: 4, purchase: 0 });
     expect(new Set(fake.state.requestIds).size).toBe(4);
   } finally { await fake.close(); }
 });

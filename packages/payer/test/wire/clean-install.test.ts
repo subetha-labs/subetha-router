@@ -88,7 +88,7 @@ async function wallet(bin: string, f: Fixture) {
   expect(JSON.stringify(value) === JSON.stringify({ exit: 0, prompts: 2, addresses: [] }), "installed PTY result").toBe(true); expect(result.stderr === "").toBe(true);
   const output = readFileSync(stdoutFile);
   // Boolean assertions prevent any future secret-output mutation entering Vitest diagnostics.
-  expect(/^0x[0-9a-fA-F]{40}\n$/.test(output.toString("utf8")), "wallet stdout address only").toBe(true);
+  expect(/^eip155 0x[0-9a-fA-F]{40}\nsolana [1-9A-HJ-NP-Za-km-z]{32,44}\n$/.test(output.toString("utf8")), "wallet stdout: the two public addresses only").toBe(true);
   const store = path.join(f.env.HOME!, ".config/subetha-payer"), file = path.join(store, "keys.json");
   const doc = json(file), entry = doc.wallets.eip155;
   expect(doc.version).toBe(1); expect(doc.kdf).toMatchObject({ name: "scrypt", N: 131072, r: 8, p: 1 });

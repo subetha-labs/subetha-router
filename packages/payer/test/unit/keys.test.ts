@@ -4,7 +4,7 @@
 import { describe, expect, test } from "vitest";
 
 import { StoreError } from "../../src/store/fs.js";
-import { createKeysDocument, deriveMaster, isValidPassphrase, open, openWallet, parseKeysDocument, SCRYPT_PARAMS, seal, subkeysOf, unlockKeys } from "../../src/store/keys.js";
+import { addWallet, createKeysDocument, deriveMaster, isValidPassphrase, open, openWallet, parseKeysDocument, SCRYPT_PARAMS, seal, subkeysOf, unlockKeys } from "../../src/store/keys.js";
 
 const PASS = "correct horse battery staple";
 const SECRET = Buffer.from("ab".repeat(32), "hex");
@@ -92,5 +92,55 @@ describe("keys: document", () => {
     expect(() => createKeysDocument(PASS, { eip155: { address: "0xabc", secret: Buffer.alloc(0) } })).toThrow(/wallet_invalid/);
     const e = (() => { try { parseKeysDocument("x"); return undefined; } catch (err) { return err; } })();
     expect(e).toBeInstanceOf(StoreError);
+  });
+});
+
+/** R-1 (docs/payer-rails-design.md §2.2, AC-R5): `wallet add solana` on a 0.1.x store. */
+describe("keys: addWallet", () => {
+  const EVM = "0x9b10584FE6dEE57E843104D2bAc214C6D507F8a2";
+  const SOLANA = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+  const SEED = Buffer.alloc(32, 0x5a);
+
+  test("adds a sealed entry under the same kek and AAD; the existing entry, kdf and verifier are byte-identical; both open afterwards", () => {
+    const before = createKeysDocument(PASS, { eip155: { address: EVM, secret: Buffer.from(SECRET) } });
+    const text = JSON.stringify(before);
+    const after = addWallet(before, PASS, "solana", { address: SOLANA, secret: Buffer.from(SEED) });
+    expect(JSON.stringify(before)).toBe(text);
+    expect(after.version).toBe(before.version);
+    expect(after.kdf).toEqual(before.kdf);
+    expect(after.verifier).toBe(before.verifier);
+    expect(after.wallets["eip155"]).toEqual(before.wallets["eip155"]);
+    expect(Object.keys(after.wallets)).toEqual(["eip155", "solana"]);
+    const entry = after.wallets["solana"]!;
+    expect(entry.address).toBe(SOLANA);
+    expect(entry.cipher).toBe("aes-256-gcm");
+    const serialized = JSON.stringify(after);
+    expect(serialized).not.toContain(SEED.toString("hex"));
+    expect(serialized).not.toContain(SEED.toString("base64"));
+    // The new document re-parses as version 1 and both wallets open with the one passphrase.
+    const parsed = parseKeysDocument(serialized);
+    const keys = unlockKeys(parsed, PASS);
+    const evm = openWallet(parsed, "eip155", keys.kek), solana = openWallet(parsed, "solana", keys.kek);
+    expect(evm.equals(SECRET)).toBe(true);
+    expect(solana.equals(SEED)).toBe(true);
+    // The AAD binds the seal to its rail and address.
+    expect(() => open(keys.kek, entry, `wallet:solana:${EVM}`)).toThrow(/seal_mismatch/);
+    expect(() => open(keys.kek, entry, `wallet:eip155:${SOLANA}`)).toThrow(/seal_mismatch/);
+    evm.fill(0); solana.fill(0); keys.kek.fill(0); keys.lek.fill(0);
+  });
+
+  test("refuses an existing rail before checking the passphrase, a wrong passphrase, and malformed rail/address/secret", () => {
+    const doc = createKeysDocument(PASS, { eip155: { address: EVM, secret: Buffer.from(SECRET) } });
+    const t0 = Date.now();
+    expect(() => addWallet(doc, "wrong passphrase", "eip155", { address: EVM, secret: Buffer.from(SEED) })).toThrow(/wallet_exists/);
+    // No scrypt ran for the refused rail (the KDF takes ~200 ms).
+    expect(Date.now() - t0).toBeLessThan(100);
+    expect(() => addWallet(doc, "wrong passphrase", "solana", { address: SOLANA, secret: Buffer.from(SEED) })).toThrow(/bad_passphrase/);
+    expect(() => addWallet(doc, "short", "solana", { address: SOLANA, secret: Buffer.from(SEED) })).toThrow(/bad_passphrase/);
+    expect(() => addWallet(doc, PASS, "sol:ana", { address: SOLANA, secret: Buffer.from(SEED) })).toThrow(/wallet_invalid/);
+    expect(() => addWallet(doc, PASS, "solana", { address: "not base58!", secret: Buffer.from(SEED) })).toThrow(/wallet_invalid/);
+    expect(() => addWallet(doc, PASS, "solana", { address: SOLANA, secret: Buffer.alloc(0) })).toThrow(/wallet_invalid/);
+    expect(() => addWallet(doc, PASS, "solana", { address: SOLANA, secret: Buffer.alloc(129) })).toThrow(/wallet_invalid/);
+    expect(Object.keys(doc.wallets)).toEqual(["eip155"]);
   });
 });
