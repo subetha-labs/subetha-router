@@ -41,7 +41,7 @@ import {
   type RouteConfig,
   type RouterConfig,
   type RuntimeConfig,
-  usesGasIndexedFee, MPP_SOLANA_SCHEME } from "./config.js";
+  usesGasIndexedFee, MPP_SOLANA_SCHEME, evmTestnetDeadlinesOf } from "./config.js";
 import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
@@ -534,7 +534,10 @@ export function composeRails(
         throw new SignerNotAuthorizedError();
       }
       const rebuild = pair.network !== BASE_SEPOLIA_NETWORK;
+      // EVM testnet 4 つだけ: 有料要求の期限をチェーン別に（`docs/evm-testnets-x402-design.md` §3.6）。ほかの network は既定（30 秒）のまま。
+      const testnetDeadlines = evmTestnetDeadlinesOf(pair.network);
       rails[key] = createX402Outbound({
+        ...(testnetDeadlines === undefined ? {} : { paidTimeoutMs: testnetDeadlines.outboundPaidMs }),
         upstreams: upstreamsFor(pair.rail, pair.network),
         capability,
         transport: transportFor(capability.kind === "non-signing-fixture", report, staticHooks),
@@ -739,12 +742,15 @@ export function composeRails(
         });
       }
       // kind `x402`（Base Sepolia、既存）: 今までどおり（`maxTimeoutSeconds` が有効期間を兼ねる）。
+      // EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.2）だけ: 表の EIP-712 domain と、チェーン別の facilitator の期限（§3.6）。ほかの network は変えない。
+      const testnet = evmTestnetDeadlinesOf(network);
       return createX402Inbound({
         facilitatorUrl: facilitator.url,
         payTo,
         transport,
         ...(bindAuthorizationNonce ? { bindAuthorizationNonce: true } : {}),
         ...(offerSeconds === undefined ? {} : { maxTimeoutSeconds: offerSeconds }),
+        ...(testnet === undefined ? {} : { timeoutMs: testnet.inboundFacilitatorMs, ...(known.domain === undefined ? {} : { assetDomain: known.domain }) }),
       });
     };
     // 受取先は route ごとに違い得るので、route 単位で adapter を作る。
