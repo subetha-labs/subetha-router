@@ -11,6 +11,10 @@ caller ──(1) x402 / Base Sepolia USDC──> Router ──(2) MPP / Tempo pa
 
 The 2 legs are **independent payments, not an exchange and not a bridge**. There is no FX conversion.
 
+**Official page: https://subethalabs.com/router/ — agent guide (read this first if you are an AI agent): https://subethalabs.com/router/llms.txt.**
+Those two pages are the current onboarding for Claude Code, OpenAI Codex CLI and Grok Build (registration, discovery
+without a wallet, the local payer, when funds move). This README is the developer view of the same system.
+
 ## For judges and reviewers: 5 minutes or 15 minutes
 
 **5 minutes, no wallet.** Register the hosted Router in Claude Code and look at what it offers:
@@ -36,21 +40,22 @@ Sepolia USDC from a faucet, start `subetha-payer daemon` in your own terminal, r
 reference price while holding only Base Sepolia USDC. You approve the purchase in the daemon's native
 dialog (check your security phrase, enter your passphrase); the Router pays the MPP-only provider on
 Tempo from its own balance and the data comes back. Step-by-step:
-[`packages/payer/README.md`](packages/payer/README.md). The payer supports this one route; the hosted
-Router's other routes use the developer signing path below.
+[`packages/payer/README.md`](packages/payer/README.md). Since 0.2.0 the payer pays on every inbound rail
+the Router offers, for all static routes and for provider URLs (dynamic profiles); the developer signing path
+below is for working from a checkout.
 
 ## Try it now
 
 The recommended agent payment path is the [local SubEtha Payer](packages/payer/README.md):
 install → encrypted wallet → owner faucet funding → human-started daemon → user-scope
 Claude registration → quote → native human approval → purchase → saved status/recovery.
-Its first slice is **macOS 14+ / Node 22 / Base Sepolia USDC / static
-`md-mpp-eth-snapshot` only**.
+It is **macOS 14+ / Node 22 / testnets only**; 0.2.0 pays with Base Sepolia USDC, Arc testnet USDC,
+Solana devnet USDC (x402 or MPP) and Tempo testnet pathUSD, on every static route and dynamic profile.
 
-**Release gate: `@subetha/payer@0.1.2` is on npm** (0.1.0 published 2026-10-10, G-A1; a funded
-owner purchase through 0.1.0 was `delivered` the same day, G-A2; 0.1.2 was accepted by the owner
-with a cancel test, G-F — records in `docs/agent-payer-tasks.md` and
-`docs/agent-payer-followups-tasks.md`). Install it with `npm i -g @subetha/payer`. The payer README
+**Release gate: `@subetha/payer@0.2.0` is on npm** (0.1.0 published 2026-10-10, G-A1; a funded
+owner purchase through 0.1.0 was `delivered` the same day, G-A2; 0.1.2 accepted with a cancel test, G-F;
+0.2.0 published 2026-10-12 and accepted with a funded purchase on each rail, G-R1/G-R2 in
+`docs/payer-rails-design.md` §6). Install it with `npm i -g @subetha/payer`. The payer README
 also gives a locally built tarball path. The Router results below are not payer acceptance results.
 This source repository is **public under the MIT license** (`LICENSE`; made public on 2026-10-10).
 
