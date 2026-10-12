@@ -61,23 +61,24 @@ Added 2026-10-11 at the owner's request as an alternative to the script above (c
 
 ---
 
-## 3. Technical demo video (target 2:40–2:50, hard limit 3:00; "how")
+## 3. Technical demo video (target 2:45–2:55, hard limit 3:00; "how")
 
-Revised 2026-10-12 after a Codex review (gpt-6-astra, read-only) of the first table (kept in this file's history): the demo opens on the purchase itself, the implementation explanation comes after the proof, and nothing the pitch already said (market, background, privacy vision, business) is repeated. 261 spoken words, 27 sentences, the longest 15 words (the owner's two appeals added 2026-10-12: no app for people, and any provider by URL); planning pace ≈ 110 wpm including pauses (the pitch's measured continuous read), so the words take ≈ 2:22 and the remaining 20–25 s go to holds on the dialog, the delivered data and the explorers. Record on the owner's Mac: first the real purchase through the published payer (testnet, Base Sepolia USDC → our reference Provider B over MPP on Tempo testnet), then one continuous narration read against the assembled footage (continuous mode, pauses kept; if screen waits are cut, the film says "Waits cut"). Persistent labels: **TESTNET** during the payer purchase and the coverage statement; **MAINNET · OWNER-RUN · LOOPBACK** plus a large **Recorded evidence · 2026-10-10** during the mainnet part. No small print, no file paths on screen (owner's on-screen policy). Use a fresh security phrase and redact it in the published footage; the passphrase entry is masked by the dialog; never show key files, `ownerKey`, credentials or notifications. Each sentence names the §5 row it rests on (tags are not spoken).
+Revised 2026-10-12 after a Codex review (gpt-6-astra, read-only) of the first table (kept in this file's history): the demo opens on the purchase itself, the implementation explanation comes after the proof, and nothing the pitch already said (market, background, privacy vision, business) is repeated. 275 spoken words, 27 sentences, the longest 17 words (owner 2026-10-12: the official page as the entry point, no app for people, any provider by URL, no open-source mention); planning pace ≈ 110 wpm including pauses (the pitch's measured continuous read), so the words take ≈ 2:30 and the remaining 15–25 s go to holds on the dialog, the delivered data and the explorers. Record on the owner's Mac: first the real purchase through the published payer (testnet, Base Sepolia USDC → our reference Provider B over MPP on Tempo testnet), then one continuous narration read against the assembled footage (continuous mode, pauses kept; if screen waits are cut, the film says "Waits cut"). Persistent labels: **TESTNET** during the payer purchase and the coverage statement; **MAINNET · OWNER-RUN · LOOPBACK** plus a large **Recorded evidence · 2026-10-10** during the mainnet part. No small print, no file paths on screen (owner's on-screen policy). Use a fresh security phrase and redact it in the published footage; the passphrase entry is masked by the dialog; never show key files, `ownerKey`, credentials or notifications. Each sentence names the §5 row it rests on (tags are not spoken).
 
 | Time | On screen | Sentences (owner) |
 |---|---|---|
-| 0:00–0:16 | Claude Code ready; a route strip "Base Sepolia USDC → SubEtha Router → Provider B · MPP on Tempo testnet" | 1. I'll buy an API response using USDC on Base Sepolia. [payer npm row] 2. The provider is our own reference Provider B, using MPP on Tempo testnet. [demo provider row] |
-| 0:16–0:32 | The real request; find_routes → quote; the quote subject enlarged (amount with decimals, asset/network, recipient, deadline) | 4. In Claude Code, I ask for the route and a quote. [payer architecture row] 5. Here are the amount, recipient, and deadline. [payer architecture row] |
-| 0:32–1:00 | The native macOS dialog: security phrase redacted, terms readable, passphrase masked, Approve; a short readable line with the three trust assumptions | 6. I check the terms and my security phrase in the native dialog. [payer architecture row] 7. Then I enter my passphrase and approve. [payer architecture row] 8. This relies on an unmodified install, OS isolation of the daemon, and a secret phrase. [trust assumptions row] |
-| 1:00–1:15 | `delivered`; the provider's actual JSON held long enough to read; the purchase reference | 9. Here is the delivered response from the provider. [payer npm row; requires the successful capture] 10. The Router paid through MPP from its own balance. [payment architecture row; demo provider row] |
-| 1:15–1:36 | Base Sepolia transfer (my wallet → Router) and Tempo testnet transfer (Router → Provider B) for the same purchase, linked by the purchase record; highlight token-transfer participants and amounts | 11. These are the two payments for this purchase. [payment architecture row] 12. First, my wallet pays the Router on Base Sepolia. [payment architecture row; payer npm row] 13. Then, the Router pays the provider on Tempo testnet. [payment architecture row; demo provider row] 14. These are separate payments, without a swap or bridge. [payment architecture row] |
-| 1:36–2:02 | Architecture with a "This Mac / Hosted" boundary: Claude Code → stdio shim → local daemon (key, native dialog) → hosted Router (HTTPS, MCP) → provider; on 18a–18b the diagram shows no screen or person on the agent's side, only the MCP call | 15. I start the local daemon myself. 16. Claude Code connects through a local shim. 17. The daemon holds my key and contacts the hosted Router over MCP. 18. The hosted Router never holds my key. [payer architecture row; payment architecture row] 18a. There is no app for people here. 18b. The Router is an MCP server, and the agent calls it directly. [hosted endpoint row; payer architecture row] |
-| 1:57–2:06 | Large statement "20 cross-rail pairs settled on testnets" (the matrix optional, labelled as recorded test results) | 19. The Router's twenty supported cross-rail pairs have settled on testnets. [20 pairs row] |
-| 2:06–2:40 | The two dated explorer screenshots (Tempo inbound 0x4ea7d6c2…, Base outbound 0x699cd8f2…) and a "Recorded result: delivered" summary; on 21a–21b the upstream URL line is highlighted and a strip reads "any x402 or MPP provider · by URL · operator-unverified"; labels MAINNET · OWNER-RUN · LOOPBACK and Recorded evidence · 2026-10-10 | 20. This is recorded evidence of one mainnet purchase on October tenth. 21. Tempo MPP paid for an API accepting only x402 on Base. 21a. That API was a third-party service; the agent needed only its URL. 21b. Give the Router a provider's URL, and it quotes and pays the same way. [mainnet purchase row; dynamic upstream row] 22. The Router ran on my machine, using repository signing tools. [mainnet purchase row] 23. The hosted Router remains testnet only. [hosted endpoint row] |
-| 2:40–2:50 | End card: github.com/subetha-labs/subetha-router, npm @subetha/payer, router.subethalabs.com/mcp with TESTNET | 24. The Router and payer are open source under MIT. [repository/license row] [the npm line stays on the card, not spoken] |
+| 0:00–0:22 | The official page subethalabs.com/router: its "Try without a wallet" section and the registration command `claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp`; then Claude Code lists the routes (subetha_router_list_routes) | 1. Everything starts at subethalabs.com/router. [official page row] 2. One command registers the Router in Claude Code. [official page row; hosted endpoint row] 3. With no wallet, the agent can list routes and take a quote. [official page row] |
+| 0:22–0:36 | A route strip "Base Sepolia USDC → SubEtha Router → Provider B · MPP on Tempo testnet"; the payer's terminal already running | 4. I'll buy an API response using USDC on Base Sepolia. [payer npm row] 5. The provider is our own reference Provider B, using MPP on Tempo testnet. [demo provider row] 6. To pay, I run the payer on this Mac; it holds my key and asks me first. [payer architecture row] |
+| 0:36–0:48 | The real request; find_routes → quote; the quote subject enlarged (amount with decimals, asset/network, recipient, deadline) | 7. In Claude Code, I ask for the route and a quote. [payer architecture row] |
+| 0:48–1:12 | The native macOS dialog: security phrase redacted, terms readable, passphrase masked, Approve; a short readable line with the three trust assumptions | 6. I check the terms and my security phrase in the native dialog. [payer architecture row] 7. Then I enter my passphrase and approve. [payer architecture row] 8. This relies on an unmodified install, OS isolation of the daemon, and a secret phrase. [trust assumptions row] |
+| 1:12–1:27 | `delivered`; the provider's actual JSON held long enough to read; the purchase reference | 9. Here is the delivered response from the provider. [payer npm row; requires the successful capture] 10. The Router paid through MPP from its own balance. [payment architecture row; demo provider row] |
+| 1:27–1:45 | Base Sepolia transfer (my wallet → Router) and Tempo testnet transfer (Router → Provider B) for the same purchase, linked by the purchase record; highlight token-transfer participants and amounts | 11. These are the two payments for this purchase. [payment architecture row] 12. First, my wallet pays the Router on Base Sepolia. [payment architecture row; payer npm row] 13. Then, the Router pays the provider on Tempo testnet. [payment architecture row; demo provider row] |
+| 1:45–2:08 | Architecture with a "This Mac / Hosted" boundary: Claude Code → stdio shim → local daemon (key, native dialog) → hosted Router (HTTPS, MCP) → provider; on 18a–18b the diagram shows no screen or person on the agent's side, only the MCP call | 15. I start the local daemon myself, and Claude Code connects through a local shim. 17. The daemon holds my key and contacts the hosted Router over MCP. 18. The hosted Router never holds my key. [payer architecture row; payment architecture row] 18a. There is no app for people here. 18b. The Router is an MCP server, and the agent calls it directly. [hosted endpoint row; payer architecture row] |
+| 2:08–2:16 | Large statement "20 cross-rail pairs settled on testnets" (the matrix optional, labelled as recorded test results) | 19. The Router's twenty supported cross-rail pairs have settled on testnets. [20 pairs row] |
+| 2:16–2:46 | The two dated explorer screenshots (Tempo inbound 0x4ea7d6c2…, Base outbound 0x699cd8f2…) and a "Recorded result: delivered" summary; on 21a–21b the upstream URL line is highlighted and a strip reads "any x402 or MPP provider · by URL · operator-unverified"; labels MAINNET · OWNER-RUN · LOOPBACK and Recorded evidence · 2026-10-10 | 20. This is recorded evidence of one mainnet purchase on October tenth. 21. Tempo MPP paid for an API accepting only x402 on Base. 21a. That API was a third-party service; the agent needed only its URL. 21b. Give the Router a provider's URL, and it quotes and pays the same way. [mainnet purchase row; dynamic upstream row] 22. The Router ran on my machine, using repository signing tools. [mainnet purchase row] |
+| 2:46–2:55 | End card: subethalabs.com/router (largest), router.subethalabs.com/mcp with TESTNET, npm @subetha/payer — no repository line, no licence line (owner 2026-10-12) | 24. Start at subethalabs.com/router. [official page row] |
 
-Not in the demo (Codex review): the npm install and MCP registration on camera (done beforehand; npm on the end card), the hash-chained ledger and retry narration, any privacy or "private intent" claim on the working Router (the integration is planned, §5), route/profile counts other than the 20 settled pairs, a second purchase path shown as a normal workflow, and a new mainnet purchase. Fallback order if the live purchase fails: use the saved successful rehearsal capture; inspect status before anything else (a timeout is not proof of nonpayment, never retry blindly); a genuine hosted-Router purchase with the repository signing tools labelled "Developer tools · TESTNET"; otherwise recorded acceptance evidence with the missing fresh capture disclosed. Troubleshooting on camera is capped at about an hour.
+Not in the demo: open source or the licence (owner 2026-10-12: not to be mentioned; the end card points to the official page), the npm install on camera (done beforehand; npm on the end card), the hash-chained ledger and retry narration, any privacy or "private intent" claim on the working Router (the integration is planned, §5), route/profile counts other than the 20 settled pairs, a second purchase path shown as a normal workflow, and a new mainnet purchase. Fallback order if the live purchase fails: use the saved successful rehearsal capture; inspect status before anything else (a timeout is not proof of nonpayment, never retry blindly); a genuine hosted-Router purchase with the repository signing tools labelled "Developer tools · TESTNET"; otherwise recorded acceptance evidence with the missing fresh capture disclosed. Troubleshooting on camera is capped at about an hour.
 
 ---
 
@@ -98,6 +99,7 @@ Not in the demo (Codex review): the npm install and MCP registration on camera (
 | Founder background (chains, cross-chain protocols, AI-driven DeFi platform) | owner-attested (Onlab application, 2026-09) | owner |
 | SubEtha's first piece, confidential payments for AI agents built on zERC20, already developed by the owner outside this repository; the Router is the second piece; bringing the two together is the plan, and nothing in the Router today hides intent | owner-attested (2026-10-10), not in this repository; the pitch states the zERC20 payments as existing SubEtha work and the integration as a plan | owner |
 | Repository `github.com/subetha-labs/subetha-router` public under the MIT license since 2026-10-10 | measured by us | GitHub repository settings; `LICENSE`; README "Sources and license" |
+| Official page `subethalabs.com/router` (EN/JA): "Try without a wallet" (discovery and quotes without signing), the Claude Code registration command `claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp`, the five rails on four test networks, "10 fixed routes · 20 dynamic profiles", caveats (testnet-only proof of concept, unaudited, not for production; no automatic retry of `paid_data_unavailable` / `unknown` / `awaiting_payment`; payments not atomic; no anonymity claims; `approval=quoteId` is not proof of human consent) | measured by us (page read 2026-10-12) | https://subethalabs.com/router/ |
 | Hosted Router MCP endpoint `https://router.subethalabs.com/mcp` (testnet only) | measured by us | `docs/DEPLOY.md`; README |
 | `@subetha/payer` on npm (`npm i -g @subetha/payer`) | measured by us | npm registry; `packages/payer/README.md` |
 | Payment architecture: two independent payments, the outbound leg from the Router's prefunded balance; no swap, no bridge, no key custody | measured by us (design and acceptance records) | README; `docs/ENGINEERING.md`; `docs/public-brief-2026-10-08.md` |
@@ -189,35 +191,35 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 **[1:21–1:39] ビジネスと締め。**
 「Router は、取り扱う購入に対してルーティング手数料を課します。目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
 
-### A.3 技術デモ動画（§3 の訳。目標 2:40〜2:50、上限 3:00、「どのように」）
+### A.3 技術デモ動画（§3 の訳。目標 2:45〜2:55、上限 3:00、「どのように」）
 
-2026-10-12 に Codex レビューを受けて改訂。購入の実演から始め、仕組みの説明は証拠の後に回し、ピッチで言ったこと（市場、経歴、プライバシーのビジョン、ビジネス）は繰り返さない。261 語・27 文（最長 15 語。2026-10-12 にオーナーの 2 点、「人間向けのアプリは無い」「URL だけでどの提供者でも」を追加）。先に payer での本物の購入を画面収録し、その映像に合わせてナレーションを 1 本通しで収録する（連続モード、間はそのまま）。画面の常時表示: payer の購入と実績の間は TESTNET、メインネット証拠の間は MAINNET · OWNER-RUN · LOOPBACK と「Recorded evidence · 2026-10-10」。小さな注記やファイルパスは出さない。セキュリティフレーズは新しいものを使い、公開映像では伏せ字にする。
+2026-10-12 に Codex レビューとオーナーの指示で改訂。導入は公式ページ subethalabs.com/router（登録コマンドと「ウォレットなしで試す」）、次に payer での本物の購入、2 つの支払い、アーキテクチャ（人間向けアプリは無い）、20 ペアの実績、メインネット証拠（第三者 API を URL 指定で）、終了カードは公式ページ。オープンソースやライセンスには触れない。275 語・27 文（最長 17 語）。先に購入を画面収録し、その映像に合わせてナレーションを 1 本通しで収録する（連続モード、間はそのまま）。常時表示: TESTNET（payer と実績）、MAINNET · OWNER-RUN · LOOPBACK と「Recorded evidence · 2026-10-10」（メインネット証拠）。小さな注記やファイルパスは出さない。セキュリティフレーズは新しいものを使い、公開映像では伏せ字にする。
 
-1. Base Sepolia の USDC で API のレスポンスを買います。
-2. 提供者は私たち自身の参照用 Provider B で、Tempo テストネット上の MPP を使います。
-4. Claude Code でルートと見積を求めます。
-5. 金額、受取先、期限がこれです。
-6. ネイティブのダイアログで、条件と自分のセキュリティフレーズを確認します。
-7. パスフレーズを入れて承認します。
-8. これは、改変されていないインストール、デーモンの OS による分離、秘密のフレーズを前提にしています。
-9. 提供者から届いたレスポンスがこれです。
-10. Router は自分の残高から MPP で支払いました。
-11. この購入の 2 つの支払いです。
-12. まず、私のウォレットが Base Sepolia で Router に支払います。
-13. 次に、Router が Tempo テストネットで提供者に支払います。
-14. 別々の支払いで、スワップもブリッジもありません。
-15. ローカルのデーモンは私自身が起動します。
-16. Claude Code はローカルのシムを通して接続します。
+1. すべては subethalabs.com/router から始まります。
+2. コマンド 1 つで Claude Code に Router を登録できます。
+3. ウォレットがなくても、エージェントはルートの一覧と見積もりを取れます。
+4. Base Sepolia の USDC で API のレスポンスを買います。
+5. 提供者は私たち自身の参照用 Provider B で、Tempo テストネット上の MPP を使います。
+6. 支払うために、この Mac で payer を動かします。鍵を持ち、毎回先に私に確認します。
+7. Claude Code でルートと見積を求めます。
+8. ネイティブのダイアログで、条件と自分のセキュリティフレーズを確認します。
+9. パスフレーズを入れて承認します。
+10. これは、改変されていないインストール、デーモンの OS による分離、秘密のフレーズを前提にしています。
+11. 提供者から届いたレスポンスがこれです。
+12. Router は自分の残高から MPP で支払いました。
+13. この購入の 2 つの支払いです。
+14. まず、私のウォレットが Base Sepolia で Router に支払います。
+15. 次に、Router が Tempo テストネットで提供者に支払います。
+16. ローカルのデーモンは私自身が起動し、Claude Code はローカルのシムを通して接続します。
 17. デーモンが鍵を持ち、MCP でホストされた Router に接続します。
 18. ホストされた Router は私の鍵を持ちません。
-18a. ここに人間向けのアプリはありません。
-18b. Router は MCP サーバで、エージェントが直接呼びます。
-19. Router が対応する 20 のクロスレールの組み合わせは、テストネットで決済済みです。
-20. これは 10 月 10 日のメインネット購入 1 件の記録です。
-21. Tempo の MPP で、Base 上の x402 しか受け付けない API に支払いました。
-21a. その API は第三者のサービスで、エージェントに必要だったのは URL だけです。
-21b. Router に提供者の URL を渡せば、同じように見積もりと支払いができます。
-22. Router は私のマシン上で、リポジトリの署名ツールを使って動かしました。
-23. ホストされた Router はテストネットのみです。
-24. Router と payer は MIT でオープンソースです。
+19. ここに人間向けのアプリはありません。
+20. Router は MCP サーバで、エージェントが直接呼びます。
+21. Router が対応する 20 のクロスレールの組み合わせは、テストネットで決済済みです。
+22. これは 10 月 10 日のメインネット購入 1 件の記録です。
+23. Tempo の MPP で、Base 上の x402 しか受け付けない API に支払いました。
+24. その API は第三者のサービスで、エージェントに必要だったのは URL だけです。
+25. Router に提供者の URL を渡せば、同じように見積もりと支払いができます。
+26. Router は私のマシン上で、リポジトリの署名ツールを使って動かしました。
+27. subethalabs.com/router から始めてください。
 
