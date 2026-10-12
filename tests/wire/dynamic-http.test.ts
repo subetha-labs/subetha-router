@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * 動的上流 URL の HTTP・client・MCP（設計 §1.1・§2.1・§5・§8、タスク T11。AC-3・AC-24）。
  *
@@ -164,6 +165,21 @@ afterEach(async () => {
 });
 
 describe("HTTP: R2 の動的 quote", () => {
+  test("POST の上流（docs/dynamic-upstream-post-design.md）: upstream.method/body を受け、文書に method・body（canonical）・bodySha256 を返す。不正は 400 で接続 0", async () => {
+    const { baseUrl } = await boot();
+    const r = await raw(baseUrl, "POST", "/v1/quotes", {}, { routeId: PROFILE_ID, requestId: "r1", upstream: { url: URL_A, method: "POST", body: { type: "fast", query: "subetha", numResults: 3 } } });
+    expect(r.status).toBe(200);
+    const body = '{"numResults":3,"query":"subetha","type":"fast"}';
+    expect(r.body).toMatchObject({ upstream: { url: URL_A, method: "POST", body, bodySha256: createHash("sha256").update(body, "utf8").digest("hex") } });
+    expect(outbound.targetsSeen).toEqual([{ url: URL_A, method: "POST", body }]);
+    for (const [upstream, reason] of [[{ url: URL_A, method: "PUT", body: {} }, "method_not_allowed"], [{ url: URL_A, method: "POST" }, "body_required"], [{ url: URL_A, method: "POST", body: "x" }, "body_not_object"], [{ url: URL_A, body: { a: 1 } }, "body_without_post"]] as const) {
+      const bad = await raw(baseUrl, "POST", "/v1/quotes", {}, { routeId: PROFILE_ID, requestId: `bad-${reason}`, upstream });
+      expect(bad.status, reason).toBe(400);
+      expect(bad.body, reason).toMatchObject({ error: "invalid_upstream_body", reason });
+    }
+    expect(outbound.targetsSeen).toHaveLength(1);
+  });
+
   test("upstream.url を持つ R2 は、FR-9・FR-10 の全項目を持つ quote 文書を返す。ownerKey は応答だけ（記録はハッシュ）", async () => {
     const { baseUrl } = await boot();
     const r = await raw(baseUrl, "POST", "/v1/quotes", {}, { routeId: PROFILE_ID, requestId: "r1", upstream: { url: URL_A } });
@@ -182,7 +198,7 @@ describe("HTTP: R2 の動的 quote", () => {
     const ownerKey = r.body["ownerKey"] as string;
     expect(ownerKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(await filesText()).not.toContain(ownerKey);
-    expect(outbound.targetsSeen).toEqual([{ url: URL_A }]);
+    expect(outbound.targetsSeen).toEqual([{ url: URL_A, method: "GET" }]);
     // 記録と一致: status（持ち主の証明つき）が同じ値を返す。
     const s = await raw(baseUrl, "GET", `/v1/purchases/${String(r.body["paymentId"])}`, { "x-router-owner-key": ownerKey });
     expect(s.status).toBe(200);

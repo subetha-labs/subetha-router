@@ -183,14 +183,14 @@ describe("composeRails（動的の配線）", () => {
     const dialed: string[] = [];
     const { rails } = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES });
     for (const profileId of ["dyn-x402-to-mpp", "dyn-mpp-to-x402"]) {
-      const error = await errorOf(rails.outbound.readChallenge(profileId, { url: "https://provider.test/v1/price" }));
+      const error = await errorOf(rails.outbound.readChallenge(profileId, { url: "https://provider.test/v1/price", method: "GET" }));
       expect(error).toBeInstanceOf(Error);
       expect(error).not.toBeInstanceOf(DynamicTargetUnsupportedError);
     }
     // 両レールとも、渡した URL のホストへ接続しようとした（差し替え先が無いので接続は断られた）。
     expect(dialed).toEqual(["provider.test", "provider.test"]);
     // 静的 route の id に target を渡しても、プロファイルではないので動的経路は使えない（静的の URL に落ちない）。
-    expect(String(await errorOf(rails.outbound.readChallenge("r-mpp", { url: "https://provider.test/" })))).toContain("no dynamic mpp profile");
+    expect(String(await errorOf(rails.outbound.readChallenge("r-mpp", { url: "https://provider.test/", method: "GET" })))).toContain("no dynamic mpp profile");
     expect(dialed).toHaveLength(2);
     expect(rails.dynamic).toBeDefined();
   });
@@ -201,8 +201,8 @@ describe("composeRails（動的の配線）", () => {
     const weakening = { ...hooks(dialed), allowLoopback: true, dns: undefined, admit: undefined, maxHeaderSize: 1 } as unknown as DynamicTransportHooks;
     const { rails } = compose(envFor({ perAddressPerMinute: 1 }), { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: weakening, ...DEPENDENCIES });
     // 1 回目は門を通って接続まで進む（差し替え先が無いので断られる）。2 回目は同じアドレスの枠が無く、接続の前に拒否される。
-    await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider.test/v1/price" }));
-    const second = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider.test/v1/other" }));
+    await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider.test/v1/price", method: "GET" }));
+    const second = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider.test/v1/other", method: "GET" }));
     expect(dialed).toEqual(["provider.test"]);
     expect(second).toBeInstanceOf(TransportError);
     expect((second as TransportError).code).toBe("admission_refused");
@@ -212,7 +212,7 @@ describe("composeRails（動的の配線）", () => {
     const dialed: string[] = [];
     const { rails } = compose(envFor(), { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES });
     // 静的 route の上流（運営の公開 Provider）は動的の宛先にできる: 判定を通って接続まで進む（差し替え先が無いので断られる）。
-    const upstream = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider-a.test/v1/eth/snapshot" }));
+    const upstream = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://provider-a.test/v1/eth/snapshot", method: "GET" }));
     expect(upstream).not.toBeInstanceOf(DynamicChallengeError);
     expect(dialed).toEqual(["provider-a.test"]);
     for (const url of [
@@ -226,7 +226,7 @@ describe("composeRails（動的の配線）", () => {
       "https://rpc.test/",
       "https://x.rpc.test/",
     ]) {
-      const error = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url }));
+      const error = await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url, method: "GET" }));
       expect(error, url).toBeInstanceOf(DynamicChallengeError);
       expect((error as DynamicChallengeError).reason, url).toBe("url");
     }
@@ -236,7 +236,7 @@ describe("composeRails（動的の配線）", () => {
   test("受信 MPP の RPC を設定したときは、そのホストが拒否される（既知の公開 RPC の代わりに）", async () => {
     const dialed: string[] = [];
     const { rails } = compose({ ...envFor(), ROUTER_MPP_INBOUND_RPC_URL: "https://inbound-rpc.test/" }, { evmSigning: REAL_EVM, mppTempo: realMpp(), dynamicTransportHooksForTest: hooks(dialed), ...DEPENDENCIES });
-    expect((await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://inbound-rpc.test/x" })) as DynamicChallengeError).reason).toBe("url");
+    expect((await errorOf(rails.outbound.readChallenge("dyn-mpp-to-x402", { url: "https://inbound-rpc.test/x", method: "GET" })) as DynamicChallengeError).reason).toBe("url");
   });
 
   test("起動時の確認: 能力の RPC ホストが拒否ホストに無ければ起動しない。RPC が eth_fillTransaction を持たなくても起動しない（読取の probe。署名も送金もしない）", async () => {
@@ -394,9 +394,9 @@ describe("本番の入口（tools/remote-mcp.ts の routerConfigOf）", () => {
       dynamic: { ledgerDir: path.join(dir, "dynamic-quotes") },
     });
     try {
-      expect(await core.quote({ principalId: "judge", requestId: "r-none", routeId: "dyn-nope", upstream: { url: "https://provider.test/v1/price" }, source: "s" })).toEqual({ ok: false, code: "unknown_route" });
-      expect(await core.quote({ principalId: "judge", requestId: "r-mpp-out-self", routeId: "dyn-x402-to-mpp", upstream: { url: "https://router.subethalabs.com/mcp" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
-      expect(await core.quote({ principalId: "judge", requestId: "r-self", routeId: "dyn-mpp-to-x402", upstream: { url: "https://router.subethalabs.com/mcp" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
+      expect(await core.quote({ principalId: "judge", requestId: "r-none", routeId: "dyn-nope", upstream: { url: "https://provider.test/v1/price", method: "GET" }, source: "s" })).toEqual({ ok: false, code: "unknown_route" });
+      expect(await core.quote({ principalId: "judge", requestId: "r-mpp-out-self", routeId: "dyn-x402-to-mpp", upstream: { url: "https://router.subethalabs.com/mcp", method: "GET" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
+      expect(await core.quote({ principalId: "judge", requestId: "r-self", routeId: "dyn-mpp-to-x402", upstream: { url: "https://router.subethalabs.com/mcp", method: "GET" }, source: "s" })).toMatchObject({ ok: false, code: "invalid_upstream_url" });
       expect(connections).toBe(0);
     } finally {
       await core.close();
@@ -413,7 +413,7 @@ describe("Solana の MPP: 受信（M3-b）・送信（M4-b）の配線", () => {
     expect(() => compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES })).toThrow(/signer|authorized/i);
     const { rails } = compose(envFor({ solanaMpp: "outbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), svmSigning: { [SOL]: createSvmSignerFixture(SOL).capability }, ...DEPENDENCIES });
     expect(rails.startup).toBeDefined();
-    await expect(rails.outbound.readChallenge("dyn-x402-to-solmpp", { url: "https://provider.test/v1/x" })).rejects.toThrow(/startup\(\) has not completed/);
+    await expect(rails.outbound.readChallenge("dyn-x402-to-solmpp", { url: "https://provider.test/v1/x", method: "GET" })).rejects.toThrow(/startup\(\) has not completed/);
   });
   test("受信（sourceRail mpp ∧ solana:）のプロファイルは組まれる: startup が要り、その前は offer を出さない", async () => {
     const { rails } = compose(envFor({ solanaMpp: "inbound" }), { evmSigning: REAL_EVM, mppTempo: realMpp(), ...DEPENDENCIES });

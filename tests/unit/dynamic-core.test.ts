@@ -9,7 +9,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
-import { capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
+import { bodySha256Of, capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
 import { stableJson } from "../../src/core/intent.js";
 import { createRouterCore, type QuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
@@ -22,7 +22,7 @@ vi.mock("../../src/core/store.js", async (importOriginal) => {
   return { ...original, capCoversFee: vi.fn(original.capCoversFee) };
 });
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
-import type { DestinationOffer, FeeEstimate, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
+import { UpstreamMethodUnsupportedError, type DestinationOffer, type FeeEstimate, type OutboundRail, type PayRequest, type PayResult, type UpstreamTarget } from "../../src/ports/outbound.js";
 
 const PROFILE_ID = "dyn-mpp-to-x402";
 const STATIC_ROUTE = "md-static";
@@ -312,7 +312,7 @@ describe("動的 quote", () => {
     expect(ledger).toContain(URL_A);
     expect(ledger).toContain(ownerKeyHashOf(quote.ownerKey!));
     expect(ledger).not.toContain(quote.ownerKey!);
-    expect(outbound.targetsSeen).toEqual([{ url: URL_A }]);
+    expect(outbound.targetsSeen).toEqual([{ url: URL_A, method: "GET" }]);
     expect(inbound.issued[0]).toMatchObject({ routeId: PROFILE_ID, amount: "6050", asset: SRC_ASSET, network: SRC_NETWORK });
     // 記録には設計 §2.4 の全欄。
     const record = JSON.parse(ledger.split("\n")[0]!) as { record: Record<string, unknown> };
@@ -442,6 +442,60 @@ describe("動的 quote", () => {
 });
 
 /* ------------------------------------------------------------------ purchase */
+
+describe("POST の上流（docs/dynamic-upstream-post-design.md）", () => {
+  const BODY_IN = { type: "fast", query: "subetha", numResults: 3 };
+  const BODY_TEXT = '{"numResults":3,"query":"subetha","type":"fast"}';
+  test("POST の quote: 本文は正規化して記録に載り、束縛は 5 要素（sha256 つき）、adapter には同じ本文の target が渡る。purchase の読み直しと送信も同じ target", async () => {
+    const core = await boot();
+    const outcome = await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream: { url: URL_A, method: "POST", body: BODY_IN }, source: "alice" });
+    expect(outcome.ok).toBe(true);
+    const quote = outcome as OkQuote;
+    const sha = bodySha256Of(BODY_TEXT);
+    expect(quote.upstream).toEqual({ url: URL_A, method: "POST", body: BODY_TEXT, bodySha256: sha });
+    expect(quote.source.offer.extra.routeBinding).toBe(dynamicBindingOf(PROFILE_ID, URL_A, "POST", sha));
+    expect(quote.source.offer.extra.routeBinding.split("|")).toHaveLength(5);
+    expect(outbound.targetsSeen).toEqual([{ url: URL_A, method: "POST", body: BODY_TEXT }]);
+    const result = await core.purchase(purchaseArgs(quote));
+    expect(result).toMatchObject({ status: "delivered", body: BODY });
+    // purchase は settle の前と後に読み直す（従来どおり 2 回）。どちらも記録の POST target で。
+    expect(outbound.targetsSeen.slice(1)).toEqual([{ url: URL_A, method: "POST", body: BODY_TEXT }, { url: URL_A, method: "POST", body: BODY_TEXT }]);
+    expect(outbound.paidFor[0]).toMatchObject({ target: { url: URL_A, method: "POST", body: BODY_TEXT } });
+    const created = (await journalLines())[0]!.patch;
+    expect(created["upstream"]).toEqual({ url: URL_A, method: "POST", body: BODY_TEXT, bodySha256: sha });
+    expect(core.status(result.paymentId!, "alice", quote.ownerKey)).toMatchObject({ upstream: { url: URL_A, method: "POST", body: BODY_TEXT, bodySha256: sha } });
+  });
+
+  test.each([
+    ["POST に本文が無い", { url: URL_A, method: "POST" as const }, "body_required"],
+    ["POST の本文が配列", { url: URL_A, method: "POST" as const, body: [1] }, "body_not_object"],
+    ["POST の本文が文字列", { url: URL_A, method: "POST" as const, body: "x" }, "body_not_object"],
+    ["POST の本文が 8 KiB 超", { url: URL_A, method: "POST" as const, body: { pad: "p".repeat(8200) } }, "body_too_large"],
+    ["GET に本文", { url: URL_A, method: "GET" as const, body: { a: 1 } }, "body_without_post"],
+    ["方法が PUT", { url: URL_A, method: "PUT" as unknown as "GET", body: { a: 1 } }, "method_not_allowed"],
+  ])("接続 0 で拒否（invalid_upstream_body）: %s", async (_name, upstream, reason) => {
+    const core = await boot();
+    const outcome = await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream, source: "alice" });
+    expect(outcome).toMatchObject({ ok: false, code: "invalid_upstream_body", reason });
+    expect(connections()).toEqual({ upstream: 0, inbound: 0 });
+    expect(await ledgerText()).toBe("");
+  });
+
+  test("GET の束縛と記録は従来のまま（4 要素、本文の欄なし）", async () => {
+    const core = await boot();
+    const quote = await quoteOk(core);
+    expect(quote.upstream).toEqual({ url: URL_A, method: "GET" });
+    expect(quote.source.offer.extra.routeBinding.split("|")).toHaveLength(4);
+  });
+
+  test("POST を受け取れない送信経路（UpstreamMethodUnsupportedError）は quote_failed / method_not_supported", async () => {
+    const core = await boot();
+    outbound.readChallengeImpl = async () => { throw new UpstreamMethodUnsupportedError(); };
+    const outcome = await core.quote({ principalId: "alice", requestId: "r1", routeId: PROFILE_ID, upstream: { url: URL_A, method: "POST", body: BODY_IN }, source: "alice" });
+    expect(outcome).toMatchObject({ ok: false, code: "quote_failed", reason: "method_not_supported" });
+    outbound.readChallengeImpl = undefined;
+  });
+});
 
 describe("動的 purchase", () => {
   test("成立の順序（設計 §6.2）: verify・期限の再検査まで何も書かず、昇格で created（予約つき）、settle、送信に target", async () => {
@@ -779,7 +833,7 @@ describe("動的 purchase", () => {
     const core = await boot();
     const quote = await quoteOk(core);
     expect((await core.purchase(purchaseArgs(quote))).status).toBe("delivered");
-    expect(outbound.targetsSeen).toEqual([{ url: URL_A }, { url: URL_A }, { url: URL_A }]);
+    expect(outbound.targetsSeen).toEqual([{ url: URL_A, method: "GET" }, { url: URL_A, method: "GET" }, { url: URL_A, method: "GET" }]);
   });
 
   test("昇格済み（created）の quote も、期限が切れていれば接続 0 で approval_expired", async () => {

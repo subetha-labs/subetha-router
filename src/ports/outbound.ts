@@ -68,6 +68,22 @@ export interface DestinationOffer {
  */
 export interface UpstreamTarget {
   readonly url: string;
+  /**
+   * `GET`（本文なし）か `POST`（`body` = canonical JSON の文字列、`content-type: application/json`。`docs/dynamic-upstream-post-design.md`）。
+   * 無ければ GET（従来の呼び出し。core は常に明示する）。POST は明示したときだけ。
+   */
+  readonly method?: "GET" | "POST";
+  readonly body?: string;
+}
+
+/** POST の上流を受け取れない動的経路（MPP、SVM の x402）に POST の target が渡された。ネットワーク I/O の前に投げる。 */
+export class UpstreamMethodUnsupportedError extends Error {
+  readonly code = "upstream_method_unsupported";
+
+  constructor() {
+    super("this outbound path sends GET only");
+    this.name = "UpstreamMethodUnsupportedError";
+  }
 }
 
 /** 動的経路を持たない adapter に上流の URL が渡された。 */

@@ -30,7 +30,7 @@ import { stableJson } from "../../core/intent.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../net/bounded-body.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import { parseUpstreamUrl } from "../../net/upstream-url.js";
-import { DynamicTargetUnsupportedError, type DestinationOffer, type OutboundRail, type PayRequest, type PayResult, type SvmSigningCapability, type UpstreamTarget } from "../../ports/outbound.js";
+import { DynamicTargetUnsupportedError, UpstreamMethodUnsupportedError, type DestinationOffer, type OutboundRail, type PayRequest, type PayResult, type SvmSigningCapability, type UpstreamTarget } from "../../ports/outbound.js";
 import { buildSvmTransactionMessage, checkSvmTransaction, MEMO_PROGRAM_ADDRESS, SVM_DEFAULT_COMPUTE_UNITS, SVM_DEFAULT_MICRO_LAMPORTS_PER_UNIT, SVM_TRANSACTION_MAX_BYTES, type SvmInboundPolicy } from "../inbound/x402-svm.js";
 import { assertAtaAccount, svmFetchJson } from "../inbound/x402-svm-startup.js";
 import { createSvmOutboundCommon, type SvmStaticDestination } from "./svm-outbound-common.js";
@@ -578,6 +578,7 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
     const ctx = { routeId, operation };
     if (target !== undefined) {
       if (!profiles.has(routeId)) throw new Error("no dynamic svm profile for route");
+      if ((target.method ?? "GET") !== "GET") throw new UpstreamMethodUnsupportedError(); // POST は x402 EVM の動的経路だけ（FR-P3）
       return dynamicChallenge(target.url, ctx);
     }
     if (options.upstreams[routeId] === undefined) throw new Error("no svm upstream for route");

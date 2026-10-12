@@ -139,6 +139,7 @@ const DYNAMIC_QUOTE_STATUS: Readonly<Record<string, number>> = {
   dynamic_disabled: 404,
   unknown_route: 404,
   invalid_upstream_url: 400,
+  invalid_upstream_body: 400,
   request_id_conflict: 409,
   rate_limited: 429,
   dynamic_capacity: 429,
@@ -355,7 +356,17 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       sendError(response, 404, options.config.dynamic === undefined || !options.config.dynamic.enabled ? "dynamic_disabled" : "unknown_route");
       return;
     }
-    const outcome = await options.core.quote({ principalId, requestId, routeId: profileId, upstream: { url }, source: sourceOf(request, principalId) });
+    const rawMethod = (upstream as Record<string, unknown>)["method"];
+    const rawBody = (upstream as Record<string, unknown>)["body"];
+    if (rawMethod !== undefined && rawMethod !== "GET" && rawMethod !== "POST") {
+      sendError(response, 400, "invalid_upstream_body", { reason: "method_not_allowed" });
+      return;
+    }
+    const outcome = await options.core.quote({
+      principalId, requestId, routeId: profileId,
+      upstream: { url, ...(rawMethod === undefined ? {} : { method: rawMethod }), ...(rawBody === undefined ? {} : { body: rawBody }) },
+      source: sourceOf(request, principalId),
+    });
     if (!outcome.ok) {
       sendError(response, DYNAMIC_QUOTE_STATUS[outcome.code] ?? 502, outcome.code, outcome.reason === undefined ? {} : { reason: outcome.reason });
       return;

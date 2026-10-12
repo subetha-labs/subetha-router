@@ -7,6 +7,7 @@ import type { InboundOffer } from "../ports/inbound.js";
 import { networkFamilyOf } from "../config.js";
 import type { MessageReservation } from "../ports/outbound.js";
 import type { DestinationOffer } from "../ports/outbound.js";
+import { createHash } from "node:crypto";
 import {
   isInterrupted,
   type DestinationOutcome,
@@ -96,7 +97,7 @@ export function dynamicFieldsOf(
   if (
     typeof rawUpstream["url"] !== "string" ||
     rawUpstream["url"] === "" ||
-    rawUpstream["method"] !== "GET" ||
+    !validUpstreamRequest(rawUpstream) ||
     typeof profileId !== "string" ||
     profileId === "" ||
     !isPlainRecord(profile) ||
@@ -174,10 +175,10 @@ export function dynamicFieldsOf(
     const rawClaimsCap = Object.hasOwn(pricing, "maxFee") || Object.hasOwn(pricing, "estimate");
     const svmWithCap = typeof copiedNetwork === "string" && networkFamilyOf(copiedNetwork) === "svm" && rawClaimsCap;
     if (svmWithCap || !capCoversFee(dynamic, bound)) {
-      return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic, dynamicCapInvalid: true };
+      return { upstream: upstreamRecordOf(rawUpstream), dynamic, dynamicCapInvalid: true };
     }
   }
-  return { upstream: { url: rawUpstream["url"], method: "GET" }, dynamic };
+  return { upstream: upstreamRecordOf(rawUpstream), dynamic };
 }
 
 /** `pricing.maxFee`・`pricing.estimate` を形どおりに読む。片方でも形が違えば `undefined`（両方無いのも `undefined`）。 */
@@ -594,4 +595,20 @@ export class IntentStore {
   statusOf(paymentId: string): InternalStatus | undefined {
     return this.#intents.get(paymentId)?.status;
   }
+}
+
+/** 記録の `upstream`（`docs/dynamic-upstream-post-design.md` FR-P2）: GET は本文なし、POST は本文（文字列、8 KiB 以内）と一致する sha256。 */
+export function validUpstreamRequest(raw: Record<string, unknown>): boolean {
+  if (typeof raw["url"] !== "string" || raw["url"] === "") return false;
+  if (raw["method"] === "GET") return !Object.hasOwn(raw, "body") && !Object.hasOwn(raw, "bodySha256");
+  if (raw["method"] !== "POST") return false;
+  const body = raw["body"];
+  if (typeof body !== "string" || Buffer.byteLength(body, "utf8") > 8192) return false;
+  return raw["bodySha256"] === createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+function upstreamRecordOf(raw: Record<string, unknown>): { url: string; method: "GET" | "POST"; body?: string; bodySha256?: string } {
+  return raw["method"] === "POST"
+    ? { url: raw["url"] as string, method: "POST", body: raw["body"] as string, bodySha256: raw["bodySha256"] as string }
+    : { url: raw["url"] as string, method: "GET" };
 }

@@ -559,10 +559,10 @@ async function harness(
     address: real.address,
     innerSigned,
     gate,
-    quote: async () => (await rail.readChallenge(PROFILE_ID, { url: URL_A }))[0]!,
+    quote: async () => (await rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" }))[0]!,
     // `maxFee`: 既定は 5,000（天井と同じ）。`null` で欄ごと無し。
-    pay: (offer, url = URL_A, maxFee: string | null = "5000") => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url }, ...(maxFee === null ? {} : { maxFee }) }),
-    estimate: (offer) => rail.estimateFee!(PROFILE_ID, offer, { url: URL_A }),
+    pay: (offer, url = URL_A, maxFee: string | null = "5000") => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url, method: "GET" }, ...(maxFee === null ? {} : { maxFee }) }),
+    estimate: (offer) => rail.estimateFee!(PROFILE_ID, offer, { url: URL_A, method: "GET" }),
     sends: () => rpc.methods.filter((method) => method.startsWith("eth_send")).length,
   };
 }
@@ -591,14 +591,14 @@ function recode(tx: Tx, recipient: Hex | undefined, amount: bigint | undefined):
 describe("未払いの読取", () => {
   test("challenge を offer にして返す。RPC には触れず、credential も作らない", async () => {
     const h = await harness();
-    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(offers).toHaveLength(1);
     expect(offers[0]).toMatchObject({ scheme: "tempo/charge", network: `eip155:${MPP_FIXTURE_CHAIN_ID}`, asset: MPP_FIXTURE_CURRENCY, amount: "1000", payTo: MPP_FIXTURE_RECIPIENT, extra: { realm: h.upstream.realm } });
     expect(h.rpc.methods).toEqual([]);
     expect(h.innerSigned).toHaveLength(0);
     expect(h.upstream.seen).toMatchObject({ challenges: 1, credentials: 0, urls: [URL_A] });
     // 同じ条件なら、読むたびに id・expires が変わっても offer は同じ。
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual(offers);
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).toEqual(offers);
   });
 
   test("1 つのヘッダに challenge が複数: 検査を通るものだけを上流の順で返す（通るものが 3 つ目でも選べる）", async () => {
@@ -607,7 +607,7 @@ describe("未払いの読取", () => {
       { id: "evm-1", realm: "provider", method: "evm", intent: "charge", request: { amount: "1000", currency: OTHER, recipient: OTHER, methodDetails: { chainId: 8453 } } },
       { id: "main-1", realm: "provider", method: "tempo", intent: "charge", request: { amount: "1000", currency: MPP_FIXTURE_CURRENCY, recipient: MPP_FIXTURE_RECIPIENT, methodDetails: { chainId: 4217 } } },
     ];
-    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(offers).toHaveLength(1);
     expect((await h.pay(offers[0]!)).outcome).toBe("paid");
     expect(h.upstream.seen.verified).toBe(1);
@@ -617,9 +617,9 @@ describe("未払いの読取", () => {
     const h = await harness();
     const filler = (count: number) => () => Array.from({ length: count }, (_, index) => ({ id: `f-${index}`, realm: "provider", method: "evm", intent: "charge", request: { amount: "1" } }));
     h.upstream.state.prependChallenges = filler(15);
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toHaveLength(1);
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).toHaveLength(1);
     h.upstream.state.prependChallenges = filler(16);
-    await expect(h.rail.readChallenge(PROFILE_ID, { url: URL_A })).rejects.toThrow("too_many_offers");
+    await expect(h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).rejects.toThrow("too_many_offers");
   });
 
   test.each([
@@ -630,23 +630,23 @@ describe("未払いの読取", () => {
   ])("範囲外の challenge（%s）は候補にならない", async (_name, mutate) => {
     const h = await harness();
     h.upstream.state.mutateChallenge = mutate as never;
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).toEqual([]);
   });
 
   test("feePayer を申し出る challenge は候補になる（使わない）", async () => {
     const h = await harness();
     h.upstream.state.mutateChallenge = (c) => ({ ...c, request: { ...(c["request"] as Tx), methodDetails: { chainId: MPP_FIXTURE_CHAIN_ID, feePayer: true } } });
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toHaveLength(1);
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).toHaveLength(1);
   });
 
   test("scope: 無ければ不問、あればこの URL のものだけ", async () => {
     const h = await harness();
     h.upstream.state.scope = "match";
-    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A });
+    const offers = await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" });
     expect(offers).toHaveLength(1);
     expect((await h.pay(offers[0]!)).outcome).toBe("paid");
     h.upstream.state.scope = "GET https://provider.test/v1/other";
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).toEqual([]);
   });
 
   test.each([
@@ -655,13 +655,13 @@ describe("未払いの読取", () => {
     ["IP リテラル", "https://93.184.216.34/v1/price"],
   ])("URL の規則を通らないものには接続しない: %s", async (_name, url) => {
     const h = await harness();
-    await expect(h.rail.readChallenge(PROFILE_ID, { url })).rejects.toThrow("url");
+    await expect(h.rail.readChallenge(PROFILE_ID, { url, method: "GET" })).rejects.toThrow("url");
     expect(h.gate.admitted).toBe(0);
   });
 
   test("プロファイルが無い id・mpp 送信でないプロファイルは使えない", async () => {
     const h = await harness({ profile: { ...PROFILE, rail: "x402" } });
-    await expect(h.rail.readChallenge(PROFILE_ID, { url: URL_A })).rejects.toThrow("no dynamic mpp profile");
+    await expect(h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).rejects.toThrow("no dynamic mpp profile");
   });
 });
 
@@ -1374,7 +1374,7 @@ describe("動的 MPP: 承認の期限と運用者の集合", () => {
       type: "local",
       signTransaction: async (tx: unknown, opts?: unknown) => { const raw = await facade.signTransaction(tx, opts); offset = 2_000; return raw; },
     })) as never;
-    expect(await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-b", attempt: 1, deadlineMs: base + 1_000, target: { url: URL_A }, maxFee: "5000" })).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
+    expect(await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-b", attempt: 1, deadlineMs: base + 1_000, target: { url: URL_A, method: "GET" }, maxFee: "5000" })).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
     expect(h.innerSigned).toHaveLength(1);
     expect(h.sends()).toBe(0);
   });
@@ -1383,7 +1383,7 @@ describe("動的 MPP: 承認の期限と運用者の集合", () => {
     const plain = await harness();
     const offer = await plain.quote();
     const h = await harness({ operatorAddresses: [MPP_FIXTURE_RECIPIENT] });
-    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A })).toEqual([]);
+    expect(await h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET" })).toEqual([]);
     const result = await h.pay(offer);
     expect(result.outcome).toBe("not_sent");
     expect(h.innerSigned).toHaveLength(0);
@@ -1405,7 +1405,7 @@ describe("動的 MPP: 検査の間に期限を越えても署名・送金しな�
     const h = await harness({ now: clock.now });
     const offer = await h.quote();
     sdk.wrapAccount = ((facade: FacadeLike) => ({ address: facade.address, type: "local", signTransaction: async (tx: unknown, opts?: unknown) => { clock.start(); return facade.signTransaction(tx, opts); } })) as never;
-    const result = await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-mid-a", attempt: 1, deadlineMs: clock.base + 1_000, target: { url: URL_A }, maxFee: "5000" });
+    const result = await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p-mid-a", attempt: 1, deadlineMs: clock.base + 1_000, target: { url: URL_A, method: "GET" }, maxFee: "5000" });
     expect(result).toEqual({ outcome: "not_sent", reason: "destination_deadline" });
     expect(clock.calls()).toBeGreaterThanOrEqual(2);
     expect(h.innerSigned).toHaveLength(0);

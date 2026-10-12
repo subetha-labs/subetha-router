@@ -20,7 +20,7 @@ import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport, type TransportContext } from "../../net/guarded-fetch.js";
 import { guardedRpcTransport } from "../../net/guarded-rpc.js";
 import type { DestinationOffer, FeeEstimate, MppTempoCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
-import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
+import { DynamicTargetUnsupportedError, UpstreamMethodUnsupportedError } from "../../ports/outbound.js";
 import { createMppDynamicPath, type MppDynamicOptions } from "./mpp-dynamic.js";
 
 /** mppx の `_mppx_scope` は `GET <canonical URL>`（クエリ無し）で cross-resource replay を防ぐ。 */
@@ -425,6 +425,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
       if (target !== undefined) {
         // 動的経路を持たないなら、設定の URL に黙って落とさない。
         if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+        if ((target.method ?? "GET") !== "GET") throw new UpstreamMethodUnsupportedError(); // POST は x402 EVM の動的経路だけ（FR-P3）
         return dynamic.readChallenge(routeId, target.url);
       }
       const url = urlFor(routeId);
@@ -465,6 +466,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
     async pay(request: PayRequest): Promise<PayResult> {
       if (request.target !== undefined) {
         if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
+        if ((request.target.method ?? "GET") !== "GET") return { outcome: "not_sent", reason: "upstream_method_unsupported" };
         return dynamic.pay({ ...request, target: request.target });
       }
       const url = urlFor(request.routeId);

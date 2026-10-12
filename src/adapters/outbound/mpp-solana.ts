@@ -227,7 +227,7 @@ import type { DynamicProfile } from "../../config.js";
 import { discardBody, type GuardedTransport, type TransportContext } from "../../net/guarded-fetch.js";
 import { parseUpstreamUrl } from "../../net/upstream-url.js";
 import type { OutboundRail, PayRequest, PayResult, SvmSigningCapability, UpstreamTarget } from "../../ports/outbound.js";
-import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
+import { DynamicTargetUnsupportedError, UpstreamMethodUnsupportedError } from "../../ports/outbound.js";
 import { SVM_TRANSACTION_MAX_BYTES } from "../inbound/x402-svm.js";
 import { createSvmOutboundCommon, type SvmStaticDestination } from "./svm-outbound-common.js";
 import { deliveredBodyOf, DynamicChallengeError } from "./x402-dynamic.js";
@@ -462,6 +462,7 @@ export function createMppSolanaOutbound(options: MppSolanaOutboundOptions): MppS
     if (target !== undefined) {
       if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
       if (!profiles.has(routeId)) throw new Error("no dynamic mpp solana profile for route");
+      if ((target.method ?? "GET") !== "GET") throw new UpstreamMethodUnsupportedError(); // POST は x402 EVM の動的経路だけ（FR-P3）
       if (!parseUpstreamUrl(target.url, { denyHosts: dynamic.denyHosts }).ok) throw new DynamicChallengeError("url");
       return { url: target.url, transport: dynamic.transport };
     }

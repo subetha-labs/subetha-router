@@ -116,7 +116,7 @@ function quoteViewOf(body: unknown): QuoteView | undefined {
       return undefined;
     }
     Object.assign(dynamic, {
-      upstream: { url: upstream["url"] as string, method: upstream["method"] as string },
+      upstream: { url: upstream["url"] as string, method: upstream["method"] as string, ...(typeof upstream["body"] === "string" ? { body: upstream["body"] } : {}), ...(typeof upstream["bodySha256"] === "string" ? { bodySha256: upstream["bodySha256"] } : {}) },
       ...(isRecord(body["pricing"]) ? { pricing: body["pricing"] } : {}),
       ...(isRecord(body["disclosures"]) ? { disclosures: body["disclosures"] } : {}),
       ownerKey,
@@ -345,7 +345,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         result = await call("/v1/quotes", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ routeId: profileId, requestId, upstream: { url } }),
+          body: JSON.stringify({ routeId: profileId, requestId, upstream: { url, ...(input.method === undefined ? {} : { method: input.method }), ...(input.body === undefined ? {} : { body: input.body }) } }),
           // 動的 quote だけ長い（上流の読取＋見積り）。静的 quote は従来どおり `timeoutMs`。
           timeoutMs: quoteTimeoutMs,
         });

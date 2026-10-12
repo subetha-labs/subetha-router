@@ -311,6 +311,8 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         profileId: z.string().min(1).describe("Dynamic profile id (shares the routeId namespace)"),
         url: z.string().min(1).describe("The upstream https URL exactly as it should be fetched (query allowed)"),
         requestId: z.string().min(1),
+        method: z.enum(["GET", "POST"]).optional().describe("GET (default) or POST. POST sends `body` as application/json; the body is part of the quoted terms and is shown in the subject."),
+        body: z.record(z.unknown()).optional().describe("For POST only: a JSON object (max 8 KiB as canonical JSON). The Router sends exactly these bytes at quote and at purchase."),
       },
       outputSchema: OUTPUT_SCHEMAS.quote,
     },

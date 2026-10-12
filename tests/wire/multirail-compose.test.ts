@@ -279,7 +279,7 @@ describe("合成: 拒否ホスト", () => {
     for (const host of [HOSTS.circle, HOSTS.svm, HOSTS.rpc, HOSTS.legacy, `sub.${HOSTS.rpc}`]) {
       let caught: unknown;
       try {
-        await rails.outbound.readChallenge!("dyn-arc-to-x402", { url: `https://${host}/v1/x` });
+        await rails.outbound.readChallenge!("dyn-arc-to-x402", { url: `https://${host}/v1/x`, method: "GET" });
       } catch (error) {
         caught = error;
       }

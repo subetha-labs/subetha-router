@@ -7,6 +7,7 @@
  */
 import type { ServerResponse } from "node:http";
 import https from "node:https";
+import type http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { decodePaymentSignatureHeader, encodePaymentRequiredHeader, encodePaymentResponseHeader } from "@x402/core/http";
@@ -62,7 +63,7 @@ export interface X402Upstream {
   readonly port: number;
   readonly host: string;
   readonly state: X402UpstreamState;
-  readonly seen: { challenges: number; payments: unknown[]; urls: string[]; connections: number; streams: StreamRecord[] };
+  readonly seen: { challenges: number; payments: unknown[]; urls: string[]; connections: number; streams: StreamRecord[]; requests: { method: string; contentType: string | undefined; body: string }[] };
   close(): Promise<void>;
 }
 
@@ -134,7 +135,7 @@ export function paidOk(payer: string, body: unknown = { ok: true }, network: str
 }
 
 export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"): Promise<X402Upstream> {
-  const seen = { challenges: 0, payments: [] as unknown[], urls: [] as string[], connections: 0, streams: [] as StreamRecord[] };
+  const seen = { challenges: 0, payments: [] as unknown[], urls: [] as string[], connections: 0, streams: [] as StreamRecord[], requests: [] as { method: string; contentType: string | undefined; body: string }[] };
   const state: X402UpstreamState = {
     accepts: [standardAccept()],
     topLevel: {},
@@ -148,6 +149,16 @@ export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"
     challengeDelayMs: 0,
   };
   const server = https.createServer({ key: tls.provider.key, cert: tls.provider.cert }, (request, response) => {
+    // 要求の本文（POST の試験用）を読み切ってから従来の処理へ（GET は空）。
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const contentType = request.headers["content-type"];
+      seen.requests.push({ method: request.method ?? "", contentType: typeof contentType === "string" ? contentType : undefined, body: Buffer.concat(chunks).toString("utf8") });
+      handle(request, response);
+    });
+  });
+  function handle(request: http.IncomingMessage, response: http.ServerResponse): void {
     // 既定のポート（443）として見せる: Router が接続した URL は `https://<host><path>`。
     const requestedUrl = `https://${request.headers.host ?? host}${request.url ?? "/"}`;
     seen.urls.push(requestedUrl);
@@ -184,7 +195,7 @@ export async function startX402Upstream(tls: TlsMaterial, host = "provider.test"
     };
     if (reply.delayMs === undefined) send();
     else setTimeout(send, reply.delayMs);
-  });
+  }
   server.on("secureConnection", () => {
     seen.connections += 1;
   });

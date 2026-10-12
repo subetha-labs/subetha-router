@@ -55,6 +55,7 @@ import { createX402Outbound } from "../../src/adapters/outbound/x402.js";
 import { checkDynamicX402Offer, createRebuildingSigner, DynamicChallengeError, SigningRefusedError } from "../../src/adapters/outbound/x402-dynamic.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
+import type { UpstreamTarget } from "../../src/ports/outbound.js";
 import { createGuardedTransport, TransportError, type TransportEvent } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer, OutboundRail } from "../../src/ports/outbound.js";
 import { dialTo, publicLookup } from "../fixtures/dynamic/dial.js";
@@ -110,8 +111,8 @@ interface Harness {
   readonly signed: TypedData[];
   readonly events: TransportEvent[];
   readonly gate: { admitted: number; released: number };
-  quote(): Promise<DestinationOffer>;
-  pay(offer: DestinationOffer, url?: string): ReturnType<OutboundRail["pay"]>;
+  quote(target?: UpstreamTarget): Promise<DestinationOffer>;
+  pay(offer: DestinationOffer, url?: string, target?: UpstreamTarget): ReturnType<OutboundRail["pay"]>;
 }
 
 async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: number; denyHosts?: readonly string[]; profile?: DynamicProfile; now?: () => number; operatorAddresses?: readonly string[]; afterSign?: () => void } = {}): Promise<Harness> {
@@ -173,8 +174,8 @@ async function harness(options: { unpaidTimeoutMs?: number; paidTimeoutMs?: numb
     signed,
     events,
     gate,
-    quote: async () => (await rail.readChallenge(PROFILE_ID, { url: URL_A }))[0]!,
-    pay: (offer, url = URL_A) => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: { url } }),
+    quote: async (target: UpstreamTarget = { url: URL_A, method: "GET" }) => (await rail.readChallenge(PROFILE_ID, target))[0]!,
+    pay: (offer, url = URL_A, target?: UpstreamTarget) => rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: target ?? { url, method: "GET" } }),
   };
 }
 
@@ -200,6 +201,8 @@ describe("offer の検査（設計 §3.3 (i)）", () => {
     ["説明だけの欄", standardAccept({ description: "price", mimeType: "application/json", resource: "https://provider.test/v1/price" })],
     ["extra.bazaar", withExtra({ bazaar: { info: { input: {} } } })],
     ["extra.decimals がプロファイルと同じ", withExtra({ decimals: 6 })],
+    ["extra.breakdown・totalUsd・acceptId（説明だけ。値は何でも）", withExtra({ breakdown: { search: 0.007 }, totalUsd: 0.007, acceptId: "legacy" })],
+    ["extra.acceptId が object でも", withExtra({ acceptId: { odd: true } })],
     ["maxAmountRequired が amount と同じ", standardAccept({ maxAmountRequired: "1000" })],
     ["asset の大文字小文字が違う", standardAccept({ asset: FIXTURE_ASSET.toLowerCase() })],
     ["amount が上限ちょうど", standardAccept({ amount: "100000" })],
@@ -412,6 +415,38 @@ describe("支払い", () => {
     const offer = await h.quote();
     await h.pay(offer);
     expect(h.upstream.seen.urls).toEqual([URL_A, URL_A, URL_A]);
+    // GET には本文も content-type も無い（FR-P1: GET は従来どおり）。
+    expect(h.upstream.seen.requests.map((r) => [r.method, r.contentType ?? null, r.body])).toEqual([["GET", null, ""], ["GET", null, ""], ["GET", null, ""]]);
+  });
+
+  /* ---------------------------------------------------------------- POST の上流（docs/dynamic-upstream-post-design.md FR-P1〜P3） */
+
+  test("POST: 未払いの読取も、送金直前の読み直しも、有料要求も、記録の本文そのものを application/json で送る（3 回とも同じバイト列）", async () => {
+    const h = await harness();
+    const body = '{"numResults":3,"query":"subetha","type":"fast"}';
+    const target: UpstreamTarget = { url: URL_A, method: "POST", body };
+    const offer = await h.quote(target);
+    expect(offer).toMatchObject({ amount: "1000" });
+    expect((await h.pay(offer, URL_A, target)).outcome).toBe("paid");
+    expect(h.upstream.seen.requests.map((r) => [r.method, r.contentType, r.body])).toEqual([["POST", "application/json", body], ["POST", "application/json", body], ["POST", "application/json", body]]);
+    expect(h.upstream.seen.urls).toEqual([URL_A, URL_A, URL_A]);
+    expect(h.signed).toHaveLength(1);
+  });
+
+  test("POST の target に本文が無い・GET の target に本文がある → 接続 0 で拒否（method）", async () => {
+    const h = await harness();
+    await expect(h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "POST" } as UpstreamTarget)).rejects.toMatchObject({ reason: "method" });
+    await expect(h.rail.readChallenge(PROFILE_ID, { url: URL_A, method: "GET", body: "{}" } as UpstreamTarget)).rejects.toMatchObject({ reason: "method" });
+    expect(h.upstream.seen.connections).toBe(0);
+  });
+
+  test("説明だけの extra（breakdown・totalUsd・acceptId。Exa の 402）を持つ offer は通り、そのまま上流に戻る", async () => {
+    const h = await harness();
+    h.upstream.state.accepts = [standardAccept({ extra: { name: "USDC", version: "2", breakdown: { search: 0.007 }, totalUsd: 0.007, acceptId: "legacy" } })];
+    const offer = await h.quote();
+    expect(offer.extra).toMatchObject({ breakdown: { search: 0.007 }, totalUsd: 0.007, acceptId: "legacy" });
+    expect((await h.pay(offer)).outcome).toBe("paid");
+    expect((h.upstream.seen.payments[0] as { accepted: unknown }).accepted).toEqual(offer);
   });
 
   /* ---------------------------------------------------------------- 一致の定義（設計 §3.2・AC-6） */

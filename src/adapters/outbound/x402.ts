@@ -407,7 +407,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       if (target !== undefined) {
         // 動的経路を持たないなら、設定の URL に黙って落とさない。
         if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
-        return dynamic.readChallenge(routeId, target.url);
+        return dynamic.readChallenge(routeId, target);
       }
       return offersOf(await getChallenge(urlFor(routeId), { routeId, operation: "challenge" }));
     },
