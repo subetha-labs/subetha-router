@@ -19,10 +19,15 @@ test("phrase first and labelled; deterministic; static record keeps every v1 fac
   expect(lines[0]).toBe('Security phrase: my\\"phrase');
   expect(lines[1]).toBe("If this line is missing or not your phrase, click Cancel.");
   expect(text).toBe(renderConfirmation(r, 'my\\"phrase'));
-  for (const value of [r.source.amount, r.source.asset, r.source.network, r.source.payTo, r.destination.quoted, r.destination.asset, r.destination.network, r.destination.payTo, r.wallet.address, r.routerUrl, r.ref, new Date(r.approvalDeadlineMs).toISOString().slice(0, 19).replace("T", " ")]) expect(text, value).toContain(value);
+  for (const value of [r.source.amount, r.source.asset, r.source.network, r.source.payTo, r.destination.quoted, r.destination.asset, r.destination.network, r.destination.payTo, r.wallet.address, r.routerUrl, r.ref, new Date(r.approvalDeadlineMs).toISOString()]) expect(text, value).toContain(value);
+  const line = (prefix: string) => lines.find(l => l.startsWith(prefix)) ?? `(no line ${prefix})`;
+  expect(line("Provider receives:")).toBe(`Provider receives: 0.01 pathUSD (${r.destination.quoted} base units, decimals 6) on Tempo testnet, MPP, to ${r.destination.payTo}`); // static md-mpp-eth-snapshot: Base USDC → Tempo pathUSD
+  expect(line("Offer expires:")).toBe(`Offer expires: ${new Date(r.approvalDeadlineMs).toISOString()} (UTC)`);
+  expect(line("From your wallet:")).toBe(`From your wallet: ${r.wallet.address}`);
+  expect(line("To the Router:")).toBe(`To the Router: ${r.source.payTo}`);
   expect(text).toContain("Route: md-mpp-eth-snapshot (operator fixed; no fee breakdown supplied)");
   expect(text).toContain("Price: 0.01 USDC (10000 base units, 6 decimals)");
-  expect(text).toContain("Pay with: USDC on Base Sepolia (testnet), x402");
+  expect(text).toContain("Pay with: USDC on Base Sepolia (testnet), x402 (exact)");
   expect(text).toContain("Funds move when the Router settles the purchase, not at approval.");
   expect(text).toContain("To approve, enter the passphrase of the wallet this payer manages and click Approve. Pressing Enter cancels.");
   expect(text).toContain("resource GET /v1/routes/md-mpp-eth-snapshot/resource (Router-internal, fixed by this payer)");
@@ -38,19 +43,25 @@ test("sanitize phrase/values; ignore upstream bodies, labels and free text; miss
   const hostile = { ...r, destination, body: "UPSTREAM_BODY", instructions: "AGENT_TEXT", label: "URL_LABEL", routerUrl: "https://fixture.invalid/‮\u001b\t" };
   const text = renderConfirmation(hostile, "ph\t\u001b​‮  rase");
   expect(text.split("\n")[0]).toBe("Security phrase: phrase");
-  expect(text).toContain("base units; decimals not supplied");
+  expect(text).toContain("base units, decimals not supplied)");
   expect(text).not.toMatch(/UPSTREAM_BODY|AGENT_TEXT|URL_LABEL|[‮\u001b\t​]/);
 });
 
 test("dynamic record: provider URL, price breakdown in asset units, profile, no-refund line, both legs named; Tempo MPP and Solana MPP funds sentences", () => {
   const dyn = renderConfirmation(buildRecord(railQuote("dyn-x402-to-mpp"), identity()), "phrase");
   expect(dyn).toContain("Provider URL: GET https://provider-mpp.subethalabs.com/v1/eth/snapshot");
-  expect(dyn).toContain("Price: 0.01 USDC + Router fee 0.001 USDC = 0.011 USDC (11000 base units, 6 decimals); chain-fee cap 158 base units");
+  // the provider's amount is in the destination's units (pathUSD, 6), the equation in the source's (USDC); every term also in base units
+  expect(dyn).toContain("Price: provider 0.01 pathUSD (10000 base units, 6 decimals) = 0.01 USDC (10000 base units) + Router fee 0.001 USDC (1000 base units) = 0.011 USDC (11000 base units, 6 decimals); chain-fee cap 158 base units (estimated ");
+  expect(dyn).toContain("Only an application/json object of 256 KiB or less is delivered.");
+  expect(dyn).toContain("Pay with: USDC on Base Sepolia (testnet), x402 (exact)");
   expect(dyn).toContain("Profile: dyn-x402-to-mpp");
   expect(dyn).toContain("- This payer signs a payment of 0.011 USDC on Base Sepolia (testnet) to the Router, from your wallet.");
-  expect(dyn).toContain("- The Router pays the provider 0.01 pathUSD on Tempo testnet from its own balance and returns the data to the agent.");
+  expect(dyn).toContain("- The Router pays the provider 0.01 pathUSD on Tempo testnet from its own balance and passes the provider's response to the agent.");
   expect(dyn).toContain("The operator has not verified this provider. No refund");
-  expect(dyn).toContain("Provider receives: 0.01 pathUSD on Tempo testnet, MPP, to 0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1");
+  expect(dyn).toContain("Provider receives: 0.01 pathUSD (10000 base units, decimals 6) on Tempo testnet, MPP, to 0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1");
+  // distinct legs: the source total (11000) and the destination amount (10000) each sit on their own labelled line
+  expect(dyn.split("\n").find(l => l.startsWith("Price:"))).toContain("11000 base units");
+  expect(dyn.split("\n").find(l => l.startsWith("Provider receives:"))).not.toContain("11000");
   expect(dyn).not.toContain("Route: ");
   const tempo = renderConfirmation(buildRecord(railQuote("tempo"), identity()), "phrase");
   expect(tempo).toContain("Approving SENDS 0.01 pathUSD now, from your wallet. It cannot be undone");
@@ -58,9 +69,10 @@ test("dynamic record: provider URL, price breakdown in asset units, profile, no-
   const solmpp = renderConfirmation(buildRecord(railQuote("solmpp"), identity()), "phrase");
   expect(solmpp).toContain("Signing only: the Router broadcasts your transaction at purchase. Your Solana key pays the network fee (devnet SOL).");
   expect(solmpp).toContain("Pay with: USDC on Solana devnet, MPP (solana/charge)");
+  expect(solmpp).toContain("Offer expires: 20"); expect(solmpp).toMatch(/Offer expires: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \(UTC\)/);
   expect(solmpp).toContain(`From your wallet: ${SOLANA}`);
   const arc = renderConfirmation(buildRecord(railQuote("dyn-arc-to-x402"), identity()), "phrase");
-  expect(arc).toContain("Pay with: USDC on Arc testnet, x402");
+  expect(arc).toContain("Pay with: USDC on Arc testnet, x402 (exact)");
 });
 
 test("labels: known networks/assets named, unknown shown raw (never guessed); amounts exact; rails", () => {
@@ -69,9 +81,13 @@ test("labels: known networks/assets named, unknown shown raw (never guessed); am
   expect(networkName("eip155:5042002")).toBe("Arc testnet");
   expect(networkName("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1")).toBe("Solana devnet");
   expect(networkName("eip155:8453")).toBe("eip155:8453");
+  expect(networkName("constructor")).toBe("constructor"); expect(networkName("__proto__")).toBe("__proto__");
   expect(assetName("eip155:84532", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")).toBe("USDC");
   expect(assetName("eip155:84532", "0x036cbd53842c5426634e7929541ec2318f3dcf7e")).toBe("USDC");
   expect(assetName("eip155:42431", "0x20c0000000000000000000000000000000000000")).toBe("pathUSD");
+  expect(assetName("eip155:42431", "0x20C0000000000000000000000000000000000000")).toBe("pathUSD");
+  expect(assetName("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "4zmmc9srt5ri5x14gagxhaHii3GnPAEERYPJgZJDncDU")).toBe("4zmmc9srt5ri5x14gagxhaHii3GnPAEERYPJgZJDncDU");
+  expect(assetName("eip155:84532", "constructor")).toBe("constructor");
   expect(assetName("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU")).toBe("USDC");
   expect(assetName("eip155:84532", "0x" + "ab".repeat(20))).toBe("0x" + "ab".repeat(20));
   expect(assetName("eip155:1", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")).toBe("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
@@ -79,7 +95,7 @@ test("labels: known networks/assets named, unknown shown raw (never guessed); am
   expect(formatAmount("-5", 6)).toBe("-5"); expect(formatAmount("1e3", 6)).toBe("1e3"); expect(formatAmount("12", undefined)).toBe("12");
   expect(money("11000", 6, "eip155:84532", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")).toBe("0.011 USDC");
   expect(money("11000", undefined, "eip155:84532", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")).toBe("11000 base units of USDC");
-  expect(railName("x402")).toBe("x402"); expect(railName("mpp")).toBe("MPP"); expect(railName("mpp", "tempo/charge")).toBe("MPP (tempo/charge)"); expect(railName("odd\u0007")).toBe("odd");
+  expect(railName("x402")).toBe("x402"); expect(railName("x402", "exact")).toBe("x402 (exact)"); expect(railName("mpp")).toBe("MPP"); expect(railName("mpp", "tempo/charge")).toBe("MPP (tempo/charge)"); expect(railName("odd\u0007")).toBe("odd");
   expect(fundsSentence("exact", "0.011 USDC")).toContain("not at approval");
 });
 

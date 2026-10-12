@@ -18,24 +18,26 @@ const ASSET_NAMES: Readonly<Record<string, string>> = Object.freeze({
 });
 
 export function networkName(network: string): string {
-  return NETWORK_NAMES[network] ?? sanitize(network);
+  return Object.hasOwn(NETWORK_NAMES, network) ? NETWORK_NAMES[network]! : sanitize(network);
 }
 
 /** The asset's short name (USDC, pathUSD) when the payer's table knows it; otherwise the raw asset id. */
 export function assetName(network: string, asset: string): string {
-  const fixed = ASSET_NAMES[`${network}/${asset}`];
-  if (fixed !== undefined) return fixed;
-  const entry = PAYER_NETWORKS.find((n) => n.network === network)?.assets.find((a) => a.id.toLowerCase() === asset.toLowerCase());
+  // EVM addresses compare case-insensitively (hex); Solana mints are case-sensitive base58 (a case-altered mint is a different id).
+  const same = (a: string, b: string) => (a.startsWith("0x") && b.startsWith("0x") ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const fixedKey = Object.keys(ASSET_NAMES).find((key) => key.startsWith(`${network}/`) && same(key.slice(network.length + 1), asset));
+  if (fixedKey !== undefined) return ASSET_NAMES[fixedKey]!;
+  const entry = PAYER_NETWORKS.find((n) => n.network === network)?.assets.find((a) => same(a.id, asset));
   return entry?.domain?.name ?? sanitize(asset);
 }
 
+/** `x402 (exact)`, `MPP (tempo/charge)`, `MPP (solana/charge)`; the scheme is shown whenever the record carries it. */
 export function railName(rail: string, scheme?: string): string {
-  if (rail === "x402") return "x402";
-  if (rail === "mpp") return scheme === undefined ? "MPP" : `MPP (${sanitize(scheme)})`;
-  return sanitize(rail);
+  const base = rail === "x402" ? "x402" : rail === "mpp" ? "MPP" : sanitize(rail);
+  return scheme === undefined ? base : `${base} (${sanitize(scheme)})`;
 }
 
-/** Base units → decimal string, exact (bigint). Non-integer input or negative decimals → the raw string. */
+/** Base units → decimal string by exact string placement (no arithmetic, no floats). Non-digit input or decimals outside 0..36 → the sanitized raw string. */
 export function formatAmount(baseUnits: string, decimals: number | undefined): string {
   if (!/^\d+$/.test(baseUnits) || decimals === undefined || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) return sanitize(baseUnits);
   if (decimals === 0) return baseUnits;

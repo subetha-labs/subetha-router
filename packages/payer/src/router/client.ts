@@ -4,7 +4,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { failure, knownCodeOf, type FailureSummary } from "../protocol/summary.js";
 
 export const ROUTER_TIMEOUT_MS = 30_000;
-export const PAYER_VERSION = "0.2.0";
+export const PAYER_VERSION = "0.2.1";
 /** The 0.1.x payer's only route. Still the default static example; the v1 record builder is bound to it (docs/payer-rails-design.md §2.4a). */
 export const STATIC_ROUTE = "md-mpp-eth-snapshot";
 /** `md-…` static routes and `dyn-…` dynamic profiles share one id namespace. */

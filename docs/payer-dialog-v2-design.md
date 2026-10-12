@@ -68,3 +68,16 @@ labels (known → name, unknown → raw id), Tempo MPP funds line, static route 
 
 Publish 0.2.1 (owner: `npm publish`), the owner upgrades (`install_changed` → README "Upgrading" → `install accept` in their terminal), and the
 demo's purchase scene is re-recorded once with the new dialog (one more testnet purchase).
+
+## 6. Independent review 1 (Codex `gpt-6-astra`, 2026-10-13, `.claude_workflow/local/payer-dialog-v2-review1.md`): REJECT → fixed
+
+Blocking: (1) v1 facts dropped — the destination's base units and decimals were shown only when decimals were missing; the dynamic
+upstream amount and fee lacked base units; the `exact` scheme, the `application/json` wording and the deadline's milliseconds were gone.
+Fixed: every amount is shown in asset units **and** base units with its decimals; `Pay with` shows the scheme (`x402 (exact)`,
+`MPP (tempo/charge)`); the disclosure says `application/json object`; the deadline is the full ISO instant. (2) The dynamic price line
+formatted the **upstream amount** (destination units) with the source's decimals and asset; fixed: the provider's amount is shown in the
+destination's units, the equation uses `pricing.converted` (the source-currency equivalent) + fee = total, all in base units too.
+Nonblocking applied: tests assert labelled lines and use legs with distinct amounts; runtime version strings (ping, shim, PAYER_VERSION)
+say 0.2.1; own-property lookups in the name table; EVM asset ids compare case-insensitively, Solana mints exactly; `GET` methods sanitized
+like every other field; "returns the data" → "passes the provider's response"; the formatter comment says string placement, not bigint.
+

@@ -32,16 +32,17 @@ export function renderConfirmation(record: ApprovalRecord, phrase: string): stri
     "",
     "What happens if you approve",
     `- This payer signs a payment of ${total} on ${networkName(s.network)} to the Router, from your wallet.`,
-    `- The Router pays the provider ${toProvider} on ${networkName(d.network)} from its own balance and returns the data to the agent.`,
+    `- The Router pays the provider ${toProvider} on ${networkName(d.network)} from its own balance and passes the provider's response to the agent.`,
     `- ${fundsSentence(s.scheme, total)}`,
   ];
-  if (kind === "dynamic") lines.push("- The operator has not verified this provider. No refund if it takes the payment and returns no usable data, or if the Router refuses after your funds moved. Only a JSON object of 256 KiB or less is delivered.");
+  if (kind === "dynamic") lines.push("- The operator has not verified this provider. No refund if it takes the payment and returns no usable data, or if the Router refuses after your funds moved. Only an application/json object of 256 KiB or less is delivered.");
   lines.push("", "Details");
-  if (kind === "dynamic" && r.upstream) lines.push(`Provider URL: ${r.upstream.method} ${sanitize(r.upstream.url)}`);
+  if (kind === "dynamic" && r.upstream) lines.push(`Provider URL: ${sanitize(r.upstream.method)} ${sanitize(r.upstream.url)}`);
   else lines.push(`Route: ${sanitize(r.routeId)} (operator fixed; no fee breakdown supplied)`);
   if (kind === "dynamic" && r.pricing) {
     const p = r.pricing;
-    let price = `Price: ${money(p.upstreamAmount, s.decimals, s.network, s.asset)} + Router fee ${money(p.fee, s.decimals, s.network, s.asset)} = ${money(p.total, s.decimals, s.network, s.asset)} (${sanitize(p.total)} base units, ${s.decimals} decimals)`;
+    // The provider's amount is in the destination's units; `converted` is its source-currency equivalent (Codex dialog review #1).
+    let price = `Price: provider ${money(p.upstreamAmount, p.destinationDecimals, d.network, d.asset)} (${sanitize(p.upstreamAmount)} base units, ${p.destinationDecimals} decimals) = ${money(p.converted, s.decimals, s.network, s.asset)} (${sanitize(p.converted)} base units) + Router fee ${money(p.fee, s.decimals, s.network, s.asset)} (${sanitize(p.fee)} base units) = ${money(p.total, s.decimals, s.network, s.asset)} (${sanitize(p.total)} base units, ${s.decimals} decimals)`;
     if (p.maxFee !== undefined) price += `; chain-fee cap ${sanitize(p.maxFee)} base units${p.estimate ? ` (estimated ${new Date(p.estimate.atMs).toISOString()})` : ""}`;
     lines.push(price);
   } else {
@@ -49,16 +50,15 @@ export function renderConfirmation(record: ApprovalRecord, phrase: string): stri
   }
   if (kind === "dynamic") lines.push(`Profile: ${sanitize(r.routeId)}`);
   lines.push(
-    `Pay with: ${assetName(s.network, s.asset)} on ${networkName(s.network)}, ${railName(s.rail, s.scheme === "exact" ? undefined : s.scheme)}`,
+    `Pay with: ${assetName(s.network, s.asset)} on ${networkName(s.network)}, ${railName(s.rail, s.scheme)}`,
     `From your wallet: ${sanitize(r.wallet.address)}`,
     `To the Router: ${sanitize(s.payTo)}`,
-    `Provider receives: ${toProvider} on ${networkName(d.network)}, ${railName(d.rail, d.scheme === undefined || d.scheme === "exact" ? undefined : d.scheme)}, to ${sanitize(d.payTo)}` +
-      (d.decimals === undefined ? ` (${sanitize(d.quoted)} base units; decimals not supplied)` : ""),
-    `Offer expires: ${new Date(r.approvalDeadlineMs).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC")}`,
+    `Provider receives: ${toProvider} (${sanitize(d.quoted)} base units, decimals ${d.decimals ?? "not supplied"}) on ${networkName(d.network)}, ${railName(d.rail, d.scheme)}, to ${sanitize(d.payTo)}`,
+    `Offer expires: ${new Date(r.approvalDeadlineMs).toISOString()} (UTC)`,
     "",
     "To approve, enter the passphrase of the wallet this payer manages and click Approve. Pressing Enter cancels.",
     "",
-    `Technical: Router ${sanitize(r.routerUrl)}; resource ${r.resource.method} ${sanitize(resourcePathOf(r.resource.url))} (Router-internal, fixed by this payer); ref ${sanitize(r.ref)}; asset ids ${sanitize(s.asset)} / ${sanitize(d.asset)}; networks ${sanitize(s.network)} / ${sanitize(d.network)}.`,
+    `Technical: Router ${sanitize(r.routerUrl)}; resource ${sanitize(r.resource.method)} ${sanitize(resourcePathOf(r.resource.url))} (Router-internal, fixed by this payer); ref ${sanitize(r.ref)}; asset ids ${sanitize(s.asset)} / ${sanitize(d.asset)}; networks ${sanitize(s.network)} / ${sanitize(d.network)}.`,
   );
   return lines.join("\n");
 }
