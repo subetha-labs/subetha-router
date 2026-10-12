@@ -3,13 +3,14 @@
  * plan の hash の安定と改ざんの拒否、subject と plan の不一致で署名の前に止まる、受信が delivered でない chain の送信は始めない、delivered でない結果で
  * 再試行せずに止まる、Transfer の不一致で止まる、秘密が証跡・stdout に出ない、`--only` が 1 件だけ選ぶ。
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
+  attemptMarkerPathOf,
   BASE_SEPOLIA,
   buildPlan,
   loadApprovedPlan,
@@ -339,6 +340,44 @@ describe("run", () => {
     expect(evidence.mismatches.join(" ")).toContain("quote.destination.payTo");
   });
 
+  for (const [label, change] of [
+    ["recipient", (offer: { payTo: string; amount: string }) => (offer.payTo = PROVIDER)],
+    ["amount", (offer: { payTo: string; amount: string }) => (offer.amount = "19999")],
+  ] as const) {
+    test(`the offer that would be signed (quote.source.offer) differing from the approved subject offer in ${label} stops before signing`, async () => {
+      const h = await harness({
+        quoteTamper: (_routeId, response) => {
+          // subject は計画どおりのまま、署名に渡る quote 文書の offer だけを変える（subject と quote は別の object にする）。
+          const quote = JSON.parse(JSON.stringify(response["quote"])) as { source: { offer: { payTo: string; amount: string } } };
+          change(quote.source.offer);
+          response["quote"] = quote;
+        },
+      });
+      const signer = countingSigner();
+      const report = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir }, deps(h, signer));
+      expect(report.stopped).toMatchObject({ routeId: "md-x402-eth-snapshot-rh", stage: "stopped_before_signing" });
+      expect(report.stopped?.reason).toContain("differs from subject.source.offer");
+      expect(report.stopped?.reason).toContain(`signed offer.${label === "recipient" ? "payTo" : "amount"}`);
+      expect(signer.calls).toBe(0);
+      expect(h.mcp.count("subetha_router_purchase")).toBe(0);
+    });
+  }
+
+  test("the signer and the purchase receive exactly the validated (frozen) quote document", async () => {
+    const h = await harness();
+    const seen: unknown[] = [];
+    const signer: Signer = async (quote) => {
+      seen.push(quote);
+      expect(Object.isFrozen(quote)).toBe(true);
+      const network = (quote as { source: { network: string } }).source.network;
+      return { ok: true, credential: "c3ludGhldGljLWNyZWRlbnRpYWwtZm9yLXRlc3Rz", chainId: Number(network.split(":")[1]) };
+    };
+    await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir, only: "md-x402-eth-snapshot-rh" }, deps(h, signer));
+    const purchase = h.mcp.calls.find((c) => c.name === "subetha_router_purchase");
+    expect(seen).toHaveLength(1);
+    expect(purchase?.args["quote"]).toBe(seen[0]);
+  });
+
   test("subjectMismatches catches the amount, network, recipient and a funds-moving offer", async () => {
     const plan = await planOf();
     const h = new FakeMcp(plan, new FakeChain());
@@ -398,6 +437,68 @@ describe("run", () => {
     expect(rerun.stopped?.reason).toContain("already attempted under this plan");
     expect(h.mcp.count("subetha_router_quote")).toBe(1);
     expect(h.mcp.count("subetha_router_purchase")).toBe(1);
+  });
+
+  test("an attempt marker without evidence (evidence lost) refuses that route with no MCP call", async () => {
+    const h = await harness({ outcomeOf: () => "unknown" });
+    const first = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir, only: "md-x402-eth-snapshot-rh" }, deps(h, countingSigner()));
+    expect(first.stopped?.paymentId).toBe("pay-1");
+    expect(existsSync(attemptMarkerPathOf(h.evidenceDir, h.sha, "md-x402-eth-snapshot-rh"))).toBe(true);
+    // 落ちて証跡が消えた状態（印だけ残る）。
+    rmSync(first.runDir, { recursive: true, force: true });
+    const calls = h.mcp.calls.length;
+    const rerun = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir, only: "md-x402-eth-snapshot-rh" }, deps(h, countingSigner()));
+    expect(rerun.stopped).toMatchObject({ stage: "not_started", reason: "already attempted under this plan" });
+    expect(h.mcp.calls.length).toBe(calls);
+  });
+
+  test("a corrupt attempt marker or a corrupt evidence file holds the run with no MCP call", async () => {
+    const h = await harness();
+    const marker = attemptMarkerPathOf(h.evidenceDir, h.sha, "md-x402-eth-snapshot-rh");
+    mkdirSync(path.dirname(marker), { recursive: true });
+    writeFileSync(marker, "{not json");
+    const held = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir }, deps(h, countingSigner()));
+    expect(held.stopped).toMatchObject({ stage: "not_started", reason: "held: unreadable attempt marker" });
+    expect(h.mcp.calls).toHaveLength(0);
+
+    const h2 = await harness();
+    const bad = path.join(h2.evidenceDir, "run-old", "purchases", "md-x402-eth-snapshot-arbsep.json");
+    mkdirSync(path.dirname(bad), { recursive: true });
+    writeFileSync(bad, ""); // 切り詰められた証跡
+    const held2 = await runPurchases({ plan: h2.plan, planSha256: h2.sha, evidenceDir: h2.evidenceDir, only: "md-x402-eth-snapshot-rh" }, deps(h2, countingSigner()));
+    expect(held2.stopped).toMatchObject({ stage: "not_started", reason: "held: unreadable evidence" });
+    expect(h2.lines.join("\n")).toContain("HELD md-x402-eth-snapshot-rh: unreadable evidence");
+    expect(h2.mcp.calls).toHaveLength(0);
+  });
+
+  test("a crash between purchase and the evidence save does not buy again on rerun", async () => {
+    // purchase は Router で成立したが、driver はその結果を受け取れず（呼び出しが落ちる）、その後の証跡も残らなかった状態を作る:
+    // purchase の呼び出しを例外にし、run の後で run の証跡を丸ごと消す（印だけが残る）。
+    const h = await harness();
+    const crashing: McpCaller = {
+      close: async () => {},
+      call: async (name, args) => {
+        const result = await h.mcp.call(name, args);
+        if (name === "subetha_router_purchase") throw new Error("process died after the Router accepted the purchase");
+        return result;
+      },
+    };
+    const report = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir, only: "md-x402-eth-snapshot-rh" }, { ...deps(h, countingSigner()), mcp: crashing });
+    expect(h.mcp.count("subetha_router_purchase")).toBe(1);
+    rmSync(report.runDir, { recursive: true, force: true });
+    const rerun = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir }, deps(h, countingSigner()));
+    expect(rerun.stopped).toMatchObject({ routeId: "md-x402-eth-snapshot-rh", stage: "not_started", reason: "already attempted under this plan" });
+    expect(h.mcp.count("subetha_router_purchase")).toBe(1);
+    expect(h.mcp.count("subetha_router_quote")).toBe(1);
+  });
+
+  test("evidence writes are atomic (no temp files left, the file is always complete JSON)", async () => {
+    const h = await harness();
+    const report = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir, only: "md-x402-eth-snapshot-rh" }, deps(h, countingSigner()));
+    const files = allFiles(h.evidenceDir);
+    expect(files.filter((f) => f.includes(".tmp-"))).toEqual([]);
+    for (const f of files) expect(() => JSON.parse(readFileSync(f, "utf8"))).not.toThrow();
+    expect(report.completed).toEqual(["md-x402-eth-snapshot-rh"]);
   });
 
   test("a Transfer that differs from the quote stops the run", async () => {

@@ -19,11 +19,12 @@
  * `EVM_FACILITATOR_GAS_CAP_<chainId>`・`EVM_FACILITATOR_MAX_FEE_PER_GAS_<chainId>`（plan の表示。facilitator と同じ名前）。
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { stableJson } from "../src/core/intent.js";
+import { KNOWN_NETWORKS, knownAssetOf, knownNetworkOf } from "../src/shared/networks.js";
 import { DEFAULT_MAX_FEE_PER_GAS, DEFAULT_RPC_URLS, SETTLE_GAS_LIMIT } from "./evm-facilitator.js";
 import { EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmInboundRouteOf, evmOutboundRouteOf, evmTestnetChainsOf, evmTestnetsConfigOf, INBOUND, type EvmTestnetChain } from "./remote-mcp-config.js";
 import { runSign } from "./sign-run.js";
@@ -128,10 +129,88 @@ function jsonText(value: unknown): string {
   return `${JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? v.toString() : v), 2)}\n`;
 }
 
-/** 証跡を書く（秘密を除いて、0600）。 */
+/** directory の fsync（rename・作成を永続にする）。 */
+function fsyncDir(dir: string): void {
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * 証跡を書く（秘密を除いて、0600）。**原子的**: 一時ファイルに書いて fsync → rename → directory の fsync（I-1 #2）。
+ * 途中で落ちても、元のファイルは前の内容のまま（切り詰めた状態を残さない）。
+ */
 function writePrivate(file: string, value: unknown, secrets: Secrets): void {
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(file, secrets.redact(typeof value === "string" ? value : jsonText(value)), { encoding: "utf8", mode: 0o600 });
+  const dir = path.dirname(file);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const text = secrets.redact(typeof value === "string" ? value : jsonText(value));
+  const tmp = `${file}.tmp-${String(process.pid)}-${randomBytes(4).toString("hex")}`;
+  const fd = openSync(tmp, "wx", 0o600);
+  try {
+    writeSync(fd, text, null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+  fsyncDir(dir);
+}
+
+/**
+ * 試みの印（I-1 #2）: 証跡とは別の **不変の** ファイル `<evidenceDir>/attempts/<planSha256>/<routeId>.json`。O_EXCL で作り、書いて fsync、directory も fsync。
+ * 既にあれば作らずに `false`（= 既に試みた）。書けなければ例外（呼び出し側は購入を始めない）。
+ */
+export function attemptMarkerPathOf(evidenceDir: string, planSha: string, routeId: string): string {
+  return path.join(evidenceDir, "attempts", planSha, `${routeId}.json`);
+}
+export function createAttemptMarker(evidenceDir: string, planSha: string, routeId: string, content: Record<string, unknown>): boolean {
+  const file = attemptMarkerPathOf(evidenceDir, planSha, routeId);
+  const dir = path.dirname(file);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fsyncDir(path.dirname(dir));
+  let fd: number;
+  try {
+    fd = openSync(file, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    writeSync(fd, jsonText({ kind: "subetha-evm-testnets-e2e-attempt", planSha256: planSha, routeId, ...content }), null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  fsyncDir(dir);
+  return true;
+}
+
+/** 印の状態: 無い・読める（同じ plan と route）・読めない（壊れている → 保留）。 */
+export function attemptMarkerStateOf(evidenceDir: string, planSha: string, routeId: string): "absent" | "present" | "corrupt" {
+  const file = attemptMarkerPathOf(evidenceDir, planSha, routeId);
+  if (!existsSync(file)) return "absent";
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    return value["kind"] === "subetha-evm-testnets-e2e-attempt" && value["planSha256"] === planSha && value["routeId"] === routeId ? "present" : "corrupt";
+  } catch {
+    return "corrupt";
+  }
+}
+
+/** ある route の印（全 plan）。読めない印は `corrupt` に数える。 */
+function attemptMarkersForRoute(evidenceDir: string, routeId: string): { planSha: string; state: "present" | "corrupt" }[] {
+  const root = path.join(evidenceDir, "attempts");
+  if (!existsSync(root)) return [];
+  const out: { planSha: string; state: "present" | "corrupt" }[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const state = attemptMarkerStateOf(evidenceDir, entry.name, routeId);
+    if (state !== "absent") out.push({ planSha: entry.name, state });
+  }
+  return out;
 }
 
 export function sha256Hex(text: string): string {
@@ -776,13 +855,27 @@ export function subjectMismatches(response: Record<string, unknown>, planned: Pl
   expect("quote.source.network", qs["network"], planned.source.network);
   expect("quote.source.asset", qs["asset"], planned.source.asset, true);
   expect("quote.source.amount", qs["amount"], planned.source.amount);
-  expect("offer.scheme", offer["scheme"], "exact");
-  expect("offer.network", offer["network"], planned.source.network);
-  expect("offer.asset", offer["asset"], planned.source.asset, true);
-  expect("offer.amount", offer["amount"], planned.source.amount);
-  expect("offer.payTo (Router receiver)", offer["payTo"], planned.source.to, true);
-  const extra = isRecord(offer["extra"]) ? offer["extra"] : {};
-  expect("offer.extra.fundsMoveOnCredential", extra["fundsMoveOnCredential"], false);
+  // 署名するのは **quote 文書の** offer（`runSign` は `quote.source.offer` を読む。I-1 #1）。subject の offer と canonical に同一であること、そのうえで
+  // 署名される側の欄を全部 plan と表に照らす（subject 側も同じ値になる）。
+  const signedOffer = isRecord(qs["offer"]) ? qs["offer"] : undefined;
+  if (signedOffer === undefined) problems.push("quote.source.offer (the offer that would be signed) is missing");
+  else if (stableJson(signedOffer) !== stableJson(offer)) problems.push("quote.source.offer (the offer that would be signed) differs from subject.source.offer (the offer shown for approval)");
+  for (const [label, o] of [["subject offer", offer], ["signed offer", signedOffer ?? {}]] as const) {
+    expect(`${label}.scheme`, o["scheme"], "exact");
+    expect(`${label}.network`, o["network"], planned.source.network);
+    expect(`${label}.asset`, o["asset"], planned.source.asset, true);
+    expect(`${label}.amount`, o["amount"], planned.source.amount);
+    expect(`${label}.payTo (Router receiver)`, o["payTo"], planned.source.to, true);
+    const extra = isRecord(o["extra"]) ? o["extra"] : {};
+    expect(`${label}.extra.fundsMoveOnCredential`, extra["fundsMoveOnCredential"], false);
+    expect(`${label}.extra.challengeNonce = quoteId`, extra["challengeNonce"], subject["quoteId"]);
+    const known = knownAssetOf(knownNetworkOf(KNOWN_NETWORKS, planned.source.network) ?? { network: "", family: "evm", inbound: [], outbound: [], assets: [] }, planned.source.asset);
+    if (known?.domain === undefined) problems.push(`${label}: the table has no EIP-712 domain for the planned asset`);
+    else {
+      expect(`${label}.extra.name (table domain)`, extra["name"], known.domain.name);
+      expect(`${label}.extra.version (table domain)`, extra["version"], known.domain.version);
+    }
+  }
   expect("subject.fundsMoveOnCredential", subject["fundsMoveOnCredential"], false);
   const d = isRecord(subject["destination"]) ? subject["destination"] : {};
   const qd = isRecord(quote["destination"]) ? quote["destination"] : {};
@@ -1001,6 +1094,18 @@ function readEvidence(file: string): PurchaseEvidence | undefined {
   }
 }
 
+/** 全証跡を読む。読めない・形の違うファイルは `unreadable` に（黙って飛ばさない。I-1 #2）。 */
+function readAllEvidence(root: string): { evidence: PurchaseEvidence[]; unreadable: string[] } {
+  const evidence: PurchaseEvidence[] = [];
+  const unreadable: string[] = [];
+  for (const file of evidenceFilesOf(root)) {
+    const value = readEvidence(file);
+    if (value === undefined) unreadable.push(file);
+    else evidence.push(value);
+  }
+  return { evidence, unreadable };
+}
+
 /* ────────────────────────────────────────────────────────────────────────────── run */
 
 export interface RunOptions {
@@ -1062,9 +1167,14 @@ async function balancesFor(reader: ChainReader, planned: PlanPurchase, plan: Pla
 /** 送信の前提（設計 §3.8）: 同じ chain の受信が `delivered`・source tx が確定、かつ送信の試み（全 run）の数 < delivered の受信の数（1 つの受信の入金は 1 回の送信だけに数える）。 */
 async function outboundPrerequisite(planned: PlanPurchase, opts: RunOptions, deps: RunDeps): Promise<{ ok: true; detail: unknown } | { ok: false; reason: string }> {
   const inboundRoute = evmInboundRouteOf(planned.chain);
-  const all = evidenceFilesOf(opts.evidenceDir).map(readEvidence).filter((e): e is PurchaseEvidence => e !== undefined);
+  const { evidence: all, unreadable } = readAllEvidence(opts.evidenceDir);
+  if (unreadable.length > 0) return { ok: false, reason: `held: unreadable evidence ${unreadable.join(", ")}` };
+  const markers = attemptMarkersForRoute(opts.evidenceDir, planned.routeId);
+  if (markers.some((m) => m.state === "corrupt")) return { ok: false, reason: `held: unreadable attempt marker for ${planned.routeId}` };
   const deliveredInbound = all.filter((e) => e.routeId === inboundRoute && e.stage === "verified" && e.outcome === "delivered");
-  const outboundAttempts = all.filter((e) => e.routeId === planned.routeId);
+  // 送信の試み: 印（不変）と、印の無い古い証跡の和。
+  const markedPlans = new Set(markers.map((m) => m.planSha));
+  const outboundAttempts = [...markers, ...all.filter((e) => e.routeId === planned.routeId && !markedPlans.has(e.planSha256))];
   if (deliveredInbound.length === 0) return { ok: false, reason: `no delivered and verified inbound ${inboundRoute} in ${opts.evidenceDir}` };
   if (outboundAttempts.length >= deliveredInbound.length) return { ok: false, reason: `${String(outboundAttempts.length)} outbound attempt(s) already use the ${String(deliveredInbound.length)} delivered inbound purchase(s) on ${planned.chain}` };
   const inbound = deliveredInbound[deliveredInbound.length - 1] as PurchaseEvidence;
@@ -1110,8 +1220,23 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
   out(`run ${runId}: ${String(selected.length)} purchase(s), plan ${opts.planSha256}`);
 
   for (const planned of selected) {
-    // 同じ plan で既に試みた route は始めない（再試行は新しい plan = owner の新しい承認）。
-    const earlier = evidenceFilesOf(opts.evidenceDir).map(readEvidence).find((e) => e !== undefined && e.planSha256 === opts.planSha256 && e.routeId === planned.routeId);
+    // 読めない証跡・印があれば保留（黙って飛ばすと、落ちた後の購入をもう一度始め得る。I-1 #2）。
+    const scanned = readAllEvidence(opts.evidenceDir);
+    if (scanned.unreadable.length > 0) {
+      out(`HELD ${planned.routeId}: unreadable evidence file(s) ${scanned.unreadable.join(", ")}; an operator must inspect them before any purchase`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "held: unreadable evidence" });
+    }
+    // 同じ plan で既に試みた route は始めない（再試行は新しい plan = owner の新しい承認）。印が権威（証跡が消えても残る）。
+    const marker = attemptMarkerStateOf(opts.evidenceDir, opts.planSha256, planned.routeId);
+    if (marker === "corrupt") {
+      out(`HELD ${planned.routeId}: the attempt marker is unreadable (${attemptMarkerPathOf(opts.evidenceDir, opts.planSha256, planned.routeId)}); treated as attempted, an operator must inspect it`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "held: unreadable attempt marker" });
+    }
+    if (marker === "present") {
+      out(`STOP ${planned.routeId}: already attempted under this plan (attempt marker present); a new attempt needs a new plan and approval`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
+    }
+    const earlier = scanned.evidence.find((e) => e.planSha256 === opts.planSha256 && e.routeId === planned.routeId);
     if (earlier !== undefined) {
       out(`STOP ${planned.routeId}: already attempted under this plan (${earlier.runId}, stage ${earlier.stage}); a new attempt needs a new plan and approval`);
       return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
@@ -1148,7 +1273,18 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
       out(`STOP ${planned.routeId}: ${reason}${evidence.paymentId === undefined ? "" : ` (paymentId ${evidence.paymentId}, status ${JSON.stringify(isRecord(evidence.status) && isRecord(evidence.status["projection"]) ? evidence.status["projection"]["status"] : (evidence.outcome ?? null))})`}`);
       return report({ routeId: planned.routeId, stage, reason, paymentId: evidence.paymentId, status: evidence.status });
     };
-    // 試みの記録を先に書く（途中で落ちても同じ plan で再び始めない）。
+    // 試みの印を **不変に** 先に書く（O_EXCL・fsync。署名・quote の前。途中で落ちても同じ plan で再び始めない）。作れなければ始めない。
+    let created: boolean;
+    try {
+      created = createAttemptMarker(opts.evidenceDir, opts.planSha256, planned.routeId, { runId, at: now().toISOString() });
+    } catch {
+      out(`HELD ${planned.routeId}: could not persist the attempt marker; not starting`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "held: attempt marker not persisted" });
+    }
+    if (!created) {
+      out(`STOP ${planned.routeId}: already attempted under this plan (attempt marker present); a new attempt needs a new plan and approval`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
+    }
     save();
     evidence.balancesBefore = await balancesFor(deps.chain, planned, opts.plan);
     save();
@@ -1171,7 +1307,9 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
     evidence.quoteDestination = q.destination;
     if (quoted["ok"] !== true) return stop("quote_failed", `quote failed: ${String(quoted["error"] ?? "unknown")}${quoted["reason"] === undefined ? "" : ` / ${String(quoted["reason"])}`} (no payment started)`);
 
-    // 2) subject と plan の照合（署名の前）。
+    // 2) subject と plan の照合（署名の前）。照合した quote 文書を **複製して凍結** し、署名と purchase にはその同じ object だけを渡す（I-1 #1）。
+    const quoteDoc = deepFreeze(structuredClone(quoted["quote"]));
+    quoted = { ...quoted, quote: quoteDoc };
     const mismatches = subjectMismatches(quoted, planned, now().getTime());
     evidence.mismatches = mismatches;
     const subject = quoted["subject"] as Record<string, unknown>;
@@ -1179,7 +1317,7 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
     if (mismatches.length > 0) return stop("stopped_before_signing", `the quote differs from the plan: ${mismatches.join("; ")}`);
 
     // 3) 署名（`npm run sign` と同じ `runSign`。x402 の EIP-3009 は署名だけで資金は動かない）。
-    const signed = await deps.sign(quoted["quote"], planned.source.from);
+    const signed = await deps.sign(quoteDoc, planned.source.from);
     if (!signed.ok) return stop("sign_refused", `signing refused: ${signed.reason} (no payment started)`);
     deps.secrets.add(signed.credential);
     const expectedChainId = Number(planned.source.network.split(":")[1]);
@@ -1191,7 +1329,7 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
     const t1 = Date.now();
     let purchased: Record<string, unknown>;
     try {
-      purchased = await deps.mcp.call("subetha_router_purchase", { quoteId, requestId, approval: quoteId, quote: quoted["quote"], credential: signed.credential });
+      purchased = await deps.mcp.call("subetha_router_purchase", { quoteId, requestId, approval: quoteId, quote: quoteDoc, credential: signed.credential });
     } catch {
       evidence.outcome = "unknown";
       // 結果が分からない: status を 1 回読んで記録し、止まる（再試行しない）。
@@ -1250,6 +1388,14 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
   return report();
 }
 
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+  }
+  return value;
+}
+
 /** status の応答の `projection.result`（body）を digest に置き換える。 */
 function withStatusDigest(status: Record<string, unknown>): unknown {
   if (!isRecord(status["projection"])) return status;
@@ -1268,7 +1414,13 @@ export async function runFinality(evidenceDir: string, reader: ChainReader, secr
     const pendingLines: string[] = [];
     for (const file of evidenceFilesOf(evidenceDir)) {
       const evidence = readEvidence(file);
-      if (evidence === undefined || evidence.legs === undefined) continue;
+      if (evidence === undefined) {
+        // 黙って飛ばさない（I-1 #2）。確定を読めなかったものとして pending に数える。
+        pending += 1;
+        pendingLines.push(`  HELD: unreadable evidence ${file}`);
+        continue;
+      }
+      if (evidence.legs === undefined) continue;
       const results: FinalityResult[] = [];
       for (const leg of evidence.legs) {
         if (leg.txHash === null || !HASH.test(leg.txHash)) continue;
@@ -1308,7 +1460,12 @@ export async function runReopen(evidenceDir: string, mcp: McpCaller, secrets: Se
   let different = 0;
   for (const file of evidenceFilesOf(evidenceDir)) {
     const evidence = readEvidence(file);
-    if (evidence === undefined || evidence.paymentId === undefined || evidence.paymentId === "") continue;
+    if (evidence === undefined) {
+      different += 1;
+      out(secrets.redact(`reopen HELD: unreadable evidence ${file}`));
+      continue;
+    }
+    if (evidence.paymentId === undefined || evidence.paymentId === "") continue;
     let again: Record<string, unknown>;
     try {
       again = await mcp.call("subetha_router_status", { paymentId: evidence.paymentId });
@@ -1331,9 +1488,9 @@ export async function runReopen(evidenceDir: string, mcp: McpCaller, secrets: Se
 
 /** 公開の要約（秘密・body・journal の行・offer を除く）。書く前に既知の秘密が残っていないことを確かめる。 */
 export function summaryOf(evidenceDir: string): Record<string, unknown> {
-  const purchases = evidenceFilesOf(evidenceDir)
-    .map(readEvidence)
-    .filter((e): e is PurchaseEvidence => e !== undefined)
+  const { evidence: all, unreadable } = readAllEvidence(evidenceDir);
+  if (unreadable.length > 0) throw new PlanRefusal(`held: unreadable evidence ${unreadable.join(", ")}; not writing a summary that would omit them`);
+  const purchases = all
     .map((e) => {
       const subject = isRecord(e.subject) ? e.subject : {};
       const source = isRecord(subject["source"]) ? subject["source"] : {};
