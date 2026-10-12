@@ -1,6 +1,6 @@
 {
   "name": "@subetha/payer",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local payer for the SubEtha Router: holds your keys (EVM and Solana), confirms every payment with you, and talks to the hosted Router for an AI agent (stdio MCP) and for you (CLI). Every inbound rail and dynamic provider URL the Router offers. Testnets only.",
   "homepage": "https://subethalabs.com/router/",
   "repository": {

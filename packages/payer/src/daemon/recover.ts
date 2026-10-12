@@ -20,6 +20,26 @@ const transitions: Record<string, readonly string[]> = {
   unknown: ["unknown", "result", "closed_by_operator"], result: [], expired: [], expired_after_sign: [], closed_by_operator: [],
 };
 function same(a: unknown, b: unknown): boolean { return canonicalJson(jsonCopy(a)) === canonicalJson(jsonCopy(b)); }
+/**
+ * A reason code the allowlist learned AFTER a record was written must not invalidate that record (0.2.0 wrote `unknown_code` for the
+ * Router's `unsupported_response` / `destination_rejected`; 0.2.1 names them, and 0.2.1 refused every 0.2.0 store with `store_corrupt`
+ * on 2026-10-13). Tolerated in one direction only: where the STORED summary says `unknown_code`, today's projection may name the code.
+ * Any other difference is still corruption. The stored summary stays authoritative (it is what the human saw).
+ */
+export function sameUpToLearnedCodes(stored: unknown, projected: unknown): boolean {
+  if (same(stored, projected)) return true;
+  const a = jsonCopy(stored), b = jsonCopy(projected);
+  const walk = (x: unknown, y: unknown): void => {
+    if (record(x) && record(y)) {
+      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) {
+        if (k === "reason" && x[k] === "unknown_code" && typeof y[k] === "string") { y[k] = "unknown_code"; continue; }
+        walk(x[k], y[k]);
+      }
+    } else if (Array.isArray(x) && Array.isArray(y)) x.forEach((v, i) => walk(v, y[i]));
+  };
+  walk(a, b);
+  return same(a, b);
+}
 /** What the Router may claim about the upstream for this record's kind (static: nothing; dynamic: the upstream's own receipt). */
 export function upstreamReceiptOf(r: ApprovalRecord): "none" | "claimed" { return kindOf(r) === "dynamic" ? "claimed" : "none"; }
 /** Validate the WHOLE history before making any entry available to replay. No migration or writes. */
@@ -63,7 +83,7 @@ export function rehydrate(ledger: Ledger, identity: Omit<RecordIdentity, "ref" |
           const result = fields.result;
           if (result.ref !== row.ref || result.paymentId !== e.record.paymentId || result.proof?.onChainFinality !== "not_checked" || result.proof.upstreamReceipt !== upstreamReceiptOf(e.record)) throw 0;
           const response = "response" in fields ? fields.response : { ok: result.ok, outcome: result.outcome, paymentId: result.paymentId, ...(result.result ? { snapshot: result.result.body, contentType: result.result.contentType } : {}), ...(result.reason ? { reason: result.reason } : {}) };
-          if (!same(result, project(e.record, response, resultSecrets(e.raw, e.credential, phrase, e.txRef)))) throw 0;
+          if (!sameUpToLearnedCodes(result, project(e.record, response, resultSecrets(e.raw, e.credential, phrase, e.txRef)))) throw 0;
           if (data.outcome !== undefined && data.outcome !== result.outcome) throw 0;
           if (row.state === "result" && (result.state !== "result" || (previous === "unknown" && !["delivered", "paid_data_unavailable"].includes(result.outcome!)))) throw 0;
           if (row.state === "unknown" && result.state !== "unknown") throw 0;

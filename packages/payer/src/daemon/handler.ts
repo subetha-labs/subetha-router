@@ -80,7 +80,7 @@ export function createDaemonHandler(context: DaemonContext, reads: ReadModels = 
     context.assertHeld();
     switch (request.method) {
       case "inspect": return createPurchaseCore(context).inspect(request.params.ref);
-      case "ping": return { ok: true, state: context.session.locked ? "locked" : "unlocked", version: "0.2.1" };
+      case "ping": return { ok: true, state: context.session.locked ? "locked" : "unlocked", version: "0.2.2" };
       case "wallet": return { ok: true, wallets: walletRows(context) };
       case "find_routes": {
         const response = await context.router.listRoutes();
