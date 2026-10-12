@@ -14,9 +14,11 @@ Base Sepolia USDC and Arc testnet USDC over x402, Solana devnet USDC over x402 o
 Tempo testnet pathUSD over MPP, for all ten static routes and all twenty dynamic profiles
 (a provider you name by URL). It still targets **macOS 14+, Node 22** and **testnets only**;
 the Router's mainnet rows are never offered or signed. Linux and Windows are not supported
-payer platforms. The 0.2.0 funded acceptance on every rail (G-R2) is an owner gate recorded
-in `docs/payer-rails-design.md`; until it is recorded, treat each rail other than Base Sepolia
-x402 as unverified end to end.
+payer platforms. The 0.2.0 funded acceptance (G-R2, 2026-10-12, owner's Mac, native dialog) is recorded in
+`docs/payer-rails-design.md` §6: Tempo MPP, Arc x402, Solana x402, Solana MPP and a dynamic
+URL (`dyn-sol-to-x402`) each `delivered`; x402.org's demo endpoint paid with
+`paid_data_unavailable` (`unsupported_response`: it does not return a JSON object), exactly
+as the disclosures say.
 
 **When funds move differs by rail.** Over x402 (Base Sepolia, Arc, Solana) and over MPP on
 Solana the daemon only signs; funds move when the Router settles or broadcasts at purchase.
@@ -160,9 +162,11 @@ recipient and the price breakdown upstream + fee = total), then calls purchase f
 that ref. Only **you** can approve in the daemon's dialog: check your security
 phrase, Router, wallet, route or profile, both legs' networks/assets/amounts/recipients,
 the rail line that says when funds move, the upstream URL, deadline and disclosures,
-then enter your passphrase and select Approve. Enter nothing in a dialog without
-your security phrase; cancel if anything differs. Cancel, timeout, wrong
-passphrase, changed terms or an expired session/quote prevents approval.
+then enter your passphrase and **click Approve with the mouse**: the dialog's default
+button is Cancel, so pressing Enter cancels (this is deliberate). Enter nothing in a
+dialog without your security phrase; cancel if anything differs. Cancel, timeout, wrong
+passphrase, changed terms or an expired session/quote prevents approval, and the
+decision sticks to that `ref`: to try again, take a new quote (a new `ref`).
 The daemon binds confirmation to the saved offer (every field, by digest) and checks
 it before signing. Do not use `npm run sign` or supply a hosted Router credential in
 this payer flow.
