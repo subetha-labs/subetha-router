@@ -27,14 +27,14 @@ test("production default generator checks ledger and pending reservations withou
   try {
     // Seed a recoverable collision without consuming the two tested quote calls or ref entropy.
     const raw = h1Quote();
-    const record = buildRecord(raw, { routerUrl: HOSTED_ROUTER_URL, address: `0x${"33".repeat(20)}`,
+    const record = buildRecord(raw, { routerUrl: HOSTED_ROUTER_URL, address: `0x${"33".repeat(20)}`, wallets: { eip155: `0x${"33".repeat(20)}` },
       ref: "p_aaaaaaaaaaaaa", requestId: "11111111-1111-4111-8111-111111111111" });
     ledger.append({ ref: record.ref, state: "quoted", data: jsonCopy(record), sealedPlain: Buffer.from(JSON.stringify(raw)) });
     entropy.octets = [0, 255, 255, 1]; entropy.sizes = [];
-    const core = createPurchaseCore({ ledger, session, address: `0x${"33".repeat(20)}`, phrase: "fixture", assertHeld() {},
+    const core = createPurchaseCore({ ledger, session, address: `0x${"33".repeat(20)}`, wallets: { eip155: `0x${"33".repeat(20)}` }, phrase: "fixture", assertHeld() {},
       purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: async () => false }, signer: { sign: vi.fn() } },
-      router: { quote, listRoutes: async () => ({}), purchase: vi.fn(), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
-    const results: any[] = await Promise.all([core.quote(), core.quote()]);
+      router: { quote, quoteUrl: async () => ({ ok: false, error: "unknown_route" }), listRoutes: async () => ({}), purchase: vi.fn(), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
+    const results: any[] = await Promise.all([core.quote({ routeId: "md-mpp-eth-snapshot" }), core.quote({ routeId: "md-mpp-eth-snapshot" })]);
     expect(results).toMatchObject([{ ok: true }, { ok: true }]);
     expect(results.map(r => r.ref)).toEqual(["p_7777777777776", "p_aeaqcaibaeaqc"]);
     expect(ledger.rows.map(r => r.ref)).toEqual(["p_aaaaaaaaaaaaa", "p_7777777777776", "p_aeaqcaibaeaqc"]);

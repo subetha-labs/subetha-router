@@ -13,7 +13,8 @@ import { StoreError } from "./store/fs.js";
 
 const USAGE = [
   "usage: subetha-payer <command>",
-  "  wallet new|address|balance   create or inspect the key (never prints secrets)",
+  "  wallet new|address|balance   create or inspect the keys: EVM and Solana (never prints secrets)",
+  "  wallet add solana            add a Solana key to a 0.1.x store (asks for the passphrase here)",
   "  daemon                       run the payer in this terminal (asks for the passphrase and the security phrase here)",
   "  mcp                          stdio MCP shim for an agent (no key, no UI; talks to the daemon)",
   "  status [ref] | inspect <ref> [--close] | config get|set | lock reclaim | ui-check",

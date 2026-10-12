@@ -124,17 +124,17 @@ class Lifecycle(unittest.TestCase):
 
     def test_eof_before_reap(self):
         self.success(World([b"Passphrase: ", b"Repeat passphrase: ",
-                            ("\n" + ADDRESS + "\n").encode(), b""],
+                            ("\neip155 " + ADDRESS + "\n").encode(), b""],
                            [False, False, False, False, True]))
 
     def test_eio_before_reap(self):
         self.success(World([b"Passphrase: ", b"Repeat passphrase: ",
-                            ("\n" + ADDRESS + "\n").encode(), "EIO"],
+                            ("\neip155 " + ADDRESS + "\n").encode(), "EIO"],
                            [False, False, False, False, True]))
 
     def test_exit_before_final_output(self):
         self.success(World([b"Passphrase: ", b"Repeat passphrase: ",
-                            ("\n" + ADDRESS + "\n").encode(), b""],
+                            ("\neip155 " + ADDRESS + "\n").encode(), b""],
                            [False, True]))
 
     def failure(self, world, classification):

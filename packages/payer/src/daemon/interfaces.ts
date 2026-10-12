@@ -9,7 +9,17 @@ export interface ConfirmUi {
   available(): Promise<boolean>;
   confirm?(record: ApprovalRecord, phrase: string): Promise<{ approved: true; recordHash: string; uiKind: "native" } | { approved: false }>;
 }
-export interface Signer { sign(offer: unknown): Promise<string> }
+/** Rail of the key that signs or pays: `eip155` (secp256k1: Base Sepolia, Arc, Tempo) or `solana` (ed25519 seed: Solana devnet). */
+export type WalletRail = "eip155" | "solana";
+/** Public addresses of the unlocked wallets (one per key rail present in the store). Never a secret. */
+export type WalletAddresses = Readonly<Partial<Record<WalletRail, string>>>;
+/**
+ * Builds the inbound credential for an approved offer; the rail is decided from the offer (docs/payer-rails-design.md §2.3).
+ * On MPP Tempo this call SENDS the transfer and returns its hash as `txRef`; on every other rail it only signs.
+ * Any throw after a Tempo transfer may have moved funds: the caller records `unknown`, never retries.
+ */
+export interface SignResult { readonly credential: string; readonly txRef?: string }
+export interface Signer { sign(offer: unknown): Promise<SignResult> }
 export interface PurchaseContext {
   readonly routerUrl: string;
   readonly canonicalResource?: ResourceIdentity;
@@ -31,7 +41,10 @@ export interface DaemonContext {
   readonly purchase?: PurchaseContext;
   readonly ledger: Ledger;
   readonly router: Router;
+  /** Public address of the EVM wallet (0.1.x field; equals `wallets.eip155`). */
   readonly address: string;
+  /** Public addresses per key rail (docs/payer-rails-design.md §2.2). */
+  readonly wallets: WalletAddresses;
   readonly phrase: string;
   assertHeld(): void;
 }

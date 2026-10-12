@@ -58,8 +58,13 @@ test("payer consumer-compatible viem patch pins upstream ws without overrides", 
     ...rootLock.packages["node_modules/viem"].dependencies,
     ws: "8.21.0",
   });
+  // Two ws nodes since 0.2.0: viem's hoisted 8.21.0 pin and the one @solana/rpc-subscriptions-channel-websocket nests, which
+  // must stay exactly what the root lock resolves for it (no third copy, no drift).
   const wsNodes = Object.keys(lock.packages).filter(name => /(?:^|\/)node_modules\/ws$/.test(name));
-  expect(wsNodes).toEqual(["node_modules/ws"]);
+  expect(wsNodes).toEqual(["node_modules/@solana/rpc-subscriptions-channel-websocket/node_modules/ws", "node_modules/ws"]);
+  const nested = "node_modules/@solana/rpc-subscriptions-channel-websocket/node_modules/ws";
+  expect.soft(lock.packages[nested].version).toBe(rootLock.packages["node_modules/ws"].version);
+  expect.soft(lock.packages[nested].integrity).toBe(rootLock.packages["node_modules/ws"].integrity);
   expect.soft(lock.packages["node_modules/ws"].version).toBe("8.21.0");
   expect.soft(lock.packages["node_modules/ws"].resolved).toBe("https://registry.npmjs.org/ws/-/ws-8.21.0.tgz");
   expect.soft(lock.packages["node_modules/ws"].integrity).toBe("sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==");

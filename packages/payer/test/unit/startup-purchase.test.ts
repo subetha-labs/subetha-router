@@ -82,7 +82,7 @@ test("actual startup and handler reuse one recovered core across encrypted store
   const quote = vi.spyOn(RouterClient.prototype, "quote").mockResolvedValue(raw);
   const purchase = vi.spyOn(RouterClient.prototype, "purchase").mockResolvedValue({ ok: true, outcome: "delivered", paymentId: raw.quote.paymentId, snapshot: { durable: true }, contentType: "application/json" });
   const status = vi.spyOn(RouterClient.prototype, "status").mockResolvedValue({ kind: "unreadable", reason: "router_unavailable" });
-  const sign = vi.fn(async () => "fixture-credential");
+  const sign = vi.fn(async () => ({ credential: "fixture-credential" }));
   const confirm = vi.fn(async (r: Parameters<typeof recordHash>[0]) => ({ approved: true as const, recordHash: recordHash(r), uiKind: "native" as const }));
   let listenerHandler: any;
   const h: DaemonHooks = { ...hooks(store), configurePurchase: base => ({ ...base, signer: { sign }, ui: { available: async () => true, confirm } }), listen: async (_path, handler) => { listenerHandler = handler; return { close: async () => undefined }; }, recover: async context => { await createPurchaseCore(context).recover(); expect(await listenerHandler({ id: 0, method: "ping", params: {} })).toMatchObject({ error: "daemon_unavailable" }); } };

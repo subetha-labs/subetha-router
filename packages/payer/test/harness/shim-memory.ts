@@ -19,12 +19,12 @@ export async function shimMemory(body = { value: "x".repeat(2036) }) {
   const ledger = openLedger(path.join(dir, "ledger.ndjson"), key, realFs);
   const session = new Session(randomBytes(32)); const quote = h1Quote();
   const counts = { ui: 0, sign: 0, purchase: 0 };
-  const context: DaemonContext = { session, ledger, address: `0x${"33".repeat(20)}`, phrase: "fixture-only", assertHeld() {},
+  const context: DaemonContext = { session, ledger, address: `0x${"33".repeat(20)}`, wallets: { eip155: `0x${"33".repeat(20)}` }, phrase: "fixture-only", assertHeld() {},
     purchase: { routerUrl: "https://fixture.invalid/mcp", canonicalResource: { ...quote.quote.resource, method: "GET" }, generateRef: () => "p_aaaaaaaaaaaaa",
       ui: { available: async () => true, confirm: async r => { counts.ui++; return { approved: true, recordHash: recordHash(r), uiKind: "native" }; } },
-      signer: { sign: async () => { counts.sign++; return "fixture-credential"; } } },
+      signer: { sign: async () => { counts.sign++; return { credential: "fixture-credential" }; } } },
     router: { listRoutes: async () => ({ ok: true, routes: [{ routeId: quote.quote.routeId, source: quote.quote.source, destination: quote.quote.destination }] }),
-      quote: async () => quote, status: async () => ({ kind: "not_found", reason: "not_found" }),
+      quote: async () => quote, quoteUrl: async () => ({ ok: false, error: "unknown_route" }), status: async () => ({ kind: "not_found", reason: "not_found" }),
       purchase: async () => { counts.purchase++; return { ok: true, outcome: "delivered", paymentId: quote.quote.paymentId, snapshot: body, contentType: "application/json" }; } },
   };
   const handler = createDaemonHandler(context); let id = 0;

@@ -18,7 +18,9 @@ export interface CliDeps {
   router?: Router;
   installRoot?: string;
   randomKey?: () => Buffer;
-  balance?: (rpc: string, address: string) => Promise<string>;
+  randomSolanaKey?: () => Buffer;
+  /** Owned fixture transport for `wallet balance` (RPC reads only; never a signer or Router path). */
+  fetchRpc?: typeof fetch;
   /** Owned crash fixtures only (install accept); bin.ts never supplies it. */
   faults?: { hit(point: string): Promise<void> };
   uiCheck?: (verify: (pass: string) => boolean) => { available(): Promise<boolean>; check(text: string): Promise<unknown> };

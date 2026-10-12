@@ -113,7 +113,8 @@ def run(cfg):
             raise HelperFailure("owned_pty_secret_leak")
         if os.waitstatus_to_exitcode(status) == 127:
             raise HelperFailure("owned_pty_launch_error")
-        addresses = [line for line in text.split("\n") if len(line) == 42 and line.startswith("0x")]
+        # `wallet new` prints one `<rail> <address>` line per key rail (0.2.0); addresses only, never the transcript.
+        addresses = [line.split(" ", 1)[1] for line in text.split("\n") if line.startswith(("eip155 ", "solana ")) and line.count(" ") == 1]
         result = {"exit": os.waitstatus_to_exitcode(status), "prompts": sent, "addresses": addresses}
         if "installedBin" in cfg:
             # Never return a raw terminal transcript. No extra diagnostic text is allowed.

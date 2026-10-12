@@ -28,10 +28,10 @@ function fixture(last = "signed", fs: StoreFs = realFs, phrase = "fixture-phrase
   ledger.close(); ledger = openLedger(file, key, fs);
   const counts = { sign: 0, purchase: 0, ui: 0, status: 0, quote: 0 };
   const session = new Session(randomBytes(32)); let status: RouterStatus = { kind: "not_found", reason: "not_found" };
-  const context: DaemonContext = { ledger, session, address, phrase, assertHeld() {}, purchase: {
+  const context: DaemonContext = { ledger, session, address, wallets: { eip155: address }, phrase, assertHeld() {}, purchase: {
     routerUrl: r.routerUrl, canonicalResource: r.resource, ui: { available: async () => true, confirm: async rec => { counts.ui++; return { approved: true, recordHash: recordHash(rec), uiKind: "native" }; } },
-    signer: { sign: async () => { counts.sign++; return "fixture-credential"; } },
-  }, router: { listRoutes: async () => ({}), quote: async () => { counts.quote++; return raw; }, status: async () => { counts.status++; return status; }, purchase: async input => { counts.purchase++; expect(input.credential === "fixture-credential").toBe(true); expect(ledger.rows.at(-1)?.state).toBe("submit_intent"); return { ok: true, outcome: "delivered", paymentId: r.paymentId, snapshot: { value: "retained" }, contentType: "application/json" }; } } };
+    signer: { sign: async () => { counts.sign++; return { credential: "fixture-credential" }; } },
+  }, router: { listRoutes: async () => ({}), quote: async () => { counts.quote++; return raw; }, quoteUrl: async () => ({ ok: false, error: "unknown_route" }), status: async () => { counts.status++; return status; }, purchase: async input => { counts.purchase++; expect(input.credential === "fixture-credential").toBe(true); expect(ledger.rows.at(-1)?.state).toBe("submit_intent"); return { ok: true, outcome: "delivered", paymentId: r.paymentId, snapshot: { value: "retained" }, contentType: "application/json" }; } } };
   return { context, counts, raw, r, ref, file, setStatus(s: RouterStatus) { status = s; }, reopen() { ledger.close(); ledger = openLedger(file, key, realFs); return { ...context, ledger }; }, close() { ledger.close(); session.close(); key.fill(0); rmSync(dir, { recursive: true, force: true }); } };
 }
 for (const source of ["challenge", "quoted-phrase", "backslash-phrase"] as const)
@@ -133,7 +133,7 @@ for (const errno of ["EROFS", "EIO"]) test(`${errno} intent write failure latche
   try {
     const core = createPurchaseCore({ ...f.context, purchase: { ...f.context.purchase!, faults: { hit: async point => { if (point === "before:sign_intent") armed = true; } } } });
     await core.recover(); expect(await core.purchase(f.ref)).toMatchObject({ error: "store_write_failed" });
-    expect(f.context.ledger.writeFailed).toBe(true); await core.purchase(f.ref); await core.quote();
+    expect(f.context.ledger.writeFailed).toBe(true); await core.purchase(f.ref); await core.quote({ routeId: "md-mpp-eth-snapshot" });
     expect(f.counts).toMatchObject({ sign: 0, purchase: 0 });
   } finally { f.close(); }
 });

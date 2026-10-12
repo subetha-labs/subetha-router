@@ -8,7 +8,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { afterEach, expect, test, vi } from "vitest";
-import { runWallet, publicBalance } from "../../src/cli/wallet.js";
+import { runWallet, publicBalance, FAUCET_NOTICE } from "../../src/cli/wallet.js";
+import { ARC_RPC, BASE_RPC, SOLANA_RPC, TEMPO_RPC } from "../../src/config.js";
+import { createKeysDocument, openWallet, parseKeysDocument, unlockKeys, zero } from "../../src/store/keys.js";
 import { runStatus } from "../../src/cli/status.js";
 import { runInspect } from "../../src/cli/inspect.js";
 import { runConfig } from "../../src/cli/config.js";
@@ -55,14 +57,36 @@ async function child(file: string, args: string[], input: unknown, env: NodeJS.P
     return { ...await exit, stdout, stderr, launchError, timedOut, outputOverflow };
   } finally { clearTimeout(timer); }
 }
-test("owned subprocess wallet encryption, exact secrecy and overwrite refusal", async () => {
+test("owned subprocess wallet encryption (both key rails), exact secrecy and overwrite refusal", async () => {
   const h = home(), key = randomBytes(32), passphrase = randomBytes(20).toString("base64"), address = privateKeyToAddress(`0x${key.toString("hex")}`);
-  const run = (args: string[]) => child(process.execPath, ["--disable-sigusr1", "--import", loader, path.join(root, "test/harness/cli-entry.ts")], { home: h, command: "wallet", args, key: key.toString("hex"), answers: [passphrase, passphrase], tty: true, alive: false }, { PATH: "/usr/bin:/bin", HOME: h });
-  const created = await run(["new"]); expect(created.code).toBe(0); expect(created.stdout).toBe(address + "\n"); expect(created.stderr).toBe("");
+  const run = (args: string[], answers: string[] = [passphrase, passphrase]) => child(process.execPath, ["--disable-sigusr1", "--import", loader, path.join(root, "test/harness/cli-entry.ts")], { home: h, command: "wallet", args, key: key.toString("hex"), answers, tty: true, alive: false }, { PATH: "/usr/bin:/bin", HOME: h });
+  const created = await run(["new"]); expect(created.code).toBe(0);
+  expect(created.stdout).toMatch(new RegExp(`^eip155 ${address}\\nsolana [1-9A-HJ-NP-Za-km-z]{32,44}\\n$`)); expect(created.stderr).toBe(FAUCET_NOTICE + "\n");
   for (const secret of [passphrase, key.toString("hex"), key.toString("base64")]) expect(created.stdout + created.stderr).not.toContain(secret);
-  expect((await run(["address"])).stdout).toBe(address + "\n");
+  expect((await run(["address"])).stdout).toBe(created.stdout);
   const file = path.join(h, ".config/subetha-payer/keys.json"), before = readFileSync(file);
-  expect((await run(["new"])).code).toBe(2); expect(readFileSync(file)).toEqual(before); key.fill(0);
+  expect(Object.keys(JSON.parse(before.toString("utf8")).wallets)).toEqual(["eip155", "solana"]);
+  expect((await run(["new"])).code).toBe(2); expect(readFileSync(file)).toEqual(before);
+  // The store already has a Solana key: `add solana` refuses before asking for the passphrase and changes nothing.
+  const added = await run(["add", "solana"], []); expect(added.code).toBe(2); expect(added.stderr).toBe("cli_refused: wallet_exists\n"); expect(readFileSync(file)).toEqual(before);
+  key.fill(0);
+});
+test("owned subprocess wallet add solana upgrades a 0.1.x store (eip155 only): same passphrase, eip155 seal byte-identical", async () => {
+  const h = home(), key = randomBytes(32), passphrase = randomBytes(20).toString("base64"), address = privateKeyToAddress(`0x${key.toString("hex")}`);
+  const dir = path.join(h, ".config/subetha-payer"); mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, "keys.json"); writeFileSync(file, JSON.stringify(createKeysDocument(passphrase, { eip155: { address, secret: Buffer.from(key) } })), { mode: 0o600 });
+  const before = JSON.parse(readFileSync(file, "utf8"));
+  const run = (args: string[], answers: string[]) => child(process.execPath, ["--disable-sigusr1", "--import", loader, path.join(root, "test/harness/cli-entry.ts")], { home: h, command: "wallet", args, answers, tty: true, alive: false }, { PATH: "/usr/bin:/bin", HOME: h });
+  const wrong = await run(["add", "solana"], ["not-the-passphrase"]); expect(wrong.code).toBe(2); expect(wrong.stderr).toBe("cli_refused: bad_passphrase\n"); expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(before);
+  const added = await run(["add", "solana"], [passphrase]); expect(added.code).toBe(0); expect(added.stderr).toBe("");
+  expect(added.stdout).toMatch(/^solana [1-9A-HJ-NP-Za-km-z]{32,44}\n$/);
+  const after = JSON.parse(readFileSync(file, "utf8"));
+  expect(after.wallets.eip155).toEqual(before.wallets.eip155); expect(after.kdf).toEqual(before.kdf); expect(after.verifier).toBe(before.verifier); expect(Object.keys(after.wallets)).toEqual(["eip155", "solana"]);
+  expect(readFileSync(file, "utf8")).not.toContain(passphrase);
+  const shown = await run(["address"], []); expect(shown.stdout).toBe(`eip155 ${address}\n${added.stdout}`);
+  // Both wallets open with the one passphrase (fixture-side check; the CLI never prints a key).
+  const doc = parseKeysDocument(readFileSync(file, "utf8")), keys = unlockKeys(doc, passphrase);
+  expect(openWallet(doc, "eip155", keys.kek).equals(key)).toBe(true); expect(openWallet(doc, "solana", keys.kek)).toHaveLength(32); zero(keys.kek, keys.lek); key.fill(0);
 });
 test("compiled real bin dispatch refuses argument consent and non-TTY close/reclaim", async () => {
   const h = home();
@@ -75,21 +99,29 @@ test("compiled real wallet new through an owned PTY hides passphrase and returns
   const h = home(), passphrase = randomBytes(20).toString("base64");
   const result = await child("python3", [path.join(root, "test/fixtures/cli-pty.py")], { node: process.execPath, bin: path.join(root, "dist/bin.js"), home: h, passphrase }, { PATH: process.env.PATH, HOME: h });
   expect(result.launchError || result.timedOut, ptyFailure(result)).toBe(false);
-  expect(result.code, ptyFailure(result)).toBe(0); const value = JSON.parse(result.stdout); expect(value.exit).toBe(0); expect(value.prompts).toBe(2); expect(value.addresses).toHaveLength(1); expect(value.addresses[0]).toMatch(/^0x[0-9a-fA-F]{40}$/); expect(result.stderr).toBe("");
+  expect(result.code, ptyFailure(result)).toBe(0); const value = JSON.parse(result.stdout); expect(value.exit).toBe(0); expect(value.prompts).toBe(2); expect(value.addresses).toHaveLength(2); expect(value.addresses[0]).toMatch(/^0x[0-9a-fA-F]{40}$/); expect(value.addresses[1]).toMatch(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/); expect(result.stderr).toBe("");
 });
-test("balance production RPC protocol over owned TCP fixture only", async () => {
-  const store = fixtureStore(), requests: any[] = [];
+test("balance production RPC protocol over owned TCP fixture only: four networks, each RPC URL routed to the fixture", async () => {
+  const store = fixtureStore(), requests: { url: string; method: string }[] = [];
+  const chains: Record<string, string> = { [BASE_RPC]: "0x14a34", [ARC_RPC]: "0x4cef52", [TEMPO_RPC]: "0xa5bf" };
   const server = createServer(async (req, res) => {
     let text = ""; for await (const chunk of req) text += chunk;
-    const request = JSON.parse(text); requests.push(request);
-    res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: request.method === "eth_chainId" ? "0x14a34" : "0x" + (1234567).toString(16).padStart(64, "0") }));
+    const request = JSON.parse(text), url = decodeURIComponent(req.url!.slice(1)); requests.push({ url, method: request.method });
+    const result = request.method === "eth_chainId" ? chains[url] : request.method === "eth_call" ? "0x" + (1234567).toString(16).padStart(64, "0")
+      : request.method === "getBalance" ? { context: { slot: 1 }, value: 99 } : { context: { slot: 1 }, value: { amount: "7", decimals: 6 } };
+    res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw 0;
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   try {
-    expect(await runWallet(["balance"], { env: { HOME: store.home }, lockDeps: { startedAtOf: () => "fixture", isAlive: () => false }, balance: (rpc, wallet) => publicBalance(rpc, wallet, (_url, init) => fetch(`http://127.0.0.1:${address.port}/`, init)) })).toBe(0);
-    expect(stdout.mock.calls.map(c => c[0]).join("")).toBe("1234567\n"); expect(requests.map(r => r.method)).toEqual(["eth_chainId", "eth_call"]);
+    // The product code only ever sees the configured public https URL; the fixture transport carries it to the owned listener.
+    expect(await runWallet(["balance"], { env: { HOME: store.home }, lockDeps: { startedAtOf: () => "fixture", isAlive: () => false }, fetchRpc: (url, init) => fetch(`http://127.0.0.1:${address.port}/${encodeURIComponent(String(url))}`, init) })).toBe(0);
+    expect(stdout.mock.calls.map(c => c[0]).join("")).toBe(`eip155:84532 USDC 1234567\neip155:5042002 USDC 1234567\neip155:42431 pathUSD 1234567\nsolana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 USDC 7\nsolana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 SOL 99\n`);
+    expect(requests).toEqual([{ url: BASE_RPC, method: "eth_chainId" }, { url: BASE_RPC, method: "eth_call" }, { url: ARC_RPC, method: "eth_chainId" }, { url: ARC_RPC, method: "eth_call" },
+      { url: TEMPO_RPC, method: "eth_chainId" }, { url: TEMPO_RPC, method: "eth_call" }, { url: SOLANA_RPC, method: "getBalance" }, { url: SOLANA_RPC, method: "getTokenAccountBalance" }]);
+    // 0.1.x-style public call still works for Base alone.
+    expect(await publicBalance(BASE_RPC, "0x" + "ab".repeat(20), (_url, init) => fetch(`http://127.0.0.1:${address.port}/${encodeURIComponent(BASE_RPC)}`, init))).toBe("1234567");
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); store.cleanup(); }
 });
 test("CLI status/inspect use actual daemon socket and durable saved quote, config refuses active daemon", async () => {
@@ -101,7 +133,7 @@ test("CLI status/inspect use actual daemon socket and durable saved quote, confi
   const output = vi.spyOn(process.stdout, "write").mockReturnValue(true), error = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   const deps = { env: { HOME: store.home }, lockDeps, tty: { available: true, read: async () => { throw 0; } } };
   try {
-    const core = createPurchaseCore(daemon.context), quoted = await core.quote() as { ref: string }; expect(quoted.ref).toMatch(/^p_/);
+    const core = createPurchaseCore(daemon.context), quoted = await core.quote({ routeId: "md-mpp-eth-snapshot" }) as { ref: string }; expect(quoted.ref).toMatch(/^p_/);
     expect(await runStatus([quoted.ref], deps)).toBe(0); expect(JSON.parse(String(output.mock.calls.at(-1)![0])).state).toBe("quoted");
     expect(await runInspect([quoted.ref], deps)).toBe(0); expect(JSON.parse(String(output.mock.calls.at(-1)![0])).inspections[0].rows).toHaveLength(1);
     expect(await runConfig(["set", "session.ttlMs", "60000"], deps)).toBe(2); expect(error.mock.calls.flat().join("")).toContain("daemon_already_running"); expect(router.state.calls.purchase).toBe(0);

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { privateKeyToAddress } from "viem/accounts";
-import { runWallet, publicBalance } from "../../src/cli/wallet.js";
+import { runWallet, publicBalance, evmBalance, solanaBalance, FAUCET_NOTICE } from "../../src/cli/wallet.js";
+import { createKeyPairSignerFromPrivateKeyBytes } from "@solana/kit";
 import { runConfig } from "../../src/cli/config.js";
 import { runLock } from "../../src/cli/lock.js";
 import { runInspect } from "../../src/cli/inspect.js";
@@ -15,7 +16,7 @@ import { type CliDeps } from "../../src/cli/common.js";
 import { createKeysDocument, parseKeysDocument, unlockKeys, openWallet, zero } from "../../src/store/keys.js";
 import { openLedger } from "../../src/store/ledger.js";
 import { realFs, StoreError } from "../../src/store/fs.js";
-import { parseConfig, BASE_RPC, USDC } from "../../src/config.js";
+import { parseConfig, ARC_RPC, ARC_USDC, BASE_RPC, PATHUSD, SOLANA_RPC, SOLANA_USDC_MINT, TEMPO_RPC, USDC } from "../../src/config.js";
 import { buildRecord, recordHash, jsonCopy } from "../../src/daemon/record.js";
 import { createDaemonHandler } from "../../src/daemon/handler.js";
 import { Session } from "../../src/daemon/session.js";
@@ -34,11 +35,13 @@ function fixture() {
   mkdirSync(path.join(installRoot, "dist"), { recursive: true }); mkdirSync(path.join(installRoot, "node_modules"));
   writeFileSync(path.join(installRoot, "dist", "entry.js"), "owned installation");
   const pass = randomBytes(20).toString("base64"), key = randomBytes(32), address = privateKeyToAddress(`0x${key.toString("hex")}`);
+  // A fixed Solana seed: its address is derived once by the test and compared against what the CLI prints.
+  const seed = Buffer.alloc(32, 0x5a), solana = "uY46ibBrA5pEsx4z8iiQ6BpNeBuMR6weo4u2ubREB9q";
   const answers: string[] = [pass, pass];
   const read = vi.fn(async () => answers.shift() ?? "y");
   const deps: CliDeps = { env: { HOME: home }, installRoot,
     lockDeps: { pid: 123456, hostname: "owned-host", isAlive: () => false, startedAtOf: () => "T0" },
-    tty: { available: true, read }, randomKey: () => Buffer.from(key),
+    tty: { available: true, read }, randomKey: () => Buffer.from(key), randomSolanaKey: () => Buffer.from(seed),
   };
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true), stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   const out = () => stdout.mock.calls.map(c => String(c[0])).join(""), err = () => stderr.mock.calls.map(c => String(c[0])).join("");
@@ -48,7 +51,7 @@ function fixture() {
     writeFileSync(path.join(dir, "daemon.lock"), JSON.stringify({ pid: 789012, startedAt: "T0", hostname: "owned-host", token: "0123456789abcdef" }), { mode: 0o600 });
     deps.lockDeps = { ...deps.lockDeps, isAlive: () => alive, startedAtOf: () => start };
   }
-  return { home, dir, pass, key, address, answers, read, deps, stdout, stderr, out, err, reset, saveKey, lock };
+  return { home, dir, pass, key, seed, address, solana, answers, read, deps, stdout, stderr, out, err, reset, saveKey, lock };
 }
 function evidence(f: ReturnType<typeof fixture>, last = "signed") {
   f.saveKey();
@@ -66,25 +69,27 @@ function evidence(f: ReturnType<typeof fixture>, last = "signed") {
   ledger.close(); zero(keys.kek, keys.lek);
   let status: RouterStatus = { kind: "not_found", reason: "not_found" };
   const statusCall = vi.fn(async () => status), purchase = vi.fn(async () => { throw new Error("must never submit"); });
-  f.deps.router = { status: statusCall, purchase, quote: async () => { throw 0; }, listRoutes: async () => { throw 0; } };
+  f.deps.router = { status: statusCall, purchase, quote: async () => { throw 0; }, quoteUrl: async () => ({ ok: false, error: "unknown_route" }), listRoutes: async () => { throw 0; } };
   f.answers.splice(0, f.answers.length, f.pass);
   return { file, ref, record, credential, statusCall, purchase, status: (value: RouterStatus) => { status = value; } };
 }
 
-test("wallet exact address-only secrecy oracle; encrypted random-key roundtrip; original key bytes zeroed", async () => {
-  const f = fixture(), bytes = Buffer.from(f.key); f.deps.randomKey = () => bytes;
+test("wallet exact address-only secrecy oracle; encrypted random-key roundtrip for both rails; original key bytes zeroed", async () => {
+  const f = fixture(), bytes = Buffer.from(f.key), seedBytes = Buffer.from(f.seed); f.deps.randomKey = () => bytes; f.deps.randomSolanaKey = () => seedBytes;
+  expect(String((await createKeyPairSignerFromPrivateKeyBytes(new Uint8Array(f.seed))).address)).toBe(f.solana);
   expect(await runWallet(["new"], f.deps)).toBe(0);
-  // Future wallet-prints-key mutation MUST fail here, after successful creation.
-  expect(f.out()).toBe(f.address + "\n"); expect(f.err()).toBe("");
-  for (const secret of [f.pass, f.key.toString("hex"), f.key.toString("base64")]) {
+  // Future wallet-prints-key mutation MUST fail here, after successful creation. stderr carries only the fixed faucet notice.
+  expect(f.out()).toBe(`eip155 ${f.address}\nsolana ${f.solana}\n`); expect(f.err()).toBe(FAUCET_NOTICE + "\n");
+  for (const secret of [f.pass, f.key.toString("hex"), f.key.toString("base64"), f.seed.toString("hex"), f.seed.toString("base64")]) {
     for (const encoded of [secret, Buffer.from(secret).toString("base64"), Buffer.from(secret).toString("hex")]) expect(f.out() + f.err()).not.toContain(encoded);
   }
-  expect(bytes.equals(Buffer.alloc(32))).toBe(true);
+  expect(bytes.equals(Buffer.alloc(32))).toBe(true); expect(seedBytes.equals(Buffer.alloc(32))).toBe(true);
   const text = readFileSync(path.join(f.dir, "keys.json"), "utf8");
-  expect(text).not.toContain(f.key.toString("hex")); expect(text).not.toContain(f.key.toString("base64")); expect(text).not.toContain(f.pass);
-  const doc = parseKeysDocument(text), keys = unlockKeys(doc, f.pass), opened = openWallet(doc, "eip155", keys.kek);
-  expect(opened.equals(f.key)).toBe(true); zero(opened, keys.kek, keys.lek);
-  f.reset(); expect(await runWallet(["address"], f.deps)).toBe(0); expect(f.out()).toBe(f.address + "\n");
+  for (const secret of [f.key.toString("hex"), f.key.toString("base64"), f.seed.toString("hex"), f.seed.toString("base64"), f.pass]) expect(text).not.toContain(secret);
+  const doc = parseKeysDocument(text), keys = unlockKeys(doc, f.pass), opened = openWallet(doc, "eip155", keys.kek), openedSeed = openWallet(doc, "solana", keys.kek);
+  expect(Object.keys(doc.wallets)).toEqual(["eip155", "solana"]);
+  expect(opened.equals(f.key)).toBe(true); expect(openedSeed.equals(f.seed)).toBe(true); zero(opened, openedSeed, keys.kek, keys.lek);
+  f.reset(); expect(await runWallet(["address"], f.deps)).toBe(0); expect(f.out()).toBe(`eip155 ${f.address}\nsolana ${f.solana}\n`);
   const before = readFileSync(path.join(f.dir, "keys.json")); f.reset();
   expect(await runWallet(["new"], f.deps)).toBe(2); expect(f.err()).toBe("cli_refused: wallet_exists\n"); expect(readFileSync(path.join(f.dir, "keys.json"))).toEqual(before);
 });
@@ -97,9 +102,86 @@ test("wallet new non-TTY and mismatched passphrases never write key", async () =
   expect(await runWallet(["new"], { ...f.deps, tty: { available: false, read: f.read } })).toBe(2); expect(f.read).not.toHaveBeenCalled();
   f.answers.splice(0, 2, f.pass, "different"); expect(await runWallet(["new"], f.deps)).toBe(2); expect(existsSync(path.join(f.dir, "keys.json"))).toBe(false);
 });
-test("wallet balance uses injected RPC and base units, not a purchase", async () => {
-  const f = fixture(); f.saveKey(); const balance = vi.fn(async () => "1234567");
-  expect(await runWallet(["balance"], { ...f.deps, balance })).toBe(0); expect(balance).toHaveBeenCalledWith(BASE_RPC, f.address); expect(f.out()).toBe("1234567\n");
+/** A JSON-RPC fake keyed by URL: chain ids for the EVM networks, balances per asset, Solana lamports and the ATA's token amount. */
+function rpcFake(options: { solanaAta?: "missing" | "present"; arcChainId?: string } = {}) {
+  const requests: { url: string; method: string; params: unknown }[] = [];
+  const chains: Record<string, string> = { [BASE_RPC]: "0x14a34", [ARC_RPC]: options.arcChainId ?? "0x4cef52", [TEMPO_RPC]: "0xa5bf" };
+  const balances: Record<string, number> = { [USDC.toLowerCase()]: 1234567, [ARC_USDC.toLowerCase()]: 42, [PATHUSD.toLowerCase()]: 5000000 };
+  const fetchRpc: typeof fetch = async (input, init) => {
+    const url = String(input), body = JSON.parse(String(init!.body)) as { method: string; params: any[]; id: number };
+    requests.push({ url, method: body.method, params: body.params });
+    const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "content-type": "application/json" } });
+    if (body.method === "eth_chainId") return reply(chains[url]);
+    if (body.method === "eth_call") return reply("0x" + balances[String(body.params[0].to).toLowerCase()]!.toString(16).padStart(64, "0"));
+    if (body.method === "getBalance") return reply({ context: { slot: 1 }, value: 1500000000 });
+    if (body.method === "getTokenAccountBalance") {
+      if (options.solanaAta === "missing") return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { code: -32602, message: "Invalid param: could not find account" } }));
+      return reply({ context: { slot: 1 }, value: { amount: "250000", decimals: 6, uiAmount: 0.25, uiAmountString: "0.25" } });
+    }
+    throw new Error("unexpected method");
+  };
+  return { fetchRpc, requests };
+}
+test("wallet balance: four networks (plus SOL) from the configured/default public RPCs in base units; no purchase, no key", async () => {
+  const f = fixture(); expect(await runWallet(["new"], f.deps)).toBe(0); f.reset();
+  const rpc = rpcFake();
+  expect(await runWallet(["balance"], { ...f.deps, fetchRpc: rpc.fetchRpc }), f.err()).toBe(0);
+  expect(f.out()).toBe([`eip155:84532 USDC 1234567`, `eip155:5042002 USDC 42`, `eip155:42431 pathUSD 5000000`, `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 USDC 250000`, `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 SOL 1500000000`].join("\n") + "\n");
+  expect(rpc.requests.map(r => [r.url, r.method])).toEqual([[BASE_RPC, "eth_chainId"], [BASE_RPC, "eth_call"], [ARC_RPC, "eth_chainId"], [ARC_RPC, "eth_call"], [TEMPO_RPC, "eth_chainId"], [TEMPO_RPC, "eth_call"], [SOLANA_RPC, "getBalance"], [SOLANA_RPC, "getTokenAccountBalance"]]);
+  expect(rpc.requests[3]!.params).toEqual([{ to: ARC_USDC, data: "0x70a08231" + f.address.slice(2).toLowerCase().padStart(64, "0") }, "latest"]);
+  expect(rpc.requests[5]!.params).toEqual([{ to: PATHUSD, data: "0x70a08231" + f.address.slice(2).toLowerCase().padStart(64, "0") }, "latest"]);
+  expect(rpc.requests[6]!.params).toEqual([f.solana, { commitment: "confirmed" }]);
+  // The ATA of the owner for the devnet USDC mint under the Token program (never the owner itself).
+  expect(rpc.requests[7]!.params).toEqual([expect.stringMatching(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/), { commitment: "confirmed" }]);
+  expect(rpc.requests[7]!.params).not.toEqual([f.solana, { commitment: "confirmed" }]);
+  expect(f.read).toHaveBeenCalledTimes(2);
+});
+test("wallet balance: a missing ATA is 0 USDC; a wrong chain id or any other RPC error fails the whole command with rpc_failed", async () => {
+  const f = fixture(); expect(await runWallet(["new"], f.deps)).toBe(0); f.reset();
+  expect(await runWallet(["balance"], { ...f.deps, fetchRpc: rpcFake({ solanaAta: "missing" }).fetchRpc })).toBe(0);
+  expect(f.out()).toContain("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1 USDC 0\n"); f.reset();
+  expect(await runWallet(["balance"], { ...f.deps, fetchRpc: rpcFake({ arcChainId: "0x1" }).fetchRpc })).toBe(2);
+  expect(f.out()).toBe(""); expect(f.err()).toBe("cli_refused: rpc_failed\n"); f.reset();
+  const failing: typeof fetch = async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: "boom" } }));
+  await expect(solanaBalance(SOLANA_RPC, f.solana, failing)).rejects.toThrow("rpc_failed");
+  await expect(evmBalance(TEMPO_RPC, "0xa5bf", PATHUSD, f.address, failing)).rejects.toThrow("rpc_failed");
+  await expect(solanaBalance("http://127.0.0.1/", f.solana, failing)).rejects.toThrow("config_invalid");
+  await expect(solanaBalance(SOLANA_RPC, f.address, failing)).rejects.toThrow("config_invalid");
+  expect(SOLANA_USDC_MINT).toBe("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+});
+test("wallet balance on a 0.1.x store (eip155 only) prints the three EVM lines and no Solana line; config.rpc overrides each RPC", async () => {
+  const f = fixture(); f.saveKey();
+  writeFileSync(path.join(f.dir, "config.json"), JSON.stringify({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: { "eip155:42431": "https://tempo.example/", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "https://solana.example/" } }), { mode: 0o600 });
+  const rpc = rpcFake(); const seen: string[] = [];
+  const fetchRpc: typeof fetch = (input, init) => { seen.push(String(input)); return rpc.fetchRpc(String(input) === "https://tempo.example/" ? TEMPO_RPC : String(input), init); };
+  expect(await runWallet(["balance"], { ...f.deps, fetchRpc })).toBe(0);
+  expect(f.out()).toBe(`eip155:84532 USDC 1234567\neip155:5042002 USDC 42\neip155:42431 pathUSD 5000000\n`);
+  expect(seen).toEqual([BASE_RPC, BASE_RPC, ARC_RPC, ARC_RPC, "https://tempo.example/", "https://tempo.example/"]);
+});
+test("wallet add solana: passphrase once under the lock, eip155 seal untouched, solana address printed; a second add is wallet_exists before the passphrase", async () => {
+  const f = fixture(); f.saveKey(); const before = JSON.parse(readFileSync(path.join(f.dir, "keys.json"), "utf8"));
+  f.answers.splice(0, f.answers.length, f.pass);
+  expect(await runWallet(["add", "solana"], f.deps)).toBe(0);
+  expect(f.out()).toBe(`solana ${f.solana}\n`); expect(f.err()).toBe(""); expect(f.read).toHaveBeenCalledTimes(1);
+  const text = readFileSync(path.join(f.dir, "keys.json"), "utf8"), doc = parseKeysDocument(text);
+  expect(text).not.toContain(f.seed.toString("hex")); expect(text).not.toContain(f.seed.toString("base64")); expect(text).not.toContain(f.pass);
+  expect(doc.wallets["eip155"]).toEqual(before.wallets.eip155); expect(doc.kdf).toEqual(before.kdf); expect(doc.verifier).toBe(before.verifier);
+  const keys = unlockKeys(doc, f.pass), opened = openWallet(doc, "solana", keys.kek); expect(opened.equals(f.seed)).toBe(true); zero(opened, keys.kek, keys.lek);
+  expect(readdirSync(f.dir).filter(n => n.endsWith(".new"))).toEqual([]);
+  f.reset(); f.read.mockClear(); f.answers.splice(0, f.answers.length, f.pass);
+  expect(await runWallet(["add", "solana"], f.deps)).toBe(2); expect(f.err()).toBe("cli_refused: wallet_exists\n"); expect(f.read).not.toHaveBeenCalled();
+  expect(readFileSync(path.join(f.dir, "keys.json"), "utf8")).toBe(text);
+  f.reset(); expect(await runWallet(["address"], f.deps)).toBe(0); expect(f.out()).toBe(`eip155 ${f.address}\nsolana ${f.solana}\n`);
+});
+test("wallet add solana: wrong passphrase, non-TTY, live daemon and bad arguments write nothing", async () => {
+  const f = fixture(); f.saveKey(); const before = readFileSync(path.join(f.dir, "keys.json"));
+  f.answers.splice(0, f.answers.length, "wrong-throwaway-passphrase");
+  expect(await runWallet(["add", "solana"], f.deps)).toBe(2); expect(f.err()).toBe("cli_refused: bad_passphrase\n"); f.reset();
+  expect(await runWallet(["add", "solana"], { ...f.deps, tty: { available: false, read: f.read } })).toBe(2); expect(f.err()).toBe("cli_refused: no_tty\n"); f.reset();
+  for (const args of [["add"], ["add", "eip155"], ["add", "solana", "x"], ["remove", "solana"]]) { expect(await runWallet(args, f.deps)).toBe(2); expect(f.err()).toBe("cli_refused: invalid_arguments\n"); f.reset(); }
+  f.lock(true); f.answers.splice(0, f.answers.length, f.pass);
+  expect(await runWallet(["add", "solana"], f.deps)).toBe(2); expect(f.err()).toBe("cli_refused: daemon_already_running\n");
+  expect(readFileSync(path.join(f.dir, "keys.json"))).toEqual(before); expect(readdirSync(f.dir).filter(n => n.endsWith(".new"))).toEqual([]);
 });
 test("production balance request pins chain, contract and selector (fetch fake, no listener)", async () => {
   const f = fixture(); const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x14a34" }))).mockResolvedValueOnce(new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x" + (1234567).toString(16).padStart(64, "0") })));
@@ -124,8 +206,21 @@ test("config defaults survive absent file; human set validated and next startup 
   expect(parseConfig(JSON.parse(readFileSync(path.join(f.dir, "config.json"), "utf8"))).session?.ttlMs).toBe(60000);
   expect(await runConfig(["set", "session.ttlMs", "30000"], { ...f.deps, tty: { available: false, read: f.read } })).toBe(2);
 });
-test.each(["http://public.example/", "https://user:pass@public.example/", "https://127.0.0.1/", "https://rpc.example/?key=secret", "https://rpc.invalid/", "https://rpc.example/#x"])("config refuses unsafe RPC %s", value => {
-  expect(() => parseConfig({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: { "eip155:84532": value } })).toThrow("config_invalid");
+const RPC_KEYS = ["eip155:84532", "eip155:42431", "eip155:5042002", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"];
+test.each(["http://public.example/", "https://user:pass@public.example/", "https://127.0.0.1/", "https://rpc.example/?key=secret", "https://rpc.invalid/", "https://rpc.example/#x"])("config refuses unsafe RPC %s on every network", value => {
+  for (const network of RPC_KEYS) expect(() => parseConfig({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: { [network]: value } }), network).toThrow("config_invalid");
+});
+test("config rpc accepts the four payer networks (public https), any subset, and nothing else; config set writes each", async () => {
+  const all = Object.fromEntries(RPC_KEYS.map(network => [network, "https://rpc.example/"]));
+  expect(parseConfig({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: all }).rpc).toEqual(all);
+  expect(parseConfig({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: { "eip155:42431": "https://rpc.example/" } }).rpc).toEqual({ "eip155:42431": "https://rpc.example/" });
+  expect(() => parseConfig({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: { "eip155:8453": "https://rpc.example/" } })).toThrow("config_invalid");
+  expect(() => parseConfig({ version: 1, router: { url: HOSTED_ROUTER_URL }, rpc: { "eip155:1": "https://rpc.example/" } })).toThrow("config_invalid");
+  const f = fixture();
+  const urlOf = (network: string) => `https://${network.replace(/[^a-z0-9]/gi, "").toLowerCase()}.example/`;
+  for (const network of RPC_KEYS) { expect(await runConfig(["set", `rpc.${network}`, urlOf(network)], f.deps), network).toBe(0); }
+  expect(parseConfig(JSON.parse(readFileSync(path.join(f.dir, "config.json"), "utf8"))).rpc).toEqual(Object.fromEntries(RPC_KEYS.map(network => [network, urlOf(network)])));
+  expect(await runConfig(["set", "rpc.eip155:8453", "https://rpc.example/"], f.deps)).toBe(2);
 });
 test("config cannot infer a new Router canonical resource, expand rails or raise version", () => {
   expect(() => parseConfig({ version: 1, router: { url: "https://other.example/mcp" } })).toThrow("config_invalid");
@@ -176,9 +271,17 @@ test("synthetic human inspect-close persists sealed reason and closed_by_operato
   f.reset(); f.answers.push(f.pass); expect(await runStatus([e.ref], f.deps)).toBe(0); expect(JSON.parse(f.out()).state).toBe("closed_by_operator");
 });
 test("live daemon wallet and inspection use validated client Summary and always close client", async () => {
-  const f = fixture(); f.lock(true); const request = vi.fn(async (method: string) => method === "wallet" ? { ok: true, wallets: [{ rail: "x402", network: "eip155:84532", address: f.address }] } : { ok: true, inspections: [] }); const close = vi.fn(async () => {}); f.deps.client = () => ({ request, close });
-  expect(await runWallet(["address"], f.deps)).toBe(0); expect(f.out()).toBe(f.address + "\n"); f.reset();
-  expect(await runStatus([], f.deps)).toBe(0); expect(request.mock.calls).toEqual([["wallet", {}], ["inspect", {}]]); expect(close).toHaveBeenCalledTimes(2); expect(f.read).not.toHaveBeenCalled();
+  const f = fixture(); f.lock(true);
+  const rows = [{ rail: "x402", network: "eip155:84532", address: f.address }, { rail: "x402", network: "eip155:5042002", address: f.address }, { rail: "mpp", network: "eip155:42431", address: f.address },
+    { rail: "x402", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", address: f.solana }, { rail: "mpp", network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", address: f.solana }];
+  const request = vi.fn(async (method: string) => method === "wallet" ? { ok: true, wallets: rows } : { ok: true, inspections: [] }); const close = vi.fn(async () => {}); f.deps.client = () => ({ request, close });
+  expect(await runWallet(["address"], f.deps), f.err()).toBe(0); expect(f.out()).toBe(`eip155 ${f.address}\nsolana ${f.solana}\n`); f.reset();
+  // Addresses come from the daemon's rows, never from keys.json while the daemon holds the lock; balances via the RPC fake.
+  const rpc = rpcFake(); expect(await runWallet(["balance"], { ...f.deps, fetchRpc: rpc.fetchRpc })).toBe(0);
+  expect(f.out().split("\n")).toHaveLength(6); expect(rpc.requests[6]!.params).toEqual([f.solana, { commitment: "confirmed" }]); f.reset();
+  // A 0.1.x daemon (eip155 rows only) yields one address line.
+  rows.splice(3); expect(await runWallet(["address"], f.deps)).toBe(0); expect(f.out()).toBe(`eip155 ${f.address}\n`); f.reset();
+  expect(await runStatus([], f.deps)).toBe(0); expect(request.mock.calls).toEqual([["wallet", {}], ["wallet", {}], ["wallet", {}], ["inspect", {}]]); expect(close).toHaveBeenCalledTimes(4); expect(f.read).not.toHaveBeenCalled();
 });
 test("untrusted client errors are fixed, no fallback to secret store", async () => {
   const f = fixture(); f.lock(true); f.deps.client = () => ({ request: async () => { throw new Error(f.pass); }, close: async () => {} });
@@ -216,8 +319,8 @@ test("real daemon handler inspection projects saved evidence without signing/sub
   const f = fixture(), e = evidence(f);
   const doc = parseKeysDocument(readFileSync(path.join(f.dir, "keys.json"), "utf8")), keys = unlockKeys(doc, f.pass);
   const ledger = openLedger(e.file, keys.lek, realFs), session = new Session(Buffer.alloc(32));
-  const signer = vi.fn(async () => "must-never-sign");
-  const handler = createDaemonHandler({ ledger, session, address: f.address, phrase: "", router: f.deps.router!, assertHeld: () => {}, purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: async () => false }, signer: { sign: signer } } });
+  const signer = vi.fn(async () => ({ credential: "must-never-sign" }));
+  const handler = createDaemonHandler({ ledger, session, address: f.address, wallets: { eip155: f.address }, phrase: "", router: f.deps.router!, assertHeld: () => {}, purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: async () => false }, signer: { sign: signer } } });
   const { dispatchLine } = await import("../../src/daemon/server.js");
   try {
     const result = await dispatchLine(JSON.stringify({ id: 1, method: "inspect", params: { ref: e.ref } }), handler);

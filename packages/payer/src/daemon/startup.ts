@@ -3,7 +3,8 @@ import { createPurchaseCore } from "./purchase.js";
 import { routerIdentity } from "../router/identity.js";
 import { generateRef } from "./ref.js";
 import { sign } from "../sign/index.js";
-import { readConfig } from "../config.js";
+import { createGuardedFetch } from "../sign/transport.js";
+import { readConfig, SOLANA_RPC, TEMPO_RPC } from "../config.js";
 import { realFs, StoreError, type StoreFs } from "../store/fs.js";
 import { acquireLock, type LockDeps } from "../store/lock.js";
 import { ensureStoreDir, storeDirOf } from "../store/paths.js";
@@ -13,7 +14,7 @@ import { RouterClient } from "../router/client.js";
 import { failure } from "../protocol/summary.js";
 import { Session, MAX_TTL_MS } from "./session.js";
 import { checkInstallSeal, installHashes } from "./seal.js";
-import type { DaemonContext, DaemonHooks } from "./interfaces.js";
+import type { DaemonContext, DaemonHooks, WalletAddresses } from "./interfaces.js";
 import type { Listener } from "./server.js";
 
 import { preflight } from "./preflight.js";
@@ -119,10 +120,18 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
     assertHeld();
     await options.hooks.faults?.hit("before:key-decrypt");
     assertHeld();
+    // Both key rails open under the same kek (docs/payer-rails-design.md §2.2); `solana` only when the store has it (0.1.x stores do not).
     const key = openWallet(doc, "eip155", keys.kek);
-    zero(keys.kek);
-    if (key.length !== 32) { zero(key); throw new StoreError("wallet_invalid"); }
-    session = new Session(key, config.session?.ttlMs ?? MAX_TTL_MS, startedAt);
+    let solanaKey: Buffer | undefined;
+    try { solanaKey = doc.wallets["solana"] === undefined ? undefined : openWallet(doc, "solana", keys.kek); }
+    catch (error) { zero(key); throw error; }
+    finally { zero(keys.kek); }
+    if (key.length !== 32 || (solanaKey !== undefined && solanaKey.length !== 32)) { zero(key); if (solanaKey) zero(solanaKey); throw new StoreError("wallet_invalid"); }
+    const sessionKeys = { eip155: key, ...(solanaKey === undefined ? {} : { solana: solanaKey }) };
+    session = new Session(sessionKeys, config.session?.ttlMs ?? MAX_TTL_MS, startedAt);
+    const wallets: WalletAddresses = { eip155: doc.wallets["eip155"]!.address, ...(doc.wallets["solana"] === undefined ? {} : { solana: doc.wallets["solana"].address }) };
+    // Fixed signer dependencies: RPCs from the human's config (public https only), the guarded transport for Tempo.
+    const signDeps = { nowMs: Date.now, tempoRpcUrl: config.rpc?.["eip155:42431"] ?? TEMPO_RPC, solanaRpcUrl: config.rpc?.["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"] ?? SOLANA_RPC, fetchFn: createGuardedFetch() };
     assertHeld();
     ledger = openLedger(path.join(dir, "ledger.ndjson"), keys.lek, fs);
     const ui = options.hooks.createConfirmUi?.((passphrase) => {
@@ -137,14 +146,14 @@ export async function startDaemon(options: StartupOptions): Promise<RunningDaemo
       } catch { return false; }
     }) ?? options.hooks.ui;
     const context: DaemonContext = {
-      session, ledger, router, address: doc.wallets["eip155"]!.address,
+      session, ledger, router, address: wallets.eip155!, wallets,
       get phrase() { return phrase; }, assertHeld,
       purchase: (options.hooks.configurePurchase ?? (value => value))({
         routerUrl: identity.routerUrl, canonicalResource: identity.resource, generateRef, ui,
         signer: { sign: (offer) => {
           assertHeld();
           if (session!.locked) throw new StoreError("locked");
-          return sign(offer, key);
+          return sign(offer, sessionKeys, signDeps);
         } },
         ...(options.hooks.faults ? { faults: options.hooks.faults } : {}),
       }),
