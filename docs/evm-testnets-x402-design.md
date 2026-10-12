@@ -129,6 +129,21 @@ x402.rs は `signers["eip155:*"]` が空（settle する鍵を公開していな
 - `/supported`: 有効な network の `{x402Version:2, scheme:"exact", network}` と `signers`（gas 鍵のアドレス）。
 - log: 1 行の JSON。鍵・署名・token は出さない。
 
+### 3.3a 実装での補足・逸脱（E-2、2026-10-13。親が読み合わせ）
+
+1. `/settle` の手順 5 の拒否の前に手順 4 の `authorizationState` の読み取りが 1 回入る（順序の帰結。SDK・送出には届かない）。`/verify` の拒否と手順 1 の拒否は RPC を呼ばない。
+2. `paymentPayload.payload` は `{ authorization, signature }` に加えて `challengeNonce` を許す（`requirements.extra.challengeNonce` と一致するときだけ）。Router の受信の封筒（`tools/x402-payer.ts`）が入れるため。
+3. `paymentPayload` の最上位の鍵は `x402Version, scheme, network, accepted, payload, resource, extensions` に限り、`extensions` は空の object だけ。
+4. 手順 1 に「network が有効」「資産が表にある」を含める（`(network, asset, from, nonce)` が決まらないため）。
+5. 手順 2 は処理中の鍵を手順 3 の合流に回す（同時の同一要求を 5xx にしない）。
+6. 使用済みの照合の `getLogs` は `validBefore` から最大 3,600 秒さかのぼる（payer は `validAfter = 0` で署名する）。範囲外は見つからず 5xx（安全側）。
+7. 新しい env `EVM_FACILITATOR_MAX_FEE_PER_GAS_<chainId>`（既定 46630・421614: 1 gwei、998: 10 gwei、11155111: 20 gwei）。超えれば 400 `fee_too_high`。gas の上限は「累計 + 200,000 × 見積もりの maxFeePerGas」で判定し、確定後は実費、不明は最悪値を足す。
+8. 新しい env `EVM_FACILITATOR_LOG_RANGE_<chainId>`（既定 5,000 / 5,000 / 500 / 1,000 block）。HyperEVM の公開 RPC は範囲より **IP ごとの rate limit**（`-32005`）が効く。
+9. 状態コード: 保留・待ち行列満杯・待ち行列での期限切れは 503（送出なし）、receipt の期限切れ 504、revert・`Transfer` 不一致・RPC 不可 502、送出の呼び出しの例外 500、送出前の手数料見積もりの失敗 400（直前に未使用を再確認済み）、認証 404、`Origin`/`Host` 403。
+10. `aborted_before_send` が最後の行の鍵は再処理してよい（送出していない）。
+11. 起動時の照合で revert が分かったものは `reverted` を追記して保留を解く。
+- 残る危険: HyperEVM の公開 RPC の rate limit（照合・起動時の検査が 5xx = `unknown` に倒れる。必要なら `EVM_FACILITATOR_RPC_998` に別の RPC）。HyperEVM の USDC の `AuthorizationUsed` は公開 RPC の 5.4 時間分の走査で **未観測**（他の 3 つは観測）。E-7 の最初の HyperEVM の settle で確かめる。viem の `writeContract` は再検査の後に nonce・chainId を読むので送出までの間はゼロではない。journal の排他は無い（同じ journal に 2 process を向けない運用）。`resolved_by_operator` は再起動で効く。
+
 ### 3.4 Provider（`providers/x402-workers`）
 
 - `ProviderNetwork` に `rh`・`arbsep`・`hyperevm`・`sepolia` を足し、`TABLE` に 4 行（network・資産・decimals・`amount: "10000"`・`extra: { name, version, assetTransferMethod: "eip3009" }`・`facilitatorKind: "x402"`・`chainId`・`family: "evm"`・`facilitatorUrl: ""`）。既存の行に `family`（`arc`: evm、`solana`: svm）を足す。
