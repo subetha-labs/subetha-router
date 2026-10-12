@@ -36,7 +36,10 @@ test("a real EIP-3009 credential: the signature is a secret; its public authoriz
   for (const notSecret of ["0", "to", "from", "value", "validAfter", "validBefore", decoded.payload.authorization.value, decoded.payload.authorization.validAfter]) expect(secrets).not.toContain(notSecret);
   // Realistic paid results are delivered (Codex implementation review #2).
   const r = buildRecord(base, { routerUrl: HOSTED_ROUTER_URL, address: EVM, wallets: { eip155: EVM, solana: SOLANA }, ref: "p_aaaaaaaaaaaaa", requestId: "6d3f1c0e-5b7a-4c2d-9e8f-0a1b2c3d4e5f" });
-  for (const body of [{ value: 123 }, { data: { price: "3000.12", to: "0xabc", from: "0xdef" } }, { fetchedAt: "2026-10-12T10:00:00Z", priceUsdcPerWeth: "3000.000000", disclaimer: "spot reference only" }, { nonce: "0", validAfter: "0", amount: "10000" }]) {
+  // Long PUBLIC values (a 42-char address, a 66-char unrelated tx hash, the payer's own address) are not secrets either (Codex I-2 note).
+  const unrelatedHash = `0x${"5e".repeat(32)}`;
+  for (const body of [{ value: 123 }, { data: { price: "3000.12", to: "0xabc", from: "0xdef" } }, { fetchedAt: "2026-10-12T10:00:00Z", priceUsdcPerWeth: "3000.000000", disclaimer: "spot reference only" }, { nonce: "0", validAfter: "0", amount: "10000" },
+    { settlementTx: unrelatedHash, payer: decoded.payload.authorization.from, recipient: decoded.payload.authorization.to, pool: "0x1234567890abcdef1234567890abcdef12345678" }]) {
     expect(containsResultSecret(body, secrets), JSON.stringify(body)).toBe(false);
     expect(projectResult(r, { ok: true, outcome: "delivered", paymentId: r.paymentId, snapshot: body, contentType: "application/json" }, secrets)).toMatchObject({ outcome: "delivered", result: { body } });
   }
