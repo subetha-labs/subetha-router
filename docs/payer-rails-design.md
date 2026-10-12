@@ -234,6 +234,23 @@ PR はこの順。R-1 と R-2 は同じ worktree（`task/payer-rails`）で続�
 - `wallet balance` の SOL は `WalletSummary` の行（`rail: mpp`、`decimals: 9`）として出す（新しい欄は足さない）。
 - 署名の例外は `rail_not_enabled`・`invalid_signing_key` 以外 `sign_failed` に落とす（0.1.x と同じ）。Tempo の `txRef` は `0x`+64 hex のときだけ記録。
 
+## 6. owner gate の記録（2026-10-12）
+
+- **G-R1（publish）** 12:0xZ: owner が `npm publish ./subetha-payer-0.2.0.tgz --access public`（main `53ab05a` から親がビルド）。registry: `dist.integrity` `sha512-VKwkGznTBdrxrGb+OwZnZ3eQP5w0xI3hWJVhV7URlbsAQNCmeyTiqd9ae8F7J5/BW0v6FdthlrEUb+4ndykbJw==`、`dist.shasum` `bf5e3ec3b5b358668577dcee421edac3569f9b89`、`_hasShrinkwrap: true`、60 files。隔離 prefix への registry install: 163 locked packages 一致、`.node` なし、`daemon --check` exit 0。
+- **R-0 の配備** 12:14:58Z: hosted を `subetha-router:b-53ab05a` に（`swap-image.sh` exit 0、入口の閉鎖約 7 秒、rollback `subetha-router-prev-20261012T121458Z` = b-a89a979）。`list_routes` の固定 10 route に `source.rail/scheme`。
+- **G-R2（資金の動く受け入れ。owner の Mac、payer 0.2.0、ネイティブダイアログで承認。親は MCP stdio client から production の shim `subetha-payer mcp` を呼んだ）**:
+
+| # | レール | route / profile | ref | paymentId | 結果 |
+|---|---|---|---|---|---|
+| 1 | Tempo pathUSD（MPP、承認で送金） | `md-x402-eth-snapshot` | `p_74tzq2vwhhg6k` | `eaafea10-6478-4938-9992-fd684a5e08d2` | `delivered`、`txRef 0x3b035bbffaa308bce500d10f3e441d5198ac083b30d9a24b1e6afd4c2674613f` |
+| 2 | Arc testnet USDC（x402） | `md-mpp-eth-snapshot-arc` | `p_72c6tqrcptlsa` | `8bc61a3d-9cad-444d-bbd4-c050bb35d56d` | `delivered`（先行の `p_4c2zelbmcvzsm` は owner の誤 Cancel で `approval_rejected`、資金は動かず） |
+| 3 | Solana devnet USDC（x402） | `md-x402-eth-snapshot-sol` | `p_l7wgonj4kjx7e` | `fa58bb6e-463c-47b4-a6d5-040137a89e03` | `delivered`（先行の `p_zlgcesojz23vo` は Enter = Cancel で `approval_rejected`） |
+| 4 | Solana devnet USDC（MPP、鍵が fee payer） | `md-mpp-eth-snapshot-solmpp` | `p_yrbgqvfhjocsa` | `e6471b21-29e1-496c-a36f-44d681a205c2` | `delivered` |
+| 5a | 動的: Solana devnet USDC → x402.org demo | `dyn-sol-to-x402` + `https://x402.vercel.app/protected` | `p_mhkjrovck5s7y` | `3af1113e-4c36-47dd-b4db-b34b761774d7` | **`paid_data_unavailable`**（Router journal: `source_settled` Solana tx `5cZvVFdk…r1bs`、`paid_undelivered` reason `unsupported_response`: 上流が JSON object を返さない。開示どおり。payer は `fundsMoved: yes`、再試行なし） |
+| 5b | 動的: Solana devnet USDC → 当方 Provider A | `dyn-sol-to-x402` + `https://provider-x402.subethalabs.com/v1/eth/snapshot` | `p_og22qppqsncfa` | `a20ff6e2-d790-412c-842f-297b19fc629b` | `delivered`、`upstreamReceipt: claimed` |
+
+学び: (1) 一度 Cancel した ref は記憶され、同じ ref への再要求は即座に同じ答え（設計どおり。新しい quote が要る）→ README に明記。(2) ダイアログの既定ボタンは Cancel なので Enter は Cancel → README に「Approve はクリック」。(3) Router の `paid_undelivered` の reason（`unsupported_response` など）が payer の `KNOWN_CODES` に無く `unknown_code` に写っていた → 追加。(4) x402.org の demo endpoint は購入すると「払って無データ」になる（quote のデモには使えるが購入には当方の Provider を使う）。
+
 ## 5. 独立レビューの記録
 
 | # | 日付 | reviewer | 結果 |
