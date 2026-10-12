@@ -98,6 +98,7 @@ export function dynamicFieldsOf(
     typeof rawUpstream["url"] !== "string" ||
     rawUpstream["url"] === "" ||
     !validUpstreamRequest(rawUpstream) ||
+    !upstreamMatchesBinding(rawUpstream, patch) ||
     typeof profileId !== "string" ||
     profileId === "" ||
     !isPlainRecord(profile) ||
@@ -612,3 +613,27 @@ function upstreamRecordOf(raw: Record<string, unknown>): { url: string; method: 
     ? { url: raw["url"] as string, method: "POST", body: raw["body"] as string, bodySha256: raw["bodySha256"] as string }
     : { url: raw["url"] as string, method: "GET" };
 }
+
+/**
+ * 復元した `upstream`（url・method・本文の sha256）が、受信 offer の `routeBinding` の言う要求と一致すること（Codex PR #173 review #3）。
+ * 束縛は `dynamic|<profile>|<METHOD>|<url>[|sha256:<hex>]`（`dynamicBindingOf`）。束縛が読めない・違う記録は動的として扱わない（fail closed）。
+ */
+function upstreamMatchesBinding(rawUpstream: Record<string, unknown>, raw: Record<string, unknown>): boolean {
+  const source = raw["source"];
+  const offer = isPlainRecord(source) ? source["offer"] : undefined;
+  const extra = isPlainRecord(offer) ? offer["extra"] : undefined;
+  const binding = isPlainRecord(extra) ? extra["routeBinding"] : undefined;
+  // 束縛が無い・動的の形でない記録（合成の試験・旧形式）はここでは判定しない: 受信 offer の束縛そのものは受信 adapter が検証する。
+  // 動的の形（`dynamic|…`）のときだけ、復元した upstream と食い違えば fail closed。
+  if (typeof binding !== "string" || !binding.startsWith("dynamic|")) return true;
+  const parts = binding.split("|");
+  try {
+    const method = rawUpstream["method"];
+    if (method === "GET") return parts.length === 4 && parts[2] === "GET" && decodeURIComponent(parts[3]!) === rawUpstream["url"];
+    if (method !== "POST") return false;
+    return parts.length === 5 && parts[2] === "POST" && decodeURIComponent(parts[3]!) === rawUpstream["url"] && decodeURIComponent(parts[4]!) === `sha256:${String(rawUpstream["bodySha256"])}`;
+  } catch {
+    return false;
+  }
+}
+

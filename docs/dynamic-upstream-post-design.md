@@ -59,3 +59,15 @@ record, re-read with the same body, paid request), HTTP/MCP input (defaults, lim
 `method POST`, `body {"query":"<a question>","numResults":3,"type":"fast"}`; expected upstream 7,000 + fee 1,000 = 8,000 base units USDC.e
 (per-purchase limit 20,000; dynamic total 60,000 of which 2,000 used on 10-10). The owner approves (funds move at `npm run sign` on Tempo MPP),
 `purchase`, `status`; evidence: Tempo inbound tx, Base outbound tx, the saved record with the body and the delivered JSON.
+
+## 5. Independent review (Codex `gpt-6-astra`, 2026-10-13, `.claude_workflow/local/dynamic-post-review1.md`)
+
+APPROVE WITH CHANGES, no blocking finding in the caller-accessible flow. Safety assessment: canonical bytes are hashed into a
+method-specific binding; both purchase re-reads, fee estimation and the paid request keep the stored target; body content never supplies
+URLs or headers; host policy, redirects, `resource.url` equality, approval, ownerKey, budget and single-signature rules are intact; the three
+extra keys are inert for signing and are echoed in `accepted` (and take part in re-read equality). Nonblocking, applied: the MPP adapter's
+`estimateFee` refuses a POST target before any RPC I/O; store recovery cross-checks the restored `upstream` (url, method, body sha256)
+against the inbound offer's `routeBinding` when that binding has the dynamic form (`dynamic|…`; synthetic fixtures and non-dynamic
+bindings are left to the inbound adapter's own verification) and marks inconsistent records invalid; a real-adapter refusal test (MPP dynamic path with a
+POST target: rejection and zero connections). Not done today: the composed quote → reopen → purchase test through `main.ts`
+(recorded as follow-up).

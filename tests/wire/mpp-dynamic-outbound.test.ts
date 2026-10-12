@@ -60,6 +60,7 @@ import type { DynamicProfile } from "../../src/config.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import { createGuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer, MppTempoCapability, OutboundRail } from "../../src/ports/outbound.js";
+import { UpstreamMethodUnsupportedError } from "../../src/ports/outbound.js";
 import { dialTo, publicLookup } from "../fixtures/dynamic/dial.js";
 import { MPP_FIXTURE_CHAIN_ID, MPP_FIXTURE_CURRENCY, MPP_FIXTURE_RECIPIENT, startMppUpstream, type MppUpstream } from "../fixtures/dynamic/mpp-upstream.js";
 import { startTempoRpc, type TempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
@@ -255,6 +256,22 @@ function feesOf(raw: Hex): { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePe
   const e = TxEnvelopeTempo.deserialize(raw as never) as unknown as { gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
   return { gas: e.gas, maxFeePerGas: e.maxFeePerGas, maxPriorityFeePerGas: e.maxPriorityFeePerGas };
 }
+
+describe("POST の上流は MPP の動的経路では受けない（docs/dynamic-upstream-post-design.md FR-P3）", () => {
+  test("readChallenge・estimateFee は I/O の前に UpstreamMethodUnsupportedError、pay は not_sent（送信 0・署名 0・枠 0）", async () => {
+    const h = await harness();
+    const offer = await h.quote();
+    const admittedBefore = h.gate.admitted;
+    const post = { url: URL_A, method: "POST", body: "{}" } as const;
+    await expect(h.rail.readChallenge(PROFILE_ID, post)).rejects.toBeInstanceOf(UpstreamMethodUnsupportedError);
+    await expect(h.rail.estimateFee!(PROFILE_ID, offer, post)).rejects.toBeInstanceOf(UpstreamMethodUnsupportedError);
+    const paid = await h.rail.pay({ routeId: PROFILE_ID, offer, paymentId: "p1", attempt: 1, deadlineMs: Date.now() + 600_000, target: post, maxFee: "5000" });
+    expect(paid).toEqual({ outcome: "not_sent", reason: "upstream_method_unsupported" });
+    expect(h.gate.admitted).toBe(admittedBefore);
+    expect(h.sends()).toBe(0);
+    expect(h.innerSigned).toHaveLength(0);
+  });
+});
 
 describe("署名の境界（設計 §3.3 (ii)、AC-16）", () => {
   const call = (patch: Tx) => ({ calls: [{ to: MPP_FIXTURE_CURRENCY, data: transferData(), ...patch }] });

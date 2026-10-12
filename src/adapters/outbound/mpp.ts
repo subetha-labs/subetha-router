@@ -458,6 +458,7 @@ export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
 
     /** 動的経路だけ（静的 route は手数料を quote 時に見積もらない）。 */
     async estimateFee(routeId: string, offer: DestinationOffer, target: UpstreamTarget): Promise<FeeEstimate> {
+      if ((target.method ?? "GET") !== "GET") throw new UpstreamMethodUnsupportedError(); // POST は x402 EVM の動的経路だけ（FR-P3）。RPC の前に拒む
       if (dynamic === undefined) throw new DynamicTargetUnsupportedError();
       void target;
       return dynamic.estimateFee(routeId, offer);
