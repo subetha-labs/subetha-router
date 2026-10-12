@@ -7,6 +7,7 @@ import { openLedger } from "../../src/store/ledger.js";
 import { realFs, type StoreFs } from "../../src/store/fs.js";
 import { Session } from "../../src/daemon/session.js";
 import { createPurchaseCore } from "../../src/daemon/purchase.js";
+import { sameUpToLearnedCodes } from "../../src/daemon/recover.js";
 import { buildRecord, jsonCopy, recordHash } from "../../src/daemon/record.js";
 import type { DaemonContext } from "../../src/daemon/interfaces.js";
 import { statusOf, type RouterStatus } from "../../src/router/client.js";
@@ -66,6 +67,41 @@ for (const path of ["status", "saved"] as const) test(`${path} body refuses ${so
     }
     expect(f.counts).toMatchObject({ purchase: 0, sign: 0 });
   } finally { f.close(); }
+});
+
+// 2026-10-13: 0.2.1 refused every 0.2.0 store with store_corrupt because the allowlist had learned the Router's paid_undelivered reasons
+// after those records were written (stored summary `unknown_code`, today's projection names the code). Tolerated in that direction only.
+test("a reason code learned after the record was written does not corrupt the store; a different known code still does", async () => {
+  for (const [stored, projected, expectOk] of [["unknown_code", "unsupported_response", true], ["unknown_code", "destination_rejected", true], ["destination_rejected", "unsupported_response", false], ["unsupported_response", "unknown_code", false]] as const) {
+    const f = fixture("submit_intent");
+    try {
+      const result = { ok: false, ref: f.ref, state: "result", outcome: "paid_data_unavailable", reason: stored, paymentId: f.r.paymentId, fundsMoved: "yes", proof: { upstreamReceipt: "none", onChainFinality: "not_checked" }, nextStep: "paid_no_data" };
+      const response = { ok: false, outcome: "paid_data_unavailable", paymentId: f.r.paymentId, reason: projected };
+      for (const state of ["submitted", "result"]) f.context.ledger.append({ ref: f.ref, state, data: { paymentId: f.r.paymentId, outcome: "paid_data_unavailable" }, sealedPlain: Buffer.from(JSON.stringify(state === "submitted" ? { response, result } : { result })) });
+      const before = readFileSync(f.file), core = createPurchaseCore(f.reopen());
+      if (expectOk) {
+        await core.recover();
+        // the stored summary (what the human saw) stays authoritative
+        expect(await core.status(f.ref, false)).toMatchObject({ state: "result", outcome: "paid_data_unavailable", reason: stored });
+      } else {
+        await expect(core.recover()).rejects.toThrow("store_corrupt");
+      }
+      expect(readFileSync(f.file).equals(before)).toBe(true);
+      expect(f.counts).toMatchObject({ purchase: 0, sign: 0, status: 0 });
+    } finally { f.close(); }
+  }
+});
+test("sameUpToLearnedCodes: only the top-level stored unknown_code → projected named code is tolerated; nothing nested; everything else must match", () => {
+  expect(sameUpToLearnedCodes({ a: 1, reason: "unknown_code" }, { a: 1, reason: "upstream_failed" })).toBe(true);
+  expect(sameUpToLearnedCodes({ a: 1, inner: { reason: "unknown_code" } }, { a: 1, inner: { reason: "upstream_failed" } })).toBe(false); // nested: not tolerated
+  expect(sameUpToLearnedCodes({ reason: "unknown_code", result: { body: { reason: "unknown_code" } } }, { reason: "x", result: { body: { reason: "y" } } })).toBe(false); // body differs
+  expect(sameUpToLearnedCodes({ reason: "unknown_code", nextStep: "unknown_code" }, { reason: "x", nextStep: "x" })).toBe(false); // another key holding the sentinel
+  expect(sameUpToLearnedCodes({ a: 1, reason: "upstream_failed" }, { a: 1, reason: "unknown_code" })).toBe(false);
+  expect(sameUpToLearnedCodes({ a: 1, reason: "unknown_code" }, { a: 2, reason: "upstream_failed" })).toBe(false);
+  expect(sameUpToLearnedCodes({ a: 1, reason: "unknown_code" }, { a: 1, reason: 5 })).toBe(false);
+  expect(sameUpToLearnedCodes({ a: 1 }, { a: 1 })).toBe(true);
+  expect(sameUpToLearnedCodes([{ reason: "unknown_code" }], [{ reason: "x" }])).toBe(false); // arrays: not tolerated
+  expect(sameUpToLearnedCodes({ reason: "unknown_code", extra: 1 }, { reason: "x" })).toBe(false);
 });
 
 test("ordinary nested body survives changed phrase and offline replay; new current phrase is checked without persistence", async () => {

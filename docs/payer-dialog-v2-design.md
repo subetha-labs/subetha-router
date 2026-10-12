@@ -86,3 +86,19 @@ Applied: a mixed-decimals test (destination 8 decimals / source 6, upstream 1000
 formatting or an `upstreamAmount`/`converted` swap; the price line separates the conversion from the sum ("provider … , equivalent to …;
 total … + Router fee … = …") so it never reads as "provider amount = fee-inclusive total".
 
+## 7. 0.2.2 — upgrade regression found on the owner's Mac (2026-10-13 ~03:45 JST)
+
+After `npm i -g @subetha/payer@0.2.1` + `install accept`, the daemon refused with `startup_refused: store_corrupt` on a healthy 0.2.0
+store. Cause: the published 0.2.0 tarball (shasum `bf5e3ec3…`) predates commits 33678c8/4cff3c3, which added the Router's
+`paid_undelivered` reasons (`unsupported_response`, `upstream_failed`, …, `destination_rejected`) to `KNOWN_CODES`. 0.2.0 wrote
+`reason: "unknown_code"` into the sealed summaries of the x402.org and Grok purchases; on recovery, 0.2.1 re-projects the stored raw
+response, now names the code, and the strict `same(stored, projected)` check fails → `store_corrupt` for the WHOLE store (fail closed by
+design). The store was never corrupt. The dialog change itself is not involved; the only other 0.2.0→0.2.1 differences are the version
+strings. Fix (`src/daemon/recover.ts` `sameUpToLearnedCodes`): where the stored summary says `unknown_code`, today's projection may name
+the code; every other difference is still corruption; the stored summary stays authoritative (it is what the human saw). Regression tests:
+`test/unit/recovery.test.ts` (stored `unknown_code` vs projected `unsupported_response` / `destination_rejected` recover; a different known
+code or the reverse direction still refuse; the ledger is untouched) and a direct unit of the comparator. 0.2.1 is superseded by 0.2.2;
+the lesson for every future allowlist change: run recovery over a ledger written by the previously published build before publishing.
+
+**Review (Codex `gpt-6-astra`, `.claude_workflow/local/payer-0.2.2-review1.md`)**: APPROVE WITH CHANGES, no blocking. Applied: the tolerance is limited to the summary's top-level `reason` (the only field `knownCodeOf` feeds); nested keys, bodies and arrays are compared strictly, with negative tests for a nested `reason`, a differing body and another key holding the sentinel.
+
