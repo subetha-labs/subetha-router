@@ -283,11 +283,24 @@ export interface ChainReader {
   svmSignatureStatus?(network: string, signature: string): Promise<{ readonly confirmationStatus: string | null; readonly err: unknown; readonly slot: number } | undefined>;
 }
 
-/** Solana の取引の要約: 成否・slot・token の残高の前後（owner × mint の組。owner は ATA の authority）。 */
+/**
+ * Solana の取引の要約: 成否・slot・token の残高の前後を **アカウントごとに**（Codex M-2 #3）。アカウントのアドレス（`accountKeys[accountIndex]`）と、
+ * 前と後のそれぞれの owner（ATA の authority）・mint を別々に持つ（前か後に無ければ null）。
+ */
+export interface SvmTokenBalanceChange {
+  readonly accountIndex: number;
+  readonly address: string | null;
+  readonly preOwner: string | null;
+  readonly preMint: string | null;
+  readonly postOwner: string | null;
+  readonly postMint: string | null;
+  readonly pre: bigint | null;
+  readonly post: bigint | null;
+}
 export interface SvmTransactionInfo {
   readonly ok: boolean;
   readonly slot: number;
-  readonly tokenBalances: readonly { readonly accountIndex: number; readonly owner: string; readonly mint: string; readonly pre: bigint; readonly post: bigint }[];
+  readonly tokenBalances: readonly SvmTokenBalanceChange[];
 }
 
 /** 行列の既存の EVM レールの公開 RPC（`docs/DEPLOY.md` の g5 の読み取りと同じ）。 */
@@ -1254,6 +1267,28 @@ async function balancesFor(reader: ChainReader, planned: PlanPurchase, plan: Pla
   return out;
 }
 
+/** 署名の印の id（試みの印と同じ置き場・同じ O_EXCL と fsync。署名を呼ぶ **前に** 作る。M-2 #5・#6）。 */
+export function signMarkerIdOf(routeId: string): string {
+  return `${routeId}.sign`;
+}
+/** 署名の印を作る（不変。既にあれば false）。中身に `fundsMoveAtSign` を残す。 */
+export function createSignMarker(evidenceDir: string, planSha: string, routeId: string, content: { readonly fundsMoveAtSign: boolean; readonly runId: string; readonly at: string }): boolean {
+  return createAttemptMarker(evidenceDir, planSha, signMarkerIdOf(routeId), { ...content, signFor: routeId });
+}
+/** どれかの plan に「資金が動く署名を呼んだ」印があれば、その plan の hash（読めない印は `corrupt`）。 */
+export function fundsMovingSignatureOf(evidenceDir: string, routeId: string): string | undefined {
+  for (const marker of attemptMarkersForRoute(evidenceDir, signMarkerIdOf(routeId))) {
+    if (marker.state === "corrupt") return "corrupt";
+    try {
+      const content = JSON.parse(readFileSync(attemptMarkerPathOf(evidenceDir, marker.planSha, signMarkerIdOf(routeId)), "utf8")) as Record<string, unknown>;
+      if (content["fundsMoveAtSign"] !== false) return marker.planSha;
+    } catch {
+      return "corrupt";
+    }
+  }
+  return undefined;
+}
+
 /** 資金が動かなかったと分かっている終わり方（印があっても、別の plan で同じ route を試みてよい）。 */
 const SAFE_PRIOR_STAGES: ReadonlySet<string> = new Set(["verified", "quote_failed", "stopped_before_signing", "not_funded"]);
 /**
@@ -1263,7 +1298,12 @@ const SAFE_PRIOR_STAGES: ReadonlySet<string> = new Set(["verified", "quote_faile
  * 同じ plan の印は呼び出し側が別に見る（`attemptMarkerStateOf`）。
  */
 export function priorAttemptHold(evidenceDir: string, routeId: string, planSha: string, all: readonly PurchaseEvidence[]): string | undefined {
-  const isSafe = (e: PurchaseEvidence): boolean => SAFE_PRIOR_STAGES.has(e.stage) || (e.stage === "sign_refused" && !(e.fundsMoveAtSign === true && e.signInvoked === true));
+  // 署名で資金が動くレール（Tempo MPP）で署名を呼んだ試みは、終わり方（`verified` を含む）によらず全 plan で二度と署名しない（Codex M-2 #5）。
+  const moved = fundsMovingSignatureOf(evidenceDir, routeId);
+  if (moved !== undefined) return moved === "corrupt" ? `a sign marker for ${routeId} is unreadable (treated as a funds-moving signature; never re-signed)` : `${routeId} already invoked a funds-moving signature under plan ${moved} (never re-signed, whatever its outcome)`;
+  const signedAndMoved = all.find((e) => e.routeId === routeId && e.fundsMoveAtSign === true && e.signInvoked === true);
+  if (signedAndMoved !== undefined) return `${routeId} already invoked a funds-moving signature (${signedAndMoved.runId}, stage ${signedAndMoved.stage}; never re-signed)`;
+  const isSafe = (e: PurchaseEvidence): boolean => SAFE_PRIOR_STAGES.has(e.stage) || e.stage === "sign_refused";
   for (const marker of attemptMarkersForRoute(evidenceDir, routeId)) {
     if (marker.planSha === planSha) continue;
     if (marker.state === "corrupt") return `an attempt marker for ${routeId} (plan ${marker.planSha}) is unreadable`;

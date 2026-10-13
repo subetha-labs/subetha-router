@@ -4,6 +4,9 @@
  *
  * - plan: 30 の `mx-<src>-to-<dst>`（route の条件は専用の設定生成 `evmTestnetsConfigOf(..., { matrix: true })` から）、役割 × レールの資金の表
  *   （**検証した初期残高 − 累計の支出**。入金は数えない。同じアカウントは 1 つにまとめる: Solana のクライアントの鍵 = Router の Solana 送信鍵）。
+ * - run（Codex M-2）: plan が `allSufficient` でなければ始めない。初めに各鍵で「今の残高 ≥ plan の初期残高 − この plan で既に試みた支出」を確かめ、
+ *   各購入は累計の帳簿（`MatrixLedger`: 初期残高 − 試みた支出。入金は数えない）と今の残高の両方で足りること。署名の前に不変の署名の印（O_EXCL・fsync）。
+ *   Solana の残高は払い手の ATA（mint・authority・token program を確かめる）だけ、レグの照合は導出した 2 つの ATA の差と owner・mint の不変。
  * - run: 1 件ずつ、`--prefunded` が必須（行列は Router の送信鍵に事前に入れた資金で払う。外すのは同じ chain の受信の依存だけで、印・保留は残す）。
  *   順序: 保留の検査 → その購入の支出の残高の検査 → 不変の試みの印（O_EXCL・fsync）→ quote → **レールごとの照合**（署名の前）→ `signInvoked` を fsync →
  *   `runSign`（`npm run sign` と同じ振り分け。全レール）→ purchase（1 回）→ status → 両レグの chain の読み取り（EVM は `Transfer`、Solana は owner × mint の残高の差）。
@@ -30,6 +33,7 @@ import {
   bodyDigest,
   compactUtc,
   createAttemptMarker,
+  createSignMarker,
   deepFreeze,
   DESIGN_GAS_CAPS,
   finalityRuleOf,
@@ -674,11 +678,17 @@ async function svmRpc(url: string, method: string, params: unknown[]): Promise<u
   return json.result;
 }
 
-/** `getTransaction`（jsonParsed）の応答を要約する（純粋。試験で確かめる）。 */
+/**
+ * `getTransaction`（jsonParsed）の応答を要約する（純粋。試験で確かめる）。アカウントごとに、アドレス（`accountKeys[accountIndex]`。jsonParsed は
+ * lookup table のアドレスも並びに含む）と、**前と後の owner・mint を別々に** 残す（後の値で前を上書きしない。Codex M-2 #3）。
+ */
 export function svmTransactionInfoOf(result: unknown): SvmTransactionInfo | undefined {
   if (!isRecord(result)) return undefined;
   const meta = isRecord(result["meta"]) ? result["meta"] : undefined;
   if (meta === undefined) return undefined;
+  const transaction = isRecord(result["transaction"]) ? result["transaction"] : {};
+  const message = isRecord(transaction["message"]) ? transaction["message"] : {};
+  const keys: (string | null)[] = (Array.isArray(message["accountKeys"]) ? message["accountKeys"] : []).map((k) => (typeof k === "string" ? k : isRecord(k) && typeof k["pubkey"] === "string" ? k["pubkey"] : null));
   const rows = (list: unknown): { accountIndex: number; owner: string; mint: string; amount: bigint }[] =>
     (Array.isArray(list) ? list : []).flatMap((b) => {
       if (!isRecord(b) || typeof b["owner"] !== "string" || typeof b["mint"] !== "string" || typeof b["accountIndex"] !== "number") return [];
@@ -691,10 +701,41 @@ export function svmTransactionInfoOf(result: unknown): SvmTransactionInfo | unde
   const tokenBalances = indexes.map((accountIndex) => {
     const a = pre.find((r) => r.accountIndex === accountIndex);
     const b = post.find((r) => r.accountIndex === accountIndex);
-    const ref = (b ?? a)!;
-    return { accountIndex, owner: ref.owner, mint: ref.mint, pre: a?.amount ?? 0n, post: b?.amount ?? 0n };
+    return { accountIndex, address: keys[accountIndex] ?? null, preOwner: a?.owner ?? null, preMint: a?.mint ?? null, postOwner: b?.owner ?? null, postMint: b?.mint ?? null, pre: a?.amount ?? null, post: b?.amount ?? null };
   });
   return { ok: meta["err"] === null, slot: typeof result["slot"] === "number" ? result["slot"] : -1, tokenBalances };
+}
+
+/** 表の mint の token program（Solana）。 */
+function tokenProgramOf(network: string, mint: string): string {
+  const entry = knownNetworkOf(KNOWN_NETWORKS, network);
+  const known = entry === undefined ? undefined : knownAssetOf(entry, mint);
+  if (known?.tokenProgram === undefined) throw new Error(`the table has no token program for ${mint} on ${network}`);
+  return known.tokenProgram;
+}
+/** owner × mint × token program の ATA（payer が送金に使う口座。`tools/svm-payer.ts`・`tools/svm-mpp-payer.ts` と同じ導出）。 */
+export async function associatedTokenAccountOf(owner: string, mint: string, tokenProgram: string): Promise<string> {
+  const [{ address }, { findAssociatedTokenPda }] = await Promise.all([import("@solana/kit"), import("@solana-program/token")]);
+  const [ata] = await findAssociatedTokenPda({ owner: address(owner), mint: address(mint), tokenProgram: address(tokenProgram) });
+  return String(ata);
+}
+
+/**
+ * ATA の `getAccountInfo`（jsonParsed）から **使える残高** を読む（純粋。Codex M-2 #4）: 口座が無ければ 0。program が表の token program、
+ * mint・authority（owner）が期待どおり、状態が `initialized`（凍結は 0）でなければ例外（残高と数えない）。
+ */
+export function svmAtaBalanceOf(result: unknown, expected: { owner: string; mint: string; tokenProgram: string }): bigint {
+  const value = isRecord(result) ? result["value"] : undefined;
+  if (value === null || value === undefined) return 0n;
+  if (!isRecord(value) || value["owner"] !== expected.tokenProgram) throw new Error("the source ATA is not owned by the table's token program");
+  const data = isRecord(value["data"]) ? value["data"] : {};
+  const parsed = isRecord(data["parsed"]) ? data["parsed"] : {};
+  const info = isRecord(parsed["info"]) ? parsed["info"] : {};
+  if (info["mint"] !== expected.mint || info["owner"] !== expected.owner) throw new Error("the source ATA's mint or authority differs from the plan");
+  if (info["state"] !== "initialized") return 0n;
+  const amount = isRecord(info["tokenAmount"]) ? info["tokenAmount"]["amount"] : undefined;
+  if (typeof amount !== "string" || !/^[0-9]+$/.test(amount)) throw new Error("the source ATA's amount is unreadable");
+  return BigInt(amount);
 }
 
 /** EVM（viem）に Solana の読み取りを足した reader。 */
@@ -704,15 +745,11 @@ export async function matrixChainReader(env: Env): Promise<ChainReader> {
   return {
     async tokenBalance(network, asset, owner) {
       if (familyOf(network) === "evm") return await evm.tokenBalance(network, asset, owner);
-      const result = await svmRpc(rpc, "getTokenAccountsByOwner", [owner, { mint: asset }, { encoding: "jsonParsed", commitment: "confirmed" }]);
-      const accounts = isRecord(result) && Array.isArray(result["value"]) ? result["value"] : [];
-      let sum = 0n;
-      for (const a of accounts) {
-        const info = isRecord(a) && isRecord(a["account"]) && isRecord(a["account"]["data"]) && isRecord(a["account"]["data"]["parsed"]) && isRecord(a["account"]["data"]["parsed"]["info"]) ? a["account"]["data"]["parsed"]["info"] : {};
-        const amount = isRecord(info["tokenAmount"]) ? info["tokenAmount"]["amount"] : undefined;
-        if (typeof amount === "string" && /^[0-9]+$/.test(amount)) sum += BigInt(amount);
-      }
-      return sum;
+      // 払い手が実際に使う口座（ATA）だけ。ほかの token 口座は数えない（Codex M-2 #4）。
+      const tokenProgram = tokenProgramOf(network, asset);
+      const ata = await associatedTokenAccountOf(owner, asset, tokenProgram);
+      const result = await svmRpc(rpc, "getAccountInfo", [ata, { encoding: "jsonParsed", commitment: "confirmed" }]);
+      return svmAtaBalanceOf(result, { owner, mint: asset, tokenProgram });
     },
     async nativeBalance(network, owner) {
       if (familyOf(network) === "evm") return await evm.nativeBalance(network, owner);
@@ -738,8 +775,9 @@ export async function matrixChainReader(env: Env): Promise<ChainReader> {
 }
 
 /**
- * Solana のレグの照合（§8.5 #4）: 署名の形、取引の成功、`mint` の残高の差が **owner（ATA の authority）ごとに** from −amount・to +amount。
- * 待つのは `waitMs` まで（commitment `confirmed`）。
+ * Solana のレグの照合（§8.5 #4・Codex M-2 #3）: 署名の形、取引の成功、そして **導出した 2 つの ATA**（from × mint、to × mint、表の token program）が
+ * ちょうど −amount と +amount だけ変わり、その 2 口座の owner（authority）・mint が前後とも計画どおり（変わっていない）こと。
+ * 口座の新規作成（前が無い）は宛先だけ、前の額 0 として許す。待つのは `waitMs` まで（commitment `confirmed`）。
  */
 export async function verifySvmLeg(reader: ChainReader, leg: "source" | "destination", planned: Pick<MatrixLeg, "network" | "asset" | "amount" | "from" | "to">, signature: unknown, opts: { waitMs: number; sleep: (ms: number) => Promise<void> }): Promise<LegEvidence> {
   const expected = { from: planned.from, to: planned.to, value: planned.amount };
@@ -758,13 +796,33 @@ export async function verifySvmLeg(reader: ChainReader, leg: "source" | "destina
     return { ...base, txHash: signature, receiptStatus: null, blockNumber: null, transfer: null, ok: false, problem: "transaction read failed (RPC)" };
   }
   if (info === undefined) return { ...base, txHash: signature, receiptStatus: null, blockNumber: null, transfer: null, ok: false, problem: "no transaction found" };
-  const deltaOf = (owner: string): bigint => info!.tokenBalances.filter((b) => b.mint === planned.asset && b.owner === owner).reduce((sum, b) => sum + (b.post - b.pre), 0n);
+  const tokenProgram = tokenProgramOf(planned.network, planned.asset);
+  const sourceAta = await associatedTokenAccountOf(planned.from, planned.asset, tokenProgram);
+  const destinationAta = await associatedTokenAccountOf(planned.to, planned.asset, tokenProgram);
   const amount = BigInt(planned.amount);
-  const fromDelta = deltaOf(planned.from);
-  const toDelta = deltaOf(planned.to);
-  const common = { ...base, txHash: signature, receiptStatus: info.ok ? "success" : "failed", blockNumber: String(info.slot), transfer: { from: planned.from, to: planned.to, value: toDelta.toString(), logIndex: -1 } };
+  const problems: string[] = [];
+  const deltaOf = (ata: string, owner: string, side: "source" | "destination"): bigint | undefined => {
+    const rows = info!.tokenBalances.filter((b) => b.address === ata);
+    if (rows.length !== 1) {
+      problems.push(`the ${side} ATA ${ata} ${rows.length === 0 ? "is not among the token balance changes" : "appears more than once"}`);
+      return undefined;
+    }
+    const row = rows[0]!;
+    if (row.postOwner !== owner || row.postMint !== planned.asset) problems.push(`the ${side} ATA's owner/mint after the transaction differs from the plan`);
+    if (row.pre !== null && (row.preOwner !== owner || row.preMint !== planned.asset)) problems.push(`the ${side} ATA's owner/mint before the transaction differs from the plan`);
+    if (row.pre === null && side === "source") problems.push("the source ATA has no balance before the transaction");
+    if (row.post === null) {
+      problems.push(`the ${side} ATA has no balance after the transaction`);
+      return undefined;
+    }
+    return row.post - (row.pre ?? 0n);
+  };
+  const fromDelta = deltaOf(sourceAta, planned.from, "source");
+  const toDelta = deltaOf(destinationAta, planned.to, "destination");
+  const common = { ...base, txHash: signature, receiptStatus: info.ok ? "success" : "failed", blockNumber: String(info.slot), transfer: { from: sourceAta, to: destinationAta, value: (toDelta ?? 0n).toString(), logIndex: -1 } };
   if (!info.ok) return { ...common, ok: false, problem: "the transaction failed (meta.err is set)" };
-  if (toDelta !== amount || fromDelta !== -amount) return { ...common, ok: false, problem: `token balance changes differ from the quote (to ${toDelta.toString()}, from ${fromDelta.toString()}, expected ±${amount.toString()} of ${planned.asset})` };
+  if (fromDelta !== undefined && toDelta !== undefined && (toDelta !== amount || fromDelta !== -amount)) problems.push(`token balance changes differ from the quote (destination ATA ${toDelta.toString()}, source ATA ${fromDelta.toString()}, expected ±${amount.toString()} of ${planned.asset})`);
+  if (problems.length > 0) return { ...common, ok: false, problem: problems.join("; ") };
   return { ...common, ok: true };
 }
 
@@ -822,6 +880,74 @@ async function fundsShortfall(reader: ChainReader, plan: MatrixPlan, planned: Ma
   return { short: undefined, balances };
 }
 
+/** この plan の 1 件の支出を鍵（アドレス × network × 資産。共有の Solana アカウントは 1 つ）ごとにまとめる。 */
+function debitsByKeyOf(plan: MatrixPlan, index: number): Map<string, { d: MatrixDebit; total: bigint }> {
+  const totals = new Map<string, { d: MatrixDebit; total: bigint }>();
+  for (const d of plan.debits) {
+    if (d.purchase !== index) continue;
+    const key = matrixBalanceKey(d.address, d.network, d.asset);
+    const t = totals.get(key) ?? { d, total: 0n };
+    t.total += BigInt(d.amount);
+    totals.set(key, t);
+  }
+  return totals;
+}
+
+/**
+ * 累計の帳簿（Codex M-2 #1）: plan の時点で検証した初期残高から、この plan で **試みた**（印のある）購入の支出を引き続ける。入金は数えない。
+ * 純粋（試験で確かめる）。`attempted` は印のある購入の番号。
+ */
+export class MatrixLedger {
+  readonly #initial = new Map<string, bigint>();
+  readonly #spent = new Map<string, bigint>();
+  constructor(private readonly plan: MatrixPlan, attempted: Iterable<number>) {
+    for (const b of plan.balances) if (b.value !== null) this.#initial.set(matrixBalanceKey(b.address, b.network, b.asset), BigInt(b.value));
+    for (const index of attempted) this.charge(index);
+  }
+  /** 鍵の残り（初期 − 累計）。初期が無ければ undefined。 */
+  remaining(key: string): bigint | undefined {
+    const initial = this.#initial.get(key);
+    return initial === undefined ? undefined : initial - (this.#spent.get(key) ?? 0n);
+  }
+  /** この購入の支出が残りで足りないなら理由。 */
+  shortfall(index: number): string | undefined {
+    for (const [key, { d, total }] of debitsByKeyOf(this.plan, index)) {
+      const left = this.remaining(key);
+      if (left === undefined) return `the plan has no verified initial balance for ${d.role} ${d.address} on ${d.network} (${d.asset ?? "native"})`;
+      if (left < total) return `${d.role} ${d.address} on ${d.network} (${d.asset ?? "native"}): ${left.toString()} left of the plan's verified initial balance after earlier attempts, this purchase needs ${total.toString()} (incoming payments are not counted)`;
+    }
+    return undefined;
+  }
+  charge(index: number): void {
+    for (const [key, { total }] of debitsByKeyOf(this.plan, index)) this.#spent.set(key, (this.#spent.get(key) ?? 0n) + total);
+  }
+  /** 試みた支出の累計（鍵ごと）。 */
+  spentOf(key: string): bigint {
+    return this.#spent.get(key) ?? 0n;
+  }
+}
+
+/**
+ * 実行の初め（Codex M-2 #1）: plan が `allSufficient` であること、そして各鍵で **今の残高 ≥ plan の初期残高 − この plan で既に試みた支出**
+ * （それより少なければ、plan の外で資金が動いた。始めない）。
+ */
+async function startCheck(reader: ChainReader, plan: MatrixPlan, ledger: MatrixLedger): Promise<string | undefined> {
+  if (plan.allSufficient !== true) return "the plan is not allSufficient (fund the payers and make a new plan)";
+  for (const b of plan.balances) {
+    if (b.value === null) return `the plan has an unreadable initial balance (${b.role} on ${b.network}); make a new plan`;
+    const key = matrixBalanceKey(b.address, b.network, b.asset);
+    let live: bigint;
+    try {
+      live = b.asset === null ? await reader.nativeBalance(b.network, b.address) : await reader.tokenBalance(b.network, b.asset, b.address);
+    } catch {
+      return `could not re-read the ${b.role} balance on ${b.network}`;
+    }
+    const floor = BigInt(b.value) - ledger.spentOf(key);
+    if (live < floor) return `${b.role} ${b.address} on ${b.network} (${b.asset ?? "native"}) has ${live.toString()}, below the plan's initial ${b.value} minus ${ledger.spentOf(key).toString()} already attempted`;
+  }
+  return undefined;
+}
+
 /**
  * 30 件を 1 つずつ。最初の `delivered` でない結果・不一致・証跡の不足で全体を止める。再試行しない。
  */
@@ -841,6 +967,13 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     return result;
   };
   out(`matrix run ${runId}: ${String(selected.length)} purchase(s), plan ${opts.planSha256} (prefunded)`);
+  // 累計の帳簿: この plan で印のある購入（どの run でも）の支出を先に引く。
+  const ledger = new MatrixLedger(opts.plan, opts.plan.purchases.filter((p) => attemptMarkerStateOf(opts.evidenceDir, opts.planSha256, p.routeId) !== "absent").map((p) => p.index));
+  const refused = await startCheck(deps.chain, opts.plan, ledger);
+  if (refused !== undefined) {
+    out(`STOP: ${refused} (nothing was started)`);
+    return report({ routeId: selected[0]?.routeId ?? "-", stage: "not_started", reason: `not funded: ${refused}` });
+  }
 
   for (const planned of selected) {
     const scanned = readAllEvidence(opts.evidenceDir);
@@ -862,7 +995,12 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
       out(`HELD ${planned.routeId}: ${hold}`);
       return report({ routeId: planned.routeId, stage: "not_started", reason: `held: ${hold}` });
     }
-    // 残高（§8.5 #5）: この購入の支出が今の残高で足りること（入金は数えない）。足りなければ印を作らずに止まる。
+    // 残高（§8.5 #5・M-2 #1）: 累計の帳簿（検証した初期残高 − 試みた支出。入金は数えない）で足り、さらに今の残高でも足りること。足りなければ印を作らずに止まる。
+    const cumulative = ledger.shortfall(planned.index);
+    if (cumulative !== undefined) {
+      out(`STOP ${planned.routeId}: not funded: ${cumulative} (nothing was started)`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: `not funded: ${cumulative}` });
+    }
     const funds = await fundsShortfall(deps.chain, opts.plan, planned);
     if (funds.short !== undefined) {
       out(`STOP ${planned.routeId}: not funded: ${funds.short} (nothing was started)`);
@@ -905,6 +1043,7 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
       out(`STOP ${planned.routeId}: already attempted under this plan (attempt marker present)`);
       return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
     }
+    ledger.charge(planned.index);
     save();
 
     // 1) quote（新しい requestId）。
@@ -932,7 +1071,12 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     evidence.paymentId = String(subject["paymentId"] ?? "");
     if (mismatches.length > 0) return stop("stopped_before_signing", `the quote differs from the plan: ${mismatches.join("; ")}`);
 
-    // 3) 署名。呼ぶ前に「呼んだ」を fsync して残す（Tempo MPP は署名で資金が動く。§8.5 #1）。
+    // 3) 署名。呼ぶ前に、不変の署名の印（O_EXCL・fsync）と証跡の `signInvoked`（原子的な書き込み・fsync）を残す（Tempo MPP は署名で資金が動く。§8.5 #1・M-2 #5）。
+    try {
+      if (!createSignMarker(opts.evidenceDir, opts.planSha256, planned.routeId, { fundsMoveAtSign, runId, at: now().toISOString() })) return stop("stopped_before_signing", "a sign marker already exists for this route under this plan (not signing again)");
+    } catch {
+      return stop("stopped_before_signing", "could not persist the sign marker; not signing");
+    }
     evidence.signInvoked = true;
     save();
     let signed: MatrixSignResult;

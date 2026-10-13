@@ -16,8 +16,12 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, loadRuntimeConfig } from "../../src/config.js";
 import { createEvmFacilitator, type ChainIo, type Hex, type JournalRecord } from "../../tools/evm-facilitator.js";
+import { existsSync } from "node:fs";
 import {
   createAttemptMarker,
+  attemptMarkerPathOf,
+  setDirSyncForTest,
+  signMarkerIdOf,
   finalityOf,
   planSha256,
   PlanRefusal,
@@ -42,12 +46,16 @@ import {
   runMatrix,
   sameAddress,
   svmTransactionInfoOf,
+  associatedTokenAccountOf,
+  MatrixLedger,
+  svmAtaBalanceOf,
+  verifySvmLeg,
   type MatrixDebit,
   type MatrixPlan,
   type MatrixPurchase,
   type MatrixSigner,
 } from "../../tools/evm-testnets-matrix.js";
-import { buildPrefundPlan, chunksOf, eip3009OfferOf, loadApprovedPrefundPlan, runPrefund, type PrefundDeps, type PrefundPlan } from "../../tools/evm-testnets-prefund.js";
+import { buildPrefundPlan, chunksOf, eip3009OfferOf, loadApprovedPrefundPlan, runPrefund, unresolvedPrefunds, type PrefundDeps, type PrefundPlan } from "../../tools/evm-testnets-prefund.js";
 import { evmTestnetsCapabilitiesOf } from "../../tools/evm-testnets-router-process.js";
 import { evmTestnetsOptionsOf } from "../../tools/evm-testnets-run.js";
 import { RAILS_ACTIVATION_ENV } from "../../tools/rails-entry.js";
@@ -308,9 +316,18 @@ class MatrixChain implements ChainReader {
   async svmSignatureStatus(_network: string, signature: string) {
     return this.statuses.get(signature);
   }
-  pay(network: string, asset: string, from: string, to: string, value: bigint, ref: string, toOverride?: string): void {
+  async pay(network: string, asset: string, from: string, to: string, value: bigint, ref: string, toOverride?: string): Promise<void> {
     if (network.startsWith("solana:")) {
-      this.svm.set(ref, { ok: true, slot: 7, tokenBalances: [{ accountIndex: 1, owner: from, mint: asset, pre: 100_000n, post: 100_000n - value }, { accountIndex: 2, owner: toOverride ?? to, mint: asset, pre: 0n, post: value }] });
+      const source = await associatedTokenAccountOf(from, asset, TOKEN_PROGRAM);
+      const destination = await associatedTokenAccountOf(toOverride ?? to, asset, TOKEN_PROGRAM);
+      this.svm.set(ref, {
+        ok: true,
+        slot: 7,
+        tokenBalances: [
+          { accountIndex: 1, address: source, preOwner: from, preMint: asset, postOwner: from, postMint: asset, pre: 100_000n, post: 100_000n - value },
+          { accountIndex: 2, address: destination, preOwner: toOverride ?? to, preMint: asset, postOwner: toOverride ?? to, postMint: asset, pre: 0n, post: value },
+        ],
+      });
       this.statuses.set(ref, { confirmationStatus: "confirmed", err: null, slot: 7 });
       return;
     }
@@ -382,8 +399,8 @@ class MatrixMcp implements McpCaller {
       const n = Number(quote.paymentId.slice(4));
       const srcRef = p.source.family === "svm" ? svmSignature(1000 + n) : hex64(0x5000 + n);
       const dstRef = p.destination.family === "svm" ? svmSignature(2000 + n) : hex64(0xd000 + n);
-      this.chain.pay(p.source.network, p.source.asset, p.source.from, p.source.to, 10_000n, srcRef, this.behaviour.sourceToOverride?.(routeId));
-      this.chain.pay(p.destination.network, p.destination.asset, p.destination.from, p.destination.to, 10_000n, dstRef);
+      await this.chain.pay(p.source.network, p.source.asset, p.source.from, p.source.to, 10_000n, srcRef, this.behaviour.sourceToOverride?.(routeId));
+      await this.chain.pay(p.destination.network, p.destination.asset, p.destination.from, p.destination.to, 10_000n, dstRef);
       const body = { market: "ETH/USDC", data: { priceUsdcPerWeth: "1" } };
       this.statuses.set(quote.paymentId, { found: true, projection: { paymentId: quote.paymentId, routeId, status: "delivered", source: { txRef: srcRef }, destination: { txRef: dstRef }, result: body } });
       return { ok: true, outcome: "delivered", paymentId: quote.paymentId, snapshot: body };
@@ -520,7 +537,7 @@ describe("matrix run (§8.5 #1, #4, #5)", () => {
     const dir = tempDir();
     const report = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: "mx-sol-to-rh" }, runDeps(mcp, chain, fakeSigner(), lines));
     expect(report.stopped?.stage).toBe("verification_failed");
-    expect(report.stopped?.reason).toMatch(/token balance changes differ/);
+    expect(report.stopped?.reason).toMatch(/destination ATA .* is not among the token balance changes/);
   });
 
   test("a mismatch stops before signing: no signature, no purchase", async () => {
@@ -633,9 +650,10 @@ describe("matrix funds table (§8.5 #5)", () => {
 /* ------------------------------------------------------------------ Solana の evidence と確定（§8.5 #4） */
 
 describe("Solana evidence and finality (§8.5 #4)", () => {
-  test("getTransaction (jsonParsed) is summarised per account: owner, mint, pre/post; a failed tx is not ok", () => {
+  test("getTransaction (jsonParsed) is summarised per account: address, pre and post owner/mint kept separately; a failed tx is not ok", () => {
     const info = svmTransactionInfoOf({
       slot: 42,
+      transaction: { message: { accountKeys: [{ pubkey: "Fee1111111111111111111111111111111111111111" }, { pubkey: "SrcAta1111111111111111111111111111111111111" }, "DstAta1111111111111111111111111111111111111"] } },
       meta: {
         err: null,
         preTokenBalances: [{ accountIndex: 1, mint: SOL_MINT, owner: SOL_PAYER, uiTokenAmount: { amount: "50000" } }],
@@ -645,7 +663,14 @@ describe("Solana evidence and finality (§8.5 #4)", () => {
         ],
       },
     });
-    expect(info).toEqual({ ok: true, slot: 42, tokenBalances: [{ accountIndex: 1, owner: SOL_PAYER, mint: SOL_MINT, pre: 50_000n, post: 40_000n }, { accountIndex: 2, owner: SOL_RECEIVER, mint: SOL_MINT, pre: 0n, post: 10_000n }] });
+    expect(info).toEqual({
+      ok: true,
+      slot: 42,
+      tokenBalances: [
+        { accountIndex: 1, address: "SrcAta1111111111111111111111111111111111111", preOwner: SOL_PAYER, preMint: SOL_MINT, postOwner: SOL_PAYER, postMint: SOL_MINT, pre: 50_000n, post: 40_000n },
+        { accountIndex: 2, address: "DstAta1111111111111111111111111111111111111", preOwner: null, preMint: null, postOwner: SOL_RECEIVER, postMint: SOL_MINT, pre: null, post: 10_000n },
+      ],
+    });
     expect(svmTransactionInfoOf({ slot: 1, meta: { err: { InstructionError: [0, "x"] } } })?.ok).toBe(false);
   });
 
@@ -659,9 +684,9 @@ describe("Solana evidence and finality (§8.5 #4)", () => {
     expect(final).toMatchObject({ final: true, rule: "finalized_commitment" });
     chain.statuses.set(sig, { confirmationStatus: "finalized", err: { x: 1 }, slot: 9 });
     expect((await finalityOf(chain, SOL_NET, sig, null, "source")).final).toBe(false);
-    chain.pay("eip155:42431", "0x20c0000000000000000000000000000000000000", T7, T8, 10_000n, hex64(1));
+    await chain.pay("eip155:42431", "0x20c0000000000000000000000000000000000000", T7, T8, 10_000n, hex64(1));
     expect(await finalityOf(chain, "eip155:42431", hex64(1), null, "source")).toMatchObject({ final: true, rule: "receipt" });
-    chain.pay("eip155:5042002", "0x3600000000000000000000000000000000000000", T7, ARC_RECEIVER, 10_000n, hex64(2));
+    await chain.pay("eip155:5042002", "0x3600000000000000000000000000000000000000", T7, ARC_RECEIVER, 10_000n, hex64(2));
     expect(await finalityOf(chain, "eip155:5042002", hex64(2), null, "source")).toMatchObject({ final: true, rule: "receipt" });
   });
 });
@@ -836,6 +861,8 @@ describe("prefund (§8.5 #3)", () => {
         return hex64(0x2000 + transfers.length);
       },
       waitReceipt: async () => "success",
+      authorizationUsed: async () => false,
+      receiptStatus: async () => undefined,
       secrets: Secrets.fromEnv({}),
       out: () => {},
     };
@@ -862,5 +889,213 @@ describe("prefund (§8.5 #3)", () => {
     expect(settles).toHaveLength(facilitatorPieces + 1);
     // 鍵が plan の払い手でなければ何もしない。
     await expect(runPrefund(plan, sha, tempDir(), { ...deps, payerAddress: T8 })).rejects.toThrow(/payer/);
+  });
+});
+
+/* ------------------------------------------------------------------ Codex M-2 の指摘（#1〜#6） */
+
+describe("M-2 #1: cumulative funding from verified initial balances (no credit for incoming payments)", () => {
+  test("a plan that is not allSufficient is refused before anything starts", async () => {
+    const chain = new MatrixChain();
+    chain.balanceOf = (network, asset, owner) => (owner === T8 && network === "eip155:46630" && asset !== null ? 55_000n : 10n ** 24n);
+    const plan = await matrixPlan(chain);
+    expect(plan.allSufficient).toBe(false);
+    // 実行時には残高が増えている（受信の入金）。それでも始めない。
+    chain.balanceOf = () => 10n ** 24n;
+    const mcp = new MatrixMcp(plan, chain);
+    const report = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: tempDir(), prefunded: true }, runDeps(mcp, chain, fakeSigner(), []));
+    expect(report.stopped?.reason).toMatch(/not allSufficient/);
+    expect(mcp.calls).toEqual([]);
+  });
+
+  test("at run start the live balance must be >= the plan's initial minus the spend already attempted under this plan", async () => {
+    const chain = new MatrixChain();
+    chain.balanceOf = (network, asset, owner) => (owner === T8 && network === "eip155:46630" && asset !== null ? 60_000n : 10n ** 24n);
+    const plan = await matrixPlan(chain);
+    expect(plan.allSufficient).toBe(true);
+    const sha = planSha256(plan);
+    const dir = tempDir();
+    // 5 件の rh 宛ての購入は既に試みた（印）。残りの床は 60,000 − 50,000 = 10,000。
+    const rhDest = plan.purchases.filter((p) => p.dst === "rh");
+    for (const p of rhDest.slice(0, 5)) createAttemptMarker(dir, sha, p.routeId, { runId: "earlier" });
+    chain.balanceOf = (network, asset, owner) => (owner === T8 && network === "eip155:46630" && asset !== null ? 9_999n : 10n ** 24n);
+    const mcp = new MatrixMcp(plan, chain);
+    const report = await runMatrix({ plan, planSha256: sha, evidenceDir: dir, prefunded: true, only: rhDest[5]!.routeId }, runDeps(mcp, chain, fakeSigner(), []));
+    expect(report.stopped?.reason).toMatch(/below the plan's initial 60000 minus 50000 already attempted/);
+    expect(mcp.calls).toEqual([]);
+    // 床ちょうどなら始める。
+    chain.balanceOf = (network, asset, owner) => (owner === T8 && network === "eip155:46630" && asset !== null ? 10_000n : 10n ** 24n);
+    const ok = await runMatrix({ plan, planSha256: sha, evidenceDir: dir, prefunded: true, only: rhDest[5]!.routeId }, runDeps(new MatrixMcp(plan, chain), chain, fakeSigner(), []));
+    expect(ok.stopped).toBeUndefined();
+  });
+
+  test("the ledger charges every attempted purchase (shared Solana account as one key) and never credits receipts", async () => {
+    const plan = await matrixPlan();
+    const solDebitors = plan.purchases.filter((p) => p.source.family === "svm" || p.destination.family === "svm");
+    expect(solDebitors).toHaveLength(12);
+    const tight = { ...plan, balances: plan.balances.map((b) => (b.network === SOL_NET && b.kind === "token" ? { ...b, value: "115000" } : b)) } as MatrixPlan;
+    const ledger = new MatrixLedger(tight, solDebitors.slice(0, 11).map((p) => p.index));
+    // 11 件で 110,000、残り 5,000 < 10,000（どちらの役割の支出も同じ口座から）。
+    expect(ledger.shortfall(solDebitors[11]!.index)).toMatch(/5000 left/);
+    expect(new MatrixLedger(tight, solDebitors.slice(0, 10).map((p) => p.index)).shortfall(solDebitors[11]!.index)).toBeUndefined();
+  });
+});
+
+describe("M-2 #2: prefund unknown outcomes hold across plan hashes until reconciled on chain", () => {
+  test("the plan fails when a balance cannot be read (it never requests the full target blindly)", async () => {
+    const chain = new PrefundChain();
+    chain.balanceOf = () => {
+      throw new Error("rpc down");
+    };
+    await expect(buildPrefundPlan({ SUBETHA_PAYER_ADDRESS: T7, SUBETHA_ROUTER_RECEIVER: T8 }, chain)).rejects.toThrow(/could not read a balance/);
+  });
+
+  test("a 5xx settle is unknown; a regenerated plan holds the same (network, asset, payer, recipient) until authorizationState shows it used or expired", async () => {
+    const dir = tempDir();
+    const planA = await prefundPlan();
+    let used = false;
+    let clock = new Date("2026-10-13T12:00:00Z");
+    const settles: unknown[] = [];
+    let answer = 503;
+    const deps: PrefundDeps = {
+      payerAddress: T7,
+      signAuthorization: (offer, chainId) => createX402Payer(PAYER_KEY).credentialFor(offer as never, chainId),
+      async settle(body) {
+        settles.push(body);
+        return answer === 200 ? { status: 200, body: { success: true, transaction: hex64(0x3000 + settles.length) } } : { status: answer, body: {} };
+      },
+      transfer: async () => hex64(0x4444),
+      waitReceipt: async () => "success",
+      authorizationUsed: async () => used,
+      receiptStatus: async () => undefined,
+      secrets: Secrets.fromEnv({}),
+      out: () => {},
+      now: () => clock,
+    };
+    const a = await runPrefund(planA, planSha256(planA), dir, deps);
+    expect(a.stopped?.reason).toMatch(/503/);
+    expect(unresolvedPrefunds(dir)).toHaveLength(1);
+    // 新しい plan（別の hash）: 照合しても未使用・期限内 → rh への入金は送らない。
+    const planB = { ...planA, createdAt: "2026-10-13T12:05:00.000Z" } as PrefundPlan;
+    answer = 200;
+    const b = await runPrefund(planB, planSha256(planB), dir, deps);
+    expect(b.stopped?.reason).toMatch(/held: an earlier prefund to the same/);
+    expect(settles).toHaveLength(1);
+    // chain で使用済みと分かれば `used`（払われた）で確定し、新しい plan は進む。
+    used = true;
+    const planC = { ...planA, createdAt: "2026-10-13T12:06:00.000Z" } as PrefundPlan;
+    const c = await runPrefund(planC, planSha256(planC), dir, deps);
+    expect(c.reconciled).toEqual([{ planSha: planSha256(planA), index: 1, state: "used" }]);
+    expect(c.stopped).toBeUndefined();
+    // 期限切れの未使用も確定（もう使えない）。
+    const dir2 = tempDir();
+    used = false;
+    answer = 503;
+    await runPrefund(planA, planSha256(planA), dir2, deps);
+    clock = new Date("2026-10-13T12:10:00Z");
+    const d = await runPrefund(planB, planSha256(planB), dir2, { ...deps, settle: async () => ({ status: 200, body: { success: true, transaction: hex64(0x5555) } }) });
+    expect(d.reconciled?.[0]?.state).toBe("expired_unused");
+    expect(d.stopped).toBeUndefined();
+  });
+});
+
+describe("M-2 #3/#4: Solana evidence by derived ATA with fixed identity; funds from the source ATA only", () => {
+  async function verifyWith(rows: (src: string, dst: string) => SvmTransactionInfo["tokenBalances"]) {
+    const chain = new MatrixChain();
+    const sig = svmSignature(77);
+    const src = await associatedTokenAccountOf(SOL_PAYER, SOL_MINT, TOKEN_PROGRAM);
+    const dst = await associatedTokenAccountOf(SOL_RECEIVER, SOL_MINT, TOKEN_PROGRAM);
+    chain.svm.set(sig, { ok: true, slot: 1, tokenBalances: rows(src, dst) });
+    return verifySvmLeg(chain, "source", { network: SOL_NET, asset: SOL_MINT, amount: "10000", from: SOL_PAYER, to: SOL_RECEIVER }, sig, { waitMs: 0, sleep: async () => {} });
+  }
+  const row = (accountIndex: number, address: string, preOwner: string | null, postOwner: string, pre: bigint | null, post: bigint) => ({ accountIndex, address, preOwner, preMint: preOwner === null ? null : SOL_MINT, postOwner, postMint: SOL_MINT, pre, post });
+
+  test("exactly the two derived ATAs change by -amount/+amount with unchanged owner and mint", async () => {
+    expect((await verifyWith((src, dst) => [row(1, src, SOL_PAYER, SOL_PAYER, 50_000n, 40_000n), row(2, dst, SOL_RECEIVER, SOL_RECEIVER, 0n, 10_000n)])).ok).toBe(true);
+    // 宛先 ATA を同じ取引で作る（前が無い）のは許す。
+    expect((await verifyWith((src, dst) => [row(1, src, SOL_PAYER, SOL_PAYER, 50_000n, 40_000n), row(2, dst, null, SOL_RECEIVER, null, 10_000n)])).ok).toBe(true);
+  });
+
+  test("a transfer followed by an authority change on the source account is rejected (pre owner is kept, not overwritten by post)", async () => {
+    const r = await verifyWith((src, dst) => [row(1, src, SOL_PROVIDER, SOL_PAYER, 50_000n, 40_000n), row(2, dst, SOL_RECEIVER, SOL_RECEIVER, 0n, 10_000n)]);
+    expect(r.ok).toBe(false);
+    expect(r.problem).toMatch(/source ATA's owner\/mint before/);
+    const r2 = await verifyWith((src, dst) => [row(1, src, SOL_PAYER, SOL_PROVIDER, 50_000n, 40_000n), row(2, dst, SOL_RECEIVER, SOL_RECEIVER, 0n, 10_000n)]);
+    expect(r2.problem).toMatch(/source ATA's owner\/mint after/);
+  });
+
+  test("a debit from another account owned by the payer (not the derived ATA) does not count", async () => {
+    const r = await verifyWith((_src, dst) => [row(1, "Other1111111111111111111111111111111111111111", SOL_PAYER, SOL_PAYER, 50_000n, 40_000n), row(2, dst, SOL_RECEIVER, SOL_RECEIVER, 0n, 10_000n)]);
+    expect(r.ok).toBe(false);
+    expect(r.problem).toMatch(/source ATA .* is not among/);
+  });
+
+  test("the funds read uses the source ATA: missing → 0, frozen → 0, wrong mint/authority/program → refused", () => {
+    const expected = { owner: SOL_PAYER, mint: SOL_MINT, tokenProgram: TOKEN_PROGRAM };
+    const account = (info: Record<string, unknown>, owner = TOKEN_PROGRAM) => ({ value: { owner, data: { parsed: { info: { mint: SOL_MINT, owner: SOL_PAYER, state: "initialized", tokenAmount: { amount: "123" }, ...info } } } } });
+    expect(svmAtaBalanceOf(account({}), expected)).toBe(123n);
+    expect(svmAtaBalanceOf({ value: null }, expected)).toBe(0n);
+    expect(svmAtaBalanceOf(account({ state: "frozen" }), expected)).toBe(0n);
+    expect(() => svmAtaBalanceOf(account({ mint: "So11111111111111111111111111111111111111112" }), expected)).toThrow(/mint or authority/);
+    expect(() => svmAtaBalanceOf(account({ owner: SOL_PROVIDER }), expected)).toThrow(/mint or authority/);
+    expect(() => svmAtaBalanceOf(account({}, "11111111111111111111111111111111"), expected)).toThrow(/token program/);
+  });
+});
+
+describe("M-2 #5/#6: a funds-moving signature is never repeated; marker fsync → signInvoked fsync → sign", () => {
+  test("a delivered (verified) Tempo route is held under every later plan", async () => {
+    const chain = new MatrixChain();
+    const plan = await matrixPlan(chain);
+    const dir = tempDir();
+    const first = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: "mx-tempo-to-rh" }, runDeps(new MatrixMcp(plan, chain), chain, fakeSigner(), []));
+    expect(first.stopped).toBeUndefined();
+    const plan2 = { ...plan, createdAt: "2026-10-13T13:00:00.000Z" } as MatrixPlan;
+    const signer2 = fakeSigner();
+    const second = await runMatrix({ plan: plan2, planSha256: planSha256(plan2), evidenceDir: dir, prefunded: true, only: "mx-tempo-to-rh" }, runDeps(new MatrixMcp(plan2, chain), chain, signer2, []));
+    expect(second.stopped?.reason).toMatch(/funds-moving signature .*never re-signed/);
+    expect(signer2.calls).toEqual([]);
+    // 署名で資金が動かないレール（x402 Solana）は verified の後に別の plan で再び買える。
+    const okFirst = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: "mx-sol-to-rh" }, runDeps(new MatrixMcp(plan, chain), chain, fakeSigner(), []));
+    expect(okFirst.stopped).toBeUndefined();
+    const okSecond = await runMatrix({ plan: plan2, planSha256: planSha256(plan2), evidenceDir: dir, prefunded: true, only: "mx-sol-to-rh" }, runDeps(new MatrixMcp(plan2, chain), chain, fakeSigner(), []));
+    expect(okSecond.stopped).toBeUndefined();
+  });
+
+  test("at the moment of signing, the attempt marker and the sign marker exist and their directory was fsynced after each, and the evidence already says signInvoked", async () => {
+    const chain = new MatrixChain();
+    const plan = await matrixPlan(chain);
+    const sha = planSha256(plan);
+    const dir = tempDir();
+    const events: string[] = [];
+    setDirSyncForTest((d) => events.push(`fsync:${d}`));
+    try {
+      const marker = attemptMarkerPathOf(dir, sha, "mx-tempo-to-rh");
+      const signMarker = attemptMarkerPathOf(dir, sha, signMarkerIdOf("mx-tempo-to-rh"));
+      const markersDir = path.dirname(marker);
+      let checked = false;
+      const sign: MatrixSigner = async (_q, planned) => {
+        events.push("sign");
+        expect(existsSync(marker)).toBe(true);
+        expect(existsSync(signMarker)).toBe(true);
+        expect(JSON.parse(readFileSync(signMarker, "utf8"))).toMatchObject({ fundsMoveAtSign: true, signFor: "mx-tempo-to-rh" });
+        // 印の置き場は 2 回以上 fsync 済み（試みの印・署名の印の各作成の後）。
+        expect(events.filter((e) => e === `fsync:${markersDir}`).length).toBeGreaterThanOrEqual(4);
+        const evidenceFiles = (await import("node:fs")).readdirSync(dir).filter((f) => f.startsWith("run-"));
+        const evidence = JSON.parse(readFileSync(path.join(dir, evidenceFiles[0]!, "purchases", "mx-tempo-to-rh.json"), "utf8")) as PurchaseEvidence;
+        expect(evidence.signInvoked).toBe(true);
+        checked = true;
+        return { ok: true, credential: "Y3JlZA==", kind: planned.expectedSign };
+      };
+      const report = await runMatrix({ plan, planSha256: sha, evidenceDir: dir, prefunded: true, only: "mx-tempo-to-rh" }, runDeps(new MatrixMcp(plan, chain), chain, sign, []));
+      expect(report.stopped).toBeUndefined();
+      expect(checked).toBe(true);
+      // 順: 署名の印の作成の後の fsync → 証跡の fsync → 署名。
+      const signAt = events.indexOf("sign");
+      const lastMarkerSyncBeforeSign = events.slice(0, signAt).lastIndexOf(`fsync:${markersDir}`);
+      expect(lastMarkerSyncBeforeSign).toBeGreaterThan(-1);
+      expect(events.slice(lastMarkerSyncBeforeSign, signAt).some((e) => e.endsWith("/purchases"))).toBe(true);
+    } finally {
+      setDirSyncForTest(undefined);
+    }
   });
 });
