@@ -332,3 +332,12 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 ### 8.4 進め方
 
 設計の独立レビュー（Codex）と実装は並行（設計の指摘は実装に反映）。実装の後に回帰・Codex の実装レビュー → 事前の資金移動 → plan → 30 件を 1 件ずつ（`delivered` 以外で止まる。testnet は owner の常設の許可で都度の承認なし）→ 確定・reopen → 記録。
+
+### 8.5 設計レビュー M-1（Codex `gpt-6-astra`、2026-10-13）: APPROVE WITH CHANGES、6 件（`review-m1.md`）
+
+1. Tempo MPP は `sign` で送金する（`tools/sign-run.ts:40`）。driver は署名の例外を「支払いは始まっていない」としている → 署名の前に payer・network・subject を照合し試みの印を fsync、Tempo の署名の後の失敗は `funds_possibly_moved`（unknown）として残し、tx の参照があれば記録、再署名しない（plan を作り直しても同じ route は始めない）。MPP Solana は署名だけで送出は purchase（同 `:54`）。
+2. 照合はレールごとに: rail・scheme・CAIP network・資産・金額・受取先・payer・埋め込みの challenge を署名の前に。MPP は `fundsMoveOnCredential: true` が正。Solana のアドレスは大文字小文字を区別して比べる。署名後の chainId の検査は EVM だけ。
+3. 事前の資金移動を自前 facilitator で行うなら、1 回 ≤ 20,000（`tools/evm-facilitator.ts:58` の上限）に分けて、それぞれを plan に載せて journal に残す。facilitator の検査を緩めない・資金移動用の extra を足さない。
+4. Solana のレグの証跡: 署名・transaction の成功・mint・ATA・authority・金額・finalized を読む。Tempo・Arc の確定の規則も決める（Tempo・Arc は receipt で確定（即時確定のチェーン）、Solana は `finalized`）。
+5. `--prefunded` は「資金の前提」だけを外し、試みの印・unknown の保留・別の plan での試みの数え方は外さない。残高の検査は検証済みの初期残高からの累積の支出で（入金を数えない）、Solana の共有の口座は重複して数えない。資金移動の plan は資金移動の前に記録する。
+6. 設計レビューと実装の並行は AGENTS.md の順序から外れる → 実装の担当にレビュー全文を渡して反映させ、実装の後に Codex の実装レビューを必ず行う（親の判断。owner は範囲を承認済み）。
