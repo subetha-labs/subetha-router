@@ -25,7 +25,7 @@ import { pathToFileURL } from "node:url";
 
 import { stableJson } from "../src/core/intent.js";
 import { KNOWN_NETWORKS, knownAssetOf, knownNetworkOf } from "../src/shared/networks.js";
-import { DEFAULT_MAX_FEE_PER_GAS, DEFAULT_RPC_URLS, SETTLE_GAS_LIMIT } from "./evm-facilitator.js";
+import { DEFAULT_MAX_FEE_PER_GAS, DEFAULT_MAX_SETTLE_GAS, DEFAULT_RPC_URLS } from "./evm-facilitator.js";
 import { EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmInboundRouteOf, evmOutboundRouteOf, evmTestnetChainsOf, evmTestnetsConfigOf, INBOUND, type EvmTestnetChain } from "./remote-mcp-config.js";
 import { runSign } from "./sign-run.js";
 
@@ -473,6 +473,11 @@ export function purchasesOf(chains: readonly EvmTestnetChain[], addresses: PlanA
     const text = env[`EVM_FACILITATOR_MAX_FEE_PER_GAS_${chainId}`];
     return text !== undefined && /^[1-9][0-9]{0,30}$/.test(text) ? BigInt(text) : (DEFAULT_MAX_FEE_PER_GAS[network] ?? 1_000_000_000n);
   };
+  const maxSettleGasOf = (network: string): bigint => {
+    const chainId = network.split(":")[1] ?? "";
+    const text = env[`EVM_FACILITATOR_MAX_GAS_${chainId}`];
+    return text !== undefined && /^[1-9][0-9]{0,15}$/.test(text) ? BigInt(text) : (DEFAULT_MAX_SETTLE_GAS[network] ?? 200_000n);
+  };
   const leg = (network: string, asset: string, decimals: number, amount: string, fromRole: string, from: string, toRole: string, to: string): PlanLeg => {
     const selfHosted = network !== BASE_SEPOLIA;
     return {
@@ -489,7 +494,8 @@ export function purchasesOf(chains: readonly EvmTestnetChain[], addresses: PlanA
       facilitator: selfHosted ? "self-hosted" : "x402.org",
       gasPayerRole: selfHosted ? "facilitatorGas" : "x402.org facilitator (its own key)",
       gasPayer: selfHosted ? addresses.facilitatorGas : null,
-      gasLimitPerSettle: selfHosted ? SETTLE_GAS_LIMIT.toString() : null,
+      // facilitator は見積もり × 1.25 を送り、この network の上限（`EVM_FACILITATOR_MAX_GAS_<chainId>`、既定 `DEFAULT_MAX_SETTLE_GAS`）を超えれば送らない。資金の表は上限で数える。
+      gasLimitPerSettle: selfHosted ? maxSettleGasOf(network).toString() : null,
       maxFeePerGasCapWei: selfHosted ? maxFeeOf(network).toString() : null,
       processGasCapWei: selfHosted ? gasCapOf(network).toString() : null,
     };
@@ -655,7 +661,8 @@ export async function buildPlan(chains: readonly EvmTestnetChain[], env: Env, re
     const cap = BigInt(legSample?.processGasCapWei ?? "0");
     const maxFeeCap = BigInt(legSample?.maxFeePerGasCapWei ?? "0");
     const estimate = n.estimatedMaxFeePerGasWei === null ? null : BigInt(n.estimatedMaxFeePerGasWei);
-    const need = estimate === null ? null : settles * SETTLE_GAS_LIMIT * estimate;
+    const gasLimit = BigInt(legSample?.gasLimitPerSettle ?? "0");
+    const need = estimate === null ? null : settles * gasLimit * estimate;
     const b = balances.find((x) => x.role === "facilitatorGas" && x.network === n.network && x.kind === "native");
     const have = b?.value === null || b?.value === undefined ? null : BigInt(b.value);
     const ok = need !== null && have !== null && have >= need && need <= cap && estimate !== null && estimate <= maxFeeCap;
@@ -669,9 +676,9 @@ export async function buildPlan(chains: readonly EvmTestnetChain[], env: Env, re
       have: have === null ? null : have.toString(),
       ok,
       note:
-        `${settles.toString()} settles x gas limit ${SETTLE_GAS_LIMIT.toString()} x estimated maxFeePerGas ${estimate === null ? "?" : estimate.toString()} wei; ` +
+        `${settles.toString()} settles x max gas per settle ${gasLimit.toString()} x estimated maxFeePerGas ${estimate === null ? "?" : estimate.toString()} wei; ` +
         `must be <= process gas cap ${cap.toString()} wei and the estimate <= maxFeePerGas cap ${maxFeeCap.toString()} wei ` +
-        `(worst case at the fee cap: ${(settles * SETTLE_GAS_LIMIT * maxFeeCap).toString()} wei)`,
+        `(worst case at the fee cap: ${(settles * gasLimit * maxFeeCap).toString()} wei)`,
     });
   }
   return {

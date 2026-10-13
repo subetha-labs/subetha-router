@@ -21,6 +21,8 @@ import {
   type SetTimer,
   type AuthorizationUsedLog,
   type ChainIo,
+  DEFAULT_MAX_SETTLE_GAS,
+  type TransferAuthorizationCall,
   type EvmFacilitator,
   type FacilitatorJournal,
   type FacilitatorResponse,
@@ -101,6 +103,9 @@ interface FakeChain {
   wait: (hash: Hex) => Promise<ReceiptView | undefined>;
   verify: (n: number) => Promise<VerifyResult>;
   fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+  /** gas の見積り（既定 100,000）。 */
+  estimate: (call: TransferAuthorizationCall) => Promise<bigint>;
+  estimates: TransferAuthorizationCall[];
 }
 
 function fakeChain(asset: string, gasCap = 10n ** 18n): FakeChain {
@@ -115,6 +120,8 @@ function fakeChain(asset: string, gasCap = 10n ** 18n): FakeChain {
     wait: async (hash) => self.receipts.get(hash) ?? okReceipt(asset),
     verify: async () => ({ isValid: true, payer: FROM }),
     fees: { maxFeePerGas: GWEI, maxPriorityFeePerGas: 1n },
+    estimate: async () => 100_000n,
+    estimates: [],
     io: undefined as unknown as ChainIo,
   };
   const keyOf = (from: string, nonce: string) => `${from.toLowerCase()}|${nonce.toLowerCase()}`;
@@ -122,6 +129,7 @@ function fakeChain(asset: string, gasCap = 10n ** 18n): FakeChain {
     maxLogRange: 500n,
     maxFeePerGas: 10n * GWEI,
     gasCap,
+    maxSettleGas: asset === SEPOLIA_USDC ? DEFAULT_MAX_SETTLE_GAS[SEPOLIA]! : DEFAULT_MAX_SETTLE_GAS[RH]!,
     reader: {
       async authorizationState(_asset, from, nonce) {
         self.calls.push("authorizationState");
@@ -151,6 +159,11 @@ function fakeChain(asset: string, gasCap = 10n ** 18n): FakeChain {
       async feesPerGas() {
         self.calls.push("feesPerGas");
         return self.fees;
+      },
+      async estimateTransferGas(call) {
+        self.calls.push("estimateGas");
+        self.estimates.push(call);
+        return await self.estimate(call);
       },
     },
     writer: {
@@ -495,8 +508,8 @@ describe("合流・指紋・直列・待ち行列・gas", () => {
   });
 
   test("gas の累計の上限: 1 回目は通り、累計 + 最悪値が上限を超える 2 回目は 400（送出なし）", async () => {
-    // 最悪値 = 200,000 × 1 gwei = 2e14。上限 2.5e14。1 回目の実費 = 100,000 × 1 gwei = 1e14。
-    const rh = fakeChain(USDG, 250_000n * GWEI);
+    // 最悪値 = gas 上限 125,000（見積り 100,000 × 1.25）× 1 gwei = 1.25e14。上限 2e14。1 回目の実費 = 100,000 × 1 gwei = 1e14。
+    const rh = fakeChain(USDG, 200_000n * GWEI);
     const h = await harness({ rh });
     expect((await h.settle(body({ nonce: nonceOf(1) }))).status).toBe(200);
     expect(h.f.gasSpent(RH)).toBe(100_000n * GWEI);
@@ -504,7 +517,7 @@ describe("合流・指紋・直列・待ち行列・gas", () => {
     expect(second.status).toBe(400);
     expect(second.body).toMatchObject({ errorReason: "gas_cap_reached" });
     expect(h.rh.writes).toHaveLength(1);
-    expect(h.rh.writes[0]).toMatchObject({ gas: 200_000n, maxFeePerGas: GWEI });
+    expect(h.rh.writes[0]).toMatchObject({ gas: 125_000n, maxFeePerGas: GWEI });
   });
 
   test("maxFeePerGas の見積りが network の上限を超えれば 400（送出なし）", async () => {
@@ -863,6 +876,24 @@ function markUsedOn(chain: FakeChain, withTx: boolean): void {
 /** 手順 4 の後の各 400 の経路で、await の間に他で使われる（state が used に変わる）。 */
 const RACE_PATHS: ReadonlyArray<readonly [string, (h: Harness, withTx: boolean) => void]> = [
   [
+    "gas の見積りの失敗（gas_estimate_unavailable）",
+    (h, withTx) => {
+      h.rh.estimate = async () => {
+        markUsedOn(h.rh, withTx);
+        throw new Error("execution reverted");
+      };
+    },
+  ],
+  [
+    "gas の見積りが上限超え（gas_limit_too_high）",
+    (h, withTx) => {
+      h.rh.estimate = async () => {
+        markUsedOn(h.rh, withTx);
+        return 200_000n;
+      };
+    },
+  ],
+  [
     "手数料の見積りの失敗（fee_estimate_unavailable）",
     (h, withTx) => {
       h.rh.io.reader.feesPerGas = async () => {
@@ -1130,5 +1161,80 @@ describe("I-1 #4: 起動の失敗は固定の文言だけ（RPC の URL・鍵・
       expect(all).toMatch(/^evm-facilitator: EVM_FACILITATOR_[A-Z_0-9]+ must /);
       for (const secret of ["SECRETNET999", "SECRETHOST", "SECRET789", SECRET_KEY, SECRET_TOKEN]) expect(all).not.toContain(secret);
     }
+  });
+});
+
+describe("gas の上限は見積り × 1.25（Sepolia の out of gas。2026-10-13 の live）", () => {
+  test("送出の gas = 見積り × 1.25 の切り上げ。見積りは送出と同じ呼び出し（署名・authorization）", async () => {
+    const h = await harness();
+    h.rh.estimate = async () => 90_001n;
+    expect((await h.settle(body())).status).toBe(200);
+    // 90,001 × 1.25 = 112,501.25 → 112,502
+    expect(h.rh.writes[0]?.gas).toBe(112_502n);
+    const { gas: _gas, maxFeePerGas: _f, maxPriorityFeePerGas: _p, ...sentCall } = h.rh.writes[0]!;
+    expect(h.rh.estimates).toEqual([sentCall]);
+    // 見積りは verify の後、送出の前。
+    expect(h.rh.calls.indexOf("estimateGas")).toBeGreaterThan(h.rh.calls.indexOf("sdkVerify"));
+    expect(h.rh.calls.indexOf("estimateGas")).toBeLessThan(h.rh.calls.indexOf("write"));
+  });
+
+  test("gas の累計の上限の最悪値も実際に送る gas 上限で数える", async () => {
+    // 見積り 160,000 → gas 上限 200,000。最悪値 2e14。上限 1.9e14 なら拒む（旧来の固定値でも同じだが、見積り 100,000 なら通る）。
+    const rh = fakeChain(USDG, 190_000n * GWEI);
+    const h = await harness({ rh });
+    h.rh.estimate = async () => 160_000n;
+    expect((await h.settle(body())).body).toMatchObject({ errorReason: "gas_cap_reached" });
+    h.rh.estimate = async () => 100_000n;
+    expect((await h.settle(body())).status).toBe(200);
+  });
+
+  test("見積り × 1.25 が network の上限を超えれば送出しない（未使用を読み直して 400）", async () => {
+    const h = await harness();
+    // 160,001 × 1.25 = 200,002 > 200,000
+    h.rh.estimate = async () => 160_001n;
+    const res = await h.settle(body());
+    expect(res).toMatchObject({ status: 400, body: { errorReason: "gas_limit_too_high" } });
+    expect(h.rh.writes).toHaveLength(0);
+    expect(h.journal.records).toEqual([]);
+    // 手順 4 の 2 回 + 拒む前の読み直し 1 回。
+    expect(h.rh.calls.filter((c) => c === "authorizationState")).toHaveLength(3);
+    expect(h.rh.calls.lastIndexOf("authorizationState")).toBeGreaterThan(h.rh.calls.indexOf("estimateGas"));
+  });
+
+  test("ちょうど上限（見積り 160,000 → 200,000）は送る", async () => {
+    const h = await harness();
+    h.rh.estimate = async () => 160_000n;
+    expect((await h.settle(body())).status).toBe(200);
+    expect(h.rh.writes[0]?.gas).toBe(200_000n);
+  });
+
+  test("見積りの失敗は送出せず、未使用を読み直して 400", async () => {
+    const h = await harness();
+    h.rh.estimate = async () => {
+      throw new Error("execution reverted");
+    };
+    const res = await h.settle(body());
+    expect(res).toMatchObject({ status: 400, body: { errorReason: "gas_estimate_unavailable" } });
+    expect(h.rh.writes).toHaveLength(0);
+    expect(h.rh.calls.filter((c) => c === "authorizationState")).toHaveLength(3);
+  });
+
+  test("Ethereum Sepolia の既定の上限 400,000 は live の見積り 288,251（× 1.25 = 360,314）を通す", async () => {
+    const h = await harness();
+    h.sepolia.estimate = async () => 288_251n;
+    expect((await h.settle(body({ network: SEPOLIA, validBefore: NOW_S + 120 }))).status).toBe(200);
+    expect(h.sepolia.writes[0]?.gas).toBe(360_314n);
+    expect(DEFAULT_MAX_SETTLE_GAS[SEPOLIA]).toBe(400_000n);
+    // 速いチェーンの既定（200,000）では同じ見積りは拒む。
+    h.rh.estimate = async () => 288_251n;
+    expect((await h.settle(body())).body).toMatchObject({ errorReason: "gas_limit_too_high" });
+  });
+
+  test("送出の後の不明（receipt の期限切れ）の最悪値も送った gas 上限で数える", async () => {
+    const h = await harness();
+    h.rh.estimate = async () => 100_000n;
+    h.rh.wait = async () => undefined;
+    await h.settle(body());
+    expect(h.f.gasSpent(RH)).toBe(125_000n * GWEI);
   });
 });

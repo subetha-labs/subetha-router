@@ -287,3 +287,9 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
   5. facilitator: journal の新規作成でディレクトリを fsync しない → 修正。`000fb6d`。
   6. facilitator: 起動の失敗で RPC の URL（鍵を含み得る）を出す → 固定の code だけ。`000fb6d`。
 - **I-2（readback、2026-10-13）: REJECT、残り 2 件**（`review-i2.md`）。1・2・4・6 は解決。残り: #3 印・証跡の新しい祖先（`attempts` を持つ証跡のディレクトリ）を fsync しない、#5 前回の起動がディレクトリの fsync で失敗した後の再起動では「既にある」として fsync を省く。どちらも親が確認し、**ファイルの親から root までの全ディレクトリを毎回 fsync** に変更（それぞれ失敗→再起動・新しい祖先の試験を追加し、元に戻すと落ちることを確認）。小さな修正なので全体の再レビューはせず親の readback（CLAUDE.md）。
+
+## 7. 実決済の記録（E-7）
+
+- plan `099d793345ceba4a1d93e55ee758acf5df1c69c0f50615d326972ea80137a997`（owner 承認 2026-10-13）。#1〜#6（Robinhood・Arbitrum Sepolia・HyperEVM の受信・送信）は `delivered`、両レグの `Transfer` を chain で照合済み。
+- **#7 `md-x402-eth-snapshot-sepolia`: `unknown`（paymentId `3cae48f5-0e15-43db-9887-98df1380b531`）**。自前 facilitator の settle の tx `0xc0e16cc735c9e7d9808caaec998cfdc94d0991334e9a1b3d197653a8b8197b27` が gas 切れで revert（gasUsed 197,313 / 上限 200,000）。Ethereum Sepolia の USDC の `transferWithAuthorization` は約 288,251 gas を要した（直前の block での `estimateGas`）。**資金は動いていない**（authorization は未使用、T7 の Sepolia USDC 20・T8 0 のまま）。Router は `unknown` を記録し送信レグに進まず、driver は再試行せず停止した。設計の見落とし: 固定の 200,000（§3.3 手順 10）と、SDK の verify の simulate は gas 上限なしで不足を検出しない。
+- 修正（`§3.3a` に追加）: 送出の直前に同じ呼び出しの gas を見積もり、見積もり × 1.25 を送る。network ごとの上限 `EVM_FACILITATOR_MAX_GAS_<chainId>`（既定 46630・421614・998: 200,000、11155111: 400,000）を超えれば送出せず 400（未使用を読み直してから）。driver の資金の表も上限で数える。#7・#8 は新しい plan と owner の新しい承認で行う。

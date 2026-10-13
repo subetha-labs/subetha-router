@@ -34,8 +34,26 @@ import { assetKeyOf, EVM_TESTNET_NETWORKS, evmChainIdOf, KNOWN_NETWORKS, knownAs
 export const DEFAULT_PORT = 8611;
 /** 要求の本文の上限（バイト）。 */
 export const MAX_BODY_BYTES = 64 * 1024;
-/** 1 回の settle の gas 上限（設計 §3.8）。 */
+/**
+ * 設計 §3.8 の当初の 1 回の settle の gas 上限。facilitator の送出はもう使わない（見積り × 1.25、上限は `DEFAULT_MAX_SETTLE_GAS`）。
+ * E2E の driver（`tools/evm-testnets-e2e.ts`）の資金の表がまだ参照するので残す。
+ */
 export const SETTLE_GAS_LIMIT = 200_000n;
+/**
+ * 1 回の settle の gas 上限の network ごとの既定（`EVM_FACILITATOR_MAX_GAS_<chainId>` で上書き）。送出の gas は見積り × 1.25（切り上げ）で、
+ * これを超えれば送出しない。Ethereum Sepolia は 200,000 で out of gas になった（2026-10-13 の live。gasUsed 197,313、estimateGas 288,251）。
+ */
+export const DEFAULT_MAX_SETTLE_GAS: Readonly<Record<string, bigint>> = Object.freeze({
+  "eip155:46630": 200_000n,
+  "eip155:421614": 200_000n,
+  "eip155:998": 200_000n,
+  "eip155:11155111": 400_000n,
+});
+
+/** 送出の gas = 見積り × 1.25 の切り上げ。 */
+export function settleGasLimitOf(estimate: bigint): bigint {
+  return (estimate * 125n + 99n) / 100n;
+}
 /** 金額の上限（最小単位。設計 §3.3 の前段の検査）。 */
 export const MAX_AMOUNT = 20_000n;
 /** network ごとの待ち行列（処理中の 1 件の外に待てる数。満杯は 503）。 */
@@ -152,9 +170,12 @@ export interface ChainReader {
   /** receipt を `timeoutMs` まで待つ（期限切れは `undefined`）。 */
   waitForReceipt(hash: Hex, timeoutMs: number): Promise<ReceiptView | undefined>;
   feesPerGas(): Promise<{ readonly maxFeePerGas: bigint; readonly maxPriorityFeePerGas: bigint }>;
+  /** 送出と同じ `transferWithAuthorization` の呼び出し（facilitator のアドレスから）の gas の見積り。再試行しない。 */
+  estimateTransferGas(args: TransferAuthorizationCall): Promise<bigint>;
 }
 
-export interface TransferWithAuthorizationArgs {
+/** `transferWithAuthorization` の引数（gas・手数料を除く）。 */
+export interface TransferAuthorizationCall {
   readonly asset: Hex;
   readonly from: Hex;
   readonly to: Hex;
@@ -163,6 +184,9 @@ export interface TransferWithAuthorizationArgs {
   readonly validBefore: bigint;
   readonly nonce: Hex;
   readonly signature: Hex;
+}
+
+export interface TransferWithAuthorizationArgs extends TransferAuthorizationCall {
   readonly gas: bigint;
   readonly maxFeePerGas: bigint;
   readonly maxPriorityFeePerGas: bigint;
@@ -193,6 +217,8 @@ export interface ChainIo {
   readonly maxFeePerGas: bigint;
   /** process の寿命での gas の累計の上限（wei）。 */
   readonly gasCap: bigint;
+  /** 1 回の settle の gas 上限（見積り × 1.25 がこれを超えれば送出しない）。 */
+  readonly maxSettleGas: bigint;
 }
 
 export type JournalRecord =
@@ -810,7 +836,28 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     if (verified?.isValid !== true) return await refuseIfStillUnused(verified === undefined ? "verify_unavailable" : "invalid_payment");
 
-    // 手順 8: gas の上限。
+    // 手順 8: gas の上限。まず送出と同じ呼び出しの gas を見積もる（固定の gas 上限は Sepolia で out of gas になった）。
+    const call: TransferAuthorizationCall = {
+      asset: id.asset,
+      from: auth.from,
+      to: auth.to,
+      value: auth.value,
+      validAfter: auth.validAfter,
+      validBefore: auth.validBefore,
+      nonce: auth.nonce,
+      signature: id.signature,
+    };
+    let gasEstimate: bigint;
+    try {
+      gasEstimate = await within(io.reader.estimateTransferGas(call), deadlineAt);
+    } catch {
+      return await refuseIfStillUnused("gas_estimate_unavailable");
+    }
+    const gasLimit = settleGasLimitOf(gasEstimate);
+    if (gasEstimate <= 0n || gasLimit > io.maxSettleGas) {
+      log({ event: "gas_limit_too_high", network, key: id.key, gasEstimate: gasEstimate.toString(), gasLimit: gasLimit.toString(), sent: false });
+      return await refuseIfStillUnused("gas_limit_too_high");
+    }
     let fees: { readonly maxFeePerGas: bigint; readonly maxPriorityFeePerGas: bigint };
     try {
       fees = await within(io.reader.feesPerGas(), deadlineAt);
@@ -818,7 +865,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       return await refuseIfStillUnused("fee_estimate_unavailable");
     }
     if (fees.maxFeePerGas > io.maxFeePerGas) return await refuseIfStillUnused("fee_too_high");
-    const worst = SETTLE_GAS_LIMIT * fees.maxFeePerGas;
+    const worst = gasLimit * fees.maxFeePerGas;
     if ((spent.get(network) ?? 0n) + worst > io.gasCap) {
       log({ event: "gas_cap_reached", network, key: id.key, sent: false });
       return await refuseIfStillUnused("gas_cap_reached");
@@ -862,6 +909,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       hold(network, id.key, timedOut ? "journal_intent_timeout" : "journal_write_failed");
       return failure(timedOut ? 504 : 500, timedOut ? "journal_timeout" : "journal_unavailable", network);
     }
+    log({ event: "submit_intent", network, key: id.key, gasEstimate: gasEstimate.toString(), gasLimit: gasLimit.toString() });
     const after = timeProblem();
     if (after !== undefined) {
       try {
@@ -875,15 +923,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     // ここから先の失敗は全部 5xx（送出したかもしれない）。検査と送出の間に await を挟まない。
     const sending = io.writer.transferWithAuthorization({
-      asset: id.asset,
-      from: auth.from,
-      to: auth.to,
-      value: auth.value,
-      validAfter: auth.validAfter,
-      validBefore: auth.validBefore,
-      nonce: auth.nonce,
-      signature: id.signature,
-      gas: SETTLE_GAS_LIMIT,
+      ...call,
+      gas: gasLimit,
       maxFeePerGas: fees.maxFeePerGas,
       maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
     });
@@ -900,7 +941,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       );
       return failure(500, "send_outcome_unknown", network);
     }
-    log({ event: "submitted", network, key: id.key, transaction: hash });
+    log({ event: "submitted", network, key: id.key, transaction: hash, gasEstimate: gasEstimate.toString(), gasLimit: gasLimit.toString() });
     try {
       await within(append({ type: "submitted", key: id.key, hash, at: clock.now() }), deadlineAt);
     } catch (error) {
@@ -1339,6 +1380,7 @@ export interface CliConfig {
   readonly rpcUrls: ReadonlyMap<string, string>;
   readonly gasCaps: ReadonlyMap<string, bigint>;
   readonly maxFees: ReadonlyMap<string, bigint>;
+  readonly maxGas: ReadonlyMap<string, bigint>;
   readonly logRanges: ReadonlyMap<string, bigint>;
   readonly journal: string;
   readonly logFile?: string;
@@ -1383,6 +1425,7 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
   const rpcUrls = new Map<string, string>();
   const gasCaps = new Map<string, bigint>();
   const maxFees = new Map<string, bigint>();
+  const maxGas = new Map<string, bigint>();
   const logRanges = new Map<string, bigint>();
   for (const network of networks) {
     const chainId = evmChainIdOf(network);
@@ -1396,12 +1439,15 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
     const fee = env[`EVM_FACILITATOR_MAX_FEE_PER_GAS_${chainId}`];
     if (fee !== undefined && !/^[1-9][0-9]{0,30}$/.test(fee)) throw new StartupError(`EVM_FACILITATOR_MAX_FEE_PER_GAS_${chainId} must be a positive wei amount`);
     maxFees.set(network, fee === undefined ? (DEFAULT_MAX_FEE_PER_GAS[network] ?? 1_000_000_000n) : BigInt(fee));
+    const gas = env[`EVM_FACILITATOR_MAX_GAS_${chainId}`];
+    if (gas !== undefined && !/^[1-9][0-9]{0,8}$/.test(gas)) throw new StartupError(`EVM_FACILITATOR_MAX_GAS_${chainId} must be a positive gas amount`);
+    maxGas.set(network, gas === undefined ? (DEFAULT_MAX_SETTLE_GAS[network] ?? SETTLE_GAS_LIMIT) : BigInt(gas));
     const range = env[`EVM_FACILITATOR_LOG_RANGE_${chainId}`];
     if (range !== undefined && !/^[1-9][0-9]{0,6}$/.test(range)) throw new StartupError(`EVM_FACILITATOR_LOG_RANGE_${chainId} must be a positive block count`);
     logRanges.set(network, range === undefined ? (DEFAULT_LOG_RANGES[network] ?? 500n) : BigInt(range));
   }
   const logFile = env["EVM_FACILITATOR_LOG"];
-  return { key: key as Hex, token, port: Number(portText), networks, payToAllowlist, rpcUrls, gasCaps, maxFees, logRanges, journal, ...(logFile === undefined || logFile === "" ? {} : { logFile }) };
+  return { key: key as Hex, token, port: Number(portText), networks, payToAllowlist, rpcUrls, gasCaps, maxFees, maxGas, logRanges, journal, ...(logFile === undefined || logFile === "" ? {} : { logFile }) };
 }
 
 /** viem の client で 1 network の I/O を作る（鍵は account にだけ渡す）。 */
@@ -1431,6 +1477,12 @@ async function viemChainIo(network: string, config: CliConfig): Promise<ChainIo>
     effectiveGasPrice: r.effectiveGasPrice,
     logs: r.logs.map((l) => ({ address: l.address, topics: [...l.topics], data: l.data })),
   });
+  // 見積りと送出で同じ引数（v・r・s に分けた 65 バイトの署名）。
+  const transferArgsOf = (call: TransferAuthorizationCall) => {
+    const sig = viem.parseSignature(call.signature);
+    const v = sig.v ?? BigInt(sig.yParity + 27);
+    return [call.from, call.to, call.value, call.validAfter, call.validBefore, call.nonce, Number(v), sig.r, sig.s] as const;
+  };
   const reader: ChainReader = {
     async authorizationState(asset, from, nonce) {
       return (await publicClient.readContract({ address: asset, abi: eip3009Abi, functionName: "authorizationState", args: [from, nonce] })) === true;
@@ -1465,17 +1517,19 @@ async function viemChainIo(network: string, config: CliConfig): Promise<ChainIo>
       const fees = await publicClient.estimateFeesPerGas({ type: "eip1559" });
       return { maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas };
     },
+    async estimateTransferGas(call) {
+      // 送出と同じ abi・引数・送出元（transport は retryCount 0）。
+      return await publicClient.estimateContractGas({ address: call.asset, abi: eip3009Abi, functionName: "transferWithAuthorization", args: transferArgsOf(call), account });
+    },
   };
   const writer: ChainWriter = {
     address: account.address,
     async transferWithAuthorization(args) {
-      const sig = viem.parseSignature(args.signature);
-      const v = sig.v ?? BigInt(sig.yParity + 27);
       return await walletClient.writeContract({
         address: args.asset,
         abi: eip3009Abi,
         functionName: "transferWithAuthorization",
-        args: [args.from, args.to, args.value, args.validAfter, args.validBefore, args.nonce, Number(v), sig.r, sig.s],
+        args: transferArgsOf(args),
         gas: args.gas,
         maxFeePerGas: args.maxFeePerGas,
         maxPriorityFeePerGas: args.maxPriorityFeePerGas,
@@ -1505,11 +1559,12 @@ async function viemChainIo(network: string, config: CliConfig): Promise<ChainIo>
   const maxFeePerGas = config.maxFees.get(network);
   const gasCap = config.gasCaps.get(network);
   const maxLogRange = config.logRanges.get(network);
-  if (maxFeePerGas === undefined || gasCap === undefined || maxLogRange === undefined) throw new Error(`incomplete config for ${network}`);
+  const maxSettleGas = config.maxGas.get(network);
+  if (maxFeePerGas === undefined || gasCap === undefined || maxLogRange === undefined || maxSettleGas === undefined) throw new Error(`incomplete config for ${network}`);
   // 起動時に chainId を確かめる（別の chain の RPC に送出しない）。
   const actual = await publicClient.getChainId();
   if (actual !== chainId) throw new Error(`RPC for ${network} reports chain id ${actual}`);
-  return { reader, writer, verify, maxLogRange, maxFeePerGas, gasCap };
+  return { reader, writer, verify, maxLogRange, maxFeePerGas, gasCap, maxSettleGas };
 }
 
 function fileLogger(file: string | undefined): Logger {
