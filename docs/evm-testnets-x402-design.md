@@ -341,3 +341,26 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 4. Solana のレグの証跡: 署名・transaction の成功・mint・ATA・authority・金額・finalized を読む。Tempo・Arc の確定の規則も決める（Tempo・Arc は receipt で確定（即時確定のチェーン）、Solana は `finalized`）。
 5. `--prefunded` は「資金の前提」だけを外し、試みの印・unknown の保留・別の plan での試みの数え方は外さない。残高の検査は検証済みの初期残高からの累積の支出で（入金を数えない）、Solana の共有の口座は重複して数えない。資金移動の plan は資金移動の前に記録する。
 6. 設計レビューと実装の並行は AGENTS.md の順序から外れる → 実装の担当にレビュー全文を渡して反映させ、実装の後に Codex の実装レビューを必ず行う（親の判断。owner は範囲を承認済み）。
+
+### 8.6 掛け合わせの実決済の記録（2026-10-13 01:5x〜02:14Z）
+
+- 事前の資金移動（prefund plan `67c1d86a…756b`）: 17 回すべて成功。新 3 は ≤ 20,000 の EIP-3009 を自前 facilitator で（各 5 回）、Arc USDC 0.045（tx `0x98ac8fc2…`）、Tempo pathUSD 0.0565（tx `0x74744899…`）。
+- 行列 plan `ee7e6444c6907e900047508b0c0b5f677e2727e8b948cbfd3001dd6d15b9f645`: 30 件中 **29 件 `delivered`**（両レグを chain で照合）。
+- **`mx-tempo-to-hyperevm`: `unknown`**（paymentId `d7e8097f-87c6-4d6b-a6cd-8efddfd780eb`）。クライアントの Tempo の送金は成立（tx `0x919072b5bf0958e13c1c13a7689947c642021e66f4486d9f0aa457e69aaa1811`、T7 → T8 0.01 pathUSD、memo つき）。Router の MPP 受信（`mppx.broadcastCredential`、既存の code）が送金の約 1 秒後に例外 → `source_settle_unknown`（例外の中身は記録しない作り。RPC への反映前に読んだ可能性が高いが未確定）。送信レグには進まず、0.01 pathUSD は T8 に残る。Tempo の route は同じ routeId で二度と署名しない。
+- 再実行（owner の依頼）: 同じ組の新しい routeId `mx-tempo-to-hyperevm-r2`（`SUBETHA_MATRIX_RERUNS`、plan `0c561e52…ed10`、`SUBETHA_MATRIX_PLAN_ONLY`）で **`delivered`**（Tempo tx `0x4d5048a6…8d15`、HyperEVM tx `0xad4a8ddf…510d`）。→ **30 組すべて実決済で通った**。
+- 確定: 60 本（30 購入 × 2 レグ）すべて final（Solana は `finalized`、Robinhood・Arbitrum Sepolia は `finalized` の block まで待った）。Router を同じ journal で再起動し 30 件の status が一致（reopen 30 same）。
+- 公開の要約: `docs/evidence/evm-testnets/e2e-2026-10-13.json`（§7 の 8 本＋失敗の記録）、`matrix-2026-10-13.json`（行列）。秘密の値の照合で 0 件。
+- 後続（owner への申し送り）: (1) Router の上流の HTTP の状態と MPP 受信の例外の種類を journal に残す（原因の特定のため。Provider A の 4xx・Tempo の受信の `unknown`）。(2) 長時間の Router の接続の再利用と Provider A の 4xx の関係（未証明）。(3) Ethereum Sepolia は行列の対象外。(4) hosted への展開は別の gate。
+
+## 9. チェーン × 方向ごとの状態（2026-10-13）
+
+| チェーン | 方向 | 実装 | 自動試験 | 実決済 E2E | 未検証・ブロッカー |
+|---|---|---|---|---|---|
+| Robinhood（USDG） | 受信 | 済 | 済 | 済（§7 #1、行列 6 本） | hosted 未展開 |
+| Robinhood | 送信 | 済 | 済 | 済（§7 #2、行列 6 本） | 同上 |
+| Arbitrum Sepolia（USDC） | 受信 | 済 | 済 | 済（§7 #3、行列 6 本） | 同上 |
+| Arbitrum Sepolia | 送信 | 済 | 済 | 済（§7 #4、行列 6 本） | 同上 |
+| HyperEVM（USDC） | 受信 | 済 | 済 | 済（§7 #5、行列 6 本） | 同上。公開 RPC の rate limit |
+| HyperEVM | 送信 | 済 | 済 | 済（§7 #6、行列 6 本。Tempo からは r2 で） | 同上 |
+| Ethereum Sepolia（USDC） | 受信 | 済 | 済 | 済（3 回目。gas 修正後） | 行列は対象外 |
+| Ethereum Sepolia | 送信 | 済 | 済 | 済 | 行列は対象外 |
