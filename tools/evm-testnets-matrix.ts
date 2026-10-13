@@ -63,7 +63,8 @@ import {
   type Secrets,
   type SvmTransactionInfo,
 } from "./evm-testnets-e2e.js";
-import { EVM_TESTNETS, evmTestnetsConfigOf, isMatrixNewChain, MATRIX_NEW_CHAINS, MATRIX_RAILS, matrixPairsOf, OUTBOUND, type MatrixEndpoint } from "./remote-mcp-config.js";
+import { EVM_TESTNETS, evmTestnetsConfigOf, isMatrixNewChain, MATRIX_NEW_CHAINS, MATRIX_RAILS, matrixPairsOf,
+  matrixRerunsOf, OUTBOUND, type MatrixEndpoint } from "./remote-mcp-config.js";
 import { checkTempoChallenge } from "./sign-check-tempo.js";
 import { runSign, type SignDeps } from "./sign-run.js";
 import { checkSvmMppChallenge } from "./svm-mpp-payer.js";
@@ -276,7 +277,7 @@ const SIGN_KIND: Readonly<Record<MatrixEndpoint, ExpectedSign>> = { rh: "x402-ev
 
 /** 30 件の購入（route の条件は専用の設定生成から。plan と Router の設定を 1 つの出所に）。 */
 export function matrixPurchasesOf(addresses: MatrixAddresses): MatrixPurchase[] {
-  const placeholderEnv: Record<string, string> = { SUBETHA_EVM_FACILITATOR_URL: "http://127.0.0.1:1/plan-only", SUBETHA_EVM_PROVIDER_PAYTO: addresses.providerPayTo };
+  const placeholderEnv: Record<string, string> = { SUBETHA_EVM_FACILITATOR_URL: "http://127.0.0.1:1/plan-only", SUBETHA_EVM_PROVIDER_PAYTO: addresses.providerPayTo, SUBETHA_MATRIX_RERUNS: process.env["SUBETHA_MATRIX_RERUNS"] ?? "" };
   for (const chain of MATRIX_NEW_CHAINS) placeholderEnv[`SUBETHA_EVM_PROVIDER_URL_${chain.toUpperCase()}`] = `http://127.0.0.1:1/${chain}`;
   const config = evmTestnetsConfigOf(placeholderEnv, addresses.routerReceiver, MATRIX_NEW_CHAINS, {
     matrix: true,
@@ -284,7 +285,7 @@ export function matrixPurchasesOf(addresses: MatrixAddresses): MatrixPurchase[] 
     providers: { arc: addresses.arcProvider, solana: addresses.solanaProvider, solanaMpp: addresses.solanaMppProvider },
   }) as { router: { routes: Record<string, RouteTerms> } };
   const byRole = addresses as unknown as Record<string, string>;
-  return matrixPairsOf().map(({ src, dst, routeId }, i) => {
+  return matrixPairsOf(matrixRerunsOf(placeholderEnv)).map(({ src, dst, routeId }, i) => {
     const route = config.router.routes[routeId];
     if (route === undefined) throw new Error(`the generated config has no route ${routeId}`);
     const s = MATRIX_RAILS[src];

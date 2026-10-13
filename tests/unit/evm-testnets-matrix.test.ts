@@ -1151,3 +1151,16 @@ describe("M-2 #5/#6: a funds-moving signature is never repeated; marker fsync �
     }
   });
 });
+
+describe("再実行の別名（SUBETHA_MATRIX_RERUNS）", () => {
+  test("既定は 30 本のまま。tempo:hyperevm を指定すると同じ組の mx-tempo-to-hyperevm-r2 が 1 本だけ足される。行列に無い組は拒む", async () => {
+    const { matrixPairsOf, matrixRerunsOf } = await import("../../tools/remote-mcp-config.js");
+    expect(matrixPairsOf()).toHaveLength(30);
+    expect(matrixRerunsOf({})).toEqual([]);
+    const pairs = matrixPairsOf(matrixRerunsOf({ SUBETHA_MATRIX_RERUNS: "tempo:hyperevm" }));
+    expect(pairs).toHaveLength(31);
+    expect(pairs[30]).toEqual({ src: "tempo", dst: "hyperevm", routeId: "mx-tempo-to-hyperevm-r2" });
+    expect(() => matrixPairsOf(["tempo:arc"])).toThrow();
+    expect(() => matrixPairsOf(["rh:rh"])).toThrow();
+  });
+});

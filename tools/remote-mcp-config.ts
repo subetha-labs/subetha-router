@@ -934,7 +934,7 @@ export function isMatrixNewChain(endpoint: string): endpoint is MatrixNewChain {
  * 30 の組（§8.1）: 受信か送信の少なくとも一方が新 3、同じ端点どうしは除く（新 × 新の同一チェーン）。Base ↔ 新 3 の 6 は §7 の `md-*` で済み（行列に Base は無い）。
  * 既存 × 既存は対象外。順は `MATRIX_ENDPOINTS` の src × dst。
  */
-export function matrixPairsOf(): readonly { readonly src: MatrixEndpoint; readonly dst: MatrixEndpoint; readonly routeId: string }[] {
+export function matrixPairsOf(reruns: readonly string[] = []): readonly { readonly src: MatrixEndpoint; readonly dst: MatrixEndpoint; readonly routeId: string }[] {
   const out: { src: MatrixEndpoint; dst: MatrixEndpoint; routeId: string }[] = [];
   for (const src of MATRIX_ENDPOINTS) {
     for (const dst of MATRIX_ENDPOINTS) {
@@ -943,7 +943,20 @@ export function matrixPairsOf(): readonly { readonly src: MatrixEndpoint; readon
       out.push({ src, dst, routeId: matrixRouteOf(src, dst) });
     }
   }
+  // 再実行の別名（owner の依頼 2026-10-13: Tempo MPP → HyperEVM の再確認）。資金が署名で動く route は同じ routeId では二度と署名しないので、
+  // 同じ組の **新しい** routeId（`-r2`）を足す。指定が無ければ 30 本のまま（既定・試験は不変）。
+  for (const pair of reruns) {
+    const [src, dst] = pair.split(":");
+    const found = out.find((p) => p.src === src && p.dst === dst && p.routeId === matrixRouteOf(p.src, p.dst));
+    if (found === undefined) throw new Error("SUBETHA_MATRIX_RERUNS: each entry must be <src>:<dst> of a matrix pair");
+    out.push({ src: found.src, dst: found.dst, routeId: `${found.routeId}-r2` });
+  }
   return out;
+}
+
+/** env `SUBETHA_MATRIX_RERUNS`（`tempo:hyperevm,...`。空なら無し）。 */
+export function matrixRerunsOf(env: Readonly<Record<string, string | undefined>>): readonly string[] {
+  return (env["SUBETHA_MATRIX_RERUNS"] ?? "").split(",").map((x) => x.trim()).filter((x) => x !== "");
 }
 
 /** 行列の有効化（既存レールの受信・送信の全部。組 `pairs` は動的プロファイル用なので無し）。子の能力の env（`SUBETHA_RAILS_ACTIVATION`）と受取先・Provider の読み取りに使う。 */
@@ -1007,7 +1020,7 @@ function matrixConfigOf(
   };
   const routes: Record<string, unknown> = { ...base.routes };
   const upstreams: Record<string, string> = { ...base.upstreams };
-  for (const { src, dst, routeId } of matrixPairsOf()) {
+  for (const { src, dst, routeId } of matrixPairsOf(matrixRerunsOf(env))) {
     const s = MATRIX_RAILS[src];
     const d = MATRIX_RAILS[dst];
     const destination = destinationOf(dst);
