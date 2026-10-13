@@ -28,19 +28,19 @@ export const INBOUND = {
   facilitator: "https://www.x402.org/facilitator",
 } as const;
 /** MPP 受信（Tempo pathUSD）。 */
-const INBOUND_MPP = {
+export const INBOUND_MPP = {
   network: "eip155:42431",
   asset: "0x20c0000000000000000000000000000000000000",
   amount: "10000",
 } as const;
 /** MPP 送信（Provider B）。 */
-const OUTBOUND = {
+export const OUTBOUND = {
   network: "eip155:42431",
   asset: "0x20c0000000000000000000000000000000000000",
   payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
 } as const;
 /** x402 送信（Provider A）。 */
-const OUTBOUND_X402 = {
+export const OUTBOUND_X402 = {
   network: "eip155:84532",
   asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
@@ -831,7 +831,7 @@ export const EVM_TESTNETS_BUDGET = Object.freeze({ maxPurchases: 32, baseSepolia
  * - C の受信の facilitator は `{ kind: "x402", url: env SUBETHA_EVM_FACILITATOR_URL }`
  * env が欠ければ例外（値は出さない）。
  */
-export function evmTestnetsConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, chains: readonly EvmTestnetChain[]): Record<string, unknown> {
+export function evmTestnetsConfigOf(env: Readonly<Record<string, string | undefined>>, receiver: string, chains: readonly EvmTestnetChain[], options?: EvmMatrixOptions): Record<string, unknown> {
   if (chains.length === 0 || new Set(chains).size !== chains.length || chains.some((chain) => !(EVM_TESTNET_CHAINS as readonly string[]).includes(chain))) {
     throw new Error("chains must be a non-empty subset of the EVM testnets without repeats");
   }
@@ -874,6 +874,9 @@ export function evmTestnetsConfigOf(env: Readonly<Record<string, string | undefi
     inboundFacilitators[c.network] = { kind: "x402", url: facilitatorUrl };
   }
   const budget = EVM_TESTNETS_BUDGET;
+  if (options?.matrix === true) {
+    return matrixConfigOf(env, receiver, chains, options, { routes, upstreams, inboundFacilitators, providerPayTo, providerUrls });
+  }
   return {
     router: {
       // 公開の生成と同じ既定（承認期限は `min(approvalTtlMs, offerExpiry)`）。
@@ -888,5 +891,160 @@ export function evmTestnetsConfigOf(env: Readonly<Record<string, string | undefi
       },
     },
     x402: { upstreams, inboundFacilitators },
+  };
+}
+
+/* ------------------------------------------------------------------ 掛け合わせの検証（`docs/evm-testnets-x402-design.md` §8、2026-10-13） */
+
+/** 行列の端点。新 3（自前 facilitator・手元の Provider）と既存 4（Base は §7 で済んだので行列に入らない）。 */
+export type MatrixNewChain = "rh" | "arbsep" | "hyperevm";
+export type MatrixExisting = "tempo" | "arc" | "sol" | "solmpp";
+export type MatrixEndpoint = MatrixNewChain | MatrixExisting;
+export const MATRIX_NEW_CHAINS: readonly MatrixNewChain[] = Object.freeze(["rh", "arbsep", "hyperevm"]);
+export const MATRIX_EXISTING: readonly MatrixExisting[] = Object.freeze(["tempo", "arc", "sol", "solmpp"]);
+/** 並び（route の順）: 新 3 → 既存 4。 */
+export const MATRIX_ENDPOINTS: readonly MatrixEndpoint[] = Object.freeze([...MATRIX_NEW_CHAINS, ...MATRIX_EXISTING]);
+
+/** 端点のレール（受信でも送信でも同じ）。network・資産・桁は表（`KNOWN_NETWORKS`）と同じ値（試験が確かめる）。 */
+export interface MatrixRail {
+  readonly rail: "x402" | "mpp";
+  readonly scheme: "exact" | "tempo/charge" | "solana/charge";
+  readonly family: "evm" | "svm";
+  readonly network: string;
+  readonly asset: string;
+  readonly decimals: number;
+}
+export const MATRIX_RAILS: Readonly<Record<MatrixEndpoint, MatrixRail>> = Object.freeze({
+  rh: Object.freeze({ rail: "x402", scheme: "exact", family: "evm", network: EVM_TESTNETS.rh.network, asset: EVM_TESTNETS.rh.asset, decimals: 6 }),
+  arbsep: Object.freeze({ rail: "x402", scheme: "exact", family: "evm", network: EVM_TESTNETS.arbsep.network, asset: EVM_TESTNETS.arbsep.asset, decimals: 6 }),
+  hyperevm: Object.freeze({ rail: "x402", scheme: "exact", family: "evm", network: EVM_TESTNETS.hyperevm.network, asset: EVM_TESTNETS.hyperevm.asset, decimals: 6 }),
+  tempo: Object.freeze({ rail: "mpp", scheme: "tempo/charge", family: "evm", network: INBOUND_MPP.network, asset: INBOUND_MPP.asset, decimals: 6 }),
+  arc: Object.freeze({ rail: "x402", scheme: "exact", family: "evm", network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, decimals: 6 }),
+  sol: Object.freeze({ rail: "x402", scheme: "exact", family: "svm", network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, decimals: 6 }),
+  solmpp: Object.freeze({ rail: "mpp", scheme: SOLANA_MPP_SCHEME, family: "svm", network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, decimals: 6 }),
+}) as Readonly<Record<MatrixEndpoint, MatrixRail>>;
+
+export function matrixRouteOf(src: MatrixEndpoint, dst: MatrixEndpoint): string {
+  return `mx-${src}-to-${dst}`;
+}
+export function isMatrixNewChain(endpoint: string): endpoint is MatrixNewChain {
+  return (MATRIX_NEW_CHAINS as readonly string[]).includes(endpoint);
+}
+/**
+ * 30 の組（§8.1）: 受信か送信の少なくとも一方が新 3、同じ端点どうしは除く（新 × 新の同一チェーン）。Base ↔ 新 3 の 6 は §7 の `md-*` で済み（行列に Base は無い）。
+ * 既存 × 既存は対象外。順は `MATRIX_ENDPOINTS` の src × dst。
+ */
+export function matrixPairsOf(): readonly { readonly src: MatrixEndpoint; readonly dst: MatrixEndpoint; readonly routeId: string }[] {
+  const out: { src: MatrixEndpoint; dst: MatrixEndpoint; routeId: string }[] = [];
+  for (const src of MATRIX_ENDPOINTS) {
+    for (const dst of MATRIX_ENDPOINTS) {
+      if (src === dst) continue;
+      if (!isMatrixNewChain(src) && !isMatrixNewChain(dst)) continue;
+      out.push({ src, dst, routeId: matrixRouteOf(src, dst) });
+    }
+  }
+  return out;
+}
+
+/** 行列の有効化（既存レールの受信・送信の全部。組 `pairs` は動的プロファイル用なので無し）。子の能力の env（`SUBETHA_RAILS_ACTIVATION`）と受取先・Provider の読み取りに使う。 */
+export const EVM_MATRIX_ACTIVATION: RailsActivation = Object.freeze({
+  arc: Object.freeze({ inbound: true, outbound: true }),
+  solana: Object.freeze({ inbound: true, outbound: true }),
+  solanaMpp: Object.freeze({ inbound: true, outbound: true }),
+});
+
+/** 行列の選択肢（§8.3-1）。受取先（Arc の証明専用の受取鍵の address・Solana の受取 owner）と hosted の Provider の受取先は入口が env から導いて渡す。 */
+export interface EvmMatrixOptions {
+  readonly matrix: true;
+  readonly receivers: { readonly arc?: string | undefined; readonly solana?: string | undefined };
+  readonly providers: { readonly arc?: string | undefined; readonly solana?: string | undefined; readonly solanaMpp?: string | undefined };
+}
+
+/**
+ * 行列の予算（§3.7 の区分に足す）。各レグ 10,000。1 件の予約で両レグが同じ区分に落ちる組は行列に無い（Solana x402 ↔ Solana MPP は既存 × 既存で対象外）ので
+ * `maxPerPurchase` は 10,000 のまま。`maxTotal` は 1 区分のレグ数 × 10,000 + 失敗の予約の余裕:
+ * 新 3 の各資産 14 レグ（`md-*` 2 + 行列 12）→ 200,000、Tempo pathUSD 6 → 100,000、Arc USDC 6 → 100,000、Solana USDC（x402 と MPP の 4 向きが同じ区分）12 → 200,000。
+ */
+export const EVM_MATRIX_BUDGET = Object.freeze({
+  maxPurchases: 80,
+  newChain: Object.freeze({ maxPerPurchase: "10000", maxTotal: "200000" }),
+  tempo: Object.freeze({ maxPerPurchase: "10000", maxTotal: "100000" }),
+  arc: Object.freeze({ maxPerPurchase: "10000", maxTotal: "100000" }),
+  solana: Object.freeze({ maxPerPurchase: "10000", maxTotal: "200000" }),
+});
+
+function matrixConfigOf(
+  env: Readonly<Record<string, string | undefined>>,
+  receiver: string,
+  chains: readonly EvmTestnetChain[],
+  options: EvmMatrixOptions,
+  base: { routes: Record<string, unknown>; upstreams: Record<string, string>; inboundFacilitators: Record<string, unknown>; providerPayTo: string; providerUrls: Record<EvmTestnetChain, string> },
+): Record<string, unknown> {
+  // 行列は新 3 の全部が要る（30 の組を欠けなく出す）。Ethereum Sepolia は行列に入らない（`md-*` は選べば出る）。
+  if (!MATRIX_NEW_CHAINS.every((chain) => chains.includes(chain))) throw new Error("the matrix requires the chains rh, arbsep and hyperevm");
+  const arcReceiver = options.receivers.arc;
+  const solReceiver = options.receivers.solana;
+  if (typeof arcReceiver !== "string" || !EVM_ADDRESS.test(arcReceiver)) throw new Error("the matrix requires the arc receiver address");
+  if (typeof solReceiver !== "string" || !isBase58PublicKey(solReceiver)) throw new Error("the matrix requires the solana receiver owner");
+  const arcProvider = options.providers.arc;
+  const solProvider = options.providers.solana;
+  const solMppProvider = options.providers.solanaMpp;
+  if (typeof arcProvider !== "string" || !EVM_ADDRESS.test(arcProvider)) throw new Error("the matrix requires the arc provider pay-to address");
+  if (typeof solProvider !== "string" || !isBase58PublicKey(solProvider)) throw new Error("the matrix requires the solana provider pay-to owner");
+  if (typeof solMppProvider !== "string" || !isBase58PublicKey(solMppProvider)) throw new Error("the matrix requires the solana mpp provider (D) pay-to owner");
+  // Provider の受取先は運用者の集合（受取先）の外（送信の設計 §2.3。Router も宛先で拒むが、ここで先に止める）。
+  const operators = new Set([receiver.toLowerCase(), arcReceiver.toLowerCase(), solReceiver]);
+  if ([base.providerPayTo.toLowerCase(), arcProvider.toLowerCase(), solProvider, solMppProvider].some((p) => operators.has(p))) {
+    throw new Error("a provider pay-to address must not be a Router receiver");
+  }
+  const sourcePayTo: Record<MatrixEndpoint, string> = { rh: receiver, arbsep: receiver, hyperevm: receiver, tempo: receiver, arc: arcReceiver, sol: solReceiver, solmpp: solReceiver };
+  const destinationOf = (dst: MatrixEndpoint): { payTo: string; upstream: string } => {
+    if (isMatrixNewChain(dst)) return { payTo: base.providerPayTo, upstream: base.providerUrls[dst] };
+    if (dst === "tempo") return { payTo: OUTBOUND.payTo, upstream: UPSTREAM };
+    if (dst === "arc") return { payTo: arcProvider, upstream: UPSTREAM_ARC };
+    if (dst === "sol") return { payTo: solProvider, upstream: UPSTREAM_SOL };
+    return { payTo: solMppProvider, upstream: UPSTREAM_SOL_MPP };
+  };
+  const routes: Record<string, unknown> = { ...base.routes };
+  const upstreams: Record<string, string> = { ...base.upstreams };
+  for (const { src, dst, routeId } of matrixPairsOf()) {
+    const s = MATRIX_RAILS[src];
+    const d = MATRIX_RAILS[dst];
+    const destination = destinationOf(dst);
+    routes[routeId] = {
+      routeId,
+      canonicalPath: `/v1/routes/${routeId}/resource`,
+      rail: d.rail,
+      sourceRail: s.rail,
+      source: { amount: "10000", asset: s.asset, decimals: s.decimals, network: s.network, payTo: sourcePayTo[src] },
+      destination: { scheme: d.scheme, network: d.network, asset: d.asset, payTo: destination.payTo },
+    };
+    upstreams[routeId] = destination.upstream;
+  }
+  const budget = EVM_TESTNETS_BUDGET;
+  const matrixBudget = EVM_MATRIX_BUDGET;
+  return {
+    router: {
+      approvalTtlMs: Number(env["SUBETHA_APPROVAL_TTL_SECONDS"] ?? "600") * 1000,
+      routes,
+      budget: {
+        maxPurchases: matrixBudget.maxPurchases,
+        buckets: [
+          { network: INBOUND.network, asset: INBOUND.asset, maxTotal: budget.baseSepolia.maxTotal, maxPerPurchase: budget.baseSepolia.maxPerPurchase },
+          ...chains.map((chain) => {
+            const limits = isMatrixNewChain(chain) ? matrixBudget.newChain : budget.chain;
+            return { network: EVM_TESTNETS[chain].network, asset: EVM_TESTNETS[chain].asset, maxTotal: limits.maxTotal, maxPerPurchase: limits.maxPerPurchase };
+          }),
+          { network: INBOUND_MPP.network, asset: INBOUND_MPP.asset, maxTotal: matrixBudget.tempo.maxTotal, maxPerPurchase: matrixBudget.tempo.maxPerPurchase },
+          { network: INBOUND_ARC.network, asset: INBOUND_ARC.asset, maxTotal: matrixBudget.arc.maxTotal, maxPerPurchase: matrixBudget.arc.maxPerPurchase },
+          { network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal: matrixBudget.solana.maxTotal, maxPerPurchase: matrixBudget.solana.maxPerPurchase },
+        ],
+      },
+    },
+    x402: {
+      upstreams,
+      // 受信の facilitator: 新 3 は自前（上の `md-*` と同じ）、Arc は Circle（kind circle）、Solana x402 は x402.org。Base Sepolia は env のまま。MPP の受信は facilitator を使わない。
+      inboundFacilitators: { ...base.inboundFacilitators, [INBOUND_ARC.network]: INBOUND_ARC.facilitator, [INBOUND_SOL.network]: INBOUND_SOL.facilitator },
+    },
   };
 }

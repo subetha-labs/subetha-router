@@ -26,8 +26,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpIngress } from "../src/mcp/ingress.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
-import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, evmProviderUrlEnvOf, evmTestnetsConfigOf, type EvmTestnetChain } from "./remote-mcp-config.js";
-import { railsChildEnvOf, railsOptionsOf } from "./rails-entry.js";
+import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, evmProviderUrlEnvOf, evmTestnetsConfigOf, type EvmTestnetChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
+import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
 function note(message: string): void {
   process.stderr.write(`${message}\n`);
@@ -68,7 +68,14 @@ export interface HostOptions {
    * EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.5）: 専用の入口（`tools/evm-testnets-run.ts`）だけが渡す。loopback 限定・専用の設定生成
    * `evmTestnetsConfigOf`・専用の子 process（`tools/evm-testnets-router-process.ts`。`localCounterparties` を渡すのはこの子だけ）。公開の入口は渡さない。
    */
-  readonly evmTestnets?: { readonly chains: readonly EvmTestnetChain[] };
+  readonly evmTestnets?: {
+    readonly chains: readonly EvmTestnetChain[];
+    /**
+     * 掛け合わせの検証（設計 §8）: 30 の `mx-*` route を足し、既存レール（Arc・Solana x402・Solana MPP・Tempo MPP）の受信・送信の能力の env を子に渡す。
+     * 無ければ今までと同じ計画（設定・子の env とも不変）。
+     */
+    readonly matrix?: true;
+  };
 }
 
 /** 公開の子 process（既定の plan）。 */
@@ -108,7 +115,7 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
   const outboundKey = required(env, "SUBETHA_OUTBOUND_PRIVATE_KEY");
   const receiver = required(env, "SUBETHA_ROUTER_RECEIVER");
   if (options.evmTestnets !== undefined) {
-    return evmTestnetsPlanOf(options, env, outboundKey, receiver, options.evmTestnets.chains);
+    return options.evmTestnets.matrix === true ? evmMatrixPlanOf(options, env, outboundKey, receiver, options.evmTestnets.chains) : evmTestnetsPlanOf(options, env, outboundKey, receiver, options.evmTestnets.chains);
   }
   if (options.mainnetFirstRoute !== undefined) {
     if (options.bind !== "127.0.0.1") throw new HostPlanError("config");
@@ -250,6 +257,47 @@ function evmTestnetsPlanOf(options: HostOptions, env: Readonly<Record<string, st
     ROUTER_X402_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
     ...evmEnv,
     ...railsChildEnvOf(RAILS_NONE, env),
+  };
+  return { config, childEnv, journalPath: options.journalPath, childScript: EVM_TESTNETS_ROUTER_PROCESS };
+}
+
+/**
+ * 掛け合わせの検証の計画（設計 §8.3-2・§8.5 #6）。`evmTestnetsPlanOf` の子の env に、行列の既存レールが要るものだけを足す:
+ * - 有効化 `EVM_MATRIX_ACTIVATION`（Arc・Solana x402・Solana MPP の受信と送信）を `railsChildEnvOf` で: 内部の `SUBETHA_RAILS_ACTIVATION`、Arc の受取鍵（Circle の売り手証明。
+ *   address は設定の `source.payTo` と同じ鍵から導くので、配線の照合と一致する）、Solana の RPC、Solana の送信鍵
+ * - MPP 受信（Tempo・Solana）の秘密と offer の有効期間、Tempo の RPC（あれば）
+ * - Tempo MPP の送信（Provider B）の鍵 `SUBETHA_OUTBOUND_MPP_KEY`（既定は送信レグの鍵 = T8。公開の分岐と同じ規則）
+ * hosted の Provider の受取先（`SUBETHA_ARC_PROVIDER_PAYTO`・`SUBETHA_SOLANA_PROVIDER_PAYTO`・`SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`）は設定の生成だけが読む（子には渡さない）。
+ * `localCounterparties` は今のまま（子が facilitator と新 3 の Provider の URL から作る）。
+ */
+function evmMatrixPlanOf(options: HostOptions, env: Readonly<Record<string, string | undefined>>, outboundKey: string, receiver: string, chains: readonly EvmTestnetChain[]): HostPlan {
+  const activation = EVM_MATRIX_ACTIVATION;
+  const secret = env["SUBETHA_MPP_INBOUND_SECRET"] ?? "";
+  if (secret === "") throw new HostPlanError("env");
+  let receivers;
+  let providers;
+  try {
+    receivers = railsReceiversOf(activation, env);
+    providers = railsProvidersOf(activation, env);
+  } catch {
+    throw new HostPlanError("rails");
+  }
+  let config: Record<string, unknown>;
+  try {
+    config = evmTestnetsConfigOf(env, receiver, chains, { matrix: true, receivers, providers });
+  } catch {
+    throw new HostPlanError("config");
+  }
+  // 非行列の計画（同じ検査・同じ env）の上に足す。設定は行列のものに置き換える。
+  const basePlan = evmTestnetsPlanOf(options, env, outboundKey, receiver, chains);
+  const tempoRpc = env["SUBETHA_TEMPO_RPC_URL"];
+  const childEnv: Record<string, string> = {
+    ...basePlan.childEnv,
+    SUBETHA_OUTBOUND_MPP_KEY: env["SUBETHA_OUTBOUND_MPP_KEY"] ?? outboundKey,
+    ROUTER_MPP_INBOUND_SECRET: secret,
+    ROUTER_MPP_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",
+    ...(tempoRpc === undefined || tempoRpc === "" ? {} : { SUBETHA_TEMPO_RPC_URL: tempoRpc, ROUTER_MPP_INBOUND_RPC_URL: tempoRpc }),
+    ...railsChildEnvOf(activation, env),
   };
   return { config, childEnv, journalPath: options.journalPath, childScript: EVM_TESTNETS_ROUTER_PROCESS };
 }

@@ -1,0 +1,1025 @@
+/**
+ * 掛け合わせの検証の driver（`docs/evm-testnets-x402-design.md` §8・§8.5、owner の依頼 2026-10-13）。**製品コードではない**（運用者の道具）。
+ * `tools/evm-testnets-e2e.ts` の `--matrix` から呼ばれる（plan・run。finality・reopen・summary は同じ証跡の形を共有する）。
+ *
+ * - plan: 30 の `mx-<src>-to-<dst>`（route の条件は専用の設定生成 `evmTestnetsConfigOf(..., { matrix: true })` から）、役割 × レールの資金の表
+ *   （**検証した初期残高 − 累計の支出**。入金は数えない。同じアカウントは 1 つにまとめる: Solana のクライアントの鍵 = Router の Solana 送信鍵）。
+ * - run: 1 件ずつ、`--prefunded` が必須（行列は Router の送信鍵に事前に入れた資金で払う。外すのは同じ chain の受信の依存だけで、印・保留は残す）。
+ *   順序: 保留の検査 → その購入の支出の残高の検査 → 不変の試みの印（O_EXCL・fsync）→ quote → **レールごとの照合**（署名の前）→ `signInvoked` を fsync →
+ *   `runSign`（`npm run sign` と同じ振り分け。全レール）→ purchase（1 回）→ status → 両レグの chain の読み取り（EVM は `Transfer`、Solana は owner × mint の残高の差）。
+ * - Tempo MPP は **署名で資金が動く**（`tools/sign-run.ts`）。署名を呼んだ後の失敗は全部 `funds_possibly_moved`（tx があれば残す）で止まり、
+ *   その route は別の plan でも二度と署名しない（`priorAttemptHold`）。MPP Solana は署名だけ（送出は Router の purchase）。
+ *
+ * env（値は出さない）: `SUBETHA_PAYER_ADDRESS`／`SUBETHA_PAYER_PRIVATE_KEY`（T7。EVM と Tempo MPP）、`SUBETHA_PAYER_SOLANA_ADDRESS`／`SOLANA_PAYER_PRIVATE_KEY`（T6 の Solana payer。
+ * `npm run sign` と同じ名前）、`SOLANA_RPC_URL`（任意、https）、`SUBETHA_ROUTER_RECEIVER`（T8）、`SUBETHA_ARC_RECEIVER_ADDRESS`／`SUBETHA_ARC_RECEIVER_KEY`、
+ * `SUBETHA_SOLANA_RECEIVER`、`SUBETHA_SOLANA_OUTBOUND_ADDRESS`／`SUBETHA_OUTBOUND_SOLANA_KEY`、`EVM_FACILITATOR_ADDRESS`／`EVM_FACILITATOR_KEY`、
+ * `SUBETHA_EVM_PROVIDER_PAYTO`、`SUBETHA_ARC_PROVIDER_PAYTO`、`SUBETHA_SOLANA_PROVIDER_PAYTO`、`SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`。
+ */
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { stableJson } from "../src/core/intent.js";
+import { KNOWN_NETWORKS, knownAssetOf, knownNetworkOf } from "../src/shared/networks.js";
+import { DEFAULT_MAX_FEE_PER_GAS, DEFAULT_MAX_SETTLE_GAS } from "./evm-facilitator.js";
+import {
+  addressesOf,
+  ASSET_SYMBOL,
+  attemptMarkerPathOf,
+  attemptMarkerStateOf,
+  bodyDigest,
+  compactUtc,
+  createAttemptMarker,
+  deepFreeze,
+  DESIGN_GAS_CAPS,
+  finalityRuleOf,
+  isRecord,
+  isTxRefOf,
+  journalLinesOf,
+  NETWORK_LABEL,
+  PlanRefusal,
+  planSha256,
+  priorAttemptHold,
+  quoteRecordOf,
+  readAllEvidence,
+  short,
+  units,
+  verifyLeg,
+  viemChainReader,
+  withoutBody,
+  withStatusDigest,
+  writePrivate,
+  type ChainReader,
+  type FinalityRule,
+  type LegEvidence,
+  type McpCaller,
+  type PlanBalance,
+  type PurchaseEvidence,
+  type RunReport,
+  type Secrets,
+  type SvmTransactionInfo,
+} from "./evm-testnets-e2e.js";
+import { EVM_TESTNETS, evmTestnetsConfigOf, isMatrixNewChain, MATRIX_NEW_CHAINS, MATRIX_RAILS, matrixPairsOf, OUTBOUND, type MatrixEndpoint } from "./remote-mcp-config.js";
+import { checkTempoChallenge } from "./sign-check-tempo.js";
+import { runSign, type SignDeps } from "./sign-run.js";
+import { checkSvmMppChallenge } from "./svm-mpp-payer.js";
+
+type Env = Readonly<Record<string, string | undefined>>;
+
+export const MATRIX_PLAN_KIND = "subetha-evm-testnets-matrix-plan";
+export const MATRIX_PLAN_VERSION = 1;
+/**
+ * Tempo の送金 1 回の手数料の見込み（pathUSD の最小単位。手数料は fee token = pathUSD で払う）。実測の上限は 79〜706（`docs/dynamic-gas-fee-design.md`）。
+ * 資金の表は余裕をみてこの値で数える（実際の額ではない）。
+ */
+export const TEMPO_FEE_ALLOWANCE = 5_000n;
+/** MPP Solana の受信 1 回で payer（fee payer）が払う SOL の見込み（lamports。署名 1 つ 5,000 + 優先手数料の余裕）。 */
+export const SOLANA_FEE_ALLOWANCE_LAMPORTS = 20_000n;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/* ────────────────────────────────────────────────────────────────────────────── plan の型 */
+
+export type ExpectedSign = "x402-evm" | "x402-svm" | "mpp" | "mpp-svm";
+export interface MatrixLeg {
+  readonly endpoint: MatrixEndpoint;
+  readonly rail: "x402" | "mpp";
+  readonly scheme: "exact" | "tempo/charge" | "solana/charge";
+  readonly family: "evm" | "svm";
+  readonly network: string;
+  readonly networkLabel: string;
+  readonly asset: string;
+  readonly assetSymbol: string;
+  readonly decimals: number;
+  readonly amount: string;
+  readonly fromRole: string;
+  readonly from: string;
+  readonly toRole: string;
+  readonly to: string;
+  /** 誰が送出し手数料を払うか（表示）。 */
+  readonly settledBy: string;
+  /** 署名（`runSign`）の時点で資金が動くか（Tempo MPP の受信だけ true）。 */
+  readonly fundsMoveAtSign: boolean;
+  readonly finalityRule: FinalityRule;
+}
+export interface MatrixPurchase {
+  readonly index: number;
+  readonly routeId: string;
+  readonly src: MatrixEndpoint;
+  readonly dst: MatrixEndpoint;
+  readonly upstream: string;
+  readonly expectedSign: ExpectedSign;
+  readonly source: MatrixLeg;
+  readonly destination: MatrixLeg;
+}
+export interface MatrixAddresses {
+  readonly payerEvm: string;
+  readonly payerSolana: string;
+  readonly routerReceiver: string;
+  readonly routerOutbound: string;
+  readonly arcReceiver: string;
+  readonly solanaReceiver: string;
+  readonly solanaOutbound: string;
+  readonly facilitatorGas: string;
+  readonly providerPayTo: string;
+  readonly providerB: string;
+  readonly arcProvider: string;
+  readonly solanaProvider: string;
+  readonly solanaMppProvider: string;
+}
+/** 支出の 1 行（資金の表。順に積む。入金は無い）。 */
+export interface MatrixDebit {
+  readonly purchase: number;
+  readonly routeId: string;
+  readonly leg: "source" | "destination";
+  readonly role: string;
+  readonly address: string;
+  readonly network: string;
+  readonly kind: "token" | "native";
+  readonly asset: string | null;
+  readonly amount: string;
+  readonly what: string;
+}
+export interface MatrixCheck {
+  readonly role: string;
+  readonly address: string;
+  readonly network: string;
+  readonly kind: "token" | "native";
+  readonly asset: string | null;
+  readonly need: string;
+  readonly have: string | null;
+  readonly ok: boolean;
+  readonly note: string;
+}
+export interface MatrixPlan {
+  readonly kind: typeof MATRIX_PLAN_KIND;
+  readonly version: typeof MATRIX_PLAN_VERSION;
+  readonly createdAt: string;
+  readonly chains: readonly string[];
+  readonly addresses: MatrixAddresses;
+  readonly addressSources: Readonly<Record<string, string>>;
+  readonly purchases: readonly MatrixPurchase[];
+  readonly debits: readonly MatrixDebit[];
+  readonly balances: readonly PlanBalance[];
+  readonly checks: readonly MatrixCheck[];
+  readonly allSufficient: boolean;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── アドレス */
+
+function familyOf(network: string): "evm" | "svm" {
+  return network.startsWith("solana:") ? "svm" : "evm";
+}
+/** アドレスの比較（§8.5 #2）: EVM は大文字小文字を無視、Solana（base58）は完全一致。 */
+export function sameAddress(network: string, a: unknown, b: unknown): boolean {
+  if (typeof a !== "string" || typeof b !== "string" || a === "" || b === "") return false;
+  return familyOf(network) === "svm" ? a === b : a.toLowerCase() === b.toLowerCase();
+}
+/** 残高の鍵（アドレス × network × 資産）。Solana のアドレスは小文字にしない（base58 は大文字小文字を区別する）。 */
+export function matrixBalanceKey(address: string, network: string, asset: string | null): string {
+  const svm = familyOf(network) === "svm";
+  const a = svm ? address : address.toLowerCase();
+  const t = asset === null ? "native" : svm ? asset : asset.toLowerCase();
+  return `${a}|${network}|${t}`;
+}
+
+async function evmAddressOfKey(key: string): Promise<string> {
+  const { privateKeyToAccount } = await import("viem/accounts");
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw new Error("an EVM private key env is not a 0x-prefixed 32-byte hex string");
+  return privateKeyToAccount(key as `0x${string}`).address;
+}
+async function svmAddressOfKey(key: string): Promise<string> {
+  const { svmSignerFromKey } = await import("./svm-payer.js");
+  return String((await svmSignerFromKey(key)).address);
+}
+
+/** env からアドレスだけを読む（鍵があればアドレスを導く。鍵の値は返さない）。 */
+export async function matrixAddressesOf(env: Env): Promise<{ addresses: MatrixAddresses; sources: Record<string, string> }> {
+  const { addresses: base, sources } = await addressesOf(env);
+  const pick = async (role: string, addressEnv: string, keyEnv: string | undefined, svm: boolean): Promise<string> => {
+    const direct = env[addressEnv];
+    if (direct !== undefined && direct !== "") {
+      if (!(svm ? BASE58 : ADDRESS).test(direct)) throw new Error(`${addressEnv} must be ${svm ? "a base58 Solana address" : "an EVM address"}`);
+      sources[role] = addressEnv;
+      return direct;
+    }
+    const key = keyEnv === undefined ? undefined : env[keyEnv];
+    if (keyEnv !== undefined && key !== undefined && key !== "") {
+      sources[role] = `derived from ${keyEnv}`;
+      return svm ? await svmAddressOfKey(key) : await evmAddressOfKey(key);
+    }
+    throw new Error(`${addressEnv}${keyEnv === undefined ? "" : ` or ${keyEnv}`} is required for the matrix`);
+  };
+  const payerSolana = await pick("payerSolana", "SUBETHA_PAYER_SOLANA_ADDRESS", "SOLANA_PAYER_PRIVATE_KEY", true);
+  const arcReceiver = await pick("arcReceiver", "SUBETHA_ARC_RECEIVER_ADDRESS", "SUBETHA_ARC_RECEIVER_KEY", false);
+  const solanaReceiver = await pick("solanaReceiver", "SUBETHA_SOLANA_RECEIVER", undefined, true);
+  const solanaOutbound = await pick("solanaOutbound", "SUBETHA_SOLANA_OUTBOUND_ADDRESS", "SUBETHA_OUTBOUND_SOLANA_KEY", true);
+  const arcProvider = await pick("arcProvider", "SUBETHA_ARC_PROVIDER_PAYTO", undefined, false);
+  const solanaProvider = await pick("solanaProvider", "SUBETHA_SOLANA_PROVIDER_PAYTO", undefined, true);
+  const solanaMppProvider = await pick("solanaMppProvider", "SUBETHA_SOLANA_MPP_PROVIDER_PAYTO", undefined, true);
+  sources["payerEvm"] = sources["payer"] ?? "";
+  sources["providerB"] = "remote-mcp-config OUTBOUND.payTo (Provider B)";
+  return {
+    addresses: {
+      payerEvm: base.payer,
+      payerSolana,
+      routerReceiver: base.routerReceiver,
+      routerOutbound: base.routerOutbound,
+      arcReceiver,
+      solanaReceiver,
+      solanaOutbound,
+      facilitatorGas: base.facilitatorGas,
+      providerPayTo: base.providerPayTo,
+      providerB: OUTBOUND.payTo,
+      arcProvider,
+      solanaProvider,
+      solanaMppProvider,
+    },
+    sources,
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── 購入の並び */
+
+interface RouteTerms {
+  readonly rail: string;
+  readonly sourceRail: string;
+  readonly source: { amount: string; asset: string; decimals: number; network: string; payTo: string };
+  readonly destination: { scheme: string; network: string; asset: string; payTo: string };
+}
+
+const SOURCE_ROLE: Readonly<Record<MatrixEndpoint, string>> = { rh: "routerReceiver", arbsep: "routerReceiver", hyperevm: "routerReceiver", tempo: "routerReceiver", arc: "arcReceiver", sol: "solanaReceiver", solmpp: "solanaReceiver" };
+const DEST_ROLE: Readonly<Record<MatrixEndpoint, string>> = { rh: "providerPayTo", arbsep: "providerPayTo", hyperevm: "providerPayTo", tempo: "providerB", arc: "arcProvider", sol: "solanaProvider", solmpp: "solanaMppProvider" };
+const SOURCE_SETTLED_BY: Readonly<Record<MatrixEndpoint, string>> = {
+  rh: "self-hosted facilitator (facilitatorGas pays gas)",
+  arbsep: "self-hosted facilitator (facilitatorGas pays gas)",
+  hyperevm: "self-hosted facilitator (facilitatorGas pays gas)",
+  tempo: "the payer broadcasts AT SIGN (MPP tempo/charge; fee in pathUSD; funds move when signing)",
+  arc: "Circle facilitator (its gas)",
+  sol: "x402.org facilitator (its fee payer)",
+  solmpp: "the Router broadcasts at purchase (MPP solana/charge; the payer's key pays the SOL fee)",
+};
+const DEST_SETTLED_BY: Readonly<Record<MatrixEndpoint, string>> = {
+  rh: "local Provider -> self-hosted facilitator (facilitatorGas pays gas)",
+  arbsep: "local Provider -> self-hosted facilitator (facilitatorGas pays gas)",
+  hyperevm: "local Provider -> self-hosted facilitator (facilitatorGas pays gas)",
+  tempo: "the Router broadcasts (MPP tempo/charge to Provider B; fee in pathUSD from routerOutbound)",
+  arc: "Arc Provider's facilitator (Circle, its gas)",
+  sol: "Solana Provider's facilitator (its fee payer)",
+  solmpp: "Provider D's fee payer (MPP solana/charge, pull)",
+};
+const SIGN_KIND: Readonly<Record<MatrixEndpoint, ExpectedSign>> = { rh: "x402-evm", arbsep: "x402-evm", hyperevm: "x402-evm", tempo: "mpp", arc: "x402-evm", sol: "x402-svm", solmpp: "mpp-svm" };
+
+/** 30 件の購入（route の条件は専用の設定生成から。plan と Router の設定を 1 つの出所に）。 */
+export function matrixPurchasesOf(addresses: MatrixAddresses): MatrixPurchase[] {
+  const placeholderEnv: Record<string, string> = { SUBETHA_EVM_FACILITATOR_URL: "http://127.0.0.1:1/plan-only", SUBETHA_EVM_PROVIDER_PAYTO: addresses.providerPayTo };
+  for (const chain of MATRIX_NEW_CHAINS) placeholderEnv[`SUBETHA_EVM_PROVIDER_URL_${chain.toUpperCase()}`] = `http://127.0.0.1:1/${chain}`;
+  const config = evmTestnetsConfigOf(placeholderEnv, addresses.routerReceiver, MATRIX_NEW_CHAINS, {
+    matrix: true,
+    receivers: { arc: addresses.arcReceiver, solana: addresses.solanaReceiver },
+    providers: { arc: addresses.arcProvider, solana: addresses.solanaProvider, solanaMpp: addresses.solanaMppProvider },
+  }) as { router: { routes: Record<string, RouteTerms> } };
+  const byRole = addresses as unknown as Record<string, string>;
+  return matrixPairsOf().map(({ src, dst, routeId }, i) => {
+    const route = config.router.routes[routeId];
+    if (route === undefined) throw new Error(`the generated config has no route ${routeId}`);
+    const s = MATRIX_RAILS[src];
+    const d = MATRIX_RAILS[dst];
+    const sourceFromRole = s.family === "svm" ? "payerSolana" : "payerEvm";
+    const destFromRole = d.family === "svm" ? "solanaOutbound" : "routerOutbound";
+    const leg = (endpoint: MatrixEndpoint, rail: typeof s, network: string, asset: string, decimals: number, fromRole: string, toRole: string, to: string, settledBy: string, fundsMoveAtSign: boolean): MatrixLeg => ({
+      endpoint,
+      rail: rail.rail,
+      scheme: rail.scheme,
+      family: rail.family,
+      network,
+      networkLabel: NETWORK_LABEL[network] ?? network,
+      asset,
+      assetSymbol: ASSET_SYMBOL[network] ?? "?",
+      decimals,
+      amount: "10000",
+      fromRole,
+      from: byRole[fromRole] as string,
+      toRole,
+      to,
+      settledBy,
+      fundsMoveAtSign,
+      finalityRule: finalityRuleOf(network),
+    });
+    if (route.source.payTo !== byRole[SOURCE_ROLE[src]]) throw new Error(`${routeId}: the generated source.payTo is not the ${SOURCE_ROLE[src]}`);
+    return {
+      index: i + 1,
+      routeId,
+      src,
+      dst,
+      upstream: isMatrixNewChain(dst) ? `${dst} Provider (local wrangler dev --env ${dst})` : `hosted ${dst === "tempo" ? "Provider B (MPP Tempo)" : dst === "arc" ? "Arc Provider (x402)" : dst === "sol" ? "Solana Provider (x402)" : "Provider D (MPP Solana)"}`,
+      expectedSign: SIGN_KIND[src],
+      source: leg(src, s, route.source.network, route.source.asset, route.source.decimals, sourceFromRole, SOURCE_ROLE[src], route.source.payTo, SOURCE_SETTLED_BY[src], src === "tempo"),
+      // 送信レグの額は Provider の 402（quote 時）。§8.1 で各レグ 10,000（1:1）。
+      destination: leg(dst, d, route.destination.network, route.destination.asset, d.decimals, destFromRole, DEST_ROLE[dst], route.destination.payTo, DEST_SETTLED_BY[dst], false),
+    };
+  });
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── 資金の表 */
+
+function bigEnv(env: Env, name: string, fallback: bigint): bigint {
+  const text = env[name];
+  return text !== undefined && /^[1-9][0-9]{0,30}$/.test(text) ? BigInt(text) : fallback;
+}
+function chainIdOf(network: string): string {
+  return network.split(":")[1] ?? "";
+}
+
+/** 支出（順に積む）。facilitator の gas は settle ごとに 上限 gas × 見積もり（無ければ上限の単価）で数える。 */
+export function matrixDebitsOf(purchases: readonly MatrixPurchase[], addresses: MatrixAddresses, fees: ReadonlyMap<string, bigint | null>, env: Env): MatrixDebit[] {
+  const out: MatrixDebit[] = [];
+  for (const p of purchases) {
+    for (const legName of ["source", "destination"] as const) {
+      const l = p[legName];
+      out.push({ purchase: p.index, routeId: p.routeId, leg: legName, role: l.fromRole, address: l.from, network: l.network, kind: "token", asset: l.asset, amount: l.amount, what: `${legName} payment` });
+      if (l.endpoint === "tempo") out.push({ purchase: p.index, routeId: p.routeId, leg: legName, role: l.fromRole, address: l.from, network: l.network, kind: "token", asset: l.asset, amount: TEMPO_FEE_ALLOWANCE.toString(), what: "Tempo fee allowance (fee token pathUSD)" });
+      if (legName === "source" && l.endpoint === "solmpp") out.push({ purchase: p.index, routeId: p.routeId, leg: legName, role: l.fromRole, address: l.from, network: l.network, kind: "native", asset: null, amount: SOLANA_FEE_ALLOWANCE_LAMPORTS.toString(), what: "SOL fee allowance (the payer is the fee payer)" });
+      if (isMatrixNewChain(l.endpoint)) {
+        const id = chainIdOf(l.network);
+        const maxGas = bigEnv(env, `EVM_FACILITATOR_MAX_GAS_${id}`, DEFAULT_MAX_SETTLE_GAS[l.network] ?? 200_000n);
+        const fee = fees.get(l.network) ?? bigEnv(env, `EVM_FACILITATOR_MAX_FEE_PER_GAS_${id}`, DEFAULT_MAX_FEE_PER_GAS[l.network] ?? 1_000_000_000n);
+        out.push({ purchase: p.index, routeId: p.routeId, leg: legName, role: "facilitatorGas", address: addresses.facilitatorGas, network: l.network, kind: "native", asset: null, amount: (maxGas * fee).toString(), what: `self-hosted facilitator settle gas (max gas ${maxGas.toString()} x ${fee.toString()} wei)` });
+      }
+    }
+  }
+  return out;
+}
+
+/** 検査（§8.5 #5）: 鍵ごとに **初期残高 ≥ 累計の支出**。入金は数えない。最初に足りなくなる購入を書く。facilitator の gas は process の上限も見る。 */
+export function matrixChecksOf(debits: readonly MatrixDebit[], balances: readonly PlanBalance[], env: Env): MatrixCheck[] {
+  const have = new Map<string, bigint | null>();
+  for (const b of balances) have.set(matrixBalanceKey(b.address, b.network, b.asset), b.value === null ? null : BigInt(b.value));
+  const need = new Map<string, { debit: MatrixDebit; total: bigint; shortAt?: MatrixDebit }>();
+  for (const d of debits) {
+    const key = matrixBalanceKey(d.address, d.network, d.asset);
+    const entry = need.get(key) ?? { debit: d, total: 0n };
+    entry.total += BigInt(d.amount);
+    const h = have.get(key);
+    if (entry.shortAt === undefined && (h === undefined || h === null || h < entry.total)) entry.shortAt = d;
+    need.set(key, entry);
+  }
+  const checks: MatrixCheck[] = [];
+  for (const [key, { debit, total, shortAt }] of need) {
+    const h = have.get(key);
+    let ok = shortAt === undefined;
+    let note = ok ? "enough for every planned debit (initial balance minus cumulative debits; incoming payments not counted)" : `short at purchase #${String(shortAt?.purchase)} ${shortAt?.routeId ?? ""} (${shortAt?.what ?? ""})`;
+    if (debit.role === "facilitatorGas") {
+      const cap = bigEnv(env, `EVM_FACILITATOR_GAS_CAP_${chainIdOf(debit.network)}`, DESIGN_GAS_CAPS[debit.network] ?? 0n);
+      if (total > cap) ok = false;
+      note += `; process gas cap ${cap.toString()} wei`;
+    }
+    checks.push({ role: debit.role, address: debit.address, network: debit.network, kind: debit.kind, asset: debit.asset, need: total.toString(), have: h === undefined || h === null ? null : h.toString(), ok, note });
+  }
+  return checks;
+}
+
+/** plan を作る（残高は読み取りだけ）。 */
+export async function buildMatrixPlan(env: Env, reader: ChainReader, now: () => Date = () => new Date()): Promise<MatrixPlan> {
+  const { addresses, sources } = await matrixAddressesOf(env);
+  const purchases = matrixPurchasesOf(addresses);
+  const fees = new Map<string, bigint | null>();
+  for (const chain of MATRIX_NEW_CHAINS) {
+    const network = EVM_TESTNETS[chain].network;
+    try {
+      fees.set(network, await reader.feeEstimate(network));
+    } catch {
+      fees.set(network, null);
+    }
+  }
+  const debits = matrixDebitsOf(purchases, addresses, fees, env);
+  const balances: PlanBalance[] = [];
+  const seen = new Set<string>();
+  for (const d of debits) {
+    const key = matrixBalanceKey(d.address, d.network, d.asset);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const value = d.asset === null ? await reader.nativeBalance(d.network, d.address) : await reader.tokenBalance(d.network, d.asset, d.address);
+      balances.push({ role: d.role, address: d.address, network: d.network, kind: d.kind, asset: d.asset, value: value.toString() });
+    } catch {
+      balances.push({ role: d.role, address: d.address, network: d.network, kind: d.kind, asset: d.asset, value: null, error: "rpc_read_failed" });
+    }
+  }
+  const checks = matrixChecksOf(debits, balances, env);
+  return {
+    kind: MATRIX_PLAN_KIND,
+    version: MATRIX_PLAN_VERSION,
+    createdAt: now().toISOString(),
+    chains: [...MATRIX_NEW_CHAINS],
+    addresses,
+    addressSources: sources,
+    purchases,
+    debits,
+    balances,
+    checks,
+    allSufficient: checks.every((c) => c.ok),
+  };
+}
+
+/** 人が読む表。 */
+export function matrixPlanText(plan: MatrixPlan, sha: string): string {
+  const lines: string[] = [];
+  lines.push(`Cross-rail matrix plan (design §8/§8.5) — created ${plan.createdAt}`);
+  lines.push(`plan sha256 (canonical JSON): ${sha}`);
+  lines.push("Nothing is signed by `plan`. `run --matrix --prefunded` refuses unless --plan-sha256 equals this hash.");
+  lines.push("Tempo MPP sources move funds AT SIGN; any failure after signing stops the run as funds_possibly_moved and that route is never re-signed.");
+  lines.push("");
+  lines.push("Addresses:");
+  for (const [role, address] of Object.entries(plan.addresses)) lines.push(`  ${role.padEnd(18)} ${address}  (${plan.addressSources[role] ?? ""})`);
+  lines.push("");
+  lines.push("Purchases (one at a time, in this order; any non-delivered result stops the run, no retries):");
+  for (const p of plan.purchases) {
+    lines.push(`  #${String(p.index).padEnd(2)} ${p.routeId}  sign: ${p.expectedSign}  upstream: ${p.upstream}`);
+    for (const [name, l] of [["src", p.source], ["dst", p.destination]] as const) {
+      lines.push(`       ${name} ${l.rail}/${l.scheme} ${l.networkLabel}: ${l.fromRole} ${short(l.from)} -> ${l.toRole} ${short(l.to)}  ${l.amount} / ${String(l.decimals)} (${units(l.amount, l.decimals)} ${l.assetSymbol}); ${l.settledBy}; finality ${l.finalityRule}`);
+    }
+  }
+  lines.push("");
+  lines.push("Funds per role and rail (initial balance vs cumulative debits; incoming payments are not counted):");
+  for (const c of plan.checks) {
+    const unit = c.kind === "native" ? "native" : (ASSET_SYMBOL[c.network] ?? "token");
+    lines.push(`  [${c.ok ? "ok" : "SHORT"}] ${c.role.padEnd(18)} ${short(c.address)}  ${(NETWORK_LABEL[c.network] ?? c.network).padEnd(26)} ${unit.padEnd(8)} need ${c.need} have ${c.have ?? "?"} — ${c.note}`);
+  }
+  lines.push("");
+  lines.push(`All payers sufficient: ${plan.allSufficient ? "yes" : "NO"}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** plan を読み、canonical sha256 が一致するときだけ返す。 */
+export function loadApprovedMatrixPlan(file: string, expectedSha: string): MatrixPlan {
+  if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new PlanRefusal("--plan-sha256 must be 64 lowercase hex characters");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    throw new PlanRefusal("the plan file is not readable JSON");
+  }
+  const actual = planSha256(parsed);
+  if (actual !== expectedSha) throw new PlanRefusal(`the plan's canonical sha256 is ${actual}, not the approved ${expectedSha}; refusing`);
+  const plan = parsed as MatrixPlan;
+  if (plan.kind !== MATRIX_PLAN_KIND || plan.version !== MATRIX_PLAN_VERSION || !Array.isArray(plan.purchases)) throw new PlanRefusal("not a matrix plan of a known version");
+  return plan;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── 照合（署名の前。§8.5 #2） */
+
+/** quote の応答をレールごとに plan と照合する。不一致の一覧（空なら一致）。 */
+export function matrixSubjectMismatches(response: Record<string, unknown>, planned: MatrixPurchase, nowMs: number): string[] {
+  const problems: string[] = [];
+  const subject = response["subject"];
+  const quote = response["quote"];
+  if (response["ok"] !== true || !isRecord(subject) || !isRecord(quote)) return ["the quote did not succeed or has no subject/quote"];
+  const src = planned.source;
+  const dst = planned.destination;
+  const eq = (label: string, actual: unknown, expected: unknown): void => {
+    if (actual !== expected) problems.push(`${label}: got ${JSON.stringify(actual)}, plan ${JSON.stringify(expected)}`);
+  };
+  const addr = (label: string, network: string, actual: unknown, expected: string): void => {
+    if (!sameAddress(network, actual, expected)) problems.push(`${label}: got ${JSON.stringify(actual)}, plan ${JSON.stringify(expected)}`);
+  };
+  eq("subject.routeId", subject["routeId"], planned.routeId);
+  eq("quote.routeId", quote["routeId"], planned.routeId);
+  eq("quote.quoteId = subject.quoteId", quote["quoteId"], subject["quoteId"]);
+  if (typeof subject["quoteId"] !== "string" || subject["quoteId"] === "") problems.push("subject.quoteId is missing");
+  if (typeof subject["paymentId"] !== "string" || subject["paymentId"] === "") problems.push("subject.paymentId is missing");
+  if (quote["upstream"] !== undefined || quote["ownerKey"] !== undefined) problems.push("the quote is dynamic (upstream/ownerKey present); the plan is for static routes");
+  const s = isRecord(subject["source"]) ? subject["source"] : {};
+  const qs = isRecord(quote["source"]) ? quote["source"] : {};
+  eq("subject.source.network", s["network"], src.network);
+  addr("subject.source.asset", src.network, s["asset"], src.asset);
+  eq("subject.source.amount", s["amount"], src.amount);
+  eq("subject.source.decimals", s["decimals"], src.decimals);
+  eq("quote.source.network", qs["network"], src.network);
+  addr("quote.source.asset", src.network, qs["asset"], src.asset);
+  eq("quote.source.amount", qs["amount"], src.amount);
+  const shownOffer = isRecord(s["offer"]) ? s["offer"] : {};
+  const signedOffer = isRecord(qs["offer"]) ? qs["offer"] : undefined;
+  if (signedOffer === undefined) problems.push("quote.source.offer (the offer that would be signed) is missing");
+  else if (stableJson(signedOffer) !== stableJson(shownOffer)) problems.push("quote.source.offer (the offer that would be signed) differs from subject.source.offer (the offer shown for approval)");
+  const moves = src.rail === "mpp";
+  const entry = knownNetworkOf(KNOWN_NETWORKS, src.network);
+  const known = entry === undefined ? undefined : knownAssetOf(entry, src.asset);
+  for (const [label, o] of [["subject offer", shownOffer], ["signed offer", signedOffer ?? {}]] as const) {
+    eq(`${label}.scheme`, o["scheme"], src.scheme);
+    eq(`${label}.network`, o["network"], src.network);
+    addr(`${label}.asset`, src.network, o["asset"], src.asset);
+    eq(`${label}.amount`, o["amount"], src.amount);
+    addr(`${label}.payTo (Router receiver)`, src.network, o["payTo"], src.to);
+    const extra = isRecord(o["extra"]) ? o["extra"] : {};
+    eq(`${label}.extra.fundsMoveOnCredential`, extra["fundsMoveOnCredential"], moves);
+    eq(`${label}.extra.challengeNonce = quoteId`, extra["challengeNonce"], subject["quoteId"]);
+    if (known === undefined) {
+      problems.push(`${label}: the planned source asset is not in the table`);
+      continue;
+    }
+    if (src.scheme === "exact" && src.family === "evm") {
+      if (known.domain === undefined) problems.push(`${label}: the table has no EIP-712 domain for the planned asset`);
+      else {
+        eq(`${label}.extra.name (table domain)`, extra["name"], known.domain.name);
+        eq(`${label}.extra.version (table domain)`, extra["version"], known.domain.version);
+      }
+    } else if (src.scheme === "exact") {
+      if (typeof extra["feePayer"] !== "string" || extra["feePayer"] === "") problems.push(`${label}.extra.feePayer is missing`);
+      if (extra["memo"] !== extra["challengeNonce"]) problems.push(`${label}.extra.memo must be the challengeNonce`);
+      for (const k of ["decimals", "tokenProgram", "mint"] as const) {
+        const want = k === "decimals" ? known.decimals : k === "tokenProgram" ? known.tokenProgram : known.id;
+        if (extra[k] !== undefined && extra[k] !== want) problems.push(`${label}.extra.${k} conflicts with the table`);
+      }
+    } else {
+      // MPP: 中身（challenge）を封筒・表と照合する（SDK は challenge の中身から送金を組む）。
+      const challenge = extra["challenge"];
+      if (typeof challenge !== "string" || challenge === "") {
+        problems.push(`${label}.extra.challenge is missing`);
+      } else if (src.scheme === "tempo/charge") {
+        const checked = checkTempoChallenge(challenge, { amount: String(o["amount"]), asset: String(o["asset"]), payTo: String(o["payTo"]), extra }, Number(chainIdOf(src.network)), nowMs);
+        if (!checked.ok) problems.push(`${label}.extra.challenge: ${checked.reason}`);
+      } else {
+        if (known.tokenProgram === undefined) problems.push(`${label}: the table has no token program`);
+        else {
+          const checked = checkSvmMppChallenge(challenge, { amount: String(o["amount"]), payTo: String(o["payTo"]), extra }, { mint: known.id, decimals: known.decimals, tokenProgram: known.tokenProgram }, nowMs);
+          if (!checked.ok) problems.push(`${label}.extra.challenge: ${checked.reason}`);
+        }
+        if (extra["decimals"] !== undefined && extra["decimals"] !== known.decimals) problems.push(`${label}.extra.decimals conflicts with the table`);
+        if (extra["tokenProgram"] !== undefined && extra["tokenProgram"] !== known.tokenProgram) problems.push(`${label}.extra.tokenProgram conflicts with the table`);
+      }
+    }
+  }
+  eq("subject.fundsMoveOnCredential", subject["fundsMoveOnCredential"], moves);
+  const d = isRecord(subject["destination"]) ? subject["destination"] : {};
+  const qd = isRecord(quote["destination"]) ? quote["destination"] : {};
+  eq("subject.destination.network", d["network"], dst.network);
+  addr("subject.destination.asset", dst.network, d["asset"], dst.asset);
+  eq("subject.destination.quoted", d["quoted"], dst.amount);
+  eq("quote.destination.network", qd["network"], dst.network);
+  addr("quote.destination.asset", dst.network, qd["asset"], dst.asset);
+  eq("quote.destination.quoted", qd["quoted"], dst.amount);
+  addr("quote.destination.payTo (upstream recipient)", dst.network, qd["payTo"], dst.to);
+  const approval = isRecord(subject["approval"]) ? subject["approval"] : {};
+  const deadline = approval["deadlineMs"];
+  if (typeof deadline !== "number" || deadline <= nowMs) problems.push("the quote's approval deadline has passed or is missing");
+  return problems;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── 署名（`npm run sign` と同じ `runSign`、全レール） */
+
+export type MatrixSignResult =
+  | { readonly ok: true; readonly credential: string; readonly kind: ExpectedSign; readonly chainId?: number; readonly txRef?: string }
+  | { readonly ok: false; readonly reason: string; readonly fundsMayHaveMoved: boolean; readonly txRef?: string };
+export type MatrixSigner = (quote: unknown, planned: MatrixPurchase) => Promise<MatrixSignResult>;
+
+/** payer の作り方（試験が差し替える）。本番は `runSignMatrixSigner`。 */
+export type MatrixPayerFactories = Pick<SignDeps, "mppPayer" | "evmPayer" | "svmPayer" | "svmMppPayer">;
+
+/**
+ * `runSign` に全レールの payer を渡す。payer の address が plan の払い手と違えば **署名・送金の前に** 止める（EVM は大文字小文字を無視、Solana は完全一致）。
+ * Tempo MPP の payer の `payAndCredential` を呼んだ後の失敗は `fundsMayHaveMoved: true`（tx があれば返す）。
+ */
+export function matrixSignerOf(env: Env, factories: MatrixPayerFactories, nowMs: () => number = Date.now): MatrixSigner {
+  return async (quote, planned) => {
+    const evmKey = env["SUBETHA_PAYER_PRIVATE_KEY"];
+    const solKey = env["SOLANA_PAYER_PRIVATE_KEY"];
+    const rpc = env["SOLANA_RPC_URL"];
+    const expectFrom = (address: string): void => {
+      if (!sameAddress(planned.source.network, address, planned.source.from)) throw new MatrixSignBlocked("the payer key does not belong to the plan's payer address");
+    };
+    let paying = false;
+    let txRef: string | undefined;
+    try {
+      const outcome = await runSign(quote, {
+        nowMs,
+        readEvmKey: () => {
+          if (evmKey === undefined || evmKey === "") throw new MatrixSignBlocked("SUBETHA_PAYER_PRIVATE_KEY is not set");
+          return evmKey;
+        },
+        readSolanaKey: () => {
+          if (solKey === undefined || solKey === "") throw new MatrixSignBlocked("SOLANA_PAYER_PRIVATE_KEY is not set");
+          return solKey;
+        },
+        ...(rpc === undefined || rpc === "" ? {} : { solanaRpcUrl: rpc }),
+        mppPayer: (key, scope) => {
+          const payer = factories.mppPayer(key, scope);
+          expectFrom(payer.address);
+          return {
+            address: payer.address,
+            async payAndCredential(offer: never) {
+              // ここから先は資金が動き得る（Tempo MPP の push）。
+              paying = true;
+              const result = await payer.payAndCredential(offer);
+              txRef = result.txRef;
+              return result;
+            },
+          };
+        },
+        evmPayer: (key) => {
+          const payer = factories.evmPayer(key);
+          expectFrom(payer.address);
+          return payer;
+        },
+        svmPayer: async (key, options) => {
+          const payer = await factories.svmPayer(key, options);
+          expectFrom(payer.address);
+          return payer;
+        },
+        svmMppPayer: async (key, options) => {
+          const payer = await factories.svmMppPayer(key, options);
+          expectFrom(payer.address);
+          return payer;
+        },
+        stderr: () => {},
+      });
+      if (!outcome.ok) return { ok: false, reason: outcome.reason, fundsMayHaveMoved: paying, ...(txRef === undefined ? {} : { txRef }) };
+      const kind = outcome.dispatch.kind as ExpectedSign;
+      return { ok: true, credential: outcome.stdout.trim(), kind, ...(outcome.dispatch.kind === "x402-evm" ? { chainId: outcome.dispatch.chainId } : {}), ...(txRef === undefined ? {} : { txRef }) };
+    } catch (error) {
+      // 例外の文言に鍵は入らない（固定文）。知らない例外は固定文に寄せる。
+      const reason = error instanceof MatrixSignBlocked ? error.message : "signing failed";
+      return { ok: false, reason, fundsMayHaveMoved: paying, ...(txRef === undefined ? {} : { txRef }) };
+    }
+  };
+}
+class MatrixSignBlocked extends Error {}
+
+/** 本番の payer（`tools/sign-payment.ts` と同じ factory）。 */
+export async function runSignMatrixSigner(env: Env): Promise<MatrixSigner> {
+  const [{ createMppPayer }, { createX402Payer }, { createSvmPayer }, { createSvmMppPayer }] = await Promise.all([import("./mpp-payer.js"), import("./x402-payer.js"), import("./svm-payer.js"), import("./svm-mpp-payer.js")]);
+  return matrixSignerOf(env, {
+    mppPayer: (key, scope) => createMppPayer(key, scope),
+    evmPayer: (key) => createX402Payer(key),
+    svmPayer: (key, options) => createSvmPayer(key, options),
+    svmMppPayer: (key, options) => createSvmMppPayer(key, options),
+  });
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── chain の読み取り（Solana を足す） */
+
+/** Solana の JSON-RPC（読み取りだけ。https、15 秒、再試行なし）。 */
+export function svmRpcUrlOf(env: Env): string {
+  const url = env["SOLANA_RPC_URL"];
+  const chosen = url === undefined || url === "" ? "https://api.devnet.solana.com" : url;
+  if (!/^https:\/\//.test(chosen)) throw new Error("SOLANA_RPC_URL must be an https URL");
+  return chosen;
+}
+
+async function svmRpc(url: string, method: string, params: unknown[]): Promise<unknown> {
+  const response = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(15_000), redirect: "error" });
+  if (!response.ok) throw new Error(`solana rpc http ${String(response.status)}`);
+  const json = (await response.json()) as { result?: unknown; error?: unknown };
+  if (json.error !== undefined) throw new Error("solana rpc error");
+  return json.result;
+}
+
+/** `getTransaction`（jsonParsed）の応答を要約する（純粋。試験で確かめる）。 */
+export function svmTransactionInfoOf(result: unknown): SvmTransactionInfo | undefined {
+  if (!isRecord(result)) return undefined;
+  const meta = isRecord(result["meta"]) ? result["meta"] : undefined;
+  if (meta === undefined) return undefined;
+  const rows = (list: unknown): { accountIndex: number; owner: string; mint: string; amount: bigint }[] =>
+    (Array.isArray(list) ? list : []).flatMap((b) => {
+      if (!isRecord(b) || typeof b["owner"] !== "string" || typeof b["mint"] !== "string" || typeof b["accountIndex"] !== "number") return [];
+      const ui = isRecord(b["uiTokenAmount"]) ? b["uiTokenAmount"] : {};
+      return typeof ui["amount"] === "string" && /^[0-9]+$/.test(ui["amount"]) ? [{ accountIndex: b["accountIndex"], owner: b["owner"], mint: b["mint"], amount: BigInt(ui["amount"]) }] : [];
+    });
+  const pre = rows(meta["preTokenBalances"]);
+  const post = rows(meta["postTokenBalances"]);
+  const indexes = [...new Set([...pre, ...post].map((r) => r.accountIndex))].sort((a, b) => a - b);
+  const tokenBalances = indexes.map((accountIndex) => {
+    const a = pre.find((r) => r.accountIndex === accountIndex);
+    const b = post.find((r) => r.accountIndex === accountIndex);
+    const ref = (b ?? a)!;
+    return { accountIndex, owner: ref.owner, mint: ref.mint, pre: a?.amount ?? 0n, post: b?.amount ?? 0n };
+  });
+  return { ok: meta["err"] === null, slot: typeof result["slot"] === "number" ? result["slot"] : -1, tokenBalances };
+}
+
+/** EVM（viem）に Solana の読み取りを足した reader。 */
+export async function matrixChainReader(env: Env): Promise<ChainReader> {
+  const evm = await viemChainReader(env);
+  const rpc = svmRpcUrlOf(env);
+  return {
+    async tokenBalance(network, asset, owner) {
+      if (familyOf(network) === "evm") return await evm.tokenBalance(network, asset, owner);
+      const result = await svmRpc(rpc, "getTokenAccountsByOwner", [owner, { mint: asset }, { encoding: "jsonParsed", commitment: "confirmed" }]);
+      const accounts = isRecord(result) && Array.isArray(result["value"]) ? result["value"] : [];
+      let sum = 0n;
+      for (const a of accounts) {
+        const info = isRecord(a) && isRecord(a["account"]) && isRecord(a["account"]["data"]) && isRecord(a["account"]["data"]["parsed"]) && isRecord(a["account"]["data"]["parsed"]["info"]) ? a["account"]["data"]["parsed"]["info"] : {};
+        const amount = isRecord(info["tokenAmount"]) ? info["tokenAmount"]["amount"] : undefined;
+        if (typeof amount === "string" && /^[0-9]+$/.test(amount)) sum += BigInt(amount);
+      }
+      return sum;
+    },
+    async nativeBalance(network, owner) {
+      if (familyOf(network) === "evm") return await evm.nativeBalance(network, owner);
+      const result = await svmRpc(rpc, "getBalance", [owner, { commitment: "confirmed" }]);
+      const value = isRecord(result) ? result["value"] : undefined;
+      if (typeof value !== "number") throw new Error("solana getBalance: unexpected form");
+      return BigInt(value);
+    },
+    feeEstimate: (network) => evm.feeEstimate(network),
+    receipt: (network, hash) => evm.receipt(network, hash),
+    finalizedBlock: (network) => evm.finalizedBlock(network),
+    async svmTransaction(_network, signature) {
+      const result = await svmRpc(rpc, "getTransaction", [signature, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }]);
+      return result === null ? undefined : svmTransactionInfoOf(result);
+    },
+    async svmSignatureStatus(_network, signature) {
+      const result = await svmRpc(rpc, "getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
+      const value = isRecord(result) && Array.isArray(result["value"]) ? result["value"][0] : undefined;
+      if (!isRecord(value)) return undefined;
+      return { confirmationStatus: typeof value["confirmationStatus"] === "string" ? value["confirmationStatus"] : null, err: value["err"] ?? null, slot: typeof value["slot"] === "number" ? value["slot"] : -1 };
+    },
+  };
+}
+
+/**
+ * Solana のレグの照合（§8.5 #4）: 署名の形、取引の成功、`mint` の残高の差が **owner（ATA の authority）ごとに** from −amount・to +amount。
+ * 待つのは `waitMs` まで（commitment `confirmed`）。
+ */
+export async function verifySvmLeg(reader: ChainReader, leg: "source" | "destination", planned: Pick<MatrixLeg, "network" | "asset" | "amount" | "from" | "to">, signature: unknown, opts: { waitMs: number; sleep: (ms: number) => Promise<void> }): Promise<LegEvidence> {
+  const expected = { from: planned.from, to: planned.to, value: planned.amount };
+  const base = { leg, network: planned.network, token: planned.asset, expected, blockHash: null };
+  if (!isTxRefOf(planned.network, signature)) return { ...base, txHash: typeof signature === "string" ? signature : null, receiptStatus: null, blockNumber: null, transfer: null, ok: false, problem: "no Solana signature recorded for this leg" };
+  if (reader.svmTransaction === undefined) return { ...base, txHash: signature, receiptStatus: null, blockNumber: null, transfer: null, ok: false, problem: "the chain reader cannot read Solana transactions" };
+  let info: SvmTransactionInfo | undefined;
+  const deadline = Date.now() + opts.waitMs;
+  try {
+    for (;;) {
+      info = await reader.svmTransaction(planned.network, signature);
+      if (info !== undefined || Date.now() >= deadline) break;
+      await opts.sleep(3_000);
+    }
+  } catch {
+    return { ...base, txHash: signature, receiptStatus: null, blockNumber: null, transfer: null, ok: false, problem: "transaction read failed (RPC)" };
+  }
+  if (info === undefined) return { ...base, txHash: signature, receiptStatus: null, blockNumber: null, transfer: null, ok: false, problem: "no transaction found" };
+  const deltaOf = (owner: string): bigint => info!.tokenBalances.filter((b) => b.mint === planned.asset && b.owner === owner).reduce((sum, b) => sum + (b.post - b.pre), 0n);
+  const amount = BigInt(planned.amount);
+  const fromDelta = deltaOf(planned.from);
+  const toDelta = deltaOf(planned.to);
+  const common = { ...base, txHash: signature, receiptStatus: info.ok ? "success" : "failed", blockNumber: String(info.slot), transfer: { from: planned.from, to: planned.to, value: toDelta.toString(), logIndex: -1 } };
+  if (!info.ok) return { ...common, ok: false, problem: "the transaction failed (meta.err is set)" };
+  if (toDelta !== amount || fromDelta !== -amount) return { ...common, ok: false, problem: `token balance changes differ from the quote (to ${toDelta.toString()}, from ${fromDelta.toString()}, expected ±${amount.toString()} of ${planned.asset})` };
+  return { ...common, ok: true };
+}
+
+/** レグの照合（family で振り分け）。EVM は `Transfer`（Tempo pathUSD も TIP-20 の `Transfer`。手数料の Transfer は fee manager 宛てで数えない）。 */
+export async function verifyMatrixLeg(reader: ChainReader, leg: "source" | "destination", planned: MatrixLeg, txRef: unknown, opts: { waitMs: number; sleep: (ms: number) => Promise<void> }): Promise<LegEvidence> {
+  return planned.family === "svm" ? await verifySvmLeg(reader, leg, planned, txRef, opts) : await verifyLeg(reader, leg, planned, txRef, opts);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────── run */
+
+export interface MatrixRunOptions {
+  readonly plan: MatrixPlan;
+  readonly planSha256: string;
+  readonly evidenceDir: string;
+  readonly only?: string | undefined;
+  /** 必須（行列は事前の入金で払う。§8.2）。 */
+  readonly prefunded: boolean;
+  readonly routerJournal?: string | undefined;
+  readonly facilitatorJournal?: string | undefined;
+  readonly facilitatorLog?: string | undefined;
+}
+export interface MatrixRunDeps {
+  readonly mcp: McpCaller;
+  readonly chain: ChainReader;
+  readonly sign: MatrixSigner;
+  readonly secrets: Secrets;
+  readonly out: (line: string) => void;
+  readonly now?: () => Date;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly receiptWaitMs?: number;
+  readonly requestIdOf?: (routeId: string) => string;
+}
+
+/** その購入の支出を今の残高と比べる（足りなければ理由。読めなければ理由）。 */
+async function fundsShortfall(reader: ChainReader, plan: MatrixPlan, planned: MatrixPurchase): Promise<{ short: string | undefined; balances: PlanBalance[] }> {
+  const mine = plan.debits.filter((d) => d.purchase === planned.index);
+  const totals = new Map<string, { d: MatrixDebit; total: bigint }>();
+  for (const d of mine) {
+    const key = matrixBalanceKey(d.address, d.network, d.asset);
+    const t = totals.get(key) ?? { d, total: 0n };
+    t.total += BigInt(d.amount);
+    totals.set(key, t);
+  }
+  const balances: PlanBalance[] = [];
+  for (const { d, total } of totals.values()) {
+    let value: bigint;
+    try {
+      value = d.asset === null ? await reader.nativeBalance(d.network, d.address) : await reader.tokenBalance(d.network, d.asset, d.address);
+    } catch {
+      return { short: `could not read the ${d.role} balance on ${d.network}`, balances };
+    }
+    balances.push({ role: d.role, address: d.address, network: d.network, kind: d.kind, asset: d.asset, value: value.toString() });
+    if (value < total) return { short: `${d.role} ${d.address} has ${value.toString()} on ${d.network} (${d.asset ?? "native"}), this purchase needs ${total.toString()}`, balances };
+  }
+  return { short: undefined, balances };
+}
+
+/**
+ * 30 件を 1 つずつ。最初の `delivered` でない結果・不一致・証跡の不足で全体を止める。再試行しない。
+ */
+export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Promise<RunReport> {
+  if (opts.prefunded !== true) throw new PlanRefusal("the matrix is paid from prefunded Router keys (design §8.2); pass --prefunded after the prefund run");
+  const now = deps.now ?? (() => new Date());
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const out = (line: string): void => deps.out(deps.secrets.redact(line));
+  const selected = opts.only === undefined ? [...opts.plan.purchases] : opts.plan.purchases.filter((p) => p.routeId === opts.only);
+  if (opts.only !== undefined && selected.length !== 1) throw new PlanRefusal(`--only ${opts.only} does not select exactly one planned purchase`);
+  const runId = `run-${compactUtc(now())}`;
+  const runDir = path.join(opts.evidenceDir, runId);
+  const completed: string[] = [];
+  const report = (stopped?: RunReport["stopped"]): RunReport => {
+    const result: RunReport = { runDir, completed, ...(stopped === undefined ? {} : { stopped }) };
+    writePrivate(path.join(runDir, "run.json"), { kind: "matrix", planSha256: opts.planSha256, only: opts.only ?? null, at: now().toISOString(), ...result }, deps.secrets);
+    return result;
+  };
+  out(`matrix run ${runId}: ${String(selected.length)} purchase(s), plan ${opts.planSha256} (prefunded)`);
+
+  for (const planned of selected) {
+    const scanned = readAllEvidence(opts.evidenceDir);
+    if (scanned.unreadable.length > 0) {
+      out(`HELD ${planned.routeId}: unreadable evidence file(s) ${scanned.unreadable.join(", ")}; an operator must inspect them before any purchase`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "held: unreadable evidence" });
+    }
+    const marker = attemptMarkerStateOf(opts.evidenceDir, opts.planSha256, planned.routeId);
+    if (marker === "corrupt") {
+      out(`HELD ${planned.routeId}: the attempt marker is unreadable (${attemptMarkerPathOf(opts.evidenceDir, opts.planSha256, planned.routeId)})`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "held: unreadable attempt marker" });
+    }
+    if (marker === "present" || scanned.evidence.some((e) => e.planSha256 === opts.planSha256 && e.routeId === planned.routeId)) {
+      out(`STOP ${planned.routeId}: already attempted under this plan; a new attempt needs a new plan and approval`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
+    }
+    const hold = priorAttemptHold(opts.evidenceDir, planned.routeId, opts.planSha256, scanned.evidence);
+    if (hold !== undefined) {
+      out(`HELD ${planned.routeId}: ${hold}`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: `held: ${hold}` });
+    }
+    // 残高（§8.5 #5）: この購入の支出が今の残高で足りること（入金は数えない）。足りなければ印を作らずに止まる。
+    const funds = await fundsShortfall(deps.chain, opts.plan, planned);
+    if (funds.short !== undefined) {
+      out(`STOP ${planned.routeId}: not funded: ${funds.short} (nothing was started)`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: `not funded: ${funds.short}` });
+    }
+
+    const fundsMoveAtSign = planned.source.fundsMoveAtSign;
+    const file = path.join(runDir, "purchases", `${planned.routeId}.json`);
+    const evidence: PurchaseEvidence = {
+      kind: "subetha-evm-testnets-e2e-purchase",
+      planSha256: opts.planSha256,
+      runId,
+      index: planned.index,
+      chain: `${planned.src}-to-${planned.dst}`,
+      direction: "matrix",
+      routeId: planned.routeId,
+      stage: "started",
+      startedAt: now().toISOString(),
+      prerequisite: { mode: "prefunded", balances: funds.balances },
+      fundsMoveAtSign,
+      timingsMs: {},
+    };
+    const save = (): void => writePrivate(file, evidence, deps.secrets);
+    const stop = (stage: PurchaseEvidence["stage"], reason: string): RunReport => {
+      evidence.stage = stage;
+      evidence.stopReason = reason;
+      evidence.finishedAt = now().toISOString();
+      save();
+      out(`STOP ${planned.routeId}: ${reason}${evidence.paymentId === undefined ? "" : ` (paymentId ${evidence.paymentId})`}`);
+      return report({ routeId: planned.routeId, stage, reason, paymentId: evidence.paymentId, status: evidence.status });
+    };
+    let created: boolean;
+    try {
+      created = createAttemptMarker(opts.evidenceDir, opts.planSha256, planned.routeId, { runId, at: now().toISOString(), fundsMoveAtSign });
+    } catch {
+      out(`HELD ${planned.routeId}: could not persist the attempt marker; not starting`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "held: attempt marker not persisted" });
+    }
+    if (!created) {
+      out(`STOP ${planned.routeId}: already attempted under this plan (attempt marker present)`);
+      return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
+    }
+    save();
+
+    // 1) quote（新しい requestId）。
+    const requestId = deps.requestIdOf?.(planned.routeId) ?? `mx-${planned.routeId}-${compactUtc(now())}-${randomBytes(3).toString("hex")}`;
+    evidence.requestId = requestId;
+    out(`#${String(planned.index)} ${planned.routeId}: quote (requestId ${requestId})`);
+    let quoted: Record<string, unknown>;
+    try {
+      quoted = await deps.mcp.call("subetha_router_quote", { routeId: planned.routeId, requestId });
+    } catch {
+      return stop("quote_failed", "the quote call failed (no payment started)");
+    }
+    const q = quoteRecordOf(quoted);
+    evidence.quoteResponse = q.response;
+    evidence.subject = q.subject;
+    evidence.quoteDestination = q.destination;
+    if (quoted["ok"] !== true) return stop("quote_failed", `quote failed: ${String(quoted["error"] ?? "unknown")} (no payment started)`);
+
+    // 2) レールごとの照合（署名の前。§8.5 #2）。照合した quote 文書を凍結し、署名と purchase にはその同じ object だけを渡す。
+    const quoteDoc = deepFreeze(structuredClone(quoted["quote"]));
+    quoted = { ...quoted, quote: quoteDoc };
+    const mismatches = matrixSubjectMismatches(quoted, planned, now().getTime());
+    evidence.mismatches = mismatches;
+    const subject = quoted["subject"] as Record<string, unknown>;
+    evidence.paymentId = String(subject["paymentId"] ?? "");
+    if (mismatches.length > 0) return stop("stopped_before_signing", `the quote differs from the plan: ${mismatches.join("; ")}`);
+
+    // 3) 署名。呼ぶ前に「呼んだ」を fsync して残す（Tempo MPP は署名で資金が動く。§8.5 #1）。
+    evidence.signInvoked = true;
+    save();
+    let signed: MatrixSignResult;
+    try {
+      signed = await deps.sign(quoteDoc, planned);
+    } catch {
+      signed = { ok: false, reason: "the signer threw", fundsMayHaveMoved: fundsMoveAtSign };
+    }
+    if (signed.txRef !== undefined) evidence.signTxRef = signed.txRef;
+    if (!signed.ok) {
+      // Tempo MPP: 署名を呼んだ後の失敗は全部「資金が動いた可能性」（§8.5 #1）。
+      if (fundsMoveAtSign || signed.fundsMayHaveMoved) return stop("funds_possibly_moved", `signing failed after a funds-moving signature was invoked (${signed.reason}); funds may have moved${signed.txRef === undefined ? "" : ` (tx ${signed.txRef})`} — not retried, never re-signed`);
+      return stop("sign_refused", `signing refused: ${signed.reason} (no payment started)`);
+    }
+    deps.secrets.add(signed.credential);
+    const signProblem =
+      signed.kind !== planned.expectedSign
+        ? `signed as ${signed.kind}, plan ${planned.expectedSign}`
+        : signed.kind === "x402-evm" && signed.chainId !== Number(chainIdOf(planned.source.network))
+          ? `signed for chain ${String(signed.chainId)}, plan ${chainIdOf(planned.source.network)}`
+          : undefined;
+    if (signProblem !== undefined) {
+      if (fundsMoveAtSign) return stop("funds_possibly_moved", `${signProblem} after a funds-moving signature; funds may have moved — not retried, never re-signed`);
+      return stop("sign_refused", `${signProblem} (credential discarded, no payment started)`);
+    }
+
+    // 4) purchase（同じ requestId、approval = quoteId）。1 回だけ。
+    const quoteId = String(subject["quoteId"]);
+    out(`#${String(planned.index)} ${planned.routeId}: purchase (paymentId ${evidence.paymentId})`);
+    const t1 = Date.now();
+    let purchased: Record<string, unknown>;
+    try {
+      purchased = await deps.mcp.call("subetha_router_purchase", { quoteId, requestId, approval: quoteId, quote: quoteDoc, credential: signed.credential });
+    } catch {
+      evidence.outcome = "unknown";
+      try {
+        evidence.status = withStatusDigest(await deps.mcp.call("subetha_router_status", { paymentId: evidence.paymentId }));
+      } catch {
+        evidence.status = "status call failed";
+      }
+      return stop(fundsMoveAtSign ? "funds_possibly_moved" : "purchase_call_failed", "the purchase call failed or timed out; funds may have moved — not retried");
+    }
+    (evidence.timingsMs as Record<string, number>)["purchase"] = Date.now() - t1;
+    evidence.purchase = withoutBody(purchased, "snapshot");
+    evidence.outcome = typeof purchased["outcome"] === "string" ? purchased["outcome"] : "unknown";
+    evidence.stage = "purchased";
+    save();
+
+    // 5) status（読むだけ）。
+    let status: Record<string, unknown> | undefined;
+    try {
+      status = await deps.mcp.call("subetha_router_status", { paymentId: evidence.paymentId });
+      evidence.status = withStatusDigest(status);
+    } catch {
+      evidence.status = "status call failed";
+    }
+    save();
+    const projection = status !== undefined && isRecord(status["projection"]) ? status["projection"] : undefined;
+    if (evidence.outcome !== "delivered" || projection?.["status"] !== "delivered") {
+      return stop(fundsMoveAtSign ? "funds_possibly_moved" : "purchased", `outcome ${evidence.outcome}, saved status ${JSON.stringify(projection?.["status"] ?? null)}; not delivered — stopping the run without retry`);
+    }
+
+    // 6) body の digest。
+    const clientDigest = bodyDigest(purchased["snapshot"]);
+    const routerRecord = projection["result"];
+    const routerSha = routerRecord === undefined ? null : bodyDigest(routerRecord).sha256;
+    evidence.body = { sha256: clientDigest.sha256, head: clientDigest.head, routerRecordSha256: routerSha, matches: routerSha === clientDigest.sha256 };
+
+    // 7) 2 レグの chain の読み取り。
+    const src = isRecord(projection["source"]) ? projection["source"] : {};
+    const dst = isRecord(projection["destination"]) ? projection["destination"] : {};
+    const legOpts = { waitMs: deps.receiptWaitMs ?? 60_000, sleep };
+    const sourceLeg = await verifyMatrixLeg(deps.chain, "source", planned.source, src["txRef"], legOpts);
+    const destinationLeg = await verifyMatrixLeg(deps.chain, "destination", planned.destination, dst["txRef"], legOpts);
+    evidence.legs = [sourceLeg, destinationLeg];
+    evidence.journal = journalLinesOf(evidence.paymentId, [sourceLeg.txHash, destinationLeg.txHash].filter((h): h is string => h !== null), { router: opts.routerJournal, facilitatorJournal: opts.facilitatorJournal, facilitatorLog: opts.facilitatorLog });
+    evidence.balancesAfter = (await fundsShortfall(deps.chain, opts.plan, planned)).balances;
+    const legProblems = evidence.legs.filter((l) => !l.ok).map((l) => `${l.leg}: ${l.problem ?? "not ok"}`);
+    if (evidence.signTxRef !== undefined && sourceLeg.txHash !== null && evidence.signTxRef.toLowerCase() !== sourceLeg.txHash.toLowerCase()) legProblems.push("the Router's source txRef differs from the transfer the signer sent");
+    if (!evidence.body.matches) legProblems.push("the delivered body's sha256 differs from the Router's saved result");
+    if (legProblems.length > 0) return stop("verification_failed", `delivered, but the evidence does not match: ${legProblems.join("; ")}`);
+    evidence.stage = "verified";
+    evidence.finishedAt = now().toISOString();
+    save();
+    completed.push(planned.routeId);
+    out(`#${String(planned.index)} ${planned.routeId}: delivered; source ${sourceLeg.txHash ?? ""}, destination ${destinationLeg.txHash ?? ""}`);
+  }
+  out(`matrix run ${runId}: all ${String(completed.length)} purchase(s) delivered and verified`);
+  return report();
+}

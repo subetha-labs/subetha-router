@@ -13,6 +13,10 @@
  * usage: SUBETHA_OUTBOUND_PRIVATE_KEY=0x... SUBETHA_ROUTER_RECEIVER=0x... SUBETHA_EVM_FACILITATOR_URL=http://127.0.0.1:8611/<token> \
  *        SUBETHA_EVM_PROVIDER_URL_RH=http://127.0.0.1:8621/v1/eth/snapshot ... SUBETHA_EVM_PROVIDER_PAYTO=0x... \
  *        tsx tools/evm-testnets-run.ts --chains rh,arbsep,hyperevm,sepolia
+ *
+ * `--matrix`（設計 §8）: 30 の `mx-<src>-to-<dst>` を足す（`--chains` に rh,arbsep,hyperevm が要る）。追加の env: `SUBETHA_MPP_INBOUND_SECRET`、
+ * `SUBETHA_ARC_RECEIVER_KEY`、`SUBETHA_SOLANA_RECEIVER`、`SUBETHA_OUTBOUND_SOLANA_KEY`、`SUBETHA_ARC_PROVIDER_PAYTO`、`SUBETHA_SOLANA_PROVIDER_PAYTO`、
+ * `SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`、任意で `SUBETHA_SOLANA_RPC_URL`・`SUBETHA_TEMPO_RPC_URL`・`SUBETHA_OUTBOUND_MPP_KEY`（既定は送信レグの鍵）。
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -31,7 +35,7 @@ function argOf(argv: readonly string[], name: string): string | undefined {
 }
 
 /** 起動の選択肢（純粋関数。試験で確かめる）。 */
-export function evmTestnetsOptionsOf(env: Readonly<Record<string, string | undefined>>, argv: readonly string[] = []): HostOptions & { readonly evmTestnets: { readonly chains: readonly EvmTestnetChain[] } } {
+export function evmTestnetsOptionsOf(env: Readonly<Record<string, string | undefined>>, argv: readonly string[] = []): HostOptions & { readonly evmTestnets: { readonly chains: readonly EvmTestnetChain[]; readonly matrix?: true } } {
   const chains = evmTestnetChainsOf(argOf(argv, "chains") ?? EVM_TESTNET_CHAINS.join(","));
   const journalPath = path.resolve(env[EVM_TESTNETS_JOURNAL_ENV] ?? path.join(path.resolve("runtime"), "evm-testnets", "journal.ndjson"));
   if (sameJournal(journalPath, publicJournalPathOf(env))) {
@@ -47,12 +51,14 @@ export function evmTestnetsOptionsOf(env: Readonly<Record<string, string | undef
   if (bind !== "127.0.0.1") {
     throw new Error(`${EVM_TESTNETS_BIND_ENV} must be 127.0.0.1`);
   }
-  return { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, bind, port, journalPath, evmTestnets: { chains } };
+  // `--matrix`（設計 §8）: 30 の `mx-*` route と既存レールの能力の env を足す（新 3 の chain が全部要る。検査は設定生成）。
+  const matrix = argv.includes("--matrix");
+  return { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, bind, port, journalPath, evmTestnets: { chains, ...(matrix ? { matrix: true as const } : {}) } };
 }
 
 /** 起動したときに stdout に書く 1 行（純粋関数。鍵・URL は載せない）。 */
-export function evmTestnetsAnnouncementOf(host: Pick<RunningHost, "mcpPort" | "mcpAddress" | "routerPort">, chains: readonly EvmTestnetChain[]): string {
-  return JSON.stringify({ event: "listening", port: host.mcpPort, address: host.mcpAddress, routerPort: host.routerPort, mode: "evm-testnets", chains: chains.join(",") });
+export function evmTestnetsAnnouncementOf(host: Pick<RunningHost, "mcpPort" | "mcpAddress" | "routerPort">, chains: readonly EvmTestnetChain[], matrix = false): string {
+  return JSON.stringify({ event: "listening", port: host.mcpPort, address: host.mcpAddress, routerPort: host.routerPort, mode: matrix ? "evm-testnets-matrix" : "evm-testnets", chains: chains.join(",") });
 }
 
 async function main(): Promise<void> {
@@ -64,7 +70,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const host = await startHost(options);
-  process.stdout.write(`${evmTestnetsAnnouncementOf(host, options.evmTestnets.chains)}\n`);
+  process.stdout.write(`${evmTestnetsAnnouncementOf(host, options.evmTestnets.chains, options.evmTestnets.matrix === true)}\n`);
 }
 
 const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

@@ -12,6 +12,8 @@
  * - `finality --evidence-dir <dir> [--wait-seconds <n>]`: 記録した tx の確定（§3.9）を読み、証跡に追記する（待ち続けない。pending を報告）。
  * - `reopen --evidence-dir <dir> --mcp-url <url> [--token <env name>]`: 全 paymentId の status を読み直し、保存した結果と比べる（Router を同じ journal で再起動した後に）。
  * - `summary --evidence-dir <dir> --out docs/evidence/evm-testnets/e2e-<date>.json`: 秘密・body・journal の行を除いた公開の要約。
+ * - `run ... --prefunded`（設計 §8.2・§8.5 #5）: 送信の前提のうち「同じ chain の受信が delivered・確定」だけを外す（印・保留は残す）。
+ * - `--matrix`（設計 §8）: `plan --matrix --out <file>`・`run --matrix --prefunded ...`・`finality --matrix ...`（Solana のレグも読む）。中身は `tools/evm-testnets-matrix.ts`。
  *
  * env（値は出さない）: `SUBETHA_PAYER_ADDRESS` または `SUBETHA_PAYER_PRIVATE_KEY`（run は鍵が必須）、`SUBETHA_ROUTER_RECEIVER`、`SUBETHA_ROUTER_OUTBOUND_ADDRESS`
  * （無ければ `SUBETHA_OUTBOUND_X402_KEY`・`SUBETHA_OUTBOUND_PRIVATE_KEY` から導く。それも無ければ受取先と同じ = T8 の兼任 §3.8）、`EVM_FACILITATOR_ADDRESS`
@@ -47,18 +49,35 @@ export const DESIGN_GAS_CAPS: Readonly<Record<string, bigint>> = Object.freeze({
   "eip155:998": 4_000_000_000_000_000n,
   "eip155:11155111": 5_000_000_000_000_000n,
 });
-const NATIVE_SYMBOL: Readonly<Record<string, string>> = Object.freeze({ "eip155:46630": "ETH", "eip155:421614": "ETH", "eip155:998": "HYPE", "eip155:11155111": "ETH", [BASE_SEPOLIA]: "ETH" });
-const ASSET_SYMBOL: Readonly<Record<string, string>> = Object.freeze({ "eip155:46630": "USDG", "eip155:421614": "USDC", "eip155:998": "USDC", "eip155:11155111": "USDC", [BASE_SEPOLIA]: "USDC" });
-const NETWORK_LABEL: Readonly<Record<string, string>> = Object.freeze({
+/** 行列（設計 §8）の既存レールの network（Tempo testnet・Arc testnet・Solana devnet）。 */
+export const TEMPO_TESTNET = "eip155:42431";
+export const ARC_TESTNET = "eip155:5042002";
+export const SOLANA_DEVNET = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+export const NATIVE_SYMBOL: Readonly<Record<string, string>> = Object.freeze({ "eip155:46630": "ETH", "eip155:421614": "ETH", "eip155:998": "HYPE", "eip155:11155111": "ETH", [BASE_SEPOLIA]: "ETH", [TEMPO_TESTNET]: "(none; fees in pathUSD)", [ARC_TESTNET]: "USDC (native, 18 decimals)", [SOLANA_DEVNET]: "SOL" });
+export const ASSET_SYMBOL: Readonly<Record<string, string>> = Object.freeze({ "eip155:46630": "USDG", "eip155:421614": "USDC", "eip155:998": "USDC", "eip155:11155111": "USDC", [BASE_SEPOLIA]: "USDC", [TEMPO_TESTNET]: "pathUSD", [ARC_TESTNET]: "USDC", [SOLANA_DEVNET]: "USDC" });
+export const NETWORK_LABEL: Readonly<Record<string, string>> = Object.freeze({
+  [TEMPO_TESTNET]: "Tempo testnet (Moderato)",
+  [ARC_TESTNET]: "Arc testnet",
+  [SOLANA_DEVNET]: "Solana devnet",
   "eip155:46630": "Robinhood Chain testnet",
   "eip155:421614": "Arbitrum Sepolia",
   "eip155:998": "HyperEVM testnet",
   "eip155:11155111": "Ethereum Sepolia",
   [BASE_SEPOLIA]: "Base Sepolia",
 });
-/** 確定の規則（設計 §3.9）: HyperEVM は receipt（単一 slot の確定）、ほかは block ≤ `finalized`。 */
-export function finalityRuleOf(network: string): "finalized_tag" | "receipt" {
-  return network === "eip155:998" ? "receipt" : "finalized_tag";
+/**
+ * 確定の規則（設計 §3.9・§8.5 #4）: HyperEVM・Tempo・Arc は receipt（即時の確定）、Solana は `finalized` の commitment、ほかの EVM は block ≤ `finalized`。
+ */
+export type FinalityRule = "finalized_tag" | "receipt" | "finalized_commitment";
+export function finalityRuleOf(network: string): FinalityRule {
+  if (network.startsWith("solana:")) return "finalized_commitment";
+  return network === "eip155:998" || network === TEMPO_TESTNET || network === ARC_TESTNET ? "receipt" : "finalized_tag";
+}
+/** Solana の取引の署名（base58、64 バイト ≈ 86〜88 文字）。 */
+export const SVM_SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
+/** その network の tx の参照の形（EVM は 0x の 32 バイト、Solana は base58 の署名）。 */
+export function isTxRefOf(network: string, ref: unknown): ref is string {
+  return typeof ref === "string" && (network.startsWith("solana:") ? SVM_SIGNATURE.test(ref) : HASH.test(ref));
 }
 
 /** 秘密を持ち得る env の名前（値を `[redacted]` に置き換える対象）。 */
@@ -125,7 +144,7 @@ export class Secrets {
   }
 }
 
-function jsonText(value: unknown): string {
+export function jsonText(value: unknown): string {
   return `${JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? v.toString() : v), 2)}\n`;
 }
 
@@ -158,7 +177,7 @@ function fsyncAncestors(dir: string): void {
  * 証跡を書く（秘密を除いて、0600）。**原子的**: 一時ファイルに書いて fsync → rename → directory の fsync（I-1 #2）。
  * 途中で落ちても、元のファイルは前の内容のまま（切り詰めた状態を残さない）。
  */
-function writePrivate(file: string, value: unknown, secrets: Secrets): void {
+export function writePrivate(file: string, value: unknown, secrets: Secrets): void {
   const dir = path.dirname(file);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const text = secrets.redact(typeof value === "string" ? value : jsonText(value));
@@ -216,7 +235,7 @@ export function attemptMarkerStateOf(evidenceDir: string, planSha: string, route
 }
 
 /** ある route の印（全 plan）。読めない印は `corrupt` に数える。 */
-function attemptMarkersForRoute(evidenceDir: string, routeId: string): { planSha: string; state: "present" | "corrupt" }[] {
+export function attemptMarkersForRoute(evidenceDir: string, routeId: string): { planSha: string; state: "present" | "corrupt" }[] {
   const root = path.join(evidenceDir, "attempts");
   if (!existsSync(root)) return [];
   const out: { planSha: string; state: "present" | "corrupt" }[] = [];
@@ -258,13 +277,27 @@ export interface ChainReader {
   receipt(network: string, hash: string): Promise<ReceiptInfo | undefined>;
   /** `finalized` の block 番号。読めなければ undefined。 */
   finalizedBlock(network: string): Promise<bigint | undefined>;
+  /** Solana の取引（行列 §8.5 #4。`getTransaction` の jsonParsed、commitment `confirmed`）。無ければ undefined。EVM だけの reader は持たない。 */
+  svmTransaction?(network: string, signature: string): Promise<SvmTransactionInfo | undefined>;
+  /** Solana の署名の状態（`getSignatureStatuses`、履歴も探す）。無ければ undefined。 */
+  svmSignatureStatus?(network: string, signature: string): Promise<{ readonly confirmationStatus: string | null; readonly err: unknown; readonly slot: number } | undefined>;
 }
+
+/** Solana の取引の要約: 成否・slot・token の残高の前後（owner × mint の組。owner は ATA の authority）。 */
+export interface SvmTransactionInfo {
+  readonly ok: boolean;
+  readonly slot: number;
+  readonly tokenBalances: readonly { readonly accountIndex: number; readonly owner: string; readonly mint: string; readonly pre: bigint; readonly post: bigint }[];
+}
+
+/** 行列の既存の EVM レールの公開 RPC（`docs/DEPLOY.md` の g5 の読み取りと同じ）。 */
+export const MATRIX_RPC_URLS: Readonly<Record<string, string>> = Object.freeze({ "eip155:42431": "https://rpc.moderato.tempo.xyz", "eip155:5042002": "https://rpc.testnet.arc.io" });
 
 /** network の RPC（`EVM_FACILITATOR_RPC_<chainId>`、無ければ facilitator と同じ既定、Base Sepolia は `https://sepolia.base.org`）。 */
 export function rpcUrlOf(network: string, env: Env): string {
   const chainId = network.split(":")[1] ?? "";
   const override = env[`EVM_FACILITATOR_RPC_${chainId}`];
-  const url = override !== undefined && override !== "" ? override : network === BASE_SEPOLIA ? BASE_SEPOLIA_RPC : DEFAULT_RPC_URLS[network];
+  const url = override !== undefined && override !== "" ? override : network === BASE_SEPOLIA ? BASE_SEPOLIA_RPC : (DEFAULT_RPC_URLS[network] ?? MATRIX_RPC_URLS[network]);
   if (url === undefined || !/^https:\/\//.test(url)) throw new Error(`EVM_FACILITATOR_RPC_${chainId} must be an https URL`);
   return url;
 }
@@ -390,7 +423,7 @@ export interface PlanNetwork {
   readonly assetSymbol: string;
   readonly decimals: number;
   readonly nativeSymbol: string;
-  readonly finalityRule: "finalized_tag" | "receipt";
+  readonly finalityRule: FinalityRule;
   readonly estimatedMaxFeePerGasWei: string | null;
 }
 export interface Plan {
@@ -697,13 +730,13 @@ export async function buildPlan(chains: readonly EvmTestnetChain[], env: Env, re
   };
 }
 
-function units(amount: string, decimals: number): string {
+export function units(amount: string, decimals: number): string {
   const v = BigInt(amount);
   const scale = 10n ** BigInt(decimals);
   const frac = (v % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
   return `${(v / scale).toString()}${frac === "" ? "" : `.${frac}`}`;
 }
-function short(address: string): string {
+export function short(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
@@ -846,7 +879,7 @@ export function runSignSigner(env: Env, nowMs: () => number = Date.now): Signer 
 
 /* ────────────────────────────────────────────────────────────────────────────── 照合 */
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 const lower = (v: unknown): string => (typeof v === "string" ? v.toLowerCase() : "");
@@ -961,7 +994,7 @@ export function isUnsealedBlockHash(hash: string): boolean {
   return /^0x0{64}$/i.test(hash);
 }
 
-export async function verifyLeg(reader: ChainReader, leg: "source" | "destination", planned: PlanLeg, txHash: unknown, opts: { waitMs: number; sleep: (ms: number) => Promise<void> }): Promise<LegEvidence> {
+export async function verifyLeg(reader: ChainReader, leg: "source" | "destination", planned: Pick<PlanLeg, "network" | "asset" | "amount" | "from" | "to">, txHash: unknown, opts: { waitMs: number; sleep: (ms: number) => Promise<void> }): Promise<LegEvidence> {
   const expected = { from: planned.from, to: planned.to, value: planned.amount };
   const base = { leg, network: planned.network, token: planned.asset, expected };
   if (typeof txHash !== "string" || !HASH.test(txHash)) return { ...base, txHash: typeof txHash === "string" ? txHash : null, receiptStatus: null, blockNumber: null, blockHash: null, transfer: null, ok: false, problem: "no transaction hash recorded for this leg" };
@@ -988,7 +1021,7 @@ export interface FinalityResult {
   readonly leg: string;
   readonly network: string;
   readonly txHash: string;
-  readonly rule: "finalized_tag" | "receipt";
+  readonly rule: FinalityRule;
   readonly final: boolean;
   readonly txBlock: string | null;
   readonly finalizedBlock: string | null;
@@ -999,6 +1032,20 @@ export interface FinalityResult {
 export async function finalityOf(reader: ChainReader, network: string, txHash: string, recordedBlockHash: string | null, leg: string, now: () => Date = () => new Date()): Promise<FinalityResult> {
   const rule = finalityRuleOf(network);
   const base = { at: now().toISOString(), leg, network, txHash, rule };
+  if (rule === "finalized_commitment") {
+    // Solana（§8.5 #4）: 署名の状態が `finalized` で err が無いこと。
+    if (reader.svmSignatureStatus === undefined) return { ...base, final: false, txBlock: null, finalizedBlock: null, note: "no Solana reader; pending" };
+    let status: Awaited<ReturnType<NonNullable<ChainReader["svmSignatureStatus"]>>>;
+    try {
+      status = await reader.svmSignatureStatus(network, txHash);
+    } catch {
+      return { ...base, final: false, txBlock: null, finalizedBlock: null, note: "signature status read failed (RPC); pending" };
+    }
+    if (status === undefined) return { ...base, final: false, txBlock: null, finalizedBlock: null, note: "no signature status (pending or dropped)" };
+    if (status.err !== null && status.err !== undefined) return { ...base, final: false, txBlock: String(status.slot), finalizedBlock: null, note: "receipt status is not success (transaction error)" };
+    const final = status.confirmationStatus === "finalized";
+    return { ...base, final, txBlock: String(status.slot), finalizedBlock: null, note: final ? "signature finalized" : `signature ${status.confirmationStatus ?? "unknown"}; pending` };
+  }
   let receipt: ReceiptInfo | undefined;
   try {
     receipt = await reader.receipt(network, txHash);
@@ -1008,7 +1055,7 @@ export async function finalityOf(reader: ChainReader, network: string, txHash: s
   if (receipt === undefined) return { ...base, final: false, txBlock: null, finalizedBlock: null, note: "no receipt (pending or dropped)" };
   if (receipt.status !== "success") return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "receipt status is not success" };
   if (recordedBlockHash !== null && !isUnsealedBlockHash(recordedBlockHash) && receipt.blockHash.toLowerCase() !== recordedBlockHash.toLowerCase()) return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "block hash differs from the recorded one (reorg?)" };
-  if (rule === "receipt") return { ...base, final: true, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "single-slot finality: receipt present (HyperEVM)" };
+  if (rule === "receipt") return { ...base, final: true, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: `instant finality: receipt present (${network === "eip155:998" ? "HyperEVM" : (NETWORK_LABEL[network] ?? network)})` };
   const finalized = await reader.finalizedBlock(network);
   if (finalized === undefined) return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "finalized block not readable; pending" };
   const final = receipt.blockNumber <= finalized;
@@ -1022,10 +1069,17 @@ export interface PurchaseEvidence {
   readonly planSha256: string;
   readonly runId: string;
   readonly index: number;
-  readonly chain: EvmTestnetChain;
-  readonly direction: Direction;
+  /** 非行列は chain の短縮名。行列（§8）は `<src>-to-<dst>`。 */
+  readonly chain: string;
+  readonly direction: Direction | "matrix";
   readonly routeId: string;
-  stage: "started" | "quote_failed" | "stopped_before_signing" | "sign_refused" | "purchase_call_failed" | "purchased" | "verified" | "verification_failed";
+  stage: "started" | "quote_failed" | "stopped_before_signing" | "sign_refused" | "purchase_call_failed" | "purchased" | "verified" | "verification_failed" | "funds_possibly_moved" | "not_funded";
+  /** 行列: 署名（`runSign`）を呼んだか。Tempo MPP は呼んだ時点で資金が動き得る（§8.5 #1）。呼ぶ前に fsync して残す。 */
+  signInvoked?: boolean;
+  /** 行列: その受信のレールで署名が資金を動かすか（Tempo MPP だけ true）。 */
+  fundsMoveAtSign?: boolean;
+  /** 行列: Tempo MPP の署名が返した送金の tx（あれば）。 */
+  signTxRef?: string;
   stopReason?: string;
   startedAt: string;
   finishedAt?: string;
@@ -1056,14 +1110,14 @@ export function bodyDigest(body: unknown): { sha256: string; head: string } {
 }
 
 /** 結果の形から body を抜いて digest に置き換える（証跡は先頭 200 字と hash だけ）。 */
-function withoutBody(value: unknown, field: string): unknown {
+export function withoutBody(value: unknown, field: string): unknown {
   if (!isRecord(value) || !(field in value)) return value;
   const { [field]: body, ...rest } = value;
   return { ...rest, [`${field}Digest`]: bodyDigest(body) };
 }
 
 /** quote の応答から証跡に残す部分（`ownerKey`・`quote` 文書全体は除く。subject と destination だけ）。 */
-function quoteRecordOf(response: Record<string, unknown>): { response: unknown; subject: unknown; destination: unknown } {
+export function quoteRecordOf(response: Record<string, unknown>): { response: unknown; subject: unknown; destination: unknown } {
   const { quote, ...rest } = response;
   const destination = isRecord(quote) ? quote["destination"] : undefined;
   return { response: { ...rest, subject: undefined }, subject: response["subject"], destination };
@@ -1102,7 +1156,7 @@ export function journalLinesOf(paymentId: string, txHashes: readonly string[], f
   return { router, facilitatorJournal, facilitatorLog };
 }
 
-function evidenceFilesOf(root: string): string[] {
+export function evidenceFilesOf(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string, depth: number): void => {
     if (depth > 3 || !existsSync(dir)) return;
@@ -1116,7 +1170,7 @@ function evidenceFilesOf(root: string): string[] {
   return out.sort();
 }
 
-function readEvidence(file: string): PurchaseEvidence | undefined {
+export function readEvidence(file: string): PurchaseEvidence | undefined {
   try {
     const value = JSON.parse(readFileSync(file, "utf8")) as PurchaseEvidence;
     return value.kind === "subetha-evm-testnets-e2e-purchase" ? value : undefined;
@@ -1126,7 +1180,7 @@ function readEvidence(file: string): PurchaseEvidence | undefined {
 }
 
 /** 全証跡を読む。読めない・形の違うファイルは `unreadable` に（黙って飛ばさない。I-1 #2）。 */
-function readAllEvidence(root: string): { evidence: PurchaseEvidence[]; unreadable: string[] } {
+export function readAllEvidence(root: string): { evidence: PurchaseEvidence[]; unreadable: string[] } {
   const evidence: PurchaseEvidence[] = [];
   const unreadable: string[] = [];
   for (const file of evidenceFilesOf(root)) {
@@ -1151,6 +1205,11 @@ export interface RunOptions {
   readonly inboundConfirmation?: "finalized" | "receipt";
   /** `finalized` を待つ上限（秒。既定 1500。越えたら送信を始めずに止まる）。 */
   readonly waitFinalizedSeconds?: number;
+  /**
+   * `--prefunded`（§8.2・§8.5 #5）: Router の送信鍵に事前に入金した。外すのは「同じ chain の受信が先に delivered・確定」の資金の依存だけ。
+   * 試みの印・読めない証跡の保留・ほかの plan の試みの保留（`priorAttemptHold`）は残す。
+   */
+  readonly prefunded?: boolean;
 }
 export interface RunDeps {
   readonly mcp: McpCaller;
@@ -1170,7 +1229,7 @@ export interface RunReport {
   readonly stopped?: { readonly routeId: string; readonly stage: string; readonly reason: string; readonly paymentId?: string | undefined; readonly status?: unknown };
 }
 
-function compactUtc(date: Date): string {
+export function compactUtc(date: Date): string {
   return date.toISOString().replace(/[-:]/g, "");
 }
 
@@ -1193,6 +1252,29 @@ async function balancesFor(reader: ChainReader, planned: PlanPurchase, plan: Pla
   const evmNetwork = EVM_TESTNETS[planned.chain].network;
   await read("facilitatorGas", plan.addresses.facilitatorGas, evmNetwork, null);
   return out;
+}
+
+/** 資金が動かなかったと分かっている終わり方（印があっても、別の plan で同じ route を試みてよい）。 */
+const SAFE_PRIOR_STAGES: ReadonlySet<string> = new Set(["verified", "quote_failed", "stopped_before_signing", "not_funded"]);
+/**
+ * ほかの plan での同じ route の試み（§8.5 #1・#5）。保留する理由（無ければ undefined）:
+ * - 読めない印、証跡の無い印（落ちた試み）、資金が動かなかったと分からない終わり方（`unknown`・購入の失敗・照合の失敗・Tempo MPP の署名の後の失敗）
+ * - `sign_refused` も、署名で資金が動くレール（`fundsMoveAtSign`）で署名を呼んだ後なら保留（二度と署名しない）
+ * 同じ plan の印は呼び出し側が別に見る（`attemptMarkerStateOf`）。
+ */
+export function priorAttemptHold(evidenceDir: string, routeId: string, planSha: string, all: readonly PurchaseEvidence[]): string | undefined {
+  const isSafe = (e: PurchaseEvidence): boolean => SAFE_PRIOR_STAGES.has(e.stage) || (e.stage === "sign_refused" && !(e.fundsMoveAtSign === true && e.signInvoked === true));
+  for (const marker of attemptMarkersForRoute(evidenceDir, routeId)) {
+    if (marker.planSha === planSha) continue;
+    if (marker.state === "corrupt") return `an attempt marker for ${routeId} (plan ${marker.planSha}) is unreadable`;
+    const evidence = all.filter((e) => e.routeId === routeId && e.planSha256 === marker.planSha);
+    if (evidence.length === 0) return `an earlier attempt of ${routeId} (plan ${marker.planSha}) left a marker but no evidence (it may have crashed mid-purchase)`;
+    const unsafe = evidence.find((e) => !isSafe(e));
+    if (unsafe !== undefined) return `an earlier attempt of ${routeId} (plan ${marker.planSha}, ${unsafe.runId}) ended at stage ${unsafe.stage}${unsafe.signInvoked === true && unsafe.fundsMoveAtSign === true ? " after a funds-moving signature (never re-signed)" : ""}; resolve it before another attempt`;
+  }
+  const unmarked = all.find((e) => e.routeId === routeId && e.planSha256 !== planSha && !isSafe(e));
+  if (unmarked !== undefined) return `an earlier attempt of ${routeId} (${unmarked.runId}) ended at stage ${unmarked.stage}; resolve it before another attempt`;
+  return undefined;
 }
 
 /** 送信の前提（設計 §3.8）: 同じ chain の受信が `delivered`・source tx が確定、かつ送信の試み（全 run）の数 < delivered の受信の数（1 つの受信の入金は 1 回の送信だけに数える）。 */
@@ -1273,7 +1355,15 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
       return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
     }
     let prerequisite: unknown;
-    if (planned.direction === "outbound") {
+    if (opts.prefunded === true) {
+      // `--prefunded`: 同じ chain の受信の依存は外すが、ほかの plan の未解決の試みは保留（§8.5 #5）。
+      const hold = priorAttemptHold(opts.evidenceDir, planned.routeId, opts.planSha256, scanned.evidence);
+      if (hold !== undefined) {
+        out(`HELD ${planned.routeId}: ${hold}`);
+        return report({ routeId: planned.routeId, stage: "not_started", reason: `held: ${hold}` });
+      }
+      prerequisite = { mode: "prefunded", note: "the Router's outbound key was prefunded (design §8.2); no same-chain inbound dependency" };
+    } else if (planned.direction === "outbound") {
       const pre = await outboundPrerequisite(planned, opts, deps);
       if (!pre.ok) {
         out(`STOP ${planned.routeId}: outbound prerequisite not met: ${pre.reason}`);
@@ -1419,7 +1509,7 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
   return report();
 }
 
-function deepFreeze<T>(value: T): T {
+export function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
     Object.freeze(value);
     for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
@@ -1428,7 +1518,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 /** status の応答の `projection.result`（body）を digest に置き換える。 */
-function withStatusDigest(status: Record<string, unknown>): unknown {
+export function withStatusDigest(status: Record<string, unknown>): unknown {
   if (!isRecord(status["projection"])) return status;
   return { ...status, projection: withoutBody(status["projection"], "result") };
 }
@@ -1454,7 +1544,7 @@ export async function runFinality(evidenceDir: string, reader: ChainReader, secr
       if (evidence.legs === undefined) continue;
       const results: FinalityResult[] = [];
       for (const leg of evidence.legs) {
-        if (leg.txHash === null || !HASH.test(leg.txHash)) continue;
+        if (leg.txHash === null || !isTxRefOf(leg.network, leg.txHash)) continue;
         const result = await finalityOf(reader, leg.network, leg.txHash, leg.blockHash, leg.leg, now);
         results.push(result);
         if (result.final) final += 1;
@@ -1585,7 +1675,7 @@ export function writeSummary(evidenceDir: string, outFile: string, secrets: Secr
 
 /* ────────────────────────────────────────────────────────────────────────────── CLI */
 
-function argOf(argv: readonly string[], name: string): string | undefined {
+export function argOf(argv: readonly string[], name: string): string | undefined {
   const index = argv.indexOf(`--${name}`);
   return index === -1 ? undefined : argv[index + 1];
 }
@@ -1597,7 +1687,7 @@ export function checkPrivateEvidenceDir(dir: string): string {
   return resolved;
 }
 
-function bearerOf(argv: readonly string[], env: Env, secrets: Secrets): string | undefined {
+export function bearerOf(argv: readonly string[], env: Env, secrets: Secrets): string | undefined {
   const name = argOf(argv, "token");
   if (name === undefined) return undefined;
   if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new PlanRefusal("--token takes the NAME of an env variable, not its value");
@@ -1614,6 +1704,47 @@ async function main(argv: readonly string[], env: Env): Promise<number> {
   };
   const secrets = Secrets.fromEnv(env);
   const safeOut = (line: string): void => out(secrets.redact(line));
+  const matrix = argv.includes("--matrix");
+  if (matrix) {
+    // 掛け合わせの検証（設計 §8）。Solana の鍵・送信鍵の値も秘密に入れる。
+    for (const name of ["SOLANA_PAYER_PRIVATE_KEY", "SUBETHA_OUTBOUND_SOLANA_KEY", "SUBETHA_ARC_RECEIVER_KEY", "SOLANA_RPC_URL"]) secrets.add(env[name]);
+  }
+  if (command === "plan" && matrix) {
+    const m = await import("./evm-testnets-matrix.js");
+    const outFile = argOf(argv, "out");
+    if (outFile === undefined) throw new PlanRefusal("--out <file> is required");
+    const plan = await m.buildMatrixPlan(env, await m.matrixChainReader(env));
+    const sha = planSha256(plan);
+    writePrivate(outFile, plan, secrets);
+    const textFile = outFile.replace(/\.json$/, "") + ".txt";
+    const text = m.matrixPlanText(plan, sha);
+    writePrivate(textFile, text, secrets);
+    safeOut(text);
+    safeOut(`plan written to ${outFile} and ${textFile}`);
+    return plan.allSufficient ? 0 : 3;
+  }
+  if (command === "run" && matrix) {
+    const m = await import("./evm-testnets-matrix.js");
+    const planFile = argOf(argv, "plan");
+    const sha = argOf(argv, "plan-sha256");
+    const url = argOf(argv, "mcp-url");
+    const evidenceArg = argOf(argv, "evidence-dir");
+    if (planFile === undefined || sha === undefined || url === undefined || evidenceArg === undefined) throw new PlanRefusal("run --matrix needs --plan, --plan-sha256, --mcp-url and --evidence-dir");
+    const plan = m.loadApprovedMatrixPlan(planFile, sha);
+    if (!argv.includes("--prefunded")) throw new PlanRefusal("the matrix is paid from prefunded Router keys (design §8.2); pass --prefunded after the prefund run");
+    const evidenceDir = checkPrivateEvidenceDir(evidenceArg);
+    const bearer = bearerOf(argv, env, secrets);
+    const mcp = await connectMcp(url, bearer);
+    try {
+      const result = await m.runMatrix(
+        { plan, planSha256: sha, evidenceDir, only: argOf(argv, "only"), prefunded: true, routerJournal: argOf(argv, "router-journal"), facilitatorJournal: argOf(argv, "facilitator-journal"), facilitatorLog: argOf(argv, "facilitator-log") },
+        { mcp, chain: await m.matrixChainReader(env), sign: await m.runSignMatrixSigner(env), secrets, out },
+      );
+      return result.stopped === undefined ? 0 : 1;
+    } finally {
+      await mcp.close().catch(() => {});
+    }
+  }
   if (command === "plan") {
     const chains = evmTestnetChainsOf(argOf(argv, "chains") ?? EVM_TESTNET_CHAINS.join(","));
     const outFile = argOf(argv, "out");
@@ -1653,6 +1784,7 @@ async function main(argv: readonly string[], env: Env): Promise<number> {
           facilitatorLog: argOf(argv, "facilitator-log"),
           inboundConfirmation: confirmation,
           ...(wait === undefined ? {} : { waitFinalizedSeconds: Number(wait) }),
+          ...(argv.includes("--prefunded") ? { prefunded: true } : {}),
         },
         { mcp, chain: await viemChainReader(env), sign: runSignSigner(env), secrets, out },
       );
@@ -1665,7 +1797,9 @@ async function main(argv: readonly string[], env: Env): Promise<number> {
     const dir = argOf(argv, "evidence-dir");
     if (dir === undefined) throw new PlanRefusal("--evidence-dir is required");
     const wait = argOf(argv, "wait-seconds");
-    const result = await runFinality(checkPrivateEvidenceDir(dir), await viemChainReader(env), secrets, out, wait === undefined ? {} : { waitSeconds: Number(wait) });
+    // `--matrix`: Solana の読み取りも持つ reader（Solana のレグの `finalized`。§8.5 #4）。
+    const reader = matrix ? await (await import("./evm-testnets-matrix.js")).matrixChainReader(env) : await viemChainReader(env);
+    const result = await runFinality(checkPrivateEvidenceDir(dir), reader, secrets, out, wait === undefined ? {} : { waitSeconds: Number(wait) });
     return result.pending === 0 ? 0 : 3;
   }
   if (command === "reopen") {
