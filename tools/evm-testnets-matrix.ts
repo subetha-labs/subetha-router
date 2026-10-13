@@ -285,7 +285,11 @@ export function matrixPurchasesOf(addresses: MatrixAddresses): MatrixPurchase[] 
     providers: { arc: addresses.arcProvider, solana: addresses.solanaProvider, solanaMpp: addresses.solanaMppProvider },
   }) as { router: { routes: Record<string, RouteTerms> } };
   const byRole = addresses as unknown as Record<string, string>;
-  return matrixPairsOf(matrixRerunsOf(placeholderEnv)).map(({ src, dst, routeId }, i) => {
+  // env `SUBETHA_MATRIX_PLAN_ONLY`（routeId の列）: plan をその route だけにする（再実行の別名を 1 本だけ買うとき。資金の表もその分だけ）。
+  const only = (process.env["SUBETHA_MATRIX_PLAN_ONLY"] ?? "").split(",").map((x) => x.trim()).filter((x) => x !== "");
+  const pairs = matrixPairsOf(matrixRerunsOf(placeholderEnv)).filter((p) => only.length === 0 || only.includes(p.routeId));
+  if (only.length > 0 && pairs.length !== only.length) throw new Error("SUBETHA_MATRIX_PLAN_ONLY names a route that is not in the matrix");
+  return pairs.map(({ src, dst, routeId }, i) => {
     const route = config.router.routes[routeId];
     if (route === undefined) throw new Error(`the generated config has no route ${routeId}`);
     const s = MATRIX_RAILS[src];
