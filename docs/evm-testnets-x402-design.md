@@ -293,3 +293,42 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 - plan `099d793345ceba4a1d93e55ee758acf5df1c69c0f50615d326972ea80137a997`（owner 承認 2026-10-13）。#1〜#6（Robinhood・Arbitrum Sepolia・HyperEVM の受信・送信）は `delivered`、両レグの `Transfer` を chain で照合済み。
 - **#7 `md-x402-eth-snapshot-sepolia`: `unknown`（paymentId `3cae48f5-0e15-43db-9887-98df1380b531`）**。自前 facilitator の settle の tx `0xc0e16cc735c9e7d9808caaec998cfdc94d0991334e9a1b3d197653a8b8197b27` が gas 切れで revert（gasUsed 197,313 / 上限 200,000）。Ethereum Sepolia の USDC の `transferWithAuthorization` は約 288,251 gas を要した（直前の block での `estimateGas`）。**資金は動いていない**（authorization は未使用、T7 の Sepolia USDC 20・T8 0 のまま）。Router は `unknown` を記録し送信レグに進まず、driver は再試行せず停止した。設計の見落とし: 固定の 200,000（§3.3 手順 10）と、SDK の verify の simulate は gas 上限なしで不足を検出しない。
 - 修正（`§3.3a` に追加）: 送出の直前に同じ呼び出しの gas を見積もり、見積もり × 1.25 を送る。network ごとの上限 `EVM_FACILITATOR_MAX_GAS_<chainId>`（既定 46630・421614・998: 200,000、11155111: 400,000）を超えれば送出せず 400（未使用を読み直してから）。driver の資金の表も上限で数える。#7・#8 は新しい plan と owner の新しい承認で行う。
+
+## 8. 掛け合わせの検証（owner の依頼 2026-10-13: 新しい 3 チェーン × 既存のレール）
+
+> owner: 「Ethereum は待つ時間が長すぎるから一旦無視」「追加した 3 つと、これまでのルートも含めて掛け合わせた inbound と outbound が全て問題なく利用できるか」→ 範囲の提案（30 件）に「進めて良いです」。当初の範囲外（総当たり）を owner が追加した。
+
+### 8.1 行列
+
+- 受信（クライアントが払う）: 既存 `base`（Base Sepolia USDC、x402、x402.org）・`tempo`（Tempo pathUSD、MPP `tempo/charge`）・`arc`（Arc USDC、x402、Circle）・`sol`（Solana devnet USDC、x402 SVM、x402.org）・`solmpp`（Solana devnet USDC、MPP `solana/charge`）、新 `rh`・`arbsep`・`hyperevm`（x402、自前 facilitator）。
+- 送信（Router が払う上流）: 既存 Provider A（`base`、hosted）・Provider B（`tempo`、hosted）・Arc の Provider（hosted）・Solana の Provider（hosted）・Provider D（`solmpp`、hosted）、新 3 つ（手元の `wrangler dev`）。
+- 対象: 受信か送信の少なくとも一方が新 3 つの組（同じ新チェーン同士は除く。同じレールは別項目: CLAUDE.md）。新 × 既存 15、既存 × 新 15、新 × 新 6 = 36。うち `base` ↔ 新 3 の 6 は §7 で済み → **30 件**。既存 × 既存 25 は以前の検証（multirail・MPP Solana・G-5）で済み、対象外。Ethereum Sepolia は外す。
+- route id: `mx-<src>-to-<dst>`（静的 route。`evmTestnetsConfigOf` に `matrix: true` の選択肢を足して生成。公開の生成・golden は変えない）。金額は各レグ 10,000（0.01、6 桁。D-17 と同じく testnet では 1:1）。
+
+### 8.2 鍵と資金（値は出さない）
+
+| 役割 | 鍵 | 資金の出どころ |
+|---|---|---|
+| クライアント（EVM: base・tempo・arc・新 3） | T7 | 既存の残高（Base 19.5、Arc 19.9、Tempo 約 100 万、新 3 は §1.4 の faucet 分） |
+| クライアント（Solana: sol・solmpp） | T6 Solana payer | devnet USDC 19.8・SOL 5.0 |
+| Router の受取（EVM x402・MPP Tempo） | T8 | — |
+| Router の受取（Arc、Circle の売り手証明） | T6 Arc receiver | — |
+| Router の受取（Solana x402・MPP） | T6 Solana receiver（ATA あり） | — |
+| Router の送信（x402 EVM: base・arc・新 3） | T8 | **事前に入れる**: 新 3 は T7 → T8 の EIP-3009 を自前 facilitator で settle（allowlist 内）、Base は既存 0.082 + 不足分、Arc は T7 → T8 の送金 |
+| Router の送信（MPP Tempo） | T8 | T7 → T8 の pathUSD 送金 |
+| Router の送信（Solana x402・MPP） | T6 Solana payer（クライアントと兼任。testnet、証跡では役割を区別） | 既存の残高 |
+| 新 3 の Provider の受取先 | E-PROV | — |
+
+- 受信の入金で送信を賄うのをやめ、事前に Router の送信鍵へ入れる（確定待ちを無くす）。driver は送信の前提（同じチェーンの受信の確定）を `--prefunded` で外す（残高は plan の検査で各段の不足を見る）。
+- MPP Tempo の受信の秘密（`ROUTER_MPP_INBOUND_SECRET`）は手元の実行ごとの乱数。
+
+### 8.3 変更
+
+1. `evmTestnetsConfigOf(env, receiver, chains, { matrix })`: 上の 30 の静的 route、既存レールの受信の facilitator（Base は env、Arc は Circle、Solana は x402.org）、MPP 受信、上流（hosted の Provider は既存の定数、新 3 は手元）、予算の区分（各資産 maxPerPurchase 10,000、maxTotal 十分）。
+2. 専用の子 process: 既存レールの能力（Arc の売り手証明、Solana の送信鍵・RPC、MPP Tempo の送信）を `routerProcessCapabilitiesOf` と同じ env で組み、`SUBETHA_RAILS_ACTIVATION` 相当を子の env に渡す。`localCounterparties` は今のまま（新 3 の静的の相手だけ）。
+3. driver: クライアントの署名を `runSign` の全レール（x402 EVM・x402 SVM・MPP Tempo・MPP Solana）に広げる（Tempo MPP は署名で送金するので subject の照合の後でだけ）。`--prefunded`。資金の表は送信鍵を役割ごとに。
+4. 試験: 設定生成（30 本、値は表と一致）、子の能力、driver の各レールの照合・停止。既存の試験と golden は不変。
+
+### 8.4 進め方
+
+設計の独立レビュー（Codex）と実装は並行（設計の指摘は実装に反映）。実装の後に回帰・Codex の実装レビュー → 事前の資金移動 → plan → 30 件を 1 件ずつ（`delivered` 以外で止まる。testnet は owner の常設の許可で都度の承認なし）→ 確定・reopen → 記録。
