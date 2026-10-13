@@ -291,6 +291,7 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 ## 7. 実決済の記録（E-7）
 
 - plan `099d793345ceba4a1d93e55ee758acf5df1c69c0f50615d326972ea80137a997`（owner 承認 2026-10-13）。#1〜#6（Robinhood・Arbitrum Sepolia・HyperEVM の受信・送信）は `delivered`、両レグの `Transfer` を chain で照合済み。
+- その後の再実行（owner の許可）: Ethereum Sepolia の受信は 2・3 回目（paymentId `859bac4c…`・`83de1168…`）とも受信は settle、Provider A が受領なしの 4xx で `paid_data_unavailable`（Base Sepolia の資金は動かず、0.01 USDC は T8 に残る）。Router の再起動の直後の 4 回目（`37fe66be…`）で delivered、続く送信 `md-sepolia-eth-snapshot` も delivered。
 - **#7 `md-x402-eth-snapshot-sepolia`: `unknown`（paymentId `3cae48f5-0e15-43db-9887-98df1380b531`）**。自前 facilitator の settle の tx `0xc0e16cc735c9e7d9808caaec998cfdc94d0991334e9a1b3d197653a8b8197b27` が gas 切れで revert（gasUsed 197,313 / 上限 200,000）。Ethereum Sepolia の USDC の `transferWithAuthorization` は約 288,251 gas を要した（直前の block での `estimateGas`）。**資金は動いていない**（authorization は未使用、T7 の Sepolia USDC 20・T8 0 のまま）。Router は `unknown` を記録し送信レグに進まず、driver は再試行せず停止した。設計の見落とし: 固定の 200,000（§3.3 手順 10）と、SDK の verify の simulate は gas 上限なしで不足を検出しない。
 - 修正（`§3.3a` に追加）: 送出の直前に同じ呼び出しの gas を見積もり、見積もり × 1.25 を送る。network ごとの上限 `EVM_FACILITATOR_MAX_GAS_<chainId>`（既定 46630・421614・998: 200,000、11155111: 400,000）を超えれば送出せず 400（未使用を読み直してから）。driver の資金の表も上限で数える。#7・#8 は新しい plan と owner の新しい承認で行う。
 
@@ -348,8 +349,8 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 - 行列 plan `ee7e6444c6907e900047508b0c0b5f677e2727e8b948cbfd3001dd6d15b9f645`: 30 件中 **29 件 `delivered`**（両レグを chain で照合）。
 - **`mx-tempo-to-hyperevm`: `unknown`**（paymentId `d7e8097f-87c6-4d6b-a6cd-8efddfd780eb`）。クライアントの Tempo の送金は成立（tx `0x919072b5bf0958e13c1c13a7689947c642021e66f4486d9f0aa457e69aaa1811`、T7 → T8 0.01 pathUSD、memo つき）。Router の MPP 受信（`mppx.broadcastCredential`、既存の code）が送金の約 1 秒後に例外 → `source_settle_unknown`（例外の中身は記録しない作り。RPC への反映前に読んだ可能性が高いが未確定）。送信レグには進まず、0.01 pathUSD は T8 に残る。Tempo の route は同じ routeId で二度と署名しない。
 - 再実行（owner の依頼）: 同じ組の新しい routeId `mx-tempo-to-hyperevm-r2`（`SUBETHA_MATRIX_RERUNS`、plan `0c561e52…ed10`、`SUBETHA_MATRIX_PLAN_ONLY`）で **`delivered`**（Tempo tx `0x4d5048a6…8d15`、HyperEVM tx `0xad4a8ddf…510d`）。→ **30 組すべて実決済で通った**。
-- 確定: 60 本（30 購入 × 2 レグ）すべて final（Solana は `finalized`、Robinhood・Arbitrum Sepolia は `finalized` の block まで待った）。Router を同じ journal で再起動し 30 件の status が一致（reopen 30 same）。
-- 公開の要約: `docs/evidence/evm-testnets/e2e-2026-10-13.json`（§7 の 8 本＋失敗の記録）、`matrix-2026-10-13.json`（行列）。秘密の値の照合で 0 件。
+- 確定: 60 本（30 購入 × 2 レグ）すべて final（Solana は `finalized`、Robinhood・Arbitrum Sepolia は `finalized` の block まで待った）。Router を同じ journal で再起動し status が一致: 行列の journal で 31 件（29 delivered・元の `unknown`・`-r2`）、§7 の journal で 11 件（Ethereum Sepolia の失敗 3 件と成功 2 件を含む）。§7 の 16 本の tx も final（最終レビューの指摘で確定・reopen を追加で実施）。
+- 公開の要約: `docs/evidence/evm-testnets/e2e-2026-10-13.json`（§7 の 8 本＋失敗の記録）、`matrix-2026-10-13.json`（行列）、`prefund-and-held-2026-10-13.json`（事前の資金移動 17 回の tx と、保留の Tempo の送金の chain の読み取り）。秘密の値の照合で 0 件。
 - 後続（owner への申し送り）: (1) Router の上流の HTTP の状態と MPP 受信の例外の種類を journal に残す（原因の特定のため。Provider A の 4xx・Tempo の受信の `unknown`）。(2) 長時間の Router の接続の再利用と Provider A の 4xx の関係（未証明）。(3) Ethereum Sepolia は行列の対象外。(4) hosted への展開は別の gate。
 
 ## 9. チェーン × 方向ごとの状態（2026-10-13）
@@ -362,5 +363,7 @@ core の予算は 2 レグとも (network, asset の文字列) の区分に累�
 | Arbitrum Sepolia | 送信 | 済 | 済 | 済（§7 #4、行列 6 本） | 同上 |
 | HyperEVM（USDC） | 受信 | 済 | 済 | 済（§7 #5、行列 6 本） | 同上。公開 RPC の rate limit |
 | HyperEVM | 送信 | 済 | 済 | 済（§7 #6、行列 6 本。Tempo からは r2 で） | 同上 |
-| Ethereum Sepolia（USDC） | 受信 | 済 | 済 | 済（3 回目。gas 修正後） | 行列は対象外 |
-| Ethereum Sepolia | 送信 | 済 | 済 | 済 | 行列は対象外 |
+| Ethereum Sepolia（USDC） | 受信 | 済 | 済 | 済（受信として 4 回目、gas 修正後の 3 回目。1 回目 gas 不足の `unknown`、2・3 回目は Provider A の 4xx で `paid_data_unavailable`。確定・reopen 済み） | 行列は対象外 |
+| Ethereum Sepolia | 送信 | 済 | 済 | 済（確定・reopen 済み） | 行列は対象外 |
+
+- **最終レビュー（Codex、2026-10-13）: APPROVE WITH CHANGES**（`review-final.md`）。コードの指摘なし。記録の 3 点（Sepolia の確定・reopen の未記録と「3 回目」の表現、`-r2` の reopen、事前資金と保留の Tempo の公開の証跡）を上のとおり実施・修正した。

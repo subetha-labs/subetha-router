@@ -49,8 +49,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:45.592Z",
-            "finalizedBlock": "133897290"
+            "at": "2026-10-13T02:46:50.938Z",
+            "finalizedBlock": "133949521"
           }
         },
         {
@@ -70,8 +70,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:45.894Z",
-            "finalizedBlock": "48041831"
+            "at": "2026-10-13T02:46:51.254Z",
+            "finalizedBlock": "48045103"
           }
         }
       ],
@@ -160,7 +160,7 @@
         }
       ],
       "reopen": {
-        "at": "2026-10-13T01:03:57.531Z",
+        "at": "2026-10-13T02:47:29.382Z",
         "same": true
       },
       "timingsMs": {
@@ -215,8 +215,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:46.323Z",
-            "finalizedBlock": "48041831"
+            "at": "2026-10-13T02:46:51.653Z",
+            "finalizedBlock": "48045103"
           }
         },
         {
@@ -236,8 +236,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:46.746Z",
-            "finalizedBlock": "133897290"
+            "at": "2026-10-13T02:46:51.997Z",
+            "finalizedBlock": "133949521"
           }
         }
       ],
@@ -326,7 +326,7 @@
         }
       ],
       "reopen": {
-        "at": "2026-10-13T01:03:57.572Z",
+        "at": "2026-10-13T02:47:29.397Z",
         "same": true
       },
       "timingsMs": {
@@ -381,8 +381,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:46.988Z",
-            "finalizedBlock": "318583457"
+            "at": "2026-10-13T02:46:52.255Z",
+            "finalizedBlock": "318609290"
           }
         },
         {
@@ -402,8 +402,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:47.498Z",
-            "finalizedBlock": "48041831"
+            "at": "2026-10-13T02:46:52.635Z",
+            "finalizedBlock": "48045103"
           }
         }
       ],
@@ -492,7 +492,7 @@
         }
       ],
       "reopen": {
-        "at": "2026-10-13T01:03:57.589Z",
+        "at": "2026-10-13T02:47:29.414Z",
         "same": true
       },
       "timingsMs": {
@@ -547,8 +547,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:47.881Z",
-            "finalizedBlock": "48041831"
+            "at": "2026-10-13T02:46:52.997Z",
+            "finalizedBlock": "48045103"
           }
         },
         {
@@ -568,8 +568,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:48.290Z",
-            "finalizedBlock": "318583457"
+            "at": "2026-10-13T02:46:53.344Z",
+            "finalizedBlock": "318609290"
           }
         }
       ],
@@ -658,7 +658,7 @@
         }
       ],
       "reopen": {
-        "at": "2026-10-13T01:03:57.601Z",
+        "at": "2026-10-13T02:47:29.426Z",
         "same": true
       },
       "timingsMs": {
@@ -713,7 +713,7 @@
           "finality": {
             "final": true,
             "rule": "receipt",
-            "at": "2026-10-13T00:58:48.765Z",
+            "at": "2026-10-13T02:46:53.687Z",
             "finalizedBlock": null
           }
         },
@@ -734,8 +734,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:48.864Z",
-            "finalizedBlock": "48041831"
+            "at": "2026-10-13T02:46:53.977Z",
+            "finalizedBlock": "48045103"
           }
         }
       ],
@@ -824,7 +824,7 @@
         }
       ],
       "reopen": {
-        "at": "2026-10-13T01:03:57.614Z",
+        "at": "2026-10-13T02:47:29.438Z",
         "same": true
       },
       "timingsMs": {
@@ -879,8 +879,8 @@
           "finality": {
             "final": true,
             "rule": "finalized_tag",
-            "at": "2026-10-13T00:58:49.250Z",
-            "finalizedBlock": "48041831"
+            "at": "2026-10-13T02:46:54.423Z",
+            "finalizedBlock": "48045103"
           }
         },
         {
@@ -900,7 +900,7 @@
           "finality": {
             "final": true,
             "rule": "receipt",
-            "at": "2026-10-13T00:58:49.619Z",
+            "at": "2026-10-13T02:46:54.783Z",
             "finalizedBlock": null
           }
         }
@@ -990,7 +990,7 @@
         }
       ],
       "reopen": {
-        "at": "2026-10-13T01:03:57.627Z",
+        "at": "2026-10-13T02:47:29.450Z",
         "same": true
       },
       "timingsMs": {
@@ -1073,7 +1073,7 @@
       ],
       "balancesAfter": [],
       "reopen": {
-        "at": "2026-10-13T01:03:57.640Z",
+        "at": "2026-10-13T02:47:29.463Z",
         "same": true
       },
       "timingsMs": {
@@ -1156,7 +1156,7 @@
       ],
       "balancesAfter": [],
       "reopen": {
-        "at": "2026-10-13T01:03:57.652Z",
+        "at": "2026-10-13T02:47:29.475Z",
         "same": true
       },
       "timingsMs": {
@@ -1239,7 +1239,7 @@
       ],
       "balancesAfter": [],
       "reopen": {
-        "at": "2026-10-13T01:03:57.665Z",
+        "at": "2026-10-13T02:47:29.487Z",
         "same": true
       },
       "timingsMs": {
@@ -1291,7 +1291,12 @@
             "logIndex": 1
           },
           "matchesQuote": true,
-          "finality": null
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-13T02:46:54.807Z",
+            "finalizedBlock": "11903081"
+          }
         },
         {
           "leg": "destination",
@@ -1307,7 +1312,12 @@
             "logIndex": 1
           },
           "matchesQuote": true,
-          "finality": null
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-13T02:46:54.928Z",
+            "finalizedBlock": "48045103"
+          }
         }
       ],
       "balancesBefore": [
@@ -1394,7 +1404,10 @@
           "value": "9999154141663793"
         }
       ],
-      "reopen": null,
+      "reopen": {
+        "at": "2026-10-13T02:47:29.496Z",
+        "same": true
+      },
       "timingsMs": {
         "quote": 372,
         "purchase": 16606
@@ -1444,7 +1457,12 @@
             "logIndex": 1
           },
           "matchesQuote": true,
-          "finality": null
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-13T02:46:55.355Z",
+            "finalizedBlock": "48045103"
+          }
         },
         {
           "leg": "destination",
@@ -1460,7 +1478,12 @@
             "logIndex": 1
           },
           "matchesQuote": true,
-          "finality": null
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-13T02:46:55.704Z",
+            "finalizedBlock": "11903081"
+          }
         }
       ],
       "balancesBefore": [
@@ -1547,7 +1570,10 @@
           "value": "9998872656878633"
         }
       ],
-      "reopen": null,
+      "reopen": {
+        "at": "2026-10-13T02:47:29.507Z",
+        "same": true
+      },
       "timingsMs": {
         "quote": 18,
         "purchase": 9270
