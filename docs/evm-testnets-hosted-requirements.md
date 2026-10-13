@@ -1,4 +1,4 @@
-# 要件: EVM testnet 3 つ（Robinhood・Arbitrum Sepolia・HyperEVM）を hosted Router に出す（第 2 版、2026-10-13）
+# 要件: EVM testnet 3 つ（Robinhood・Arbitrum Sepolia・HyperEVM）を hosted Router に出す（第 2.1 版、2026-10-13）
 
 > owner の依頼（2026-10-13 14:3x JST）: 「追加したチェーンをちゃんと Provider も用意して、Hosted testnet demo で検証を進めましょう。テストネットの資産なので、どんどん勝手に Router 使って送金して検証を進めてもらって構わない」。
 > 前提: `docs/evm-testnets-x402-design.md`（第 3 版、ブランチ `task/evm-testnets-x402`）で、4 つの testnet の x402 受信・送信と、新 3 チェーン × 既存のレールの 30 組を **手元の Router** で実決済まで確かめた（§7・§8.6。行列は **静的 route** `mx-*`）。hosted Router・公開の設定生成・golden はそこでは **変えていない**（同 §5 で「hosted への展開」は後続とした）。本書はその後続。
@@ -29,7 +29,7 @@
 - **FR-H3 hosted の受信**: 新 3 の kind `x402` 受信を公開の設定生成（`routerConfigOf`）に足す。受取先は Router の EVM の受取先（既存）。facilitator は FR-H1。offer の `extra.name/version` は表の domain（ローカル版 FR-E2 の修正が公開の経路でも効くこと）。
 - **FR-H4 hosted の送信**: 新 3 への x402 送信を公開の設定生成に足す（Router の EVM 送信鍵、D-11 と同じ鍵を新 3 の network でも使う）。x402 送信では Router はチェーン手数料を払わない（上流の facilitator が送出する）ので、Router の送信鍵に要るのは新 3 の通貨だけ。
 - **FR-H5 組の出し方・価格・区分**: 36 の組を hosted の一覧（`subetha_router_list_routes`）から買えるようにする。既存の 20 組と同じく **動的プロファイル `dyn-<src>-to-<dst>`** で出す（静的 route を 36 本足すと一覧が 10 → 46 本になり、既存の出し方とも揃わない）。動的プロファイルは **呼び出し側が選ぶ URL** を買うもので、FR-H2 の Provider に固定されない（`tools/remote-mcp-config.ts:390` の既存のプロファイルと同じ）。各プロファイルについて次を明示する（設計で値を表にする）:
-  - 宛先: scheme `exact`、network・資産・decimals 6・`tokenDomain`（表の domain。USDG は `Global Dollar`/`1`、Arbitrum Sepolia は `USD Coin`/`2` など）。
+  - 宛先（新 3 を destination とするプロファイル。EVM の x402）: scheme `exact`、network・資産・decimals 6・`tokenDomain`（表の domain。USDG は `Global Dollar`/`1`、Arbitrum Sepolia は `USD Coin`/`2` など）。既存のレールを destination とするプロファイルの宛先は既存のビルダーのまま（Base・Arc は `exact` + `tokenDomain`、Solana x402 は `exact` + `tokenProgram`、Tempo は `tempo/charge`、Solana MPP は `solana/charge` + `tokenProgram`。`tools/remote-mcp-config.ts:306-365`）。
   - 価格: 新 3 への x402 送信は既存の x402 送信と同じ定額 1,000、上流の上限 10,000（`DYNAMIC_FEE_X402_OUT`・`DYNAMIC_MAX_UPSTREAM_AMOUNT`）。新 3 → Tempo（MPP 送信）は既存の Tempo の見積もりと上限の規則（`feeMargin`・`maxFee` 50,000）をそのまま使う。新 3 → `solmpp` は既存の `toSolMpp` の規則（`maxFee` なし）。
   - 予算の区分: 新 3 の (network, asset) ごとに `dynamic.budget.buckets` の区分を足す（区分が無いと quote は拒まれる。`src/core/dynamic.ts:223-252`）。総額と 1 件の上限は G-1 で決める。1 件の予約は源と宛先の区分ごとの合算で見る規則（`tools/remote-mcp-config.ts:277-284`）に照らし、新 3 → Tempo で gas の cap が手数料を押し上げる場合も含めて境界の試験を置く。新 × 新は源と宛先が別の区分になる（同じチェーン同士は組にしない）。
   - facilitator の金額の上限（`tools/evm-facilitator.ts:58,397` の 20,000）が、源のレグの最大（上流の上限 + 手数料、Tempo 宛では cap を含む）を下回らないこと。
@@ -57,7 +57,7 @@
 - **AC-H4（G-3、本番の env、資金が動く）** 前例の排他の引き継ぎ（`docs/DEPLOY.md:137-141`）に従う: 進行中の購入が無いときに公開の Router を止め、**同じイメージ・同じ network・同じボリューム** で受け入れの Router を単独で動かし、終わったら止めて公開の Router を戻す（同時に 2 つの Router を動かさない。journal は前例どおりの扱い）。この中で 36 組それぞれを 1 回以上買い、`delivered` と 2 レグの on-chain の `Transfer`（token・from・to・value が quote と一致、receipt 成功、チェーン別の確定）がそろうこと。
 - **AC-H5（G-4 の後、公開の hosted、資金が動く）** 公開の hosted MCP（HTTPS）から 36 組を各 1 回買い、AC-H4 と同じ証跡がそろうこと。既存の 20 組から少なくとも各レールを 1 回ずつ含む数組を買い、回帰が無いこと。Router を同じ journal で再起動した後も全 paymentId の status が同じ。
 - **AC-H6（Provider）** 3 つの Provider の公開の URL が未払いで 402 と正しい offer（network・資産・domain・payTo・金額）を返し、支払いつきでデータを返す（AC-H4・H5 の購入で兼ねてよい）。
-- **AC-H7（受け入れのクライアントと動的の証跡）** 受け入れのクライアントはこのリポジトリの道具（hosted MCP を HTTPS で呼び、`npm run sign` と同じ `runSign` で署名する driver。前例 G-5、`docs/DEPLOY.md` §2e）。各購入で: `subetha_router_quote_url` の `url` に **FR-H2 の Provider の URL を明示** し、subject の upstream URL・宛先・価格が plan と一致することを署名の前に確かめる。quote の `ownerKey` を保存し、`subetha_router_status` を `ownerKey` つきで読み直す。保存した結果を Router の再起動の後に読み直す（AC-H5）。SR-H7 を守る。
+- **AC-H7（受け入れのクライアントと動的の証跡）** 受け入れのクライアントはこのリポジトリの道具（hosted MCP を HTTPS で呼び、`npm run sign` と同じ `runSign` で署名する driver。前例 G-5、`docs/DEPLOY.md` §2e）。各購入で: `subetha_router_quote_url` の `url` に **その組の宛先のレールを受ける Provider の URL を明示** し（新 3 が宛先なら FR-H2 の Provider、既存のレールが宛先なら既存の hosted の Provider: Provider A・B・Arc・Solana・D。動的の offer の scheme・network は宛先と一致が要る `src/core/dynamic.ts:391`）、subject の upstream URL・宛先・価格が plan と一致することを署名の前に確かめる。quote の `ownerKey` を保存し、`subetha_router_status` を `ownerKey` つきで読み直す。保存した結果を Router の再起動の後に読み直す（AC-H5）。SR-H7 を守る。
 
 ## 6. owner の gate
 
@@ -81,3 +81,4 @@
   4. major — 動的の価格・区分・宛先の意味が「既存の規則」では足りない、プロファイルは呼び出し側の URL → FR-H5、AC-H2、AC-H7。
   5. major — G-3 の「別 port」は前例の排他に反する → AC-H4。
   6. major — 受け入れのクライアントと payer の制限、動的の証跡、Tempo の資金が先に動く規則 → §1、AC-H7、SR-H7。
+- **R2（readback、第 2 版 `6aec554`）: APPROVE WITH CHANGES**。R1 の 6 件は解決。新しい 2 件を第 2.1 版で反映: 宛先の `exact`・`tokenDomain` を新 3 宛てに限定（FR-H5）、受け入れの URL は組の宛先のレールの Provider（AC-H7）。
