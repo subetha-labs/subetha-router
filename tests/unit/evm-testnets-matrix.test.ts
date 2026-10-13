@@ -861,6 +861,7 @@ describe("prefund (§8.5 #3)", () => {
         return hex64(0x2000 + transfers.length);
       },
       waitReceipt: async () => "success",
+      latestBlock: async () => ({ number: 1n, timestamp: 0 }),
       authorizationUsed: async () => false,
       receiptStatus: async () => undefined,
       secrets: Secrets.fromEnv({}),
@@ -950,52 +951,103 @@ describe("M-2 #2: prefund unknown outcomes hold across plan hashes until reconci
     await expect(buildPrefundPlan({ SUBETHA_PAYER_ADDRESS: T7, SUBETHA_ROUTER_RECEIVER: T8 }, chain)).rejects.toThrow(/could not read a balance/);
   });
 
-  test("a 5xx settle is unknown; a regenerated plan holds the same (network, asset, payer, recipient) until authorizationState shows it used or expired", async () => {
-    const dir = tempDir();
-    const planA = await prefundPlan();
-    let used = false;
-    let clock = new Date("2026-10-13T12:00:00Z");
-    const settles: unknown[] = [];
-    let answer = 503;
-    const deps: PrefundDeps = {
+  /** 偽の chain: 最新の block の時刻（秒）と、block ごとの authorizationState。 */
+  function prefundDeps(state: { used: boolean; blockTimestamp: number; clock: Date; answer: number; settles: unknown[]; reads: bigint[] }): PrefundDeps {
+    return {
       payerAddress: T7,
       signAuthorization: (offer, chainId) => createX402Payer(PAYER_KEY).credentialFor(offer as never, chainId),
       async settle(body) {
-        settles.push(body);
-        return answer === 200 ? { status: 200, body: { success: true, transaction: hex64(0x3000 + settles.length) } } : { status: answer, body: {} };
+        state.settles.push(body);
+        return state.answer === 200 ? { status: 200, body: { success: true, transaction: hex64(0x3000 + state.settles.length) } } : { status: state.answer, body: {} };
       },
       transfer: async () => hex64(0x4444),
       waitReceipt: async () => "success",
-      authorizationUsed: async () => used,
+      latestBlock: async () => ({ number: 4242n, timestamp: state.blockTimestamp }),
+      async authorizationUsed(_n, _a, _f, _nonce, blockNumber) {
+        state.reads.push(blockNumber);
+        return state.used;
+      },
       receiptStatus: async () => undefined,
       secrets: Secrets.fromEnv({}),
       out: () => {},
-      now: () => clock,
+      now: () => state.clock,
     };
+  }
+  const T0 = Date.parse("2026-10-13T12:00:00Z") / 1000;
+
+  test("a 5xx settle is unknown; a regenerated plan is held until the authorization is used on chain; a plan made before that resolution is then refused as stale (M-3 #3)", async () => {
+    const dir = tempDir();
+    const st = { used: false, blockTimestamp: T0, clock: new Date("2026-10-13T12:00:00Z"), answer: 503, settles: [] as unknown[], reads: [] as bigint[] };
+    const deps = prefundDeps(st);
+    const planA = await prefundPlan();
     const a = await runPrefund(planA, planSha256(planA), dir, deps);
     expect(a.stopped?.reason).toMatch(/503/);
     expect(unresolvedPrefunds(dir)).toHaveLength(1);
-    // 新しい plan（別の hash）: 照合しても未使用・期限内 → rh への入金は送らない。
     const planB = { ...planA, createdAt: "2026-10-13T12:05:00.000Z" } as PrefundPlan;
-    answer = 200;
+    st.answer = 200;
+    st.clock = new Date("2026-10-13T12:05:30Z");
     const b = await runPrefund(planB, planSha256(planB), dir, deps);
     expect(b.stopped?.reason).toMatch(/held: an earlier prefund to the same/);
-    expect(settles).toHaveLength(1);
-    // chain で使用済みと分かれば `used`（払われた）で確定し、新しい plan は進む。
-    used = true;
+    expect(st.settles).toHaveLength(1);
+    // chain で使用済み → `used` と確定。plan C はその確定より前に作った（不足額が古い）ので送らない。
+    st.used = true;
     const planC = { ...planA, createdAt: "2026-10-13T12:06:00.000Z" } as PrefundPlan;
+    st.clock = new Date("2026-10-13T12:07:00Z");
     const c = await runPrefund(planC, planSha256(planC), dir, deps);
     expect(c.reconciled).toEqual([{ planSha: planSha256(planA), index: 1, state: "used" }]);
-    expect(c.stopped).toBeUndefined();
-    // 期限切れの未使用も確定（もう使えない）。
-    const dir2 = tempDir();
-    used = false;
-    answer = 503;
-    await runPrefund(planA, planSha256(planA), dir2, deps);
-    clock = new Date("2026-10-13T12:10:00Z");
-    const d = await runPrefund(planB, planSha256(planB), dir2, { ...deps, settle: async () => ({ status: 200, body: { success: true, transaction: hex64(0x5555) } }) });
-    expect(d.reconciled?.[0]?.state).toBe("expired_unused");
+    expect(c.stopped?.reason).toMatch(/make a fresh plan/);
+    expect(c.done).toEqual([]);
+    expect(st.settles).toHaveLength(1);
+    // 確定の後に作った plan（残高を読み直した新しい hash）は進む。
+    const planD = { ...planA, createdAt: "2026-10-13T12:08:00.000Z" } as PrefundPlan;
+    st.clock = new Date("2026-10-13T12:08:30Z");
+    const d = await runPrefund(planD, planSha256(planD), dir, deps);
     expect(d.stopped).toBeUndefined();
+  });
+
+  test("expiry is decided by the chain's block time with authorizationState pinned at that block, never by the local clock (M-3 #2)", async () => {
+    const dir = tempDir();
+    const st = { used: false, blockTimestamp: T0, clock: new Date("2026-10-13T12:00:00Z"), answer: 503, settles: [] as unknown[], reads: [] as bigint[] };
+    const deps = prefundDeps(st);
+    const planA = await prefundPlan();
+    await runPrefund(planA, planSha256(planA), dir, deps);
+    const validBefore = unresolvedPrefunds(dir)[0]!.validBefore!;
+    // ローカルの時計は 1 日後でも、chain の block の時刻が validBefore 以下なら未確定のまま。
+    st.clock = new Date("2026-10-14T12:00:00Z");
+    st.blockTimestamp = validBefore;
+    const planB = { ...planA, createdAt: "2026-10-14T12:00:00.000Z" } as PrefundPlan;
+    const held = await runPrefund(planB, planSha256(planB), dir, deps);
+    expect(held.reconciled?.[0]?.state).toMatch(/still unresolved/);
+    expect(held.stopped?.reason).toMatch(/held/);
+    expect(st.reads.at(-1)).toBe(4242n);
+    // block の時刻が validBefore を越え、その block で未使用 → expired_unused。
+    st.blockTimestamp = validBefore + 1;
+    const released = await runPrefund({ ...planB, createdAt: "2026-10-14T12:00:01.000Z" } as PrefundPlan, planSha256({ ...planB, createdAt: "2026-10-14T12:00:01.000Z" }), dir, { ...deps, settle: async () => ({ status: 200, body: { success: true, transaction: hex64(0x5555) } }) });
+    expect(released.reconciled?.[0]?.state).toBe("expired_unused");
+    expect(released.stopped).toBeUndefined();
+  });
+
+  test("a marker without a record (crash after broadcast, before the record) holds the target until reconciled on chain; an ERC-20 marker without a tx stays held (M-3 #1)", async () => {
+    const dir = tempDir();
+    const st = { used: false, blockTimestamp: T0, clock: new Date("2026-10-13T12:00:00Z"), answer: 200, settles: [] as unknown[], reads: [] as bigint[] };
+    const deps = prefundDeps(st);
+    const old = await prefundPlan();
+    const oldSha = planSha256({ ...old, createdAt: "2026-10-13T11:00:00.000Z" });
+    const rh = old.transfers.find((t) => t.endpoint === "rh")!;
+    const arc = old.transfers.find((t) => t.endpoint === "arc")!;
+    createAttemptMarker(dir, oldSha, `prefund-${String(rh.index)}`, { at: "x", transfer: rh, nonce: hex64(0xabc), validBefore: T0 + 60 });
+    createAttemptMarker(dir, oldSha, `prefund-${String(arc.index)}`, { at: "x", transfer: arc });
+    expect(unresolvedPrefunds(dir).map((u) => u.why)).toEqual([expect.stringMatching(/without a record/), expect.stringMatching(/without a record/)]);
+    const plan = await prefundPlan();
+    const held = await runPrefund(plan, planSha256(plan), dir, deps);
+    expect(held.stopped?.reason).toMatch(/held: an earlier prefund/);
+    expect(st.settles).toEqual([]);
+    // EIP-3009 は印の nonce で照合できる。chain で使用済み → used（記録を作る）。ERC-20 は tx が無いので保留のまま。
+    st.used = true;
+    st.clock = new Date("2026-10-13T12:01:00Z");
+    const results = await (await import("../../tools/evm-testnets-prefund.js")).reconcilePrefunds(dir, deps);
+    expect(results.map((r) => r.state)).toEqual(expect.arrayContaining(["used", expect.stringMatching(/still unresolved/)]));
+    expect(unresolvedPrefunds(dir).map((u) => u.transfer?.endpoint)).toEqual(["arc"]);
   });
 });
 

@@ -8,7 +8,9 @@
  * - `plan` は残高が 1 つでも読めなければ失敗する（目標の全額を求める計画を作らない。Codex M-2 #2）。
  * - `run --plan <file> --plan-sha256 <hex> --evidence-dir <dir>`: hash が一致したときだけ、表の順に 1 件ずつ。**再試行しない**。各送金の前に不変の印（O_EXCL・fsync）と
  *   `pending` の記録（EIP-3009 は nonce・validBefore）を作り、同じ plan の同じ番号は二度と送らない。失敗・不明で止まる。tx hash を表示・記録する。
- *   初めに **全 plan** の未確定の入金を chain で照合し（`authorizationState`・receipt）、同じ (network, 資産, 払い手, 受取先) に未確定が残れば送らない。
+ *   初めに **全 plan** の未確定の入金（記録の無い印を含む）を chain で照合し（最新の block の時刻と、その block での `authorizationState`・receipt。
+ *   ローカルの時計は使わない）、同じ (network, 資産, 払い手, 受取先) に未確定が残れば送らない。plan を作った後に「払われた」と確定した入金があれば、
+ *   その plan は古いので走らせない（新しい `plan` を求める。Codex M-3）。
  * - `reconcile --evidence-dir <dir>`: 送らずに照合だけ（未確定が残れば exit 1）。tx の無い普通の送金の未確定は運用者が chain で調べる。
  *
  * 方法:
@@ -265,8 +267,10 @@ export interface PrefundDeps {
   transfer(t: PrefundTransfer): Promise<string>;
   /** receipt を待つ（無ければ undefined）。 */
   waitReceipt(network: string, hash: string): Promise<"success" | "reverted" | undefined>;
-  /** 照合（読み取りだけ）: EIP-3009 の `authorizationState(from, nonce)`（使用済みなら true）。 */
-  authorizationUsed(network: string, asset: string, from: string, nonce: string): Promise<boolean>;
+  /** 照合（読み取りだけ）: 同じ RPC の最新の block（番号と時刻・秒）。期限の判断は chain の時刻だけで行う（Codex M-3 #2）。 */
+  latestBlock(network: string): Promise<{ readonly number: bigint; readonly timestamp: number }>;
+  /** 照合（読み取りだけ）: EIP-3009 の `authorizationState(from, nonce)` を **その block で**（使用済みなら true）。 */
+  authorizationUsed(network: string, asset: string, from: string, nonce: string, blockNumber: bigint): Promise<boolean>;
   /** 照合（読み取りだけ・待たない）: receipt の状態（無ければ undefined）。 */
   receiptStatus(network: string, hash: string): Promise<"success" | "reverted" | undefined>;
   readonly secrets: Secrets;
@@ -287,7 +291,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * 1 件の送金の記録（`<evidence>/prefund/<planSha>/transfer-<n>.json`。原子的な書き込みと fsync）。送出の **前に** `pending`（EIP-3009 は nonce と validBefore）を書く。
  * 確定した状態: `confirmed`・`not_sent`（署名の失敗・facilitator の 400）・`reverted`・`used`（照合: authorization は使用済み）・`expired_unused`（照合: 未使用のまま期限切れ）。
- * 未確定: `pending`・`unknown`（読めない記録も未確定）。印があって記録が無いのは、送出の前（`pending` の前）で止まったもの = `not_sent`。
+ * 未確定: `pending`・`unknown`（読めない記録も未確定）。**印があって記録が無いものも未確定**（送出の後・記録の前に落ちた場合と区別できない。Codex M-3 #1）。
+ * EIP-3009 の nonce・validBefore は印（送出の前に O_EXCL・fsync）にも残すので、記録が無くても chain で照合できる。
  */
 export type PrefundState = "pending" | "unknown" | "confirmed" | "not_sent" | "reverted" | "used" | "expired_unused";
 const FINAL_STATES: ReadonlySet<string> = new Set(["confirmed", "not_sent", "reverted", "used", "expired_unused"]);
@@ -305,38 +310,76 @@ function recordFileOf(evidenceDir: string, sha: string, index: number): string {
   return path.join(evidenceDir, "prefund", sha, `transfer-${String(index)}.json`);
 }
 
-/** 全 plan の入金の印と記録（Codex M-2 #2）。未確定のものを返す（`record` が無い・読めない印も含む）。 */
-export function unresolvedPrefunds(evidenceDir: string): { planSha: string; index: number; transfer: PrefundTransfer | undefined; record: PrefundRecord | undefined; why: string }[] {
+/** 未確定の入金（印と記録から）。`nonce`・`validBefore` は記録か印から。 */
+export interface UnresolvedPrefund {
+  readonly planSha: string;
+  readonly index: number;
+  readonly transfer: PrefundTransfer | undefined;
+  readonly record: PrefundRecord | undefined;
+  readonly nonce: string | undefined;
+  readonly validBefore: number | undefined;
+  readonly why: string;
+}
+
+/** 全 plan の入金の印と記録（Codex M-2 #2・M-3 #1）。未確定のものを返す（記録の無い印・読めない印と記録も含む）。 */
+export function unresolvedPrefunds(evidenceDir: string): UnresolvedPrefund[] {
   const root = path.join(evidenceDir, "attempts");
   if (!existsSync(root)) return [];
-  const out: { planSha: string; index: number; transfer: PrefundTransfer | undefined; record: PrefundRecord | undefined; why: string }[] = [];
+  const out: UnresolvedPrefund[] = [];
   for (const dir of readdirSync(root, { withFileTypes: true })) {
     if (!dir.isDirectory()) continue;
     for (const file of readdirSync(path.join(root, dir.name))) {
       const m = /^prefund-(\d+)\.json$/.exec(file);
       if (m === null) continue;
       const index = Number(m[1]);
-      let transfer: PrefundTransfer | undefined;
+      let marker: Record<string, unknown> = {};
       try {
-        const marker = JSON.parse(readFileSync(path.join(root, dir.name, file), "utf8")) as Record<string, unknown>;
-        transfer = isRecord(marker["transfer"]) ? (marker["transfer"] as unknown as PrefundTransfer) : undefined;
+        const parsed = JSON.parse(readFileSync(path.join(root, dir.name, file), "utf8")) as unknown;
+        marker = isRecord(parsed) ? parsed : {};
       } catch {
-        transfer = undefined;
+        marker = {};
       }
+      const transfer = isRecord(marker["transfer"]) ? (marker["transfer"] as unknown as PrefundTransfer) : undefined;
+      const markerNonce = typeof marker["nonce"] === "string" ? marker["nonce"] : undefined;
+      const markerValidBefore = typeof marker["validBefore"] === "number" ? marker["validBefore"] : undefined;
       if (transfer === undefined) {
-        out.push({ planSha: dir.name, index, transfer, record: undefined, why: "unreadable marker" });
+        out.push({ planSha: dir.name, index, transfer, record: undefined, nonce: markerNonce, validBefore: markerValidBefore, why: "unreadable marker" });
         continue;
       }
       const recordFile = recordFileOf(evidenceDir, dir.name, index);
-      if (!existsSync(recordFile)) continue; // 送出の前（pending の前）で止まった = not_sent。
+      if (!existsSync(recordFile)) {
+        out.push({ planSha: dir.name, index, transfer, record: undefined, nonce: markerNonce, validBefore: markerValidBefore, why: "marker without a record (it may have been sent before the record was written)" });
+        continue;
+      }
       let record: PrefundRecord | undefined;
       try {
         record = JSON.parse(readFileSync(recordFile, "utf8")) as PrefundRecord;
       } catch {
         record = undefined;
       }
-      if (record === undefined || typeof record.state !== "string") out.push({ planSha: dir.name, index, transfer, record: undefined, why: "unreadable record" });
-      else if (!FINAL_STATES.has(record.state)) out.push({ planSha: dir.name, index, transfer, record, why: `state ${record.state}` });
+      if (record === undefined || typeof record.state !== "string") out.push({ planSha: dir.name, index, transfer, record: undefined, nonce: markerNonce, validBefore: markerValidBefore, why: "unreadable record" });
+      else if (!FINAL_STATES.has(record.state)) out.push({ planSha: dir.name, index, transfer, record, nonce: record.nonce ?? markerNonce, validBefore: record.validBefore ?? markerValidBefore, why: `state ${record.state}` });
+    }
+  }
+  return out;
+}
+
+/** 全 plan の「払われた」と確定した記録（`confirmed`・`used`）と、その確定の時刻（照合の時刻があればそれ）。 */
+function paidRecords(evidenceDir: string): { planSha: string; index: number; at: string }[] {
+  const root = path.join(evidenceDir, "prefund");
+  if (!existsSync(root)) return [];
+  const out: { planSha: string; index: number; at: string }[] = [];
+  for (const dir of readdirSync(root, { withFileTypes: true })) {
+    if (!dir.isDirectory()) continue;
+    for (const file of readdirSync(path.join(root, dir.name))) {
+      const m = /^transfer-(\d+)\.json$/.exec(file);
+      if (m === null) continue;
+      try {
+        const r = JSON.parse(readFileSync(path.join(root, dir.name, file), "utf8")) as Record<string, unknown>;
+        if (r["state"] === "confirmed" || r["state"] === "used") out.push({ planSha: dir.name, index: Number(m[1]), at: String(r["reconciledAt"] ?? r["at"] ?? "") });
+      } catch {
+        // 読めない記録は未確定として `unresolvedPrefunds` が保留する。
+      }
     }
   }
   return out;
@@ -347,33 +390,47 @@ function sameTarget(a: PrefundTransfer, b: PrefundTransfer): boolean {
 }
 
 /**
- * 未確定の入金を chain で照合する（読み取りだけ。送らない）。EIP-3009: `authorizationState` が使用済みなら `used`、未使用で `validBefore` を過ぎていれば
- * `expired_unused`（もう使えない）、それ以外は未確定のまま。普通の送金: tx があれば receipt で `confirmed`／`reverted`、無ければ未確定のまま（運用者が調べる）。
+ * 未確定の入金を chain で照合する（読み取りだけ。送らない。Codex M-3 #1・#2）。
+ * - EIP-3009（nonce は記録か印から）: 同じ RPC の最新の block を読み、その block で `authorizationState` を読む。使用済みなら `used`。
+ *   未使用で **その block の時刻 > validBefore** なら `expired_unused`（もう使えない）。ローカルの時計は使わない。それ以外は未確定のまま。
+ * - 普通の送金: 記録に tx があれば receipt で `confirmed`／`reverted`。tx が無ければ未確定のまま（運用者が chain で調べる）。
  */
 export async function reconcilePrefunds(evidenceDir: string, deps: PrefundDeps): Promise<{ planSha: string; index: number; state: string }[]> {
   const now = deps.now ?? (() => new Date());
   const results: { planSha: string; index: number; state: string }[] = [];
   for (const entry of unresolvedPrefunds(evidenceDir)) {
-    const record = entry.record;
-    if (record === undefined || entry.transfer === undefined) {
+    const transfer = entry.transfer;
+    if (transfer === undefined) {
       results.push({ planSha: entry.planSha, index: entry.index, state: entry.why });
       continue;
     }
     let state: PrefundState | undefined;
+    let evidence: Record<string, unknown> = {};
     try {
-      if (record.transfer.method === "eip3009_via_self_hosted_facilitator" && typeof record.nonce === "string" && typeof record.validBefore === "number") {
-        if (await deps.authorizationUsed(record.transfer.network, record.transfer.asset, record.transfer.from, record.nonce)) state = "used";
-        else if (now().getTime() / 1000 > record.validBefore) state = "expired_unused";
-      } else if (typeof record.tx === "string") {
-        const r = await deps.receiptStatus(record.transfer.network, record.tx);
+      if (transfer.method === "eip3009_via_self_hosted_facilitator") {
+        if (entry.nonce !== undefined && entry.validBefore !== undefined) {
+          const block = await deps.latestBlock(transfer.network);
+          const used = await deps.authorizationUsed(transfer.network, transfer.asset, transfer.from, entry.nonce, block.number);
+          evidence = { blockNumber: block.number.toString(), blockTimestamp: block.timestamp, authorizationUsed: used };
+          if (used) state = "used";
+          else if (block.timestamp > entry.validBefore) state = "expired_unused";
+        }
+      } else if (typeof entry.record?.tx === "string") {
+        const r = await deps.receiptStatus(transfer.network, entry.record.tx);
         if (r === "success") state = "confirmed";
         else if (r === "reverted") state = "reverted";
       }
     } catch {
       state = undefined;
     }
-    if (state !== undefined) writePrivate(recordFileOf(evidenceDir, entry.planSha, entry.index), { ...record, state, reconciledAt: now().toISOString() }, deps.secrets);
-    results.push({ planSha: entry.planSha, index: entry.index, state: state ?? `still ${record.state}` });
+    if (state !== undefined) {
+      writePrivate(
+        recordFileOf(evidenceDir, entry.planSha, entry.index),
+        { ...(entry.record ?? { index: entry.index, transfer, at: now().toISOString() }), ...(entry.nonce === undefined ? {} : { nonce: entry.nonce }), ...(entry.validBefore === undefined ? {} : { validBefore: entry.validBefore }), state, reconciledAt: now().toISOString(), reconciliation: evidence },
+        deps.secrets,
+      );
+    }
+    results.push({ planSha: entry.planSha, index: entry.index, state: state ?? `still unresolved (${entry.why})` });
   }
   return results;
 }
@@ -389,6 +446,13 @@ export async function runPrefund(plan: PrefundPlan, sha: string, evidenceDir: st
   const done: { index: number; tx: string }[] = [];
   const reconciled = await reconcilePrefunds(evidenceDir, deps);
   for (const r of reconciled) out(`prefund reconcile ${r.planSha}#${String(r.index)}: ${r.state}`);
+  // plan を作った後に「払われた」と確定した入金があれば、その plan の不足額は古い（Codex M-3 #3）。新しい plan（残高の読み直しと新しい hash）を求める。
+  const stale = paidRecords(evidenceDir).filter((r) => r.at === "" || r.at > plan.createdAt);
+  if (stale.length > 0) {
+    const reason = `an earlier prefund was settled or reconciled as paid after this plan was made (${stale.map((r) => `${r.planSha}#${String(r.index)}`).join(", ")}); make a fresh plan (new balances, new hash)`;
+    out(`STOP prefund: ${reason}`);
+    return { done, reconciled, stopped: { index: 0, reason } };
+  }
   const save = (t: PrefundTransfer, state: PrefundState, extra: Partial<PrefundRecord> = {}): void => writePrivate(recordFileOf(evidenceDir, sha, t.index), { index: t.index, state, transfer: t, at: now().toISOString(), ...extra }, deps.secrets);
   const stop = (t: PrefundTransfer, state: PrefundState | undefined, reason: string, extra: Partial<PrefundRecord> = {}): PrefundReport => {
     if (state !== undefined) save(t, state, { ...extra, reason });
@@ -401,18 +465,20 @@ export async function runPrefund(plan: PrefundPlan, sha: string, evidenceDir: st
     if (state !== "absent") return stop(t, undefined, `already attempted under this plan (${state}); a new transfer needs a new plan`);
     const open = unresolvedPrefunds(evidenceDir).filter((u) => u.transfer === undefined || sameTarget(u.transfer, t));
     if (open.length > 0) return stop(t, undefined, `held: an earlier prefund to the same (network, asset, payer, recipient) is unresolved (${open.map((u) => `${u.planSha}#${String(u.index)}: ${u.why}`).join(", ")}); reconcile it on chain first`);
+    // EIP-3009 の nonce と validBefore は印に先に残す（記録の前に落ちても chain で照合できる。M-3 #1）。
+    const viaFacilitator = t.method === "eip3009_via_self_hosted_facilitator";
+    const nonce = `0x${randomBytes(32).toString("hex")}`;
+    const offer = viaFacilitator ? eip3009OfferOf(t, Math.floor(now().getTime() / 1000), nonce) : undefined;
+    const validBefore = offer === undefined ? undefined : (offer["extra"] as { expiresAt: number }).expiresAt;
     let created: boolean;
     try {
-      created = createAttemptMarker(evidenceDir, sha, markerId, { at: now().toISOString(), transfer: t });
+      created = createAttemptMarker(evidenceDir, sha, markerId, { at: now().toISOString(), transfer: t, ...(offer === undefined ? {} : { nonce, validBefore }) });
     } catch {
       return stop(t, undefined, "held: could not persist the attempt marker; not sending");
     }
     if (!created) return stop(t, undefined, "already attempted under this plan");
     out(`prefund #${String(t.index)}: ${t.method} ${t.amount} ${t.assetSymbol} on ${t.networkLabel} -> ${t.to}`);
-    if (t.method === "eip3009_via_self_hosted_facilitator") {
-      const nonce = `0x${randomBytes(32).toString("hex")}`;
-      const offer = eip3009OfferOf(t, Math.floor(now().getTime() / 1000), nonce);
-      const validBefore = (offer["extra"] as { expiresAt: number }).expiresAt;
+    if (offer !== undefined && validBefore !== undefined) {
       let paymentPayload: Record<string, unknown>;
       try {
         const credential = await deps.signAuthorization(offer, Number(t.network.split(":")[1]));
@@ -513,8 +579,12 @@ async function realDeps(env: Env, secrets: Secrets): Promise<PrefundDeps> {
       const data = viem.encodeFunctionData({ abi: erc20, functionName: "transfer", args: [t.to as `0x${string}`, BigInt(t.amount)] });
       return await client.sendTransaction({ to: t.asset as `0x${string}`, data, ...(t.endpoint === "tempo" ? { feeToken: MATRIX_RAILS.tempo.asset } : {}) } as never);
     },
-    async authorizationUsed(network, asset, from, nonce) {
-      return (await clientOf(network).readContract({ address: asset as `0x${string}`, abi: authAbi, functionName: "authorizationState", args: [from as `0x${string}`, nonce as `0x${string}`] })) as boolean;
+    async latestBlock(network) {
+      const block = await clientOf(network).getBlock({ blockTag: "latest" });
+      return { number: block.number, timestamp: Number(block.timestamp) };
+    },
+    async authorizationUsed(network, asset, from, nonce, blockNumber) {
+      return (await clientOf(network).readContract({ address: asset as `0x${string}`, abi: authAbi, functionName: "authorizationState", args: [from as `0x${string}`, nonce as `0x${string}`], blockNumber })) as boolean;
     },
     async receiptStatus(network, hash) {
       try {
