@@ -12,6 +12,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   attemptMarkerPathOf,
   createAttemptMarker,
+  isUnsealedBlockHash,
   setDirSyncForTest,
   BASE_SEPOLIA,
   buildPlan,
@@ -577,5 +578,13 @@ describe("I-2 #3: 印を作るとき、新しく作った祖先（attempts な�
     });
     expect(() => createAttemptMarker(evidenceDir, "b".repeat(64), "md-rh-eth-snapshot", { at: 2 })).toThrow();
     rmSync(evidenceDir, { recursive: true, force: true });
+  });
+});
+
+describe("E-7: 封をされる前の receipt の block hash（ゼロ）を reorg と誤らない", () => {
+  test("isUnsealedBlockHash はゼロの 32 バイトだけを真にする", () => {
+    expect(isUnsealedBlockHash(`0x${"0".repeat(64)}`)).toBe(true);
+    expect(isUnsealedBlockHash(`0x${"0".repeat(63)}1`)).toBe(false);
+    expect(isUnsealedBlockHash("0x92938eab2067409085c46d954831f109373ac4ae61e2cf94208e8ddd111fa839")).toBe(false);
   });
 });

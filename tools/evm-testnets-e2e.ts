@@ -952,6 +952,15 @@ async function receiptWithin(reader: ChainReader, network: string, hash: string,
 }
 
 /** 1 レグの chain の読み取りと照合（token の contract・from・to・value が quote と一致する `Transfer` がちょうど 1 つ、receipt が成功）。 */
+/**
+ * 封をされる前の receipt の block hash（ゼロ）。Base Sepolia の公開 RPC は送出の直後に block が封をされる前の receipt（flashblocks の先行の receipt）を
+ * block hash ゼロで返すことがある（E-7 で実測、2026-10-13）。記録の hash がゼロなら、確定の判定で「記録と違う（reorg?）」と比べない
+ * （tx の receipt・block 番号・`finalized` で判定する）。
+ */
+export function isUnsealedBlockHash(hash: string): boolean {
+  return /^0x0{64}$/i.test(hash);
+}
+
 export async function verifyLeg(reader: ChainReader, leg: "source" | "destination", planned: PlanLeg, txHash: unknown, opts: { waitMs: number; sleep: (ms: number) => Promise<void> }): Promise<LegEvidence> {
   const expected = { from: planned.from, to: planned.to, value: planned.amount };
   const base = { leg, network: planned.network, token: planned.asset, expected };
@@ -998,7 +1007,7 @@ export async function finalityOf(reader: ChainReader, network: string, txHash: s
   }
   if (receipt === undefined) return { ...base, final: false, txBlock: null, finalizedBlock: null, note: "no receipt (pending or dropped)" };
   if (receipt.status !== "success") return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "receipt status is not success" };
-  if (recordedBlockHash !== null && receipt.blockHash.toLowerCase() !== recordedBlockHash.toLowerCase()) return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "block hash differs from the recorded one (reorg?)" };
+  if (recordedBlockHash !== null && !isUnsealedBlockHash(recordedBlockHash) && receipt.blockHash.toLowerCase() !== recordedBlockHash.toLowerCase()) return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "block hash differs from the recorded one (reorg?)" };
   if (rule === "receipt") return { ...base, final: true, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "single-slot finality: receipt present (HyperEVM)" };
   const finalized = await reader.finalizedBlock(network);
   if (finalized === undefined) return { ...base, final: false, txBlock: receipt.blockNumber.toString(), finalizedBlock: null, note: "finalized block not readable; pending" };
@@ -1207,7 +1216,7 @@ async function outboundPrerequisite(planned: PlanPurchase, opts: RunOptions, dep
   const now = deps.now ?? (() => new Date());
   if (mode === "receipt") {
     const again = await verifyLeg(deps.chain, "source", { ...planned.source, network: sourceLeg.network, asset: sourceLeg.token, from: sourceLeg.expected.from, to: sourceLeg.expected.to, amount: sourceLeg.expected.value }, sourceLeg.txHash, { waitMs: 0, sleep });
-    if (!again.ok || again.blockHash?.toLowerCase() !== sourceLeg.blockHash?.toLowerCase()) return { ok: false, reason: `the inbound source tx is not confirmed again (${again.problem ?? "block hash changed"})` };
+    if (!again.ok || (sourceLeg.blockHash !== null && !isUnsealedBlockHash(sourceLeg.blockHash) && again.blockHash?.toLowerCase() !== sourceLeg.blockHash.toLowerCase())) return { ok: false, reason: `the inbound source tx is not confirmed again (${again.problem ?? "block hash changed"})` };
     return { ok: true, detail: { inboundPaymentId: inbound.paymentId, mode, sourceTx: sourceLeg.txHash, block: again.blockNumber } };
   }
   const deadline = now().getTime() + (opts.waitFinalizedSeconds ?? 1_500) * 1000;
