@@ -424,9 +424,11 @@ const FACILITATOR_LISTEN_TIMEOUT_MS = 60_000;
  * facilitator の `/<token>/supported` を loopback で 1 回読み、`networks` が全部（x402 v2・`exact`）載っているか（hosted 設計 §4）。
  * 失敗（接続・期限・redirect・200 以外・大きすぎる・JSON でない・欠け）はすべて `false`（理由・値は返さない）。
  */
-export async function facilitatorSupportsAll(url: string, networks: readonly string[], fetchImpl: typeof fetch = fetch): Promise<boolean> {
+export async function facilitatorSupportsAll(url: string, networks: readonly string[], fetchImpl: typeof fetch = fetch, cancel?: AbortSignal): Promise<boolean> {
   try {
-    const response = await fetchImpl(`${url}/supported`, { method: "GET", redirect: "error", signal: AbortSignal.timeout(SUPPORTED_TIMEOUT_MS) });
+    // 期限と、入口の取り消し（signal・子の終了）のどちらでも止まる。
+    const timeout = AbortSignal.timeout(SUPPORTED_TIMEOUT_MS);
+    const response = await fetchImpl(`${url}/supported`, { method: "GET", redirect: "error", signal: cancel === undefined ? timeout : AbortSignal.any([timeout, cancel]) });
     if (response.status !== 200) {
       await response.body?.cancel().catch(() => {});
       return false;
@@ -449,8 +451,12 @@ export async function facilitatorSupportsAll(url: string, networks: readonly str
 
 /** MCP の入口を bind する。実際のアドレスと port を返す（試験で bind を確かめる）。 */
 export function listenMcp(http: Server, bind: string, port: number): Promise<{ address: string; port: number }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // bind の失敗（port の使用中など）は reject（未処理の 'error' で process を落とさない。入口は片付けてから終わる）。
+    const onError = (error: Error): void => reject(error);
+    http.once("error", onError);
     http.listen(port, bind, () => {
+      http.off("error", onError);
       const address = http.address();
       resolve(typeof address === "object" && address !== null ? { address: address.address, port: address.port } : { address: bind, port });
     });
@@ -483,6 +489,51 @@ export async function startHost(
   }
 
   /**
+   * 子の所有と片付け（H-4 のレビュー）: signal の handler と取り消し（`lifecycle`）は **子を起動する前に** 入れる。
+   * - 起動待ちの子（listening の前）は `lifecycle` の abort で止まる（`startListening` が SIGTERM → 5 秒で SIGKILL、終了を待つ）
+   * - 起動した子は `owned` に入れ、そのときから終了を見る（facilitator が Router の起動待ちの間に落ちても、その時点で全体を止める）
+   * - 起動の後の失敗（`/supported`・Router の起動・証拠の書き込み・MCP の bind）と signal と子の終了は、すべて `shutdown` を通る:
+   *   取り消し → 入口を閉じる → 起動待ちと起動済みの子の **終了を待ってから** `process.exit`。facilitator が入口より長く lock を持つことはない
+   */
+  const lifecycle = new AbortController();
+  const owned: Listening[] = [];
+  const pending = new Set<Promise<unknown>>();
+  let http: Server | undefined;
+  let shuttingDown = false;
+  let ready = false;
+  const shutdown = async (code: number, message?: string): Promise<never> => {
+    if (!shuttingDown) {
+      shuttingDown = true;
+      if (message !== undefined) note(message);
+      lifecycle.abort();
+      http?.close();
+      await Promise.allSettled([...pending]);
+      await Promise.allSettled(owned.map((child) => child.stop()));
+      process.exit(code);
+    }
+    // 2 回目以降（片付けの途中の別の失敗）は、最初の片付けが終わらせるまで待つ。
+    return new Promise<never>(() => {});
+  };
+  const onSignal = (): void => void shutdown(0);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  /** 子を起動する（取り消し可能）。起動したらすぐ `owned` に入れて終了を見る（`watch` が true の子）。 */
+  const spawnChild = async (script: string, env: Readonly<Record<string, string>>, listenTimeoutMs: number, label: string, watch: boolean): Promise<Listening> => {
+    const starting = startListening(script, [], env, { listenTimeoutMs, signal: lifecycle.signal });
+    pending.add(starting);
+    try {
+      const child = await starting;
+      owned.push(child);
+      if (watch) void child.exited.then(() => void shutdown(1, `${label} exited: stopping the entry`));
+      return child;
+    } finally {
+      pending.delete(starting);
+    }
+  };
+  /** 起動の段の失敗: 取り消し中（signal・子の終了）なら片付けに任せる。そうでなければ固定文で片付けて終わる。 */
+  const startupFailed = (message: string): Promise<never> => (shuttingDown ? shutdown(1) : shutdown(1, message));
+
+  /**
    * 使い捨ての作業領域。**config と証拠ログだけ**を置く（起動ごとに新しくてよい）。
    * journal は**ここに置かない**（下記）。
    */
@@ -505,22 +556,19 @@ export async function startHost(
   /**
    * 自前の EVM facilitator（hosted 設計 §4）: Router の子より **先に** 起動する。`startListening` は `node --import tsx <script>` で
    * script 自身を唯一の子にする（tsx の CLI は script を孫で動かし、signal が `flock` を持つ process に届かない）。
-   * listening の行を待ち、`/<token>/supported` を 1 回読んで有効な network が全部あることを確かめる。だめなら facilitator を止めて終わる（固定文）。
+   * listening の行を待ち、`/<token>/supported` を 1 回読んで有効な network が全部あることを確かめる。だめなら片付けて終わる（固定文）。
+   * 起動した時点から終了を見る（Router の起動待ちの間に落ちれば、Router の起動を取り消して終わる）。
    */
   let facilitator: Listening | undefined;
   if (plan.facilitator !== undefined) {
     try {
-      facilitator = await startListening(overrides.facilitatorScriptForTest ?? plan.facilitator.script, [], { ...(overrides.facilitatorEnvExtraForTest ?? {}), ...plan.facilitator.env }, { listenTimeoutMs: FACILITATOR_LISTEN_TIMEOUT_MS });
-    } catch (error) {
       // 固定文のみ（起動失敗の例外は子の出力を丸ごと含む）。原因（lock・gas の上限・RPC など）は facilitator を単体で起動して調べる（固定文の code を出す）。
-      void error;
-      note("could not start the EVM facilitator");
-      process.exit(1);
+      facilitator = await spawnChild(overrides.facilitatorScriptForTest ?? plan.facilitator.script, { ...(overrides.facilitatorEnvExtraForTest ?? {}), ...plan.facilitator.env }, FACILITATOR_LISTEN_TIMEOUT_MS, "the EVM facilitator", true);
+    } catch {
+      return startupFailed("could not start the EVM facilitator");
     }
-    if (facilitator.port !== plan.facilitator.port || !(await facilitatorSupportsAll(plan.facilitator.url, plan.facilitator.networks))) {
-      await facilitator.stop();
-      note("the EVM facilitator did not list every active network at /supported");
-      process.exit(1);
+    if (facilitator.port !== plan.facilitator.port || !(await facilitatorSupportsAll(plan.facilitator.url, plan.facilitator.networks, fetch, lifecycle.signal))) {
+      return startupFailed("the EVM facilitator did not list every active network at /supported");
     }
     note(`evm facilitator: listening on port ${facilitator.port} (${plan.facilitator.networks.join(",")})`);
   }
@@ -529,19 +577,21 @@ export async function startHost(
   try {
     // 起動待ちは 120 秒: 子の Router は listen の前に Solana の起動時の検査（`/supported`・ATA、各 10 秒まで）、MPP 送信のプロファイルごとの Tempo の probe（各 6 秒まで、最大 3 本）、
     // journal の replay を行う。上限に達すると子は殺され、入口は固定文で止まる。
-    router = await startListening(overrides.childScriptForTest ?? plan.childScript, [], { ...(overrides.childEnvExtraForTest ?? {}), ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, { listenTimeoutMs: 120_000 });
-  } catch (error) {
+    // 終了を見るのは facilitator があるときだけ（無いときは今までと同じ: Router の子が落ちても入口は残る）。
+    router = await spawnChild(overrides.childScriptForTest ?? plan.childScript, { ...(overrides.childEnvExtraForTest ?? {}), ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, 120_000, "the Router", facilitator !== undefined);
+  } catch {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
-    void error;
-    await facilitator?.stop();
-    note("could not start the Router");
-    process.exit(1);
+    return startupFailed("could not start the Router");
   }
   const listening = router.stdout().trim();
   note(`router: ${listening}`);
 
   const evidenceFile = path.join(work, "router-listening.log");
-  await writeFile(evidenceFile, listening, "utf8");
+  try {
+    await writeFile(evidenceFile, listening, "utf8");
+  } catch {
+    return startupFailed("could not write the Router evidence file");
+  }
 
   process.env["ROUTER_MCP_BASE_URL"] = router.baseUrl;
   process.env["ROUTER_MCP_PRINCIPAL_ID"] = "judge";
@@ -557,7 +607,7 @@ export async function startHost(
    * 入口の資源上限（本文 64 KiB・受信 10 秒・同時接続数）は `createMcpIngress` が持つ。
    * 例外の文字列は外にもログにも出さない（固定文のみ）。
    */
-  const http = createMcpIngress({
+  const ingress = createMcpIngress({
     note,
     handle: async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
       // ステートレス。セッションを跨いで状態を持たない。
@@ -575,36 +625,21 @@ export async function startHost(
     },
   });
 
-  let stopping = false;
-  const stop = (): void => {
-    if (stopping) return;
-    stopping = true;
-    http.close();
-    void router.stop();
-    void facilitator?.stop();
-  };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-  /**
-   * facilitator があるとき: どちらかの子が落ちたら、もう片方を止めて入口も終わる（hosted 設計 §4。`--restart unless-stopped` がコンテナごと戻す）。
-   * 片方だけが動き続ける（facilitator の無い Router・Router の無い facilitator）状態を残さない。
-   */
-  if (facilitator !== undefined) {
-    const running = facilitator;
-    const down = (which: string): void => {
-      if (stopping) return;
-      stopping = true;
-      note(`${which} exited: stopping the entry`);
-      http.close();
-      void Promise.allSettled([router.stop(), running.stop()]).then(() => process.exit(1));
-    };
-    void running.exited.then(() => down("the EVM facilitator"));
-    void router.exited.then(() => down("the Router"));
+  http = ingress;
+  // 起動の後の 'error'（bind の後に起きるもの）も未処理にしない: 片付けて終わる。
+  ingress.on("error", () => {
+    if (ready) void shutdown(1, "the MCP ingress failed");
+  });
+  let bound: { address: string; port: number };
+  try {
+    bound = await listenMcp(ingress, options.bind, options.port);
+  } catch {
+    return startupFailed("could not bind the MCP ingress");
   }
-
-  const bound = await listenMcp(http, options.bind, options.port);
+  if (shuttingDown) return shutdown(0);
+  ready = true;
   note(`subetha-router remote MCP on ${bound.address}:${bound.port}/mcp (inbound payer: the caller's own key)`);
-  return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, ...(facilitator === undefined ? {} : { facilitatorPort: facilitator.port }), stop };
+  return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, ...(facilitator === undefined ? {} : { facilitatorPort: facilitator.port }), stop: () => void shutdown(0) };
 }
 
 /** 公開の入口: 多レールは定数 `RAILS_ACTIVATION`（G-4 で両方 true）、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */

@@ -97,7 +97,14 @@ export async function startListening(
   args: readonly string[],
   env: Readonly<Record<string, string>> = {},
   /** `listening` の行を待つ上限（既定 20 秒。本番の入口は起動時の外部検査を含むので長く渡す）。 */
-  options: { readonly listenTimeoutMs?: number } = {},
+  options: {
+    readonly listenTimeoutMs?: number;
+    /**
+     * 起動待ちの取り消し（入口が signal・もう片方の子の終了で止まるとき）。listening の前に abort されたら、子を SIGTERM で止め（5 秒で SIGKILL）、
+     * 終了を待ってから reject する。listening の後の abort は何もしない（呼び出し側が `stop` する）。
+     */
+    readonly signal?: AbortSignal;
+  } = {},
 ): Promise<Listening> {
   const listenTimeoutMs = options.listenTimeoutMs ?? 20_000;
   const child = spawnApp(script, args, env);
@@ -112,11 +119,22 @@ export async function startListening(
   const closing = once(child, "close").then(() => {
     closed = true;
   });
+  let settleListening!: () => void;
+  const listeningDone = new Promise<void>((resolve) => (settleListening = resolve));
 
+  let aborted = false;
   const listening = new Promise<number>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`timeout waiting for listen: ${script}\n${stdout}\n${stderr}`));
     }, listenTimeoutMs);
+    const onAbort = (): void => {
+      aborted = true;
+      clearTimeout(timer);
+      reject(new Error(`aborted before listening: ${script}`));
+    };
+    if (options.signal?.aborted === true) onAbort();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    void listeningDone.then(() => options.signal?.removeEventListener("abort", onAbort));
     const check = (): void => {
       for (const line of stdout.split("\n")) {
         if (line === "") {
@@ -147,12 +165,21 @@ export async function startListening(
   try {
     port = await listening;
   } catch (error) {
-    // 起動できなかった子を残さない（タイムアウト時も含め、所有している子だけを落とす）。
+    // 起動できなかった子を残さない（タイムアウト時も含め、所有している子だけを落とす）。取り消しは SIGTERM（5 秒で SIGKILL）、それ以外は SIGKILL。
     if (!closed) {
-      child.kill("SIGKILL");
-      await closing;
+      if (aborted) {
+        child.kill("SIGTERM");
+        const guard = setTimeout(() => child.kill("SIGKILL"), 5_000);
+        await closing;
+        clearTimeout(guard);
+      } else {
+        child.kill("SIGKILL");
+        await closing;
+      }
     }
     throw error;
+  } finally {
+    settleListening();
   }
 
   return {

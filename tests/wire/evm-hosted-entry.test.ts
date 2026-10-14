@@ -4,8 +4,11 @@
  * （`tests/fixtures/evm-facilitator-fake.ts`・`tests/fixtures/router-env-child.ts`。env と pid を答える）か、本物の `tools/evm-facilitator.ts`
  * （RPC は閉じた loopback の port: listen の前に固定文で止まる）。鍵は毎回の乱数で、署名・送出はしない。外へは接続しない。
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -41,13 +44,21 @@ afterAll(() => {
   for (const name of readdirSync(runtimeRoot).filter((entry) => entry.startsWith("remote-") && !createdBefore.has(entry))) {
     let ours = false;
     try {
-      ours = readFileSync(path.join(runtimeRoot, name, "router.config.json"), "utf8").includes("h4-wire-");
+      ours = readFileSync(path.join(runtimeRoot, name, "router.config.json"), "utf8").includes("h4-wire-") || (statSync(path.join(runtimeRoot, name)).mode & 0o777) === 0o500;
     } catch {
       ours = false;
     }
     if (ours) configDirs.add(path.join(runtimeRoot, name));
   }
-  for (const dir of configDirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of configDirs) {
+    // 証拠の書き込みの失敗の試験は作業領域を 0500 にする（消す前に戻す）。
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // 無ければよい。
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function workDir(prefix: string): string {
@@ -261,5 +272,115 @@ describe("本物の facilitator の CLI（tools/evm-facilitator.ts）を計画�
     const plan = hostPlanOf({ ...acceptanceOptionsOf(f.env, ["--rails", "rh-in"]), evmFacilitatorPortForTest: f.facilitatorPort }, f.env);
     const { EVM_FACILITATOR_GAS_CAP_46630: _cap, ...noCap } = plan.facilitator!.env;
     expect((await runToExit(plan.facilitator!.script, [], noCap)).stderr.trim()).toBe("evm-facilitator: EVM_FACILITATOR_GAS_CAP_46630 must be a positive wei amount");
+  }, 90_000);
+});
+
+/**
+ * 起動の各段の片付け（H-4 のレビュー、Codex REJECT #1）: signal・子の終了・起動の後の失敗のどれでも、入口は起動待ちと起動済みの子の **終了を待ってから** 終わる。
+ * 各試験は、入口の終了の後に子が 1 つも残っていないこと（pid）と、facilitator の lock が解けていること（別の process が取れる）を確かめる。
+ */
+describe("起動の各段の片付け: signal・子の終了・起動の後の失敗で、子は残らず lock は解ける", () => {
+  const repoRoot = path.resolve(import.meta.dirname, "../..");
+
+  /** 入口を spawn する（listening を待たない。途中で signal を送るため）。 */
+  function spawnHost(f: Fixture, rails: string) {
+    const env: Record<string, string> = {};
+    for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]) if (process.env[key] !== undefined) env[key] = process.env[key]!;
+    const child = spawn(process.execPath, ["--import", "tsx", path.join(repoRoot, HOST), "--rails", rails], { cwd: repoRoot, env: { ...env, ...f.env }, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    const done = once(child, "close").then(([code, signal]) => ({ code: code as number | null, signal: signal as string | null, stdout, stderr }));
+    closers.push(async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await done;
+    });
+    return { pid: child.pid!, done };
+  }
+
+  const pidOf = (file: string): number => Number(readFileSync(file, "utf8"));
+  const lockPathOf = (f: Fixture): string => path.join(f.dir, "public", "evm-facilitator", "facilitator.lock");
+  async function lockIsFree(f: Fixture): Promise<boolean> {
+    const result = await runToExit("tests/fixtures/facilitator-lock-child.ts", ["try", lockPathOf(f)], {});
+    return result.stdout.trim() === "ACQUIRED";
+  }
+  /** 入口の終了と、子が残っていないこと・lock が解けていることを確かめる。 */
+  async function expectAllGone(f: Fixture, done: Promise<{ code: number | null; stderr: string }>, pids: number[], code: number): Promise<string> {
+    const result = await Promise.race([done, delay(30_000).then(() => ({ code: -999, stderr: "entry did not exit" }))]);
+    expect(result.code, result.stderr).toBe(code);
+    for (const pid of pids) expect(alive(pid), `pid ${pid}`).toBe(false);
+    if (existsSync(lockPathOf(f))) expect(await lockIsFree(f)).toBe(true);
+    return result.stderr;
+  }
+
+  test("facilitator の起動待ちの間に SIGTERM → facilitator を止めて終わる（Router の子は起動しない）", async () => {
+    const f = await fixture("h4-sig-fac-", { SUBETHA_TEST_FAKE_LISTEN_DELAY_MS: "60000" });
+    const { pid, done } = spawnHost(f, "rh-in");
+    expect(await waitFor(() => existsSync(f.facilitatorPidFile), 20_000)).toBe(true);
+    expect(await lockIsFree(f)).toBe(false);
+    process.kill(pid, "SIGTERM");
+    await expectAllGone(f, done, [pid, pidOf(f.facilitatorPidFile)], 0);
+    expect(existsSync(f.routerMark)).toBe(false);
+  }, 90_000);
+
+  test("/supported の待ちの間に SIGTERM → 読み取りを取り消し、facilitator を止めて終わる", async () => {
+    const hit = path.join(os.tmpdir(), `h4-hit-${crypto.randomUUID()}`);
+    const f = await fixture("h4-sig-sup-", { SUBETHA_TEST_FAKE_SUPPORTED_DELAY_MS: "60000", SUBETHA_TEST_SUPPORTED_HIT: hit });
+    const { pid, done } = spawnHost(f, "rh-in");
+    expect(await waitFor(() => existsSync(hit), 20_000)).toBe(true);
+    rmSync(hit, { force: true });
+    process.kill(pid, "SIGTERM");
+    await expectAllGone(f, done, [pid, pidOf(f.facilitatorPidFile)], 0);
+    expect(existsSync(f.routerMark)).toBe(false);
+  }, 90_000);
+
+  test("Router の起動待ちの間に SIGTERM → Router の子と facilitator の両方を止めて終わる", async () => {
+    const f = await fixture("h4-sig-router-", { SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS: "60000" });
+    const { pid, done } = spawnHost(f, "rh-in");
+    expect(await waitFor(() => existsSync(f.routerMark), 20_000)).toBe(true);
+    process.kill(pid, "SIGTERM");
+    await expectAllGone(f, done, [pid, pidOf(f.facilitatorPidFile), pidOf(f.routerMark)], 0);
+  }, 90_000);
+
+  test("EVM が無効でも同じ: Router の起動待ちの間に SIGTERM → Router の子を止めて終わる", async () => {
+    const f = await fixture("h4-sig-off-", { SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS: "60000", SUBETHA_ARC_RECEIVER_KEY: generatePrivateKey() });
+    const { pid, done } = spawnHost(f, "arc-in");
+    expect(await waitFor(() => existsSync(f.routerMark), 20_000)).toBe(true);
+    process.kill(pid, "SIGTERM");
+    await expectAllGone(f, done, [pid, pidOf(f.routerMark)], 0);
+    expect(existsSync(f.facilitatorPidFile)).toBe(false);
+  }, 90_000);
+
+  test("Router の起動待ちの間に facilitator が落ちる → その時点で Router の起動を取り消し、入口は exit 1", async () => {
+    const f = await fixture("h4-fac-dies-", { SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS: "60000" });
+    const { pid, done } = spawnHost(f, "rh-in");
+    expect(await waitFor(() => existsSync(f.routerMark), 20_000)).toBe(true);
+    process.kill(pidOf(f.facilitatorPidFile), "SIGKILL");
+    const stderr = await expectAllGone(f, done, [pid, pidOf(f.facilitatorPidFile), pidOf(f.routerMark)], 1);
+    expect(stderr).toContain("the EVM facilitator exited: stopping the entry");
+    expect(stderr).not.toContain("router: ");
+  }, 90_000);
+
+  test("起動の後のファイルの失敗（証拠の書き込み）→ 両方の子を止めて exit 1（固定文）", async () => {
+    const f = await fixture("h4-evidence-", { SUBETHA_TEST_ROUTER_LOCK_WORKDIR: "1" });
+    const { pid, done } = spawnHost(f, "rh-in");
+    const stderr = await expectAllGone(f, done, [pid], 1);
+    expect(stderr).toContain("could not write the Router evidence file");
+    for (const child of [pidOf(f.facilitatorPidFile), pidOf(f.routerMark)]) expect(alive(child)).toBe(false);
+    expect(stderr).not.toContain(f.token);
+  }, 90_000);
+
+  test("MCP の bind の失敗（port の使用中）→ 両方の子を止めて exit 1（固定文。未処理の例外にならない）", async () => {
+    const busy = createServer();
+    await new Promise<void>((resolve) => busy.listen(0, "127.0.0.1", resolve));
+    closers.push(() => new Promise<void>((resolve) => busy.close(() => resolve())));
+    const port = (busy.address() as { port: number }).port;
+    const f = await fixture("h4-bind-", { SUBETHA_ACCEPTANCE_PORT: String(port) });
+    const { pid, done } = spawnHost(f, "rh-in");
+    const stderr = await expectAllGone(f, done, [pid], 1);
+    expect(stderr).toContain("could not bind the MCP ingress");
+    expect(stderr).not.toMatch(/EADDRINUSE|at listenMcp|Error:/);
+    for (const child of [pidOf(f.facilitatorPidFile), pidOf(f.routerMark)]) expect(alive(child)).toBe(false);
   }, 90_000);
 });

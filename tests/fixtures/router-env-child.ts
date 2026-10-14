@@ -2,10 +2,13 @@
  * 試験用の偽の Router の子（hosted 設計 §4、タスク H-4）。**製品コードではない。** 入口（`startHost`）が本物の子と同じ env で起動する。
  * - 起動時に env `SUBETHA_EVM_FACILITATOR_URL` があれば `<url>/supported` を 1 回読み、答えたかを覚える（facilitator が先に起動していることの確認）
  * - `SUBETHA_TEST_ROUTER_MARK`: 起動したらこのファイルに pid を書く（Router の子が起動しなかったことを試験が確かめる）
+ * - `SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS`: listen をこの時間だけ遅らせる（入口の「Router の起動待ち」の段）
+ * - `SUBETHA_TEST_ROUTER_LOCK_WORKDIR=1`: listen の前に設定のディレクトリ（入口の作業領域）を 0500 にする（入口の証拠の書き込みを失敗させる）
  * - 127.0.0.1 の使い捨ての port に listen し、listening の行を書く。`GET /env`: 受け取った env・pid・ppid・設定ファイルの mode
  */
-import { statSync, writeFileSync } from "node:fs";
+import { chmodSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import path from "node:path";
 
 const env = process.env;
 const mark = env["SUBETHA_TEST_ROUTER_MARK"];
@@ -33,7 +36,10 @@ const server = createServer((req, res) => {
   res.writeHead(404);
   res.end();
 });
-server.listen(0, "127.0.0.1", () => {
-  const address = server.address();
-  process.stdout.write(`${JSON.stringify({ event: "listening", port: typeof address === "object" && address !== null ? address.port : 0 })}\n`);
-});
+if (env["SUBETHA_TEST_ROUTER_LOCK_WORKDIR"] === "1" && configPath !== undefined) chmodSync(path.dirname(configPath), 0o500);
+setTimeout(() => {
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    process.stdout.write(`${JSON.stringify({ event: "listening", port: typeof address === "object" && address !== null ? address.port : 0 })}\n`);
+  });
+}, Number(env["SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS"] ?? "0"));

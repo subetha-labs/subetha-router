@@ -4,7 +4,7 @@
  * - facilitator の port（`SUBETHA_TEST_FACILITATOR_PORT`。固定の 8611 は並列の試験で衝突する）
  * - Router の子の script を偽の子 `tests/fixtures/router-env-child.ts` に（本物の子は起動時に外の RPC を読むので接続の無い試験では listen しない）
  * - facilitator の子の script を偽の `tests/fixtures/evm-facilitator-fake.ts` に（`SUBETHA_TEST_REAL_FACILITATOR=1` なら差し替えない: 本物の CLI）
- * - 子に足す試験の env（`SUBETHA_TEST_*`。計画の env を上書きしない）
+ * - 子に足す試験の env（`SUBETHA_TEST_*`: pid・印のファイル、起動の遅れ、作業領域の書き込みの失敗。計画の env を上書きしない）
  * 起動したら stdout に 1 行（listening・各 port・自分の pid）を書く。
  */
 import { acceptanceOptionsOf } from "../../tools/rails-acceptance-run.js";
@@ -15,10 +15,13 @@ const test = (name: string): string => env[name] ?? "";
 const options = { ...acceptanceOptionsOf(env, process.argv.slice(2)), evmFacilitatorPortForTest: Number(test("SUBETHA_TEST_FACILITATOR_PORT")) };
 const host = await startHost(options, {
   childScriptForTest: "tests/fixtures/router-env-child.ts",
-  childEnvExtraForTest: { SUBETHA_TEST_ROUTER_MARK: test("SUBETHA_TEST_ROUTER_MARK") },
+  childEnvExtraForTest: { SUBETHA_TEST_ROUTER_MARK: test("SUBETHA_TEST_ROUTER_MARK"), SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS: test("SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS"), SUBETHA_TEST_ROUTER_LOCK_WORKDIR: test("SUBETHA_TEST_ROUTER_LOCK_WORKDIR") },
   ...(test("SUBETHA_TEST_REAL_FACILITATOR") === "1" ? {} : { facilitatorScriptForTest: "tests/fixtures/evm-facilitator-fake.ts" }),
   facilitatorEnvExtraForTest: {
     SUBETHA_TEST_PID_FILE: test("SUBETHA_TEST_PID_FILE"),
+    SUBETHA_TEST_FAKE_LISTEN_DELAY_MS: test("SUBETHA_TEST_FAKE_LISTEN_DELAY_MS"),
+    SUBETHA_TEST_FAKE_SUPPORTED_DELAY_MS: test("SUBETHA_TEST_FAKE_SUPPORTED_DELAY_MS"),
+    SUBETHA_TEST_SUPPORTED_HIT: test("SUBETHA_TEST_SUPPORTED_HIT"),
     ...(env["SUBETHA_TEST_FAKE_SUPPORTED"] === undefined ? {} : { SUBETHA_TEST_FAKE_SUPPORTED: test("SUBETHA_TEST_FAKE_SUPPORTED") }),
   },
 });
