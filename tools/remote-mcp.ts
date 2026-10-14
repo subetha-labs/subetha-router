@@ -26,7 +26,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpIngress } from "../src/mcp/ingress.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
-import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, evmProviderUrlEnvOf, evmTestnetsConfigOf, type EvmTestnetChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
+import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
 function note(message: string): void {
@@ -34,9 +34,9 @@ function note(message: string): void {
 }
 
 export class HostPlanError extends Error {
-  readonly code: "env" | "rails" | "config";
-  constructor(code: "env" | "rails" | "config") {
-    super(code === "env" ? "a required env is missing" : code === "rails" ? "rails receivers could not be derived" : "router config could not be generated");
+  readonly code: "env" | "rails" | "config" | "evm_facilitator";
+  constructor(code: "env" | "rails" | "config" | "evm_facilitator") {
+    super(code === "env" ? "a required env is missing" : code === "rails" ? "rails receivers could not be derived" : code === "evm_facilitator" ? "the EVM facilitator env is incomplete" : "router config could not be generated");
     this.name = "HostPlanError";
     this.code = code;
   }
@@ -76,12 +76,42 @@ export interface HostOptions {
      */
     readonly matrix?: true;
   };
+  /**
+   * 自前の EVM facilitator の port（hosted 設計 §4。既定 `EVM_FACILITATOR_PORT` = 8611。コンテナの publish・Caddy の宛先と同じ）。
+   * **試験だけ**が渡す（固定の 8611 は並列の試験で衝突する）。本番の入口（`start`・`tools/rails-acceptance-run.ts`）は渡さない（静的検査で固定する）。
+   */
+  readonly evmFacilitatorPortForTest?: number;
 }
 
 /** 公開の子 process（既定の plan）。 */
 export const PUBLIC_ROUTER_PROCESS = "tools/remote-router-process.ts";
 /** EVM testnet の専用の子 process。 */
 export const EVM_TESTNETS_ROUTER_PROCESS = "tools/evm-testnets-router-process.ts";
+
+/** 自前の EVM facilitator の子 process（hosted 設計 §0・§4）。 */
+export const EVM_FACILITATOR_PROCESS = "tools/evm-facilitator.ts";
+/** facilitator の port（コンテナの中。`deploy/swap-image.sh` が host の `127.0.0.1:8611` に publish し、Caddy がそこへ流す）。 */
+export const EVM_FACILITATOR_PORT = 8611;
+/** `tools/evm-facilitator.ts` の `TOKEN_PATTERN` と同じ形（Router の子の `evmFacilitatorOriginOf` も同じ形だけを受ける）。 */
+const EVM_FACILITATOR_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,256}$/;
+/** 本番の env（root 所有 600 の env ファイル）の名前。facilitator の子にだけ、`EVM_FACILITATOR_*` の名前に写して渡す。 */
+export const EVM_FACILITATOR_HOST_ENV = Object.freeze({
+  key: "SUBETHA_EVM_FACILITATOR_KEY",
+  token: "SUBETHA_EVM_FACILITATOR_TOKEN",
+  log: "SUBETHA_EVM_FACILITATOR_LOG",
+  gasCapPrefix: "SUBETHA_EVM_FACILITATOR_GAS_CAP_",
+  rpcPrefix: "SUBETHA_EVM_FACILITATOR_RPC_",
+});
+
+/** facilitator の子の計画（純粋）。`url` は Router の子に渡す `http://127.0.0.1:<port>/<token>`（token を含むので出力しない）。 */
+export interface EvmFacilitatorPlan {
+  readonly script: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly port: number;
+  readonly url: string;
+  /** 有効な chain（受信か送信）の network。`/supported` にすべて載っていなければ Router の子を起動しない。 */
+  readonly networks: readonly string[];
+}
 
 /** 起動の計画（純粋。process に触らない）: Router に渡す設定と、子プロセスの env（`ROUTER_CONFIG_PATH` は起動側が足す）。 */
 export interface HostPlan {
@@ -90,6 +120,8 @@ export interface HostPlan {
   readonly journalPath: string;
   /** 起動する子 process の script（repo の相対パス）。既定は公開の子 `tools/remote-router-process.ts`。 */
   readonly childScript: string;
+  /** EVM testnet 3 つのどれか（受信か送信）が有効なときだけ: Router の子より先に起動する facilitator の子（hosted 設計 §4）。 */
+  readonly facilitator?: EvmFacilitatorPlan;
 }
 
 export interface RunningHost {
@@ -98,12 +130,75 @@ export interface RunningHost {
   readonly mcpAddress: string;
   readonly routerPort: number;
   readonly journalPath: string;
+  /** facilitator の子の port（起動したときだけ）。 */
+  readonly facilitatorPort?: number;
   stop(): void;
 }
 
 /** 公開の入口の journal の既定（受け入れ用の起動はこれと別のパスでなければならない）。 */
 export function publicJournalPathOf(env: Readonly<Record<string, string | undefined>>): string {
   return env["SUBETHA_JOURNAL_PATH"] ?? path.join(path.resolve("runtime"), "journal.ndjson");
+}
+
+/**
+ * 自前の EVM facilitator の journal（hosted 設計 §2.3・§4）: **公開の journal のディレクトリ**の下の `evm-facilitator/journal.ndjson`（lock はその隣の
+ * `facilitator.lock`）。公開の入口と受け入れ用の起動で **同じ 1 つ**（受け入れの Router の journal は別のパスのまま。facilitator は gas 鍵の状態なので分けない）。
+ * コンテナでは `/app/runtime/evm-facilitator/journal.ndjson`（ボリューム）。
+ */
+export function evmFacilitatorJournalPathOf(env: Readonly<Record<string, string | undefined>>): string {
+  return path.join(path.dirname(publicJournalPathOf(env)), "evm-facilitator", "journal.ndjson");
+}
+
+/** 有効な（受信か送信の）EVM testnet。 */
+function evmUsedChainsOf(activation: RailsActivation): readonly HostedEvmChain[] {
+  const evm = evmOf(activation);
+  return HOSTED_EVM_CHAINS.filter((chain) => evm[chain].inbound || evm[chain].outbound);
+}
+
+/**
+ * facilitator の子の計画（hosted 設計 §4）。子の env は allowlist: 本番の env の `SUBETHA_EVM_FACILITATOR_*` を `EVM_FACILITATOR_*` に写したものと、
+ * 計画が決める bind・port・network・payTo の allowlist（Router の受取先と新 3 の Provider の受取先）・journal だけ。
+ * 必須の env（gas 鍵・token・有効な chain ごとの gas の上限・Provider の受取先）が無い・token の形が違えば `HostPlanError("evm_facilitator")`（値は出さない）。
+ * bind は入口と同じ（公開の入口は `0.0.0.0` = コンテナの中で publish に届く。受け入れの起動はその bind: コンテナの外の既定 `127.0.0.1` では facilitator も loopback だけ）。
+ */
+function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string, string | undefined>>, receiver: string, chains: readonly HostedEvmChain[]): EvmFacilitatorPlan {
+  const present = (name: string): string => {
+    const value = env[name];
+    if (value === undefined || value === "") throw new HostPlanError("evm_facilitator");
+    return value;
+  };
+  const key = present(EVM_FACILITATOR_HOST_ENV.key);
+  const token = present(EVM_FACILITATOR_HOST_ENV.token);
+  if (!EVM_FACILITATOR_TOKEN_PATTERN.test(token)) throw new HostPlanError("evm_facilitator");
+  const providerPayTo = present(EVM_PROVIDER_PAYTO_ENV);
+  const port = options.evmFacilitatorPortForTest ?? EVM_FACILITATOR_PORT;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new HostPlanError("evm_facilitator");
+  const networks = chains.map((chain) => EVM_TESTNETS[chain].network);
+  const perChain: Record<string, string> = {};
+  for (const network of networks) {
+    const chainId = network.slice("eip155:".length);
+    perChain[`EVM_FACILITATOR_GAS_CAP_${chainId}`] = present(`${EVM_FACILITATOR_HOST_ENV.gasCapPrefix}${chainId}`);
+    const rpc = env[`${EVM_FACILITATOR_HOST_ENV.rpcPrefix}${chainId}`];
+    if (rpc !== undefined && rpc !== "") perChain[`EVM_FACILITATOR_RPC_${chainId}`] = rpc;
+  }
+  const log = env[EVM_FACILITATOR_HOST_ENV.log];
+  return {
+    script: EVM_FACILITATOR_PROCESS,
+    port,
+    url: `http://127.0.0.1:${port}/${token}`,
+    networks,
+    env: {
+      EVM_FACILITATOR_KEY: key,
+      EVM_FACILITATOR_TOKEN: token,
+      EVM_FACILITATOR_BIND: options.bind,
+      EVM_FACILITATOR_PORT: String(port),
+      EVM_FACILITATOR_NETWORKS: networks.join(","),
+      EVM_FACILITATOR_PAYTO_ALLOWLIST: [receiver, providerPayTo].join(","),
+      ...perChain,
+      EVM_FACILITATOR_JOURNAL: evmFacilitatorJournalPathOf(env),
+      ...(log === undefined || log === "" ? {} : { EVM_FACILITATOR_LOG: log }),
+    },
+  };
 }
 
 /**
@@ -175,9 +270,16 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
   const x402OutboundKey = env["SUBETHA_OUTBOUND_X402_KEY"] ?? outboundKey;
   const mppInboundEnabled = mppInboundSecret !== "";
   const journalPath = options.journalPath;
+  /**
+   * EVM testnet 3 つ（hosted 設計 §4）: どれかが有効なら facilitator の子を計画し、その URL（`http://127.0.0.1:<port>/<token>`）を設定生成と Router の子に渡す。
+   * 親の env の `SUBETHA_EVM_FACILITATOR_URL` は使わない（URL は計画が token と port から作る）。全部無効なら env も計画も今と同じ。
+   */
+  const evmChains = evmUsedChainsOf(options.activation);
+  const facilitator = evmChains.length === 0 ? undefined : evmFacilitatorPlanOf(options, env, receiver, evmChains);
+  const configEnv = facilitator === undefined ? env : { ...env, [EVM_FACILITATOR_URL_ENV]: facilitator.url };
   let config: Record<string, unknown>;
   try {
-    config = routerConfigOf(env, receiver, mppInboundEnabled, rails);
+    config = routerConfigOf(configEnv, receiver, mppInboundEnabled, rails);
   } catch {
     throw new HostPlanError("config");
   }
@@ -218,8 +320,10 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
         : {}),
       // 多レール: 有効化の値と、有効なレールの受取鍵・RPC だけ（`tools/rails-entry.ts`）。
       ...railsChildEnvOf(options.activation, env),
+      // 自前の facilitator の URL と token だけ（gas 鍵は渡さない。hosted 設計 §4）。子はこの origin だけで `localCounterparties` を作る。
+      ...(facilitator === undefined ? {} : { [EVM_FACILITATOR_URL_ENV]: facilitator.url }),
   };
-  return { config, childEnv, journalPath, childScript: PUBLIC_ROUTER_PROCESS };
+  return { config, childEnv, journalPath, childScript: PUBLIC_ROUTER_PROCESS, ...(facilitator === undefined ? {} : { facilitator }) };
 }
 
 /**
@@ -310,10 +414,49 @@ export function hasX402Outbound(config: Record<string, unknown>): boolean {
   return [...routes, ...profiles].some((entry) => (entry.rail ?? "x402") === "x402");
 }
 
+/** `/supported` の応答の上限（バイト）と期限。 */
+const SUPPORTED_MAX_BYTES = 64 * 1024;
+const SUPPORTED_TIMEOUT_MS = 10_000;
+/** facilitator の listening の行を待つ上限（起動時に chain ごとの RPC で chain id を確かめ、journal を照合する）。 */
+const FACILITATOR_LISTEN_TIMEOUT_MS = 60_000;
+
+/**
+ * facilitator の `/<token>/supported` を loopback で 1 回読み、`networks` が全部（x402 v2・`exact`）載っているか（hosted 設計 §4）。
+ * 失敗（接続・期限・redirect・200 以外・大きすぎる・JSON でない・欠け）はすべて `false`（理由・値は返さない）。
+ */
+export async function facilitatorSupportsAll(url: string, networks: readonly string[], fetchImpl: typeof fetch = fetch, cancel?: AbortSignal): Promise<boolean> {
+  try {
+    // 期限と、入口の取り消し（signal・子の終了）のどちらでも止まる。
+    const timeout = AbortSignal.timeout(SUPPORTED_TIMEOUT_MS);
+    const response = await fetchImpl(`${url}/supported`, { method: "GET", redirect: "error", signal: cancel === undefined ? timeout : AbortSignal.any([timeout, cancel]) });
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {});
+      return false;
+    }
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > SUPPORTED_MAX_BYTES) return false;
+    const body = JSON.parse(text) as { kinds?: unknown };
+    if (!Array.isArray(body.kinds)) return false;
+    const listed = new Set(
+      body.kinds
+        .filter((kind): kind is { x402Version: unknown; scheme: unknown; network: unknown } => typeof kind === "object" && kind !== null)
+        .filter((kind) => kind.x402Version === 2 && kind.scheme === "exact" && typeof kind.network === "string")
+        .map((kind) => kind.network as string),
+    );
+    return networks.length > 0 && networks.every((network) => listed.has(network));
+  } catch {
+    return false;
+  }
+}
+
 /** MCP の入口を bind する。実際のアドレスと port を返す（試験で bind を確かめる）。 */
 export function listenMcp(http: Server, bind: string, port: number): Promise<{ address: string; port: number }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // bind の失敗（port の使用中など）は reject（未処理の 'error' で process を落とさない。入口は片付けてから終わる）。
+    const onError = (error: Error): void => reject(error);
+    http.once("error", onError);
     http.listen(port, bind, () => {
+      http.off("error", onError);
       const address = http.address();
       resolve(typeof address === "object" && address !== null ? { address: address.address, port: address.port } : { address: bind, port });
     });
@@ -325,16 +468,70 @@ export function listenMcp(http: Server, bind: string, port: number): Promise<{ a
  * 足す env は計画の env を上書きしない）。
  * 本番の入口（`start`・`tools/rails-acceptance-run.ts`・`tools/evm-testnets-run.ts`）は渡さない（静的検査で固定する）。
  */
-export async function startHost(options: HostOptions, overrides: { readonly childScriptForTest?: string; readonly childEnvExtraForTest?: Readonly<Record<string, string>> } = {}): Promise<RunningHost> {
+export async function startHost(
+  options: HostOptions,
+  overrides: {
+    readonly childScriptForTest?: string;
+    readonly childEnvExtraForTest?: Readonly<Record<string, string>>;
+    /** facilitator の子の script と、足す env（計画の env を上書きしない）。試験専用（上と同じ規則）。 */
+    readonly facilitatorScriptForTest?: string;
+    readonly facilitatorEnvExtraForTest?: Readonly<Record<string, string>>;
+  } = {},
+): Promise<RunningHost> {
   let plan: HostPlan;
   try {
     plan = hostPlanOf(options, process.env);
   } catch (error) {
     // 固定文のみ（理由の code で選ぶ。値は出さない）。
     const code = error instanceof HostPlanError ? error.code : undefined;
-    note(code === "env" ? "SUBETHA_OUTBOUND_PRIVATE_KEY and SUBETHA_ROUTER_RECEIVER are required." : options.evmTestnets !== undefined ? "evm testnets config could not be generated (check SUBETHA_EVM_FACILITATOR_URL / SUBETHA_EVM_PROVIDER_URL_<CHAIN> / SUBETHA_EVM_PROVIDER_PAYTO and the loopback bind)" : code === "rails" ? "rails receivers could not be derived (check SUBETHA_ARC_RECEIVER_KEY / SUBETHA_SOLANA_RECEIVER)" : "router config could not be generated (check the rails receivers)");
+    note(code === "env" ? "SUBETHA_OUTBOUND_PRIVATE_KEY and SUBETHA_ROUTER_RECEIVER are required." : code === "evm_facilitator" ? "an EVM testnet rail is activated: SUBETHA_EVM_FACILITATOR_KEY, SUBETHA_EVM_FACILITATOR_TOKEN (32+ characters of [A-Za-z0-9_-]), SUBETHA_EVM_FACILITATOR_GAS_CAP_<chainId> for each active chain and SUBETHA_EVM_PROVIDER_PAYTO are required" : options.evmTestnets !== undefined ? "evm testnets config could not be generated (check SUBETHA_EVM_FACILITATOR_URL / SUBETHA_EVM_PROVIDER_URL_<CHAIN> / SUBETHA_EVM_PROVIDER_PAYTO and the loopback bind)" : code === "rails" ? "rails receivers could not be derived (check SUBETHA_ARC_RECEIVER_KEY / SUBETHA_SOLANA_RECEIVER)" : "router config could not be generated (check the rails receivers)");
     process.exit(2);
   }
+
+  /**
+   * 子の所有と片付け（H-4 のレビュー）: signal の handler と取り消し（`lifecycle`）は **子を起動する前に** 入れる。
+   * - 起動待ちの子（listening の前）は `lifecycle` の abort で止まる（`startListening` が SIGTERM → 5 秒で SIGKILL、終了を待つ）
+   * - 起動した子は `owned` に入れ、そのときから終了を見る（facilitator が Router の起動待ちの間に落ちても、その時点で全体を止める）
+   * - 起動の後の失敗（`/supported`・Router の起動・証拠の書き込み・MCP の bind）と signal と子の終了は、すべて `shutdown` を通る:
+   *   取り消し → 入口を閉じる → 起動待ちと起動済みの子の **終了を待ってから** `process.exit`。facilitator が入口より長く lock を持つことはない
+   */
+  const lifecycle = new AbortController();
+  const owned: Listening[] = [];
+  const pending = new Set<Promise<unknown>>();
+  let http: Server | undefined;
+  let shuttingDown = false;
+  let ready = false;
+  const shutdown = async (code: number, message?: string): Promise<never> => {
+    if (!shuttingDown) {
+      shuttingDown = true;
+      if (message !== undefined) note(message);
+      lifecycle.abort();
+      http?.close();
+      await Promise.allSettled([...pending]);
+      await Promise.allSettled(owned.map((child) => child.stop()));
+      process.exit(code);
+    }
+    // 2 回目以降（片付けの途中の別の失敗）は、最初の片付けが終わらせるまで待つ。
+    return new Promise<never>(() => {});
+  };
+  const onSignal = (): void => void shutdown(0);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  /** 子を起動する（取り消し可能）。起動したらすぐ `owned` に入れて終了を見る（`watch` が true の子）。 */
+  const spawnChild = async (script: string, env: Readonly<Record<string, string>>, listenTimeoutMs: number, label: string, watch: boolean): Promise<Listening> => {
+    const starting = startListening(script, [], env, { listenTimeoutMs, signal: lifecycle.signal });
+    pending.add(starting);
+    try {
+      const child = await starting;
+      owned.push(child);
+      if (watch) void child.exited.then(() => void shutdown(1, `${label} exited: stopping the entry`));
+      return child;
+    } finally {
+      pending.delete(starting);
+    }
+  };
+  /** 起動の段の失敗: 取り消し中（signal・子の終了）なら片付けに任せる。そうでなければ固定文で片付けて終わる。 */
+  const startupFailed = (message: string): Promise<never> => (shuttingDown ? shutdown(1) : shutdown(1, message));
 
   /**
    * 使い捨ての作業領域。**config と証拠ログだけ**を置く（起動ごとに新しくてよい）。
@@ -353,24 +550,48 @@ export async function startHost(options: HostOptions, overrides: { readonly chil
   const journalPath = plan.journalPath;
   await mkdir(path.dirname(journalPath), { recursive: true });
   const configPath = path.join(work, "router.config.json");
-  await writeFile(configPath, JSON.stringify(plan.config, null, 2), "utf8");
+  // 0600: 設定は facilitator の URL（token を含む）を持ち得る。作業領域（`mkdtemp`）は 0700。
+  await writeFile(configPath, JSON.stringify(plan.config, null, 2), { encoding: "utf8", mode: 0o600 });
+
+  /**
+   * 自前の EVM facilitator（hosted 設計 §4）: Router の子より **先に** 起動する。`startListening` は `node --import tsx <script>` で
+   * script 自身を唯一の子にする（tsx の CLI は script を孫で動かし、signal が `flock` を持つ process に届かない）。
+   * listening の行を待ち、`/<token>/supported` を 1 回読んで有効な network が全部あることを確かめる。だめなら片付けて終わる（固定文）。
+   * 起動した時点から終了を見る（Router の起動待ちの間に落ちれば、Router の起動を取り消して終わる）。
+   */
+  let facilitator: Listening | undefined;
+  if (plan.facilitator !== undefined) {
+    try {
+      // 固定文のみ（起動失敗の例外は子の出力を丸ごと含む）。原因（lock・gas の上限・RPC など）は facilitator を単体で起動して調べる（固定文の code を出す）。
+      facilitator = await spawnChild(overrides.facilitatorScriptForTest ?? plan.facilitator.script, { ...(overrides.facilitatorEnvExtraForTest ?? {}), ...plan.facilitator.env }, FACILITATOR_LISTEN_TIMEOUT_MS, "the EVM facilitator", true);
+    } catch {
+      return startupFailed("could not start the EVM facilitator");
+    }
+    if (facilitator.port !== plan.facilitator.port || !(await facilitatorSupportsAll(plan.facilitator.url, plan.facilitator.networks, fetch, lifecycle.signal))) {
+      return startupFailed("the EVM facilitator did not list every active network at /supported");
+    }
+    note(`evm facilitator: listening on port ${facilitator.port} (${plan.facilitator.networks.join(",")})`);
+  }
 
   let router: Listening;
   try {
     // 起動待ちは 120 秒: 子の Router は listen の前に Solana の起動時の検査（`/supported`・ATA、各 10 秒まで）、MPP 送信のプロファイルごとの Tempo の probe（各 6 秒まで、最大 3 本）、
     // journal の replay を行う。上限に達すると子は殺され、入口は固定文で止まる。
-    router = await startListening(overrides.childScriptForTest ?? plan.childScript, [], { ...(overrides.childEnvExtraForTest ?? {}), ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, { listenTimeoutMs: 120_000 });
-  } catch (error) {
+    // 終了を見るのは facilitator があるときだけ（無いときは今までと同じ: Router の子が落ちても入口は残る）。
+    router = await spawnChild(overrides.childScriptForTest ?? plan.childScript, { ...(overrides.childEnvExtraForTest ?? {}), ...plan.childEnv, ROUTER_CONFIG_PATH: configPath }, 120_000, "the Router", facilitator !== undefined);
+  } catch {
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
-    void error;
-    note("could not start the Router");
-    process.exit(1);
+    return startupFailed("could not start the Router");
   }
   const listening = router.stdout().trim();
   note(`router: ${listening}`);
 
   const evidenceFile = path.join(work, "router-listening.log");
-  await writeFile(evidenceFile, listening, "utf8");
+  try {
+    await writeFile(evidenceFile, listening, "utf8");
+  } catch {
+    return startupFailed("could not write the Router evidence file");
+  }
 
   process.env["ROUTER_MCP_BASE_URL"] = router.baseUrl;
   process.env["ROUTER_MCP_PRINCIPAL_ID"] = "judge";
@@ -386,7 +607,7 @@ export async function startHost(options: HostOptions, overrides: { readonly chil
    * 入口の資源上限（本文 64 KiB・受信 10 秒・同時接続数）は `createMcpIngress` が持つ。
    * 例外の文字列は外にもログにも出さない（固定文のみ）。
    */
-  const http = createMcpIngress({
+  const ingress = createMcpIngress({
     note,
     handle: async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
       // ステートレス。セッションを跨いで状態を持たない。
@@ -404,16 +625,21 @@ export async function startHost(options: HostOptions, overrides: { readonly chil
     },
   });
 
-  const stop = (): void => {
-    http.close();
-    void router.stop();
-  };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-
-  const bound = await listenMcp(http, options.bind, options.port);
+  http = ingress;
+  // 起動の後の 'error'（bind の後に起きるもの）も未処理にしない: 片付けて終わる。
+  ingress.on("error", () => {
+    if (ready) void shutdown(1, "the MCP ingress failed");
+  });
+  let bound: { address: string; port: number };
+  try {
+    bound = await listenMcp(ingress, options.bind, options.port);
+  } catch {
+    return startupFailed("could not bind the MCP ingress");
+  }
+  if (shuttingDown) return shutdown(0);
+  ready = true;
   note(`subetha-router remote MCP on ${bound.address}:${bound.port}/mcp (inbound payer: the caller's own key)`);
-  return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, stop };
+  return { mcpPort: bound.port, mcpAddress: bound.address, routerPort: router.port, journalPath, ...(facilitator === undefined ? {} : { facilitatorPort: facilitator.port }), stop: () => void shutdown(0) };
 }
 
 /** 公開の入口: 多レールは定数 `RAILS_ACTIVATION`（G-4 で両方 true）、0.0.0.0、`PORT`（既定 8787）、journal は固定パス。 */

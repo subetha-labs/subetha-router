@@ -47,14 +47,19 @@ const FACILITATOR_URL = `http://127.0.0.1:8611/${TOKEN}`;
 /** golden と同じ env（`tests/unit/config-golden.test.ts`）。 */
 const goldenEnv = { SUBETHA_OUTBOUND_PRIVATE_KEY: "0x" + "11".repeat(32), SUBETHA_ROUTER_RECEIVER: RECEIVER, SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-golden", SUBETHA_TEMPO_RPC_URL: "https://tempo.example/v1/TOKEN", SUBETHA_ARC_RECEIVER_KEY: ARC_KEY, SUBETHA_SOLANA_RECEIVER: SOL_OWNER, SUBETHA_OUTBOUND_SOLANA_KEY: "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2", SUBETHA_ARC_PROVIDER_PAYTO: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", SUBETHA_SOLANA_PROVIDER_PAYTO: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", SUBETHA_SOLANA_MPP_PROVIDER_PAYTO: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" };
 const golden = (name: string) => JSON.parse(readFileSync(path.join(import.meta.dirname, "../fixtures/config-golden", `${name}.json`), "utf8"));
-const planOf = (activation: RailsActivation, env: Record<string, string | undefined> = goldenEnv) => hostPlanOf({ activation, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson" }, env);
+const planOf = (activation: RailsActivation, env: Record<string, string | undefined> = goldenEnv, facilitatorPort?: number) => hostPlanOf({ activation, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson", ...(facilitatorPort === undefined ? {} : { evmFacilitatorPortForTest: facilitatorPort }) }, env);
 
 const ON = { inbound: true, outbound: true } as const;
 const OFF = { inbound: false, outbound: false } as const;
 const EVM_ALL: EvmRailsActivation = { rh: ON, arbsep: ON, hyperevm: ON };
 const withEvm = (activation: RailsActivation, evm: EvmRailsActivation): RailsActivation => ({ ...activation, evm });
 const PUBLIC_ALL = withEvm(RAILS_ACTIVATION, EVM_ALL);
-const evmEnv = { ...goldenEnv, SUBETHA_EVM_FACILITATOR_URL: FACILITATOR_URL };
+/**
+ * 有効時の env: H-4 から、入口は facilitator の子を計画し、URL（`http://127.0.0.1:8611/<token>`）を token と port から作る（親の env の URL は使わない）。
+ * gas 鍵・token・各 chain の gas の上限・Provider の受取先が要る（`tests/unit/evm-hosted-entry.test.ts`）。
+ */
+const FAC_KEY = "0x" + "44".repeat(32);
+const evmEnv = { ...goldenEnv, SUBETHA_EVM_FACILITATOR_KEY: FAC_KEY, SUBETHA_EVM_FACILITATOR_TOKEN: TOKEN, SUBETHA_EVM_FACILITATOR_GAS_CAP_46630: "1000000000000000", SUBETHA_EVM_FACILITATOR_GAS_CAP_421614: "1000000000000000", SUBETHA_EVM_FACILITATOR_GAS_CAP_998: "1000000000000000", SUBETHA_EVM_PROVIDER_PAYTO: "0xf8243d93F339807CA9846Aa31155A2B2262D08db" };
 
 const NET = { rh: EVM_TESTNETS.rh.network, arbsep: EVM_TESTNETS.arbsep.network, hyperevm: EVM_TESTNETS.hyperevm.network } as const;
 const BASE = INBOUND.network;
@@ -162,12 +167,13 @@ describe("全部 true: golden との差分は追加だけ（SR-H2）", () => {
     // 静的 route・静的の予算は足さない（動的だけ。FR-H5）。
     expect((plan.config as any).router.routes).toEqual(expected.config.router.routes);
     expect((plan.config as any).router.budget).toEqual(expected.config.router.budget);
-    // 子の env: 有効化の値だけが変わる（H-3 では facilitator の URL・鍵は渡さない。H-4）。
-    const { [RAILS_ACTIVATION_ENV]: activationValue, ...rest } = plan.childEnv;
+    // 子の env: 有効化の値が変わり、facilitator の URL（H-4。token を含む）が足されるだけ。gas 鍵は渡さない。
+    const { [RAILS_ACTIVATION_ENV]: activationValue, SUBETHA_EVM_FACILITATOR_URL: urlValue, ...rest } = plan.childEnv;
     const { [RAILS_ACTIVATION_ENV]: goldenValue, ...goldenRest } = expected.childEnv as Record<string, string>;
     expect(rest).toEqual(goldenRest);
     expect(activationValue).toBe(`${goldenValue},rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out`);
-    expect(JSON.stringify(plan.childEnv)).not.toContain(TOKEN);
+    expect(urlValue).toBe(FACILITATOR_URL);
+    expect(JSON.stringify(plan.childEnv)).not.toContain(FAC_KEY.slice(2));
   });
 
   test("本番と同じ読み込み（KNOWN_NETWORKS の検証）を通り、一覧に 56 本が出る。新 3 の受信の facilitator は env の URL（kind x402）で、HTTP の期限は表のチェーン別（20 秒）", () => {
@@ -278,7 +284,7 @@ describe("出す条件（チェーン × 方向、既存の宛先・源の条件
     expect(Object.keys(existingOf(withEvm(noPairs, EVM_ALL), true))).not.toContain("dyn-arc-to-sol");
   });
 
-  test("受信が有効で SUBETHA_EVM_FACILITATOR_URL が無い・空 → 固定文で止まる（値は出さない）。入口は HostPlanError(config)", () => {
+  test("受信が有効で SUBETHA_EVM_FACILITATOR_URL が無い・空 → 固定文で止まる（値は出さない）。入口は facilitator の env が無ければ HostPlanError(evm_facilitator)（H-4: URL は入口が作る）", () => {
     for (const env of [{}, { SUBETHA_EVM_FACILITATOR_URL: "" }]) {
       expect(() => routerConfigOf(env, RECEIVER, true, { activation: withEvm(RAILS_NONE, { rh: OFF, arbsep: OFF, hyperevm: { inbound: true, outbound: false } }), receivers: {} })).toThrow(/^SUBETHA_EVM_FACILITATOR_URL is required when an EVM testnet inbound rail is activated$/);
     }
@@ -289,7 +295,7 @@ describe("出す条件（チェーン × 方向、既存の宛先・源の条件
       caught = error;
     }
     expect(caught).toBeInstanceOf(HostPlanError);
-    expect((caught as HostPlanError).code).toBe("config");
+    expect((caught as HostPlanError).code).toBe("evm_facilitator");
   });
 
   test("区分: 受信か送信が有効な chain の (network, asset) を 1 件 20,000、総額は SUBETHA_DYNAMIC_MAX_TOTAL（既定 100,000,000）。静的の予算には足さない", () => {
@@ -546,10 +552,13 @@ describe("配線: 公開の生成（全部 true）と公開の子の能力で、
   /** 入口と同じ計画 → 子の env（+ H-4 が渡す facilitator の URL）→ 本番の読み込み → 公開の子の能力 → composeRails。 */
   const composed = (withFacilitatorEnv: boolean) => {
     const url = `${facilitator.origin}/${TOKEN}`;
-    const plan = planOf(PUBLIC_ALL, { ...goldenEnv, SUBETHA_EVM_FACILITATOR_URL: url });
+    const plan = planOf(PUBLIC_ALL, evmEnv, Number(new URL(facilitator.origin).port));
+    expect(plan.childEnv["SUBETHA_EVM_FACILITATOR_URL"]).toBe(url);
     const config = loadPlan(plan);
     const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
-    const capabilities = routerProcessCapabilitiesOf({ ...plan.childEnv, SUBETHA_OUTBOUND_SOLANA_KEY: seed, ...(withFacilitatorEnv ? { SUBETHA_EVM_FACILITATOR_URL: url } : {}) });
+    // 子の env は計画のもの（H-4 で URL を含む）。`false` は URL を抜いた形（能力が無い場合の対照）。
+    const { SUBETHA_EVM_FACILITATOR_URL: _url, ...withoutUrl } = plan.childEnv;
+    const capabilities = routerProcessCapabilitiesOf({ ...(withFacilitatorEnv ? plan.childEnv : withoutUrl), SUBETHA_OUTBOUND_SOLANA_KEY: seed });
     const events: TransportEvent[] = [];
     return { rails: composeRails(config, capabilities, (event) => events.push(event), () => {}), events, capabilities };
   };

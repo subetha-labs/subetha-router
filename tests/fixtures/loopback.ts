@@ -13,7 +13,6 @@
  */
 
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { once } from "node:events";
 import path from "node:path";
 import type { Readable } from "node:stream";
 
@@ -35,6 +34,20 @@ function spawnApp(
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+}
+
+/**
+ * 子の終了を待つ（`close`）。spawn そのものの失敗（ENOENT・EAGAIN など）は 'error' だけが来て `close` が来ないことがあるので、
+ * pid の無い子の 'error' でも終わったものとして解く（`events.once` は 'error' で reject し、待つ側が未処理の reject になる）。
+ * 'error' は記録だけして投げない（起動待ちは「listening の前に終わった」として reject する）。
+ */
+function closedOf(child: ChildProcessByStdio<null, Readable, Readable>): Promise<[number | null, NodeJS.Signals | null]> {
+  return new Promise((resolve) => {
+    child.once("close", (code: number | null, signal: NodeJS.Signals | null) => resolve([code, signal]));
+    child.on("error", () => {
+      if (child.pid === undefined) resolve([null, null]);
+    });
+  });
 }
 
 /** 子に渡してよい親 env のキー（これ以外は読まない・渡さない）。 */
@@ -71,7 +84,7 @@ export async function runToExit(
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => (stdout += chunk));
   child.stderr.on("data", (chunk: string) => (stderr += chunk));
-  const [code, signal] = (await once(child, "close")) as [number | null, NodeJS.Signals | null];
+  const [code, signal] = await closedOf(child);
   return { code, signal, stdout, stderr };
 }
 
@@ -88,6 +101,8 @@ export interface Listening {
    * 応答前クラッシュの再現に使う（graceful shutdown ではない）。
    */
   kill(signal: NodeJS.Signals): Promise<void>;
+  /** 子が終わったら解ける（理由を問わない。入口が「どちらかの子が落ちたら両方を止める」ために見る）。 */
+  readonly exited: Promise<void>;
 }
 
 export async function startListening(
@@ -95,7 +110,14 @@ export async function startListening(
   args: readonly string[],
   env: Readonly<Record<string, string>> = {},
   /** `listening` の行を待つ上限（既定 20 秒。本番の入口は起動時の外部検査を含むので長く渡す）。 */
-  options: { readonly listenTimeoutMs?: number } = {},
+  options: {
+    readonly listenTimeoutMs?: number;
+    /**
+     * 起動待ちの取り消し（入口が signal・もう片方の子の終了で止まるとき）。listening の前に abort されたら、子を SIGTERM で止め（5 秒で SIGKILL）、
+     * 終了を待ってから reject する。listening の後の abort は何もしない（呼び出し側が `stop` する）。
+     */
+    readonly signal?: AbortSignal;
+  } = {},
 ): Promise<Listening> {
   const listenTimeoutMs = options.listenTimeoutMs ?? 20_000;
   const child = spawnApp(script, args, env);
@@ -107,14 +129,25 @@ export async function startListening(
   child.stderr.on("data", (chunk: string) => (stderr += chunk));
 
   let closed = false;
-  const closing = once(child, "close").then(() => {
+  const closing = closedOf(child).then(() => {
     closed = true;
   });
+  let settleListening!: () => void;
+  const listeningDone = new Promise<void>((resolve) => (settleListening = resolve));
 
+  let aborted = false;
   const listening = new Promise<number>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`timeout waiting for listen: ${script}\n${stdout}\n${stderr}`));
     }, listenTimeoutMs);
+    const onAbort = (): void => {
+      aborted = true;
+      clearTimeout(timer);
+      reject(new Error(`aborted before listening: ${script}`));
+    };
+    if (options.signal?.aborted === true) onAbort();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    void listeningDone.then(() => options.signal?.removeEventListener("abort", onAbort));
     const check = (): void => {
       for (const line of stdout.split("\n")) {
         if (line === "") {
@@ -145,12 +178,21 @@ export async function startListening(
   try {
     port = await listening;
   } catch (error) {
-    // 起動できなかった子を残さない（タイムアウト時も含め、所有している子だけを落とす）。
+    // 起動できなかった子を残さない（タイムアウト時も含め、所有している子だけを落とす）。取り消しは SIGTERM（5 秒で SIGKILL）、それ以外は SIGKILL。
     if (!closed) {
-      child.kill("SIGKILL");
-      await closing;
+      if (aborted) {
+        child.kill("SIGTERM");
+        const guard = setTimeout(() => child.kill("SIGKILL"), 5_000);
+        await closing;
+        clearTimeout(guard);
+      } else {
+        child.kill("SIGKILL");
+        await closing;
+      }
     }
     throw error;
+  } finally {
+    settleListening();
   }
 
   return {
@@ -158,6 +200,7 @@ export async function startListening(
     baseUrl: `http://127.0.0.1:${port}`,
     stdout: () => stdout,
     stderr: () => stderr,
+    exited: closing,
     async stop(): Promise<void> {
       if (!closed) {
         child.kill("SIGTERM");

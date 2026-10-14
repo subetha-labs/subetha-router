@@ -8,6 +8,9 @@
  *   （凍結されている。G-4 の後は公開も受信は両方 true、送信は両方 false）
  * - bind: `127.0.0.1`（公開しない。必要なら ssh のトンネルで）、port は `SUBETHA_ACCEPTANCE_PORT`（既定 0 = 使い捨て）
  * - journal: `SUBETHA_ACCEPTANCE_JOURNAL_PATH`（既定 `runtime/acceptance/journal.ndjson`）。公開の journal と同じパスは拒む
+ * - EVM testnet 3 つ（hosted 設計 §4・§8.2 の G-3）: `--rails` に `rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out` の部分集合を足すと、公開の入口と同じく
+ *   facilitator の子を先に起動する（env は `SUBETHA_EVM_FACILITATOR_*`）。facilitator の journal と lock は **公開と同じ 1 つ**（公開の journal のディレクトリの
+ *   `evm-facilitator/`）で、動いている公開の facilitator があれば `flock` で起動しない。port は 8611（コンテナでは `-p 127.0.0.1:8611:8611`）
  * 本番の env（送信の鍵・MPP 受信の秘密・Arc の受取鍵・Solana の受取 owner・RPC）はそのまま読む。鍵・URL の値は出さない。
  *
  * 起動したら stdout に 1 行 `{"event":"listening","port":<MCP>,"routerPort":<Router>,"mode":"acceptance","rails":"arc-in,solana-in"}` を書く（`rails` は有効化の token）。
@@ -20,7 +23,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { activationFromEnv, activationToEnv } from "./rails-entry.js";
-import { railActive, type RailsActivation } from "./remote-mcp-config.js";
+import { evmOf, HOSTED_EVM_CHAINS, railActive, type RailsActivation } from "./remote-mcp-config.js";
 import { publicJournalPathOf, startHost, type HostOptions, type RunningHost } from "./remote-mcp.js";
 
 export const ACCEPTANCE_PORT_ENV = "SUBETHA_ACCEPTANCE_PORT";
@@ -93,8 +96,11 @@ export function announcementOf(host: Pick<RunningHost, "mcpPort" | "mcpAddress" 
 export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefined>>, argv: readonly string[] = []): HostOptions {
   // 既定は x402 の受信の両方（公開の定数と同じ形）。送信・Solana の MPP の受け入れは `--rails arc-in,arc-out,solana-in,solana-mpp-in` のように語を足す（送信の設計 §6.1、`docs/mpp-solana-design.md` §6.1）。
   const activation: RailsActivation = activationFromEnv(argOf(argv, "rails") ?? "arc-in,solana-in");
-  if (!railActive(activation)) {
-    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out, solana-mpp-in, solana-mpp-out (arc-to-sol / sol-to-arc only add the pair profiles)");
+  // EVM testnet 3 つの token（`rh-in`・`rh-out`・`arbsep-in`・`arbsep-out`・`hyperevm-in`・`hyperevm-out`。hosted 設計 §4・§8.2 の G-3）も方向に数える。
+  // どれかがあれば、公開の入口と同じく facilitator の子を Router の子より先に起動する（journal と lock は公開と同じ 1 つ: `evmFacilitatorJournalPathOf`）。
+  const evm = evmOf(activation);
+  if (!railActive(activation) && !HOSTED_EVM_CHAINS.some((chain) => evm[chain].inbound || evm[chain].outbound)) {
+    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out, solana-mpp-in, solana-mpp-out, rh-in, rh-out, arbsep-in, arbsep-out, hyperevm-in, hyperevm-out (arc-to-sol / sol-to-arc only add the pair profiles)");
   }
   const journalPath = path.resolve(env[ACCEPTANCE_JOURNAL_ENV] ?? path.join(path.resolve("runtime"), "acceptance", "journal.ndjson"));
   if (sameJournal(journalPath, publicJournalPathOf(env))) {
