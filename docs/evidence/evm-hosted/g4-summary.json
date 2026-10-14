@@ -1,0 +1,3993 @@
+{
+  "kind": "subetha-evm-testnets-e2e-summary",
+  "design": "docs/evm-testnets-x402-design.md §3.9",
+  "purchases": [
+    {
+      "runId": "run-20261014T195714.221Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 1,
+      "chain": "base-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-x402-to-rh@g4",
+      "profileId": "dyn-x402-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "0bdc3bd0-3045-4a98-b7a1-60ff559a9e20",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "f18b0c21e35d0642ff516d850131d6f2cde92cbc87e6b73d183abd4511d4488d",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:84532",
+          "txHash": "0xe1c383d990e20c73087b612ada1f0a70c592f7d27ca65186764c921299f8df29",
+          "receiptStatus": "success",
+          "blockNumber": "48119775",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:08.524Z",
+            "finalizedBlock": "48121135"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0xfc77b679daf372efbd93e8e67b23ae6d47dacde262cd6deb5acc7fa19e35ec0d",
+          "receiptStatus": "success",
+          "blockNumber": "135290743",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:08.942Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:84532",
+          "kind": "token",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "value": "19484000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:22:59.148Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5258
+      }
+    },
+    {
+      "runId": "run-20261014T195749.579Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 2,
+      "chain": "base-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-x402-to-arbsep@g4",
+      "profileId": "dyn-x402-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "6c4d17e4-b007-4985-aa0e-0eb6b428b62b",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "a9136b63baae7eb06016ef2f23c7431f8e386b4654431c325090c5ee9fb78309",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:84532",
+          "txHash": "0xcad5bb15798014e1649824393051e8245214c8e88aa8d02acea0dfa1403624e1",
+          "receiptStatus": "success",
+          "blockNumber": "48119793",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:09.236Z",
+            "finalizedBlock": "48121135"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0x56b3517f8d554e03323173f671164d74da8aa2167ce6be958331981973a5ec93",
+          "receiptStatus": "success",
+          "blockNumber": "319190767",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:09.593Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:84532",
+          "kind": "token",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "value": "19473000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:22:59.396Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 4451
+      }
+    },
+    {
+      "runId": "run-20261014T195824.748Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 3,
+      "chain": "base-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-x402-to-hyperevm@g4",
+      "profileId": "dyn-x402-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "7296e8b4-324d-4ed6-9877-88c2b6e7fe6a",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "df13562dad90526456f8b6564c64fa11037facd7cd67467341bad9b339ae07d9",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:84532",
+          "txHash": "0xc5c13b62aa9359402f8b4707fb6aa962840c02e11b69840582a4ae653a3b0df7",
+          "receiptStatus": "success",
+          "blockNumber": "48119811",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:09.984Z",
+            "finalizedBlock": "48121135"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0x5e3771fe81821995af4726a0d4a6edba7272de31a891a03b38daa846179878dc",
+          "receiptStatus": "success",
+          "blockNumber": "66909343",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:10.341Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:84532",
+          "kind": "token",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "value": "19462000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:22:59.923Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6552
+      }
+    },
+    {
+      "runId": "run-20261014T195902.547Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 4,
+      "chain": "tempo-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-mpp-to-rh@g4",
+      "profileId": "dyn-mpp-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "be6c1d42-557c-48f1-adcf-32e06d6e7251",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:42431",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": true
+      },
+      "bodySha256": "bde2dad9b943d37da63bc96a56eac66eace62e716aa6276a705c6f5f2a98e24f",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:42431",
+          "txHash": "0x703b85743a4b912a0d9683b7e223f2509915f03a0d93c255e9c38339a4015eb7",
+          "receiptStatus": "success",
+          "blockNumber": "39597288",
+          "token": "0x20c0000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 0
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:10.414Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0xa550a93a9ed97c66ad54bd722c5cd8410fccfddea17f1f9e2d6fa5eeb1e76fb0",
+          "receiptStatus": "success",
+          "blockNumber": "135291700",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:10.686Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:42431",
+          "kind": "token",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "value": "999999321375"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:00.129Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 3619
+      }
+    },
+    {
+      "runId": "run-20261014T195937.683Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 5,
+      "chain": "tempo-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-mpp-to-arbsep@g4",
+      "profileId": "dyn-mpp-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "13fea961-0e22-4f6f-b3c5-7d2bab666456",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:42431",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": true
+      },
+      "bodySha256": "d87addce3d9199e7f6ab495441c2a889331fb1df7198625879767dc5d5700617",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:42431",
+          "txHash": "0x4c0bad47dd76764e06d9b99924e89c6ea08cda105d156784b4dbdd8affc5fc10",
+          "receiptStatus": "success",
+          "blockNumber": "39597347",
+          "token": "0x20c0000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 0
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:10.923Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0x34e5d77e58786360190ad4d3aedcc0b4a7fbae52e9ee3d5da1712920f3bf6ae1",
+          "receiptStatus": "success",
+          "blockNumber": "319191187",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:11.118Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:42431",
+          "kind": "token",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "value": "999999310346"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:00.342Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 2468
+      }
+    },
+    {
+      "runId": "run-20261014T200013.297Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 6,
+      "chain": "tempo-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-mpp-to-hyperevm@g4",
+      "profileId": "dyn-mpp-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "0cacb088-423a-4ce7-a5bf-0d8422fed277",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:42431",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": true
+      },
+      "bodySha256": "d5b0fb8792434a12dbc77f7439d05449620b6eeadf5aaca06cefc6f866e84595",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:42431",
+          "txHash": "0xdcf48f7a74bd11f3c55f1e160f8d9c6f3f131ff356d53f94a5faf0ffb0d053a3",
+          "receiptStatus": "success",
+          "blockNumber": "39597405",
+          "token": "0x20c0000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 0
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:11.466Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0x1ac6423337b8c56a511ecdfc20afe6ace7c3aca05ae34e244ad6fe59fe8e9a13",
+          "receiptStatus": "success",
+          "blockNumber": "66909453",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:11.667Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:42431",
+          "kind": "token",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "value": "999999299317"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:00.548Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5562
+      }
+    },
+    {
+      "runId": "run-20261014T200049.830Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 7,
+      "chain": "arc-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-arc-to-rh@g4",
+      "profileId": "dyn-arc-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "727252a6-6fb1-49c0-896a-e0fbd8b08509",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "237667ecf8b101f721433bc9457c2431a655741500e266c50128b21606240b45",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:5042002",
+          "txHash": "0xb6301d891eee752fae69b5d7a1e553179643acc8c8e190ec8e13880091b12970",
+          "receiptStatus": "success",
+          "blockNumber": "67212824",
+          "token": "0x3600000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0xaf42cffe4b35a05098613d962af43cdc43fbb4ea",
+            "value": "11000",
+            "logIndex": 2
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:11.684Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0x22807eaa93ce4c88f2882d7d7cd983084c5867a8978f87a9276e361fe21402d9",
+          "receiptStatus": "success",
+          "blockNumber": "135292687",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:11.756Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:5042002",
+          "kind": "token",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "value": "19803151"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:00.745Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7138
+      }
+    },
+    {
+      "runId": "run-20261014T200126.340Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 8,
+      "chain": "arc-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-arc-to-arbsep@g4",
+      "profileId": "dyn-arc-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "65286bed-0ff1-4311-b1a1-dd8e162e283b",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "84590c5edb1d1393224282d08575c618ab3fd7e59bb905f3456b8fbaeb2c2e14",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:5042002",
+          "txHash": "0xa4909142c7b1169fc3017d39d983d0bfae49aa45bc2aa4e1de1fcc65b9fd1fef",
+          "receiptStatus": "success",
+          "blockNumber": "67212895",
+          "token": "0x3600000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0xaf42cffe4b35a05098613d962af43cdc43fbb4ea",
+            "value": "11000",
+            "logIndex": 2
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:11.995Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0x2e21c671599304cd6140fa9f63fe689fbdb4272af737e9fb9ff66549a4fc2a6b",
+          "receiptStatus": "success",
+          "blockNumber": "319191619",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:12.022Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:5042002",
+          "kind": "token",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "value": "19792151"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:00.959Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6669
+      }
+    },
+    {
+      "runId": "run-20261014T200202.625Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 9,
+      "chain": "arc-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-arc-to-hyperevm@g4",
+      "profileId": "dyn-arc-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "4c2f40c7-660f-4109-a9c1-3c97b0aff9c1",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "18dc2c0ddadace155dd5d2594851e627840d887e31e94ba30b683dfbdfa9ed04",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:5042002",
+          "txHash": "0xd6693e982e13fd26d86d3747d095c3786f98a1ff6fdde25a8758482ec11d8d75",
+          "receiptStatus": "success",
+          "blockNumber": "67212967",
+          "token": "0x3600000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0xaf42cffe4b35a05098613d962af43cdc43fbb4ea",
+            "value": "11000",
+            "logIndex": 2
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:12.367Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0x6bbab7bb6184002efebf569471043b9e37a159306120ce4df0f5ed181972acd1",
+          "receiptStatus": "success",
+          "blockNumber": "66909569",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:12.389Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:5042002",
+          "kind": "token",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "value": "19781151"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:01.192Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 11518
+      }
+    },
+    {
+      "runId": "run-20261014T200243.600Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 10,
+      "chain": "sol-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-sol-to-rh@g4",
+      "profileId": "dyn-sol-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "76f390a8-afbc-43ac-8c86-50f486470622",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "5fd8ac3c031565cca9ea3e74db7e633faf9bbd02a5f390c25df278d68ef23c73",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "RF3ZSYGfmKj5jKDWYj4vBaJBtsCyVsMgXb1q4RVHaHx2y9gQiqiHdubyuBEyB1e6BwHxiBSMJxZwymC1GFud9j2",
+          "receiptStatus": "success",
+          "blockNumber": "511101141",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y",
+            "to": "7pjZnp8kuG7hy7Gav4jG282PovTKnipAYUcT6REA63fN",
+            "value": "11000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:12.415Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0x7562df7509506220db5937a44ccffadaa6d526f9cd995c0cb34b29ead90e8d45",
+          "receiptStatus": "success",
+          "blockNumber": "135293731",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:12.778Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "token",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "value": "19664000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:01.436Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 8453
+      }
+    },
+    {
+      "runId": "run-20261014T200322.707Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 11,
+      "chain": "sol-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-sol-to-arbsep@g4",
+      "profileId": "dyn-sol-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "3268c8a5-792c-4bd0-8206-5d214d8158d5",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "81bc021cc802305a5eeac1c1ab76a6e4ed03a89e03f9b23d49e80b0d0c379c5c",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "5cN3TAMkuMHcpk8fs5mgExL3CEQxkBjLSvjxnCukTSh2nLC9kmLaY4em7JuPpdfVdD6f1xxQoP9fS5kmdhhi4xnS",
+          "receiptStatus": "success",
+          "blockNumber": "511101292",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y",
+            "to": "7pjZnp8kuG7hy7Gav4jG282PovTKnipAYUcT6REA63fN",
+            "value": "11000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:13.017Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0x1346de65b2ddd12fdfe7d258758bd7669c48100c9278e287e737eb4bc7222c71",
+          "receiptStatus": "success",
+          "blockNumber": "319192081",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:13.097Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "token",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "value": "19653000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:01.667Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6037
+      }
+    },
+    {
+      "runId": "run-20261014T200400.966Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 12,
+      "chain": "sol-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-sol-to-hyperevm@g4",
+      "profileId": "dyn-sol-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "purchased",
+      "stopReason": "outcome unknown, saved status \"unknown\"; not delivered — stopping the run without retry",
+      "paymentId": "298084d8-942c-4d46-bec4-babe1f64b6d3",
+      "outcome": "unknown",
+      "savedStatus": "unknown",
+      "terminalReason": "destination_pay_unknown",
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": null,
+      "bodyMatchesRouterRecord": null,
+      "legs": [],
+      "balancesBefore": [],
+      "balancesAfter": [],
+      "reopen": {
+        "at": "2026-10-14T20:23:01.896Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5564
+      }
+    },
+    {
+      "runId": "run-20261014T200436.482Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 13,
+      "chain": "solmpp-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-solmpp-to-rh@g4",
+      "profileId": "dyn-solmpp-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "15807d09-5bac-4462-ad02-fe6c35d50825",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": true
+      },
+      "bodySha256": "c36bb1532d4e3cd2111ff3f15efbacc985c5c037349fd8f61702a7621dfbceed",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "3hzhDH2Hn1NGHyEGH4Dtxq6zaJae2Wztntw73m2Dsggdqd82uPf8Hod8ZbLRPnXEBQzPpmADFWXf7o8gUEm1WYyp",
+          "receiptStatus": "success",
+          "blockNumber": "511101603",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y",
+            "to": "7pjZnp8kuG7hy7Gav4jG282PovTKnipAYUcT6REA63fN",
+            "value": "11000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:13.433Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0xb119e969b11ef235239c1297641c553ef734c93d226efbc8f04ac2df3432bbd2",
+          "receiptStatus": "success",
+          "blockNumber": "135294699",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:13.513Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "token",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "value": "19631000"
+        },
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "native",
+          "asset": null,
+          "value": "4998446548"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:02.127Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6544
+      }
+    },
+    {
+      "runId": "run-20261014T200514.381Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 14,
+      "chain": "solmpp-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-solmpp-to-arbsep@g4",
+      "profileId": "dyn-solmpp-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "26130da5-bb3f-4f5b-ac5c-f365af6f0a83",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": true
+      },
+      "bodySha256": "f810deb26fda546091e0851c66f3b2236010a2b96bd03a1aa3692d755a6d6f41",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "22Nz6iafWNiw4rhd9r9bKNiZSDsGWPi4VXNrZfqDsMtFXjGeEa7d4oa42A6jrQui3c3skvZLqK2hFzJibvAW8yLH",
+          "receiptStatus": "success",
+          "blockNumber": "511101760",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y",
+            "to": "7pjZnp8kuG7hy7Gav4jG282PovTKnipAYUcT6REA63fN",
+            "value": "11000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:13.756Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0x08c57ee47f6388275eed5c1eadc6f8bcec9dba5e8f74d48b90665933dd700f45",
+          "receiptStatus": "success",
+          "blockNumber": "319192509",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:13.836Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "token",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "value": "19620000"
+        },
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "native",
+          "asset": null,
+          "value": "4998441547"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:02.475Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5480
+      }
+    },
+    {
+      "runId": "run-20261014T200550.221Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 15,
+      "chain": "solmpp-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-solmpp-to-hyperevm@g4",
+      "profileId": "dyn-solmpp-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "fb574abe-e3e1-442d-b173-814be719012b",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": true
+      },
+      "bodySha256": "def98b2947fb3c8952d627c7c6a8553c834975752470bde03308f0fc7c3e1c1a",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "55jGnaSYWPnZZCQBgB2guFjxBgSDjEP12ba8vtzozCfwqSvk5EJaECWdinhqZHM7pm5V2YCiy4XdYQ9vrY8Mp6Pf",
+          "receiptStatus": "success",
+          "blockNumber": "511101916",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y",
+            "to": "7pjZnp8kuG7hy7Gav4jG282PovTKnipAYUcT6REA63fN",
+            "value": "11000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:14.176Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0xef974baa446c2656e2432cc1f6230e9b027095c634d50d225c8b292384fe1d7c",
+          "receiptStatus": "success",
+          "blockNumber": "66909797",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:14.256Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "token",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "value": "19609000"
+        },
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "native",
+          "asset": null,
+          "value": "4998436546"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:02.722Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 9468
+      }
+    },
+    {
+      "runId": "run-20261014T200631.425Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 16,
+      "chain": "rh-to-base",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-x402@g4",
+      "profileId": "dyn-rh-to-x402",
+      "upstreamUrl": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "purchased",
+      "stopReason": "outcome paid_data_unavailable, saved status \"paid_data_unavailable\"; not delivered — stopping the run without retry",
+      "paymentId": "75f4fae1-b398-419c-9d66-e18f79d65034",
+      "outcome": "paid_data_unavailable",
+      "savedStatus": "paid_data_unavailable",
+      "terminalReason": "destination_rejected",
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": null,
+      "bodyMatchesRouterRecord": null,
+      "legs": [],
+      "balancesBefore": [],
+      "balancesAfter": [],
+      "reopen": {
+        "at": "2026-10-14T20:23:02.958Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 4883
+      }
+    },
+    {
+      "runId": "run-20261014T200706.414Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 17,
+      "chain": "rh-to-tempo",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-mpp@g4",
+      "profileId": "dyn-rh-to-mpp",
+      "upstreamUrl": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "maxFee": "158",
+          "estimate": {
+            "gas": "54399",
+            "maxFeePerGas": "1440000001",
+            "bound": "79",
+            "atMs": 1792008428503
+          },
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "355b6794-b024-4eba-b575-edf26b8d202b",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:42431",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "4fe2578e2410c1c790a9e19e2e589c7beaf488e131a93816752475b9a15b4001",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0xdda5f50964005d28165675f32ba6044b3642ae0d3a6687235b14fb816bfe4333",
+          "receiptStatus": "success",
+          "blockNumber": "135296009",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:14.276Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:42431",
+          "txHash": "0x8e787b050c09bfa1a565663d7e39cb9f68dca309184ccc53ba01b8b193f76af8",
+          "receiptStatus": "success",
+          "blockNumber": "39598091",
+          "token": "0x20c0000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x901404ccf8a4e61050fc3cae4a26b05fdc136fe1",
+            "value": "10000",
+            "logIndex": 0
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:14.519Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99485000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:03.198Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5592
+      }
+    },
+    {
+      "runId": "run-20261014T200743.133Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 18,
+      "chain": "rh-to-arc",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-arc@g4",
+      "profileId": "dyn-rh-to-arc",
+      "upstreamUrl": "https://provider-x402-arc.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "e5e318d2-42bd-45e8-9dd6-9500d545fba1",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "16f4dbcaf0beed1aae9ec1dc3e1ef5b0141764bbe3263e5c4634c8daa5cb91e3",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0xc817844f99fd8b69e68496720765e38b5406887e518909031e4c31072258e026",
+          "receiptStatus": "success",
+          "blockNumber": "135296341",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:14.732Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:5042002",
+          "txHash": "0x404bc2100e6250a58e33d253d70f76bfe155f3596e0a010bb0238246be19b72c",
+          "receiptStatus": "success",
+          "blockNumber": "67213649",
+          "token": "0x3600000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x719eaec2eb4bddf10460c01832857c86e0ba42f1",
+            "value": "10000",
+            "logIndex": 2
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:14.964Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99474000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:03.428Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7796
+      }
+    },
+    {
+      "runId": "run-20261014T200821.119Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 19,
+      "chain": "rh-to-sol",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-sol@g4",
+      "profileId": "dyn-rh-to-sol",
+      "upstreamUrl": "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "2c033e02-0697-49da-9992-13d55406d4c8",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "quoted": "10000",
+          "payTo": "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "8dc0f08bb0b40d74925484117771e89cf475f691be7d23cec32dec6416ec225f",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0x69408642547bd3ea823384e530e70306dba893fd3fa72bf5bfde7f3ce0271875",
+          "receiptStatus": "success",
+          "blockNumber": "135296672",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:14.999Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "2fMLmyxKzQExoX2nh3CAT2FUZK2K5JLTFYJ1Lmh4K5GXgNa5yazWKTAd1npSM1X87j8BKvKzGAf3gDZNmRXxEan2",
+          "receiptStatus": "success",
+          "blockNumber": "511102559",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf",
+            "to": "HnuscuMcYCh8urbQ83vYNd3vTH4VKMdBLCW52tt6J63E",
+            "value": "10000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:15.232Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99463000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:03.656Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5597
+      }
+    },
+    {
+      "runId": "run-20261014T200857.113Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 20,
+      "chain": "rh-to-solmpp",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-solmpp@g4",
+      "profileId": "dyn-rh-to-solmpp",
+      "upstreamUrl": "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "a4709ae3-a0d1-49f0-8118-0362345f64ae",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "quoted": "10000",
+          "payTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "0e3e2b33a05fe85de8f176316014c91390e36d06209dd661f682f5ac1115d702",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0x776f184e14623ac2c68fc140be82c2cc8714699c5fe6a83557025cd18ac86d0b",
+          "receiptStatus": "success",
+          "blockNumber": "135296982",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:15.321Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "5wYZ4hfhLHdi5d6LGr3T4zBbVo6PdZQFiFzkVFJiBN1QrnzNEGD7yGc6oSmbGTVFNtvhH9GH9PjZH11JLdWGp7i3",
+          "receiptStatus": "success",
+          "blockNumber": "511102710",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf",
+            "to": "MUbNoZ9cjg2vtwEJxbnChk315fhj1daMYEumWKDCR4S",
+            "value": "10000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:15.546Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99452000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:03.890Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7661
+      }
+    },
+    {
+      "runId": "run-20261014T200935.602Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 21,
+      "chain": "rh-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-arbsep@g4",
+      "profileId": "dyn-rh-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "e0a6a450-e49a-4c66-811a-985ebde5fdc2",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "7c8f6f55d9fe63eb9864ded659320708025f400a1c762dcc8d470d3a0dfe9e8c",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0x1abc048569441d18ff9d34eef07bf713c3bacab510c099ce43ed4981932d476c",
+          "receiptStatus": "success",
+          "blockNumber": "135297313",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:15.634Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0xf996d05ca81158f5ee962352bc22cb266c315b0be65851bfaaa5ce5b5adb072a",
+          "receiptStatus": "success",
+          "blockNumber": "319193513",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:15.861Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99441000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:04.125Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5700
+      }
+    },
+    {
+      "runId": "run-20261014T201012.457Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 22,
+      "chain": "rh-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-hyperevm@g4",
+      "profileId": "dyn-rh-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "a668426e-90a1-4598-aa50-97bb8062c39c",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "6c80ff5b3b694241bec7e65d497b8e0667a5dffc1173e6c946f3082ef5c1151b",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0x200975c77facaa145e8ae41b0b4df9a6ba3e30404e4e69c323b0223ac1735dc5",
+          "receiptStatus": "success",
+          "blockNumber": "135297631",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:16.201Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0x9aa4138c980eed0abc032d735a2be0a1540ff26824301e5e1cf8919c525689dc",
+          "receiptStatus": "success",
+          "blockNumber": "66910063",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:16.438Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99430000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:04.359Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7576
+      }
+    },
+    {
+      "runId": "run-20261014T201049.897Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 23,
+      "chain": "arbsep-to-base",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-x402@g4",
+      "profileId": "dyn-arbsep-to-x402",
+      "upstreamUrl": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "e9ffc1f8-07d4-4446-a5e4-31b7dc15150d",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "274ea3aa579f7153d11bbd01e10aea94774e1d024c9f40a74f8ca33334e9f568",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0xeb3eb88b751a04f8368ed1c705e8fd7d8cc38e274c793d4d0b21eb62ec159bcf",
+          "receiptStatus": "success",
+          "blockNumber": "319193785",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:16.459Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:84532",
+          "txHash": "0x1d11574df58d655782c4eddb5a606ce64df7de6de7a3241405ccc9e87ea3e703",
+          "receiptStatus": "success",
+          "blockNumber": "48120185",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x901404ccf8a4e61050fc3cae4a26b05fdc136fe1",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:16.784Z",
+            "finalizedBlock": "48121135"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19518000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:04.551Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5412
+      }
+    },
+    {
+      "runId": "run-20261014T201125.794Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 24,
+      "chain": "arbsep-to-tempo",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-mpp@g4",
+      "profileId": "dyn-arbsep-to-mpp",
+      "upstreamUrl": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "maxFee": "158",
+          "estimate": {
+            "gas": "54399",
+            "maxFeePerGas": "1440000001",
+            "bound": "79",
+            "atMs": 1792008687950
+          },
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "d0195311-511d-41c7-b6d7-bfff8f84729d",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:42431",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "dafe6c69decb22b68da6661648bb017e241dfddb81d88c5d36858af81e5c5a8c",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0xaf8cf2384f2afd36fbfd87fe36e2fd193aa494e628f86101c5e7bf45fa733e15",
+          "receiptStatus": "success",
+          "blockNumber": "319193927",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:17.204Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:42431",
+          "txHash": "0xd9bfe2038f4166759bcdd9acb53000e62dc039001e41f6c88c23b6f0383eda67",
+          "receiptStatus": "success",
+          "blockNumber": "39598519",
+          "token": "0x20c0000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x901404ccf8a4e61050fc3cae4a26b05fdc136fe1",
+            "value": "10000",
+            "logIndex": 0
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:17.533Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19507000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:04.787Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 4966
+      }
+    },
+    {
+      "runId": "run-20261014T201202.026Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 25,
+      "chain": "arbsep-to-arc",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-arc@g4",
+      "profileId": "dyn-arbsep-to-arc",
+      "upstreamUrl": "https://provider-x402-arc.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "96ba37f1-e5c8-4393-bcc8-ab594cffe7c5",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "d77bbe7c20b1575dcf04cea4426fb577732e7cfa86a8765f7b0b357b0f60c8e4",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0x45377a3aa24d5183163f0e5870243ee71f6de614ee01e780f57df90074650de3",
+          "receiptStatus": "success",
+          "blockNumber": "319194065",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:17.756Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:5042002",
+          "txHash": "0x7992bf5ad3a59e1a9c46f8fcf0c17be214b6aab89b65126e913677bf893bb981",
+          "receiptStatus": "success",
+          "blockNumber": "67214159",
+          "token": "0x3600000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x719eaec2eb4bddf10460c01832857c86e0ba42f1",
+            "value": "10000",
+            "logIndex": 2
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:18.084Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19496000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:04.977Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 8386
+      }
+    },
+    {
+      "runId": "run-20261014T201240.814Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 26,
+      "chain": "arbsep-to-sol",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-sol@g4",
+      "profileId": "dyn-arbsep-to-sol",
+      "upstreamUrl": "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "2c4e5244-b5b3-46bb-ad91-93c8be76d079",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "quoted": "10000",
+          "payTo": "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "3f78dcf71c5ad58f2aa5c1e4af20501c835e696a4fbdabc42708e89a9c710c8e",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0x95601db1543b7bc61f42b587d63852aeca10ae17b74b55e9f7dce0fb00572d2c",
+          "receiptStatus": "success",
+          "blockNumber": "319194212",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:18.116Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "35c6A6mgpbB6FtyxNz7Vqf2EBrdit1eu3pFD7ViNij6Zype9LJhDNobLimKRTdrHy5mbRdzuT4U46fq7uVxyAxEJ",
+          "receiptStatus": "success",
+          "blockNumber": "511103637",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf",
+            "to": "HnuscuMcYCh8urbQ83vYNd3vTH4VKMdBLCW52tt6J63E",
+            "value": "10000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:18.444Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19485000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:05.208Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 4425
+      }
+    },
+    {
+      "runId": "run-20261014T201316.056Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 27,
+      "chain": "arbsep-to-solmpp",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-solmpp@g4",
+      "profileId": "dyn-arbsep-to-solmpp",
+      "upstreamUrl": "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "bf4af1ab-92f9-4272-a87b-3e448f0184e2",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "quoted": "10000",
+          "payTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "888540cac7824e0471297ed7e0d16a1b84208edf26862a4aa0e4e4cb525dfdd0",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0xf4a94f1290cedbcb20ff4d1116af878b470b7f70889d9e87a9e83370203bcf95",
+          "receiptStatus": "success",
+          "blockNumber": "319194355",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:18.535Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "61zGFNYppo3WyzL3u8ULFFTM5iB8yNnpYpgzX71NXkvB4a9A1mcxPiByDuimKov1sDxR1gJwztfFAnojM6LXrFBk",
+          "receiptStatus": "success",
+          "blockNumber": "511103790",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf",
+            "to": "MUbNoZ9cjg2vtwEJxbnChk315fhj1daMYEumWKDCR4S",
+            "value": "10000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:18.865Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19474000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:05.450Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6704
+      }
+    },
+    {
+      "runId": "run-20261014T201353.561Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 28,
+      "chain": "arbsep-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-rh@g4",
+      "profileId": "dyn-arbsep-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "b06ec00e-fa22-4d09-b797-987f21d2ddb5",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "f72368bbb386fff02aa9649f1ce0419d2ae734bdab4d35a82754b42c46b29644",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0xe389e0b8875dd9ff3c870627c1d134681fcadfa7cdb45d1138b44f78595f27c3",
+          "receiptStatus": "success",
+          "blockNumber": "319194493",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:18.958Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0x40e609b1bd796b43af62b10932b526ffd5faedac445708404ae5c6396c7e5403",
+          "receiptStatus": "success",
+          "blockNumber": "135299623",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:19.285Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19463000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:05.686Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5667
+      }
+    },
+    {
+      "runId": "run-20261014T201429.379Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 29,
+      "chain": "arbsep-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-arbsep-to-hyperevm@g4",
+      "profileId": "dyn-arbsep-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "669d87d8-27ae-4f12-8826-c468f994c702",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "03b92627691572e5f7f0a3758bf6dbfce84fca4b190077451130a3e5428df5a7",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:421614",
+          "txHash": "0x8573bcc87b91754606931a2f2250f4c77da4bf2eda610392f53b4e0fcde18106",
+          "receiptStatus": "success",
+          "blockNumber": "319194633",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:19.527Z",
+            "finalizedBlock": "319200950"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0x2d97c0d55c3aa42d44bdbf1a5929425129d4f1dcffc5b3dc36c81ed34aace160",
+          "receiptStatus": "success",
+          "blockNumber": "66910324",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:19.853Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:421614",
+          "kind": "token",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "value": "19452000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:05.922Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7599
+      }
+    },
+    {
+      "runId": "run-20261014T201507.677Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 30,
+      "chain": "hyperevm-to-base",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-x402@g4",
+      "profileId": "dyn-hyperevm-to-x402",
+      "upstreamUrl": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "8c7f0caf-c604-41bd-bdd1-378605e4a380",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "9aa688c87d259139eba6bf578b8eda81b40683eb4962d6b40742e957a71b5a09",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0x7176b7e796d0388726da7e8c6ec790ff4988f4241e2dd48a65ad7f90244da938",
+          "receiptStatus": "success",
+          "blockNumber": "66910361",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:19.875Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:84532",
+          "txHash": "0xef50fea4e4a850fb9e28e0244a372990a30f930ca2af41515fce909edde09cd9",
+          "receiptStatus": "success",
+          "blockNumber": "48120315",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x901404ccf8a4e61050fc3cae4a26b05fdc136fe1",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:19.908Z",
+            "finalizedBlock": "48121135"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19518000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:06.154Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6457
+      }
+    },
+    {
+      "runId": "run-20261014T201544.407Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 31,
+      "chain": "hyperevm-to-tempo",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-mpp@g4",
+      "profileId": "dyn-hyperevm-to-mpp",
+      "upstreamUrl": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "maxFee": "158",
+          "estimate": {
+            "gas": "54399",
+            "maxFeePerGas": "1440000001",
+            "bound": "79",
+            "atMs": 1792008946560
+          },
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "3e3c3cf0-be7f-4bab-8ae2-f71a43cdec40",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:42431",
+          "asset": "0x20c0000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "1de8fd3361c35580e8a54cb9fc76b3447eefb8086dd84dde3a07076e1da18e62",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0x44668f913a6dd53ad78fa41895d6dac970294e47f7527153e55de8f5b33bd126",
+          "receiptStatus": "success",
+          "blockNumber": "66910398",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:20.310Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:42431",
+          "txHash": "0xf650912272f6c4565968e36f7f0e1b187cf9d3072bb206b9bf6b4e258a42dc2e",
+          "receiptStatus": "success",
+          "blockNumber": "39598950",
+          "token": "0x20c0000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x901404ccf8a4e61050fc3cae4a26b05fdc136fe1",
+            "value": "10000",
+            "logIndex": 0
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:20.322Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19507000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:06.383Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 6865
+      }
+    },
+    {
+      "runId": "run-20261014T201622.423Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 32,
+      "chain": "hyperevm-to-arc",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-arc@g4",
+      "profileId": "dyn-hyperevm-to-arc",
+      "upstreamUrl": "https://provider-x402-arc.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "purchased",
+      "stopReason": "outcome unknown, saved status \"unknown\"; not delivered — stopping the run without retry",
+      "paymentId": "8718e87d-abe4-4d5c-96b9-099b0d04290c",
+      "outcome": "unknown",
+      "savedStatus": "unknown",
+      "terminalReason": "destination_pay_unknown",
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": null,
+      "bodyMatchesRouterRecord": null,
+      "legs": [],
+      "balancesBefore": [],
+      "balancesAfter": [],
+      "reopen": {
+        "at": "2026-10-14T20:23:06.566Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 26075
+      }
+    },
+    {
+      "runId": "run-20261014T201718.385Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 33,
+      "chain": "hyperevm-to-sol",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-sol@g4",
+      "profileId": "dyn-hyperevm-to-sol",
+      "upstreamUrl": "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "aaa3f173-ccb7-42d4-9e02-c3937277d2ef",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "quoted": "10000",
+          "payTo": "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "160538d89e018e6129009528b09ee12f5fd5a24843f061a034cde98c8f5f7b68",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0x3e5ae6608f66df0e3696fb5e1ef5b172c507c34fac2fbf0166142152ec5fbe50",
+          "receiptStatus": "success",
+          "blockNumber": "66910494",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:20.533Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "51hv3rFrgpxLShTPUjTVb1eu6FYdUsvKaYivrdLmMCPdsn2dUuY7DckWamg2jaBoLWxkL3jSt34LsWKHEHfNkTYK",
+          "receiptStatus": "success",
+          "blockNumber": "511104816",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf",
+            "to": "HnuscuMcYCh8urbQ83vYNd3vTH4VKMdBLCW52tt6J63E",
+            "value": "10000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:20.547Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19485000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:06.803Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7763
+      }
+    },
+    {
+      "runId": "run-20261014T201756.578Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 34,
+      "chain": "hyperevm-to-solmpp",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-solmpp@g4",
+      "profileId": "dyn-hyperevm-to-solmpp",
+      "upstreamUrl": "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "05878a7e-4296-4781-a7c0-9c650a0a0af2",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "quoted": "10000",
+          "payTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "b21e35d63574a29d4309519587db002ac2d364d2a6107ece802d54d98c15eb6c",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0xbb6a2e6c53e039c506e5de636a338888c2beafde8e28ec0c195804206cab7287",
+          "receiptStatus": "success",
+          "blockNumber": "66910533",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:20.637Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "oDnKLd8dg7Sg4wGq6d4tjXNfwK5E5CttjBP7xZRDi7Qc1JYFN2bGU2F6NcfE76B33uPFJHtuWcVD783VTqqYp1K",
+          "receiptStatus": "success",
+          "blockNumber": "511104972",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "2mpwiLPKbNSan8zsGNCNAngxXJuFHb3MfbeK17aiyyXf",
+            "to": "MUbNoZ9cjg2vtwEJxbnChk315fhj1daMYEumWKDCR4S",
+            "value": "10000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": false,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:20.652Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19474000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:07.040Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 8076
+      }
+    },
+    {
+      "runId": "run-20261014T201835.216Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 35,
+      "chain": "hyperevm-to-rh",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-rh@g4",
+      "profileId": "dyn-hyperevm-to-rh",
+      "upstreamUrl": "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "f3841590-684e-4dd1-9e89-e122626eb583",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "36984a7f14ea795a13ebffef1b138ebe2f634c1815a6bc920ca6bad61421fab9",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0xb86c731075df905d8b37ef5689c327d135f7ae6372646c819d143f579dd3b9dd",
+          "receiptStatus": "success",
+          "blockNumber": "66910571",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:20.740Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:46630",
+          "txHash": "0x4bc1fdea145a87349e6cc19e560aabc6b6afef8ec1d5ce40154cd4f37d64f8b0",
+          "receiptStatus": "success",
+          "blockNumber": "135302112",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:20.750Z",
+            "finalizedBlock": "135314309"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19463000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:07.293Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 8467
+      }
+    },
+    {
+      "runId": "run-20261014T201913.263Z",
+      "planSha256": "cf73733cb0c30d4240c9964e077a10eda28f9e3d1fbbd21150008e0c0caea909",
+      "index": 36,
+      "chain": "hyperevm-to-arbsep",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-arbsep@g4",
+      "profileId": "dyn-hyperevm-to-arbsep",
+      "upstreamUrl": "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "658822f1-ea69-47cc-bb68-482baeb9f807",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:421614",
+          "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "3d54237ae623ef6da7b730e8a4505c4a41d4513026023ef1abdcfbedfb88043d",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0x83f3e0e13de3291e9a2a43ebe73d2b974339b2233522fb36397835e1932a9238",
+          "receiptStatus": "success",
+          "blockNumber": "66910611",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:20.991Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:421614",
+          "txHash": "0x11aa139c5ccc763e256dcf3d387b3c069ccd3beda6f191877073d6bcfbd4832f",
+          "receiptStatus": "success",
+          "blockNumber": "319195736",
+          "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:21.002Z",
+            "finalizedBlock": "319200950"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19452000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:07.531Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 7777
+      }
+    },
+    {
+      "runId": "run-20261014T202015.793Z",
+      "planSha256": "dc3b6f19d5da77c47b9c5b56cb4ed6b269c2c6778fa750390b1694f96549a46a",
+      "index": 16,
+      "chain": "rh-to-base",
+      "direction": "hosted",
+      "routeId": "dyn-rh-to-x402@g4b",
+      "profileId": "dyn-rh-to-x402",
+      "upstreamUrl": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "6ce65869-51ab-4c4e-91f4-ed16df32308a",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:46630",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:84532",
+          "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "quoted": "10000",
+          "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "bf6126c68a528e29ef5eaca0d165de164c238db9efd346cd4f069600cc9da08d",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:46630",
+          "txHash": "0x15ba1ad63253b78b371e89aed449c46408e6f3294f2a9855d0281eebaf2ff0b8",
+          "receiptStatus": "success",
+          "blockNumber": "135302941",
+          "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:21.343Z",
+            "finalizedBlock": "135314309"
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:84532",
+          "txHash": "0x34724cc7ad14ac8dba528ebd63983fa26b47ca621e0b3650a44960a6315075ba",
+          "receiptStatus": "success",
+          "blockNumber": "48120468",
+          "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x901404ccf8a4e61050fc3cae4a26b05fdc136fe1",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "finalized_tag",
+            "at": "2026-10-14T20:58:21.574Z",
+            "finalizedBlock": "48121135"
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:46630",
+          "kind": "token",
+          "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+          "value": "99419000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:07.782Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 5516
+      }
+    },
+    {
+      "runId": "run-20261014T202051.766Z",
+      "planSha256": "dc3b6f19d5da77c47b9c5b56cb4ed6b269c2c6778fa750390b1694f96549a46a",
+      "index": 12,
+      "chain": "sol-to-hyperevm",
+      "direction": "hosted",
+      "routeId": "dyn-sol-to-hyperevm@g4b",
+      "profileId": "dyn-sol-to-hyperevm",
+      "upstreamUrl": "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "bfe074c5-65e3-4a10-8406-ae23f5ae32a3",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "quoted": "10000",
+          "payTo": "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "30d0aae965527af5dc690e95fe13c92a7119b2bec044144331a39da7e876518f",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "txHash": "2YSfTbnqpDdifPv5fP34PLCdvQKtQnu4HRPDRvXmFooHFqXXLGyVDYddo19ZErZoXhVNCFv8To4cg5ExyLyAQr6a",
+          "receiptStatus": "success",
+          "blockNumber": "511105689",
+          "token": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "transfer": {
+            "from": "6MycWeoQv6kaLCKa4VwAP35tBhzZsFSBKJWH9heAnL6y",
+            "to": "7pjZnp8kuG7hy7Gav4jG282PovTKnipAYUcT6REA63fN",
+            "value": "11000",
+            "logIndex": -1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": false,
+            "rule": "finalized_commitment",
+            "at": "2026-10-14T20:58:21.960Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:998",
+          "txHash": "0x1bdb5eeab3a50166afa6564d4b915c1b56ad4cea6f858430158392927a307d37",
+          "receiptStatus": "success",
+          "blockNumber": "66910714",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0xf8243d93f339807ca9846aa31155a2b2262d08db",
+            "value": "10000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:22.203Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerSolana",
+          "address": "HTazrCcGEzWPKSKLFtbzszPJYTrFdD6xFHN4rLbwQng5",
+          "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+          "kind": "token",
+          "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "value": "19598000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:08.015Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 8072
+      }
+    },
+    {
+      "runId": "run-20261014T202130.046Z",
+      "planSha256": "dc3b6f19d5da77c47b9c5b56cb4ed6b269c2c6778fa750390b1694f96549a46a",
+      "index": 32,
+      "chain": "hyperevm-to-arc",
+      "direction": "hosted",
+      "routeId": "dyn-hyperevm-to-arc@g4b",
+      "profileId": "dyn-hyperevm-to-arc",
+      "upstreamUrl": "https://provider-x402-arc.subethalabs.com/v1/eth/snapshot",
+      "dynamic": {
+        "destinationPayTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1",
+        "pricing": {
+          "upstreamAmount": "10000",
+          "converted": "10000",
+          "fee": "1000",
+          "total": "11000",
+          "sourceDecimals": 6,
+          "destinationDecimals": 6
+        }
+      },
+      "stage": "verified",
+      "paymentId": "319826d2-a334-41ed-8ad7-120a0f51b763",
+      "outcome": "delivered",
+      "savedStatus": "delivered",
+      "terminalReason": null,
+      "quote": {
+        "source": {
+          "network": "eip155:998",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "amount": "11000",
+          "decimals": 6
+        },
+        "destination": {
+          "network": "eip155:5042002",
+          "asset": "0x3600000000000000000000000000000000000000",
+          "quoted": "10000",
+          "payTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1"
+        },
+        "fundsMoveOnCredential": false
+      },
+      "bodySha256": "28867471bf8a6aa5a68098ef634ffaa110f18e717d51ffe68068dd3782341a5b",
+      "bodyMatchesRouterRecord": true,
+      "legs": [
+        {
+          "leg": "source",
+          "network": "eip155:998",
+          "txHash": "0x362499dcbc12c2a48dec22948d68fb32ed5eecf1ce18589c6a1de8abce5b8164",
+          "receiptStatus": "success",
+          "blockNumber": "66910749",
+          "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "transfer": {
+            "from": "0xfcea8a897af225bd00cf815bf41966ca6bf60bf1",
+            "to": "0x9b10584fe6dee57e843104d2bac214c6d507f8a2",
+            "value": "11000",
+            "logIndex": 1
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:22.221Z",
+            "finalizedBlock": null
+          }
+        },
+        {
+          "leg": "destination",
+          "network": "eip155:5042002",
+          "txHash": "0x4d2d227645d1e8a027a4b6d5646e293f1162010f3eb530088deaa9e290e47275",
+          "receiptStatus": "success",
+          "blockNumber": "67215286",
+          "token": "0x3600000000000000000000000000000000000000",
+          "transfer": {
+            "from": "0x5d78cbd6ffa81a5dbe435ccfc79271a0f6a42274",
+            "to": "0x719eaec2eb4bddf10460c01832857c86e0ba42f1",
+            "value": "10000",
+            "logIndex": 2
+          },
+          "matchesQuote": true,
+          "finality": {
+            "final": true,
+            "rule": "receipt",
+            "at": "2026-10-14T20:58:22.230Z",
+            "finalizedBlock": null
+          }
+        }
+      ],
+      "balancesBefore": [],
+      "balancesAfter": [
+        {
+          "role": "payerEvm",
+          "address": "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1",
+          "network": "eip155:998",
+          "kind": "token",
+          "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+          "value": "19441000"
+        }
+      ],
+      "reopen": {
+        "at": "2026-10-14T20:23:08.255Z",
+        "same": true
+      },
+      "timingsMs": {
+        "purchase": 9365
+      }
+    }
+  ]
+}

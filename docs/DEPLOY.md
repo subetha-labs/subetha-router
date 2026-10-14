@@ -628,7 +628,7 @@ rollback は `subetha-router-prev-20261008T195406Z`（`b-d162524`）。コンテ
 
 **F-c の配備（2026-10-10 05:20Z。owner の決定「解決してしまいたいので、2で進めましょう」= 手元の Colima を作り直して build・配備）**: 手元の Colima は VM のディスクの I/O エラー（host の空きが 99% 使用）で壊れていたため、owner の同意で VM を削除して同じ設定（4 CPU・8 GiB・40 GiB・vz・virtiofs・docker）で作り直した（9 月の復旧用の控え `recovery-run312-20260917` は残した）。main `a89a979`（PR #152 = 静的 route の宛先の桁を本番の読み込みの経路で埋める）のイメージ `b-a89a979` を手元で `linux/arm64` に build し、host で load して layer の一致を確認、`swap-image.sh` で入れ替え: exit 0、journal の接頭辞は不変、egress ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行、healthy。rollback は `subetha-router-prev-20261010T052006Z`（`b-3b60355`）。それより古い停止中の rollback 2 つは既定の規則で削除。公開の `subetha_router_quote`（`md-mpp-eth-snapshot`、購入なし）の `quote.destination.decimals` が `6`。承認対象の `subject` の形は不変（0.1.x の payer と互換）。
 
-### 2g. EVM testnet 3 つ（Robinhood Chain testnet USDG・Arbitrum Sepolia USDC・HyperEVM testnet USDC）の x402 — **本番では無効（`RAILS_ACTIVATION.evm` は全部 `false`）**
+### 2g. EVM testnet 3 つ（Robinhood Chain testnet USDG・Arbitrum Sepolia USDC・HyperEVM testnet USDC）の x402 — **本番で両方向が有効（2026-10-14 19:56Z の G-4 から。`b-10dd795`。下の記録）**
 
 要件 `docs/evm-testnets-hosted-requirements.md`（v2.1 + Q-4）、設計 `docs/evm-testnets-hosted-design.md`（v2.1）。36 の組は動的プロファイル `dyn-<src>-to-<dst>` だけ（静的 route は足さない）。
 新 3 チェーンには公開の facilitator が無いので、**自前の facilitator（`tools/evm-facilitator.ts`）が Router のコンテナの中の 2 つ目の子** として動く（入口 `tools/remote-mcp.ts` が、有効化のどれかが `true` のときだけ Router の子より先に起動する）。
@@ -739,6 +739,29 @@ sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
 （ボリュームは `swap-image.sh` の `VOL` と同じ host のパス。`raise-cap` は journal だけを読み、鍵も網も使わない。）理由は必須で journal に残る。env の上限の値は変えない（変えると起動しない）。
 
 **戻す**: 有効化を `false` に戻したイメージに入れ替える（facilitator は起動しなくなる。journal と lock はボリュームに残り、次の起動で同じ状態から続く）。Caddyfile の `handle_path` は残してよい（後ろに何も無ければ 502）。
+
+**記録（2026-10-14。owner の決定: 受信も公開 Q-4、入れ替えは提出期限の後 Q-3、G-3 の公開の停止 15〜20 分を了承、testnet の支出は承認済み）**
+
+- **G-1**: E-FAC-H `0x09688ae64Dbb0B360de070D294c8d3d313790480` を作成、E-FAC から gas を入金（Robinhood 0.005 ETH `0xc4284e43…c488`、Arbitrum Sepolia 0.025 ETH `0x437e06da…5ff6`、HyperEVM 0.5 HYPE `0x2d8d4ebb…bdf5`。送金の前に E-FAC で送出し得る process を全部止め、ローカル版の journal の未解決 0 を確認）。本番の送信鍵 `0x5d78…2274` に T7 から USDG・USDC を各 0.3（EIP-3009、`0x4c294e0d…`・`0xacd7e13f…`・`0x9dedb1fc…`）。本番の env に §2g の表の値を追記（`.bak-*` を残す）。
+- **G-2**（19:04Z）: `b-6222b81`（main）を `swap-image.sh` で入れ替え（exit 0、rollback `b-53ab05a`）。Caddyfile を上の形に（`.bak-*`、validate → reload）。公開の一覧は不変（route 10・プロファイル 20）、facilitator の path は 502、Caddy のログに token 0 行。
+- **G-3**（公開の停止 19:15:07Z〜19:25:02Z）: 受け入れのコンテナ（`--env-file`、新 3 と既存のレールの語）。facilitator は公開の path で `/supported` に 3 network。Provider 3 つを配備（`wrangler secret put` は標準入力、`wrangler deploy`）、未払いの 402 が表どおり（network・資産・domain・`payTo` = E-PROV・10,000）。driver の hosted 動的モードで **14 件 delivered**（両レグの on-chain を driver が照合）、新 3 はどれも源としても宛先としても delivered。失敗 3 件（どれも既存のレールの側）:
+  - `dyn-x402-to-hyperevm`: x402.org が受信の settle を拒否（`source_rejected`）。資金は動かず、authorization は期限（19:26:54Z）の後も未使用を Base Sepolia の `Transfer` で確認。
+  - `dyn-mpp-to-hyperevm`: Tempo の MPP の署名で送金した後に署名の道具が失敗（ローカル版でも見た症状）。**0.011 pathUSD が Router の受取先へ移動（`0xf518a081…0241`）、購入は呼ばれていない**。返金なし（testnet）。driver はこの組を再署名しない。
+  - `dyn-rh-to-x402`: Provider A が宛先を拒否（`destination_rejected`、Router は払っていない）。受信の 0.011 USDG は Router の受取先に残る。
+  - 他に quote の `rate_limited`（呼び出し元ごとに quote 3 回・purchase 3 回 / 分の固定窓）7 件、支払いは始まっていない。以後の driver は 25 秒の間隔。
+- **G-4**（19:56Z）: PR #183（`RAILS_ACTIVATION.evm` 全部 `true`。golden は追加だけ）、`b-10dd795` を入れ替え（exit 0、rollback `b-6222b81`）。公開の一覧にプロファイル 56（新 36）。**公開の HTTPS の MCP から 36 組を各 1 回: 1 回目 33 delivered**、失敗 3 件を新しい quote で 1 回ずつ買い直して **3 件とも delivered（計 36/36）**。失敗の内訳:
+  - `dyn-sol-to-hyperevm`: HyperEVM の Provider への支払いが 3.4 秒で `unknown`（facilitator に settle の記録が無く chain の移動も無い。Provider → facilitator の verify の段で失敗したと見る。HyperEVM の公開 RPC の制限が候補）。
+  - `dyn-rh-to-x402`: G-3 と同じ `destination_rejected`。**その Router の process で最初の Provider A への支払いだけが拒否される**（G-3・G-4・G-5 の 2026-10-08 の `dyn-arc-to-x402` で同じ形。2 回目以降は通る）。Provider A の持ち主に伝える。
+  - `dyn-hyperevm-to-arc`: Arc の Provider（Circle の facilitator）への支払いが 20 秒で `unknown`。
+  - Router を再起動して全 39 件の status を `ownerKey` つきで読み直し: **39 件とも同じ**。
+  - 期限の後の確認（2026-10-14 20:29Z）: `dyn-hyperevm-to-arc` の 1 回目の宛先の authorization は未使用（Router → Arc の Provider の `Transfer` は 18・25 番目と買い直しの 3 件だけ）。`dyn-sol-to-hyperevm` の 1 回目も未使用（facilitator の journal で HyperEVM の E-PROV 向けの送出は 9 件 = HyperEVM 宛ての delivered の数。journal の送出の意図 59 件はすべて settled、aborted・reverted・運用者の解決は 0）。
+  - finality（2026-10-14 20:58Z の読み直し）: G-4 の 72 レグのうち 70 が final、残り 2 は Solana の公開 RPC の読み取りの失敗で、`getSignatureStatuses` を直接引いて 2 つとも `finalized`（err なし）。公開の要約は `docs/evidence/evm-hosted/g3-summary.json`・`g4-summary.json`（ownerKey・鍵・token は含まない）。
+  - **支払い手から Router への支払いは成立し、購入は届かなかったもの**（どれも Router の受取先に残る。testnet、返金なし。買い直しは新しい支払いで、元の分を返すものではない。Codex の記録 review #1）:
+    - G-3 `dyn-mpp-to-hyperevm`: 0.011 pathUSD（Tempo、署名で送金 `0xf518a081…0241`、購入は呼ばれていない）。
+    - G-3・G-4 `dyn-rh-to-x402`: 各 0.011 USDG（Robinhood、受信は settle 済み。宛先は `rejected` で Router は Provider A に払っていない）。
+    - G-4 `dyn-sol-to-hyperevm`: 0.011 Solana devnet USDC（受信 `5w1CpfQm…`）。宛先（Router → HyperEVM の Provider）は送出されず、authorization は期限切れで未使用。
+    - G-4 `dyn-hyperevm-to-arc`: 0.011 HyperEVM USDC（受信 `0x84aa842d…`）。宛先（Router → Arc の Provider）は送出されず、authorization は期限切れで未使用。
+  - **資金が動かなかったもの**: G-3 `dyn-x402-to-hyperevm`（受信の settle を x402.org が拒否、authorization は期限切れで未使用）と、quote の `rate_limited` の 7 件。
 
 ## 3. 動作確認
 

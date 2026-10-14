@@ -23,9 +23,9 @@ without a wallet, the local payer, when funds move). This README is the develope
 claude mcp add --scope user --transport http subetha-router https://router.subethalabs.com/mcp
 ```
 
-Ask for `subetha_router_list_routes`: ten static routes and twenty dynamic profiles, each a pair of
+Ask for `subetha_router_list_routes`: ten static routes and fifty-six dynamic profiles, each a pair of
 "what you pay with" and "what the provider accepts" across x402 (Base Sepolia, Arc testnet, Solana
-devnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with a listed `routeId` and any fresh
+devnet, and since 2026-10-14 Robinhood Chain testnet, Arbitrum Sepolia and HyperEVM testnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with a listed `routeId` and any fresh
 `requestId`) pays nothing and shows the human-readable `subject` an agent must present before a
 purchase. Then read [`docs/public-brief-2026-10-08.md`](docs/public-brief-2026-10-08.md) (all 20
 cross-rail pairs settled on testnets, with transaction hashes) and
@@ -68,7 +68,7 @@ claude mcp add --scope user --transport http subetha-router https://router.subet
 ```
 
 Ask for `subetha_router_list_routes` to discover the hosted Router's ten static
-routes and twenty dynamic profiles (trust the current listing). Discovery does
+routes and fifty-six dynamic profiles (trust the current listing). Discovery does
 not pay, fund a wallet or authorize purchase. This hosted low-level API is
 separate from the local payer's five tools and native confirmation flow.
 
@@ -175,7 +175,7 @@ submits and pays the gas. **Look at the Transfer log for the address that actual
 (for the outbound leg above, `0x5d78cbd6…` -> Provider A). Looking only at `tx.from` makes it look
 like someone else's payment.
 
-The hosted Router lists **ten static routes and twenty dynamic profiles** (since 2026-10-08; trust the current listing). The original two:
+The hosted Router lists **ten static routes and fifty-six dynamic profiles** (since 2026-10-14: the 36 added ones pay or reach Robinhood Chain testnet USDG, Arbitrum Sepolia USDC or HyperEVM testnet USDC over x402, see `docs/DEPLOY.md` §2g; trust the current listing). The original two:
 
 | routeId | Inbound | Outbound |
 |---|---|---|
@@ -263,7 +263,7 @@ Payments on the hosted Router are **testnet only**. One owner-run mainnet purcha
 tradable quotes**. Providers A/B are **hosted by us**, and this is not a claim that Hyperliquid or
 Uniswap support these payment methods.
 
-## Dynamic upstream URLs (twenty profiles enabled on the hosted Router)
+## Dynamic upstream URLs (fifty-six profiles enabled on the hosted Router)
 
 A caller can name **its own upstream URL** (a third-party x402 or MPP provider) and pay for it over the
 other rail: pay in Base Sepolia USDC (x402) for an MPP upstream, or in Tempo pathUSD (MPP) for an x402
