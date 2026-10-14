@@ -866,6 +866,8 @@ describe("prefund (§8.5 #3)", () => {
       receiptStatus: async () => undefined,
       secrets: Secrets.fromEnv({}),
       out: () => {},
+      // 記録の時刻は plan（2026-10-13T12:00Z）の後（実際の運用と同じ順）。実時計に依存させない（実時計だと plan の固定時刻との前後が日付で変わる）。
+      now: () => new Date("2026-10-13T12:30:00Z"),
     };
     const first = await runPrefund(plan, sha, dir, deps);
     expect(first.stopped).toBeUndefined();
@@ -877,9 +879,10 @@ describe("prefund (§8.5 #3)", () => {
       expect(Object.keys(body.paymentRequirements.extra).sort()).toEqual(["challengeNonce", "expiresAt", "name", "version"]);
     }
     expect(transfers).toEqual(["arc", "tempo"]);
-    // 同じ plan をもう一度: 1 件目の印で止まり、何も送らない。
+    // 同じ plan をもう一度: この plan の後に払われた入金がある（Codex M-3 #3）ので、印より先に plan ごと拒み、何も送らない。
     const again = await runPrefund(plan, sha, dir, deps);
-    expect(again.stopped?.reason).toMatch(/already attempted/);
+    expect(again.stopped).toMatchObject({ index: 0 });
+    expect(again.stopped?.reason).toMatch(/settled or reconciled as paid after this plan was made/);
     expect(settles).toHaveLength(facilitatorPieces);
     // 不明（5xx）で止まり、残りは送らない。
     const dir2 = tempDir();
@@ -887,6 +890,12 @@ describe("prefund (§8.5 #3)", () => {
     const unknown = await runPrefund(plan, sha, dir2, deps);
     expect(unknown.stopped).toMatchObject({ index: 1 });
     expect(unknown.stopped?.reason).toMatch(/unknown/);
+    expect(settles).toHaveLength(facilitatorPieces + 1);
+    // 払われた記録の無い印（不明で止まった 1 件目）: 同じ plan の再実行は送らずに止まる。
+    answer = 200;
+    const rerun = await runPrefund(plan, sha, dir2, deps);
+    expect(rerun.stopped).toBeDefined();
+    expect(rerun.stopped?.reason).toMatch(/already attempted under this plan/);
     expect(settles).toHaveLength(facilitatorPieces + 1);
     // 鍵が plan の払い手でなければ何もしない。
     await expect(runPrefund(plan, sha, tempDir(), { ...deps, payerAddress: T8 })).rejects.toThrow(/payer/);
