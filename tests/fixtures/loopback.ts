@@ -88,6 +88,8 @@ export interface Listening {
    * 応答前クラッシュの再現に使う（graceful shutdown ではない）。
    */
   kill(signal: NodeJS.Signals): Promise<void>;
+  /** 子が終わったら解ける（理由を問わない。入口が「どちらかの子が落ちたら両方を止める」ために見る）。 */
+  readonly exited: Promise<void>;
 }
 
 export async function startListening(
@@ -158,6 +160,7 @@ export async function startListening(
     baseUrl: `http://127.0.0.1:${port}`,
     stdout: () => stdout,
     stderr: () => stderr,
+    exited: closing,
     async stop(): Promise<void> {
       if (!closed) {
         child.kill("SIGTERM");

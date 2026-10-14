@@ -182,7 +182,8 @@ esac
 # 変更操作は mutate で（成功と確認できるまで PENDING。失敗は ERR で restore へ）。
 mutate stop stop "$OLD_ID" >/dev/null
 mutate rename rename "$OLD_ID" "$PREV"
-mutate run run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG" > "$OUTTMP"
+# 8611: 自前の EVM facilitator（hosted 設計 §4）。host の loopback だけに publish し、Caddy の /evm-facilitator/* がそこへ流す。有効化が無いイメージでは何も listen しない。
+mutate run run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -p 127.0.0.1:8611:8611 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG" > "$OUTTMP"
 NEW_ID=$(tr -d '[:space:]' < "$OUTTMP")
 [ -n "$NEW_ID" ]
 echo "new container: $NEW_ID"
