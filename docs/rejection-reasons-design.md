@@ -1,9 +1,9 @@
-# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 2 版、2026-10-15）
+# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 3 版、2026-10-15）
 
 > 要件 `docs/rejection-reasons-requirements.md` 第 2.1 版と §7 の owner の決定（Q-1 → 運用者だけ、Q-2 → 進行中の購入が無ければ本番の入れ替えは Claude の判断）。
 > コードは `origin/main`。SDK は `@x402/core`・`@x402/evm`・`@x402/fetch`・SVM の実装 2.28.0 に固定（`package.json:28-30,40`）。SDK の実装は同じ版の `node_modules` で読んだ（下の `chunk-*.mjs`）。
 > 下書きは Plan エージェント（コードを引いて作成）、親が読んで採用。進め方: 設計 → Codex のレビュー → タスク → 実装の PR。
-> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
+> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版（`5a52163`）は D-2 の readback で **REJECT**（#3・#9 が未解決、#7 は失敗の終了の扱い）→ 第 3 版の §13 が §12 の該当の記述（§12.3・§12.7・§12.9）に優先する。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
 
 ## 0. 一枚で
 
@@ -369,3 +369,22 @@ export function validateDiagRecord(value: unknown): DiagRecord | undefined;     
 ### 12.9 入れ替えの前の静止（D-1 #9）
 - 「journal の末尾と 10 分の無活動」では、昇格の前の購入（journal の行が無い）と、確認の後に入る購入を除けない。入れ替えは `swap-image.sh` の手順そのもので静止を作る: (1) 入口（Caddy）を止めて新しい要求を入れない、(2) 古いコンテナの `docker stop`（graceful shutdown の中で進行中の要求が終わるのを待つ）、(3) journal の末尾に `*_pending` で止まった支払いが無いことを入れ替えの後に確かめ、あれば owner に報告する。
 - 昇格の前の購入が止められたときの扱いは、これまでの入れ替えと同じ（x402 の受信は署名だけで資金は動かない。MPP の受信は呼び出し側の送金が済んでいる場合があり、それは既存の入れ替えの性質で、この作業では変わらない）。
+- **D-2（readback、第 2 版 `5a52163`）: REJECT**。#1・#2・#5・#8 は解決、#4・#6 は範囲で解決（`txRefCheck` は通常の payer の経路が RPC の結果を既に持つときだけ。scope の値は intent から作り、記録を積む時点の scope を固定する）。未解決: #3（`setImmediate` は支払いの応答の後を保証しない。Codex の再現で診断が先に走った。§12.6 の入口での hash と §12.3 の「hash は後」が矛盾）、#9（入口の停止は子を同時に止め 5 秒で SIGKILL、入れ替えの後の journal では入れ替えの前の静止を示せない）、#7（`tools/sign-payment.ts:90` の `process.exit(2)` で後回しの記録が消える）。反映は §13。
+
+## 13. 第 3 版の変更（§12.3・§12.6 の hash の位置・§12.7・§12.9 に優先する）
+
+### 13.1 観測の流れ（D-2 #3）
+- **hook が同期で行うのは 1 回の push だけ**: 手元の値（数字・結果の code・ヘッダの文字列の参照・その時点の scope の写し）を凍結した小さな object にして、メモリの有界の環（1,000 件。満杯なら捨てて数える）に積む。分類・hash（`cid`・`quoteHash`・`requestHash`）・検査・JSON 化・書き込みは hook ではしない。scope の写しは **積む時点** に作る（後の書き出しで今の scope を読まない）。
+- 生の値（`quoteId`・nonce・ヘッダの文字列）は環の中のメモリにだけあり、書き出しで分類・hash にした後に捨てる。ファイルには書かない。
+- **書き出し**は `setImmediate` で動き、1 回に 16 件までを処理して次の `setImmediate` に譲る。1 件の処理は短い文字列の sha256・Map の参照・2 KiB までの JSON 化で、数十マイクロ秒の桁。**「支払いの応答の後に走る」とは主張しない**: 他の購入の待ちの間に割り込み得る。主張は「判断の経路の同期の部分に加わるのは push だけ」「割り込む処理は 1 回あたり上限がある」。
+- 試験: (1) 期限の境界（期限の 1 ms 前に決まる場面で、sink 無し・記録する sink・投げる sink・遅い fs のどれでも結果が同じ）、(2) 100 件の fake の購入を同時に進め、sink の有無で event loop の遅れ（`perf_hooks.monitorEventLoopDelay`）の p99 の差が 2 ms 未満、(3) 環の満杯・書き出しの失敗で push が throw しない。
+
+### 13.2 署名の道具の終了（D-2 #7）
+- `tools/sign-payment.ts` は、成功・失敗のどちらの終了（`process.exit` を含む）の前にも `await sink.flush({ timeoutMs: 500 })`（best effort。時間切れ・失敗は無視）を呼ぶ。投げられた署名の失敗も同じ経路を通す。
+- 試験: 実際の入口を子 process で動かし、fake の Tempo の RPC で「送出の後に receipt の待ちで失敗」させ、終了コードと stdout・stderr が今と同じで、`signerStage:"pay_and_credential"`・`broadcast`・手元で計算した `txRef` の行がファイルに残ること。
+
+### 13.3 入れ替えの前の静止（D-2 #9。新しいタスク R-0）
+- **入口の graceful drain**（`tools/remote-mcp.ts`）: SIGTERM・SIGINT を受けたら、(1) MCP の HTTP の listener を閉じて新しい要求を受けない、(2) 進行中の MCP の要求の数が 0 になるのを待つ（上限 `DRAIN_TIMEOUT` 150 秒: 1 件の購入の最長（受信の settle と宛先の支払いの期限の合計）より長い。設計の値は R-0 で表にする）、(3) 0 になってから今の手順で子（Router、その後 facilitator）を止める、(4) 固定の 1 行 `drain: complete` か `drain: timeout`（数だけ）を出す。待っている間に子が落ちたら今どおり両方を止める。
+- **合図が入口に届くこと**: 今の `CMD` は `npx tsx tools/remote-mcp.ts`（入口は孫）。`docker stop` の SIGTERM が入口に届くことを R-0 の試験（実際のイメージ、`docker stop` で `drain: complete` が出る）で確かめる。届かなければ `CMD` を `node --import tsx tools/remote-mcp.ts` に替える（入口を PID 1 の直接の子 = PID 1 にする）。
+- **`deploy/swap-image.sh`**: 入口（Caddy）を止める（今どおり）→ 古いコンテナを `docker stop -t 180` → 古いコンテナの log に `drain: complete` があることを確かめる。無い（`drain: timeout`・SIGKILL・行が無い）なら **入れ替えをやめて** 既存の復旧の経路で古いコンテナを戻し、「静止できなかった」として exit 1。owner の Q-2 の条件（進行中の購入が無い）はこの `drain: complete` で満たす。
+- 既存の試験（`swap-image.sh` の mock）に、drain の成功・時間切れ・行が無いの 3 つの場面を足す。
