@@ -628,6 +628,118 @@ rollback は `subetha-router-prev-20261008T195406Z`（`b-d162524`）。コンテ
 
 **F-c の配備（2026-10-10 05:20Z。owner の決定「解決してしまいたいので、2で進めましょう」= 手元の Colima を作り直して build・配備）**: 手元の Colima は VM のディスクの I/O エラー（host の空きが 99% 使用）で壊れていたため、owner の同意で VM を削除して同じ設定（4 CPU・8 GiB・40 GiB・vz・virtiofs・docker）で作り直した（9 月の復旧用の控え `recovery-run312-20260917` は残した）。main `a89a979`（PR #152 = 静的 route の宛先の桁を本番の読み込みの経路で埋める）のイメージ `b-a89a979` を手元で `linux/arm64` に build し、host で load して layer の一致を確認、`swap-image.sh` で入れ替え: exit 0、journal の接頭辞は不変、egress ok、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行、healthy。rollback は `subetha-router-prev-20261010T052006Z`（`b-3b60355`）。それより古い停止中の rollback 2 つは既定の規則で削除。公開の `subetha_router_quote`（`md-mpp-eth-snapshot`、購入なし）の `quote.destination.decimals` が `6`。承認対象の `subject` の形は不変（0.1.x の payer と互換）。
 
+### 2g. EVM testnet 3 つ（Robinhood Chain testnet USDG・Arbitrum Sepolia USDC・HyperEVM testnet USDC）の x402 — **本番では無効（`RAILS_ACTIVATION.evm` は全部 `false`）**
+
+要件 `docs/evm-testnets-hosted-requirements.md`（v2.1 + Q-4）、設計 `docs/evm-testnets-hosted-design.md`（v2.1）。36 の組は動的プロファイル `dyn-<src>-to-<dst>` だけ（静的 route は足さない）。
+新 3 チェーンには公開の facilitator が無いので、**自前の facilitator（`tools/evm-facilitator.ts`）が Router のコンテナの中の 2 つ目の子** として動く（入口 `tools/remote-mcp.ts` が、有効化のどれかが `true` のときだけ Router の子より先に起動する）。
+
+- **Router → facilitator**: コンテナの中の loopback（`http://127.0.0.1:8611/<token>`）。例外は facilitator の origin の完全一致だけで、受信の transport（静的・動的）にだけ効く。動的上流（呼び出し側の URL）は今どおり loopback 不可。
+- **Provider（Worker）→ facilitator**: `https://router.subethalabs.com/evm-facilitator/<token>/…` を Caddy が host の `127.0.0.1:8611`（コンテナの publish）へ流す。
+- **gas 鍵**（E-FAC-H）は facilitator の子の env にだけ渡る（Router の子には URL だけ）。journal と lock は公開・受け入れで共通の `/app/runtime/evm-facilitator/{journal.ndjson,facilitator.lock}`（`flock`。2 つ目の facilitator は起動しない）。
+- **gas の上限** は最初の起動で env の値を journal の `gas_cap_init` に書き、以後 env を変えると起動しない。補充は facilitator を止めて `raise-cap`（下）。公開の受信で第三者が使っても、上限で止まる（Q-4）。
+
+**env（`/etc/subetha-router.env` に足す。値は出さない）**
+
+| 名前 | 中身 |
+|---|---|
+| `SUBETHA_EVM_FACILITATOR_KEY` | E-FAC-H の鍵（`0x09688ae64Dbb0B360de070D294c8d3d313790480`） |
+| `SUBETHA_EVM_FACILITATOR_TOKEN` | 32 バイトの乱数（base64url）。Worker の secret の URL にも入る |
+| `SUBETHA_EVM_FACILITATOR_GAS_CAP_46630` | `2500000000000000`（0.0025 ETH。入金 0.005 の半分） |
+| `SUBETHA_EVM_FACILITATOR_GAS_CAP_421614` | `12500000000000000`（0.0125 ETH。入金 0.025 の半分） |
+| `SUBETHA_EVM_FACILITATOR_GAS_CAP_998` | `250000000000000000`（0.25 HYPE。入金 0.5 の半分） |
+| `SUBETHA_EVM_PROVIDER_PAYTO` | E-PROV `0xf8243d93F339807CA9846Aa31155A2B2262D08db`（facilitator の allowlist。Router の受取先は `SUBETHA_ROUTER_RECEIVER`） |
+| `SUBETHA_EVM_FACILITATOR_LOG` | `/app/runtime/evm-facilitator/log.ndjson`（無ければ stderr に出て入口がメモリに貯める） |
+| `SUBETHA_EVM_FACILITATOR_RPC_<chainId>` | 任意（既定は公開 RPC） |
+| （足さない） | 新 3 の送信は Arc と同じ x402 の送信鍵（D-11）。入口が `SUBETHA_OUTBOUND_X402_KEY ?? SUBETHA_OUTBOUND_PRIVATE_KEY` を子に渡す（`tools/remote-mcp.ts`）。本番は後者で、アドレス `0x5d78CBD6fFA81a5dBe435ccfC79271a0F6a42274`。新 3 の USDG・USDC をここに入れる（G-1） |
+
+**Caddy（`/etc/caddy/Caddyfile`。path に token が入るので、access log は付けず、エラーログからも要求の URI を消す）**
+
+```
+{
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>headers>Referer delete
+			}
+		}
+	}
+}
+
+router.subethalabs.com {
+    handle_path /evm-facilitator/* {
+        reverse_proxy 127.0.0.1:8611 {
+            header_up Host 127.0.0.1:8611
+            header_up -Origin
+        }
+    }
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+手元の Caddy 2.11.4（本番と同じ版）で確かめた（2026-10-14）: `/evm-facilitator/<token>/supported` は接頭辞を外して `/<token>/supported` で 8611 に、`Host` は `127.0.0.1:8611`、`Origin` は落ちる。`/mcp` は今どおり 8787（`Host`・`Origin` はそのまま）。
+**facilitator が止まっているとき**（8611 に何も無い）Caddy は 502 を返し、`http.log.error` に要求を記録する。上の `log default` の filter が無いと、その行の `request.uri` に token が出る（実測: 1 行）。filter を入れると token は 0 行（502 の connection refused と応答待ちの切れの 2 つで確かめた。Codex の docs review #1）。
+
+**G-2（無効のまま配備）**: main のイメージ（`RAILS_ACTIVATION.evm` 全部 `false`）を `swap-image.sh` で入れ替える（`-p 127.0.0.1:8611:8611` が足された。無効の間は何も listen しない）。Caddyfile を上のとおりにする（読み込みは次の行の手順）。
+Caddyfile は検証してから読み込む: `sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`（引数無しの `caddy reload` は今のディレクトリの Caddyfile を読む）。
+確認: 公開の一覧が入れ替え前と同じ（route 10・プロファイル 20）、`/healthz`、`subetha-egress check`、`curl -s -o /dev/null -w '%{http_code}' https://router.subethalabs.com/evm-facilitator/x/supported` が 502（後ろに何も無い）。
+
+**G-3（本番の env での受け入れ。資金が動く。testnet の支出は owner の承認済み 2026-10-13）**: §2c と同じ排他の引き継ぎ（進行中の購入が無いときに公開を止め、同じイメージ・同じ network・同じボリュームで受け入れのコンテナを単独で動かす）。違いは:
+- §2c の例は env を 1 つずつ `-e` で渡しているが、ここでは **本番の env ファイルをそのまま読ませる**（facilitator の鍵・token・上限・`SUBETHA_EVM_PROVIDER_PAYTO` が要る。値をコマンドに書かない）:
+  ```sh
+  sudo docker stop subetha-router
+  sudo docker run -it --rm --name subetha-router-acceptance \
+    --network subetha-router-net -p 127.0.0.1:8788:8788 -p 127.0.0.1:8611:8611 \
+    -v /var/lib/subetha-router:/app/runtime --env-file /etc/subetha-router.env \
+    -e SUBETHA_ACCEPTANCE_PORT=8788 -e SUBETHA_ACCEPTANCE_BIND=0.0.0.0 \
+    -e SUBETHA_ACCEPTANCE_JOURNAL_PATH=runtime/acceptance/evm-journal.ndjson \
+    subetha-router:<公開と同じ tag> node --import tsx tools/rails-acceptance-run.ts \
+    --rails arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out
+  # 終わったら Ctrl-C（入口が facilitator と Router の子を止めて終わる）→ sudo docker start subetha-router
+  ```
+  facilitator の journal と lock は公開と同じ `/app/runtime/evm-facilitator/`（公開を止めているので lock は空いている。動いていれば受け入れの facilitator は起動しない）。Router の journal は受け入れの別のパス（§2c と同じ）。
+- 受け入れの間に Provider 3 つを配備する（facilitator が公開の path で届いてから）:
+  ```sh
+  cd providers/x402-workers
+  for c in rh arbsep hyperevm; do
+    npx wrangler secret put FACILITATOR_URL --env $c   # 値 https://router.subethalabs.com/evm-facilitator/<token>
+    npx wrangler deploy --env $c
+  done
+  ```
+  未払いの `GET https://provider-x402-<c>.subethalabs.com/v1/eth/snapshot` が 402 と正しい offer（network・資産・domain・`payTo` = E-PROV・10,000）を返すこと。
+- driver（手元の Mac で。`ssh -L 8788:127.0.0.1:8788 subetha-router-new` を張っておく）。subcommand が先、`--hosted` で行列の hosted 動的モード:
+  ```sh
+  # env（値は出さない。鍵は手元の使い捨てだけ。本番の秘密鍵は写さない）:
+  #   SUBETHA_HOSTED_MCP_URL=http://127.0.0.1:8788/mcp SUBETHA_HOSTED_MCP_ALLOW_LOOPBACK=1 SUBETHA_HOSTED_LABEL=g3
+  #   支払い手: SUBETHA_PAYER_ADDRESS / SUBETHA_PAYER_PRIVATE_KEY（EVM・Tempo）、SUBETHA_PAYER_SOLANA_ADDRESS / SOLANA_PAYER_PRIVATE_KEY
+  #   hosted Router の公開アドレス（鍵ではなくアドレスで渡す）: SUBETHA_ROUTER_RECEIVER、SUBETHA_ROUTER_OUTBOUND_ADDRESS（x402 送信 0x5d78…2274）、
+  #     SUBETHA_ROUTER_MPP_OUTBOUND_ADDRESS（Tempo 送信）、SUBETHA_ARC_RECEIVER_ADDRESS、SUBETHA_SOLANA_RECEIVER、SUBETHA_SOLANA_OUTBOUND_ADDRESS
+  #   Provider の受取先: SUBETHA_EVM_PROVIDER_PAYTO、SUBETHA_ARC_PROVIDER_PAYTO、SUBETHA_SOLANA_PROVIDER_PAYTO、SUBETHA_SOLANA_MPP_PROVIDER_PAYTO
+  #   facilitator の gas（読むだけ）: EVM_FACILITATOR_ADDRESS（E-FAC-H 0x0968…0480）
+  npx tsx tools/evm-testnets-e2e.ts plan --hosted --out <dir>/plan-g3.json      # 資金の表と plan の sha256。何も署名しない
+  npx tsx tools/evm-testnets-e2e.ts run --hosted --plan <dir>/plan-g3.json --plan-sha256 <承認した hash> --evidence-dir <dir>/evidence
+  npx tsx tools/evm-testnets-e2e.ts finality --hosted --evidence-dir <dir>/evidence
+  npx tsx tools/evm-testnets-e2e.ts reopen --hosted --evidence-dir <dir>/evidence   # Router の再起動の後。ownerKey つき
+  npx tsx tools/evm-testnets-e2e.ts summary --hosted --evidence-dir <dir>/evidence --out docs/evidence/evm-hosted/g3-summary.json   # 公開してよい要約（ownerKey・鍵は入らない）
+  ```
+  plan は MCP の URL を束ねる（G-3 の tunnel と G-4 の https は別の plan）。36 組を各 1 回。Tempo を源とする組は署名で送金する（失敗・`unknown` は再署名しない）。`ownerKey` は `<evidence>/owner-keys/`（0600）にだけ残る。
+
+**G-4（公開の有効化）**: `RAILS_ACTIVATION.evm` を全部 `true` にしたイメージに入れ替える。公開の HTTPS の MCP から driver（`SUBETHA_HOSTED_LABEL=g4`、新しい plan）で 36 組を各 1 回 + 既存の組を各レール 1 回以上。Router の再起動の後に全 status を `ownerKey` つきで読み直す。
+
+**gas の上限の補充（運用者）**: facilitator が lock を持っている間は書けない。公開の Router を止めた状態で、同じボリュームを mount した一時コンテナから:
+
+```sh
+sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
+  -e EVM_FACILITATOR_JOURNAL=/app/runtime/evm-facilitator/journal.ndjson \
+  --entrypoint node subetha-router:<tag> --import tsx tools/evm-facilitator.ts \
+  raise-cap --network eip155:998 --add-wei 250000000000000000 --reason "E-FAC-H に 0.5 HYPE を追加入金（tx 0x…）"
+```
+
+（ボリュームは `swap-image.sh` の `VOL` と同じ host のパス。`raise-cap` は journal だけを読み、鍵も網も使わない。）理由は必須で journal に残る。env の上限の値は変えない（変えると起動しない）。
+
+**戻す**: 有効化を `false` に戻したイメージに入れ替える（facilitator は起動しなくなる。journal と lock はボリュームに残り、次の起動で同じ状態から続く）。Caddyfile の `handle_path` は残してよい（後ろに何も無ければ 502）。
+
 ## 3. 動作確認
 
 ```sh
