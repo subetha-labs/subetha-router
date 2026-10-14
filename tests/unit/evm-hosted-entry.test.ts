@@ -1,7 +1,8 @@
 /**
  * 入口とコンテナ（`docs/evm-testnets-hosted-design.md` §2.3・§4、FR-H1・FR-H8・SR-H3〜SR-H5、タスク H-4）の純粋な部分:
  * - 計画: EVM testnet 3 つのどれかが有効なら facilitator の子の計画（env の allowlist・URL・network）。Router の子の env は URL と token だけ（gas 鍵は無い）
- * - 全部無効: facilitator の計画は無く、子の env は golden と byte 一致（facilitator の env が親にあっても）
+ * - 全部無効: facilitator の計画は無く、子の env は G-4 の前の golden（`public-pre-evm.json`）と byte 一致（facilitator の env が親にあっても）。
+ *   公開の定数は G-4（hosted 設計 §8.2、2026-10-14）で evm が全部 true なので、evm を除いた・全部 false にした形で見る
  * - facilitator の journal は公開の入口と受け入れ用の起動で同じ 1 つ（Router の journal は受け入れで別）
  * - 受け入れ用の起動の `--rails` の新しい 6 語
  * - `/supported` の照合（偽の fetch）、試験の口を本番の入口が使わないこと
@@ -128,14 +129,20 @@ describe("計画: EVM testnet のどれかが有効なら facilitator の子（h
   });
 
   test("全部無効: facilitator の計画は無く、子の env と設定は golden と byte 一致（facilitator の env・URL が親にあっても読まない）", () => {
-    const expected = golden("public");
-    for (const activation of [RAILS_ACTIVATION, withEvm(RAILS_ACTIVATION, { rh: OFF, arbsep: OFF, hyperevm: OFF })]) {
+    // G-4 の前の golden（evm が全部 false の公開の生成）。公開の定数は G-4 で evm が全部 true なので、evm を除いた形と全部 false の形で見る。
+    const expected = golden("public-pre-evm");
+    const { evm: _evm, ...publicPreEvm } = RAILS_ACTIVATION;
+    for (const activation of [publicPreEvm, withEvm(RAILS_ACTIVATION, { rh: OFF, arbsep: OFF, hyperevm: OFF })]) {
       const plan = hostPlanOf({ activation, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson" }, { ...goldenEnv, ...facilitatorEnv, SUBETHA_EVM_FACILITATOR_URL: `http://127.0.0.1:8611/${TOKEN}` });
       expect(plan.facilitator).toBeUndefined();
       expect(plan).not.toHaveProperty("facilitator");
       expect(JSON.stringify(plan.childEnv)).toBe(JSON.stringify(expected.childEnv));
       expect(JSON.stringify(plan.config, null, 2)).toBe(JSON.stringify(expected.config, null, 2));
     }
+    // 対照: G-4 の公開の定数そのものは facilitator の子を計画する（3 つの chain、URL は token と port 8611 から。親の env の URL は使わない）。
+    const publicPlan = hostPlanOf({ activation: RAILS_ACTIVATION, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson" }, { ...goldenEnv, ...facilitatorEnv, SUBETHA_EVM_FACILITATOR_URL: "http://127.0.0.1:9999/parent-url-is-ignored_0123456789abcdef" });
+    expect(publicPlan.facilitator?.networks).toEqual([EVM_TESTNETS.rh.network, EVM_TESTNETS.arbsep.network, EVM_TESTNETS.hyperevm.network]);
+    expect(publicPlan.childEnv["SUBETHA_EVM_FACILITATOR_URL"]).toBe(`http://127.0.0.1:8611/${TOKEN}`);
   });
 });
 

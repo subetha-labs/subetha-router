@@ -1,0 +1,859 @@
+{
+ "config": {
+  "router": {
+   "approvalTtlMs": 600000,
+   "routes": {
+    "md-mpp-eth-snapshot": {
+     "routeId": "md-mpp-eth-snapshot",
+     "canonicalPath": "/v1/routes/md-mpp-eth-snapshot/resource",
+     "rail": "mpp",
+     "sourceRail": "x402",
+     "source": {
+      "amount": "10000",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "decimals": 6,
+      "network": "eip155:84532",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "tempo/charge",
+      "network": "eip155:42431",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-x402-eth-snapshot": {
+     "routeId": "md-x402-eth-snapshot",
+     "canonicalPath": "/v1/routes/md-x402-eth-snapshot/resource",
+     "rail": "x402",
+     "sourceRail": "mpp",
+     "source": {
+      "amount": "10000",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "decimals": 6,
+      "network": "eip155:42431",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "exact",
+      "network": "eip155:84532",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-mpp-eth-snapshot-arc": {
+     "routeId": "md-mpp-eth-snapshot-arc",
+     "canonicalPath": "/v1/routes/md-mpp-eth-snapshot-arc/resource",
+     "rail": "mpp",
+     "sourceRail": "x402",
+     "source": {
+      "amount": "10000",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "decimals": 6,
+      "network": "eip155:5042002",
+      "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+     },
+     "destination": {
+      "scheme": "tempo/charge",
+      "network": "eip155:42431",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-x402-eth-snapshot-sol": {
+     "routeId": "md-x402-eth-snapshot-sol",
+     "canonicalPath": "/v1/routes/md-x402-eth-snapshot-sol/resource",
+     "rail": "x402",
+     "sourceRail": "x402",
+     "source": {
+      "amount": "10000",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "decimals": 6,
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+     },
+     "destination": {
+      "scheme": "exact",
+      "network": "eip155:84532",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-arc-eth-snapshot": {
+     "routeId": "md-arc-eth-snapshot",
+     "canonicalPath": "/v1/routes/md-arc-eth-snapshot/resource",
+     "rail": "x402",
+     "sourceRail": "x402",
+     "source": {
+      "amount": "10000",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "decimals": 6,
+      "network": "eip155:84532",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "exact",
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "payTo": "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1"
+     }
+    },
+    "md-sol-eth-snapshot-mpp": {
+     "routeId": "md-sol-eth-snapshot-mpp",
+     "canonicalPath": "/v1/routes/md-sol-eth-snapshot-mpp/resource",
+     "rail": "x402",
+     "sourceRail": "mpp",
+     "source": {
+      "amount": "10000",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "decimals": 6,
+      "network": "eip155:42431",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "exact",
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "payTo": "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d"
+     }
+    },
+    "md-x402-eth-snapshot-solmpp": {
+     "routeId": "md-x402-eth-snapshot-solmpp",
+     "canonicalPath": "/v1/routes/md-x402-eth-snapshot-solmpp/resource",
+     "rail": "x402",
+     "sourceRail": "mpp",
+     "source": {
+      "amount": "10000",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "decimals": 6,
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+     },
+     "destination": {
+      "scheme": "exact",
+      "network": "eip155:84532",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-mpp-eth-snapshot-solmpp": {
+     "routeId": "md-mpp-eth-snapshot-solmpp",
+     "canonicalPath": "/v1/routes/md-mpp-eth-snapshot-solmpp/resource",
+     "rail": "mpp",
+     "sourceRail": "mpp",
+     "source": {
+      "amount": "10000",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "decimals": 6,
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+     },
+     "destination": {
+      "scheme": "tempo/charge",
+      "network": "eip155:42431",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "payTo": "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"
+     }
+    },
+    "md-solmpp-eth-snapshot": {
+     "routeId": "md-solmpp-eth-snapshot",
+     "canonicalPath": "/v1/routes/md-solmpp-eth-snapshot/resource",
+     "rail": "mpp",
+     "sourceRail": "x402",
+     "source": {
+      "amount": "10000",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "decimals": 6,
+      "network": "eip155:84532",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "solana/charge",
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "payTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc"
+     }
+    },
+    "md-solmpp-eth-snapshot-mpp": {
+     "routeId": "md-solmpp-eth-snapshot-mpp",
+     "canonicalPath": "/v1/routes/md-solmpp-eth-snapshot-mpp/resource",
+     "rail": "mpp",
+     "sourceRail": "mpp",
+     "source": {
+      "amount": "10000",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "decimals": 6,
+      "network": "eip155:42431",
+      "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+     },
+     "destination": {
+      "scheme": "solana/charge",
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "payTo": "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc"
+     }
+    }
+   },
+   "budget": {
+    "maxPurchases": 100000,
+    "buckets": [
+     {
+      "network": "eip155:84532",
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "maxTotal": "1000000000",
+      "maxPerPurchase": "10000"
+     },
+     {
+      "network": "eip155:42431",
+      "asset": "0x20c0000000000000000000000000000000000000",
+      "maxTotal": "1000000000",
+      "maxPerPurchase": "10000"
+     },
+     {
+      "network": "eip155:5042002",
+      "asset": "0x3600000000000000000000000000000000000000",
+      "maxTotal": "1000000000",
+      "maxPerPurchase": "10000"
+     },
+     {
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "maxTotal": "1000000000",
+      "maxPerPurchase": "10000"
+     }
+    ]
+   },
+   "dynamic": {
+    "enabled": true,
+    "profiles": {
+     "dyn-arc-to-sol": {
+      "profileId": "dyn-arc-to-sol",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-arc": {
+      "profileId": "dyn-sol-to-arc",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-x402": {
+      "profileId": "dyn-solmpp-to-x402",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-mpp": {
+      "profileId": "dyn-solmpp-to-mpp",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-arc": {
+      "profileId": "dyn-solmpp-to-arc",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-sol": {
+      "profileId": "dyn-solmpp-to-sol",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-x402-to-solmpp": {
+      "profileId": "dyn-x402-to-solmpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-solmpp": {
+      "profileId": "dyn-mpp-to-solmpp",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arc-to-solmpp": {
+      "profileId": "dyn-arc-to-solmpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-solmpp": {
+      "profileId": "dyn-sol-to-solmpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arc-to-mpp": {
+      "profileId": "dyn-arc-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arc-to-x402": {
+      "profileId": "dyn-arc-to-x402",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-x402": {
+      "profileId": "dyn-sol-to-x402",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-mpp": {
+      "profileId": "dyn-sol-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-x402-to-arc": {
+      "profileId": "dyn-x402-to-arc",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-arc": {
+      "profileId": "dyn-mpp-to-arc",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-x402-to-sol": {
+      "profileId": "dyn-x402-to-sol",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-sol": {
+      "profileId": "dyn-mpp-to-sol",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-x402-to-mpp": {
+      "profileId": "dyn-x402-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-x402": {
+      "profileId": "dyn-mpp-to-x402",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     }
+    },
+    "budget": {
+     "maxPurchases": 1000,
+     "buckets": [
+      {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      },
+      {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      },
+      {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      },
+      {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "21000"
+      }
+     ]
+    },
+    "denyHosts": [
+     "router.subethalabs.com"
+    ]
+   }
+  },
+  "x402": {
+   "upstreams": {
+    "md-mpp-eth-snapshot": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+    "md-x402-eth-snapshot": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+    "md-mpp-eth-snapshot-arc": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+    "md-x402-eth-snapshot-sol": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+    "md-arc-eth-snapshot": "https://provider-x402-arc.subethalabs.com/v1/eth/snapshot",
+    "md-sol-eth-snapshot-mpp": "https://provider-x402-sol.subethalabs.com/v1/eth/snapshot",
+    "md-x402-eth-snapshot-solmpp": "https://provider-x402.subethalabs.com/v1/eth/snapshot",
+    "md-mpp-eth-snapshot-solmpp": "https://provider-mpp.subethalabs.com/v1/eth/snapshot",
+    "md-solmpp-eth-snapshot": "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot",
+    "md-solmpp-eth-snapshot-mpp": "https://provider-mpp-sol.subethalabs.com/v1/eth/snapshot"
+   },
+   "inboundFacilitators": {
+    "eip155:5042002": {
+     "kind": "circle",
+     "url": "https://api.circle.com/v1/facilitator/x402"
+    },
+    "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
+     "kind": "x402",
+     "url": "https://www.x402.org/facilitator"
+    }
+   }
+  }
+ },
+ "childEnvKeys": [
+  "ROUTER_ADAPTER_MODE",
+  "ROUTER_CANONICAL_BASE_URL",
+  "ROUTER_HTTP_PORT",
+  "ROUTER_JOURNAL_PATH",
+  "ROUTER_MPP_INBOUND_OFFER_SECONDS",
+  "ROUTER_MPP_INBOUND_RPC_URL",
+  "ROUTER_MPP_INBOUND_SECRET",
+  "ROUTER_PRINCIPAL_TOKENS",
+  "ROUTER_SUBETHA_FACILITATOR_URL",
+  "ROUTER_X402_INBOUND_FACILITATOR_URL",
+  "ROUTER_X402_INBOUND_OFFER_SECONDS",
+  "SUBETHA_ARC_RECEIVER_KEY",
+  "SUBETHA_OUTBOUND_MPP_KEY",
+  "SUBETHA_OUTBOUND_SOLANA_KEY",
+  "SUBETHA_OUTBOUND_X402_KEY",
+  "SUBETHA_RAILS_ACTIVATION",
+  "SUBETHA_TEMPO_RPC_URL"
+ ],
+ "childEnv": {
+  "SUBETHA_OUTBOUND_MPP_KEY": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "SUBETHA_OUTBOUND_X402_KEY": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "ROUTER_JOURNAL_PATH": "/tmp/golden.ndjson",
+  "ROUTER_HTTP_PORT": "0",
+  "ROUTER_CANONICAL_BASE_URL": "http://127.0.0.1:8500",
+  "ROUTER_PRINCIPAL_TOKENS": "judge:public",
+  "ROUTER_ADAPTER_MODE": "real",
+  "ROUTER_SUBETHA_FACILITATOR_URL": "https://www.x402.org/facilitator",
+  "ROUTER_X402_INBOUND_FACILITATOR_URL": "https://www.x402.org/facilitator",
+  "ROUTER_X402_INBOUND_OFFER_SECONDS": "600",
+  "SUBETHA_TEMPO_RPC_URL": "https://tempo.example/v1/TOKEN",
+  "ROUTER_MPP_INBOUND_RPC_URL": "https://tempo.example/v1/TOKEN",
+  "ROUTER_MPP_INBOUND_SECRET": "0123456789abcdef0123456789abcdef-golden",
+  "ROUTER_MPP_INBOUND_OFFER_SECONDS": "600",
+  "SUBETHA_RAILS_ACTIVATION": "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc",
+  "SUBETHA_ARC_RECEIVER_KEY": "0x2222222222222222222222222222222222222222222222222222222222222222",
+  "SUBETHA_OUTBOUND_SOLANA_KEY": "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2"
+ }
+}

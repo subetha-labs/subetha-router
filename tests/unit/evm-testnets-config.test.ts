@@ -265,7 +265,9 @@ describe("公開の入口には EVM testnet のものが無い（FR-E6・AC-E5�
   const goldenEnv = { SUBETHA_OUTBOUND_PRIVATE_KEY: "0x" + "11".repeat(32), SUBETHA_ROUTER_RECEIVER: RECEIVER, SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-golden", SUBETHA_TEMPO_RPC_URL: "https://tempo.example/v1/TOKEN", SUBETHA_ARC_RECEIVER_KEY: "0x" + "22".repeat(32), SUBETHA_SOLANA_RECEIVER: "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5", SUBETHA_OUTBOUND_SOLANA_KEY: "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2", SUBETHA_ARC_PROVIDER_PAYTO: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", SUBETHA_SOLANA_PROVIDER_PAYTO: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", SUBETHA_SOLANA_MPP_PROVIDER_PAYTO: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" };
   const golden = (name: string) => JSON.parse(readFileSync(path.join(import.meta.dirname, "../fixtures/config-golden", `${name}.json`), "utf8"));
 
-  test.each([["public", RAILS_ACTIVATION], ["none", RAILS_NONE]] as const)("公開の計画（%s）: EVM の env を与えても golden と一致し、子は公開の子、子の env・能力に localCounterparties・SUBETHA_EVM_* が無い", (name, activation) => {
+  // 公開の定数は G-4（hosted 設計 §8.2、2026-10-14）で evm が全部 true。evm を除いた形（G-4 の前の公開の定数）が G-4 の前の golden（public-pre-evm）。
+  const { evm: _evm, ...publicPreEvm } = RAILS_ACTIVATION;
+  test.each([["public-pre-evm", publicPreEvm], ["none", RAILS_NONE]] as const)("公開の計画（%s）: EVM の env を与えても golden と一致し、子は公開の子、子の env・能力に localCounterparties・SUBETHA_EVM_* が無い", (name, activation) => {
     const plan = hostPlanOf({ activation, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson" }, { ...goldenEnv, ...evmEnv, SUBETHA_EVM_CHAINS: "rh,arbsep" });
     const expected = golden(name);
     expect(plan.config).toEqual(expected.config);
@@ -280,6 +282,20 @@ describe("公開の入口には EVM testnet のものが無い（FR-E6・AC-E5�
     const capabilities = routerProcessCapabilitiesOf({ ...plan.childEnv, ...localOnlyEnv, SUBETHA_EVM_CHAINS: "rh,arbsep", ...(plan.childEnv["SUBETHA_OUTBOUND_SOLANA_KEY"] === undefined ? {} : { SUBETHA_OUTBOUND_SOLANA_KEY: seed }) });
     expect(Object.keys(capabilities)).not.toContain("localCounterparties");
     expect(Object.keys(capabilities.evmSigningByNetwork ?? {}).filter((network) => EVM_TESTNET_NETWORKS.has(network))).toEqual([]);
+  });
+
+  test("G-4 の公開の定数（hosted の EVM testnet 3 つが全部 true）: ローカル版の env を与えても golden（public）と同じで、足されるのは hosted の facilitator の URL だけ。ローカル版の子・env・Sepolia は出ない", () => {
+    const hostedFacilitatorEnv = { SUBETHA_EVM_FACILITATOR_KEY: "0x" + "44".repeat(32), SUBETHA_EVM_FACILITATOR_TOKEN: "config-golden-token_0123456789abcdefABCDEF", SUBETHA_EVM_FACILITATOR_GAS_CAP_46630: "1000000000000000", SUBETHA_EVM_FACILITATOR_GAS_CAP_421614: "1000000000000000", SUBETHA_EVM_FACILITATOR_GAS_CAP_998: "1000000000000000" };
+    // evmEnv の SUBETHA_EVM_PROVIDER_PAYTO は golden と同じ値。親の env の URL（evmEnv の FACILITATOR）は使わず、計画が token と port から作る。
+    const plan = hostPlanOf({ activation: RAILS_ACTIVATION, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson" }, { ...goldenEnv, ...evmEnv, ...hostedFacilitatorEnv, SUBETHA_EVM_CHAINS: "rh,arbsep" });
+    const expected = golden("public");
+    expect(plan.config).toEqual(expected.config);
+    expect(plan.childEnv).toEqual(expected.childEnv);
+    expect(plan.childScript).toBe(PUBLIC_ROUTER_PROCESS);
+    expect(Object.keys(plan.childEnv).filter((name) => name.startsWith("SUBETHA_EVM_"))).toEqual(["SUBETHA_EVM_FACILITATOR_URL"]);
+    const text = JSON.stringify({ config: plan.config, childEnv: plan.childEnv, childScript: plan.childScript });
+    expect(text).not.toMatch(/localCounterparties|evm-testnets-router-process|eip155:11155111|SUBETHA_EVM_CHAINS|SUBETHA_EVM_PROVIDER_URL_|127\.0\.0\.1:862|0123456789abcdef-token/);
+    expect(text).not.toContain("44".repeat(32));
   });
 
   test("mainnet の計画も公開の子のまま", () => {
