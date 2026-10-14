@@ -2003,9 +2003,9 @@ describe("H-1 §2.3 単一の実行者の lock", () => {
       expect(refused.stderr).toBe(`evm-facilitator: ${LOCKED_MESSAGE}\n`);
       expect(readFileSync(journal, "utf8")).toBe(before);
 
-      // 止めた（SIGSTOP）holder: 待っても後継は取れない（heartbeat・奪取が無い）。
+      // 止めた（SIGSTOP）holder: 第 1 版の設計の奪取の閾値（30 秒）を越えて待っても後継は取れない（heartbeat・奪取が無い。Codex H-1 #1）。
       holder.kill("SIGSTOP");
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 31_000));
       expect((await start("try", lockPath)).line).toBe(`LOCKED ${LOCKED_MESSAGE}`);
       expect((await raiseCapProcess(journal)).code).toBe(1);
 
@@ -2017,6 +2017,6 @@ describe("H-1 §2.3 単一の実行者の lock", () => {
       const ok = await raiseCapProcess(journal);
       expect(ok.code).toBe(0);
       expect(JSON.parse(ok.stdout)).toEqual({ event: "cap_raised", network: RH, addWei: "5", effectiveCapWei: (CAP + 5n).toString() });
-    }, 60_000);
+    }, 90_000);
   });
 });
