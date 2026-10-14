@@ -216,6 +216,9 @@ export function originPinnedTransport(inner: GuardedTransport, allowed: Readonly
  *   無ければ起動しない。あれば `inbound[routeId]` にその origin 1 つ。loopback でない URL は今の transport（ここには載らない）
  * - 送信: `(x402, network)` の組で network が EVM testnet。組の上流の URL の loopback のものは全部 allowlist にあること。loopback が 1 つでもあれば
  *   **全部**が loopback（allowlist 済み）であること（一部だけなら起動しない）。全部なら `outbound[network]` にその origin の集合
+ * - 動的の受信（hosted 設計 `docs/evm-testnets-hosted-design.md` §3）: `sourceRail: "x402"` で source の network が EVM testnet のプロファイル。
+ *   facilitator の URL の扱いは静的の受信と同じ（loopback で allowlist に無ければ起動しない）。あれば `inboundDynamic[profileId]` にその origin 1 つ。
+ *   **受信の facilitator の transport だけ**に効く（動的上流の transport・送信の `dynamic` の transport は変えない）
  * 能力が無ければ空（何も変えない）。
  */
 export function localCounterpartyPlanOf(
@@ -223,10 +226,12 @@ export function localCounterpartyPlanOf(
   upstreams: Readonly<Record<string, string>>,
   facilitatorUrlOf: (network: string) => string | undefined,
   origins: ReadonlySet<string> | undefined,
-): { readonly inbound: ReadonlyMap<string, string>; readonly outbound: ReadonlyMap<string, ReadonlySet<string>> } {
+  profiles: Readonly<Record<string, DynamicProfile>> = {},
+): { readonly inbound: ReadonlyMap<string, string>; readonly inboundDynamic: ReadonlyMap<string, string>; readonly outbound: ReadonlyMap<string, ReadonlySet<string>> } {
   const inbound = new Map<string, string>();
+  const inboundDynamic = new Map<string, string>();
   const outbound = new Map<string, Set<string>>();
-  if (origins === undefined) return { inbound, outbound };
+  if (origins === undefined) return { inbound, inboundDynamic, outbound };
   const listed = (raw: string): string | undefined => {
     try {
       const origin = new URL(raw).origin;
@@ -270,7 +275,17 @@ export function localCounterpartyPlanOf(
       throw new ConfigError(`outbound x402 ${network}: either every upstream of the group is a listed local counterparty or none is`);
     }
   }
-  return { inbound, outbound };
+  for (const profile of Object.values(profiles)) {
+    if (profile.sourceRail !== "x402" || !EVM_TESTNET_NETWORKS.has(profile.source.network)) continue;
+    const url = facilitatorUrlOf(profile.source.network);
+    if (url === undefined || !isLoopbackUrl(url)) continue;
+    const origin = listed(url);
+    if (origin === undefined) {
+      throw new ConfigError(`dynamic.profiles.${profile.profileId}: the inbound facilitator is a loopback address that RouterCapabilities.localCounterparties does not list`);
+    }
+    inboundDynamic.set(profile.profileId, origin);
+  }
+  return { inbound, inboundDynamic, outbound };
 }
 
 /** Solana の公開 devnet RPC（`ROUTER_SOLANA_RPC_URL` が無いときの既定）。 */
@@ -584,6 +599,7 @@ export function composeRails(
     real.upstreams,
     (network) => (network === LEGACY_X402_INBOUND_NETWORK ? real.x402InboundFacilitatorUrl : real.x402InboundFacilitators?.[network]?.url),
     localOrigins,
+    config.router.dynamic?.profiles ?? {},
   );
 
   /**
@@ -938,14 +954,20 @@ export function composeRails(
           : evmRail(route.source.network, route.source.asset, payTo, at, transport, facilitator, real.x402InboundOfferSeconds, false);
     }
     // 動的プロファイルの受信（x402）: 署名を quote に束縛し、transport は動的用（loopback 不可）。
+    // EVM testnet の受信で facilitator が allowlist の loopback なら、静的と同じく loopback を許しその origin だけを通す transport（hosted 設計 §3）。
     for (const profile of Object.values(profiles)) {
       if (profile.sourceRail !== "x402" || dynamicTransport === undefined) continue;
       const at = `dynamic.profiles.${profile.profileId}`;
       const facilitator = facilitatorFor(profile.source.network, at);
+      const localOrigin = localPlan.inboundDynamic.get(profile.profileId);
+      const transport =
+        localOrigin === undefined
+          ? dynamicTransport
+          : originPinnedTransport(createGuardedTransport({ ...staticHooks, allowLoopback: true, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }), new Set([localOrigin]), report);
       inboundRails[`x402:${profile.profileId}`] =
         networkFamilyOf(profile.source.network) === "svm"
-          ? svmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, dynamicTransport, facilitator.url, real.x402InboundOfferSeconds)
-          : evmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, dynamicTransport, facilitator, real.x402InboundOfferSeconds, true);
+          ? svmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, transport, facilitator.url, real.x402InboundOfferSeconds)
+          : evmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, transport, facilitator, real.x402InboundOfferSeconds, true);
     }
   }
 
