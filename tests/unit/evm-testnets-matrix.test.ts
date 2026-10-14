@@ -6,7 +6,7 @@
  *   Solana のレグの照合（owner × mint の差）と `finalized`、`--prefunded` の範囲、資金の表（入金を数えない・共有の Solana アカウント）
  * - prefund: 20,000 以下の分割、plan の hash の束縛、本物の facilitator の核が分割の要求を受ける
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Challenge } from "mppx";
@@ -26,8 +26,12 @@ import {
   planSha256,
   PlanRefusal,
   priorAttemptHold,
+  ownerKeysOf,
+  readOwnerKey,
   runPurchases,
+  runReopen,
   Secrets,
+  writeSummary,
   TRANSFER_TOPIC,
   buildPlan,
   type ChainReader,
@@ -38,8 +42,14 @@ import {
   type SvmTransactionInfo,
 } from "../../tools/evm-testnets-e2e.js";
 import {
+  buildHostedPlan,
   buildMatrixPlan,
+  hostedPairsOf,
+  hostedSubjectMismatches,
+  loadApprovedHostedPlan,
   loadApprovedMatrixPlan,
+  runHostedMatrix,
+  type HostedPlan,
   matrixChecksOf,
   matrixSignerOf,
   matrixSubjectMismatches,
@@ -59,7 +69,7 @@ import { buildPrefundPlan, chunksOf, eip3009OfferOf, loadApprovedPrefundPlan, ru
 import { evmTestnetsCapabilitiesOf } from "../../tools/evm-testnets-router-process.js";
 import { evmTestnetsOptionsOf } from "../../tools/evm-testnets-run.js";
 import { RAILS_ACTIVATION_ENV } from "../../tools/rails-entry.js";
-import { EVM_MATRIX_ACTIVATION, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmTestnetsConfigOf, MATRIX_RAILS, matrixPairsOf, OUTBOUND, RAILS_NONE, UPSTREAM, UPSTREAM_ARC, UPSTREAM_SOL, UPSTREAM_SOL_MPP } from "../../tools/remote-mcp-config.js";
+import { EVM_MATRIX_ACTIVATION, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmTestnetsConfigOf, MATRIX_RAILS, matrixPairsOf, OUTBOUND, OUTBOUND_X402, RAILS_NONE, UPSTREAM, UPSTREAM_ARC, UPSTREAM_SOL, UPSTREAM_SOL_MPP, UPSTREAM_X402 } from "../../tools/remote-mcp-config.js";
 import { EVM_TESTNETS_ROUTER_PROCESS, hostPlanOf, HostPlanError } from "../../tools/remote-mcp.js";
 import { createX402Payer } from "../../tools/x402-payer.js";
 
@@ -1171,5 +1181,418 @@ describe("再実行の別名（SUBETHA_MATRIX_RERUNS）", () => {
     expect(pairs[30]).toEqual({ src: "tempo", dst: "hyperevm", routeId: "mx-tempo-to-hyperevm-r2" });
     expect(() => matrixPairsOf(["tempo:arc"])).toThrow();
     expect(() => matrixPairsOf(["rh:rh"])).toThrow();
+  });
+});
+
+/* ------------------------------------------------------------------ hosted 動的モード（`docs/evm-testnets-hosted-design.md` §8.1、AC-H7・SR-H7） */
+
+const HOSTED_URL = "https://router.subethalabs.com/mcp";
+const ROUTER_X402_OUT = "0x1111111111111111111111111111111111111111";
+const ROUTER_MPP_OUT = "0x2222222222222222222222222222222222222222";
+const HOSTED_SOL_OUT = getBase58Decoder().decode(new Uint8Array(32).fill(5));
+const hostedEnv = {
+  ...driverEnv,
+  SUBETHA_SOLANA_OUTBOUND_ADDRESS: HOSTED_SOL_OUT,
+  SUBETHA_ROUTER_OUTBOUND_ADDRESS: ROUTER_X402_OUT,
+  SUBETHA_ROUTER_MPP_OUTBOUND_ADDRESS: ROUTER_MPP_OUT,
+  SUBETHA_HOSTED_MCP_URL: HOSTED_URL,
+  SUBETHA_HOSTED_LABEL: "g3",
+};
+const NEW3_SET: ReadonlySet<string> = new Set(NEW3);
+const HOSTED_EPS = ["x402", "mpp", "arc", "sol", "solmpp", "rh", "arbsep", "hyperevm"] as const;
+
+async function hostedPlan(chain = new MatrixChain(), env: Record<string, string> = hostedEnv): Promise<HostedPlan> {
+  return buildHostedPlan(env, chain, () => new Date("2026-10-15T12:00:00Z"));
+}
+
+interface HostedBehaviour {
+  /** quote の応答を書き換える（subject と quote 文書の両方を渡す）。 */
+  tamper?: (profileId: string, response: Record<string, unknown>) => void;
+  /** Tempo 宛ての cap（既定 700 → 手数料 1,000）。 */
+  capOf?: (profileId: string) => string;
+  purchaseThrows?: (profileId: string) => boolean;
+}
+/** hosted の MCP の偽物（`src/mcp/tools.ts` の `quoteUrl`・`purchase`・`status` と同じ形）。status は ownerKey が一致するときだけ読める。 */
+/** paymentId は fake の間でも一意（本番は UUID。同じ paymentId の ownerKey の置き場は上書きしない）。 */
+let hostedPaymentSeq = 0;
+class HostedMcp implements McpCaller {
+  readonly calls: { name: string; args: Record<string, unknown> }[] = [];
+  readonly statuses = new Map<string, { ownerKey: string; status: Record<string, unknown> }>();
+  readonly ownerKeys: string[] = [];
+  #n = 0;
+  constructor(private readonly plan: HostedPlan, private readonly chain: MatrixChain, private readonly behaviour: HostedBehaviour = {}) {}
+  async close(): Promise<void> {}
+  count(name: string): number {
+    return this.calls.filter((c) => c.name === name).length;
+  }
+  async call(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.calls.push({ name, args });
+    if (name === "subetha_router_status") {
+      const saved = this.statuses.get(String(args["paymentId"]));
+      // Router は ownerKey が無い・違うと存在を隠す（`src/http/app.ts`）。
+      if (saved === undefined || args["ownerKey"] !== saved.ownerKey) return { found: false };
+      return { ...saved.status, echo: `owner ${saved.ownerKey}` };
+    }
+    const profileId = String(args["profileId"] ?? (args["quote"] as { routeId?: string } | undefined)?.routeId ?? "");
+    const p = this.plan.purchases.find((x) => x.profileId === profileId);
+    if (p === undefined) throw new Error(`no planned ${profileId}`);
+    if (name === "subetha_router_quote_url") {
+      this.#n += 1;
+      const quoteId = p.source.scheme === "exact" && p.source.family === "evm" ? hex64(0xbbb000 + this.#n) : `dynid${String(this.#n)}`.padEnd(43, "B");
+      hostedPaymentSeq += 1;
+      const paymentId = `00000000-0000-4000-8000-${String(hostedPaymentSeq).padStart(12, "0")}`;
+      const ownerKey = `owner-key-${String(this.#n)}-${"k".repeat(32)}`;
+      this.ownerKeys.push(ownerKey);
+      const gas = p.expected.gasIndexedFee;
+      const cap = gas ? (this.behaviour.capOf?.(profileId) ?? "700") : undefined;
+      const fee = cap === undefined ? "1000" : BigInt(cap) > 1000n ? cap : "1000";
+      const total = (10_000n + BigInt(fee)).toString();
+      const pricing = { upstreamAmount: "10000", converted: "10000", fee, total, ...(cap === undefined ? {} : { maxFee: cap, estimate: { gas: "1", maxFeePerGas: "1", bound: "350", atMs: Date.now() } }), sourceDecimals: 6, destinationDecimals: 6 };
+      const moves = p.source.rail === "mpp";
+      const disclosures = { destinationVerifiedByOperator: false, refundOnFailure: false, fundsMoveOnCredential: moves, unsupportedResponseIsPaidWithoutData: true };
+      const offer = offerFor({ ...p, source: { ...p.source, amount: total } }, quoteId);
+      const approval = { required: true, boundTo: quoteId, deadlineMs: Date.now() + 600_000 };
+      const upstream = { url: String(args["url"]), method: "GET" };
+      const quote = {
+        quoteId, paymentId, routeId: profileId, resource: { url: `https://router.subethalabs.com/v1/dynamic/${profileId}`, method: "GET" }, upstream,
+        source: { rail: p.source.rail, amount: total, asset: p.source.asset, decimals: 6, network: p.source.network, payTo: p.source.to, expiresAt: 0, offer },
+        destination: { rail: p.destination.rail, quoted: "10000", asset: p.destination.asset, decimals: 6, network: p.destination.network, payTo: p.destination.to, quoteFingerprint: "sha256:00" },
+        pricing, disclosures, approval, ownerKey,
+      };
+      const subject = {
+        quoteId, paymentId, routeId: profileId, resource: quote.resource,
+        source: { amount: total, decimals: 6, asset: p.source.asset, network: p.source.network, expiresAt: 0, offer },
+        destination: { quoted: "10000", asset: p.destination.asset, network: p.destination.network },
+        approval, fundsMoveOnCredential: moves, upstream, destinationPayTo: p.destination.to, destinationDecimals: 6, pricing, disclosures,
+      };
+      const response: Record<string, unknown> = { ok: true, approvalRequired: true, quote: structuredClone(quote), nextStep: `pass the owner key ${ownerKey} to status`, subject: structuredClone(subject) };
+      this.behaviour.tamper?.(profileId, response);
+      return response;
+    }
+    if (name === "subetha_router_purchase") {
+      if (this.behaviour.purchaseThrows?.(profileId) === true) throw new Error("timeout");
+      const quote = args["quote"] as { paymentId: string; ownerKey: string; source: { amount: string } };
+      const n = Number(quote.paymentId.slice(-12));
+      const srcRef = p.source.family === "svm" ? svmSignature(3000 + n) : hex64(0x6000 + n);
+      const dstRef = p.destination.family === "svm" ? svmSignature(4000 + n) : hex64(0xe000 + n);
+      await this.chain.pay(p.source.network, p.source.asset, p.source.from, p.source.to, BigInt(quote.source.amount), srcRef);
+      await this.chain.pay(p.destination.network, p.destination.asset, p.destination.from, p.destination.to, 10_000n, dstRef);
+      const body = { market: "ETH/USDC", data: { priceUsdcPerWeth: "1" } };
+      const wrapped = { untrusted: true, source: "upstream", contentType: "application/json", body };
+      this.statuses.set(quote.paymentId, { ownerKey: quote.ownerKey, status: { found: true, projection: { paymentId: quote.paymentId, routeId: profileId, status: "delivered", source: { txRef: srcRef }, destination: { txRef: dstRef }, result: wrapped }, proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" } } });
+      return { ok: true, outcome: "delivered", paymentId: quote.paymentId, result: wrapped, proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" } };
+    }
+    throw new Error(`unexpected tool ${name}`);
+  }
+}
+
+/** 証跡のディレクトリの全ファイルの中身（owner-keys を除く）。 */
+function evidenceTextsOf(dir: string): string {
+  const out: string[] = [];
+  const walk = (d: string): void => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "owner-keys") walk(full);
+      } else out.push(readFileSync(full, "utf8"));
+    }
+  };
+  walk(dir);
+  return out.join("\n");
+}
+
+describe("hosted dynamic plan (hosted design §8.1)", () => {
+  test("36 purchases dyn-<s>-to-<d>: at least one side new, s != d; URL = the destination rail's Provider; amounts and recipients per rail", async () => {
+    const plan = await hostedPlan();
+    const expected = HOSTED_EPS.flatMap((s) => HOSTED_EPS.filter((d) => d !== s && (NEW3_SET.has(s) || NEW3_SET.has(d))).map((d) => `dyn-${s}-to-${d}`));
+    expect(expected).toHaveLength(36);
+    expect(plan.purchases.map((p) => p.profileId)).toEqual(expected);
+    expect(hostedPairsOf().map((p) => p.profileId)).toEqual(expected);
+    expect(plan.hosted).toEqual({ mcpUrl: HOSTED_URL, label: "g3", tempoMaxTotal: "11000", profiles: 36 });
+    const urlOf: Record<string, string> = { x402: UPSTREAM_X402, mpp: UPSTREAM, arc: UPSTREAM_ARC, sol: UPSTREAM_SOL, solmpp: UPSTREAM_SOL_MPP, rh: "https://provider-x402-rh.subethalabs.com/v1/eth/snapshot", arbsep: "https://provider-x402-arbsep.subethalabs.com/v1/eth/snapshot", hyperevm: "https://provider-x402-hyperevm.subethalabs.com/v1/eth/snapshot" };
+    const sourceTo: Record<string, string> = { x402: T8, mpp: T8, arc: ARC_RECEIVER, sol: SOL_RECEIVER, solmpp: SOL_RECEIVER, rh: T8, arbsep: T8, hyperevm: T8 };
+    const destTo: Record<string, string> = { x402: OUTBOUND_X402.payTo, mpp: OUTBOUND.payTo, arc: ARC_PROVIDER, sol: SOL_PROVIDER, solmpp: D_PROVIDER, rh: E_PROV, arbsep: E_PROV, hyperevm: E_PROV };
+    const destFrom: Record<string, string> = { x402: ROUTER_X402_OUT, mpp: ROUTER_MPP_OUT, arc: ROUTER_X402_OUT, sol: HOSTED_SOL_OUT, solmpp: HOSTED_SOL_OUT, rh: ROUTER_X402_OUT, arbsep: ROUTER_X402_OUT, hyperevm: ROUTER_X402_OUT };
+    const networkOf: Record<string, string> = { x402: "eip155:84532", mpp: "eip155:42431", arc: "eip155:5042002", sol: SOL_NET, solmpp: SOL_NET, rh: EVM_TESTNETS.rh.network, arbsep: EVM_TESTNETS.arbsep.network, hyperevm: EVM_TESTNETS.hyperevm.network };
+    for (const p of plan.purchases) {
+      const [, s, d] = /^dyn-(.+)-to-(.+)$/.exec(p.profileId)!;
+      expect(p.routeId).toBe(`${p.profileId}@g3`);
+      expect(p.url).toBe(urlOf[d!]);
+      expect(p.source.network).toBe(networkOf[s!]);
+      expect(p.destination.network).toBe(networkOf[d!]);
+      expect(p.source.to).toBe(sourceTo[s!]);
+      expect(p.destination.to).toBe(destTo[d!]);
+      expect(p.destination.from).toBe(destFrom[d!]);
+      expect(p.source.from).toBe(s === "sol" || s === "solmpp" ? SOL_PAYER : T7);
+      expect(p.destination.amount).toBe("10000");
+      expect(p.source.amount).toBe("11000");
+      expect(p.expected).toEqual({ upstreamAmount: "10000", gasIndexedFee: d === "mpp", total: d === "mpp" ? null : "11000", maxTotal: "11000", fundsMoveOnCredential: s === "mpp" || s === "solmpp" });
+      expect(p.source.fundsMoveAtSign).toBe(s === "mpp");
+    }
+    // 宛先ごとの数: 新 3 宛ては 7 件ずつ、既存宛ては 3 件ずつ。
+    const byDest = new Map<string, number>();
+    for (const p of plan.purchases) byDest.set(p.pair.destination, (byDest.get(p.pair.destination) ?? 0) + 1);
+    expect(Object.fromEntries(byDest)).toEqual({ x402: 3, mpp: 3, arc: 3, sol: 3, solmpp: 3, rh: 7, arbsep: 7, hyperevm: 7 });
+    // 払い手の支出だけが gate。hosted Router・facilitator の資金は情報。
+    expect(plan.debits.every((d) => d.role === "payerEvm" || d.role === "payerSolana")).toBe(true);
+    expect(plan.operator.debits.some((d) => d.role === "routerOutbound")).toBe(true);
+    expect(plan.operator.debits.some((d) => d.role === "facilitatorGas")).toBe(true);
+    expect(plan.allSufficient).toBe(true);
+    const baseDebit = plan.debits.filter((d) => d.routeId === "dyn-x402-to-rh@g3");
+    expect(baseDebit.map((d) => d.amount)).toEqual(["11000"]);
+  });
+
+  test("the Tempo ceiling env raises only the Tempo-destination totals; env refusals (http, label, ceiling, MPP outbound address)", async () => {
+    const plan = await hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_TEMPO_MAX_TOTAL: "12000" });
+    for (const p of plan.purchases) expect(p.source.amount).toBe(p.pair.destination === "mpp" ? "12000" : "11000");
+    await expect(hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_MCP_URL: "http://router.subethalabs.com/mcp" })).rejects.toThrow(/must be https/);
+    await expect(hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_MCP_URL: "http://127.0.0.1:18787/mcp" })).rejects.toThrow(/SUBETHA_HOSTED_MCP_ALLOW_LOOPBACK/);
+    const tunnel = await hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_MCP_URL: "http://127.0.0.1:18787/mcp", SUBETHA_HOSTED_MCP_ALLOW_LOOPBACK: "1" });
+    expect(tunnel.hosted.mcpUrl).toBe("http://127.0.0.1:18787/mcp");
+    await expect(hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_MCP_URL: "http://localhost:18787/mcp", SUBETHA_HOSTED_MCP_ALLOW_LOOPBACK: "1" })).rejects.toThrow(/must be https/);
+    await expect(hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_LABEL: "" })).rejects.toThrow(/SUBETHA_HOSTED_LABEL/);
+    for (const bad of ["10999", "20001", "abc"]) await expect(hostedPlan(new MatrixChain(), { ...hostedEnv, SUBETHA_HOSTED_TEMPO_MAX_TOTAL: bad })).rejects.toThrow(/SUBETHA_HOSTED_TEMPO_MAX_TOTAL/);
+    const { SUBETHA_ROUTER_MPP_OUTBOUND_ADDRESS: _m, ...noMpp } = hostedEnv;
+    await expect(hostedPlan(new MatrixChain(), noMpp)).rejects.toThrow(/SUBETHA_ROUTER_MPP_OUTBOUND_ADDRESS/);
+    const { SUBETHA_ROUTER_OUTBOUND_ADDRESS: _x, ...noX402 } = hostedEnv;
+    await expect(hostedPlan(new MatrixChain(), noX402)).rejects.toThrow(/x402 outbound address/);
+  });
+
+  test("a short payer is SHORT (the gate); a short hosted Router outbound is information only", async () => {
+    const chain = new MatrixChain();
+    chain.balanceOf = (network, asset, owner) => (owner === ROUTER_X402_OUT && asset !== null ? 0n : 10n ** 24n);
+    expect((await hostedPlan(chain)).allSufficient).toBe(true);
+    chain.balanceOf = (network, asset, owner) => (owner === T7 && network === "eip155:84532" && asset !== null ? 20_000n : 10n ** 24n);
+    const short = await hostedPlan(chain);
+    expect(short.allSufficient).toBe(false);
+    expect(short.checks.find((c) => !c.ok)?.note).toMatch(/short at purchase #2 dyn-x402-to-arbsep@g3/);
+  });
+});
+
+/** quote を取って照合だけを見る。 */
+async function hostedQuote(profileId: string, behaviour: HostedBehaviour = {}) {
+  const plan = await hostedPlan();
+  const p = plan.purchases.find((x) => x.profileId === profileId)!;
+  const mcp = new HostedMcp(plan, new MatrixChain(), behaviour);
+  return { p, response: await mcp.call("subetha_router_quote_url", { profileId, url: p.url, requestId: "r" }) };
+}
+const subjectOf = (r: Record<string, unknown>) => r["subject"] as Record<string, any>;
+const quoteDocOf = (r: Record<string, unknown>) => r["quote"] as Record<string, any>;
+/** 署名される offer と表示の offer を同じに書き換える（offer の照合以外の欄の検査を見るため）。 */
+function bothOffers(r: Record<string, unknown>, mutate: (offer: Record<string, any>) => void): void {
+  const offer = structuredClone(quoteDocOf(r)["source"]["offer"]);
+  mutate(offer);
+  quoteDocOf(r)["source"]["offer"] = offer;
+  subjectOf(r)["source"]["offer"] = structuredClone(offer);
+}
+
+describe("hosted subject/plan comparison before signing (AC-H7)", () => {
+  test.each(["dyn-x402-to-rh", "dyn-rh-to-mpp", "dyn-mpp-to-arbsep", "dyn-solmpp-to-hyperevm", "dyn-sol-to-rh", "dyn-rh-to-solmpp", "dyn-arbsep-to-hyperevm", "dyn-hyperevm-to-arc", "dyn-rh-to-sol", "dyn-arc-to-rh"])("a well-formed dynamic quote for %s has no mismatches", async (profileId) => {
+    const { p, response } = await hostedQuote(profileId);
+    expect(hostedSubjectMismatches(response, p, Date.now())).toEqual([]);
+  });
+
+  const cases: [string, string, HostedBehaviour, RegExp][] = [
+    ["profileId (subject.routeId)", "dyn-x402-to-rh", { tamper: (_id, r) => (subjectOf(r)["routeId"] = "dyn-x402-to-arbsep") }, /subject\.routeId \(profileId\)/],
+    ["upstream URL (subject)", "dyn-x402-to-rh", { tamper: (_id, r) => (subjectOf(r)["upstream"] = { url: "https://evil.example/v1/eth/snapshot", method: "GET" }) }, /subject\.upstream\.url/],
+    ["upstream URL (quote document, trailing slash)", "dyn-rh-to-x402", { tamper: (_id, r) => (quoteDocOf(r)["upstream"] = { url: `${UPSTREAM_X402}/`, method: "GET" }) }, /quote\.upstream\.url/],
+    ["upstream method", "dyn-rh-to-x402", { tamper: (_id, r) => (subjectOf(r)["upstream"] = { url: UPSTREAM_X402, method: "POST" }) }, /subject\.upstream\.method/],
+    ["source network", "dyn-rh-to-x402", { tamper: (_id, r) => (subjectOf(r)["source"]["network"] = "eip155:421614") }, /subject\.source\.network/],
+    ["source asset", "dyn-rh-to-x402", { tamper: (_id, r) => (subjectOf(r)["source"]["asset"] = EVM_TESTNETS.arbsep.asset) }, /subject\.source\.asset/],
+    ["source decimals", "dyn-rh-to-x402", { tamper: (_id, r) => (subjectOf(r)["source"]["decimals"] = 18) }, /subject\.source\.decimals/],
+    ["source payTo (the offer that is signed)", "dyn-sol-to-rh", { tamper: (_id, r) => bothOffers(r, (o) => (o["payTo"] = SOL_PAYER)) }, /payTo \(Router receiver\)/],
+    ["source payTo (quote document)", "dyn-arc-to-rh", { tamper: (_id, r) => (quoteDocOf(r)["source"]["payTo"] = T8) }, /quote\.source\.payTo/],
+    ["destination network", "dyn-x402-to-rh", { tamper: (_id, r) => (subjectOf(r)["destination"]["network"] = "eip155:998") }, /subject\.destination\.network/],
+    ["destination asset", "dyn-x402-to-rh", { tamper: (_id, r) => (quoteDocOf(r)["destination"]["asset"] = EVM_TESTNETS.hyperevm.asset) }, /quote\.destination\.asset/],
+    ["destinationPayTo", "dyn-x402-to-rh", { tamper: (_id, r) => (subjectOf(r)["destinationPayTo"] = T8) }, /subject\.destinationPayTo/],
+    ["destination payTo (quote document)", "dyn-rh-to-sol", { tamper: (_id, r) => (quoteDocOf(r)["destination"]["payTo"] = SOL_PROVIDER.toLowerCase()) }, /quote\.destination\.payTo/],
+    ["destination decimals", "dyn-rh-to-sol", { tamper: (_id, r) => (subjectOf(r)["destinationDecimals"] = 9) }, /destinationDecimals/],
+    ["pricing upstream amount", "dyn-rh-to-x402", { tamper: (_id, r) => { subjectOf(r)["pricing"]["upstreamAmount"] = "9999"; quoteDocOf(r)["pricing"]["upstreamAmount"] = "9999"; } }, /pricing\.upstreamAmount/],
+    ["pricing fee", "dyn-rh-to-x402", { tamper: (_id, r) => { subjectOf(r)["pricing"]["fee"] = "2000"; quoteDocOf(r)["pricing"]["fee"] = "2000"; } }, /subject\.pricing\.fee/],
+    ["pricing total", "dyn-rh-to-x402", { tamper: (_id, r) => { subjectOf(r)["pricing"]["total"] = "12000"; quoteDocOf(r)["pricing"]["total"] = "12000"; } }, /subject\.pricing\.total/],
+    ["pricing differs between subject and quote document", "dyn-rh-to-x402", { tamper: (_id, r) => (quoteDocOf(r)["pricing"]["fee"] = "1") }, /quote\.pricing differs/],
+    ["maxFee on an x402 destination", "dyn-rh-to-arc", { tamper: (_id, r) => { subjectOf(r)["pricing"]["maxFee"] = "500"; quoteDocOf(r)["pricing"]["maxFee"] = "500"; } }, /carries maxFee/],
+    ["Tempo cap pushes the total above the ceiling", "dyn-rh-to-mpp", { capOf: () => "1500" }, /above the plan's ceiling 11000/],
+    ["Tempo fee is not max(1000, cap)", "dyn-arbsep-to-mpp", { tamper: (_id, r) => { subjectOf(r)["pricing"]["maxFee"] = "1200"; quoteDocOf(r)["pricing"]["maxFee"] = "1200"; } }, /fee = max\(1000, maxFee\)/],
+    ["Tempo cap missing", "dyn-hyperevm-to-mpp", { tamper: (_id, r) => { delete subjectOf(r)["pricing"]["maxFee"]; delete quoteDocOf(r)["pricing"]["maxFee"]; } }, /maxFee \(the Tempo gas cap\)/],
+    ["deadline in the past", "dyn-x402-to-rh", { tamper: (_id, r) => (subjectOf(r)["approval"] = { required: true, boundTo: "x", deadlineMs: Date.now() - 1 }) }, /deadline has passed/],
+    ["fundsMoveOnCredential (x402 source says true)", "dyn-rh-to-x402", { tamper: (_id, r) => (subjectOf(r)["fundsMoveOnCredential"] = true) }, /subject\.fundsMoveOnCredential/],
+    ["fundsMoveOnCredential (Tempo source says false)", "dyn-mpp-to-rh", { tamper: (_id, r) => (subjectOf(r)["fundsMoveOnCredential"] = false) }, /subject\.fundsMoveOnCredential/],
+    ["disclosures promise a refund", "dyn-x402-to-rh", { tamper: (_id, r) => { subjectOf(r)["disclosures"]["refundOnFailure"] = true; quoteDocOf(r)["disclosures"]["refundOnFailure"] = true; } }, /refundOnFailure/],
+    ["no ownerKey (not a dynamic quote)", "dyn-x402-to-rh", { tamper: (_id, r) => delete quoteDocOf(r)["ownerKey"] }, /ownerKey is missing/],
+  ];
+  test.each(cases)("%s: a mismatch, and the run stops before signing (no signature, no purchase)", async (_label, profileId, behaviour, pattern) => {
+    const { p, response } = await hostedQuote(profileId, behaviour);
+    expect(hostedSubjectMismatches(response, p, Date.now()).join("; ")).toMatch(pattern);
+    const chain = new MatrixChain();
+    const plan = await hostedPlan(chain);
+    const mcp = new HostedMcp(plan, chain, behaviour);
+    const signer = fakeSigner();
+    const dir = tempDir();
+    const report = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, only: profileId }, runDeps(mcp, chain, signer, []));
+    expect(report.stopped?.stage).toBe("stopped_before_signing");
+    expect(signer.calls).toEqual([]);
+    expect(mcp.count("subetha_router_purchase")).toBe(0);
+    // 照合で止まった quote の ownerKey は置き場に残さない（署名へ進むときだけ）。
+    expect(ownerKeysOf(dir)).toEqual([]);
+  });
+});
+
+describe("hosted run: ownerKey, status, SR-H7 holds, end to end", () => {
+  test("all 36 delivered and both legs verified against a fake hosted MCP; status and purchase carry the quote's ownerKey", async () => {
+    const chain = new MatrixChain();
+    const plan = await hostedPlan(chain);
+    const mcp = new HostedMcp(plan, chain);
+    const signer = fakeSigner();
+    const lines: string[] = [];
+    const dir = tempDir();
+    const report = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir }, runDeps(mcp, chain, signer, lines));
+    expect(report.stopped, lines.join("\n")).toBeUndefined();
+    expect(report.completed).toHaveLength(36);
+    expect(signer.calls).toHaveLength(36);
+    const quotes = mcp.calls.filter((c) => c.name === "subetha_router_quote_url");
+    expect(quotes.map((c) => [c.args["profileId"], c.args["url"]])).toEqual(plan.purchases.map((p) => [p.profileId, p.url]));
+    expect(new Set(quotes.map((c) => c.args["requestId"])).size).toBe(36);
+    const purchases = mcp.calls.filter((c) => c.name === "subetha_router_purchase");
+    const statuses = mcp.calls.filter((c) => c.name === "subetha_router_status");
+    expect(purchases).toHaveLength(36);
+    expect(statuses).toHaveLength(36);
+    purchases.forEach((c, i) => {
+      // purchase は quote 文書を丸ごと（ownerKey を含む）。status は ownerKey つき。
+      expect((c.args["quote"] as Record<string, unknown>)["ownerKey"]).toBe(mcp.ownerKeys[i]);
+      expect(statuses[i]!.args).toEqual({ paymentId: (c.args["quote"] as Record<string, unknown>)["paymentId"], ownerKey: mcp.ownerKeys[i] });
+    });
+    const tempo = JSON.parse(readFileSync(path.join(report.runDir, "purchases", "dyn-rh-to-mpp@g3.json"), "utf8")) as PurchaseEvidence;
+    expect(tempo.stage).toBe("verified");
+    expect(tempo.profileId).toBe("dyn-rh-to-mpp");
+    expect(tempo.upstreamUrl).toBe(UPSTREAM);
+    expect(tempo.legs?.map((l) => l.expected.value)).toEqual(["11000", "10000"]);
+  }, 60_000);
+
+  test("ownerKey: kept only in owner-keys/ (0600); redacted from stdout, evidence, reopen output and the public summary", async () => {
+    const chain = new MatrixChain();
+    const plan = await hostedPlan(chain);
+    const mcp = new HostedMcp(plan, chain);
+    const lines: string[] = [];
+    const dir = tempDir();
+    const deps = runDeps(mcp, chain, fakeSigner(), lines);
+    for (const profileId of ["dyn-x402-to-rh", "dyn-rh-to-mpp"]) {
+      const report = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, only: profileId }, deps);
+      expect(report.stopped).toBeUndefined();
+    }
+    const keys = mcp.ownerKeys;
+    expect(keys).toHaveLength(2);
+    // 私的な置き場にだけ値がある。
+    expect(ownerKeysOf(dir).sort()).toEqual([...keys].sort());
+    const paymentIds = mcp.calls.filter((c) => c.name === "subetha_router_purchase").map((c) => String((c.args["quote"] as Record<string, unknown>)["paymentId"]));
+    expect(readOwnerKey(dir, paymentIds[0]!)).toBe(keys[0]);
+    expect(statSync(path.join(dir, "owner-keys", `${paymentIds[0]!}.json`)).mode & 0o777).toBe(0o600);
+    // stdout・証跡（quote の応答の nextStep と status の echo に値が入っていた）には残らない。
+    const evidence = evidenceTextsOf(dir);
+    for (const key of keys) {
+      expect(lines.join("\n")).not.toContain(key);
+      expect(evidence).not.toContain(key);
+    }
+    expect(evidence).toContain("[redacted]");
+    const saved = JSON.parse(readFileSync(path.join(dir, readdirSync(dir).find((f) => f.startsWith("run-"))!, "purchases", "dyn-x402-to-rh@g3.json"), "utf8")) as PurchaseEvidence;
+    expect(saved.ownerKeyRef).toBe(path.join("owner-keys", `${paymentIds[0]!}.json`));
+    // reopen: 置き場の ownerKey で status を読み直す（新しい Secrets でも置き場から読んで消す）。
+    const reopenLines: string[] = [];
+    const secrets = Secrets.fromEnv({});
+    const result = await runReopen(dir, mcp, secrets, (l) => reopenLines.push(l));
+    expect(result).toEqual({ same: 2, different: 0 });
+    const reopenCalls = mcp.calls.filter((c) => c.name === "subetha_router_status").slice(-2);
+    expect(reopenCalls.map((c) => c.args["ownerKey"]).sort()).toEqual([...keys].sort());
+    for (const key of keys) {
+      expect(reopenLines.join("\n")).not.toContain(key);
+      expect(evidenceTextsOf(dir)).not.toContain(key);
+    }
+    // 公開の要約: ownerKey も置き場の場所も無い。プロファイル・URL・価格はある。
+    const summarySecrets = Secrets.fromEnv({});
+    for (const key of ownerKeysOf(dir)) summarySecrets.add(key);
+    const out = path.join(tempDir(), "summary.json");
+    writeSummary(dir, out, summarySecrets);
+    const text = readFileSync(out, "utf8");
+    for (const key of keys) expect(text).not.toContain(key);
+    expect(text).not.toContain("owner-keys");
+    expect(text).toContain("dyn-rh-to-mpp");
+    expect(text).toContain(UPSTREAM);
+    // 置き場が消えたら reopen は保留（鍵なしで読んで「無い」と比べない）。
+    rmSync(path.join(dir, "owner-keys"), { recursive: true });
+    const held = await runReopen(dir, mcp, Secrets.fromEnv({}), () => {});
+    expect(held).toEqual({ same: 0, different: 2 });
+  });
+
+  test("the ownerKey must be persisted before signing: if it cannot be, nothing is signed", async () => {
+    const chain = new MatrixChain();
+    const plan = await hostedPlan(chain);
+    const dir = tempDir();
+    // 置き場をファイルで塞ぐ（mkdir が失敗する）。
+    writeFileSync(path.join(dir, "owner-keys"), "not a directory");
+    const mcp = new HostedMcp(plan, chain);
+    const signer = fakeSigner();
+    const report = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, only: "dyn-mpp-to-rh" }, runDeps(mcp, chain, signer, []));
+    expect(report.stopped?.stage).toBe("stopped_before_signing");
+    expect(report.stopped?.reason).toMatch(/ownerKey/);
+    expect(signer.calls).toEqual([]);
+  });
+
+  test("SR-H7: a Tempo source failure after signing is funds_possibly_moved, not retried, and the profile is never re-signed under another plan or label", async () => {
+    const chain = new MatrixChain();
+    const plan = await hostedPlan(chain);
+    const dir = tempDir();
+    const signer = fakeSigner({ fail: (p) => (p.src === "tempo" ? { reason: "rpc dropped after broadcast", fundsMayHaveMoved: false, txRef: hex64(0x8888) } : undefined) });
+    const mcp = new HostedMcp(plan, chain);
+    const report = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, only: "dyn-mpp-to-rh" }, runDeps(mcp, chain, signer, []));
+    expect(report.stopped?.stage).toBe("funds_possibly_moved");
+    expect(signer.calls).toEqual(["dyn-mpp-to-rh@g3"]);
+    expect(mcp.count("subetha_router_purchase")).toBe(0);
+    // 同じ label の新しい plan でも、別の label（G-4）の plan でも保留。
+    for (const env of [{ ...hostedEnv }, { ...hostedEnv, SUBETHA_HOSTED_LABEL: "g4" }]) {
+      const plan2 = { ...(await hostedPlan(chain, env)), createdAt: "2026-10-15T13:00:00.000Z" } as HostedPlan;
+      const signer2 = fakeSigner();
+      const again = await runHostedMatrix({ plan: plan2, planSha256: planSha256(plan2), evidenceDir: dir, only: "dyn-mpp-to-rh" }, runDeps(new HostedMcp(plan2, chain), chain, signer2, []));
+      expect(again.stopped?.stage).toBe("not_started");
+      expect(again.stopped?.reason).toMatch(/never re-signed/);
+      expect(signer2.calls).toEqual([]);
+    }
+    // 資金が署名で動かない源（x402）は影響を受けない。
+    const other = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, only: "dyn-x402-to-rh" }, runDeps(new HostedMcp(plan, chain), chain, fakeSigner(), []));
+    expect(other.stopped).toBeUndefined();
+  });
+
+  test("SR-H7: a Tempo purchase call that fails is funds_possibly_moved (status read with ownerKey) and not retried", async () => {
+    const chain = new MatrixChain();
+    const plan = await hostedPlan(chain);
+    const mcp = new HostedMcp(plan, chain, { purchaseThrows: (id) => id === "dyn-mpp-to-arbsep" });
+    const report = await runHostedMatrix({ plan, planSha256: planSha256(plan), evidenceDir: tempDir(), only: "dyn-mpp-to-arbsep" }, runDeps(mcp, chain, fakeSigner(), []));
+    expect(report.stopped?.stage).toBe("funds_possibly_moved");
+    expect(mcp.count("subetha_router_purchase")).toBe(1);
+    expect(mcp.calls.filter((c) => c.name === "subetha_router_status").map((c) => typeof c.args["ownerKey"])).toEqual(["string"]);
+  });
+
+  test("a Tempo source verified under G-3 can be bought once under G-4 (a new label), but never twice under the same label", async () => {
+    const chain = new MatrixChain();
+    const dir = tempDir();
+    const g3 = await hostedPlan(chain);
+    expect((await runHostedMatrix({ plan: g3, planSha256: planSha256(g3), evidenceDir: dir, only: "dyn-mpp-to-hyperevm" }, runDeps(new HostedMcp(g3, chain), chain, fakeSigner(), []))).stopped).toBeUndefined();
+    const g3b = { ...g3, createdAt: "2026-10-15T14:00:00.000Z" } as HostedPlan;
+    const again = await runHostedMatrix({ plan: g3b, planSha256: planSha256(g3b), evidenceDir: dir, only: "dyn-mpp-to-hyperevm" }, runDeps(new HostedMcp(g3b, chain), chain, fakeSigner(), []));
+    expect(again.stopped?.reason).toMatch(/never re-signed/);
+    const g4 = await hostedPlan(chain, { ...hostedEnv, SUBETHA_HOSTED_LABEL: "g4" });
+    expect((await runHostedMatrix({ plan: g4, planSha256: planSha256(g4), evidenceDir: dir, only: "dyn-mpp-to-hyperevm" }, runDeps(new HostedMcp(g4, chain), chain, fakeSigner(), []))).stopped).toBeUndefined();
+  });
+
+  test("the hosted plan's hash binds it; a static matrix plan is not a hosted plan", async () => {
+    const plan = await hostedPlan();
+    const dir = tempDir();
+    const file = path.join(dir, "plan.json");
+    writeFileSync(file, JSON.stringify(plan));
+    expect(loadApprovedHostedPlan(file, planSha256(plan)).purchases).toHaveLength(36);
+    writeFileSync(file, JSON.stringify({ ...plan, hosted: { ...plan.hosted, tempoMaxTotal: "20000" } }));
+    expect(() => loadApprovedHostedPlan(file, planSha256(plan))).toThrow(/not the approved/);
+    const matrix = await matrixPlan();
+    writeFileSync(file, JSON.stringify(matrix));
+    expect(() => loadApprovedHostedPlan(file, planSha256(matrix))).toThrow(/not a hosted matrix plan/);
   });
 });
