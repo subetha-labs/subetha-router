@@ -103,7 +103,7 @@
 
 | 役割 | 鍵 | 要る資金 | 案 |
 |---|---|---|---|
-| facilitator の gas | 本番用の **新しい鍵 E-FAC-H**（`wallet:new` と同じ生成、本番の env にだけ置く）。ローカル版の E-FAC とは別にし、nonce を共有しない | 新 3 のネイティブ通貨。E-FAC から送る（2026-10-14 15:1xZ の読み取り: Robinhood 0.00998 ETH、Arbitrum Sepolia 0.0500 ETH、HyperEVM 1.008 HYPE。各半分程度） | 本番の env に `SUBETHA_EVM_FACILITATOR_KEY`。E-FAC の送金の前にローカル版の journal に未解決が無いことを確かめる |
+| facilitator の gas | 本番用の **新しい鍵 E-FAC-H**（`wallet:new` と同じ生成、本番の env にだけ置く）。ローカル版の E-FAC とは別にし、nonce を共有しない | 新 3 のネイティブ通貨。E-FAC から送る（2026-10-14 15:1xZ の読み取り: Robinhood 0.00998 ETH、Arbitrum Sepolia 0.0500 ETH、HyperEVM 1.008 HYPE。各半分程度） | 本番の env に `SUBETHA_EVM_FACILITATOR_KEY`。E-FAC の送金の手順: (1) E-FAC で送出し得る process（ローカル版の facilitator・それを使う入口）を **全部止め**、送金の確定まで起動しない、(2) その後にローカル版の journal に未解決が無いことを確かめる、(3) 送金し確定を読む。2026-10-14 15:4xZ に (1) を実施（10-13 のローカル版のスタックが動いたままだったのを SIGINT で止めた）、(2) は settled 61・reverted 1・未解決 0 |
 | facilitator の token | 新しい 32 バイトの乱数 | — | 本番の env に `SUBETHA_EVM_FACILITATOR_TOKEN`、Worker 3 つの secret |
 | Router の受取（新 3 の受信） | 本番の `SUBETHA_ROUTER_RECEIVER`（既存の EVM の受取先） | — | facilitator の allowlist に入る |
 | Router の送信（新 3 へ） | 本番の `SUBETHA_OUTBOUND_X402_KEY` のアドレス | 新 3 の通貨 各 ≥ 0.2（36 組の送信のうち新 3 宛て 18 件 × 0.01 + 余裕） | T7（ローカルのクライアント）から EIP-3009 で送る（`tools/evm-testnets-prefund.ts`、自前 facilitator で settle） |
@@ -148,3 +148,4 @@
   3. major — 補充を env の変更にするのは FR-H9 に反する → §2.2 の `gas_cap_init`・`raise-cap`。
   4. minor — Tempo 宛ての境界で宛先の区分（`u + c`）が抜けている → §5 の両区分の不等式と試験。
   5. minor — 参照の誤り（`denyHosts` の行、`routerProcessCapabilitiesOf` の場所）→ §3。
+- **D-2（readback、第 2 版 `8327f62`）: APPROVE WITH CHANGES**。D-1 の 5 件は解決。新しい 1 件: 「ローカル版の journal に未解決が無い」はその時点の確認でしかない → §7 の E-FAC の送金の手順（止める → 確かめる → 送る、確定まで止めたまま）。
