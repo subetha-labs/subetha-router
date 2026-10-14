@@ -1,12 +1,16 @@
 /**
  * 自前の x402 v2 facilitator（EVM testnet 4 つ。設計 `docs/evm-testnets-x402-design.md` §3.3）。**製品コードではない**（運用者の道具）。
  *
- * - `GET /<token>/supported`・`POST /<token>/verify`・`POST /<token>/settle`。bind は 127.0.0.1 だけ。`Origin` つき・`Host` 違いは拒む。
+ * - `GET /<token>/supported`・`POST /<token>/verify`・`POST /<token>/settle`。bind は env `EVM_FACILITATOR_BIND`（`127.0.0.1` 既定か `0.0.0.0`。
+ *   hosted 設計 `docs/evm-testnets-hosted-design.md` §2.1）。`Origin` つき・`Host` 違い（`127.0.0.1:<port>` の完全一致でない）は拒む。
  * - verify は SDK（`@x402/evm/exact/facilitator` の `ExactEvmScheme`）の **verify だけ** を使う。settle は SDK に任せない
  *   （固定版 2.28.0 の settle は receipt の失敗を `success: false` で返し、Router が `rejected` に写す。設計 §1.2）。
  * - 原則: settle の 400（= Router の `rejected`）は「その authorization が chain で未使用で、この facilitator が一度も送出していない」と
  *   確かめたときだけ。それ以外の失敗は 5xx（Router の `unknown`）。
  * - 送出の意図は永続の journal（ndjson、追記と fsync）に書いてから送出する。未解決の送出がある network は保留（再起動後も）。
+ * - gas の累計と上限は journal から復元する（hosted 設計 §2.2）。上限は最初の起動で env の値を `gas_cap_init` に書き、以後は
+ *   journal の記録（`gas_cap_init` + `gas_cap_raise`）だけで決まる。補充は運用者の `raise-cap`（facilitator が止まっているときだけ）。
+ * - 実行者は 1 つ: journal の隣の常設の `facilitator.lock` に OS の `flock` を process の寿命の間かける（hosted 設計 §2.3）。
  *
  * 核（`createEvmFacilitator`）は chain の I/O・journal・時計を注入で受け、網なしで試験できる（`tests/unit/evm-facilitator.test.ts`）。
  * CLI（`main`）だけが viem と SDK の verify を配線する。
@@ -16,13 +20,16 @@
  * usage: EVM_FACILITATOR_KEY=0x... EVM_FACILITATOR_TOKEN=<32 文字以上> EVM_FACILITATOR_NETWORKS=eip155:46630,eip155:998 \
  *        EVM_FACILITATOR_PAYTO_ALLOWLIST=0x... EVM_FACILITATOR_GAS_CAP_46630=<wei> EVM_FACILITATOR_GAS_CAP_998=<wei> \
  *        EVM_FACILITATOR_JOURNAL=.claude_workflow/local/evm-testnets/run-<UTC>/facilitator-journal.ndjson tsx tools/evm-facilitator.ts
+ *        補充: EVM_FACILITATOR_JOURNAL=<同じ journal> tsx tools/evm-facilitator.ts raise-cap --network <eip155:id> --add-wei <wei> --reason <文>
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+import fsExt from "fs-ext";
 
 import { stableJson } from "../src/core/intent.js";
 import { assetKeyOf, EVM_TESTNET_NETWORKS, evmChainIdOf, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, type KnownNetwork } from "../src/shared/networks.js";
@@ -215,7 +222,10 @@ export interface ChainIo {
   readonly maxLogRange: bigint;
   /** `maxFeePerGas` の上限（wei）。 */
   readonly maxFeePerGas: bigint;
-  /** process の寿命での gas の累計の上限（wei）。 */
+  /**
+   * env の gas の累計の上限（wei。`EVM_FACILITATOR_GAS_CAP_<chainId>`）。最初の起動で journal の `gas_cap_init` に書くか、
+   * 既にある `gas_cap_init` と照合するだけ（違えば起動しない）。有効な上限は journal の記録で決まる（hosted 設計 §2.2）。
+   */
   readonly gasCap: bigint;
   /** 1 回の settle の gas 上限（見積り × 1.25 がこれを超えれば送出しない）。 */
   readonly maxSettleGas: bigint;
@@ -234,13 +244,23 @@ export type JournalRecord =
       readonly nonce: string;
       readonly validAfter: string;
       readonly validBefore: string;
+      /** gas の予約（wei の 10 進。= 送る gas 上限 × `maxFeePerGas`。送出の最悪値）。 */
+      readonly gasReservedWei: string;
       readonly at: number;
     }
   | { readonly type: "aborted_before_send"; readonly key: string; readonly reason: string; readonly at: number }
   | { readonly type: "submitted"; readonly key: string; readonly hash: string; readonly at: number }
-  | { readonly type: "settled"; readonly key: string; readonly hash: string; readonly blockNumber: string; readonly via: "receipt" | "startup"; readonly at: number }
-  | { readonly type: "reverted"; readonly key: string; readonly hash: string; readonly via: "receipt" | "startup"; readonly at: number }
-  | { readonly type: "resolved_by_operator"; readonly key: string; readonly reason: string; readonly at: number };
+  /** `gasUsedWei`: 数える gas（wei の 10 進）。receipt の `gasUsed × effectiveGasPrice`（hash の分からない起動時の照合は予約の値。`resolveAtStartup`）。 */
+  | { readonly type: "settled"; readonly key: string; readonly hash: string; readonly blockNumber: string; readonly via: "receipt" | "startup"; readonly gasUsedWei: string; readonly at: number }
+  | { readonly type: "reverted"; readonly key: string; readonly hash: string; readonly via: "receipt" | "startup"; readonly gasUsedWei: string; readonly at: number }
+  | { readonly type: "resolved_by_operator"; readonly key: string; readonly reason: string; readonly at: number }
+  /** network ごとに 1 つ。最初の起動で env の上限を書く（hosted 設計 §2.2）。 */
+  | { readonly type: "gas_cap_init"; readonly network: string; readonly capWei: string; readonly at: number }
+  /** 運用者の補充（`raise-cap`）。理由は必須。 */
+  | { readonly type: "gas_cap_raise"; readonly network: string; readonly addWei: string; readonly reason: string; readonly at: number };
+
+/** 支払いの記録（`key` を持つもの）。 */
+export type PaymentRecord = Exclude<JournalRecord, { type: "gas_cap_init" } | { type: "gas_cap_raise" }>;
 
 /** 追記と fsync。`append` は fsync まで終えてから resolve する（失敗は reject）。 */
 export interface FacilitatorJournal {
@@ -551,6 +571,8 @@ interface KeyState {
   status: KeyStatus;
   intent: Extract<JournalRecord, { type: "submit_intent" }>;
   hash?: string;
+  /** この鍵が gas の累計に入れている額（wei）。未解決・運用者の解決 = 予約、確定・revert = `gasUsedWei`、`aborted_before_send` = 0。 */
+  counted: bigint;
 }
 
 export interface EvmFacilitator {
@@ -562,6 +584,8 @@ export interface EvmFacilitator {
   heldNetworks(): readonly string[];
   /** network ごとの gas の累計（wei）。 */
   gasSpent(network: string): bigint;
+  /** network ごとの有効な gas の上限（wei。`gas_cap_init` + Σ `gas_cap_raise`）。`start` の前・記録の無い network は `undefined`。 */
+  gasCap(network: string): bigint | undefined;
 }
 
 export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilitator {
@@ -582,7 +606,12 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
 
   const queues = new Map<string, SerialQueue>();
   for (const network of enabled) queues.set(network, new SerialQueue(MAX_WAITING_PER_NETWORK, timer));
+  /** network → gas の累計（wei）。journal の再生と live の記録の両方を `applyRecord` だけが動かす（再生と同じ値になる）。 */
   const spent = new Map<string, bigint>();
+  /** network → `gas_cap_init.capWei`。 */
+  const capInit = new Map<string, bigint>();
+  /** network → Σ `gas_cap_raise.addWei`。 */
+  const capRaised = new Map<string, bigint>();
   const keys = new Map<string, KeyState>();
   /** network → 未解決の鍵（処理中のものは含めない）。1 つでもあれば保留。 */
   const held = new Map<string, Set<string>>();
@@ -620,10 +649,36 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     spent.set(network, (spent.get(network) ?? 0n) + wei);
   }
 
+  /** 鍵の数える額を `wei` に置き換える（差分だけ累計を動かす）。 */
+  function recount(state: KeyState, wei: bigint): void {
+    addSpent(state.intent.network, wei - state.counted);
+    state.counted = wei;
+  }
+
+  function effectiveCap(network: string): bigint | undefined {
+    const init = capInit.get(network);
+    return init === undefined ? undefined : init + (capRaised.get(network) ?? 0n);
+  }
+
+  /**
+   * 1 つの記録を状態に写す（起動の再生と live の追記の共通。gas の累計もここだけで動く: hosted 設計 §2.2）。
+   * 累計 = Σ(確定・revert の `gasUsedWei`) + Σ(未解決・運用者の解決の予約)。`aborted_before_send` は 0（送出していない）。
+   */
   function applyRecord(record: JournalRecord): void {
-    if (record.type === "submit_intent") {
-      keys.set(record.key, { status: "unresolved", intent: record });
-      return;
+    switch (record.type) {
+      case "gas_cap_init":
+        capInit.set(record.network, BigInt(record.capWei));
+        return;
+      case "gas_cap_raise":
+        capRaised.set(record.network, (capRaised.get(record.network) ?? 0n) + BigInt(record.addWei));
+        return;
+      case "submit_intent": {
+        // 同じ鍵の前の状態（`aborted_before_send` の後の再送）の数えた額はそのまま残す（0 のはず。違っても安全側）。
+        const reserved = BigInt(record.gasReservedWei);
+        keys.set(record.key, { status: "unresolved", intent: record, counted: reserved });
+        addSpent(record.network, reserved);
+        return;
+      }
     }
     const state = keys.get(record.key);
     if (state === undefined) return;
@@ -634,15 +689,21 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       case "settled":
         state.status = "settled";
         state.hash = record.hash;
+        recount(state, BigInt(record.gasUsedWei));
         return;
       case "reverted":
         state.status = "reverted";
         state.hash = record.hash;
+        recount(state, BigInt(record.gasUsedWei));
         return;
       case "aborted_before_send":
-        if (state.status === "unresolved") state.status = "aborted";
+        if (state.status === "unresolved") {
+          state.status = "aborted";
+          recount(state, 0n);
+        }
         return;
       case "resolved_by_operator":
+        // 予約の分は戻さない（chain で何が起きたかを facilitator は確かめていない）。
         if (state.status === "unresolved") state.status = "operator";
         return;
     }
@@ -866,7 +927,9 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     if (fees.maxFeePerGas > io.maxFeePerGas) return await refuseIfStillUnused("fee_too_high");
     const worst = gasLimit * fees.maxFeePerGas;
-    if ((spent.get(network) ?? 0n) + worst > io.gasCap) {
+    // 累計は journal から復元した値から始まり、上限は journal の記録の有効な上限（hosted 設計 §2.2。env の値は使わない）。
+    const cap = effectiveCap(network);
+    if (cap === undefined || (spent.get(network) ?? 0n) + worst > cap) {
       log({ event: "gas_cap_reached", network, key: id.key, sent: false });
       return await refuseIfStillUnused("gas_cap_reached");
     }
@@ -899,6 +962,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
           nonce: auth.nonce,
           validAfter: auth.validAfter.toString(),
           validBefore: auth.validBefore.toString(),
+          // 予約は意図の行と一緒に永続にする（fsync の後に `applyRecord` が累計に足す）。
+          gasReservedWei: worst.toString(),
           at: clock.now(),
         }),
         deadlineAt,
@@ -932,7 +997,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     try {
       hash = await within(sending, deadlineAt);
     } catch {
-      addSpent(network, worst);
+      // 予約（意図の行）が累計に入ったまま（未解決）。
       hold(network, id.key, "send_outcome_unknown");
       // 期限の後に hash が返れば journal に残す（運用者の照合のため）。
       sending.then(
@@ -946,8 +1011,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       await within(append({ type: "submitted", key: id.key, hash, at: clock.now() }), deadlineAt);
     } catch (error) {
       if (error instanceof DeadlineExceeded) {
-        // 書き込みは裏で続く。応答は締め切りで返し、network を保留する。
-        addSpent(network, worst);
+        // 書き込みは裏で続く。応答は締め切りで返し、network を保留する（予約は累計に入ったまま）。
         hold(network, id.key, "journal_submitted_timeout");
         return failure(504, "journal_timeout", network);
       }
@@ -963,14 +1027,15 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       receipt = undefined;
     }
     if (receipt === undefined) {
-      addSpent(network, worst);
       hold(network, id.key, "receipt_timeout");
       return failure(504, "receipt_timeout", network);
     }
-    addSpent(network, receipt.gasUsed * receipt.effectiveGasPrice);
+    // 実費は確定・revert の記録（`gasUsedWei`）が載ったときに予約と置き換わる。記録が載らなければ予約のまま（安全側。再生と同じ）。
+    // Transfer の不一致は未解決のまま（予約のまま）。
+    const gasUsedWei = (receipt.gasUsed * receipt.effectiveGasPrice).toString();
     if (receipt.status === "reverted") {
       try {
-        await within(append({ type: "reverted", key: id.key, hash, via: "receipt", at: clock.now() }), deadlineAt);
+        await within(append({ type: "reverted", key: id.key, hash, via: "receipt", gasUsedWei, at: clock.now() }), deadlineAt);
       } catch {
         hold(network, id.key, "journal_write_failed");
       }
@@ -982,14 +1047,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       return failure(502, "transfer_mismatch", network);
     }
     try {
-      await within(append({ type: "settled", key: id.key, hash, blockNumber: receipt.blockNumber.toString(), via: "receipt", at: clock.now() }), deadlineAt);
+      await within(append({ type: "settled", key: id.key, hash, blockNumber: receipt.blockNumber.toString(), via: "receipt", gasUsedWei, at: clock.now() }), deadlineAt);
     } catch (error) {
       if (error instanceof DeadlineExceeded) {
         // chain では確定しているが journal に載ったか分からない。締め切りで 5xx、保留（再起動の照合で解ける）。
         hold(network, id.key, "journal_settled_timeout");
         return failure(504, "journal_timeout", network);
       }
-      // chain では確定している。再起動の照合で解ける（意図と submitted が残る）。
+      // chain では確定している。再起動の照合で解ける（意図と submitted が残る）。累計は予約のまま（再生と同じ）。
       log({ event: "journal_write_failed", network, key: id.key, stage: "settled" });
       const s = keys.get(id.key);
       if (s !== undefined) {
@@ -1068,12 +1133,25 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     return { status: 200, body: { kinds, extensions: [], signers: { "eip155:*": signers } } };
   }
 
-  /** 起動時: journal を読み、未解決を chain で照合する。解けないものは保留。 */
+  /**
+   * 起動時: journal を読み、gas の累計と上限を復元し、未解決を chain で照合する。解けないものは保留。
+   * 旧形式の journal・env の上限と journal の `gas_cap_init` の違いは `StartupError`（起動しない。hosted 設計 §2.2）。
+   */
   async function start(): Promise<void> {
     if (started) throw new Error("already started");
     started = true;
     const records = await options.journal.load();
+    checkGasJournal(records);
     for (const record of records) applyRecord(record);
+    // 上限: env の値は journal の `gas_cap_init` と照合するだけ（env の書き換えで黙って補充できない）。全部を確かめてから書く。
+    const fresh: string[] = [];
+    for (const network of enabled) {
+      const recorded = capInit.get(network);
+      if (recorded === undefined) fresh.push(network);
+      else if (recorded !== chainOf(network).gasCap) throw new StartupError(`gas_cap_env_mismatch:${network}`);
+    }
+    // 最初の起動: env の上限を fsync で書く（listen の前。`append` は fsync まで待つ）。
+    for (const network of fresh) await append({ type: "gas_cap_init", network, capWei: chainOf(network).gasCap.toString(), at: clock.now() });
     for (const [key, state] of keys) {
       if (state.status !== "unresolved") continue;
       const network = state.intent.network;
@@ -1086,6 +1164,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       const resolved = await resolveAtStartup(key, state, io).catch(() => false);
       if (!resolved) hold(network, key, "unresolved_at_startup");
     }
+    // 値は wei だけ（鍵・token は出さない）。
+    for (const network of enabled) log({ event: "gas_budget", network, capWei: (effectiveCap(network) ?? 0n).toString(), spentWei: (spent.get(network) ?? 0n).toString() });
     log({ event: "started", held: [...held.keys()] });
   }
 
@@ -1096,7 +1176,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const value = BigInt(intent.value);
     const startupDeadline = clock.now() + 60_000;
     let hash = state.hash as Hex | undefined;
+    /**
+     * 数える gas: hash が journal にある（自分の送出の tx）なら receipt の実費。hash が無く `AuthorizationUsed` から tx を見つけたときは
+     * その tx が自分の送出とは限らない（他で使われ、自分の送出は別に revert したかもしれない）ので、予約（自分の送出の最悪値）を書く。
+     * どちらの場合も自分の送出の実費は予約を超えない（gasUsed ≤ gas 上限、effectiveGasPrice ≤ maxFeePerGas）ので、再生は安全側になる。
+     */
+    let ours = true;
     if (hash === undefined) {
+      ours = false;
       const used = await within(io.reader.authorizationState(asset, from, intent.nonce as Hex), startupDeadline);
       if (!used) return false; // 送出中かもしれない（hash 無し）。運用者の判断。
       const found = await reconcile(
@@ -1112,13 +1199,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     const receipt = await within(io.reader.receipt(hash), startupDeadline);
     if (receipt === undefined) return false;
+    const gasUsedWei = ours ? (receipt.gasUsed * receipt.effectiveGasPrice).toString() : intent.gasReservedWei;
     if (receipt.status === "reverted") {
-      await append({ type: "reverted", key, hash, via: "startup", at: clock.now() });
+      await append({ type: "reverted", key, hash, via: "startup", gasUsedWei, at: clock.now() });
       log({ event: "resolved_at_startup", key, outcome: "reverted", transaction: hash });
       return true;
     }
     if (matchingTransfers(receipt, asset, from, intent.to, value) !== 1) return false;
-    await append({ type: "settled", key, hash, blockNumber: receipt.blockNumber.toString(), via: "startup", at: clock.now() });
+    await append({ type: "settled", key, hash, blockNumber: receipt.blockNumber.toString(), via: "startup", gasUsedWei, at: clock.now() });
     log({ event: "resolved_at_startup", key, outcome: "settled", transaction: hash });
     return true;
   }
@@ -1157,6 +1245,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     handle,
     heldNetworks: () => [...held.keys()],
     gasSpent: (network) => spent.get(network) ?? 0n,
+    gasCap: (network) => effectiveCap(network),
   };
 }
 
@@ -1183,9 +1272,17 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string | unde
   });
 }
 
-/** `facilitator` を `127.0.0.1:<port>` に bind する。`port` 0 は使い捨て（試験）。 */
-export async function listenFacilitator(facilitator: EvmFacilitator, token: string, port: number): Promise<{ server: Server; port: number }> {
+/** bind してよいアドレス（hosted 設計 §2.1。コンテナの中は `0.0.0.0`: docker の publish はコンテナの eth0 に届く）。 */
+export const BIND_ADDRESSES: ReadonlySet<string> = new Set(["127.0.0.1", "0.0.0.0"]);
+export const DEFAULT_BIND = "127.0.0.1";
+
+/**
+ * `facilitator` を `<host>:<port>` に bind する（`host` は `BIND_ADDRESSES` だけ、既定 `127.0.0.1`）。`port` 0 は使い捨て（試験）。
+ * `Host` の検査は bind によらず `127.0.0.1:<port>` の完全一致のまま（Router は loopback で直接、Worker は Caddy の書き換えで同じ値）。
+ */
+export async function listenFacilitator(facilitator: EvmFacilitator, token: string, port: number, host: string = DEFAULT_BIND): Promise<{ server: Server; port: number; host: string }> {
   if (!TOKEN_PATTERN.test(token)) throw new Error("EVM_FACILITATOR_TOKEN must be 32+ characters of [A-Za-z0-9_-]");
+  if (!BIND_ADDRESSES.has(host)) throw new Error("bind address must be 127.0.0.1 or 0.0.0.0");
   let bound = port;
   const guard: HttpGuard = { token, port: () => bound };
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -1212,7 +1309,7 @@ export async function listenFacilitator(facilitator: EvmFacilitator, token: stri
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(port, host, () => {
       server.off("error", reject);
       resolve();
     });
@@ -1220,16 +1317,36 @@ export async function listenFacilitator(facilitator: EvmFacilitator, token: stri
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("server has no TCP address");
   bound = address.port;
-  return { server, port: bound };
+  return { server, port: bound, host: address.address };
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
  * 永続の journal（ndjson、追記と fsync）
  * ────────────────────────────────────────────────────────────────────────────── */
 
-const RECORD_TYPES: ReadonlySet<string> = new Set(["submit_intent", "aborted_before_send", "submitted", "settled", "reverted", "resolved_by_operator"]);
+const RECORD_TYPES: ReadonlySet<string> = new Set(["submit_intent", "aborted_before_send", "submitted", "settled", "reverted", "resolved_by_operator", "gas_cap_init", "gas_cap_raise"]);
+const GAS_CAP_TYPES: ReadonlySet<string> = new Set(["gas_cap_init", "gas_cap_raise"]);
+/** 上限・補充の額（正の wei の 10 進、uint256 の桁まで）。 */
+const POSITIVE_WEI = /^[1-9][0-9]{0,77}$/;
+/** 補充の理由の長さの上限（文字）。 */
+export const MAX_REASON_LENGTH = 200;
+/** C0・C1 の制御文字と行・段落の区切り。 */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
-/** 1 行を読む。形が違えば例外（起動しない: 運用者が直す）。`resolved_by_operator` は理由が必須。 */
+/** 補充の理由: 空（空白だけ）でなく、制御文字を含まず、`MAX_REASON_LENGTH` 文字まで。 */
+export function isValidReason(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "" && value.length <= MAX_REASON_LENGTH && !CONTROL_CHARACTERS.test(value);
+}
+
+/** 旧形式（gas の欄の無い記録・`gas_cap_init` の無い支払い）の journal の拒否の文言（固定）。 */
+export const OLD_FORMAT_MESSAGE = "journal_old_format: start with a new journal (gas fields or gas_cap_init missing)";
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((k) => own.includes(k));
+}
+
+/** 1 行を読む。形が違えば例外（起動しない: 運用者が直す）。`resolved_by_operator` は理由が必須。旧形式の行は `StartupError`（固定の文言）。 */
 export function parseJournalLine(line: string, lineNo: number): JournalRecord {
   let value: unknown;
   try {
@@ -1237,8 +1354,27 @@ export function parseJournalLine(line: string, lineNo: number): JournalRecord {
   } catch {
     throw new Error(`journal line ${lineNo} is not JSON`);
   }
-  if (!isRecord(value) || typeof value["type"] !== "string" || !RECORD_TYPES.has(value["type"]) || typeof value["key"] !== "string") {
+  if (!isRecord(value) || typeof value["type"] !== "string" || !RECORD_TYPES.has(value["type"])) {
     throw new Error(`journal line ${lineNo} is not a facilitator record`);
+  }
+  if (GAS_CAP_TYPES.has(value["type"])) {
+    // 上限の記録: 欄はちょうど決まったものだけ。
+    const init = value["type"] === "gas_cap_init";
+    if (!exactKeys(value, init ? ["type", "network", "capWei", "at"] : ["type", "network", "addWei", "reason", "at"])) throw new Error(`journal line ${lineNo}: malformed ${value["type"]}`);
+    if (typeof value["network"] !== "string" || !EVM_TESTNET_NETWORKS.has(value["network"])) throw new Error(`journal line ${lineNo}: unknown network`);
+    const amount = value[init ? "capWei" : "addWei"];
+    if (typeof amount !== "string" || !POSITIVE_WEI.test(amount)) throw new Error(`journal line ${lineNo}: malformed wei amount`);
+    if (!init && !isValidReason(value["reason"])) throw new Error(`journal line ${lineNo}: gas_cap_raise needs a reason`);
+    if (typeof value["at"] !== "number" || !Number.isSafeInteger(value["at"]) || value["at"] < 0) throw new Error(`journal line ${lineNo}: malformed at`);
+    return value as unknown as JournalRecord;
+  }
+  if (typeof value["key"] !== "string") throw new Error(`journal line ${lineNo} is not a facilitator record`);
+  const gasField = value["type"] === "submit_intent" ? "gasReservedWei" : value["type"] === "settled" || value["type"] === "reverted" ? "gasUsedWei" : undefined;
+  if (gasField !== undefined) {
+    const gas = value[gasField];
+    // 欄が無い = 旧形式（ローカル版の journal）。持ち込まない（hosted 設計 §2.2）。
+    if (gas === undefined) throw new StartupError(OLD_FORMAT_MESSAGE);
+    if (typeof gas !== "string" || !CANONICAL_UINT.test(gas)) throw new Error(`journal line ${lineNo}: malformed ${gasField}`);
   }
   if (value["type"] === "resolved_by_operator" && (typeof value["reason"] !== "string" || value["reason"].trim() === "")) {
     throw new Error(`journal line ${lineNo}: resolved_by_operator needs a reason`);
@@ -1247,6 +1383,43 @@ export function parseJournalLine(line: string, lineNo: number): JournalRecord {
     throw new Error(`journal line ${lineNo}: malformed hash`);
   }
   return value as unknown as JournalRecord;
+}
+
+/**
+ * 読んだ記録の全体の検査（`start`・`raise-cap` の両方。注入の journal にも効く）。違えば `StartupError`（固定の文言）。
+ * - 旧形式: gas の欄の無い `submit_intent`・`settled`・`reverted`、またはその network の `gas_cap_init` より前（無い）の `submit_intent`。
+ * - `gas_cap_init` は network ごとに 1 つ。`gas_cap_raise` はその network の `gas_cap_init` の後だけ。
+ */
+export function checkGasJournal(records: readonly JournalRecord[]): void {
+  const inited = new Set<string>();
+  const weiOf = (value: unknown, pattern: RegExp): void => {
+    if (value === undefined) throw new StartupError(OLD_FORMAT_MESSAGE);
+    if (typeof value !== "string" || !pattern.test(value)) throw new StartupError("journal_malformed");
+  };
+  for (const record of records) {
+    const raw = record as unknown as Record<string, unknown>;
+    switch (record.type) {
+      case "gas_cap_init":
+        weiOf(raw["capWei"], POSITIVE_WEI);
+        if (inited.has(record.network)) throw new StartupError("journal_gas_cap_invalid");
+        inited.add(record.network);
+        break;
+      case "gas_cap_raise":
+        weiOf(raw["addWei"], POSITIVE_WEI);
+        if (!inited.has(record.network)) throw new StartupError("journal_gas_cap_invalid");
+        break;
+      case "submit_intent":
+        weiOf(raw["gasReservedWei"], CANONICAL_UINT);
+        if (!inited.has(record.network)) throw new StartupError(OLD_FORMAT_MESSAGE);
+        break;
+      case "settled":
+      case "reverted":
+        weiOf(raw["gasUsedWei"], CANONICAL_UINT);
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 /** journal のファイル（追記と fsync）。 */
@@ -1375,6 +1548,8 @@ export interface CliConfig {
   readonly key: Hex;
   readonly token: string;
   readonly port: number;
+  /** bind のアドレス（`BIND_ADDRESSES`）。 */
+  readonly bind: string;
   readonly networks: readonly string[];
   readonly payToAllowlist: readonly string[];
   readonly rpcUrls: ReadonlyMap<string, string>;
@@ -1415,6 +1590,8 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
   if (token === undefined || !TOKEN_PATTERN.test(token)) throw new StartupError("EVM_FACILITATOR_TOKEN must be set (32+ characters of [A-Za-z0-9_-])");
   const portText = env["EVM_FACILITATOR_PORT"] ?? String(DEFAULT_PORT);
   if (!/^[1-9][0-9]{0,4}$/.test(portText) || Number(portText) > 65535) throw new StartupError("EVM_FACILITATOR_PORT must be a TCP port");
+  const bind = env["EVM_FACILITATOR_BIND"] ?? DEFAULT_BIND;
+  if (!BIND_ADDRESSES.has(bind)) throw new StartupError("EVM_FACILITATOR_BIND must be 127.0.0.1 or 0.0.0.0");
   const networks = (env["EVM_FACILITATOR_NETWORKS"] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
   if (networks.length === 0) throw new StartupError("EVM_FACILITATOR_NETWORKS must list at least one of the EVM testnets");
   for (const n of networks) if (!EVM_TESTNET_NETWORKS.has(n)) throw new StartupError(`EVM_FACILITATOR_NETWORKS must list only ${[...EVM_TESTNET_NETWORKS].join(", ")}`);
@@ -1447,7 +1624,7 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
     logRanges.set(network, range === undefined ? (DEFAULT_LOG_RANGES[network] ?? 500n) : BigInt(range));
   }
   const logFile = env["EVM_FACILITATOR_LOG"];
-  return { key: key as Hex, token, port: Number(portText), networks, payToAllowlist, rpcUrls, gasCaps, maxFees, maxGas, logRanges, journal, ...(logFile === undefined || logFile === "" ? {} : { logFile }) };
+  return { key: key as Hex, token, port: Number(portText), bind, networks, payToAllowlist, rpcUrls, gasCaps, maxFees, maxGas, logRanges, journal, ...(logFile === undefined || logFile === "" ? {} : { logFile }) };
 }
 
 /** viem の client で 1 network の I/O を作る（鍵は account にだけ渡す）。 */
@@ -1589,34 +1766,202 @@ export interface CliOutput {
   stderr(text: string): void;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────────
+ * 単一の実行者の lock（hosted 設計 §2.3。`src/core/journal.ts` の `acquireLock` と同じ仕組み）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+/** `flock(2)` の非ブロッキング排他（試験は差し替える）。取れなければ `code` つきの例外。 */
+export type FlockFn = (fd: number, flags: "exnb") => void;
+
+export const realFlock: FlockFn = (fd, flags) => fsExt.flockSync(fd, flags);
+
+/** 持っている lock。`release` は fd を閉じる（process の終了でも kernel が解く）。 */
+export interface FacilitatorLock {
+  release(): void;
+}
+
+/** lock が他（動いている facilitator・`raise-cap`）に持たれているときの文言（固定）。 */
+export const LOCKED_MESSAGE = "facilitator_locked: another facilitator or raise-cap holds the journal lock";
+
+/** journal の隣の常設の lock ファイル（同じディレクトリの `facilitator.lock`）。 */
+export function facilitatorLockPathOf(journal: string): string {
+  return path.join(path.dirname(path.resolve(journal)), "facilitator.lock");
+}
+
+/**
+ * 常設の lock ファイルを open（無ければ 0600 で作る、切り詰めない）し、その fd に非ブロッキングの排他 lock をかける。
+ * - 取れなければ `StartupError`（`LOCKED_MESSAGE`）。heartbeat・奪取は **しない**（止まった process も lock を持ったまま: fail closed）。
+ * - lock ファイルは **消さない**（解放は fd のクローズ = process の終了）。
+ * - fd は数値の fd で持つ（`FileHandle` は GC で閉じられ、lock が黙って解けることがある）。呼び出し側は返り値を process の寿命の間持つ。
+ */
+export function acquireFacilitatorLock(lockPath: string, flock: FlockFn = realFlock): FacilitatorLock {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, "a", 0o600);
+  } catch {
+    throw new StartupError("lock_unavailable");
+  }
+  try {
+    flock(fd, "exnb");
+  } catch (error) {
+    closeSync(fd);
+    const code = (error as { code?: unknown }).code;
+    if (code === "EAGAIN" || code === "EWOULDBLOCK" || code === "EACCES") throw new StartupError(LOCKED_MESSAGE);
+    throw new StartupError("lock_unavailable");
+  }
+  let open = true;
+  return {
+    release() {
+      if (!open) return;
+      open = false;
+      closeSync(fd);
+    },
+  };
+}
+
+/** 起動の差し替え（試験）。既定は実際の `flock` と viem の I/O。 */
+export interface MainDeps {
+  readonly lock?: (lockPath: string) => FacilitatorLock;
+  readonly chainIoOf?: (network: string, config: CliConfig) => Promise<ChainIo>;
+}
+
+/** listen 中の facilitator。`close` は server・journal・lock を閉じる（試験用。本番は process の終了まで持つ）。 */
+export interface RunningFacilitator {
+  readonly server: Server;
+  readonly port: number;
+  readonly host: string;
+  close(): Promise<void>;
+}
+
 /** 起動の本体。失敗は `StartupError` だけを投げる（`runCli` が固定の文言で出す）。 */
-export async function main(env: NodeJS.ProcessEnv, out: CliOutput): Promise<void> {
+export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDeps = {}): Promise<RunningFacilitator> {
   const config = cliConfigOf(env);
-  const chains = new Map<string, ChainIo>();
-  // network は表の 4 つに確かめ済み（code に入れてよい）。RPC の URL・例外の文言は入れない。
-  for (const network of config.networks) chains.set(network, await orStartupError(`rpc_check_failed:${network}`, () => viemChainIo(network, config)));
-  const log = await orStartupError("log_unavailable", () => fileLogger(config.logFile));
-  const facilitator = createEvmFacilitator({
-    networks: config.networks,
-    chains,
-    journal: createFileJournal(config.journal),
-    payToAllowlist: config.payToAllowlist,
-    log,
-  });
-  await orStartupError("journal_unavailable", () => facilitator.start());
-  const { port } = await orStartupError("listen_failed", () => listenFacilitator(facilitator, config.token, config.port));
-  const signer = chains.values().next().value?.writer.address;
-  // token は出さない。
-  out.stdout(`${JSON.stringify({ event: "listening", host: "127.0.0.1", port, networks: config.networks, signer, held: facilitator.heldNetworks() })}\n`);
+  const lockPath = facilitatorLockPathOf(config.journal);
+  // journal の読み書きより前に lock を取る（§2.3）。lock ファイルは journal の隣なので、そのディレクトリは先に作る。
+  await orStartupError("lock_unavailable", () => void mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 }));
+  const lock = await orStartupError("lock_unavailable", () => (deps.lock ?? ((p: string) => acquireFacilitatorLock(p)))(lockPath));
+  const journal = createFileJournal(config.journal);
+  try {
+    const chains = new Map<string, ChainIo>();
+    const chainIoOf = deps.chainIoOf ?? viemChainIo;
+    // network は表の 4 つに確かめ済み（code に入れてよい）。RPC の URL・例外の文言は入れない。
+    for (const network of config.networks) chains.set(network, await orStartupError(`rpc_check_failed:${network}`, () => chainIoOf(network, config)));
+    const log = await orStartupError("log_unavailable", () => fileLogger(config.logFile));
+    const facilitator = createEvmFacilitator({
+      networks: config.networks,
+      chains,
+      journal,
+      payToAllowlist: config.payToAllowlist,
+      log,
+    });
+    await orStartupError("journal_unavailable", () => facilitator.start());
+    const { server, port, host } = await orStartupError("listen_failed", () => listenFacilitator(facilitator, config.token, config.port, config.bind));
+    const signer = chains.values().next().value?.writer.address;
+    // token は出さない。
+    out.stdout(`${JSON.stringify({ event: "listening", host, port, networks: config.networks, signer, held: facilitator.heldNetworks() })}\n`);
+    return {
+      server,
+      port,
+      host,
+      async close() {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await journal.close().catch(() => {});
+        lock.release();
+      },
+    };
+  } catch (error) {
+    await journal.close().catch(() => {});
+    lock.release();
+    throw error;
+  }
 }
 
 /** CLI の入口。終了 code を返す（0 = listen 中）。失敗の出力は固定の文言だけ。 */
-export async function runCli(env: NodeJS.ProcessEnv, out: CliOutput): Promise<number> {
+export async function runCli(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDeps = {}): Promise<number> {
   try {
-    await main(env, out);
+    await main(env, out, deps);
     return 0;
   } catch (error) {
     out.stderr(`evm-facilitator: ${error instanceof StartupError ? error.message : "startup_failed"}\n`);
+    return 1;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * 運用者の補充 `raise-cap`（hosted 設計 §2.2）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+export const RAISE_CAP_USAGE = "usage: raise-cap --network <eip155:id> --add-wei <positive wei> --reason <text>";
+
+export interface RaiseCapArgs {
+  readonly network: string;
+  readonly addWei: bigint;
+  readonly reason: string;
+}
+
+/** 引数を読む（各 flag ちょうど 1 回、順不同）。違えば `StartupError`（`RAISE_CAP_USAGE`。値は出さない）。 */
+export function raiseCapArgsOf(args: readonly string[]): RaiseCapArgs {
+  const usage = (): never => {
+    throw new StartupError(RAISE_CAP_USAGE);
+  };
+  const seen = new Map<string, string>();
+  if (args.length !== 6) usage();
+  for (let i = 0; i < args.length; i += 2) {
+    const flag = args[i] as string;
+    const value = args[i + 1] as string;
+    if (!["--network", "--add-wei", "--reason"].includes(flag) || seen.has(flag)) usage();
+    seen.set(flag, value);
+  }
+  const network = seen.get("--network");
+  const addWei = seen.get("--add-wei");
+  const reason = seen.get("--reason");
+  if (network === undefined || !EVM_TESTNET_NETWORKS.has(network)) return usage();
+  if (addWei === undefined || !POSITIVE_WEI.test(addWei)) return usage();
+  if (!isValidReason(reason)) return usage();
+  return { network, addWei: BigInt(addWei), reason };
+}
+
+/**
+ * `raise-cap` の本体。env は `EVM_FACILITATOR_JOURNAL` だけを読む（鍵・token は読まない）。
+ * facilitator と同じ lock を取る（= facilitator が止まっているときだけ書ける）。journal に その network の `gas_cap_init` が無ければ拒む。
+ * `gas_cap_raise` を fsync で追記し、1 行の JSON を出す。失敗は固定の文言で終了 code 1。
+ */
+export async function runRaiseCap(args: readonly string[], env: NodeJS.ProcessEnv, out: CliOutput, deps: Pick<MainDeps, "lock"> & { readonly clock?: Clock } = {}): Promise<number> {
+  try {
+    const parsed = raiseCapArgsOf(args);
+    const file = env["EVM_FACILITATOR_JOURNAL"];
+    if (file === undefined || file === "") throw new StartupError("EVM_FACILITATOR_JOURNAL must be set");
+    const noInit = `raise_cap_refused: the journal has no gas_cap_init for ${parsed.network}`;
+    const lockPath = facilitatorLockPathOf(file);
+    // journal のディレクトリが無ければ journal も無い（lock ファイルも作らない）。
+    if (!existsSync(path.dirname(lockPath))) throw new StartupError(noInit);
+    const lock = await orStartupError("lock_unavailable", () => (deps.lock ?? ((p: string) => acquireFacilitatorLock(p)))(lockPath));
+    try {
+      // lock を取ってから journal を見る（無い journal は作らない）。
+      if (!existsSync(path.resolve(file))) throw new StartupError(noInit);
+      const journal = createFileJournal(file);
+      try {
+        const records = await orStartupError("journal_unavailable", () => journal.load());
+        checkGasJournal(records);
+        let cap: bigint | undefined;
+        for (const r of records) {
+          if (r.type === "gas_cap_init" && r.network === parsed.network) cap = BigInt(r.capWei);
+          if (r.type === "gas_cap_raise" && r.network === parsed.network && cap !== undefined) cap += BigInt(r.addWei);
+        }
+        if (cap === undefined) throw new StartupError(noInit);
+        const at = (deps.clock ?? { now: () => Date.now() }).now();
+        await orStartupError("journal_unavailable", () => journal.append({ type: "gas_cap_raise", network: parsed.network, addWei: parsed.addWei.toString(), reason: parsed.reason, at }));
+        const effectiveCapWei = (cap + parsed.addWei).toString();
+        out.stdout(`${JSON.stringify({ event: "cap_raised", network: parsed.network, addWei: parsed.addWei.toString(), effectiveCapWei })}\n`);
+        return 0;
+      } finally {
+        await journal.close().catch(() => {});
+      }
+    } finally {
+      lock.release();
+    }
+  } catch (error) {
+    out.stderr(`evm-facilitator: ${error instanceof StartupError ? error.message : "raise_cap_failed"}\n`);
     return 1;
   }
 }
@@ -1630,7 +1975,14 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   };
   process.on("uncaughtException", fatal);
   process.on("unhandledRejection", fatal);
-  void runCli(process.env, out).then((code) => {
-    if (code !== 0) process.exit(code);
-  });
+  if (process.argv[2] === "raise-cap") {
+    // lock と journal を閉じた後は自然に終わる（`process.exit` は pipe の stdout を切り詰め得るので使わない）。
+    void runRaiseCap(process.argv.slice(3), process.env, out).then((code) => {
+      process.exitCode = code;
+    });
+  } else {
+    void runCli(process.env, out).then((code) => {
+      if (code !== 0) process.exit(code);
+    });
+  }
 }
