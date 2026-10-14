@@ -77,7 +77,7 @@ publication or funded payer acceptance.
 **requires `credential`** — an `X-Payment` value signed with the caller's own key.
 **The Router never holds your key**, so the signature is produced here.
 
-The Router exposes **ten routes** and **twenty dynamic profiles** (each rail only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
+The Router exposes **ten routes** and **fifty-six dynamic profiles** (each rail only while the operator's switch is on; **trust the listing**). **Pick the one you can pay with what you hold**:
 
 | routeId | you pay with | reaches |
 |---|---|---|
@@ -200,11 +200,25 @@ direction; **if a route or profile is missing from `subetha_router_list_routes`,
   the Router pays the provider over MPP on Solana with its own key. The dynamic `*-to-solmpp` quotes carry no `pricing.maxFee`
   (the Router pays no chain fee on that leg).
 
+### EVM testnets: Robinhood Chain, Arbitrum Sepolia, HyperEVM (on the hosted Router since 2026-10-14)
+
+Three more x402 networks, both as what you pay with and as what the upstream accepts: **Robinhood Chain testnet USDG**
+(`eip155:46630`), **Arbitrum Sepolia USDC** (`eip155:421614`) and **HyperEVM testnet USDC** (`eip155:998`). They are offered only as
+dynamic profiles `dyn-<source>-to-<destination>` with `rh`, `arbsep`, `hyperevm` beside the existing names (`x402` = Base Sepolia,
+`mpp` = Tempo, `arc`, `sol`, `solmpp`), 36 in all; **if one is missing from `subetha_router_list_routes`, it does not exist for you.**
+
+- Paying with one of them is x402 (EIP-3009): `npm run sign` detects the network from the offer and **only signs**; funds move at
+  purchase. No public facilitator serves these chains, so SubEtha runs its own; it pays the gas, never holds your key, and only
+  settles transfers to the Router's receiver or SubEtha's providers.
+- An upstream that accepts one of them is paid by the Router from its own balance; nothing changes for you.
+- SubEtha's own providers for these chains: `https://provider-x402-rh.subethalabs.com/v1/eth/snapshot` (and `-arbsep`, `-hyperevm`).
+- The local payer (`@subetha/payer`) does not offer these networks yet.
+
 ### Dynamic upstream URLs (`subetha_router_quote_url`)
 
 The Router can also pay **an upstream URL you choose** (a third-party x402 or MPP provider the
 operator has **not** verified). `subetha_router_list_routes` shows the profiles under `dynamic`
-with `enabled`. On the hosted Router **twenty profiles** are enabled since G-4⁗ (2026-10-08 18:52Z; eighteen after G-4″, ten after G-4′, six before it; **trust the listing**); the eight `*solmpp*` ones are described under "MPP on Solana" above, and the two newest are `dyn-arc-to-sol` (you pay **Arc testnet USDC** over x402, the upstream accepts **Solana devnet USDC** over x402) and `dyn-sol-to-arc` (you pay **Solana devnet USDC** over x402, the upstream accepts **Arc testnet USDC** over x402); both are x402 on both legs, so `npm run sign` only signs and funds move at purchase. The original two: `dyn-mpp-to-x402` (you pay **Tempo
+with `enabled`. On the hosted Router **fifty-six profiles** are enabled since 2026-10-14 (the 36 EVM-testnet ones under "EVM testnets" above; twenty since G-4⁗ 2026-10-08 18:52Z, eighteen after G-4″, ten after G-4′, six before it; **trust the listing**); the eight `*solmpp*` ones are described under "MPP on Solana" above, and the two newest are `dyn-arc-to-sol` (you pay **Arc testnet USDC** over x402, the upstream accepts **Solana devnet USDC** over x402) and `dyn-sol-to-arc` (you pay **Solana devnet USDC** over x402, the upstream accepts **Arc testnet USDC** over x402); both are x402 on both legs, so `npm run sign` only signs and funds move at purchase. The original two: `dyn-mpp-to-x402` (you pay **Tempo
 pathUSD**, the upstream must accept **x402 on Base Sepolia USDC**) and `dyn-x402-to-mpp` (you pay
 **Base Sepolia USDC**, the upstream must accept **MPP on Tempo pathUSD**); since 2026-10-07 also `dyn-arc-to-mpp` /
 `dyn-arc-to-x402` (you pay **Arc testnet USDC**) and `dyn-sol-to-x402` / `dyn-sol-to-mpp` (you pay **Solana devnet USDC**); with G-4′ also `dyn-x402-to-arc` / `dyn-x402-to-sol`
