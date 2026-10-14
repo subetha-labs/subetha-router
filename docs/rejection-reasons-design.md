@@ -1,9 +1,9 @@
-# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 4 版、2026-10-15）
+# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 5 版、2026-10-15）
 
 > 要件 `docs/rejection-reasons-requirements.md` 第 2.1 版と §7 の owner の決定（Q-1 → 運用者だけ、Q-2 → 進行中の購入が無ければ本番の入れ替えは Claude の判断）。
 > コードは `origin/main`。SDK は `@x402/core`・`@x402/evm`・`@x402/fetch`・SVM の実装 2.28.0 に固定（`package.json:28-30,40`）。SDK の実装は同じ版の `node_modules` で読んだ（下の `chunk-*.mjs`）。
 > 下書きは Plan エージェント（コードを引いて作成）、親が読んで採用。進め方: 設計 → Codex のレビュー → タスク → 実装の PR。
-> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版（`5a52163`）は D-2 の readback で **REJECT**（#3・#9 が未解決、#7 は失敗の終了の扱い）→ 第 3 版の §13 が §12 の該当の記述に優先する。第 3 版（`5fcd58d`）は D-3 で **REJECT**（§13.1 の割り込み、上限の量、drain の時間の根拠、入れ替えの script との食い違い）→ 第 4 版の §14 が §13 に優先する。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
+> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版（`5a52163`）は D-2 の readback で **REJECT**（#3・#9 が未解決、#7 は失敗の終了の扱い）→ 第 3 版の §13 が §12 の該当の記述に優先する。第 3 版（`5fcd58d`）は D-3 で **REJECT**（§13.1 の割り込み、上限の量、drain の時間の根拠、入れ替えの script との食い違い）→ 第 4 版の §14 が §13 に優先する。第 4 版（`14abe39`）は D-4 で REJECT（worker の起動と送りの総量、drain の導出、exit 2）→ 第 5 版の §15 が §14 に優先する。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
 
 ## 0. 一枚で
 
@@ -407,3 +407,19 @@ export function validateDiagRecord(value: unknown): DiagRecord | undefined;     
 - `swap-image.sh` の古いコンテナの停止だけ、専用の上限を持つ: `docker stop -t 240`（`DRAIN_TIMEOUT` 225 秒 ＋ 15 秒）を、外側の上限 270 秒の `timeout -k` で包む（既存の 30 秒の `mutate` の上限は、この 1 つの操作にだけ置き換える）。停止の完了の確認・復旧の待ち（`STOP_SETTLE_S`）も 270 秒に合わせる。
 - 静止の確認は **今回の停止の log だけ**: 停止を始める直前の時刻を記録し、`docker logs --since <その時刻>` に `drain: complete` があること。無ければ入れ替えをやめ、既存の復旧の経路で古いコンテナを戻す: 復旧を確かめられたら exit 1（「静止できなかった、戻した」）、確かめられなければ既存どおり **exit 2（状態不明）**。
 - mock の試験: drain の成功、時間切れ、行が無い、古い log にだけ `drain: complete` がある（今回の停止には無い）、停止が 270 秒で切れる、復旧の未確認（exit 2）の 6 つ。
+- **D-4（readback、第 4 版 `14abe39`）: REJECT**。#1（割り込み）は SR-R3 の言い直しで解決。残り: worker thread の起動（`.ts` の worker、Dockerfile の `--noEmit`・tsx の実行、Vitest）と送りの総量の上限が無い、225 秒は SVM の settle の後の追跡 15 秒（`src/adapters/inbound/x402-svm.ts:303,497`）を落としていた、停止の操作が未確定なら後で health が戻っても既存の PENDING → UNRESOLVED（`deploy/swap-image.sh:99`）どおり exit 2。反映は §15。
+
+## 15. 第 5 版の変更（§14 に優先する）
+
+### 15.1 worker thread はやめる（D-4 #2・#3）
+- SR-R3 の言い直し（要件 第 2.3 版: 主の thread に加わる時間は上限つきで試験で確かめる）により、後回しの処理を別の thread に移す必要が無くなった。worker thread は起動・送りの総量・停止の管理を増やすだけなので **入れない**。
+- 後回しの処理は主の thread の `setImmediate` で、1 回に 16 件まで（§13.1 と同じ）。量の上限は §14.2 のうち主の thread の分（文字列の欄 8 KiB、1 件 16 KiB、環の総量 2 MiB、参照の解放）。worker への送りの上限は不要になる。
+- 時間の上限の試験（§14.1 の (3) をそのまま使う）: 100 件の fake の購入を同時に進め、sink の有無で `monitorEventLoopDelay` の p99 の差が 1 ms 未満、1 件の push が 20 µs 未満、1 回の `setImmediate` の処理（16 件）が 1 ms 未満。fs が遅い・失敗する場面でも同じ（書き込みは非同期の 1 本の連鎖）。
+
+### 15.2 drain の時間は定数から試験で導く（D-4 #4）
+- 手で合計を書かない。R-0 の試験が、経路ごとに期限の定数を足して 1 件の購入の最長を計算する: 受信（kind `x402`・`circle` の facilitator の期限 `evmTestnetDeadlinesOf` / 既定、SVM の HTTP の settle と追跡 `SVM_SETTLE_FOLLOW_UP_DEFAULTS.totalMs`、MPP の受信の RPC の期限）＋ 宛先（challenge の読み直し、有料の要求 `outboundPaidMs` / `paidTimeoutMs`、MPP の送信の期限）＋ 余裕 30 秒。`DRAIN_TIMEOUT` は 300 秒から始め、試験が「どの経路の最長よりも長い」ことを固定する（定数が増えて超えたら試験が落ちる）。
+- 時間切れは失敗（入れ替えをやめる。§14.3 のとおり）。`swap-image.sh` の古いコンテナの停止は `docker stop -t 315`（300 ＋ 15）、外側の上限 345 秒、`STOP_SETTLE_S` も 345 秒。
+
+### 15.3 exit 2 の条件（D-4 #5）
+- 停止の操作（`docker stop`）が未確定（上限に当たった・daemon のエラー・切断）なら、既存の規則（`deploy/swap-image.sh:99` の PENDING → UNRESOLVED）どおり、その後に古いコンテナの health が戻っても **exit 2（状態不明）**。exit 1 は、停止が確定し、静止の確認（今回の停止の `drain: complete`）が無く、復旧を確かめられたときだけ。
+- mock の試験: 停止が 345 秒で切れた後に health が戻る場面で exit 2 であること（§14.4 の 6 つの場面に加える）。
