@@ -1,4 +1,4 @@
-# 要件: 拒否・不明の理由の分類を診断の記録に残す（第 2 版、2026-10-15）
+# 要件: 拒否・不明の理由の分類を診断の記録に残す（第 2.1 版、2026-10-15）
 
 > owner の依頼（2026-10-15）: hosted の EVM testnet の検証（`docs/DEPLOY.md` §2g）で、受信の facilitator の拒否・Provider の拒否・宛先の `unknown`・Tempo の署名の後の失敗が起き、どれも原因を確定できなかった（理由が残っていない）。「その形で進めましょう」= 拒否・不明の理由の **分類** を残し、次に起きたときに判別できるようにする。
 > 進め方は前例どおり: 要件 → 設計 → タスク → 実装 PR。各段で Codex（`gpt-6-astra`）の独立レビューと owner の確認。本番の入れ替えは owner の確認つき。
@@ -9,7 +9,7 @@
 | 事実 | 場所 |
 |---|---|
 | x402 受信の verify（kind `x402`）は 200 以外・形の違う応答を `isValid: false` にし、応答の `isValid` 以外を読まない（コメントは `invalidMessage`・`error` を読まないと書く） | `src/adapters/inbound/x402.ts:336-346` |
-| x402 受信の settle（kind `x402`）は送出の後の 4xx・`success !== true` を `source_rejected`、5xx・形の違い・network の違いを `source_settle_unknown` にまとめる。kind `circle` は送出の後の失敗を 4xx も含めて `unknown` にし、`403 registration_required` だけを `facilitator_trial_exhausted` にする | `src/adapters/inbound/x402.ts:350-404` |
+| x402 受信の settle（kind `x402`）は送出の後の 4xx・`success !== true` を `source_rejected`、5xx・形の違い・network の違いを `source_settle_unknown` にまとめる。kind `circle` は送出の後の失敗を 4xx も含めて `unknown`（`source_settle_unknown`）にする。`403 registration_required` も結果は同じ `unknown` で、診断（報告）として `facilitator_trial_exhausted` を出すだけ | `src/adapters/inbound/x402.ts:350-404` |
 | 動的プロファイルの受信の verify の失敗は promotion の前で、支払いの journal に行を書かずに `awaiting_payment` を返す | `src/core/dynamic.ts:624-640` |
 | x402 送信は **領収を先に** 見る（`PAYMENT-RESPONSE`・`X-PAYMENT-RESPONSE`）: 整合した領収 ∧ 200 → 本文、整合 ∧ 200 以外 → `paid_no_data`、領収の `payer` 違い → `unknown`、領収なしで 2xx・5xx → `unknown`、4xx → `rejected`。領収なし・壊れた領収・失敗の領収・network 違いは区別されない。拒否の応答の本文は読まずに捨てる。送出しなかった失敗（`not_sent`）は手元の理由 | `src/adapters/outbound/x402-dynamic.ts:54-149,610-680` |
 | 支払いの journal は区分（`source_rejected`・`destination_pay_unknown` など）・時刻のほか、識別子・結果・tx の参照・領収の参照・届いた本文を持つ。status の公開の射影は `terminalReason`・tx の参照・`receiptRef` を出す | `src/core/orchestrator.ts:176-203,759-911`、`src/core/journal.ts:278-285` |
@@ -30,7 +30,7 @@
 - **FR-R3 宛先**: x402 送信（動的 EVM・静的・SVM）が `rejected`・`unknown`・`paid_no_data`・`not_sent` になるとき、(a) 段（challenge の読み直し・支払いつきの要求・領収の検査・本文の読み取り）、(b) HTTP のステータス **と** 本文の読み取りの通信の失敗の分類（両方あり得る）、(c) 領収の分類（`absent`・`malformed`・`failed`・`network_mismatch`・`payer_mismatch`・`ok`。どちらのヘッダを使ったか。読む順と大きさの上限は設計で決める）、(d) 拒否の応答の本文の x402 の理由（規定の欄だけを、大きさと時間の上限つきで。**結果が決まった後に** 読み、結果を遅らせない・変えない）、(e) `not_sent` は手元の理由の分類、(f) 経過時間、(g) paymentId と attempt。
 - **FR-R4 MPP の経路**: Tempo・Solana の MPP の受信・送信も、同じ形で分類できるもの（RPC・facilitator の HTTP のステータス、通信の失敗の分類、規定の理由）を残す。範囲は設計で決める。
 - **FR-R5 本番で見える場所**: Router の子の診断の記録はボリュームのファイル（本番の journal と同じボリューム）。通信の失敗の分類（`TransportEvent`）は、どの支払い・どの段の要求かを結びつけて診断の記録に入れる（stderr の転送だけでは支払いと結びつかない）。
-- **FR-R6 自前の facilitator**: verify の失敗の理由（SDK の `invalidReason` を FR-R1 で分類）と、RPC の失敗の分類（時間切れ・頻度制限（HTTP 429・JSON-RPC の限度のエラー）・その他）を log に出す。結びつけの鍵は authorization の識別（network・資産・from・nonce の hash。既存の `key`）。
+- **FR-R6 自前の facilitator**: verify の失敗の理由（SDK の `invalidReason` を FR-R1 で分類）と、RPC の失敗の分類（時間切れ・頻度制限（HTTP 429・JSON-RPC の限度のエラー）・その他）を log に出す。結びつけの鍵は、診断用に別に作る hash の識別子（network・資産・from・nonce から作る。既存の `key` は nonce をそのまま含むので診断には出さない。SR-R2）。Router の側の宛先の診断にも同じ識別子を出し、両方を結びつける。
 - **FR-R7 署名の道具と driver**: 署名の道具（`npm run sign` の本体）と行列の driver が、署名の段の失敗を分類して残す（どの段で失敗したか、送金が送出されたか分かるか、tx の参照があればそれ）。資金が動き得る段の後の失敗は今どおり「再署名しない」を保ち、送金の tx が分かればそれを証跡に残す。
 - **FR-R8 読み方**: 運用者が paymentId（promotion の前は quoteId）から、Router・facilitator・driver の診断を並べて引ける道具（読むだけ）。呼び出し側（MCP の status）には出さない（§7 Q-1 の既定）。
 
@@ -55,8 +55,8 @@
   |---|---|---|
   | x402.org の受信の拒否 | settle の HTTP のステータス、`errorReason` の分類、経過時間 | x402.org の内部の理由（集合に無ければ `unrecognized`） |
   | Provider A の拒否 | 支払いつきの要求のステータス、領収の分類、本文の x402 の理由（あれば） | Provider A の内部（理由を返さなければ `absent`） |
-  | HyperEVM の Provider への 3.4 秒の `unknown` | ステータス・領収の分類、自前の facilitator の verify の失敗の理由・RPC の分類（authorization の鍵で結びつく） | Provider の Worker の内部（Worker が理由を返さなければ） |
-  | Arc の Provider への 20 秒の `unknown` | 通信の失敗の分類（`upstream_timeout`）・経過時間 | Circle の facilitator の内部の段 |
+  | HyperEVM の Provider への 3.4 秒の `unknown` | ステータス・領収の分類。要求が自前の facilitator に届いて記録された場合だけ、その verify の失敗の理由・RPC の分類（診断用の識別子で結びつく） | Provider の Worker の内部、Worker が facilitator を呼ぶ前に失敗した場合の理由 |
+  | Arc の Provider への 20 秒の `unknown` | 実際に観測した通信の失敗の分類（経過時間から推定しない）またはステータス、経過時間 | Circle の facilitator の内部の段 |
   | Tempo の署名の後の失敗 | 署名の道具の段の分類、送金の tx（分かれば） | RPC の内部の理由 |
 
 - **AC-R7（本番）** 配備の後、制御した失敗（例: 拒否を返す試験用の上流の URL への動的の購入、残高の足りない支払い手）で、診断の行が出ることを確かめる。期限切れの quote だけでは facilitator の診断を通らないので、それだけにしない。testnet の小額の支払いは owner の承認の範囲（2026-10-13）。
@@ -84,3 +84,4 @@
   6. medium — 「次は判別できる」は言い過ぎ → AC-R6 の出来事の表（分からないことを含む）、facilitator の log を本番のファイルに、結びつけの鍵。
   7. high — journal の上限と互換・結果の確定の衝突 → 診断を journal と別にし（§2）、SR-R4・AC-R2。
   8. medium — 既存の公開の欄 → SR-R1 で既存の例外として明記、AC-R4 で status・reopen に出ないこと。AC-R7 に制御した上流の失敗。
+- **R2（readback、第 2 版）: APPROVE WITH CHANGES**。R1 の 8 件のうち 6 件は解決。残りと新しい点を第 2.1 版で反映: Circle の `403` の結果は `unknown` のまま（診断の値だけ）、facilitator の結びつけは既存の `key`（nonce をそのまま含む）ではなく診断用の hash の識別子、出来事の表は「facilitator に届いて記録された場合だけ」「観測した分類で、経過時間から推定しない」。
