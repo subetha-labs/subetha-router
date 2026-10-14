@@ -25,7 +25,7 @@ claude mcp add --scope user --transport http subetha-router https://router.subet
 
 Ask for `subetha_router_list_routes`: ten static routes and fifty-six dynamic profiles, each a pair of
 "what you pay with" and "what the provider accepts" across x402 (Base Sepolia, Arc testnet, Solana
-devnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with a listed `routeId` and any fresh
+devnet, and since 2026-10-14 Robinhood Chain testnet, Arbitrum Sepolia and HyperEVM testnet) and MPP (Tempo, Solana devnet). Taking a quote (`subetha_router_quote` with a listed `routeId` and any fresh
 `requestId`) pays nothing and shows the human-readable `subject` an agent must present before a
 purchase. Then read [`docs/public-brief-2026-10-08.md`](docs/public-brief-2026-10-08.md) (all 20
 cross-rail pairs settled on testnets, with transaction hashes) and

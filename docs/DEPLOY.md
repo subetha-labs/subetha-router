@@ -756,7 +756,12 @@ sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
   - Router を再起動して全 39 件の status を `ownerKey` つきで読み直し: **39 件とも同じ**。
   - 期限の後の確認（2026-10-14 20:29Z）: `dyn-hyperevm-to-arc` の 1 回目の宛先の authorization は未使用（Router → Arc の Provider の `Transfer` は 18・25 番目と買い直しの 3 件だけ）。`dyn-sol-to-hyperevm` の 1 回目も未使用（facilitator の journal で HyperEVM の E-PROV 向けの送出は 9 件 = HyperEVM 宛ての delivered の数。journal の送出の意図 59 件はすべて settled、aborted・reverted・運用者の解決は 0）。
   - finality（2026-10-14 20:58Z の読み直し）: G-4 の 72 レグのうち 70 が final、残り 2 は Solana の公開 RPC の読み取りの失敗で、`getSignatureStatuses` を直接引いて 2 つとも `finalized`（err なし）。公開の要約は `docs/evidence/evm-hosted/g3-summary.json`・`g4-summary.json`（ownerKey・鍵・token は含まない）。
-  - **資金が動いて購入が成立しなかったもの**: G-3 の `dyn-mpp-to-hyperevm` の 0.011 pathUSD と、`dyn-rh-to-x402` の受信の 0.011 USDG（G-3・G-4 の 2 回）。どれも Router の受取先に残る（testnet、返金なし）。
+  - **支払い手から Router への支払いは成立し、購入は届かなかったもの**（どれも Router の受取先に残る。testnet、返金なし。買い直しは新しい支払いで、元の分を返すものではない。Codex の記録 review #1）:
+    - G-3 `dyn-mpp-to-hyperevm`: 0.011 pathUSD（Tempo、署名で送金 `0xf518a081…0241`、購入は呼ばれていない）。
+    - G-3・G-4 `dyn-rh-to-x402`: 各 0.011 USDG（Robinhood、受信は settle 済み。宛先は `rejected` で Router は Provider A に払っていない）。
+    - G-4 `dyn-sol-to-hyperevm`: 0.011 Solana devnet USDC（受信 `5w1CpfQm…`）。宛先（Router → HyperEVM の Provider）は送出されず、authorization は期限切れで未使用。
+    - G-4 `dyn-hyperevm-to-arc`: 0.011 HyperEVM USDC（受信 `0x84aa842d…`）。宛先（Router → Arc の Provider）は送出されず、authorization は期限切れで未使用。
+  - **資金が動かなかったもの**: G-3 `dyn-x402-to-hyperevm`（受信の settle を x402.org が拒否、authorization は期限切れで未使用）と、quote の `rate_limited` の 7 件。
 
 ## 3. 動作確認
 
