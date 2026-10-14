@@ -127,7 +127,7 @@
 
 ## 9. タスク（実装の PR の単位）
 
-- **H-1** facilitator: bind・gas の累計の永続・lock（§2）。試験: 再起動で上限が戻らない、旧形式の journal で起動しない、lock の競合で 2 つ目が起動しない・古い lock は奪える、lock の更新の失敗で保留。
+- **H-1** facilitator: bind・gas の累計の永続と `gas_cap_init`・`raise-cap`・`flock` の排他（§2）。試験: 再起動で上限が戻らない、env の上限が journal と違えば起動しない、`raise-cap` は理由が必須で動作中は拒む、旧形式の journal で起動しない、§2.3 の lock の試験（同時起動・SIGSTOP・SIGKILL の後）。
 - **H-2** Router: 動的受信の facilitator の transport（§3）。試験: allowlist の origin の facilitator にだけ loopback で届く、別の loopback の origin・redirect は送出前に拒否、動的上流の transport は loopback を拒んだまま、allowlist に無い loopback の facilitator で起動しない。
 - **H-3** 設定生成と有効化（§5）、公開の子の能力（§3 の最後）。試験: golden の byte 一致（無効）、有効時の差分が追加だけ、36 の id と値、区分、1 件の上限の境界（新 3 → Tempo の cap）。
 - **H-4** 入口とコンテナ（§4）、`swap-image.sh`、受け入れの起動の token。試験: facilitator の子が先に起動し `/supported` を確かめる、どちらかが落ちると両方止まる、Router の子の env に gas 鍵が無い。mock の docker での `swap-image.sh` の試験（前例）。
