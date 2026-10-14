@@ -24,30 +24,36 @@ PROVIDER_NETWORK = "solana"
 PAY_TO = "4LrB4peq75FSg9UhSyfhp4onb6GMKgEtC3o3wndgguBc"
 FACILITATOR_URL = "https://www.x402.org/facilitator"
 
-# EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.4）。**手元の `wrangler dev` だけ**（配備しない: routes・custom domain・secret 無し）。
-# facilitator は自前（`tools/evm-facilitator.ts`）で既定が無いので `FACILITATOR_URL` は必須。token を含むので var に書かず、起動時に渡す:
-#   npx wrangler dev --env rh --port 8621 --var FACILITATOR_URL:http://127.0.0.1:8611/<token>
+# EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.4）。facilitator は自前（`tools/evm-facilitator.ts`）で既定が無いので `FACILITATOR_URL` は必須。
+# token を含むので var に書かない。
+# - hosted（`docs/evm-testnets-hosted-design.md` §6）: `rh`・`arbsep`・`hyperevm` は custom domain で配備する。`FACILITATOR_URL` は secret:
+#     npx wrangler secret put FACILITATOR_URL --env rh   # 値 https://router.subethalabs.com/evm-facilitator/<token>
+#     npx wrangler deploy --env rh
+# - 手元: `npx wrangler dev --env rh --port 8621 --var FACILITATOR_URL:http://127.0.0.1:8611/<token>`（`sepolia` は手元だけ。配備しない）
 # 受取 address は 4 つとも E-PROV（鍵は owner の手元。Worker には置かない: 売り手証明は Circle だけ）。
 [env.rh]
-# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+# hosted（docs/evm-testnets-hosted-design.md §6）: custom domain だけで公開する（workers.dev には出さない）。
 workers_dev = false
 name = "provider-x402-rh"
+routes = [{ pattern = "provider-x402-rh.subethalabs.com", custom_domain = true }]
 [env.rh.vars]
 PROVIDER_NETWORK = "rh"
 PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
 
 [env.arbsep]
-# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+# hosted（docs/evm-testnets-hosted-design.md §6）: custom domain だけで公開する（workers.dev には出さない）。
 workers_dev = false
 name = "provider-x402-arbsep"
+routes = [{ pattern = "provider-x402-arbsep.subethalabs.com", custom_domain = true }]
 [env.arbsep.vars]
 PROVIDER_NETWORK = "arbsep"
 PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
 
 [env.hyperevm]
-# 手元の wrangler dev 専用。workers.dev への公開を止める（配備しない。docs/evm-testnets-x402-design.md §3.4）。
+# hosted（docs/evm-testnets-hosted-design.md §6）: custom domain だけで公開する（workers.dev には出さない）。
 workers_dev = false
 name = "provider-x402-hyperevm"
+routes = [{ pattern = "provider-x402-hyperevm.subethalabs.com", custom_domain = true }]
 [env.hyperevm.vars]
 PROVIDER_NETWORK = "hyperevm"
 PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"

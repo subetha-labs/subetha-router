@@ -14,6 +14,11 @@
  * - `summary --evidence-dir <dir> --out docs/evidence/evm-testnets/e2e-<date>.json`: 秘密・body・journal の行を除いた公開の要約。
  * - `run ... --prefunded`（設計 §8.2・§8.5 #5）: 送信の前提のうち「同じ chain の受信が delivered・確定」だけを外す（印・保留は残す）。
  * - `--matrix`（設計 §8）: `plan --matrix --out <file>`・`run --matrix --prefunded ...`・`finality --matrix ...`（Solana のレグも読む）。中身は `tools/evm-testnets-matrix.ts`。
+ * - `--hosted`（`docs/evm-testnets-hosted-design.md` §8.1）: hosted Router の 36 の動的プロファイル `dyn-<s>-to-<d>`。`plan --hosted --out <file>`・
+ *   `run --hosted --plan <file> --plan-sha256 <hex> --evidence-dir <dir> [--token <env name>] [--only <profileId>]`・`reopen --hosted --evidence-dir <dir>`・`finality --hosted ...`。
+ *   env: `SUBETHA_HOSTED_MCP_URL`（https。G-3 の ssh tunnel だけ `SUBETHA_HOSTED_MCP_ALLOW_LOOPBACK=1` で `http://127.0.0.1:<port>`）、`SUBETHA_HOSTED_LABEL`（`g3`・`g4` など）、
+ *   `SUBETHA_HOSTED_TEMPO_MAX_TOTAL`（Tempo 宛ての源の合計の上限、既定 11000）、`SUBETHA_ROUTER_MPP_OUTBOUND_ADDRESS`（hosted Router の Tempo の送信鍵の address）。
+ *   quote の `ownerKey` は `<evidence-dir>/owner-keys/` にだけ置く（stdout・証跡・公開の要約には出さない）。
  *
  * env（値は出さない）: `SUBETHA_PAYER_ADDRESS` または `SUBETHA_PAYER_PRIVATE_KEY`（run は鍵が必須）、`SUBETHA_ROUTER_RECEIVER`、`SUBETHA_ROUTER_OUTBOUND_ADDRESS`
  * （無ければ `SUBETHA_OUTBOUND_X402_KEY`・`SUBETHA_OUTBOUND_PRIVATE_KEY` から導く。それも無ければ受取先と同じ = T8 の兼任 §3.8）、`EVM_FACILITATOR_ADDRESS`
@@ -220,6 +225,51 @@ export function createAttemptMarker(evidenceDir: string, planSha: string, routeI
   }
   fsyncAncestors(dir);
   return true;
+}
+
+/**
+ * 動的 quote の `ownerKey`（hosted 設計 §8.1、AC-H7）の私的な置き場 `<evidenceDir>/owner-keys/<paymentId>.json`。status を読み直すのに要る
+ * （Router の再起動の後も）。**証跡（`writePrivate`）は秘密を消して書くので、そこには入れない**: この置き場だけが値を持つ。O_EXCL・0600・fsync、
+ * directory も fsync。既にあれば例外（同じ paymentId の key を上書きしない）。stdout・公開の要約には出さない（呼び出し側が `Secrets` に入れる）。
+ */
+export function ownerKeyRefOf(paymentId: string): string {
+  return path.join("owner-keys", `${paymentId}.json`);
+}
+const OWNER_KEY_PAYMENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+export function saveOwnerKey(evidenceDir: string, paymentId: string, ownerKey: string, content: { readonly routeId: string; readonly profileId: string }): void {
+  if (!OWNER_KEY_PAYMENT_ID.test(paymentId)) throw new Error("the paymentId is not a plain id");
+  if (ownerKey === "" || ownerKey.length > 256) throw new Error("the ownerKey is malformed");
+  const file = path.join(evidenceDir, ownerKeyRefOf(paymentId));
+  const dir = path.dirname(file);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fsyncAncestors(dir);
+  const fd = openSync(file, "wx", 0o600);
+  try {
+    writeSync(fd, jsonText({ kind: "subetha-evm-testnets-owner-key", paymentId, ...content, ownerKey }), null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  fsyncAncestors(dir);
+}
+/** 保存した `ownerKey`（無い・読めない・別の paymentId なら undefined）。 */
+export function readOwnerKey(evidenceDir: string, paymentId: string): string | undefined {
+  if (!OWNER_KEY_PAYMENT_ID.test(paymentId)) return undefined;
+  try {
+    const value = JSON.parse(readFileSync(path.join(evidenceDir, ownerKeyRefOf(paymentId)), "utf8")) as Record<string, unknown>;
+    return value["kind"] === "subetha-evm-testnets-owner-key" && value["paymentId"] === paymentId && typeof value["ownerKey"] === "string" && value["ownerKey"] !== "" ? value["ownerKey"] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+/** 置き場の全 `ownerKey`（`Secrets` に入れて、stdout・要約の漏れの検査に使う）。読めないファイルは飛ばす（値が無いので漏れようがない）。 */
+export function ownerKeysOf(evidenceDir: string): string[] {
+  const dir = path.join(evidenceDir, "owner-keys");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readOwnerKey(evidenceDir, name.slice(0, -".json".length)))
+    .filter((key): key is string => key !== undefined);
 }
 
 /** 印の状態: 無い・読める（同じ plan と route）・読めない（壊れている → 保留）。 */
@@ -1084,8 +1134,13 @@ export interface PurchaseEvidence {
   readonly index: number;
   /** 非行列は chain の短縮名。行列（§8）は `<src>-to-<dst>`。 */
   readonly chain: string;
-  readonly direction: Direction | "matrix";
+  readonly direction: Direction | "matrix" | "hosted";
   readonly routeId: string;
+  /** hosted 動的モード（hosted 設計 §8.1）: プロファイルの id（`routeId` は試みの鍵 `<profileId>@<label>`）と上流の URL。 */
+  profileId?: string;
+  upstreamUrl?: string;
+  /** hosted 動的モード: quote の `ownerKey` の置き場（証跡のディレクトリからの相対。値はここに書かない）。 */
+  ownerKeyRef?: string;
   stage: "started" | "quote_failed" | "stopped_before_signing" | "sign_refused" | "purchase_call_failed" | "purchased" | "verified" | "verification_failed" | "funds_possibly_moved" | "not_funded";
   /** 行列: 署名（`runSign`）を呼んだか。Tempo MPP は呼んだ時点で資金が動き得る（§8.5 #1）。呼ぶ前に fsync して残す。 */
   signInvoked?: boolean;
@@ -1627,9 +1682,20 @@ export async function runReopen(evidenceDir: string, mcp: McpCaller, secrets: Se
       continue;
     }
     if (evidence.paymentId === undefined || evidence.paymentId === "") continue;
+    // hosted 動的モード: status は quote の `ownerKey` つきでしか読めない（AC-H7）。置き場から読み、秘密に入れる。読めなければ保留（鍵なしで読んで「無い」と比べない）。
+    let ownerKey: string | undefined;
+    if (evidence.ownerKeyRef !== undefined) {
+      ownerKey = readOwnerKey(evidenceDir, evidence.paymentId);
+      if (ownerKey === undefined) {
+        different += 1;
+        out(secrets.redact(`reopen HELD ${evidence.routeId} ${evidence.paymentId}: the saved ownerKey (${evidence.ownerKeyRef}) is missing or unreadable`));
+        continue;
+      }
+      secrets.add(ownerKey);
+    }
     let again: Record<string, unknown>;
     try {
-      again = await mcp.call("subetha_router_status", { paymentId: evidence.paymentId });
+      again = await mcp.call("subetha_router_status", { paymentId: evidence.paymentId, ...(ownerKey === undefined ? {} : { ownerKey }) });
     } catch {
       again = { found: false, error: "status call failed" };
     }
@@ -1668,6 +1734,8 @@ export function summaryOf(evidenceDir: string): Record<string, unknown> {
         chain: e.chain,
         direction: e.direction,
         routeId: e.routeId,
+        // hosted 動的モード: プロファイル・上流 URL・宛先の受取先・価格の内訳（`ownerKey` は証跡に無い。置き場は公開しない）。
+        ...(e.profileId === undefined ? {} : { profileId: e.profileId, upstreamUrl: e.upstreamUrl ?? null, dynamic: { destinationPayTo: subject["destinationPayTo"] ?? null, pricing: subject["pricing"] ?? null } }),
         stage: e.stage,
         ...(e.stopReason === undefined ? {} : { stopReason: e.stopReason }),
         paymentId: e.paymentId ?? null,
@@ -1744,10 +1812,50 @@ async function main(argv: readonly string[], env: Env): Promise<number> {
   };
   const secrets = Secrets.fromEnv(env);
   const safeOut = (line: string): void => out(secrets.redact(line));
-  const matrix = argv.includes("--matrix");
+  // `--hosted`（hosted 設計 §8.1）: 行列の hosted 動的モード（`--matrix` を含む）。MCP の URL は env `SUBETHA_HOSTED_MCP_URL` だけ（https。G-3 の tunnel だけ明示の env で loopback）。
+  const hosted = argv.includes("--hosted");
+  const matrix = hosted || argv.includes("--matrix");
+  if (hosted && argOf(argv, "mcp-url") !== undefined) throw new PlanRefusal("--hosted takes the MCP endpoint from SUBETHA_HOSTED_MCP_URL only; drop --mcp-url");
   if (matrix) {
     // 掛け合わせの検証（設計 §8）。Solana の鍵・送信鍵の値も秘密に入れる。
     for (const name of ["SOLANA_PAYER_PRIVATE_KEY", "SUBETHA_OUTBOUND_SOLANA_KEY", "SUBETHA_ARC_RECEIVER_KEY", "SOLANA_RPC_URL"]) secrets.add(env[name]);
+  }
+  if (command === "plan" && hosted) {
+    const m = await import("./evm-testnets-matrix.js");
+    const outFile = argOf(argv, "out");
+    if (outFile === undefined) throw new PlanRefusal("--out <file> is required");
+    const plan = await m.buildHostedPlan(env, await m.matrixChainReader(env));
+    const sha = planSha256(plan);
+    writePrivate(outFile, plan, secrets);
+    const textFile = outFile.replace(/\.json$/, "") + ".txt";
+    const text = m.hostedPlanText(plan, sha);
+    writePrivate(textFile, text, secrets);
+    safeOut(text);
+    safeOut(`plan written to ${outFile} and ${textFile}`);
+    return plan.allSufficient ? 0 : 3;
+  }
+  if (command === "run" && hosted) {
+    const m = await import("./evm-testnets-matrix.js");
+    const planFile = argOf(argv, "plan");
+    const sha = argOf(argv, "plan-sha256");
+    const evidenceArg = argOf(argv, "evidence-dir");
+    if (planFile === undefined || sha === undefined || evidenceArg === undefined) throw new PlanRefusal("run --hosted needs --plan, --plan-sha256 and --evidence-dir");
+    const plan = m.loadApprovedHostedPlan(planFile, sha);
+    const url = m.hostedMcpUrlOf(env);
+    if (url !== plan.hosted.mcpUrl) throw new PlanRefusal(`SUBETHA_HOSTED_MCP_URL is not the plan's endpoint ${plan.hosted.mcpUrl}; make a new plan for another endpoint`);
+    const evidenceDir = checkPrivateEvidenceDir(evidenceArg);
+    for (const key of ownerKeysOf(evidenceDir)) secrets.add(key);
+    const bearer = bearerOf(argv, env, secrets);
+    const mcp = await connectMcp(url, bearer);
+    try {
+      const result = await m.runHostedMatrix(
+        { plan, planSha256: sha, evidenceDir, only: argOf(argv, "only"), routerJournal: argOf(argv, "router-journal"), facilitatorJournal: argOf(argv, "facilitator-journal"), facilitatorLog: argOf(argv, "facilitator-log") },
+        { mcp, chain: await m.matrixChainReader(env), sign: await m.runSignMatrixSigner(env), secrets, out },
+      );
+      return result.stopped === undefined ? 0 : 1;
+    } finally {
+      await mcp.close().catch(() => {});
+    }
   }
   if (command === "plan" && matrix) {
     const m = await import("./evm-testnets-matrix.js");
@@ -1839,13 +1947,15 @@ async function main(argv: readonly string[], env: Env): Promise<number> {
     const wait = argOf(argv, "wait-seconds");
     // `--matrix`: Solana の読み取りも持つ reader（Solana のレグの `finalized`。§8.5 #4）。
     const reader = matrix ? await (await import("./evm-testnets-matrix.js")).matrixChainReader(env) : await viemChainReader(env);
+    for (const key of ownerKeysOf(checkPrivateEvidenceDir(dir))) secrets.add(key);
     const result = await runFinality(checkPrivateEvidenceDir(dir), reader, secrets, out, wait === undefined ? {} : { waitSeconds: Number(wait) });
     return result.pending === 0 ? 0 : 3;
   }
   if (command === "reopen") {
     const dir = argOf(argv, "evidence-dir");
-    const url = argOf(argv, "mcp-url");
-    if (dir === undefined || url === undefined) throw new PlanRefusal("reopen needs --evidence-dir and --mcp-url");
+    const url = hosted ? (await import("./evm-testnets-matrix.js")).hostedMcpUrlOf(env) : argOf(argv, "mcp-url");
+    if (dir === undefined || url === undefined) throw new PlanRefusal("reopen needs --evidence-dir and --mcp-url (or --hosted with SUBETHA_HOSTED_MCP_URL)");
+    for (const key of ownerKeysOf(checkPrivateEvidenceDir(dir))) secrets.add(key);
     const mcp = await connectMcp(url, bearerOf(argv, env, secrets));
     try {
       const result = await runReopen(checkPrivateEvidenceDir(dir), mcp, secrets, out);
@@ -1858,6 +1968,8 @@ async function main(argv: readonly string[], env: Env): Promise<number> {
     const dir = argOf(argv, "evidence-dir");
     const outFile = argOf(argv, "out");
     if (dir === undefined || outFile === undefined) throw new PlanRefusal("summary needs --evidence-dir and --out");
+    // hosted 動的モードの `ownerKey` も漏れの検査に入れる（要約に入れば書かない）。
+    for (const key of ownerKeysOf(path.resolve(dir))) secrets.add(key);
     writeSummary(path.resolve(dir), outFile, secrets);
     safeOut(`summary written to ${outFile}`);
     return 0;

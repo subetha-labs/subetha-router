@@ -19,7 +19,7 @@
  * `SUBETHA_EVM_PROVIDER_PAYTO`、`SUBETHA_ARC_PROVIDER_PAYTO`、`SUBETHA_SOLANA_PROVIDER_PAYTO`、`SUBETHA_SOLANA_MPP_PROVIDER_PAYTO`。
  */
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { stableJson } from "../src/core/intent.js";
@@ -46,6 +46,10 @@ import {
   priorAttemptHold,
   quoteRecordOf,
   readAllEvidence,
+  readOwnerKey,
+  ownerKeyRefOf,
+  saveOwnerKey,
+  signMarkerIdOf,
   short,
   units,
   verifyLeg,
@@ -63,8 +67,8 @@ import {
   type Secrets,
   type SvmTransactionInfo,
 } from "./evm-testnets-e2e.js";
-import { EVM_TESTNETS, evmTestnetsConfigOf, isMatrixNewChain, MATRIX_NEW_CHAINS, MATRIX_RAILS, matrixPairsOf,
-  matrixRerunsOf, OUTBOUND, type MatrixEndpoint } from "./remote-mcp-config.js";
+import { EVM_TESTNETS, evmTestnetsConfigOf, INBOUND, isMatrixNewChain, MATRIX_NEW_CHAINS, MATRIX_RAILS, matrixPairsOf,
+  matrixRerunsOf, OUTBOUND, OUTBOUND_X402, UPSTREAM, UPSTREAM_ARC, UPSTREAM_SOL, UPSTREAM_SOL_MPP, UPSTREAM_X402, type MatrixEndpoint, type MatrixNewChain, type MatrixRail } from "./remote-mcp-config.js";
 import { checkTempoChallenge } from "./sign-check-tempo.js";
 import { runSign, type SignDeps } from "./sign-run.js";
 import { checkSvmMppChallenge } from "./svm-mpp-payer.js";
@@ -86,8 +90,10 @@ const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 /* ────────────────────────────────────────────────────────────────────────────── plan の型 */
 
 export type ExpectedSign = "x402-evm" | "x402-svm" | "mpp" | "mpp-svm";
+/** レグの端点。行列（`mx-*`）は `MatrixEndpoint`、hosted 動的モード（§8.1）は Base Sepolia の x402 も端点になる（`base`）。 */
+export type LegEndpoint = MatrixEndpoint | "base";
 export interface MatrixLeg {
-  readonly endpoint: MatrixEndpoint;
+  readonly endpoint: LegEndpoint;
   readonly rail: "x402" | "mpp";
   readonly scheme: "exact" | "tempo/charge" | "solana/charge";
   readonly family: "evm" | "svm";
@@ -110,8 +116,8 @@ export interface MatrixLeg {
 export interface MatrixPurchase {
   readonly index: number;
   readonly routeId: string;
-  readonly src: MatrixEndpoint;
-  readonly dst: MatrixEndpoint;
+  readonly src: LegEndpoint;
+  readonly dst: LegEndpoint;
   readonly upstream: string;
   readonly expectedSign: ExpectedSign;
   readonly source: MatrixLeg;
@@ -498,15 +504,60 @@ export function matrixSubjectMismatches(response: Record<string, unknown>, plann
   if (typeof subject["quoteId"] !== "string" || subject["quoteId"] === "") problems.push("subject.quoteId is missing");
   if (typeof subject["paymentId"] !== "string" || subject["paymentId"] === "") problems.push("subject.paymentId is missing");
   if (quote["upstream"] !== undefined || quote["ownerKey"] !== undefined) problems.push("the quote is dynamic (upstream/ownerKey present); the plan is for static routes");
+  problems.push(...sourceOfferProblems(subject, quote, src, src.amount, nowMs));
+  const d = isRecord(subject["destination"]) ? subject["destination"] : {};
+  const qd = isRecord(quote["destination"]) ? quote["destination"] : {};
+  eq("subject.destination.network", d["network"], dst.network);
+  addr("subject.destination.asset", dst.network, d["asset"], dst.asset);
+  eq("subject.destination.quoted", d["quoted"], dst.amount);
+  eq("quote.destination.network", qd["network"], dst.network);
+  addr("quote.destination.asset", dst.network, qd["asset"], dst.asset);
+  eq("quote.destination.quoted", qd["quoted"], dst.amount);
+  addr("quote.destination.payTo (upstream recipient)", dst.network, qd["payTo"], dst.to);
+  // 承認: subject と、署名する quote 文書の両方（Codex H-5 #1）。required・この quote への束縛・同じ有限の期限・期限の前、がそろわなければ署名しない
+  // （subject だけを見ると、期限の切れた quote 文書に Tempo の送金を署名し得る）。
+  const approvalProblems = (label: string, value: unknown): number | undefined => {
+    if (!isRecord(value)) {
+      problems.push(`${label} is missing`);
+      return undefined;
+    }
+    eq(`${label}.required`, value["required"], true);
+    eq(`${label}.boundTo = subject.quoteId`, value["boundTo"], subject["quoteId"]);
+    const deadline = value["deadlineMs"];
+    if (typeof deadline !== "number" || !Number.isFinite(deadline)) {
+      problems.push(`${label}.deadlineMs is missing or not a finite number`);
+      return undefined;
+    }
+    if (deadline <= nowMs) problems.push(`${label}.deadlineMs has passed`);
+    return deadline;
+  };
+  const subjectDeadline = approvalProblems("subject.approval", subject["approval"]);
+  const quoteDeadline = approvalProblems("quote.approval", quote["approval"]);
+  if (subjectDeadline !== undefined && quoteDeadline !== undefined && subjectDeadline !== quoteDeadline) problems.push("quote.approval.deadlineMs differs from subject.approval.deadlineMs");
+  return problems;
+}
+
+/**
+ * 受信のレグ（subject・署名される offer・埋め込みの challenge）の照合（§8.5 #2）。静的の行列と hosted 動的モードで共有する。
+ * `amount` は期待する受信額（静的は plan の額、hosted は照合済みの `pricing.total`）。不一致の一覧（空なら一致）。
+ */
+export function sourceOfferProblems(subject: Record<string, unknown>, quote: Record<string, unknown>, src: MatrixLeg, amount: string, nowMs: number): string[] {
+  const problems: string[] = [];
+  const eq = (label: string, actual: unknown, expected: unknown): void => {
+    if (actual !== expected) problems.push(`${label}: got ${JSON.stringify(actual)}, plan ${JSON.stringify(expected)}`);
+  };
+  const addr = (label: string, network: string, actual: unknown, expected: string): void => {
+    if (!sameAddress(network, actual, expected)) problems.push(`${label}: got ${JSON.stringify(actual)}, plan ${JSON.stringify(expected)}`);
+  };
   const s = isRecord(subject["source"]) ? subject["source"] : {};
   const qs = isRecord(quote["source"]) ? quote["source"] : {};
   eq("subject.source.network", s["network"], src.network);
   addr("subject.source.asset", src.network, s["asset"], src.asset);
-  eq("subject.source.amount", s["amount"], src.amount);
+  eq("subject.source.amount", s["amount"], amount);
   eq("subject.source.decimals", s["decimals"], src.decimals);
   eq("quote.source.network", qs["network"], src.network);
   addr("quote.source.asset", src.network, qs["asset"], src.asset);
-  eq("quote.source.amount", qs["amount"], src.amount);
+  eq("quote.source.amount", qs["amount"], amount);
   const shownOffer = isRecord(s["offer"]) ? s["offer"] : {};
   const signedOffer = isRecord(qs["offer"]) ? qs["offer"] : undefined;
   if (signedOffer === undefined) problems.push("quote.source.offer (the offer that would be signed) is missing");
@@ -518,7 +569,7 @@ export function matrixSubjectMismatches(response: Record<string, unknown>, plann
     eq(`${label}.scheme`, o["scheme"], src.scheme);
     eq(`${label}.network`, o["network"], src.network);
     addr(`${label}.asset`, src.network, o["asset"], src.asset);
-    eq(`${label}.amount`, o["amount"], src.amount);
+    eq(`${label}.amount`, o["amount"], amount);
     addr(`${label}.payTo (Router receiver)`, src.network, o["payTo"], src.to);
     const extra = isRecord(o["extra"]) ? o["extra"] : {};
     eq(`${label}.extra.fundsMoveOnCredential`, extra["fundsMoveOnCredential"], moves);
@@ -560,18 +611,6 @@ export function matrixSubjectMismatches(response: Record<string, unknown>, plann
     }
   }
   eq("subject.fundsMoveOnCredential", subject["fundsMoveOnCredential"], moves);
-  const d = isRecord(subject["destination"]) ? subject["destination"] : {};
-  const qd = isRecord(quote["destination"]) ? quote["destination"] : {};
-  eq("subject.destination.network", d["network"], dst.network);
-  addr("subject.destination.asset", dst.network, d["asset"], dst.asset);
-  eq("subject.destination.quoted", d["quoted"], dst.amount);
-  eq("quote.destination.network", qd["network"], dst.network);
-  addr("quote.destination.asset", dst.network, qd["asset"], dst.asset);
-  eq("quote.destination.quoted", qd["quoted"], dst.amount);
-  addr("quote.destination.payTo (upstream recipient)", dst.network, qd["payTo"], dst.to);
-  const approval = isRecord(subject["approval"]) ? subject["approval"] : {};
-  const deadline = approval["deadlineMs"];
-  if (typeof deadline !== "number" || deadline <= nowMs) problems.push("the quote's approval deadline has passed or is missing");
   return problems;
 }
 
@@ -861,8 +900,17 @@ export interface MatrixRunDeps {
   readonly requestIdOf?: (routeId: string) => string;
 }
 
+
+/** 実行が使う plan の部分（帳簿・残高の検査。静的の行列と hosted 動的モードで共有）。 */
+export interface FundedPlan<P extends MatrixPurchase = MatrixPurchase> {
+  readonly purchases: readonly P[];
+  readonly debits: readonly MatrixDebit[];
+  readonly balances: readonly PlanBalance[];
+  readonly allSufficient: boolean;
+}
+
 /** その購入の支出を今の残高と比べる（足りなければ理由。読めなければ理由）。 */
-async function fundsShortfall(reader: ChainReader, plan: MatrixPlan, planned: MatrixPurchase): Promise<{ short: string | undefined; balances: PlanBalance[] }> {
+async function fundsShortfall(reader: ChainReader, plan: Pick<FundedPlan, "debits">, planned: MatrixPurchase): Promise<{ short: string | undefined; balances: PlanBalance[] }> {
   const mine = plan.debits.filter((d) => d.purchase === planned.index);
   const totals = new Map<string, { d: MatrixDebit; total: bigint }>();
   for (const d of mine) {
@@ -886,7 +934,7 @@ async function fundsShortfall(reader: ChainReader, plan: MatrixPlan, planned: Ma
 }
 
 /** この plan の 1 件の支出を鍵（アドレス × network × 資産。共有の Solana アカウントは 1 つ）ごとにまとめる。 */
-function debitsByKeyOf(plan: MatrixPlan, index: number): Map<string, { d: MatrixDebit; total: bigint }> {
+function debitsByKeyOf(plan: Pick<FundedPlan, "debits">, index: number): Map<string, { d: MatrixDebit; total: bigint }> {
   const totals = new Map<string, { d: MatrixDebit; total: bigint }>();
   for (const d of plan.debits) {
     if (d.purchase !== index) continue;
@@ -905,7 +953,7 @@ function debitsByKeyOf(plan: MatrixPlan, index: number): Map<string, { d: Matrix
 export class MatrixLedger {
   readonly #initial = new Map<string, bigint>();
   readonly #spent = new Map<string, bigint>();
-  constructor(private readonly plan: MatrixPlan, attempted: Iterable<number>) {
+  constructor(private readonly plan: Pick<FundedPlan, "debits" | "balances">, attempted: Iterable<number>) {
     for (const b of plan.balances) if (b.value !== null) this.#initial.set(matrixBalanceKey(b.address, b.network, b.asset), BigInt(b.value));
     for (const index of attempted) this.charge(index);
   }
@@ -936,7 +984,7 @@ export class MatrixLedger {
  * 実行の初め（Codex M-2 #1）: plan が `allSufficient` であること、そして各鍵で **今の残高 ≥ plan の初期残高 − この plan で既に試みた支出**
  * （それより少なければ、plan の外で資金が動いた。始めない）。
  */
-async function startCheck(reader: ChainReader, plan: MatrixPlan, ledger: MatrixLedger): Promise<string | undefined> {
+async function startCheck(reader: ChainReader, plan: FundedPlan, ledger: MatrixLedger): Promise<string | undefined> {
   if (plan.allSufficient !== true) return "the plan is not allSufficient (fund the payers and make a new plan)";
   for (const b of plan.balances) {
     if (b.value === null) return `the plan has an unreadable initial balance (${b.role} on ${b.network}); make a new plan`;
@@ -954,24 +1002,81 @@ async function startCheck(reader: ChainReader, plan: MatrixPlan, ledger: MatrixL
 }
 
 /**
+ * 実行のレールに依らない部分は 1 つの手順（`runMatrixLoop`）にし、quote の呼び方・照合・status の引数・body の形・レグの額だけを差し替える。
+ * 静的の行列（`subetha_router_quote` + `mx-*`）と hosted 動的モード（`subetha_router_quote_url` + `ownerKey`。設計 hosted §8.1）。
+ */
+interface RunMode<P extends MatrixPurchase> {
+  readonly kind: "matrix" | "hosted-matrix";
+  readonly direction: "matrix" | "hosted";
+  readonly name: string;
+  selects(planned: P, only: string): boolean;
+  requestIdOf(planned: P, now: Date): string;
+  quote(mcp: McpCaller, planned: P, requestId: string): Promise<Record<string, unknown>>;
+  mismatches(quoted: Record<string, unknown>, planned: P, nowMs: number): string[];
+  /** 印・帳簿より前の追加の保留（hosted: 同じプロファイルの資金が動く署名を label をまたいで見る）。 */
+  extraHold(planned: P, all: readonly PurchaseEvidence[]): string | undefined;
+  /** 証跡の初めに足す欄。 */
+  annotate(evidence: PurchaseEvidence, planned: P): void;
+  /** 照合の後・署名の印の前（hosted: `ownerKey` を私的な置き場に保存）。止める理由か undefined。 */
+  beforeSign(quoted: Record<string, unknown>, planned: P, evidence: PurchaseEvidence): string | undefined;
+  statusArgs(evidence: PurchaseEvidence): Record<string, unknown>;
+  purchaseRecord(purchased: Record<string, unknown>): unknown;
+  deliveredBody(purchased: Record<string, unknown>): unknown;
+  routerBody(projection: Record<string, unknown>): unknown;
+  legsOf(planned: P, quoted: Record<string, unknown>): { source: MatrixLeg; destination: MatrixLeg };
+}
+
+const STATIC_MODE: RunMode<MatrixPurchase> = {
+  kind: "matrix",
+  direction: "matrix",
+  name: "matrix run",
+  selects: (planned, only) => planned.routeId === only,
+  requestIdOf: (planned, now) => `mx-${planned.routeId}-${compactUtc(now)}-${randomBytes(3).toString("hex")}`,
+  quote: (mcp, planned, requestId) => mcp.call("subetha_router_quote", { routeId: planned.routeId, requestId }),
+  mismatches: (quoted, planned, nowMs) => matrixSubjectMismatches(quoted, planned, nowMs),
+  extraHold: () => undefined,
+  annotate: () => {},
+  beforeSign: () => undefined,
+  statusArgs: (evidence) => ({ paymentId: evidence.paymentId }),
+  purchaseRecord: (purchased) => withoutBody(purchased, "snapshot"),
+  deliveredBody: (purchased) => purchased["snapshot"],
+  routerBody: (projection) => projection["result"],
+  legsOf: (planned) => ({ source: planned.source, destination: planned.destination }),
+};
+
+interface LoopOptions<P extends MatrixPurchase> {
+  readonly plan: FundedPlan<P>;
+  readonly planSha256: string;
+  readonly evidenceDir: string;
+  readonly only?: string | undefined;
+  readonly routerJournal?: string | undefined;
+  readonly facilitatorJournal?: string | undefined;
+  readonly facilitatorLog?: string | undefined;
+}
+
+/**
  * 30 件を 1 つずつ。最初の `delivered` でない結果・不一致・証跡の不足で全体を止める。再試行しない。
  */
 export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Promise<RunReport> {
   if (opts.prefunded !== true) throw new PlanRefusal("the matrix is paid from prefunded Router keys (design §8.2); pass --prefunded after the prefund run");
+  return await runMatrixLoop(opts, deps, STATIC_MODE);
+}
+
+async function runMatrixLoop<P extends MatrixPurchase>(opts: LoopOptions<P>, deps: MatrixRunDeps, mode: RunMode<P>): Promise<RunReport> {
   const now = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const out = (line: string): void => deps.out(deps.secrets.redact(line));
-  const selected = opts.only === undefined ? [...opts.plan.purchases] : opts.plan.purchases.filter((p) => p.routeId === opts.only);
+  const selected = opts.only === undefined ? [...opts.plan.purchases] : opts.plan.purchases.filter((p) => mode.selects(p, opts.only as string));
   if (opts.only !== undefined && selected.length !== 1) throw new PlanRefusal(`--only ${opts.only} does not select exactly one planned purchase`);
   const runId = `run-${compactUtc(now())}`;
   const runDir = path.join(opts.evidenceDir, runId);
   const completed: string[] = [];
   const report = (stopped?: RunReport["stopped"]): RunReport => {
     const result: RunReport = { runDir, completed, ...(stopped === undefined ? {} : { stopped }) };
-    writePrivate(path.join(runDir, "run.json"), { kind: "matrix", planSha256: opts.planSha256, only: opts.only ?? null, at: now().toISOString(), ...result }, deps.secrets);
+    writePrivate(path.join(runDir, "run.json"), { kind: mode.kind, planSha256: opts.planSha256, only: opts.only ?? null, at: now().toISOString(), ...result }, deps.secrets);
     return result;
   };
-  out(`matrix run ${runId}: ${String(selected.length)} purchase(s), plan ${opts.planSha256} (prefunded)`);
+  out(`${mode.name} ${runId}: ${String(selected.length)} purchase(s), plan ${opts.planSha256}${mode.kind === "matrix" ? " (prefunded)" : ""}`);
   // 累計の帳簿: この plan で印のある購入（どの run でも）の支出を先に引く。
   const ledger = new MatrixLedger(opts.plan, opts.plan.purchases.filter((p) => attemptMarkerStateOf(opts.evidenceDir, opts.planSha256, p.routeId) !== "absent").map((p) => p.index));
   const refused = await startCheck(deps.chain, opts.plan, ledger);
@@ -995,7 +1100,7 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
       out(`STOP ${planned.routeId}: already attempted under this plan; a new attempt needs a new plan and approval`);
       return report({ routeId: planned.routeId, stage: "not_started", reason: "already attempted under this plan" });
     }
-    const hold = priorAttemptHold(opts.evidenceDir, planned.routeId, opts.planSha256, scanned.evidence);
+    const hold = priorAttemptHold(opts.evidenceDir, planned.routeId, opts.planSha256, scanned.evidence) ?? mode.extraHold(planned, scanned.evidence);
     if (hold !== undefined) {
       out(`HELD ${planned.routeId}: ${hold}`);
       return report({ routeId: planned.routeId, stage: "not_started", reason: `held: ${hold}` });
@@ -1020,14 +1125,15 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
       runId,
       index: planned.index,
       chain: `${planned.src}-to-${planned.dst}`,
-      direction: "matrix",
+      direction: mode.direction,
       routeId: planned.routeId,
       stage: "started",
       startedAt: now().toISOString(),
-      prerequisite: { mode: "prefunded", balances: funds.balances },
+      prerequisite: { mode: mode.kind === "matrix" ? "prefunded" : "hosted (the hosted Router's outbound funds are the operator's)", balances: funds.balances },
       fundsMoveAtSign,
       timingsMs: {},
     };
+    mode.annotate(evidence, planned);
     const save = (): void => writePrivate(file, evidence, deps.secrets);
     const stop = (stage: PurchaseEvidence["stage"], reason: string): RunReport => {
       evidence.stage = stage;
@@ -1052,12 +1158,12 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     save();
 
     // 1) quote（新しい requestId）。
-    const requestId = deps.requestIdOf?.(planned.routeId) ?? `mx-${planned.routeId}-${compactUtc(now())}-${randomBytes(3).toString("hex")}`;
+    const requestId = deps.requestIdOf?.(planned.routeId) ?? mode.requestIdOf(planned, now());
     evidence.requestId = requestId;
     out(`#${String(planned.index)} ${planned.routeId}: quote (requestId ${requestId})`);
     let quoted: Record<string, unknown>;
     try {
-      quoted = await deps.mcp.call("subetha_router_quote", { routeId: planned.routeId, requestId });
+      quoted = await mode.quote(deps.mcp, planned, requestId);
     } catch {
       return stop("quote_failed", "the quote call failed (no payment started)");
     }
@@ -1065,16 +1171,18 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     evidence.quoteResponse = q.response;
     evidence.subject = q.subject;
     evidence.quoteDestination = q.destination;
-    if (quoted["ok"] !== true) return stop("quote_failed", `quote failed: ${String(quoted["error"] ?? "unknown")} (no payment started)`);
+    if (quoted["ok"] !== true) return stop("quote_failed", `quote failed: ${String(quoted["error"] ?? "unknown")}${typeof quoted["reason"] === "string" ? ` (${quoted["reason"]})` : ""} (no payment started)`);
 
     // 2) レールごとの照合（署名の前。§8.5 #2）。照合した quote 文書を凍結し、署名と purchase にはその同じ object だけを渡す。
     const quoteDoc = deepFreeze(structuredClone(quoted["quote"]));
     quoted = { ...quoted, quote: quoteDoc };
-    const mismatches = matrixSubjectMismatches(quoted, planned, now().getTime());
+    const mismatches = mode.mismatches(quoted, planned, now().getTime());
     evidence.mismatches = mismatches;
     const subject = quoted["subject"] as Record<string, unknown>;
     evidence.paymentId = String(subject["paymentId"] ?? "");
     if (mismatches.length > 0) return stop("stopped_before_signing", `the quote differs from the plan: ${mismatches.join("; ")}`);
+    const unready = mode.beforeSign(quoted, planned, evidence);
+    if (unready !== undefined) return stop("stopped_before_signing", `${unready} (not signing, no payment started)`);
 
     // 3) 署名。呼ぶ前に、不変の署名の印（O_EXCL・fsync）と証跡の `signInvoked`（原子的な書き込み・fsync）を残す（Tempo MPP は署名で資金が動く。§8.5 #1・M-2 #5）。
     try {
@@ -1108,7 +1216,7 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
       return stop("sign_refused", `${signProblem} (credential discarded, no payment started)`);
     }
 
-    // 4) purchase（同じ requestId、approval = quoteId）。1 回だけ。
+    // 4) purchase（同じ requestId、approval = quoteId、quote 文書はそのまま）。1 回だけ。
     const quoteId = String(subject["quoteId"]);
     out(`#${String(planned.index)} ${planned.routeId}: purchase (paymentId ${evidence.paymentId})`);
     const t1 = Date.now();
@@ -1118,14 +1226,14 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     } catch {
       evidence.outcome = "unknown";
       try {
-        evidence.status = withStatusDigest(await deps.mcp.call("subetha_router_status", { paymentId: evidence.paymentId }));
+        evidence.status = withStatusDigest(await deps.mcp.call("subetha_router_status", mode.statusArgs(evidence)));
       } catch {
         evidence.status = "status call failed";
       }
       return stop(fundsMoveAtSign ? "funds_possibly_moved" : "purchase_call_failed", "the purchase call failed or timed out; funds may have moved — not retried");
     }
     (evidence.timingsMs as Record<string, number>)["purchase"] = Date.now() - t1;
-    evidence.purchase = withoutBody(purchased, "snapshot");
+    evidence.purchase = mode.purchaseRecord(purchased);
     evidence.outcome = typeof purchased["outcome"] === "string" ? purchased["outcome"] : "unknown";
     evidence.stage = "purchased";
     save();
@@ -1133,7 +1241,7 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     // 5) status（読むだけ）。
     let status: Record<string, unknown> | undefined;
     try {
-      status = await deps.mcp.call("subetha_router_status", { paymentId: evidence.paymentId });
+      status = await deps.mcp.call("subetha_router_status", mode.statusArgs(evidence));
       evidence.status = withStatusDigest(status);
     } catch {
       evidence.status = "status call failed";
@@ -1145,8 +1253,8 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     }
 
     // 6) body の digest。
-    const clientDigest = bodyDigest(purchased["snapshot"]);
-    const routerRecord = projection["result"];
+    const clientDigest = bodyDigest(mode.deliveredBody(purchased));
+    const routerRecord = mode.routerBody(projection);
     const routerSha = routerRecord === undefined ? null : bodyDigest(routerRecord).sha256;
     evidence.body = { sha256: clientDigest.sha256, head: clientDigest.head, routerRecordSha256: routerSha, matches: routerSha === clientDigest.sha256 };
 
@@ -1154,8 +1262,9 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     const src = isRecord(projection["source"]) ? projection["source"] : {};
     const dst = isRecord(projection["destination"]) ? projection["destination"] : {};
     const legOpts = { waitMs: deps.receiptWaitMs ?? 60_000, sleep };
-    const sourceLeg = await verifyMatrixLeg(deps.chain, "source", planned.source, src["txRef"], legOpts);
-    const destinationLeg = await verifyMatrixLeg(deps.chain, "destination", planned.destination, dst["txRef"], legOpts);
+    const legs = mode.legsOf(planned, quoted);
+    const sourceLeg = await verifyMatrixLeg(deps.chain, "source", legs.source, src["txRef"], legOpts);
+    const destinationLeg = await verifyMatrixLeg(deps.chain, "destination", legs.destination, dst["txRef"], legOpts);
     evidence.legs = [sourceLeg, destinationLeg];
     evidence.journal = journalLinesOf(evidence.paymentId, [sourceLeg.txHash, destinationLeg.txHash].filter((h): h is string => h !== null), { router: opts.routerJournal, facilitatorJournal: opts.facilitatorJournal, facilitatorLog: opts.facilitatorLog });
     evidence.balancesAfter = (await fundsShortfall(deps.chain, opts.plan, planned)).balances;
@@ -1169,6 +1278,533 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
     completed.push(planned.routeId);
     out(`#${String(planned.index)} ${planned.routeId}: delivered; source ${sourceLeg.txHash ?? ""}, destination ${destinationLeg.txHash ?? ""}`);
   }
-  out(`matrix run ${runId}: all ${String(completed.length)} purchase(s) delivered and verified`);
+  out(`${mode.name} ${runId}: all ${String(completed.length)} purchase(s) delivered and verified`);
   return report();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════ hosted 動的モード（`docs/evm-testnets-hosted-design.md` §8.1、AC-H4・AC-H5・AC-H7・SR-H7） */
+
+/**
+ * hosted Router の 36 の動的プロファイル `dyn-<s>-to-<d>`（設計 hosted §5）。s・d ∈ 下の 8 端点、少なくとも一方が新 3、s ≠ d。
+ * **H-3 の設定生成（並行して作業中）を import しない**: この一覧は driver に持ち、id は H-3 の名付けと同じ規則。
+ * 端点の名前: `x402` = Base Sepolia USDC（x402）、`mpp` = Tempo pathUSD（MPP `tempo/charge`）、`arc`・`sol`・`solmpp`・新 3（`rh`・`arbsep`・`hyperevm`）。
+ */
+export type HostedEndpoint = "x402" | "mpp" | "arc" | "sol" | "solmpp" | MatrixNewChain;
+export const HOSTED_ENDPOINTS: readonly HostedEndpoint[] = Object.freeze(["x402", "mpp", "arc", "sol", "solmpp", "rh", "arbsep", "hyperevm"]);
+export const HOSTED_PLAN_KIND = "subetha-evm-testnets-hosted-matrix-plan";
+export const HOSTED_PLAN_VERSION = 1;
+/** 動的の上流額（Provider の 402 の額）と x402 送信・Solana MPP 送信の定額の手数料（`tools/remote-mcp-config.ts` の `DYNAMIC_*`）。 */
+export const HOSTED_UPSTREAM_AMOUNT = "10000";
+export const HOSTED_FIXED_FEE = "1000";
+/** Tempo 宛て（手数料 = max(1,000, cap)）の 1 件の源の合計の上限の既定（env `SUBETHA_HOSTED_TEMPO_MAX_TOTAL`）と、その env の上限（区分の 1 件の上限 M = 20,000。設計 hosted §5）。 */
+export const HOSTED_TEMPO_MAX_TOTAL_DEFAULT = "11000";
+const HOSTED_TEMPO_MAX_TOTAL_LIMIT = 20_000n;
+export const HOSTED_ENV = Object.freeze({ mcpUrl: "SUBETHA_HOSTED_MCP_URL", allowLoopback: "SUBETHA_HOSTED_MCP_ALLOW_LOOPBACK", label: "SUBETHA_HOSTED_LABEL", tempoMaxTotal: "SUBETHA_HOSTED_TEMPO_MAX_TOTAL", mppOutbound: "SUBETHA_ROUTER_MPP_OUTBOUND_ADDRESS" });
+
+const HOSTED_LEG_ENDPOINT: Readonly<Record<HostedEndpoint, LegEndpoint>> = Object.freeze({ x402: "base", mpp: "tempo", arc: "arc", sol: "sol", solmpp: "solmpp", rh: "rh", arbsep: "arbsep", hyperevm: "hyperevm" });
+const BASE_RAIL = Object.freeze({ rail: "x402", scheme: "exact", family: "evm", network: INBOUND.network, asset: INBOUND.asset, decimals: 6 }) as MatrixRail;
+function hostedRailOf(endpoint: HostedEndpoint): MatrixRail {
+  return endpoint === "x402" ? BASE_RAIL : MATRIX_RAILS[HOSTED_LEG_ENDPOINT[endpoint] as MatrixEndpoint];
+}
+export function hostedProfileIdOf(source: HostedEndpoint, destination: HostedEndpoint): string {
+  return `dyn-${source}-to-${destination}`;
+}
+/** 宛先のレールを受ける Provider の URL（AC-H7）。既存のレールは hosted の Provider の定数、新 3 は `provider-x402-<c>.subethalabs.com`（設計 hosted §6）。 */
+export function hostedProviderUrlOf(destination: HostedEndpoint): string {
+  if (destination === "x402") return UPSTREAM_X402;
+  if (destination === "mpp") return UPSTREAM;
+  if (destination === "arc") return UPSTREAM_ARC;
+  if (destination === "sol") return UPSTREAM_SOL;
+  if (destination === "solmpp") return UPSTREAM_SOL_MPP;
+  return `https://provider-x402-${destination}.subethalabs.com/v1/eth/snapshot`;
+}
+/** 36 の組（順は `HOSTED_ENDPOINTS` の源 × 宛先）。 */
+export function hostedPairsOf(): readonly { readonly source: HostedEndpoint; readonly destination: HostedEndpoint; readonly profileId: string }[] {
+  const out: { source: HostedEndpoint; destination: HostedEndpoint; profileId: string }[] = [];
+  for (const source of HOSTED_ENDPOINTS) {
+    for (const destination of HOSTED_ENDPOINTS) {
+      if (source === destination || (!isMatrixNewChain(source) && !isMatrixNewChain(destination))) continue;
+      out.push({ source, destination, profileId: hostedProfileIdOf(source, destination) });
+    }
+  }
+  return out;
+}
+
+/** hosted の MCP の URL（env）。https だけ。G-3 の ssh tunnel のときだけ、明示の env で `http://127.0.0.1:<port>` を許す。 */
+export function hostedMcpUrlOf(env: Env): string {
+  const text = env[HOSTED_ENV.mcpUrl];
+  if (text === undefined || text === "") throw new PlanRefusal(`${HOSTED_ENV.mcpUrl} is required in hosted mode`);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new PlanRefusal(`${HOSTED_ENV.mcpUrl} is not a URL`);
+  }
+  if (url.username !== "" || url.password !== "" || url.hash !== "") throw new PlanRefusal(`${HOSTED_ENV.mcpUrl} must not carry credentials or a fragment`);
+  if (url.protocol === "https:") return url.href;
+  if (url.protocol === "http:" && url.hostname === "127.0.0.1" && env[HOSTED_ENV.allowLoopback] === "1") return url.href;
+  throw new PlanRefusal(`${HOSTED_ENV.mcpUrl} must be https (http://127.0.0.1 only with ${HOSTED_ENV.allowLoopback}=1, for the G-3 ssh tunnel)`);
+}
+/** 受け入れの段の名前（例 `g3`・`g4`）。試みの印と証跡の鍵（`<profileId>@<label>`）に入る。 */
+export function hostedLabelOf(env: Env): string {
+  const label = env[HOSTED_ENV.label];
+  if (label === undefined || !/^[a-z0-9][a-z0-9-]{0,15}$/.test(label)) throw new PlanRefusal(`${HOSTED_ENV.label} is required in hosted mode (lowercase letters, digits and '-', at most 16; e.g. g3 or g4)`);
+  return label;
+}
+/** Tempo 宛ての源の合計の上限（既定 11,000。11,000 以上 20,000 以下）。 */
+export function hostedTempoMaxTotalOf(env: Env): string {
+  const text = env[HOSTED_ENV.tempoMaxTotal];
+  if (text === undefined || text === "") return HOSTED_TEMPO_MAX_TOTAL_DEFAULT;
+  if (!/^[1-9][0-9]{0,5}$/.test(text) || BigInt(text) < BigInt(HOSTED_TEMPO_MAX_TOTAL_DEFAULT) || BigInt(text) > HOSTED_TEMPO_MAX_TOTAL_LIMIT) {
+    throw new PlanRefusal(`${HOSTED_ENV.tempoMaxTotal} must be an integer from ${HOSTED_TEMPO_MAX_TOTAL_DEFAULT} to ${HOSTED_TEMPO_MAX_TOTAL_LIMIT.toString()}`);
+  }
+  return text;
+}
+
+export interface HostedAddresses extends MatrixAddresses {
+  /** hosted Router の Tempo MPP の送信鍵の address（本番の `SUBETHA_OUTBOUND_PRIVATE_KEY`。x402 の送信鍵と別のことがある）。 */
+  readonly routerMppOutbound: string;
+  /** Provider A の受取先（`OUTBOUND_X402.payTo`）。 */
+  readonly providerA: string;
+}
+export interface HostedExpectation {
+  readonly upstreamAmount: string;
+  /** 宛先が Tempo（MPP 送信）なら手数料は max(1,000, cap)（`pricing.maxFee`）、ほかは定額 1,000 で `maxFee` は無い。 */
+  readonly gasIndexedFee: boolean;
+  /** 定額のときの合計（11,000）。gas の cap のときは null（`maxTotal` 以下）。 */
+  readonly total: string | null;
+  readonly maxTotal: string;
+  readonly fundsMoveOnCredential: boolean;
+}
+export interface HostedPurchase extends MatrixPurchase {
+  /** 試みの鍵 `<profileId>@<label>`（印・証跡のファイル名。subject の routeId は `profileId`）。 */
+  readonly routeId: string;
+  readonly profileId: string;
+  readonly url: string;
+  readonly pair: { readonly source: HostedEndpoint; readonly destination: HostedEndpoint };
+  readonly expected: HostedExpectation;
+}
+export interface HostedPlan extends FundedPlan<HostedPurchase> {
+  readonly kind: typeof HOSTED_PLAN_KIND;
+  readonly version: typeof HOSTED_PLAN_VERSION;
+  readonly createdAt: string;
+  readonly hosted: { readonly mcpUrl: string; readonly label: string; readonly tempoMaxTotal: string; readonly profiles: number };
+  readonly addresses: HostedAddresses;
+  readonly addressSources: Readonly<Record<string, string>>;
+  readonly purchases: readonly HostedPurchase[];
+  /** 払い手（クライアント）の支出だけ。実行の帳簿と残高の検査はこれだけを見る。 */
+  readonly debits: readonly MatrixDebit[];
+  readonly balances: readonly PlanBalance[];
+  readonly checks: readonly MatrixCheck[];
+  readonly allSufficient: boolean;
+  /** hosted Router の送信鍵・facilitator の gas（運用者の資金）。読み取りだけの **情報** で、実行の gate にしない。 */
+  readonly operator: { readonly debits: readonly MatrixDebit[]; readonly balances: readonly PlanBalance[]; readonly checks: readonly MatrixCheck[] };
+}
+
+const PAYER_ROLES: ReadonlySet<string> = new Set(["payerEvm", "payerSolana"]);
+
+/** hosted の address（鍵があれば address を導くだけ）。Router の送信鍵は hosted のものを明示する（受取先と同じ、の既定を使わない）。 */
+export async function hostedAddressesOf(env: Env): Promise<{ addresses: HostedAddresses; sources: Record<string, string> }> {
+  const { addresses, sources } = await matrixAddressesOf(env);
+  if ((sources["routerOutbound"] ?? "").startsWith("same as")) throw new PlanRefusal("hosted mode needs the hosted Router's x402 outbound address (SUBETHA_ROUTER_OUTBOUND_ADDRESS)");
+  let routerMppOutbound = env[HOSTED_ENV.mppOutbound];
+  if (routerMppOutbound !== undefined && routerMppOutbound !== "") {
+    if (!ADDRESS.test(routerMppOutbound)) throw new PlanRefusal(`${HOSTED_ENV.mppOutbound} must be an EVM address`);
+    sources["routerMppOutbound"] = HOSTED_ENV.mppOutbound;
+  } else {
+    const key = env["SUBETHA_OUTBOUND_MPP_KEY"];
+    if (key === undefined || key === "") throw new PlanRefusal(`${HOSTED_ENV.mppOutbound} (the hosted Router's Tempo MPP outbound address) is required in hosted mode`);
+    routerMppOutbound = await evmAddressOfKey(key);
+    sources["routerMppOutbound"] = "derived from SUBETHA_OUTBOUND_MPP_KEY";
+  }
+  sources["providerA"] = "remote-mcp-config OUTBOUND_X402.payTo (Provider A)";
+  const hosted: HostedAddresses = { ...addresses, routerMppOutbound, providerA: OUTBOUND_X402.payTo };
+  // Provider の受取先は Router の受取先と別（送信の設計 §2.3。Router も宛先で拒むが、ここで先に止める）。
+  const receivers = [hosted.routerReceiver.toLowerCase(), hosted.arcReceiver.toLowerCase(), hosted.solanaReceiver];
+  if ([hosted.providerPayTo.toLowerCase(), hosted.arcProvider.toLowerCase(), hosted.solanaProvider, hosted.solanaMppProvider].some((p) => receivers.includes(p))) throw new PlanRefusal("a provider pay-to address must not be a Router receiver");
+  return { addresses: hosted, sources };
+}
+
+const HOSTED_SOURCE_ROLE: Readonly<Record<HostedEndpoint, keyof HostedAddresses>> = { x402: "routerReceiver", mpp: "routerReceiver", arc: "arcReceiver", sol: "solanaReceiver", solmpp: "solanaReceiver", rh: "routerReceiver", arbsep: "routerReceiver", hyperevm: "routerReceiver" };
+const HOSTED_DEST_FROM_ROLE: Readonly<Record<HostedEndpoint, keyof HostedAddresses>> = { x402: "routerOutbound", mpp: "routerMppOutbound", arc: "routerOutbound", sol: "solanaOutbound", solmpp: "solanaOutbound", rh: "routerOutbound", arbsep: "routerOutbound", hyperevm: "routerOutbound" };
+const HOSTED_DEST_ROLE: Readonly<Record<HostedEndpoint, keyof HostedAddresses>> = { x402: "providerA", mpp: "providerB", arc: "arcProvider", sol: "solanaProvider", solmpp: "solanaMppProvider", rh: "providerPayTo", arbsep: "providerPayTo", hyperevm: "providerPayTo" };
+const HOSTED_SOURCE_SETTLED_BY: Readonly<Record<HostedEndpoint, string>> = {
+  x402: "x402.org facilitator (its gas)",
+  mpp: "the payer broadcasts AT SIGN (MPP tempo/charge; fee in pathUSD; funds move when signing)",
+  arc: "Circle facilitator (its gas)",
+  sol: "x402.org facilitator (its fee payer)",
+  solmpp: "the hosted Router broadcasts at purchase (MPP solana/charge; the payer's key pays the SOL fee)",
+  rh: "hosted self-hosted facilitator (E-FAC-H pays gas)",
+  arbsep: "hosted self-hosted facilitator (E-FAC-H pays gas)",
+  hyperevm: "hosted self-hosted facilitator (E-FAC-H pays gas)",
+};
+const HOSTED_DEST_SETTLED_BY: Readonly<Record<HostedEndpoint, string>> = {
+  x402: "Provider A's facilitator (x402.org)",
+  mpp: "the hosted Router broadcasts (MPP tempo/charge to Provider B; fee in pathUSD from routerMppOutbound)",
+  arc: "Arc Provider's facilitator (Circle)",
+  sol: "Solana Provider's facilitator (its fee payer)",
+  solmpp: "Provider D's fee payer (MPP solana/charge, pull)",
+  rh: "rh Provider -> hosted self-hosted facilitator (E-FAC-H pays gas)",
+  arbsep: "arbsep Provider -> hosted self-hosted facilitator (E-FAC-H pays gas)",
+  hyperevm: "hyperevm Provider -> hosted self-hosted facilitator (E-FAC-H pays gas)",
+};
+const HOSTED_SIGN_KIND: Readonly<Record<HostedEndpoint, ExpectedSign>> = { x402: "x402-evm", mpp: "mpp", arc: "x402-evm", sol: "x402-svm", solmpp: "mpp-svm", rh: "x402-evm", arbsep: "x402-evm", hyperevm: "x402-evm" };
+
+/** 36 件の購入（URL・額・受取先）。源のレグの額は定額なら 11,000、Tempo 宛てなら上限（帳簿は最悪の額で数える。照合と chain の照合は quote の `pricing.total`）。 */
+export function hostedPurchasesOf(addresses: HostedAddresses, label: string, tempoMaxTotal: string): HostedPurchase[] {
+  const byRole = addresses as unknown as Record<string, string>;
+  const fixedTotal = (BigInt(HOSTED_UPSTREAM_AMOUNT) + BigInt(HOSTED_FIXED_FEE)).toString();
+  return hostedPairsOf().map(({ source, destination, profileId }, i) => {
+    const s = hostedRailOf(source);
+    const d = hostedRailOf(destination);
+    const gasIndexedFee = destination === "mpp";
+    const leg = (endpoint: HostedEndpoint, rail: MatrixRail, amount: string, fromRole: string, toRole: string, settledBy: string, fundsMoveAtSign: boolean): MatrixLeg => ({
+      endpoint: HOSTED_LEG_ENDPOINT[endpoint],
+      rail: rail.rail,
+      scheme: rail.scheme,
+      family: rail.family,
+      network: rail.network,
+      networkLabel: NETWORK_LABEL[rail.network] ?? rail.network,
+      asset: rail.asset,
+      assetSymbol: ASSET_SYMBOL[rail.network] ?? "?",
+      decimals: rail.decimals,
+      amount,
+      fromRole,
+      from: byRole[fromRole] as string,
+      toRole,
+      to: byRole[toRole] as string,
+      settledBy,
+      fundsMoveAtSign,
+      finalityRule: finalityRuleOf(rail.network),
+    });
+    const url = hostedProviderUrlOf(destination);
+    return {
+      index: i + 1,
+      routeId: `${profileId}@${label}`,
+      profileId,
+      url,
+      pair: { source, destination },
+      src: HOSTED_LEG_ENDPOINT[source],
+      dst: HOSTED_LEG_ENDPOINT[destination],
+      upstream: `${url} (${destination === "x402" ? "Provider A" : destination === "mpp" ? "Provider B" : destination === "arc" ? "Arc Provider" : destination === "sol" ? "Solana Provider" : destination === "solmpp" ? "Provider D" : `${destination} Provider`})`,
+      expectedSign: HOSTED_SIGN_KIND[source],
+      expected: { upstreamAmount: HOSTED_UPSTREAM_AMOUNT, gasIndexedFee, total: gasIndexedFee ? null : fixedTotal, maxTotal: gasIndexedFee ? tempoMaxTotal : fixedTotal, fundsMoveOnCredential: s.rail === "mpp" },
+      source: leg(source, s, gasIndexedFee ? tempoMaxTotal : fixedTotal, s.family === "svm" ? "payerSolana" : "payerEvm", HOSTED_SOURCE_ROLE[source], HOSTED_SOURCE_SETTLED_BY[source], source === "mpp"),
+      destination: leg(destination, d, HOSTED_UPSTREAM_AMOUNT, HOSTED_DEST_FROM_ROLE[destination], HOSTED_DEST_ROLE[destination], HOSTED_DEST_SETTLED_BY[destination], false),
+    };
+  });
+}
+
+async function balancesOf(reader: ChainReader, debits: readonly MatrixDebit[]): Promise<PlanBalance[]> {
+  const balances: PlanBalance[] = [];
+  const seen = new Set<string>();
+  for (const d of debits) {
+    const key = matrixBalanceKey(d.address, d.network, d.asset);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      const value = d.asset === null ? await reader.nativeBalance(d.network, d.address) : await reader.tokenBalance(d.network, d.asset, d.address);
+      balances.push({ role: d.role, address: d.address, network: d.network, kind: d.kind, asset: d.asset, value: value.toString() });
+    } catch {
+      balances.push({ role: d.role, address: d.address, network: d.network, kind: d.kind, asset: d.asset, value: null, error: "rpc_read_failed" });
+    }
+  }
+  return balances;
+}
+
+/** hosted の plan（残高は読み取りだけ。払い手の資金は gate、運用者の資金は情報）。何も署名しない・MCP に接続しない。 */
+export async function buildHostedPlan(env: Env, reader: ChainReader, now: () => Date = () => new Date()): Promise<HostedPlan> {
+  const mcpUrl = hostedMcpUrlOf(env);
+  const label = hostedLabelOf(env);
+  const tempoMaxTotal = hostedTempoMaxTotalOf(env);
+  const { addresses, sources } = await hostedAddressesOf(env);
+  const purchases = hostedPurchasesOf(addresses, label, tempoMaxTotal);
+  const fees = new Map<string, bigint | null>();
+  for (const chain of MATRIX_NEW_CHAINS) {
+    const network = EVM_TESTNETS[chain].network;
+    try {
+      fees.set(network, await reader.feeEstimate(network));
+    } catch {
+      fees.set(network, null);
+    }
+  }
+  const all = matrixDebitsOf(purchases, addresses, fees, env);
+  const debits = all.filter((d) => PAYER_ROLES.has(d.role));
+  const operatorDebits = all.filter((d) => !PAYER_ROLES.has(d.role));
+  const balances = await balancesOf(reader, debits);
+  const operatorBalances = await balancesOf(reader, operatorDebits);
+  const checks = matrixChecksOf(debits, balances, env);
+  const operatorChecks = matrixChecksOf(operatorDebits, operatorBalances, env).map((c) => ({ ...c, note: `information only (the hosted Router's funds are the operator's; not a gate): ${c.note}` }));
+  return {
+    kind: HOSTED_PLAN_KIND,
+    version: HOSTED_PLAN_VERSION,
+    createdAt: now().toISOString(),
+    hosted: { mcpUrl, label, tempoMaxTotal, profiles: purchases.length },
+    addresses,
+    addressSources: sources,
+    purchases,
+    debits,
+    balances,
+    checks,
+    allSufficient: checks.length > 0 && checks.every((c) => c.ok),
+    operator: { debits: operatorDebits, balances: operatorBalances, checks: operatorChecks },
+  };
+}
+
+/** 人が読む表。 */
+export function hostedPlanText(plan: HostedPlan, sha: string): string {
+  const lines: string[] = [];
+  lines.push(`Hosted dynamic matrix plan (hosted design §8.1) — created ${plan.createdAt}, label ${plan.hosted.label}`);
+  lines.push(`plan sha256 (canonical JSON): ${sha}`);
+  lines.push(`MCP endpoint: ${plan.hosted.mcpUrl}`);
+  lines.push("Nothing is signed by `plan`. `run --hosted` refuses unless --plan-sha256 equals this hash and SUBETHA_HOSTED_MCP_URL equals the endpoint above.");
+  lines.push("Each purchase: subetha_router_quote_url with the destination rail's Provider URL; the dynamic subject is compared with the plan BEFORE signing.");
+  lines.push("The quote's ownerKey is kept only in the private evidence directory (owner-keys/), never printed and never in the public summary.");
+  lines.push("Tempo MPP sources move funds AT SIGN; any failure after signing stops the run as funds_possibly_moved and that profile is never re-signed (any plan, any label) until it is resolved.");
+  lines.push(`Amounts: upstream ${HOSTED_UPSTREAM_AMOUNT} + fee ${HOSTED_FIXED_FEE} = ${(BigInt(HOSTED_UPSTREAM_AMOUNT) + BigInt(HOSTED_FIXED_FEE)).toString()}; to Tempo the fee is max(${HOSTED_FIXED_FEE}, cap) and the total must be <= ${plan.hosted.tempoMaxTotal}.`);
+  lines.push("");
+  lines.push("Addresses:");
+  for (const [role, address] of Object.entries(plan.addresses)) lines.push(`  ${role.padEnd(18)} ${address}  (${plan.addressSources[role] ?? ""})`);
+  lines.push("");
+  lines.push(`Purchases (${String(plan.purchases.length)}, one at a time, in this order; any non-delivered result stops the run, no retries):`);
+  for (const p of plan.purchases) {
+    lines.push(`  #${String(p.index).padEnd(2)} ${p.profileId}  sign: ${p.expectedSign}  url: ${p.url}`);
+    lines.push(`       src ${p.source.rail}/${p.source.scheme} ${p.source.networkLabel}: ${p.source.fromRole} ${short(p.source.from)} -> ${p.source.toRole} ${short(p.source.to)}  ${p.expected.gasIndexedFee ? `<= ${p.source.amount}` : p.source.amount} / ${String(p.source.decimals)} (${units(p.source.amount, p.source.decimals)} ${p.source.assetSymbol}); ${p.source.settledBy}`);
+    lines.push(`       dst ${p.destination.rail}/${p.destination.scheme} ${p.destination.networkLabel}: ${p.destination.fromRole} ${short(p.destination.from)} -> ${p.destination.toRole} ${short(p.destination.to)}  ${p.destination.amount} / ${String(p.destination.decimals)}; ${p.destination.settledBy}`);
+  }
+  lines.push("");
+  lines.push("Payer funds (the gate: initial balance vs cumulative debits; incoming payments are not counted):");
+  for (const c of plan.checks) lines.push(`  [${c.ok ? "ok" : "SHORT"}] ${c.role.padEnd(18)} ${short(c.address)}  ${(NETWORK_LABEL[c.network] ?? c.network).padEnd(26)} ${(c.kind === "native" ? "native" : (ASSET_SYMBOL[c.network] ?? "token")).padEnd(8)} need ${c.need} have ${c.have ?? "?"} — ${c.note}`);
+  lines.push("");
+  lines.push("Hosted Router / facilitator funds (information only, not a gate):");
+  for (const c of plan.operator.checks) lines.push(`  [${c.ok ? "ok" : "low"}] ${c.role.padEnd(18)} ${short(c.address)}  ${(NETWORK_LABEL[c.network] ?? c.network).padEnd(26)} ${(c.kind === "native" ? "native" : (ASSET_SYMBOL[c.network] ?? "token")).padEnd(8)} need ${c.need} have ${c.have ?? "?"}`);
+  lines.push("");
+  lines.push(`All payers sufficient: ${plan.allSufficient ? "yes" : "NO"}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** hosted の plan を読み、canonical sha256 が一致するときだけ返す。 */
+export function loadApprovedHostedPlan(file: string, expectedSha: string): HostedPlan {
+  if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new PlanRefusal("--plan-sha256 must be 64 lowercase hex characters");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    throw new PlanRefusal("the plan file is not readable JSON");
+  }
+  const actual = planSha256(parsed);
+  if (actual !== expectedSha) throw new PlanRefusal(`the plan's canonical sha256 is ${actual}, not the approved ${expectedSha}; refusing`);
+  const plan = parsed as HostedPlan;
+  if (plan.kind !== HOSTED_PLAN_KIND || plan.version !== HOSTED_PLAN_VERSION || !Array.isArray(plan.purchases) || !isRecord(plan.hosted)) throw new PlanRefusal("not a hosted matrix plan of a known version");
+  return plan;
+}
+
+const AMOUNT = /^(0|[1-9][0-9]{0,29})$/;
+/** 証跡のファイル名にも使う paymentId の形（Router は UUID）。 */
+export const SAFE_PAYMENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * 動的の quote（`subetha_router_quote_url`）を plan と照合する（**署名の前**。AC-H7）。不一致の一覧（空なら一致）。
+ * profileId（= subject・quote の `routeId`）、上流 URL（完全一致）・method、源の network・資産・桁・受取先と offer・challenge（静的と同じ照合）、
+ * 宛先の network・資産・桁・受取先（`destinationPayTo`）、価格（上流額・換算・手数料・合計、Tempo 宛ての cap と上限）、開示、`fundsMoveOnCredential`、期限、`ownerKey` の有無。
+ */
+export function hostedSubjectMismatches(response: Record<string, unknown>, planned: HostedPurchase, nowMs: number): string[] {
+  const problems: string[] = [];
+  const subject = response["subject"];
+  const quote = response["quote"];
+  if (response["ok"] !== true || !isRecord(subject) || !isRecord(quote)) return ["the quote did not succeed or has no subject/quote"];
+  const src = planned.source;
+  const dst = planned.destination;
+  const exp = planned.expected;
+  const eq = (label: string, actual: unknown, expected: unknown): void => {
+    if (actual !== expected) problems.push(`${label}: got ${JSON.stringify(actual)}, plan ${JSON.stringify(expected)}`);
+  };
+  const addr = (label: string, network: string, actual: unknown, expected: string): void => {
+    if (!sameAddress(network, actual, expected)) problems.push(`${label}: got ${JSON.stringify(actual)}, plan ${JSON.stringify(expected)}`);
+  };
+  // プロファイルと quote の同一性。
+  eq("subject.routeId (profileId)", subject["routeId"], planned.profileId);
+  eq("quote.routeId (profileId)", quote["routeId"], planned.profileId);
+  eq("quote.quoteId = subject.quoteId", quote["quoteId"], subject["quoteId"]);
+  eq("quote.paymentId = subject.paymentId", quote["paymentId"], subject["paymentId"]);
+  if (typeof subject["quoteId"] !== "string" || subject["quoteId"] === "") problems.push("subject.quoteId is missing");
+  if (typeof subject["paymentId"] !== "string" || !SAFE_PAYMENT_ID.test(subject["paymentId"])) problems.push("subject.paymentId is missing or not a plain id");
+  const ownerKey = quote["ownerKey"];
+  if (typeof ownerKey !== "string" || ownerKey.length < 16 || ownerKey.length > 256) problems.push("quote.ownerKey is missing (not a dynamic quote)");
+  if (subject["ownerKey"] !== undefined) problems.push("subject carries an ownerKey (it must be only in the quote document)");
+  // 上流（呼び出し側の URL）。完全一致、GET、body なし。
+  for (const [label, record] of [["subject.upstream", subject["upstream"]], ["quote.upstream", quote["upstream"]]] as const) {
+    const up = isRecord(record) ? record : {};
+    eq(`${label}.url`, up["url"], planned.url);
+    eq(`${label}.method`, up["method"], "GET");
+    if (up["body"] !== undefined || up["bodySha256"] !== undefined) problems.push(`${label} carries a body (the plan is GET without a body)`);
+  }
+  // 価格（subject と quote 文書は同じ値）。
+  const pricing = isRecord(subject["pricing"]) ? subject["pricing"] : undefined;
+  let total: string = exp.total ?? exp.maxTotal;
+  if (pricing === undefined) {
+    problems.push("subject.pricing is missing");
+  } else {
+    if (!isRecord(quote["pricing"]) || stableJson(quote["pricing"]) !== stableJson(pricing)) problems.push("quote.pricing differs from subject.pricing");
+    eq("subject.pricing.upstreamAmount", pricing["upstreamAmount"], exp.upstreamAmount);
+    eq("subject.pricing.converted (par 1:1)", pricing["converted"], exp.upstreamAmount);
+    const fee = pricing["fee"];
+    const shownTotal = pricing["total"];
+    if (typeof fee !== "string" || !AMOUNT.test(fee) || typeof shownTotal !== "string" || !AMOUNT.test(shownTotal)) {
+      problems.push("subject.pricing.fee/total are not base-unit integers");
+    } else {
+      total = shownTotal;
+      if (exp.gasIndexedFee) {
+        const maxFee = pricing["maxFee"];
+        const estimate = pricing["estimate"];
+        if (typeof maxFee !== "string" || !AMOUNT.test(maxFee)) problems.push("subject.pricing.maxFee (the Tempo gas cap) is missing");
+        else {
+          const want = BigInt(maxFee) > BigInt(HOSTED_FIXED_FEE) ? maxFee : HOSTED_FIXED_FEE;
+          eq("subject.pricing.fee = max(1000, maxFee)", fee, want);
+        }
+        if (!isRecord(estimate) || typeof estimate["atMs"] !== "number") problems.push("subject.pricing.estimate (the gas estimate at quote time) is missing");
+      } else {
+        if (pricing["maxFee"] !== undefined || pricing["estimate"] !== undefined) problems.push("subject.pricing carries maxFee/estimate on a destination where the Router pays no chain fee");
+        eq("subject.pricing.fee", fee, HOSTED_FIXED_FEE);
+        eq("subject.pricing.total", shownTotal, exp.total);
+      }
+      if (BigInt(shownTotal) !== BigInt(typeof pricing["upstreamAmount"] === "string" && AMOUNT.test(pricing["upstreamAmount"]) ? pricing["upstreamAmount"] : "0") + BigInt(fee)) problems.push("subject.pricing.total is not upstreamAmount + fee");
+      if (BigInt(shownTotal) > BigInt(exp.maxTotal)) problems.push(`subject.pricing.total ${shownTotal} is above the plan's ceiling ${exp.maxTotal}`);
+    }
+  }
+  // 源（静的と同じ照合: subject・署名される offer・challenge。額は pricing.total）。
+  problems.push(...sourceOfferProblems(subject, quote, src, total, nowMs));
+  const qs = isRecord(quote["source"]) ? quote["source"] : {};
+  addr("quote.source.payTo (Router receiver)", src.network, qs["payTo"], src.to);
+  // 宛先。
+  const d = isRecord(subject["destination"]) ? subject["destination"] : {};
+  const qd = isRecord(quote["destination"]) ? quote["destination"] : {};
+  eq("subject.destination.network", d["network"], dst.network);
+  addr("subject.destination.asset", dst.network, d["asset"], dst.asset);
+  eq("subject.destination.quoted", d["quoted"], exp.upstreamAmount);
+  eq("subject.destinationDecimals", subject["destinationDecimals"], dst.decimals);
+  addr("subject.destinationPayTo (upstream recipient)", dst.network, subject["destinationPayTo"], dst.to);
+  eq("quote.destination.network", qd["network"], dst.network);
+  addr("quote.destination.asset", dst.network, qd["asset"], dst.asset);
+  eq("quote.destination.quoted", qd["quoted"], exp.upstreamAmount);
+  addr("quote.destination.payTo (upstream recipient)", dst.network, qd["payTo"], dst.to);
+  // 開示（返金なし・運用者は宛先を確かめていない・資金が動く時点）。
+  const disclosures = isRecord(subject["disclosures"]) ? subject["disclosures"] : undefined;
+  if (disclosures === undefined) problems.push("subject.disclosures is missing");
+  else {
+    if (!isRecord(quote["disclosures"]) || stableJson(quote["disclosures"]) !== stableJson(disclosures)) problems.push("quote.disclosures differs from subject.disclosures");
+    eq("subject.disclosures.refundOnFailure", disclosures["refundOnFailure"], false);
+    eq("subject.disclosures.destinationVerifiedByOperator", disclosures["destinationVerifiedByOperator"], false);
+    eq("subject.disclosures.fundsMoveOnCredential", disclosures["fundsMoveOnCredential"], exp.fundsMoveOnCredential);
+  }
+  eq("subject.fundsMoveOnCredential (expected per source rail)", subject["fundsMoveOnCredential"], exp.fundsMoveOnCredential);
+  // 承認: subject と、署名する quote 文書の両方（Codex H-5 #1）。required・この quote への束縛・同じ有限の期限・期限の前、がそろわなければ署名しない
+  // （subject だけを見ると、期限の切れた quote 文書に Tempo の送金を署名し得る）。
+  const approvalProblems = (label: string, value: unknown): number | undefined => {
+    if (!isRecord(value)) {
+      problems.push(`${label} is missing`);
+      return undefined;
+    }
+    eq(`${label}.required`, value["required"], true);
+    eq(`${label}.boundTo = subject.quoteId`, value["boundTo"], subject["quoteId"]);
+    const deadline = value["deadlineMs"];
+    if (typeof deadline !== "number" || !Number.isFinite(deadline)) {
+      problems.push(`${label}.deadlineMs is missing or not a finite number`);
+      return undefined;
+    }
+    if (deadline <= nowMs) problems.push(`${label}.deadlineMs has passed`);
+    return deadline;
+  };
+  const subjectDeadline = approvalProblems("subject.approval", subject["approval"]);
+  const quoteDeadline = approvalProblems("quote.approval", quote["approval"]);
+  if (subjectDeadline !== undefined && quoteDeadline !== undefined && subjectDeadline !== quoteDeadline) problems.push("quote.approval.deadlineMs differs from subject.approval.deadlineMs");
+  return problems;
+}
+
+/**
+ * hosted の追加の保留（SR-H7）: Tempo MPP を源とするプロファイルは、**どの plan・どの label でも**、資金が動く署名を呼んだ試みが
+ * `verified` で終わっていなければ二度と署名しない（証跡の無い署名の印・読めない印も保留）。`verified` で終わった試みは、別の label（G-3 → G-4）で買ってよい。
+ */
+export function hostedProfileHold(evidenceDir: string, planned: HostedPurchase, all: readonly PurchaseEvidence[]): string | undefined {
+  if (!planned.source.fundsMoveAtSign) return undefined;
+  const unresolved = all.find((e) => e.profileId === planned.profileId && e.fundsMoveAtSign === true && e.signInvoked === true && e.stage !== "verified");
+  if (unresolved !== undefined) return `${planned.profileId} invoked a funds-moving signature under ${unresolved.routeId} (${unresolved.runId}) that ended at stage ${unresolved.stage}; never re-signed under any plan or label`;
+  const root = path.join(evidenceDir, "attempts");
+  if (!existsSync(root)) return undefined;
+  const prefix = `${planned.profileId}@`;
+  const suffix = `${signMarkerIdOf("")}.json`;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    for (const name of readdirSync(path.join(root, entry.name))) {
+      if (!name.startsWith(prefix) || !name.endsWith(suffix)) continue;
+      const routeId = name.slice(0, -suffix.length);
+      if (!all.some((e) => e.planSha256 === entry.name && e.routeId === routeId && e.stage === "verified")) {
+        return `a funds-moving sign marker for ${planned.profileId} (${routeId}, plan ${entry.name}) has no verified evidence; never re-signed under any plan or label`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** hosted の実行のモード。`ownerKey` は quote の直後に秘密に入れ（stdout・証跡から消す）、署名の前に私的な置き場へ O_EXCL・fsync で残す。 */
+function hostedMode(evidenceDir: string, secrets: Secrets): RunMode<HostedPurchase> {
+  const keys = new Map<string, string>();
+  const ownerKeyOf = (paymentId: string | undefined): string | undefined => (paymentId === undefined ? undefined : (keys.get(paymentId) ?? readOwnerKey(evidenceDir, paymentId)));
+  return {
+    kind: "hosted-matrix",
+    direction: "hosted",
+    name: "hosted matrix run",
+    selects: (planned, only) => planned.routeId === only || planned.profileId === only,
+    requestIdOf: (planned, now) => `hx-${planned.profileId}-${compactUtc(now)}-${randomBytes(3).toString("hex")}`,
+    async quote(mcp, planned, requestId) {
+      const quoted = await mcp.call("subetha_router_quote_url", { profileId: planned.profileId, url: planned.url, requestId });
+      const doc = quoted["quote"];
+      if (isRecord(doc) && typeof doc["ownerKey"] === "string") secrets.add(doc["ownerKey"]);
+      return quoted;
+    },
+    mismatches: (quoted, planned, nowMs) => hostedSubjectMismatches(quoted, planned, nowMs),
+    extraHold: (planned, all) => hostedProfileHold(evidenceDir, planned, all),
+    annotate(evidence, planned) {
+      evidence.profileId = planned.profileId;
+      evidence.upstreamUrl = planned.url;
+    },
+    beforeSign(quoted, planned, evidence) {
+      const doc = quoted["quote"] as Record<string, unknown>;
+      const ownerKey = doc["ownerKey"] as string;
+      const paymentId = evidence.paymentId ?? "";
+      try {
+        saveOwnerKey(evidenceDir, paymentId, ownerKey, { routeId: planned.routeId, profileId: planned.profileId });
+      } catch {
+        return "could not persist the quote's ownerKey in the private evidence";
+      }
+      keys.set(paymentId, ownerKey);
+      evidence.ownerKeyRef = ownerKeyRefOf(paymentId);
+      return undefined;
+    },
+    statusArgs(evidence) {
+      const ownerKey = ownerKeyOf(evidence.paymentId);
+      return { paymentId: evidence.paymentId, ...(ownerKey === undefined ? {} : { ownerKey }) };
+    },
+    purchaseRecord: (purchased) => {
+      const result = purchased["result"];
+      return isRecord(result) ? { ...purchased, result: withoutBody(result, "body") } : purchased;
+    },
+    deliveredBody: (purchased) => (isRecord(purchased["result"]) ? purchased["result"]["body"] : undefined),
+    routerBody: (projection) => (isRecord(projection["result"]) ? projection["result"]["body"] : undefined),
+    legsOf(planned, quoted) {
+      const subject = quoted["subject"] as Record<string, unknown>;
+      const pricing = subject["pricing"] as Record<string, unknown>;
+      return { source: { ...planned.source, amount: String(pricing["total"]) }, destination: planned.destination };
+    },
+  };
+}
+
+export interface HostedRunOptions extends LoopOptions<HostedPurchase> {
+  readonly plan: HostedPlan;
+}
+
+/** hosted の 36 件を 1 つずつ（`runMatrix` と同じ順序と保証。事前の入金はしない）。 */
+export async function runHostedMatrix(opts: HostedRunOptions, deps: MatrixRunDeps): Promise<RunReport> {
+  if (opts.plan.kind !== HOSTED_PLAN_KIND) throw new PlanRefusal("not a hosted matrix plan");
+  return await runMatrixLoop(opts, deps, hostedMode(opts.evidenceDir, deps.secrets));
 }
