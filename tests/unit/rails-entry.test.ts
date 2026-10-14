@@ -432,7 +432,7 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）の選択�
     expect(options.journalPath).toBe(path.resolve("runtime", "acceptance", "journal.ndjson"));
     expect(options.journalPath).not.toBe(path.resolve(publicJournalPathOf({})));
     // 公開の定数は受信（G-4）も送信（G-4′）も両方 true（受け入れ用の起動はそれを読まず、--rails で決める。既定の無効は RAILS_NONE）。
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true }, evm: { rh: { inbound: false, outbound: false }, arbsep: { inbound: false, outbound: false }, hyperevm: { inbound: false, outbound: false } } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
   });
 
@@ -646,7 +646,7 @@ describe("Solana の MPP の有効化（solanaMpp）: token・受取 owner・鍵
     expect(activationToEnv(RAILS_ACTIVATION)).toBe("arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc");
     expect(activationFromEnv("")).toEqual(RAILS_NONE);
     for (const bad of ["solana-mpp", "solanampp-in", "solana-mpp-in,solana-mpp-in", "mpp-in"]) {
-      expect(() => activationFromEnv(bad), bad).toThrow(/must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc"/);
+      expect(() => activationFromEnv(bad), bad).toThrow(/must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc,rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out"/);
     }
   });
 

@@ -217,7 +217,9 @@ describe("専用の子の能力（evmTestnetsCapabilitiesOf）", () => {
 
   test("公開の子と同じ能力に、選んだ chain の evmSigningByNetwork（同じ鍵）と loopback の origin（facilitator・Provider）だけを足す", () => {
     const env = childEnvOf();
-    const base = routerProcessCapabilitiesOf(env);
+    // 公開の子の能力は `SUBETHA_EVM_FACILITATOR_URL` を hosted の規則で読む（hosted 設計 §3）。この子はそれを通さずに渡す（`evmTestnetsCapabilitiesOf`）ので、比べる相手も同じ env を除いたもの。
+    const { SUBETHA_EVM_FACILITATOR_URL: _url, ...publicEnv } = env;
+    const base = routerProcessCapabilitiesOf(publicEnv);
     const capabilities = evmTestnetsCapabilitiesOf(env);
     const address = privateKeyToAccount(outboundKey).address;
     expect(capabilities.evmSigning?.network).toBe("eip155:84532");
@@ -271,9 +273,11 @@ describe("公開の入口には EVM testnet のものが無い（FR-E6・AC-E5�
     expect(plan.childScript).toBe(PUBLIC_ROUTER_PROCESS);
     const text = JSON.stringify({ config: plan.config, childEnv: plan.childEnv, childScript: plan.childScript });
     expect(text).not.toMatch(/localCounterparties|SUBETHA_EVM_|evm-testnets-router-process|eip155:46630|eip155:421614|eip155:998"|eip155:11155111|127\.0\.0\.1:86/);
-    // 公開の子の能力（同じ関数）にも無い。子の env に EVM の値を足しても読まれない。
+    // 公開の子の能力（同じ関数）にも無い。子の env にローカル版の EVM の値（Provider の URL・受取先・chain）を足しても読まれない。
+    // hosted の内部の env `SUBETHA_EVM_FACILITATOR_URL` だけは公開の子が読む（hosted 設計 §3。`tests/unit/evm-hosted-config.test.ts`）ので、ここでは足さない。
     const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
-    const capabilities = routerProcessCapabilitiesOf({ ...plan.childEnv, ...evmEnv, ...(plan.childEnv["SUBETHA_OUTBOUND_SOLANA_KEY"] === undefined ? {} : { SUBETHA_OUTBOUND_SOLANA_KEY: seed }) });
+    const { SUBETHA_EVM_FACILITATOR_URL: _url, ...localOnlyEnv } = evmEnv;
+    const capabilities = routerProcessCapabilitiesOf({ ...plan.childEnv, ...localOnlyEnv, SUBETHA_EVM_CHAINS: "rh,arbsep", ...(plan.childEnv["SUBETHA_OUTBOUND_SOLANA_KEY"] === undefined ? {} : { SUBETHA_OUTBOUND_SOLANA_KEY: seed }) });
     expect(Object.keys(capabilities)).not.toContain("localCounterparties");
     expect(Object.keys(capabilities.evmSigningByNetwork ?? {}).filter((network) => EVM_TESTNET_NETWORKS.has(network))).toEqual([]);
   });
@@ -284,15 +288,17 @@ describe("公開の入口には EVM testnet のものが無い（FR-E6・AC-E5�
     expect(JSON.stringify(plan)).not.toMatch(/SUBETHA_EVM_|localCounterparties/);
   });
 
-  test("静的検査: 公開の子・能力の組み立て・公開の生成は localCounterparties・EVM testnet の env を参照しない。本番の入口は試験用の上書きを渡さない", () => {
+  test("静的検査: 公開の子・能力の組み立て・公開の生成はローカル版の EVM testnet の env（Provider の URL・受取先・chain）と専用の子を参照しない。本番の入口は試験用の上書きを渡さない", () => {
+    // hosted 設計 §3・§5（H-3）: 公開の側が読む EVM の env は facilitator の URL（`SUBETHA_EVM_FACILITATOR_URL`、定数 `EVM_FACILITATOR_URL_ENV`）だけ。
     for (const file of ["tools/remote-router-process.ts", "tools/rails-entry.ts"]) {
       const source = readFileSync(file, "utf8");
-      expect(source).not.toMatch(/localCounterparties|SUBETHA_EVM_|evm-testnets/);
+      expect(source.replaceAll("SUBETHA_EVM_FACILITATOR_URL", "")).not.toMatch(/SUBETHA_EVM_|evm-testnets|EVM_PROVIDER|EVM_CHAINS_ENV|evmTestnetChainsOf|evmProviderUrlEnvOf/);
     }
-    // 公開の生成（`routerConfigOf`）の本体は EVM testnet の定数を使わない。
+    expect(readFileSync("tools/remote-router-process.ts", "utf8")).not.toMatch(/localCounterparties/);
+    // 公開の生成（`routerConfigOf`）の本体はローカル版の生成・env を使わない（EVM testnet の定数と facilitator の URL の env は hosted の有効化の分だけ）。
     const config = readFileSync("tools/remote-mcp-config.ts", "utf8");
     const publicPart = config.slice(config.indexOf("export function routerConfigOf"), config.indexOf("/* ------------------------------------------------------------------ mainnet"));
-    expect(publicPart).not.toMatch(/EVM_TESTNETS|evmTestnets|SUBETHA_EVM_/);
+    expect(publicPart).not.toMatch(/evmTestnets|SUBETHA_EVM_|EVM_PROVIDER|EVM_CHAINS_ENV/);
     // 試験用の上書き（子の script・env）を渡すのは試験の fixture だけ。
     for (const file of readdirSync("tools").filter((name) => name.endsWith(".ts"))) {
       const source = readFileSync(path.join("tools", file), "utf8");
