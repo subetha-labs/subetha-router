@@ -1,13 +1,14 @@
 /**
  * settle の応答の検査（`docs/provider-x402-workers.md` §2.2 の表）。成功を**確かめられたとき**だけ `PAYMENT-RESPONSE` を作る。
- * `payer` があれば**支払い側の署名者と同一**であること（Arc: authorization の `from`、Solana: transaction の authority = 2 番目の static account）。
+ * `payer` があれば**支払い側の署名者と同一**であること（EVM: authorization の `from`、Solana: transaction の authority = 2 番目の static account）。
+ * 分岐は network の族（`TABLE[network].family`）で行う。
  * それ以外は固定の分類（Provider は 502 で返し、Router は `unknown` にする）。
  */
 import { encodePaymentResponseHeader } from "@x402/core/http";
 import type { PaymentPayload, SettleResponse } from "@x402/core/types";
 import { getBase58Encoder, getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit";
 
-import type { ProviderNetwork } from "./config.js";
+import { TABLE, type ProviderNetwork } from "./config.js";
 
 export type ReceiptFailure = "settlement_pending" | "settle_failed" | "receipt_malformed";
 
@@ -36,7 +37,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function payerOfPayload(network: ProviderNetwork, payload: PaymentPayload): string | undefined {
   const inner = (payload as { payload?: unknown }).payload;
   if (!isRecord(inner)) return undefined;
-  if (network === "arc") {
+  if (TABLE[network].family === "evm") {
     const authorization = inner["authorization"];
     const from = isRecord(authorization) ? authorization["from"] : undefined;
     return typeof from === "string" && EVM_ADDRESS.test(from) ? from.toLowerCase() : undefined;
@@ -63,12 +64,13 @@ export function checkReceipt(network: ProviderNetwork, expectedNetwork: string, 
   const net = response["network"];
   const payer = response["payer"];
   if (net !== expectedNetwork || typeof transaction !== "string") return { ok: false, reason: "receipt_malformed" };
-  const transactionOk = network === "arc" ? BYTES32.test(transaction) : isBase58Bytes(transaction, 64);
+  const evm = TABLE[network].family === "evm";
+  const transactionOk = evm ? BYTES32.test(transaction) : isBase58Bytes(transaction, 64);
   if (!transactionOk) return { ok: false, reason: "receipt_malformed" };
   if (payer !== undefined) {
     if (typeof payer !== "string") return { ok: false, reason: "receipt_malformed" };
     const signer = payerOfPayload(network, payload);
-    const same = signer !== undefined && (network === "arc" ? EVM_ADDRESS.test(payer) && payer.toLowerCase() === signer : isBase58Bytes(payer, 32) && payer === signer);
+    const same = signer !== undefined && (evm ? EVM_ADDRESS.test(payer) && payer.toLowerCase() === signer : isBase58Bytes(payer, 32) && payer === signer);
     if (!same) return { ok: false, reason: "receipt_malformed" };
   }
   // 封筒は確かめた欄だけで作り直す（facilitator の余分な欄を透過しない）。

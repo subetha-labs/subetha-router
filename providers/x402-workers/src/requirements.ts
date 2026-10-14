@@ -10,7 +10,7 @@ import type { PaymentPayload, PaymentRequired, PaymentRequirements, SupportedRes
 import { registerExactEvmScheme } from "@x402/evm/exact/server";
 import { registerExactSvmScheme } from "@x402/svm/exact/server";
 
-import { MAX_TIMEOUT_SECONDS, type ProviderConfig } from "./config.js";
+import type { ProviderConfig } from "./config.js";
 import { DeadlineError, withSignal, type Stage } from "./deadline.js";
 import { supportedKindOf } from "./facilitator-client.js";
 
@@ -58,7 +58,7 @@ export function createRequirementsBuilder(config: ProviderConfig, clientFor: (st
   };
   const server = new x402ResourceServer(sdkFacilitator);
   const network = config.table.network as never;
-  if (config.network === "arc") registerExactEvmScheme(server, { networks: [network] });
+  if (config.table.family === "evm") registerExactEvmScheme(server, { networks: [network] });
   else registerExactSvmScheme(server, { networks: [network] }); // rpcUrl 無し: `recentBlockhash` を足させない
   let initialized = false;
   let inflight: Promise<void> | undefined;
@@ -96,7 +96,7 @@ export function createRequirementsBuilder(config: ProviderConfig, clientFor: (st
           network,
           payTo: config.payTo,
           price: { amount: config.table.amount, asset: config.table.asset, extra: { ...config.table.extra } },
-          maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+          maxTimeoutSeconds: config.table.maxTimeoutSeconds,
         },
       ],
       undefined,

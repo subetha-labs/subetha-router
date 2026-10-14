@@ -124,7 +124,66 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
     outbound: ["mpp"],
     assets: [{ id: "0x20C000000000000000000000b9537d11c60E8b50", decimals: 6 }],
   },
+  /*
+   * EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §1.1。2026-10-13 に公式の一覧と読み取り専用 RPC で確認。証跡 `docs/evidence/evm-testnets/`）。
+   * x402 の受信・送信（EIP-3009）。facilitator は公開のものが無い（Robinhood）ので自前（`tools/evm-facilitator.ts`、kind `x402`）。
+   * 設定生成の既定ではどの route もこれらを使わない（専用の入口 `tools/evm-testnets-run.ts` だけ）。
+   */
+  {
+    // Robinhood Chain testnet。Paxos の USDG。`version()` を持たない: domain は `DOMAIN_SEPARATOR()` を name・`1`・chainId・address から再計算して一致を確認。EIP-3009 は facet が受ける。
+    network: "eip155:46630",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: ["x402"],
+    x402Facilitator: "x402",
+    assets: [{ id: "0x7E955252E15c84f5768B83c41a71F9eba181802F", decimals: 6, domain: { name: "Global Dollar", version: "1" } }],
+  },
+  {
+    // Arbitrum Sepolia。Circle の USDC（`name()` は `USD Coin`）。
+    network: "eip155:421614",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: ["x402"],
+    x402Facilitator: "x402",
+    assets: [{ id: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", decimals: 6, domain: { name: "USD Coin", version: "2" } }],
+  },
+  {
+    // HyperEVM testnet。Circle の ERC-20 USDC（HyperCore の取引用 USDC ではない）。
+    network: "eip155:998",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: ["x402"],
+    x402Facilitator: "x402",
+    assets: [{ id: "0x2B3370eE501B4a559b57D449569354196457D8Ab", decimals: 6, domain: { name: "USDC", version: "2" } }],
+  },
+  {
+    // Ethereum Sepolia。Circle の USDC。
+    network: "eip155:11155111",
+    family: "evm",
+    inbound: ["x402"],
+    outbound: ["x402"],
+    x402Facilitator: "x402",
+    assets: [{ id: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", decimals: 6, domain: { name: "USDC", version: "2" } }],
+  },
 ]);
+
+/**
+ * 上の EVM testnet 4 つ（設計 `docs/evm-testnets-x402-design.md`）。受信の domain と期限（§3.2）・loopback の相手（§3.5）はこの集合の network だけに効く。
+ */
+export const EVM_TESTNET_NETWORKS: ReadonlySet<string> = Object.freeze(new Set(["eip155:46630", "eip155:421614", "eip155:998", "eip155:11155111"]));
+
+/** 遅いチェーン（block ~12 秒）。期限の表（設計 §3.6）の右の列。 */
+const SLOW_EVM_TESTNETS: ReadonlySet<string> = Object.freeze(new Set(["eip155:11155111"]));
+
+/**
+ * EVM testnet 4 つの期限（ms。設計 §3.6）。ほかの network には使わない（`undefined`）。
+ * - `inboundFacilitatorMs`: Router 受信の facilitator の HTTP 期限（verify と settle）
+ * - `outboundPaidMs`: Router 送信の有料要求の期限（Provider の要求全体の外側）
+ */
+export function evmTestnetDeadlinesOf(network: string): { readonly inboundFacilitatorMs: number; readonly outboundPaidMs: number } | undefined {
+  if (!EVM_TESTNET_NETWORKS.has(network)) return undefined;
+  return SLOW_EVM_TESTNETS.has(network) ? { inboundFacilitatorMs: 50_000, outboundPaidMs: 75_000 } : { inboundFacilitatorMs: 20_000, outboundPaidMs: 30_000 };
+}
 
 /** CAIP-2 の構文そのもの（facilitator の表の鍵に使う。route の network は従来どおり文字列）。 */
 const CAIP2_PATTERN = /^(eip155:[1-9][0-9]{0,19}|solana:[1-9A-HJ-NP-Za-km-z]{32})$/;

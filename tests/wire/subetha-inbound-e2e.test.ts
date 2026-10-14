@@ -30,6 +30,11 @@ const CHAIN_ID = 11_155_111;
 const SOURCE_NETWORK = `eip155:${CHAIN_ID}`;
 const SOURCE_TOKEN = "0x0000000000000000000000000000000000005ce7";
 const SOURCE_PAY_TO = "0x0000000000000000000000000000000000000a0e";
+/**
+ * MPP 受信の拒否の試験の受信 network。Ethereum Sepolia（`eip155:11155111`）は本番の表で x402 の受信だけ（`docs/evm-testnets-x402-design.md`）になったので、
+ * MPP の向きを許す合成の network（`tests/fixtures/known-networks.ts` の `eip155:1`）を使う。
+ */
+const SYNTHETIC_MPP_NETWORK = "eip155:1";
 
 /** 送信レグ（Tempo 形。spy が受ける）。 */
 const DEST_NETWORK = "eip155:42431";
@@ -326,7 +331,7 @@ describe("mpp inbound wiring (real composition, unpaid)", () => {
     // 理由まで固定する。理由を見ないと、無関係な構成エラーでも緑になってしまう
     // （実際、budget が空のまま書いていて別の理由で落ちていたのを実測で見つけた）。
     await expect(
-      start({ sourceRail: "mpp", sourcePayTo: MPP_PAY_TO }),
+      start({ sourceRail: "mpp", sourcePayTo: MPP_PAY_TO, sourceNetwork: SYNTHETIC_MPP_NETWORK }),
     ).rejects.toThrow(/ROUTER_MPP_INBOUND_SECRET is required/);
   });
 
@@ -334,6 +339,7 @@ describe("mpp inbound wiring (real composition, unpaid)", () => {
     await expect(
       start({
         sourceRail: "mpp",
+        sourceNetwork: SYNTHETIC_MPP_NETWORK,
         env: { ROUTER_MPP_INBOUND_SECRET: SECRET },
       }),
     ).rejects.toThrow(/source\.payTo is required when sourceRail is "mpp"/);
@@ -344,6 +350,7 @@ describe("mpp inbound wiring (real composition, unpaid)", () => {
       start({
         sourceRail: "mpp",
         sourcePayTo: MPP_PAY_TO,
+        sourceNetwork: SYNTHETIC_MPP_NETWORK,
         env: { ROUTER_MPP_INBOUND_SECRET: "too-short" },
       }),
     ).rejects.toThrow(/at least 32 bytes/);

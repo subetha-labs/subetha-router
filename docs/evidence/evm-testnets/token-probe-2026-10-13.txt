@@ -1,0 +1,89 @@
+2026-10-12T20:37:03Z
+{
+ "label": "robinhood",
+ "chainId": 46630,
+ "token": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+ "codeBytes": 170,
+ "impl@0x360894": "0xf0863d7a29a55d0c4263c11bfac754312ff078df",
+ "name": "Global Dollar",
+ "symbol": "USDG",
+ "decimals": 6,
+ "version": "ERR:The contract function \"version\" reverted with the following signature:",
+ "DOMAIN_SEPARATOR": "0xb1debe91e09d82163fd9cddaab89359061c0671664e1611258a3c3de7c2d950b",
+ "eip712Domain": "ERR:The contract function \"eip712Domain\" reverted with the following signature:",
+ "TRANSFER_WITH_AUTHORIZATION_TYPEHASH": "0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267",
+ "RECEIVE_WITH_AUTHORIZATION_TYPEHASH": "0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8",
+ "totalSupply": "57301240000000",
+ "authorizationState": false,
+ "domainMatches": {
+  "name": "Global Dollar",
+  "version": "1"
+ },
+ "twaSim": "The contract function \"transferWithAuthorization\" reverted with the following signature: | 0x8baa579f"
+}
+{
+ "label": "arb-sepolia",
+ "chainId": 421614,
+ "token": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+ "codeBytes": 1798,
+ "impl@0x7050c9": "0xfbb8ee011af0f15ee171e79c0688d05a58f7f566",
+ "name": "USD Coin",
+ "symbol": "USDC",
+ "decimals": 6,
+ "version": "2",
+ "DOMAIN_SEPARATOR": "0x85944e1292d007732838d6eadfa67589b78ffcededbd4df60488d0af251308bb",
+ "eip712Domain": "ERR:The contract function \"eip712Domain\" reverted.",
+ "TRANSFER_WITH_AUTHORIZATION_TYPEHASH": "0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267",
+ "RECEIVE_WITH_AUTHORIZATION_TYPEHASH": "0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8",
+ "totalSupply": "68844724899917284",
+ "authorizationState": false,
+ "domainMatches": {
+  "name": "USD Coin",
+  "version": "2"
+ },
+ "twaSim": "The contract function \"transferWithAuthorization\" reverted with the following reason: | FiatTokenV2: invalid signature"
+}
+{
+ "label": "hyperevm-testnet",
+ "chainId": 998,
+ "token": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+ "codeBytes": 1798,
+ "impl@0x7050c9": "0x667454c82b1ddac283ce360f34ba8dee4c22f768",
+ "name": "USDC",
+ "symbol": "USDC",
+ "decimals": 6,
+ "version": "2",
+ "DOMAIN_SEPARATOR": "0xf26c39ac3b2040472381fddbd35212755a23586ffb86e608e151af6caa1d465e",
+ "eip712Domain": "ERR:The contract function \"eip712Domain\" reverted.",
+ "TRANSFER_WITH_AUTHORIZATION_TYPEHASH": "0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267",
+ "RECEIVE_WITH_AUTHORIZATION_TYPEHASH": "0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8",
+ "totalSupply": "12435981973291557",
+ "authorizationState": false,
+ "domainMatches": {
+  "name": "USDC",
+  "version": "2"
+ },
+ "twaSim": "The contract function \"transferWithAuthorization\" reverted with the following reason: | FiatTokenV2: invalid signature"
+}
+{
+ "label": "eth-sepolia",
+ "chainId": 11155111,
+ "token": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+ "codeBytes": 1798,
+ "impl@0x7050c9": "0xda317c1d3e835dd5f1be459006471acaa1289068",
+ "name": "USDC",
+ "symbol": "USDC",
+ "decimals": 6,
+ "version": "2",
+ "DOMAIN_SEPARATOR": "0xb90e5057db141a932946e64d09ccb7ffc9b00bd79fec26f698d29af0c83320a6",
+ "eip712Domain": "ERR:The contract function \"eip712Domain\" reverted.",
+ "TRANSFER_WITH_AUTHORIZATION_TYPEHASH": "0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267",
+ "RECEIVE_WITH_AUTHORIZATION_TYPEHASH": "0xd099cc98ef71107a616c4f0f941f04c322d8e254fe26b3c6668db87aae413de8",
+ "totalSupply": "10742401172596241624",
+ "authorizationState": false,
+ "domainMatches": {
+  "name": "USDC",
+  "version": "2"
+ },
+ "twaSim": "The contract function \"transferWithAuthorization\" reverted with the following reason: | FiatTokenV2: invalid signature"
+}
