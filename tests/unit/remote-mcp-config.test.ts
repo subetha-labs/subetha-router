@@ -1,7 +1,8 @@
 /**
  * 本番の入口の設定生成（`tools/remote-mcp-config.ts`）の多レール（multirail 設計 §8、タスク T8-a）。
  * 登録は 1 つの値 `activation: { arc, solana }` で決まる。設定生成の既定の引数（`RAILS_DISABLED`）は**どちらも無効**、公開の process の定数
- * `RAILS_ACTIVATION` は G-4（2026-10-07）で両方 `true`。
+ * `RAILS_ACTIVATION` は G-4（2026-10-07）で両方 `true`。EVM testnet 3 つ（`evm`）は hosted 設計 §8.2 の G-4（2026-10-14）で全部 `true`
+ * （公開の生成に 36 本のプロファイルが足され、受信の facilitator の URL の内部 env が要る。`EVM_FAC_ENV`）。
  * env からは変えられない。有効にしたときだけ route・プロファイル・予算の区分・facilitator が出て、`KNOWN_NETWORKS` の検証を通る。
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -14,6 +15,7 @@ import { perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynam
 import { quoteBody, routeListBody } from "../../src/http/projection.js";
 import {
   dynamicProfilesOf,
+  EVM_NONE,
   INBOUND,
   INBOUND_ARC,
   INBOUND_SOL,
@@ -47,6 +49,22 @@ import {
 const RECEIVER = "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405";
 const ARC_RECEIVER = "0xAF42CFfe4B35A05098613d962aF43CDc43fBb4Ea";
 const SOL_OWNER = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+/**
+ * 公開の定数の EVM testnet 3 つ（hosted 設計 §8.2 の G-4、2026-10-14 に全部 true）は受信が有効なので、生成に自前の facilitator の URL（内部 env。
+ * 入口が token と port から作る `http://127.0.0.1:8611/<token>`）が要る。値は試験用の固定値（外へは接続しない）。
+ */
+const EVM_FAC_ENV = { SUBETHA_EVM_FACILITATOR_URL: "http://127.0.0.1:8611/remote-mcp-config-test-token_0123456789abcdef" };
+/** G-4 で足される 36 本（実装の組み立てを写さず文字で書く。`tests/unit/evm-hosted-config.test.ts` の EXPECTED_36 と同じ）。 */
+const EVM_36 = [
+  "dyn-rh-to-x402", "dyn-rh-to-mpp", "dyn-rh-to-arc", "dyn-rh-to-sol", "dyn-rh-to-solmpp",
+  "dyn-arbsep-to-x402", "dyn-arbsep-to-mpp", "dyn-arbsep-to-arc", "dyn-arbsep-to-sol", "dyn-arbsep-to-solmpp",
+  "dyn-hyperevm-to-x402", "dyn-hyperevm-to-mpp", "dyn-hyperevm-to-arc", "dyn-hyperevm-to-sol", "dyn-hyperevm-to-solmpp",
+  "dyn-x402-to-rh", "dyn-mpp-to-rh", "dyn-arc-to-rh", "dyn-sol-to-rh", "dyn-solmpp-to-rh",
+  "dyn-x402-to-arbsep", "dyn-mpp-to-arbsep", "dyn-arc-to-arbsep", "dyn-sol-to-arbsep", "dyn-solmpp-to-arbsep",
+  "dyn-x402-to-hyperevm", "dyn-mpp-to-hyperevm", "dyn-arc-to-hyperevm", "dyn-sol-to-hyperevm", "dyn-solmpp-to-hyperevm",
+  "dyn-rh-to-arbsep", "dyn-rh-to-hyperevm", "dyn-arbsep-to-rh", "dyn-arbsep-to-hyperevm", "dyn-hyperevm-to-rh", "dyn-hyperevm-to-arbsep",
+];
+const isEvmProfile = (id: string): boolean => /dyn-(rh|arbsep|hyperevm)-|-to-(rh|arbsep|hyperevm)$/.test(id);
 const BOTH: RailsOptions = { activation: { arc: { inbound: true, outbound: false }, solana: { inbound: true, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } };
 
 const dirs: string[] = [];
@@ -90,11 +108,11 @@ function bucketsOf(router: RouterConfig): { static: string[]; dynamic: string[] 
 }
 
 describe("公開の process の既定: Arc・Solana はどちらも無効", () => {
-  test("既定の生成（RAILS_DISABLED = RAILS_NONE）は既存の 2 経路・2 プロファイルだけ。公開の定数 RAILS_ACTIVATION は受信（G-4）も送信（G-4′）も両方 true（凍結）", () => {
+  test("既定の生成（RAILS_DISABLED = RAILS_NONE）は既存の 2 経路・2 プロファイルだけ。公開の定数 RAILS_ACTIVATION は受信（G-4）も送信（G-4′）も両方 true、EVM testnet 3 つ（evm）も全部 true（hosted 設計 §8.2 の G-4、2026-10-14）（凍結）", () => {
     expect(RAILS_NONE).toEqual({ arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } });
     expect(Object.isFrozen(RAILS_NONE)).toBe(true);
     expect(RAILS_DISABLED.activation).toBe(RAILS_NONE);
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true }, evm: { rh: { inbound: false, outbound: false }, arbsep: { inbound: false, outbound: false }, hyperevm: { inbound: false, outbound: false } } });
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true }, evm: { rh: { inbound: true, outbound: true }, arbsep: { inbound: true, outbound: true }, hyperevm: { inbound: true, outbound: true } } });
     expect(Object.isFrozen(RAILS_ACTIVATION)).toBe(true);
     const document = routerConfigOf({}, RECEIVER, true);
     expect(document).toEqual(routerConfigOf({}, RECEIVER, true, RAILS_DISABLED));
@@ -256,23 +274,28 @@ describe("送信の有効化（Arc）: 方向別の定数と生成", () => {
   const ARC_PROVIDER = "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1";
   const OUT_ONLY: RailsOptions = { activation: { arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { arc: ARC_PROVIDER } };
 
-  test("公開の定数は受信 true・送信 true（Arc・Solana とも。G-4′ 2026-10-08）。railActive は方向のどれかで決まる", () => {
-    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true }, evm: { rh: { inbound: false, outbound: false }, arbsep: { inbound: false, outbound: false }, hyperevm: { inbound: false, outbound: false } } });
+  test("公開の定数は受信 true・送信 true（Arc・Solana とも。G-4′ 2026-10-08。EVM testnet 3 つも G-4 2026-10-14 で全部 true）。railActive は方向のどれかで決まる", () => {
+    expect(RAILS_ACTIVATION).toEqual({ arc: { inbound: true, outbound: true }, solana: { inbound: true, outbound: true }, solanaMpp: { inbound: true, outbound: true }, pairs: { arcToSol: true, solToArc: true }, evm: { rh: { inbound: true, outbound: true }, arbsep: { inbound: true, outbound: true }, hyperevm: { inbound: true, outbound: true } } });
     expect(Object.isFrozen(RAILS_ACTIVATION) && Object.isFrozen(RAILS_ACTIVATION.arc)).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
     expect(railActive({ arc: { inbound: false, outbound: true }, solana: { inbound: false, outbound: false }, solanaMpp: { inbound: false, outbound: false } })).toBe(true);
   });
 
-  test("公開の設定（定数、G-4⁗ の後）: route 10 本（受信 4 + 送信 2 + MPP Solana の受信 2・送信 2）と 20 本のプロファイル（O-5・O-6 の dyn-arc-to-sol・dyn-sol-to-arc を含む。D-17）。送信の受取先が無ければ起動しない", () => {
-    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
+  test("公開の設定（定数、G-4 の EVM testnet の後）: route 10 本（受信 4 + 送信 2 + MPP Solana の受信 2・送信 2）と 56 本のプロファイル（G-4⁗ までの 20 本 = O-5・O-6 の dyn-arc-to-sol・dyn-sol-to-arc を含む。D-17。+ G-4 の EVM testnet 3 つの 36 本）。送信の受取先が無ければ起動しない", () => {
+    const document = routerConfigOf(EVM_FAC_ENV, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
     const router = routerOf(document);
     expect(Object.keys(router.routes).sort()).toEqual([ROUTE, ROUTE_MPP_IN, ROUTE_ARC, ROUTE_SOL, ROUTE_ARC_OUT, ROUTE_SOL_OUT, ROUTE_SOLMPP_TO_X402, ROUTE_SOLMPP_TO_MPP, ROUTE_SOLMPP_OUT, ROUTE_SOLMPP_OUT_MPP].sort());
-    expect(Object.keys(router.dynamic!.profiles).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-sol", "dyn-arc-to-solmpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-sol-to-arc", "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402", "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp"]);
+    // G-4⁗ までの 20 本は変わらず、G-4（2026-10-14）の EVM testnet 3 つの 36 本が足される（計 56）。
+    expect(Object.keys(router.dynamic!.profiles).filter((id) => !isEvmProfile(id)).sort()).toEqual(["dyn-arc-to-mpp", "dyn-arc-to-sol", "dyn-arc-to-solmpp", "dyn-arc-to-x402", "dyn-mpp-to-arc", "dyn-mpp-to-sol", "dyn-mpp-to-solmpp", "dyn-mpp-to-x402", "dyn-sol-to-arc", "dyn-sol-to-mpp", "dyn-sol-to-solmpp", "dyn-sol-to-x402", "dyn-solmpp-to-arc", "dyn-solmpp-to-mpp", "dyn-solmpp-to-sol", "dyn-solmpp-to-x402", "dyn-x402-to-arc", "dyn-x402-to-mpp", "dyn-x402-to-sol", "dyn-x402-to-solmpp"]);
+    expect(Object.keys(router.dynamic!.profiles).filter(isEvmProfile).sort()).toEqual([...EVM_36].sort());
+    expect(Object.keys(router.dynamic!.profiles)).toHaveLength(56);
     expect(JSON.stringify(document)).toMatch(/dyn-arc-to-sol"/);
     expect(JSON.stringify(document)).toMatch(/dyn-sol-to-arc"/);
     // URL（定数）があるのに受取先が無ければ起動しない（固定文）。Provider D の受取 owner が欠けても同じ。
-    expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } })).toThrow();
-    expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d" } })).toThrow(/solana mpp outbound rail/);
+    expect(() => routerConfigOf(EVM_FAC_ENV, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER } })).toThrow();
+    expect(() => routerConfigOf(EVM_FAC_ENV, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d" } })).toThrow(/solana mpp outbound rail/);
+    // G-4（EVM testnet 3 つの受信が有効）: facilitator の URL の内部 env が無ければ固定文で止まる（受取先がそろっていても）。
+    expect(() => routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } })).toThrow(/SUBETHA_EVM_FACILITATOR_URL is required when an EVM testnet inbound rail is activated/);
   });
 
   test("arc.outbound だけ true（受信は無効）: 動的 dyn-x402-to-arc と（MPP 受信があれば）dyn-mpp-to-arc が出て、受取先の env は読まれず、Arc USDC の区分が静的・動的に出る", () => {
@@ -376,17 +399,19 @@ describe("送信の有効化（Solana）: 生成（送信の設計 §6.3、D-12�
   const SOL_OUT: RailsOptions = { activation: { arc: { inbound: false, outbound: false }, solana: { inbound: false, outbound: true }, solanaMpp: { inbound: false, outbound: false } }, receivers: {}, providers: { solana: SOL_PROVIDER } };
   const SOL_URL = "https://provider-sol.test/v1/eth/snapshot";
 
-  test("公開の定数は solana.outbound true（G-4′）。URL の定数は配備した Provider（G-1′）。公開の ID は route 10・プロファイル 18（G-4″ の後）で重複なし", () => {
+  test("公開の定数は solana.outbound true（G-4′）。URL の定数は配備した Provider（G-1′）。公開の ID は route 10・プロファイル 56（G-4″ の後 18、G-4⁗ の後 20、G-4 の EVM testnet の後 56）で重複なし", () => {
     expect(RAILS_ACTIVATION.solana.outbound).toBe(true);
     expect(UPSTREAM_SOL).toBe("https://provider-x402-sol.subethalabs.com/v1/eth/snapshot");
     expect(RAIL_UPSTREAMS.solana).toBe(UPSTREAM_SOL);
-    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: SOL_PROVIDER, solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } }));
+    const router = routerOf(routerConfigOf(EVM_FAC_ENV, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: SOL_PROVIDER, solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } }));
     const ids = listedIds(router);
     expect(ids.routes).toContain(ROUTE_SOL_OUT);
     expect(ids.profiles).toContain("dyn-x402-to-sol");
     expect(ids.profiles).toContain("dyn-mpp-to-sol");
     expect(ids.routes).toHaveLength(10);
-    expect(ids.profiles).toHaveLength(20);
+    // G-4（2026-10-14）: 20 本 + EVM testnet 3 つの 36 本。
+    expect(ids.profiles).toHaveLength(56);
+    expect(ids.profiles.filter((id) => !isEvmProfile(id))).toHaveLength(20);
     expect(new Set([...ids.routes, ...ids.profiles]).size).toBe(ids.routes.length + ids.profiles.length);
   });
 
@@ -451,7 +476,7 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
   const SOL_MPP_URL = "https://provider-solmpp.test/v1/eth/snapshot";
   const SOLMPP_DEST = { scheme: "solana/charge", network: OUTBOUND_SOL.network, asset: OUTBOUND_SOL.asset, decimals: 6, tokenProgram: OUTBOUND_SOL.tokenProgram };
 
-  test("公開の定数: solanaMpp は両方 true（G-4″、2026-10-08）、UPSTREAM_SOL_MPP は配備した Provider D の URL（G-1″）。railActive は solanaMpp だけでも true。公開の設定は route 10・プロファイル 18 で、solmpp の 4 本と 8 本を含む", () => {
+  test("公開の定数: solanaMpp は両方 true（G-4″、2026-10-08）、UPSTREAM_SOL_MPP は配備した Provider D の URL（G-1″）。railActive は solanaMpp だけでも true。公開の設定は route 10・プロファイル 56（G-4 の EVM testnet の後。その前は 20）で、solmpp の 4 本と 14 本（8 本 + EVM testnet 3 つとの 6 本）を含む", () => {
     expect(RAILS_ACTIVATION.solanaMpp).toEqual({ inbound: true, outbound: true });
     expect(Object.isFrozen(RAILS_ACTIVATION.solanaMpp)).toBe(true);
     expect(RAILS_NONE.solanaMpp).toEqual(OFF);
@@ -460,12 +485,14 @@ describe("Solana の MPP の有効化（solanaMpp）: 生成（設計 §6.3）",
     expect(railActive({ arc: OFF, solana: OFF, solanaMpp: IN })).toBe(true);
     expect(railActive({ arc: OFF, solana: OFF, solanaMpp: OUT })).toBe(true);
     expect(railActive(RAILS_NONE)).toBe(false);
-    const router = routerOf(routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER } }));
+    const router = routerOf(routerConfigOf(EVM_FAC_ENV, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: ARC_PROVIDER, solana: SOL_PROVIDER, solanaMpp: SOL_MPP_PROVIDER } }));
     const ids = listedIds(router);
     expect(ids.routes).toHaveLength(10);
-    expect(ids.profiles).toHaveLength(20);
+    expect(ids.profiles).toHaveLength(56);
     expect(ids.routes.filter((r) => r.includes("solmpp"))).toEqual(["md-mpp-eth-snapshot-solmpp", "md-solmpp-eth-snapshot", "md-solmpp-eth-snapshot-mpp", "md-x402-eth-snapshot-solmpp"]);
-    expect(ids.profiles.filter((p) => p.includes("solmpp"))).toHaveLength(8);
+    expect(ids.profiles.filter((p) => p.includes("solmpp") && !isEvmProfile(p))).toHaveLength(8);
+    // G-4: dyn-solmpp-to-<chain>・dyn-<chain>-to-solmpp の 6 本が足される。
+    expect(ids.profiles.filter((p) => p.includes("solmpp") && isEvmProfile(p)).sort()).toEqual(["dyn-arbsep-to-solmpp", "dyn-hyperevm-to-solmpp", "dyn-rh-to-solmpp", "dyn-solmpp-to-arbsep", "dyn-solmpp-to-hyperevm", "dyn-solmpp-to-rh"]);
     expect(router.routes[ROUTE_SOLMPP_OUT]?.destination.payTo).toBe(SOL_MPP_PROVIDER);
   });
 
@@ -707,14 +734,16 @@ describe("O-5・O-6: 組の切り替え pairs と dyn-arc-to-sol・dyn-sol-to-ar
     expect(JSON.stringify(document)).not.toContain(`${absent}"`);
   });
 
-  test("pairs 両方 false、または無し（G-2⁗ の配備の形）: 18 本のまま。ID は文書に出ない。公開の定数（G-4⁗）は 20 本", () => {
+  test("pairs 両方 false、または無し（G-2⁗ の配備の形）: 18 本のまま。ID は文書に出ない。公開の定数（G-4⁗）は 20 本、G-4 の EVM testnet の後は 56 本", () => {
     for (const pairs of [{ arcToSol: false, solToArc: false }, undefined]) {
       const document = routerConfigOf({}, RECEIVER, true, optionsOf(pairs));
       expect(Object.keys(routerOf(document).dynamic!.profiles).sort()).toEqual(EIGHTEEN);
       expect(JSON.stringify(document)).not.toMatch(/dyn-arc-to-sol"|dyn-sol-to-arc"/);
     }
     // 公開の定数は G-4⁗ で両方 true → 20 本。false の固定の構成（上）が 18 本の対照。
-    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, true, optionsOf(RAILS_ACTIVATION.pairs, RAILS_ACTIVATION))).dynamic!.profiles)).toHaveLength(20);
+    // G-4（2026-10-14）で evm も全部 true → 56 本（evm を除けば 20 本のまま）。
+    expect(Object.keys(routerOf(routerConfigOf({}, RECEIVER, true, optionsOf(RAILS_ACTIVATION.pairs, { ...RAILS_ACTIVATION, evm: EVM_NONE }))).dynamic!.profiles)).toHaveLength(20);
+    expect(Object.keys(routerOf(routerConfigOf(EVM_FAC_ENV, RECEIVER, true, optionsOf(RAILS_ACTIVATION.pairs, RAILS_ACTIVATION))).dynamic!.profiles)).toHaveLength(56);
   });
 
   test.each([
@@ -761,7 +790,8 @@ describe("O-5・O-6: 組の切り替え pairs と dyn-arc-to-sol・dyn-sol-to-ar
 // table, and the quote projection carries them (the payer dialog showed "decimals not supplied" on b-3b60355).
 describe("静的 route の宛先の桁（本番の読み込みの経路）", () => {
   test("loadRuntimeConfig（real）で md-mpp-eth-snapshot の宛先に decimals 6 が入り、quote の射影に出る", () => {
-    const document = routerConfigOf({}, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
+    // 公開の定数（G-4 の後は EVM testnet の受信を含む）なので、facilitator の URL の内部 env を与える。
+    const document = routerConfigOf(EVM_FAC_ENV, RECEIVER, true, { activation: RAILS_ACTIVATION, receivers: { arc: ARC_RECEIVER, solana: SOL_OWNER }, providers: { arc: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", solana: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", solanaMpp: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" } });
     const config = loadAsProduction(document);
     const route = config.router.routes[ROUTE]!;
     expect(route.destination.network).toBe("eip155:42431");

@@ -757,6 +757,993 @@
        "bps": 0,
        "min": "1000"
       }
+     },
+     "dyn-x402-to-rh": {
+      "profileId": "dyn-x402-to-rh",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-x402-to-arbsep": {
+      "profileId": "dyn-x402-to-arbsep",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-x402-to-hyperevm": {
+      "profileId": "dyn-x402-to-hyperevm",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-rh": {
+      "profileId": "dyn-mpp-to-rh",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-arbsep": {
+      "profileId": "dyn-mpp-to-arbsep",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-mpp-to-hyperevm": {
+      "profileId": "dyn-mpp-to-hyperevm",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arc-to-rh": {
+      "profileId": "dyn-arc-to-rh",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arc-to-arbsep": {
+      "profileId": "dyn-arc-to-arbsep",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arc-to-hyperevm": {
+      "profileId": "dyn-arc-to-hyperevm",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "payTo": "0x1563915e194D8CfBA1943570603F7606A3115508"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-rh": {
+      "profileId": "dyn-sol-to-rh",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-arbsep": {
+      "profileId": "dyn-sol-to-arbsep",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-sol-to-hyperevm": {
+      "profileId": "dyn-sol-to-hyperevm",
+      "sourceRail": "x402",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-rh": {
+      "profileId": "dyn-solmpp-to-rh",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-arbsep": {
+      "profileId": "dyn-solmpp-to-arbsep",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-solmpp-to-hyperevm": {
+      "profileId": "dyn-solmpp-to-hyperevm",
+      "sourceRail": "mpp",
+      "source": {
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "payTo": "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-x402": {
+      "profileId": "dyn-rh-to-x402",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-mpp": {
+      "profileId": "dyn-rh-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-arc": {
+      "profileId": "dyn-rh-to-arc",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-sol": {
+      "profileId": "dyn-rh-to-sol",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-solmpp": {
+      "profileId": "dyn-rh-to-solmpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-arbsep": {
+      "profileId": "dyn-rh-to-arbsep",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-rh-to-hyperevm": {
+      "profileId": "dyn-rh-to-hyperevm",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-x402": {
+      "profileId": "dyn-arbsep-to-x402",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-mpp": {
+      "profileId": "dyn-arbsep-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-arc": {
+      "profileId": "dyn-arbsep-to-arc",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-sol": {
+      "profileId": "dyn-arbsep-to-sol",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-solmpp": {
+      "profileId": "dyn-arbsep-to-solmpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-rh": {
+      "profileId": "dyn-arbsep-to-rh",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-arbsep-to-hyperevm": {
+      "profileId": "dyn-arbsep-to-hyperevm",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-x402": {
+      "profileId": "dyn-hyperevm-to-x402",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:84532",
+       "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-mpp": {
+      "profileId": "dyn-hyperevm-to-mpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "tempo/charge",
+       "network": "eip155:42431",
+       "asset": "0x20c0000000000000000000000000000000000000",
+       "decimals": 6,
+       "feeAsset": "0x20c0000000000000000000000000000000000000",
+       "maxFee": "50000",
+       "feeMargin": 20000
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-arc": {
+      "profileId": "dyn-hyperevm-to-arc",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:5042002",
+       "asset": "0x3600000000000000000000000000000000000000",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USDC",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-sol": {
+      "profileId": "dyn-hyperevm-to-sol",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-solmpp": {
+      "profileId": "dyn-hyperevm-to-solmpp",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "mpp",
+      "destination": {
+       "scheme": "solana/charge",
+       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+       "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+       "decimals": 6,
+       "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-rh": {
+      "profileId": "dyn-hyperevm-to-rh",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "Global Dollar",
+        "version": "1"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
+     },
+     "dyn-hyperevm-to-arbsep": {
+      "profileId": "dyn-hyperevm-to-arbsep",
+      "sourceRail": "x402",
+      "source": {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "decimals": 6,
+       "payTo": "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405"
+      },
+      "rail": "x402",
+      "destination": {
+       "scheme": "exact",
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "decimals": 6,
+       "tokenDomain": {
+        "name": "USD Coin",
+        "version": "2"
+       }
+      },
+      "par": true,
+      "maxUpstreamAmount": "10000",
+      "fee": {
+       "flat": "1000",
+       "bps": 0,
+       "min": "1000"
+      }
      }
     },
     "budget": {
@@ -785,6 +1772,24 @@
        "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
        "maxTotal": "100000000",
        "maxPerPurchase": "21000"
+      },
+      {
+       "network": "eip155:46630",
+       "asset": "0x7E955252E15c84f5768B83c41a71F9eba181802F",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      },
+      {
+       "network": "eip155:421614",
+       "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
+      },
+      {
+       "network": "eip155:998",
+       "asset": "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+       "maxTotal": "100000000",
+       "maxPerPurchase": "20000"
       }
      ]
     },
@@ -814,6 +1819,18 @@
     "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
      "kind": "x402",
      "url": "https://www.x402.org/facilitator"
+    },
+    "eip155:46630": {
+     "kind": "x402",
+     "url": "http://127.0.0.1:8611/config-golden-token_0123456789abcdefABCDEF"
+    },
+    "eip155:421614": {
+     "kind": "x402",
+     "url": "http://127.0.0.1:8611/config-golden-token_0123456789abcdefABCDEF"
+    },
+    "eip155:998": {
+     "kind": "x402",
+     "url": "http://127.0.0.1:8611/config-golden-token_0123456789abcdefABCDEF"
     }
    }
   }
@@ -831,6 +1848,7 @@
   "ROUTER_X402_INBOUND_FACILITATOR_URL",
   "ROUTER_X402_INBOUND_OFFER_SECONDS",
   "SUBETHA_ARC_RECEIVER_KEY",
+  "SUBETHA_EVM_FACILITATOR_URL",
   "SUBETHA_OUTBOUND_MPP_KEY",
   "SUBETHA_OUTBOUND_SOLANA_KEY",
   "SUBETHA_OUTBOUND_X402_KEY",
@@ -852,8 +1870,9 @@
   "ROUTER_MPP_INBOUND_RPC_URL": "https://tempo.example/v1/TOKEN",
   "ROUTER_MPP_INBOUND_SECRET": "0123456789abcdef0123456789abcdef-golden",
   "ROUTER_MPP_INBOUND_OFFER_SECONDS": "600",
-  "SUBETHA_RAILS_ACTIVATION": "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc",
+  "SUBETHA_RAILS_ACTIVATION": "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc,rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out",
   "SUBETHA_ARC_RECEIVER_KEY": "0x2222222222222222222222222222222222222222222222222222222222222222",
-  "SUBETHA_OUTBOUND_SOLANA_KEY": "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2"
+  "SUBETHA_OUTBOUND_SOLANA_KEY": "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2",
+  "SUBETHA_EVM_FACILITATOR_URL": "http://127.0.0.1:8611/config-golden-token_0123456789abcdefABCDEF"
  }
 }

@@ -1,7 +1,8 @@
 /**
  * EVM testnet 3 つを hosted に出す設定生成と公開の子の能力（`docs/evm-testnets-hosted-design.md` §3 の最後・§5、FR-H3〜FR-H6、SR-H2、AC-H1・AC-H2、タスク H-3）。
- * - 有効化 `RAILS_ACTIVATION.evm` が無い・全部 false: 公開の設定・子の env・一覧は今と byte 一致（golden）
- * - 全部 true: golden との差分は追加だけ（既存の値は 1 つも変わらない）。足されるのは 36 本のプロファイル・3 つの区分・3 つの受信の facilitator
+ * - 有効化 `RAILS_ACTIVATION.evm` が無い・全部 false: 公開の設定・子の env・一覧は G-4 の前と byte 一致（golden `public-pre-evm.json`）
+ * - 全部 true: G-4 の前の golden との差分は追加だけ（既存の値は 1 つも変わらない）。足されるのは 36 本のプロファイル・3 つの区分・3 つの受信の facilitator
+ * - G-4（hosted 設計 §8.2、2026-10-14）で公開の定数 `RAILS_ACTIVATION.evm` は全部 true。その生成の golden `public.json` も、`public-pre-evm.json` との差分が追加だけ
  * - 1 件の上限の境界は本物の予約の計算（`src/core/dynamic.ts`）で。公開の子の能力（`localCounterparties`・`evmSigningByNetwork`）、配線（composeRails）
  * 鍵は固定の合成値か乱数。外へは接続しない（loopback の相手は試験の中の HTTP の server）。
  */
@@ -54,6 +55,10 @@ const OFF = { inbound: false, outbound: false } as const;
 const EVM_ALL: EvmRailsActivation = { rh: ON, arbsep: ON, hyperevm: ON };
 const withEvm = (activation: RailsActivation, evm: EvmRailsActivation): RailsActivation => ({ ...activation, evm });
 const PUBLIC_ALL = withEvm(RAILS_ACTIVATION, EVM_ALL);
+/** 公開の定数から evm の欄を除いた形（G-4 の前の公開の定数と同じ値）。 */
+const { evm: _publicEvm, ...PUBLIC_PRE_EVM } = RAILS_ACTIVATION;
+/** G-4 の後の golden（`public.json`）の facilitator の URL（`tests/unit/config-golden.test.ts` の token と既定の port 8611）。 */
+const GOLDEN_FACILITATOR_URL = "http://127.0.0.1:8611/config-golden-token_0123456789abcdefABCDEF";
 /**
  * 有効時の env: H-4 から、入口は facilitator の子を計画し、URL（`http://127.0.0.1:8611/<token>`）を token と port から作る（親の env の URL は使わない）。
  * gas 鍵・token・各 chain の gas の上限・Provider の受取先が要る（`tests/unit/evm-hosted-entry.test.ts`）。
@@ -120,7 +125,8 @@ function additionsOf(before: unknown, after: unknown, at = "$"): string[] {
 }
 
 describe("AC-H1: evm が無い・全部 false なら公開の生成は byte 一致", () => {
-  test.each([["public", RAILS_ACTIVATION], ["none", RAILS_NONE]] as const)("%s: evm 無し・全部 false・facilitator の env あり（無効なので読まない）のどれでも、書き出す設定の文字列・子の env・一覧が golden と同じ", (name, activation) => {
+  // 公開の定数は G-4（2026-10-14）で evm が全部 true。その evm を除いた・全部 false にした形が、G-4 の前の golden（public-pre-evm）と byte 一致。
+  test.each([["public-pre-evm", RAILS_ACTIVATION], ["none", RAILS_NONE]] as const)("%s: evm 無し・全部 false・facilitator の env あり（無効なので読まない）のどれでも、書き出す設定の文字列・子の env・一覧が golden と同じ", (name, activation) => {
     const expected = golden(name);
     const { evm: _evm, ...withoutEvm } = activation as RailsActivation;
     const variants: [RailsActivation, Record<string, string | undefined>][] = [
@@ -140,9 +146,11 @@ describe("AC-H1: evm が無い・全部 false なら公開の生成は byte 一�
     expect(listed(withEvm(withoutEvm, EVM_NONE))).toBe(listed(withoutEvm));
   });
 
-  test("公開の定数 RAILS_ACTIVATION.evm は全部 false（凍結）。evmOf は無ければ全部 false", () => {
-    expect(RAILS_ACTIVATION.evm).toEqual({ rh: OFF, arbsep: OFF, hyperevm: OFF });
+  test("公開の定数 RAILS_ACTIVATION.evm は全部 true（G-4、2026-10-14。H-3〜G-3 の間は全部 false）（凍結）。evmOf は無ければ全部 false", () => {
+    expect(RAILS_ACTIVATION.evm).toEqual({ rh: ON, arbsep: ON, hyperevm: ON });
+    expect(RAILS_ACTIVATION.evm).toEqual(EVM_ALL);
     expect(Object.isFrozen(RAILS_ACTIVATION.evm)).toBe(true);
+    for (const chain of HOSTED_EVM_CHAINS) expect(Object.isFrozen(RAILS_ACTIVATION.evm![chain]), chain).toBe(true);
     expect(evmOf(RAILS_NONE)).toBe(EVM_NONE);
     expect(Object.keys(EVM_NONE)).toEqual(["rh", "arbsep", "hyperevm"]);
     expect(HOSTED_EVM_CHAINS).toEqual(["rh", "arbsep", "hyperevm"]);
@@ -153,7 +161,9 @@ describe("AC-H1: evm が無い・全部 false なら公開の生成は byte 一�
 
 describe("全部 true: golden との差分は追加だけ（SR-H2）", () => {
   test("既存の値は 1 つも変わらない。追加は 36 本のプロファイル・動的の区分 3 つ・受信の facilitator 3 つだけ。子の env は有効化の値に 6 語が後ろに付くだけ", () => {
-    const expected = golden("public");
+    // 基準は G-4 の前の golden（evm が全部 false の公開の生成）。G-4 の後の公開の定数は PUBLIC_ALL と同じ値。
+    expect(PUBLIC_ALL).toEqual(RAILS_ACTIVATION);
+    const expected = golden("public-pre-evm");
     const plan = planOf(PUBLIC_ALL, evmEnv);
     const added = additionsOf(expected.config, plan.config);
     expect(added.filter((p) => p.startsWith("$.router.dynamic.profiles.")).map((p) => p.slice("$.router.dynamic.profiles.".length)).sort()).toEqual(EXPECTED_36);
@@ -174,6 +184,31 @@ describe("全部 true: golden との差分は追加だけ（SR-H2）", () => {
     expect(activationValue).toBe(`${goldenValue},rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out`);
     expect(urlValue).toBe(FACILITATOR_URL);
     expect(JSON.stringify(plan.childEnv)).not.toContain(FAC_KEY.slice(2));
+  });
+
+  test("G-4 の golden（public.json）も G-4 の前の golden（public-pre-evm.json）から追加だけ: 36 本・3 区分・3 facilitator、子の env は 6 語と facilitator の URL。公開の定数の計画はその追加と同じ", () => {
+    const before = golden("public-pre-evm");
+    const after = golden("public");
+    const added = additionsOf(before.config, after.config);
+    expect(added.filter((p) => p.startsWith("$.router.dynamic.profiles.")).map((p) => p.slice("$.router.dynamic.profiles.".length)).sort()).toEqual(EXPECTED_36);
+    expect(added.filter((p) => !p.startsWith("$.router.dynamic.profiles.")).sort()).toEqual(
+      ["$.router.dynamic.budget.buckets[4]", "$.router.dynamic.budget.buckets[5]", "$.router.dynamic.budget.buckets[6]", `$.x402.inboundFacilitators.${NET.rh}`, `$.x402.inboundFacilitators.${NET.arbsep}`, `$.x402.inboundFacilitators.${NET.hyperevm}`].sort(),
+    );
+    expect(Object.keys(after.config.router.dynamic.profiles)).toHaveLength(56);
+    expect(Object.keys(after.config.router.dynamic.profiles).slice(0, 20)).toEqual(Object.keys(before.config.router.dynamic.profiles));
+    expect(after.config.router.routes).toEqual(before.config.router.routes);
+    expect(after.config.router.budget).toEqual(before.config.router.budget);
+    // 子の env: 鍵の集合は facilitator の URL が 1 つ増えるだけ、値は有効化の語が後ろに 6 語付くだけ。
+    expect(after.childEnvKeys).toEqual([...before.childEnvKeys, "SUBETHA_EVM_FACILITATOR_URL"].sort());
+    const { [RAILS_ACTIVATION_ENV]: afterActivation, SUBETHA_EVM_FACILITATOR_URL: afterUrl, ...afterRest } = after.childEnv as Record<string, string>;
+    const { [RAILS_ACTIVATION_ENV]: beforeActivation, ...beforeRest } = before.childEnv as Record<string, string>;
+    expect(afterRest).toEqual(beforeRest);
+    expect(afterActivation).toBe(`${beforeActivation},rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out`);
+    expect(afterUrl).toBe(GOLDEN_FACILITATOR_URL);
+    for (const chain of HOSTED_EVM_CHAINS) expect(after.config.x402.inboundFacilitators[NET[chain]]).toEqual({ kind: "x402", url: GOLDEN_FACILITATOR_URL });
+    // 公開の定数（G-4）の計画も同じ追加（token だけがこの試験の値）。
+    const plan = planOf(RAILS_ACTIVATION, evmEnv);
+    expect(JSON.stringify(plan.config).replaceAll(FACILITATOR_URL, GOLDEN_FACILITATOR_URL)).toBe(JSON.stringify(after.config));
   });
 
   test("本番と同じ読み込み（KNOWN_NETWORKS の検証）を通り、一覧に 56 本が出る。新 3 の受信の facilitator は env の URL（kind x402）で、HTTP の期限は表のチェーン別（20 秒）", () => {
@@ -274,8 +309,9 @@ describe("出す条件（チェーン × 方向、既存の宛先・源の条件
       const document = routerConfigOf({ SUBETHA_EVM_FACILITATOR_URL: FACILITATOR_URL }, RECEIVER, mppInbound, { activation, receivers, upstreams: { arc: "", solana: "", solanaMpp: "" } }) as any;
       return Object.fromEntries(Object.entries(document.router.dynamic?.profiles ?? {}).filter(([id]) => !/(^dyn-(rh|arbsep|hyperevm)-)|(-to-(rh|arbsep|hyperevm)$)/.test(id)));
     };
-    const { pairs: _pairs, ...noPairs } = RAILS_ACTIVATION;
-    const shapes: RailsActivation[] = [RAILS_NONE, noPairs, RAILS_ACTIVATION, { ...RAILS_NONE, arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: true } }, { ...RAILS_NONE, solanaMpp: { inbound: true, outbound: false }, arc: { inbound: false, outbound: true } }];
+    // 公開の定数は G-4 で evm が全部 true なので、evm を除いた形（PUBLIC_PRE_EVM）を基準にする。
+    const { pairs: _pairs, ...noPairs } = PUBLIC_PRE_EVM;
+    const shapes: RailsActivation[] = [RAILS_NONE, noPairs, PUBLIC_PRE_EVM, { ...RAILS_NONE, arc: { inbound: true, outbound: false }, solana: { inbound: false, outbound: true } }, { ...RAILS_NONE, solanaMpp: { inbound: true, outbound: false }, arc: { inbound: false, outbound: true } }];
     for (const shape of shapes) {
       for (const mppInbound of [true, false]) {
         expect(existingOf(withEvm(shape, EVM_ALL), mppInbound)).toStrictEqual(existingOf(shape, mppInbound));
@@ -397,8 +433,12 @@ describe("有効化の往復（ホスト → 子の内部 env SUBETHA_RAILS_ACTI
   test("6 語（<chain>-in・<chain>-out）を組の後ろに。全部 false なら 1 語も出ず、復元した値に evm の欄は無い。部分の往復", () => {
     expect(activationToEnv(withEvm(RAILS_NONE, EVM_ALL))).toBe("rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out");
     expect(activationFromEnv(activationToEnv(PUBLIC_ALL))).toEqual(PUBLIC_ALL);
-    expect(activationToEnv(withEvm(RAILS_ACTIVATION, EVM_NONE))).toBe(activationToEnv(RAILS_ACTIVATION));
-    expect(activationFromEnv(activationToEnv(RAILS_ACTIVATION))).not.toHaveProperty("evm");
+    // 全部 false は evm の欄が無いのと同じ語（G-4 の後の公開の定数から evm を除いた形で見る）。
+    expect(activationToEnv(withEvm(RAILS_ACTIVATION, EVM_NONE))).toBe(activationToEnv(PUBLIC_PRE_EVM));
+    expect(activationFromEnv(activationToEnv(PUBLIC_PRE_EVM))).not.toHaveProperty("evm");
+    // G-4 の公開の定数（evm 全部 true）は 6 語が後ろに付き、往復で同じ値に戻る。
+    expect(activationToEnv(RAILS_ACTIVATION)).toBe(`${activationToEnv(PUBLIC_PRE_EVM)},rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out`);
+    expect(activationFromEnv(activationToEnv(RAILS_ACTIVATION))).toEqual(RAILS_ACTIVATION);
     const partial = withEvm(RAILS_NONE, { rh: { inbound: true, outbound: false }, arbsep: OFF, hyperevm: { inbound: false, outbound: true } });
     expect(activationToEnv(partial)).toBe("rh-in,hyperevm-out");
     expect(activationFromEnv(activationToEnv(partial))).toEqual(partial);

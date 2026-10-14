@@ -215,8 +215,15 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   solanaMpp: Object.freeze({ inbound: true, outbound: true }),
   /** Arc x402 ↔ Solana x402 の組: **2026-10-08 に両方 `true`**（G-4⁗。owner の決定。G-3⁗ で O-5・O-6 を各 1 件 delivered。`docs/DEPLOY.md` §2c-2）。戻すのはここ（イメージを作り直して入れ替える）。 */
   pairs: Object.freeze({ arcToSol: true, solToArc: true }),
-  /** EVM testnet 3 つ: **全部 `false`**（hosted 設計 §8.2 の G-2・G-3 の間。G-4 で `true` にする）。`false` の間、公開の設定・一覧・golden は byte 一致（AC-H1）。戻すのはここ（イメージを作り直して入れ替える）。 */
-  evm: EVM_NONE,
+  /**
+   * EVM testnet 3 つ（Robinhood・Arbitrum Sepolia・HyperEVM）: **2026-10-14 に全部 `true`**（G-4。owner の依頼 2026-10-13・Q-3/Q-4。G-3 で 3 チェーンとも受信・送信が本番の env で delivered:
+   * `docs/DEPLOY.md` §2g の記録）。戻すのは `EVM_NONE` に（イメージを作り直して入れ替える）。
+   */
+  evm: Object.freeze({
+    rh: Object.freeze({ inbound: true, outbound: true }),
+    arbsep: Object.freeze({ inbound: true, outbound: true }),
+    hyperevm: Object.freeze({ inbound: true, outbound: true }),
+  }),
 });
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });
