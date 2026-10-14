@@ -1,9 +1,9 @@
-# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 3 版、2026-10-15）
+# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 4 版、2026-10-15）
 
 > 要件 `docs/rejection-reasons-requirements.md` 第 2.1 版と §7 の owner の決定（Q-1 → 運用者だけ、Q-2 → 進行中の購入が無ければ本番の入れ替えは Claude の判断）。
 > コードは `origin/main`。SDK は `@x402/core`・`@x402/evm`・`@x402/fetch`・SVM の実装 2.28.0 に固定（`package.json:28-30,40`）。SDK の実装は同じ版の `node_modules` で読んだ（下の `chunk-*.mjs`）。
 > 下書きは Plan エージェント（コードを引いて作成）、親が読んで採用。進め方: 設計 → Codex のレビュー → タスク → 実装の PR。
-> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版（`5a52163`）は D-2 の readback で **REJECT**（#3・#9 が未解決、#7 は失敗の終了の扱い）→ 第 3 版の §13 が §12 の該当の記述（§12.3・§12.7・§12.9）に優先する。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
+> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版（`5a52163`）は D-2 の readback で **REJECT**（#3・#9 が未解決、#7 は失敗の終了の扱い）→ 第 3 版の §13 が §12 の該当の記述に優先する。第 3 版（`5fcd58d`）は D-3 で **REJECT**（§13.1 の割り込み、上限の量、drain の時間の根拠、入れ替えの script との食い違い）→ 第 4 版の §14 が §13 に優先する。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
 
 ## 0. 一枚で
 
@@ -388,3 +388,22 @@ export function validateDiagRecord(value: unknown): DiagRecord | undefined;     
 - **合図が入口に届くこと**: 今の `CMD` は `npx tsx tools/remote-mcp.ts`（入口は孫）。`docker stop` の SIGTERM が入口に届くことを R-0 の試験（実際のイメージ、`docker stop` で `drain: complete` が出る）で確かめる。届かなければ `CMD` を `node --import tsx tools/remote-mcp.ts` に替える（入口を PID 1 の直接の子 = PID 1 にする）。
 - **`deploy/swap-image.sh`**: 入口（Caddy）を止める（今どおり）→ 古いコンテナを `docker stop -t 180` → 古いコンテナの log に `drain: complete` があることを確かめる。無い（`drain: timeout`・SIGKILL・行が無い）なら **入れ替えをやめて** 既存の復旧の経路で古いコンテナを戻し、「静止できなかった」として exit 1。owner の Q-2 の条件（進行中の購入が無い）はこの `drain: complete` で満たす。
 - 既存の試験（`swap-image.sh` の mock）に、drain の成功・時間切れ・行が無いの 3 つの場面を足す。
+- **D-3（readback、第 3 版 `5fcd58d`）: REJECT**。#7 は解決（flush は後回しの待ち行列と書き込みの両方を空にすること）。未解決・新規: 主の thread での後回しの処理は 1 ms の期限の境界での不変を保証しない、上限が件数だけで量（バイト・decode の仕事）が無い、drain の 150 秒は verify 50・settle 50・有料の要求 75 秒（`src/shared/networks.ts:183`）を足すと足りない、`docker stop -t 180` は `swap-image.sh` の 30 秒の上限（`:59,122`）と食い違い、復旧の未確認は exit 2 を保つべき、`drain: complete` は今回の停止のものに限る。反映は §14。
+
+## 14. 第 4 版の変更（§13 に優先する）
+
+### 14.1 後回しの処理は worker thread で（D-3 #1）と、要件 SR-R3 の言い直し
+- 主の thread がするのは (a) hook の push（凍結した小さな object を環に積む）と、(b) `setImmediate` で環をまとめて worker thread に `postMessage` すること（1 回 64 件まで）だけ。分類・hash・検査・JSON 化・ファイルへの書き込みは worker thread（`src/shared/diagnostics-worker.ts`、`node:worker_threads`）で行う。worker が落ちた・詰まったら主の thread は積むのをやめて数える（再起動はしない。診断が止まるだけ）。
+- **要件 SR-R3 を言い直す**（要件 第 2.3 版）: 計測を入れる以上、処理時間は 0 にはならない。主張するのは (1) 同じ入力と同じ時刻なら結果は同じ（分類は結果の値を読むだけで、結果の決め方の分岐に入らない）、(2) 外への要求の数・順序・期限の値は変わらない、(3) 主の thread に加わる時間は上限つき（試験: 100 件の fake の購入を同時に進め、sink の有無で `monitorEventLoopDelay` の p99 の差が 1 ms 未満、1 件の push は 20 µs 未満）。「1 ms の期限の境界でも判断が必ず同じ」は主張しない（今の Router も GC・他の購入の処理で同じ程度にずれる）。
+
+### 14.2 量の上限（D-3 #2）
+- push の入力: 文字列の欄（ヘッダの値）は 8 KiB まで（超えたら写さず `malformed` の印だけ）、1 件の object の総量 16 KiB まで、環の総量 2 MiB まで（超えたら捨てて数える）。worker への 1 回の送りの総量 256 KiB まで。
+- 参照の解放: 処理・捨てる・失敗のどの経路でも、環から外した時点で object を手放す（worker 側も 1 件ごと）。試験: 大きいヘッダ・大量の push・worker の停止で、主の thread の heap が環の上限で止まる。
+
+### 14.3 drain の時間（D-3 #3）
+- 1 件の購入の最長を表から足す: 受信の verify（最長 50 秒）＋ settle（最長 50 秒、SVM の追跡を含めて設定の最大）＋ 宛先の challenge の読み直し（20 秒）＋ 有料の要求（最長 75 秒）＋ 余裕 30 秒 = **225 秒**。R-0 で `src/shared/networks.ts`・adapter の期限の定数から試験で計算し、`DRAIN_TIMEOUT` がそれ以上であることを固定する（定数が増えたら試験が落ちる）。**時間切れは失敗として扱う**（「全部の購入より長い」とは主張しない: 期限の外で止まる処理があれば時間切れで止まり、入れ替えをやめる）。
+
+### 14.4 入れ替えの script（D-3 #4）
+- `swap-image.sh` の古いコンテナの停止だけ、専用の上限を持つ: `docker stop -t 240`（`DRAIN_TIMEOUT` 225 秒 ＋ 15 秒）を、外側の上限 270 秒の `timeout -k` で包む（既存の 30 秒の `mutate` の上限は、この 1 つの操作にだけ置き換える）。停止の完了の確認・復旧の待ち（`STOP_SETTLE_S`）も 270 秒に合わせる。
+- 静止の確認は **今回の停止の log だけ**: 停止を始める直前の時刻を記録し、`docker logs --since <その時刻>` に `drain: complete` があること。無ければ入れ替えをやめ、既存の復旧の経路で古いコンテナを戻す: 復旧を確かめられたら exit 1（「静止できなかった、戻した」）、確かめられなければ既存どおり **exit 2（状態不明）**。
+- mock の試験: drain の成功、時間切れ、行が無い、古い log にだけ `drain: complete` がある（今回の停止には無い）、停止が 270 秒で切れる、復旧の未確認（exit 2）の 6 つ。
