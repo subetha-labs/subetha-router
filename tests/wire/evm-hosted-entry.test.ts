@@ -44,14 +44,14 @@ afterAll(() => {
   for (const name of readdirSync(runtimeRoot).filter((entry) => entry.startsWith("remote-") && !createdBefore.has(entry))) {
     let ours = false;
     try {
-      ours = readFileSync(path.join(runtimeRoot, name, "router.config.json"), "utf8").includes("h4-wire-") || (statSync(path.join(runtimeRoot, name)).mode & 0o777) === 0o500;
+      ours = readFileSync(path.join(runtimeRoot, name, "router.config.json"), "utf8").includes("h4-wire-");
     } catch {
       ours = false;
     }
     if (ours) configDirs.add(path.join(runtimeRoot, name));
   }
   for (const dir of configDirs) {
-    // 証拠の書き込みの失敗の試験は作業領域を 0500 にする（消す前に戻す）。
+    // 以前の版の証拠の書き込みの失敗の試験は作業領域を 0500 にした（残っていれば消す前に戻す）。
     try {
       chmodSync(dir, 0o700);
     } catch {
@@ -363,12 +363,34 @@ describe("起動の各段の片付け: signal・子の終了・起動の後の�
   }, 90_000);
 
   test("起動の後のファイルの失敗（証拠の書き込み）→ 両方の子を止めて exit 1（固定文）", async () => {
-    const f = await fixture("h4-evidence-", { SUBETHA_TEST_ROUTER_LOCK_WORKDIR: "1" });
+    // 証拠のパスをディレクトリにして EISDIR で失敗させる（権限ではないので root でも失敗する。Linux の docker の試験は root で走る）。
+    const f = await fixture("h4-evidence-", { SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE: "1" });
     const { pid, done } = spawnHost(f, "rh-in");
     const stderr = await expectAllGone(f, done, [pid], 1);
     expect(stderr).toContain("could not write the Router evidence file");
     for (const child of [pidOf(f.facilitatorPidFile), pidOf(f.routerMark)]) expect(alive(child)).toBe(false);
     expect(stderr).not.toContain(f.token);
+  }, 90_000);
+
+  test("Router の子の spawn の失敗（'error' ENOENT）→ 起動済みの facilitator を止め、lock を解いて exit 1（固定文。未処理の reject にならない）", async () => {
+    const f = await fixture("h4-spawn-", { SUBETHA_TEST_SPAWN_FAIL: "router-env-child.ts" });
+    const { pid, done } = spawnHost(f, "rh-in");
+    const stderr = await expectAllGone(f, done, [pid], 1);
+    expect(stderr).toContain("could not start the Router");
+    expect(stderr).not.toMatch(/ENOENT|Unhandled|unhandled|ERR_|at |nonexistent/);
+    expect(alive(pidOf(f.facilitatorPidFile))).toBe(false);
+    expect(await lockIsFree(f)).toBe(true);
+    expect(existsSync(f.routerMark)).toBe(false);
+  }, 90_000);
+
+  test("facilitator の子の spawn の失敗（'error' ENOENT）→ Router の子を起動せず exit 1（固定文。未処理の reject にならない）", async () => {
+    const f = await fixture("h4-spawn-fac-", { SUBETHA_TEST_SPAWN_FAIL: "evm-facilitator-fake.ts" });
+    const { pid, done } = spawnHost(f, "rh-in");
+    const stderr = await expectAllGone(f, done, [pid], 1);
+    expect(stderr).toContain("could not start the EVM facilitator");
+    expect(stderr).not.toMatch(/ENOENT|Unhandled|unhandled|ERR_|at |nonexistent/);
+    expect(existsSync(f.facilitatorPidFile)).toBe(false);
+    expect(existsSync(f.routerMark)).toBe(false);
   }, 90_000);
 
   test("MCP の bind の失敗（port の使用中）→ 両方の子を止めて exit 1（固定文。未処理の例外にならない）", async () => {

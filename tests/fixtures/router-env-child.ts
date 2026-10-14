@@ -3,10 +3,11 @@
  * - 起動時に env `SUBETHA_EVM_FACILITATOR_URL` があれば `<url>/supported` を 1 回読み、答えたかを覚える（facilitator が先に起動していることの確認）
  * - `SUBETHA_TEST_ROUTER_MARK`: 起動したらこのファイルに pid を書く（Router の子が起動しなかったことを試験が確かめる）
  * - `SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS`: listen をこの時間だけ遅らせる（入口の「Router の起動待ち」の段）
- * - `SUBETHA_TEST_ROUTER_LOCK_WORKDIR=1`: listen の前に設定のディレクトリ（入口の作業領域）を 0500 にする（入口の証拠の書き込みを失敗させる）
+ * - `SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE=1`: listen の前に入口の証拠のファイルのパス（設定の隣の `router-listening.log`）をディレクトリにする
+ *   （入口の書き込みが EISDIR で失敗する。root でも同じ: 権限ではなくファイルの種類で失敗させる）
  * - 127.0.0.1 の使い捨ての port に listen し、listening の行を書く。`GET /env`: 受け取った env・pid・ppid・設定ファイルの mode
  */
-import { chmodSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 
@@ -36,7 +37,7 @@ const server = createServer((req, res) => {
   res.writeHead(404);
   res.end();
 });
-if (env["SUBETHA_TEST_ROUTER_LOCK_WORKDIR"] === "1" && configPath !== undefined) chmodSync(path.dirname(configPath), 0o500);
+if (env["SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE"] === "1" && configPath !== undefined) mkdirSync(path.join(path.dirname(configPath), "router-listening.log"));
 setTimeout(() => {
   server.listen(0, "127.0.0.1", () => {
     const address = server.address();

@@ -13,7 +13,6 @@
  */
 
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { once } from "node:events";
 import path from "node:path";
 import type { Readable } from "node:stream";
 
@@ -35,6 +34,20 @@ function spawnApp(
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+}
+
+/**
+ * 子の終了を待つ（`close`）。spawn そのものの失敗（ENOENT・EAGAIN など）は 'error' だけが来て `close` が来ないことがあるので、
+ * pid の無い子の 'error' でも終わったものとして解く（`events.once` は 'error' で reject し、待つ側が未処理の reject になる）。
+ * 'error' は記録だけして投げない（起動待ちは「listening の前に終わった」として reject する）。
+ */
+function closedOf(child: ChildProcessByStdio<null, Readable, Readable>): Promise<[number | null, NodeJS.Signals | null]> {
+  return new Promise((resolve) => {
+    child.once("close", (code: number | null, signal: NodeJS.Signals | null) => resolve([code, signal]));
+    child.on("error", () => {
+      if (child.pid === undefined) resolve([null, null]);
+    });
+  });
 }
 
 /** 子に渡してよい親 env のキー（これ以外は読まない・渡さない）。 */
@@ -71,7 +84,7 @@ export async function runToExit(
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => (stdout += chunk));
   child.stderr.on("data", (chunk: string) => (stderr += chunk));
-  const [code, signal] = (await once(child, "close")) as [number | null, NodeJS.Signals | null];
+  const [code, signal] = await closedOf(child);
   return { code, signal, stdout, stderr };
 }
 
@@ -116,7 +129,7 @@ export async function startListening(
   child.stderr.on("data", (chunk: string) => (stderr += chunk));
 
   let closed = false;
-  const closing = once(child, "close").then(() => {
+  const closing = closedOf(child).then(() => {
     closed = true;
   });
   let settleListening!: () => void;

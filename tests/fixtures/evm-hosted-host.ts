@@ -7,15 +7,29 @@
  * - 子に足す試験の env（`SUBETHA_TEST_*`: pid・印のファイル、起動の遅れ、作業領域の書き込みの失敗。計画の env を上書きしない）
  * 起動したら stdout に 1 行（listening・各 port・自分の pid）を書く。
  */
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
 import { acceptanceOptionsOf } from "../../tools/rails-acceptance-run.js";
 import { startHost } from "../../tools/remote-mcp.js";
 
 const env = process.env;
 const test = (name: string): string => env[name] ?? "";
+/**
+ * `SUBETHA_TEST_SPAWN_FAIL=<script の一部>`: その script の子の spawn を、存在しない実行ファイルで失敗させる（'error' ENOENT。EAGAIN などの spawn の失敗の代わり）。
+ * `node:child_process` の `spawn` を包み、ESM の名前つきの export にも反映する（`tests/fixtures/loopback.ts` が import した `spawn` も同じものになる）。
+ */
+const spawnFail = test("SUBETHA_TEST_SPAWN_FAIL");
+if (spawnFail !== "") {
+  const original = childProcess.spawn;
+  childProcess.spawn = ((command: string, args: readonly string[], options: object) =>
+    args.some((arg) => arg.includes(spawnFail)) ? original("/nonexistent/h4-spawn-fail", args, options) : original(command, args, options)) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+}
 const options = { ...acceptanceOptionsOf(env, process.argv.slice(2)), evmFacilitatorPortForTest: Number(test("SUBETHA_TEST_FACILITATOR_PORT")) };
 const host = await startHost(options, {
   childScriptForTest: "tests/fixtures/router-env-child.ts",
-  childEnvExtraForTest: { SUBETHA_TEST_ROUTER_MARK: test("SUBETHA_TEST_ROUTER_MARK"), SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS: test("SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS"), SUBETHA_TEST_ROUTER_LOCK_WORKDIR: test("SUBETHA_TEST_ROUTER_LOCK_WORKDIR") },
+  childEnvExtraForTest: { SUBETHA_TEST_ROUTER_MARK: test("SUBETHA_TEST_ROUTER_MARK"), SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS: test("SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS"), SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE: test("SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE") },
   ...(test("SUBETHA_TEST_REAL_FACILITATOR") === "1" ? {} : { facilitatorScriptForTest: "tests/fixtures/evm-facilitator-fake.ts" }),
   facilitatorEnvExtraForTest: {
     SUBETHA_TEST_PID_FILE: test("SUBETHA_TEST_PID_FILE"),
