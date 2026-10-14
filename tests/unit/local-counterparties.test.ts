@@ -12,8 +12,9 @@ import { generatePrivateKey } from "viem/accounts";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 import { ConfigError, loadRuntimeConfig, routeBindingOf, type RuntimeConfig } from "../../src/config.js";
-import { composeRails, isLoopbackUrl, localCounterpartyOriginsOf, localCounterpartyPlanOf, originPinnedTransport, transportFor, type RouterCapabilities } from "../../src/main.js";
-import { TransportError, type TransportEvent } from "../../src/net/guarded-fetch.js";
+import { composeRails, type DynamicTransportHooks, isLoopbackUrl, localCounterpartyOriginsOf, localCounterpartyPlanOf, originPinnedTransport, transportFor, type RouterCapabilities } from "../../src/main.js";
+import { TransportError, type LookupFn, type TransportEvent } from "../../src/net/guarded-fetch.js";
+import { publicLookup, UnmappedFixtureHostError } from "../fixtures/dynamic/dial.js";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { EVM_TESTNETS, evmTestnetsConfigOf, INBOUND, type EvmTestnetChain } from "../../tools/remote-mcp-config.js";
 
@@ -302,15 +303,42 @@ describe("配線（composeRails）: 許すのは EVM testnet の静的の相手�
     expect(b.connections).toBe(connections);
   });
 
-  test("動的上流（呼び出し側の URL）は、能力に loopback の origin があっても loopback に届かない: challenge も支払いつきの要求も接続 0（Codex H-2 #1）", async () => {
-    const rails = compose(dynamicConfigOf(), capabilitiesOf(["rh"], [a.origin, b.origin]));
-    const target = { url: `${b.origin}/v1/eth/snapshot`, method: "GET" as const };
+  test("動的上流（呼び出し側の URL）は、能力に loopback の origin があっても loopback に届かない: URL の検査を通る名前が loopback に解決すると、challenge も pay の中の要求も送出の前に拒む（Codex H-2 #1）", async () => {
+    // 名前解決: `loop.test` は常に 127.0.0.1。`flip.test` は 1 回目だけ公開アドレス（dialForTest で b へ）、2 回目から 127.0.0.1（rebinding）。
+    let flips = 0;
+    const lookup: LookupFn = (hostname, options, callback) => {
+      if (hostname === "flip.test") flips += 1;
+      const loop = hostname === "loop.test" || (hostname === "flip.test" && flips > 1);
+      publicLookup(loop ? { [hostname]: ["127.0.0.1"] } : {})(hostname, options, callback);
+    };
+    const dialed: string[] = [];
+    const hooks: DynamicTransportHooks = {
+      interfaces: () => [],
+      lookup,
+      dialForTest: (target) => {
+        dialed.push(target.hostname);
+        if (target.hostname === "flip.test") return { host: "127.0.0.1", port: b.port };
+        throw new UnmappedFixtureHostError();
+      },
+    };
+    const rails = compose(dynamicConfigOf(), { ...capabilitiesOf(["rh"], [a.origin, b.origin]), dynamicTransportHooksForTest: hooks });
     const connections = b.connections;
-    await expect(rails.outbound.readChallenge("dyn-x402-to-rh", target)).rejects.toBeDefined();
+    // challenge: 判定で拒む（接続 0、dial にも至らない）。
+    const challenge = await rails.outbound.readChallenge("dyn-x402-to-rh", { url: "https://loop.test/v1/eth/snapshot", method: "GET" }).catch((error: unknown) => error);
+    expect(challenge).toBeInstanceOf(TransportError);
+    expect((challenge as TransportError).code).toBe("destination_blocked");
+    expect(dialed).toEqual([]);
+    // 対照: 公開アドレスに解決する 1 回目は dial まで進む（b に届く。402 ではないので challenge としては失敗）。
+    await rails.outbound.readChallenge("dyn-x402-to-rh", { url: "https://flip.test/v1/eth/snapshot", method: "GET" }).catch(() => undefined);
+    expect(dialed).toEqual(["flip.test"]);
+    const afterControl = b.connections;
+    expect(afterControl).toBeGreaterThan(connections);
+    // pay: 同じ名前が loopback に変わった後（rebinding）、pay の中の要求は送出の前に拒まれ、支払いに至らない（b への接続は増えない）。
     const offer = { scheme: "exact", network: RH.network, asset: RH.asset, amount: "10000", payTo: PROVIDER, maxTimeoutSeconds: 60, extra: { name: RH.domain.name, version: RH.domain.version } };
-    const paid = await rails.outbound.pay({ routeId: "dyn-x402-to-rh", offer: offer as never, paymentId: "p-loopback", attempt: 1, deadlineMs: Date.now() + 60_000, target }).catch((error: unknown) => error);
+    const paid = await rails.outbound.pay({ routeId: "dyn-x402-to-rh", offer: offer as never, paymentId: "p-loopback", attempt: 1, deadlineMs: Date.now() + 60_000, target: { url: "https://flip.test/v1/eth/snapshot", method: "GET" } }).catch((error: unknown) => error);
     expect(paid).not.toMatchObject({ outcome: "paid" });
-    expect(b.connections).toBe(connections);
+    expect(dialed).toEqual(["flip.test"]);
+    expect(b.connections).toBe(afterControl);
   });
 });
 
