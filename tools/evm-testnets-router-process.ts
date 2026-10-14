@@ -49,7 +49,11 @@ function localOriginOf(raw: string): string | undefined {
 export function evmTestnetsCapabilitiesOf(env: Readonly<Record<string, string | undefined>>): RouterCapabilities {
   let base: RouterCapabilities;
   try {
-    base = routerProcessCapabilitiesOf(env);
+    // 公開の子の能力は `SUBETHA_EVM_FACILITATOR_URL` から `localCounterparties` を作る（hosted 設計 §3）。この子は同じ env を自分の規則（facilitator と Provider の
+    // origin。下の `localOriginOf`）で読むので、公開の子の読み方は通さない（ローカル版の挙動・失敗の code を変えない）。
+    const { [EVM_FACILITATOR_URL_ENV]: _facilitatorUrl, ...publicEnv } = env;
+    void _facilitatorUrl;
+    base = routerProcessCapabilitiesOf(publicEnv);
   } catch (error) {
     throw error instanceof ProcessEntryError && error.code === "outbound_keys" ? new EvmTestnetsProcessError("outbound_keys") : new EvmTestnetsProcessError("base");
   }

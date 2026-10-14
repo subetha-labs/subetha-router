@@ -14,10 +14,10 @@ import { createRealEvmCapability } from "./real-evm-capability.js";
 import { KNOWN_NETWORKS, knownNetworkOf } from "../src/shared/networks.js";
 import { createRealMppCapability, defaultTempoRpcUrl, TEMPO_MODERATO_CHAIN_ID } from "./real-mpp-capability.js";
 import { createRealSvmCapability } from "./real-svm-capability.js";
-import { INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
+import { EVM_FACILITATOR_URL_ENV, EVM_TESTNETS, evmOf, HOSTED_EVM_CHAINS, INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, type EvmRailsActivation, type HostedEvmChain, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
-/** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`"arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out"` の部分集合。空 = すべて無効）。 */
+/** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`ACTIVATION_TOKENS` の部分集合。空 = すべて無効）。 */
 export const RAILS_ACTIVATION_ENV = "SUBETHA_RAILS_ACTIVATION";
 /** x402 送信（`evmSigning`）の network（`docs/mainnet-first-route.md` 案 B）。省略時は Base Sepolia。表で x402 の送信を許す EVM の network だけ。 */
 export const X402_OUTBOUND_NETWORK_ENV = "SUBETHA_X402_OUTBOUND_NETWORK";
@@ -45,8 +45,10 @@ const PAIR_TOKENS = [
   ["arcToSol", "arc-to-sol"],
   ["solToArc", "sol-to-arc"],
 ] as const satisfies readonly (readonly [keyof PairsActivation, string])[];
-/** 内部 env の token（方向別。送信の設計 §6.1。組の 2 語は §13.1）。旧い `arc`・`solana` は受け付けない。 */
-const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc"] as const;
+/** EVM testnet 3 つの token（hosted 設計 §5。`<短縮名>-in`・`<短縮名>-out`）。組の後ろに付ける（`evm` が全部 false なら 1 語も出ないので、既存の値は変わらない）。 */
+const EVM_TOKENS = HOSTED_EVM_CHAINS.flatMap((chain) => [`${chain}-in`, `${chain}-out`]);
+/** 内部 env の token（方向別。送信の設計 §6.1。組の 2 語は §13.1、EVM testnet 3 つの 6 語は hosted 設計 §5）。旧い `arc`・`solana` は受け付けない。 */
+const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc", ...EVM_TOKENS] as const;
 const ACTIVATION_TOKENS_TEXT = ACTIVATION_TOKENS.join(",");
 
 export function activationToEnv(activation: RailsActivation): string {
@@ -57,6 +59,11 @@ export function activationToEnv(activation: RailsActivation): string {
   }
   const pairs = pairsOf(activation);
   for (const [pair, token] of PAIR_TOKENS) if (pairs[pair]) tokens.push(token);
+  const evm = evmOf(activation);
+  for (const chain of HOSTED_EVM_CHAINS) {
+    if (evm[chain].inbound) tokens.push(`${chain}-in`);
+    if (evm[chain].outbound) tokens.push(`${chain}-out`);
+  }
   return tokens.join(",");
 }
 
@@ -73,13 +80,41 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
     }
   }
   const pairs: PairsActivation = { arcToSol: seen.has("arc-to-sol"), solToArc: seen.has("sol-to-arc") };
+  const evm = Object.fromEntries(HOSTED_EVM_CHAINS.map((chain) => [chain, { inbound: seen.has(`${chain}-in`), outbound: seen.has(`${chain}-out`) }])) as Record<HostedEvmChain, { inbound: boolean; outbound: boolean }>;
   return {
     arc: { inbound: seen.has("arc-in"), outbound: seen.has("arc-out") },
     solana: { inbound: seen.has("solana-in"), outbound: seen.has("solana-out") },
     solanaMpp: { inbound: seen.has("solana-mpp-in"), outbound: seen.has("solana-mpp-out") },
     // 組は token があるときだけ欄を持つ（無い = 両方 false。`pairsOf`）。
     ...(pairs.arcToSol || pairs.solToArc ? { pairs } : {}),
+    // EVM testnet 3 つも token があるときだけ欄を持つ（無い = 全部 false。`evmOf`）。
+    ...(EVM_TOKENS.some((token) => seen.has(token)) ? { evm: evm as EvmRailsActivation } : {}),
   };
+}
+
+/** 送信が有効な EVM testnet（hosted 設計 §3 の最後: その network の `evmSigningByNetwork` が要る）。 */
+export function evmOutboundChainsOf(activation: RailsActivation): readonly HostedEvmChain[] {
+  const evm = evmOf(activation);
+  return HOSTED_EVM_CHAINS.filter((chain) => evm[chain].outbound);
+}
+
+/**
+ * 自前の facilitator の URL の形（hosted 設計 §0・§3）: `http://127.0.0.1:<port>/<token>` だけ。port は 1..65535（前ゼロなし）、token は
+ * `tools/evm-facilitator.ts` の `TOKEN_PATTERN`（`[A-Za-z0-9_-]{32,256}`。試験が source の一致を確かめる）。末尾の `/`・query・fragment・userinfo・別表記は受けない。
+ */
+const EVM_FACILITATOR_URL_PATTERN = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/([A-Za-z0-9_-]{32,256})$/;
+/** 形が合えば origin（`http://127.0.0.1:<port>`）、合わなければ `undefined`。値は返さない（呼び出し側が固定文で止める）。 */
+export function evmFacilitatorOriginOf(raw: string): string | undefined {
+  const match = EVM_FACILITATOR_URL_PATTERN.exec(raw);
+  if (match === null || Number(match[1]) > 65_535) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  // URL として読み直しても同じ文字列（正規化で別の宛先に化けない）。
+  return url.href === raw && url.origin === `http://127.0.0.1:${match[1]}` ? url.origin : undefined;
 }
 
 /** Solana の受取 owner が要るか（x402 の受信か MPP の受信。設計 §6.2）。 */
@@ -164,10 +199,12 @@ export function railsCapabilitiesOf(activation: RailsActivation, env: Readonly<R
 
 /** Router の process の起動が止まる理由（固定文は入口が選ぶ。鍵・URL の値は持たない）。 */
 export class ProcessEntryError extends Error {
-  readonly code: "outbound_keys" | "rails" | "solana_key" | "x402_network";
-  constructor(code: "outbound_keys" | "rails" | "solana_key" | "x402_network") {
+  readonly code: "outbound_keys" | "rails" | "solana_key" | "x402_network" | "evm_facilitator";
+  constructor(code: "outbound_keys" | "rails" | "solana_key" | "x402_network" | "evm_facilitator") {
     super(
-      code === "outbound_keys"
+      code === "evm_facilitator"
+        ? "SUBETHA_EVM_FACILITATOR_URL must be exactly http://127.0.0.1:<port>/<token>"
+        : code === "outbound_keys"
         ? "at least one of SUBETHA_OUTBOUND_X402_KEY / SUBETHA_OUTBOUND_MPP_KEY is required"
         : code === "solana_key"
           ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail (x402 or MPP) is activated"
@@ -182,7 +219,8 @@ export class ProcessEntryError extends Error {
 
 /**
  * Router の process（`tools/remote-router-process.ts`）が `startRouter` に注入する**能力の全部**。純粋関数（process に触らない。試験で確かめる）:
- * 送信の鍵（x402・MPP）、送信 MPP の RPC（依存先）、多レール（内部の env `SUBETHA_RAILS_ACTIVATION` から復元した有効化で `railsCapabilitiesOf`）。
+ * 送信の鍵（x402・MPP）、送信 MPP の RPC（依存先）、多レール（内部の env `SUBETHA_RAILS_ACTIVATION` から復元した有効化で `railsCapabilitiesOf`）、
+ * EVM testnet 3 つ（hosted 設計 §3 の最後）: 送信が有効な chain の `evmSigningByNetwork`（x402 の送信鍵）、内部の env `SUBETHA_EVM_FACILITATOR_URL` があればその origin だけの `localCounterparties`。
  * 無効なレールの env は読まない。
  */
 export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string | undefined>>, now: () => number = Date.now): RouterCapabilities {
@@ -212,6 +250,18 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
   if (activation.arc.outbound && (evmKey === undefined || evmKey === "")) {
     throw new ProcessEntryError("outbound_keys");
   }
+  // EVM testnet 3 つの送信（hosted 設計 §3 の最後、D-11）: Arc と同じ鍵を各 network の札で束ねる。鍵が無ければ組めない（fail closed）。
+  const evmOutbound = evmOutboundChainsOf(activation);
+  if (evmOutbound.length > 0 && (evmKey === undefined || evmKey === "")) {
+    throw new ProcessEntryError("outbound_keys");
+  }
+  // 自前の facilitator（hosted 設計 §3 の最後）: 内部の env があるとき（空文字は無いと同じ。ほかの env と同じ扱い）だけ、その origin 1 つで `localCounterparties`。形が違えば起動しない（値は出さない）。無ければ今と同じ。
+  const facilitatorUrl = env[EVM_FACILITATOR_URL_ENV];
+  let facilitatorOrigin: string | undefined;
+  if (facilitatorUrl !== undefined && facilitatorUrl !== "") {
+    facilitatorOrigin = evmFacilitatorOriginOf(facilitatorUrl);
+    if (facilitatorOrigin === undefined) throw new ProcessEntryError("evm_facilitator");
+  }
   const evm = evmKey === undefined || evmKey === "" ? undefined : createRealEvmCapability(evmKey);
   // Solana の送信（送信の設計 §6.2、D-11。MPP の送信も同じ鍵・同じ能力: `docs/mpp-solana-design.md` §6.2）: 専用の ed25519 の鍵を **`solana.outbound ∨ solanaMpp.outbound` のときだけ**読む。無い・形が違えば起動しない（値は出さない）。
   let svm: ReturnType<typeof createRealSvmCapability> | undefined;
@@ -229,9 +279,17 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
     dependencyUrls: [tempoRpcUrl, ...(rails.dependencyUrls ?? [])],
     ...(rails.sellerProofs === undefined ? {} : { sellerProofs: rails.sellerProofs }),
     ...(evm === undefined ? {} : { evmSigning: evm.capability(x402Network) }),
-    ...(evm !== undefined && activation.arc.outbound ? { evmSigningByNetwork: { [OUTBOUND_ARC.network]: evm.capability(OUTBOUND_ARC.network) } } : {}),
+    ...(evm !== undefined && (activation.arc.outbound || evmOutbound.length > 0)
+      ? {
+          evmSigningByNetwork: {
+            ...(activation.arc.outbound ? { [OUTBOUND_ARC.network]: evm.capability(OUTBOUND_ARC.network) } : {}),
+            ...Object.fromEntries(evmOutbound.map((chain) => [EVM_TESTNETS[chain].network, evm.capability(EVM_TESTNETS[chain].network)])),
+          },
+        }
+      : {}),
     ...(svm === undefined ? {} : { svmSigning: { [OUTBOUND_SOL.network]: svm.capability(OUTBOUND_SOL.network) } }),
     ...(mppKey === undefined || mppKey === "" ? {} : { mppTempo: createRealMppCapability(mppKey, { chainId: tempoChainId, rpcUrl: tempoRpcUrl }).capability() }),
+    ...(facilitatorOrigin === undefined ? {} : { localCounterparties: { origins: [facilitatorOrigin] } }),
   };
 }
 

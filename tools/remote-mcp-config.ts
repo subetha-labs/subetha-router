@@ -147,6 +147,21 @@ export interface RailsActivation {
    * 無ければ両方 `false`。組だけでは何も動かない（能力・鍵・env はレールの方向で決まり、`railActive` も見ない）。組が `true` で必要なレールの方向が無ければ設定生成は固定文で止まる（FR-41）。
    */
   readonly pairs?: PairsActivation;
+  /**
+   * EVM testnet 3 つ（Robinhood Chain testnet・Arbitrum Sepolia・HyperEVM testnet）の x402（hosted 設計 `docs/evm-testnets-hosted-design.md` §5、FR-H6）。
+   * チェーン × 方向。無ければ全部 `false`（`evmOf`）。受信は自前の facilitator（env `SUBETHA_EVM_FACILITATOR_URL`）、送信は Arc と同じ x402 の送信鍵（D-11）。
+   * 出すのは動的プロファイルだけ（静的 route は足さない）。Ethereum Sepolia は対象外。
+   */
+  readonly evm?: EvmRailsActivation;
+}
+/** hosted に出す EVM testnet 3 つの短縮名（プロファイル id・内部 env の token の語幹）。値は `EVM_TESTNETS` の同じ名前。 */
+export type HostedEvmChain = "rh" | "arbsep" | "hyperevm";
+export const HOSTED_EVM_CHAINS: readonly HostedEvmChain[] = Object.freeze(["rh", "arbsep", "hyperevm"]);
+/** EVM testnet 3 つの有効化（チェーンごと・方向ごと）。 */
+export type EvmRailsActivation = Readonly<Record<HostedEvmChain, RailActivation>>;
+/** `evm` の既定（無ければ全部 `false`）。 */
+export function evmOf(activation: RailsActivation): EvmRailsActivation {
+  return activation.evm ?? EVM_NONE;
 }
 /** Arc x402 ↔ Solana x402 の組（方向別。内部 env の token は `arc-to-sol`・`sol-to-arc`）。 */
 export interface PairsActivation {
@@ -187,6 +202,8 @@ export interface RailsOptions {
   readonly upstreams?: RailUpstreams;
 }
 const RAIL_OFF: RailActivation = Object.freeze({ inbound: false, outbound: false });
+/** EVM testnet 3 つがすべて無効（`evm` の既定）。 */
+export const EVM_NONE: EvmRailsActivation = Object.freeze({ rh: RAIL_OFF, arbsep: RAIL_OFF, hyperevm: RAIL_OFF });
 /**
  * 公開の process の有効化。受信は **2026-10-07 に両方 `true`**（T10 の G-4。`docs/DEPLOY.md` §2c の記録）。
  * 送信は **2026-10-08 に両方 `true`**（UG-A・UG-S の G-4′。`docs/DEPLOY.md` §2c の記録。送信の設計 §6.1）。env からは変えられない。戻すのはここ（イメージを作り直して入れ替える）。
@@ -198,6 +215,8 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   solanaMpp: Object.freeze({ inbound: true, outbound: true }),
   /** Arc x402 ↔ Solana x402 の組: **2026-10-08 に両方 `true`**（G-4⁗。owner の決定。G-3⁗ で O-5・O-6 を各 1 件 delivered。`docs/DEPLOY.md` §2c-2）。戻すのはここ（イメージを作り直して入れ替える）。 */
   pairs: Object.freeze({ arcToSol: true, solToArc: true }),
+  /** EVM testnet 3 つ: **全部 `false`**（hosted 設計 §8.2 の G-2・G-3 の間。G-4 で `true` にする）。`false` の間、公開の設定・一覧・golden は byte 一致（AC-H1）。戻すのはここ（イメージを作り直して入れ替える）。 */
+  evm: EVM_NONE,
 });
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });
@@ -429,8 +448,87 @@ export function dynamicProfilesOf(env: Readonly<Record<string, string | undefine
           },
         }
       : {}),
+    // EVM testnet 3 つ（hosted 設計 §5）: 既存の 20 本の後ろに足すだけ（既存の id・値・順は変えない。`evm` が無い・全部 false なら 1 本も出ない）。
+    ...evmProfilesOf({ receiver, mppInboundEnabled, arcReceiver, solReceiver, solMppReceiver, arcOutbound, solOutbound, solMppOutbound, evm: evmOf(rails.activation) }, { toX402, toMpp, toArc, toSol, toSolMpp }),
   };
   return Object.keys(profiles).length === 0 ? undefined : profiles;
+}
+
+/** 動的プロファイルの源・宛先の端点（hosted 設計 §5）。既存は `x402`（Base）・`mpp`（Tempo）・`arc`・`sol`・`solmpp`、新 3 は短縮名。 */
+type ProfileEndpoint = "x402" | "mpp" | "arc" | "sol" | "solmpp" | HostedEvmChain;
+type ProfileBuilder = (profileId: string, source: { network: string; asset: string }, payTo: string, sourceRail: "x402" | "mpp") => Record<string, unknown>;
+interface ExistingBuilders {
+  readonly toX402: (profileId: string, source: { network: string; asset: string }, payTo: string, sourceRail?: "x402" | "mpp") => Record<string, unknown>;
+  readonly toMpp: (profileId: string, source: { network: string; asset: string }, payTo: string, sourceRail?: "x402" | "mpp") => Record<string, unknown>;
+  readonly toArc: (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }, payTo?: string) => Record<string, unknown>;
+  readonly toSol: (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }, payTo?: string) => Record<string, unknown>;
+  readonly toSolMpp: (profileId: string, sourceRail: "x402" | "mpp", source: { network: string; asset: string }, payTo?: string) => Record<string, unknown>;
+}
+interface EvmProfileInputs {
+  readonly receiver: string;
+  readonly mppInboundEnabled: boolean;
+  readonly arcReceiver: string | undefined;
+  readonly solReceiver: string | undefined;
+  readonly solMppReceiver: string | undefined;
+  readonly arcOutbound: boolean;
+  readonly solOutbound: boolean;
+  readonly solMppOutbound: boolean;
+  readonly evm: EvmRailsActivation;
+}
+
+/**
+ * EVM testnet 3 つの動的プロファイル（hosted 設計 §5、FR-H5）。源の集合 S × 宛先の集合 D のうち、**どちらかが新 3** で、源と宛先が同じ端点でないもの。
+ * - S: `x402`（Base。常に）・`mpp`（Tempo。MPP 受信が有効）・`arc`・`sol`・`solmpp`（各受信が有効 = 受取先がある）・`evm[c].inbound` の c
+ * - D: `x402`（Base。常に）・`mpp`（Tempo。`MPP_OUTBOUND_PROFILE_ENABLED`）・`arc`・`sol`・`solmpp`（各送信が有効）・`evm[c].outbound` の c
+ * 条件は既存のビルダーが出る条件と同じ（例: Tempo 宛は `MPP_OUTBOUND_PROFILE_ENABLED` だけ、`dyn-x402-to-mpp` と同じ）。
+ * 新 3 宛: `rail: "x402"`、`exact`・表の資産と domain、手数料 定額 1,000、上流の上限 10,000、par。新 3 からの既存宛: 既存のビルダーに `sourceRail: "x402"`・受取先 `receiver`。
+ * 順は S の順 × D の順（決定的。既存の 20 本の後ろ）。
+ */
+function evmProfilesOf(inputs: EvmProfileInputs, builders: ExistingBuilders): Record<string, unknown> {
+  const { receiver, evm } = inputs;
+  const newChains = HOSTED_EVM_CHAINS;
+  if (!newChains.some((chain) => evm[chain].inbound || evm[chain].outbound)) return {};
+  const isNew = (endpoint: ProfileEndpoint): endpoint is HostedEvmChain => (newChains as readonly string[]).includes(endpoint);
+  /** 源: 端点 → (network・資産・受取先・sourceRail)。無効な源は入れない。 */
+  const sources: [ProfileEndpoint, { network: string; asset: string }, string, "x402" | "mpp"][] = [
+    ["x402", INBOUND, receiver, "x402"],
+    ...(inputs.mppInboundEnabled ? [["mpp", INBOUND_MPP, receiver, "mpp"] as [ProfileEndpoint, { network: string; asset: string }, string, "x402" | "mpp"]] : []),
+    ...(inputs.arcReceiver === undefined ? [] : [["arc", INBOUND_ARC, inputs.arcReceiver, "x402"] as [ProfileEndpoint, { network: string; asset: string }, string, "x402" | "mpp"]]),
+    ...(inputs.solReceiver === undefined ? [] : [["sol", INBOUND_SOL, inputs.solReceiver, "x402"] as [ProfileEndpoint, { network: string; asset: string }, string, "x402" | "mpp"]]),
+    ...(inputs.solMppReceiver === undefined ? [] : [["solmpp", INBOUND_SOL, inputs.solMppReceiver, "mpp"] as [ProfileEndpoint, { network: string; asset: string }, string, "x402" | "mpp"]]),
+    ...newChains.filter((chain) => evm[chain].inbound).map((chain) => [chain, EVM_TESTNETS[chain], receiver, "x402"] as [ProfileEndpoint, { network: string; asset: string }, string, "x402" | "mpp"]),
+  ];
+  /** 新 3 宛（hosted 設計 §5）: 表の資産と EIP-712 domain。Router はチェーン手数料を払わない（`maxFee` は無い）。 */
+  const toEvm = (chain: HostedEvmChain): ProfileBuilder => (profileId, source, payTo, sourceRail) => ({
+    profileId,
+    sourceRail,
+    source: { network: source.network, asset: source.asset, decimals: 6, payTo },
+    rail: "x402",
+    destination: { scheme: "exact", network: EVM_TESTNETS[chain].network, asset: EVM_TESTNETS[chain].asset, decimals: 6, tokenDomain: { ...EVM_TESTNETS[chain].domain } },
+    par: true,
+    maxUpstreamAmount: DYNAMIC_MAX_UPSTREAM_AMOUNT,
+    fee: DYNAMIC_FEE_X402_OUT,
+  });
+  /** 宛先: 端点 → ビルダー。無効な宛先は入れない。既存のビルダーの引数の順の違いはここで揃える。 */
+  const destinations: [ProfileEndpoint, ProfileBuilder][] = [
+    ["x402", (id, source, payTo, sourceRail) => builders.toX402(id, source, payTo, sourceRail)],
+    ...(MPP_OUTBOUND_PROFILE_ENABLED ? [["mpp", (id, source, payTo, sourceRail) => builders.toMpp(id, source, payTo, sourceRail)] as [ProfileEndpoint, ProfileBuilder]] : []),
+    ...(inputs.arcOutbound ? [["arc", (id, source, payTo, sourceRail) => builders.toArc(id, sourceRail, source, payTo)] as [ProfileEndpoint, ProfileBuilder]] : []),
+    ...(inputs.solOutbound ? [["sol", (id, source, payTo, sourceRail) => builders.toSol(id, sourceRail, source, payTo)] as [ProfileEndpoint, ProfileBuilder]] : []),
+    ...(inputs.solMppOutbound ? [["solmpp", (id, source, payTo, sourceRail) => builders.toSolMpp(id, sourceRail, source, payTo)] as [ProfileEndpoint, ProfileBuilder]] : []),
+    ...newChains.filter((chain) => evm[chain].outbound).map((chain) => [chain, toEvm(chain)] as [ProfileEndpoint, ProfileBuilder]),
+  ];
+  const out: Record<string, unknown> = {};
+  for (const [s, source, payTo, sourceRail] of sources) {
+    for (const [d, build] of destinations) {
+      // どちらかが新 3（既存 × 既存は既存の 20 本のまま）、同じ端点どうし（新 × 新の同じチェーン）は除く。
+      if (!isNew(s) && !isNew(d)) continue;
+      if (s === d) continue;
+      const profileId = `dyn-${s}-to-${d}`;
+      out[profileId] = build(profileId, source, payTo, sourceRail);
+    }
+  }
+  return out;
 }
 
 /**
@@ -452,6 +550,14 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
   const upstreamSolMpp = (rails.upstreams ?? RAIL_UPSTREAMS).solanaMpp;
   const solMppProvider = providerOf(rails, "solanaMpp", upstreamSolMpp);
   const solMppOutbound = rails.activation.solanaMpp.outbound;
+  // EVM testnet 3 つ（hosted 設計 §5）: 受信のある chain は自前の facilitator（env）。受信が 1 つでもあって env が無ければ固定文で止まる（値は出さない）。
+  const evm = evmOf(rails.activation);
+  const evmInbound = HOSTED_EVM_CHAINS.filter((chain) => evm[chain].inbound);
+  const evmUsed = HOSTED_EVM_CHAINS.filter((chain) => evm[chain].inbound || evm[chain].outbound);
+  const evmFacilitatorUrl = env[EVM_FACILITATOR_URL_ENV];
+  if (evmInbound.length > 0 && (evmFacilitatorUrl === undefined || evmFacilitatorUrl === "")) {
+    throw new Error(`${EVM_FACILITATOR_URL_ENV} is required when an EVM testnet inbound rail is activated`);
+  }
   /**
    * 新しい `(network, asset)` の区分（D-7: 既存と同じ桁。静的は 1 件 10,000、動的は 1 件 20,000）。
    * その network が**受信か送信のどちらか**で有効なら出す（受信と送信は同じ区分に合算する。送信の設計 §6.3、FR-29、D-14）。
@@ -663,6 +769,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                   { network: INBOUND.network, asset: INBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE },
                   { network: OUTBOUND.network, asset: OUTBOUND.asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE },
                   ...railBuckets(DYNAMIC_MAX_PER_PURCHASE, env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", DYNAMIC_MAX_PER_PURCHASE_SOL),
+                  // EVM testnet 3 つ（hosted 設計 §5）: 受信か送信が有効な chain の (network, asset)。1 件 20,000、総額は既存の動的と同じ env。
+                  ...evmUsed.map((chain) => ({ network: EVM_TESTNETS[chain].network, asset: EVM_TESTNETS[chain].asset, maxTotal: env["SUBETHA_DYNAMIC_MAX_TOTAL"] ?? "100000000", maxPerPurchase: DYNAMIC_MAX_PER_PURCHASE })),
                 ],
               },
               // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
@@ -684,12 +792,14 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ...(solMppProvider === undefined ? {} : { [ROUTE_SOLMPP_OUT]: upstreamSolMpp, ...(mppInboundEnabled ? { [ROUTE_SOLMPP_OUT_MPP]: upstreamSolMpp } : {}) }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
-      ...(arcReceiver === undefined && solReceiver === undefined
+      // EVM testnet 3 つの受信（hosted 設計 §5）は自前の facilitator（kind `x402`）。HTTP の期限はチェーン別に Router が決める（`evmTestnetDeadlinesOf`。ローカル版 §3.6 の 20 秒）。
+      ...(arcReceiver === undefined && solReceiver === undefined && evmInbound.length === 0
         ? {}
         : {
             inboundFacilitators: {
               ...(arcReceiver === undefined ? {} : { [INBOUND_ARC.network]: INBOUND_ARC.facilitator }),
               ...(solReceiver === undefined ? {} : { [INBOUND_SOL.network]: INBOUND_SOL.facilitator }),
+              ...Object.fromEntries(evmInbound.map((chain) => [EVM_TESTNETS[chain].network, { kind: "x402", url: evmFacilitatorUrl }])),
             },
           }),
     },

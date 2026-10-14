@@ -41,6 +41,8 @@ try {
           ? "SUBETHA_X402_OUTBOUND_NETWORK must be an EVM network with x402 outbound in the table\n"
         : code === "solana_key"
           ? "SUBETHA_OUTBOUND_SOLANA_KEY is required and must be a base58 seed when the solana outbound rail (x402 or MPP) is activated\n"
+        : code === "evm_facilitator"
+          ? "SUBETHA_EVM_FACILITATOR_URL must be exactly http://127.0.0.1:<port>/<token>\n"
           : "router process capabilities could not be created\n",
   );
   process.exit(2);
