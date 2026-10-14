@@ -514,9 +514,26 @@ export function matrixSubjectMismatches(response: Record<string, unknown>, plann
   addr("quote.destination.asset", dst.network, qd["asset"], dst.asset);
   eq("quote.destination.quoted", qd["quoted"], dst.amount);
   addr("quote.destination.payTo (upstream recipient)", dst.network, qd["payTo"], dst.to);
-  const approval = isRecord(subject["approval"]) ? subject["approval"] : {};
-  const deadline = approval["deadlineMs"];
-  if (typeof deadline !== "number" || deadline <= nowMs) problems.push("the quote's approval deadline has passed or is missing");
+  // 承認: subject と、署名する quote 文書の両方（Codex H-5 #1）。required・この quote への束縛・同じ有限の期限・期限の前、がそろわなければ署名しない
+  // （subject だけを見ると、期限の切れた quote 文書に Tempo の送金を署名し得る）。
+  const approvalProblems = (label: string, value: unknown): number | undefined => {
+    if (!isRecord(value)) {
+      problems.push(`${label} is missing`);
+      return undefined;
+    }
+    eq(`${label}.required`, value["required"], true);
+    eq(`${label}.boundTo = subject.quoteId`, value["boundTo"], subject["quoteId"]);
+    const deadline = value["deadlineMs"];
+    if (typeof deadline !== "number" || !Number.isFinite(deadline)) {
+      problems.push(`${label}.deadlineMs is missing or not a finite number`);
+      return undefined;
+    }
+    if (deadline <= nowMs) problems.push(`${label}.deadlineMs has passed`);
+    return deadline;
+  };
+  const subjectDeadline = approvalProblems("subject.approval", subject["approval"]);
+  const quoteDeadline = approvalProblems("quote.approval", quote["approval"]);
+  if (subjectDeadline !== undefined && quoteDeadline !== undefined && subjectDeadline !== quoteDeadline) problems.push("quote.approval.deadlineMs differs from subject.approval.deadlineMs");
   return problems;
 }
 
@@ -1681,9 +1698,26 @@ export function hostedSubjectMismatches(response: Record<string, unknown>, plann
     eq("subject.disclosures.fundsMoveOnCredential", disclosures["fundsMoveOnCredential"], exp.fundsMoveOnCredential);
   }
   eq("subject.fundsMoveOnCredential (expected per source rail)", subject["fundsMoveOnCredential"], exp.fundsMoveOnCredential);
-  const approval = isRecord(subject["approval"]) ? subject["approval"] : {};
-  const deadline = approval["deadlineMs"];
-  if (typeof deadline !== "number" || deadline <= nowMs) problems.push("the quote's approval deadline has passed or is missing");
+  // 承認: subject と、署名する quote 文書の両方（Codex H-5 #1）。required・この quote への束縛・同じ有限の期限・期限の前、がそろわなければ署名しない
+  // （subject だけを見ると、期限の切れた quote 文書に Tempo の送金を署名し得る）。
+  const approvalProblems = (label: string, value: unknown): number | undefined => {
+    if (!isRecord(value)) {
+      problems.push(`${label} is missing`);
+      return undefined;
+    }
+    eq(`${label}.required`, value["required"], true);
+    eq(`${label}.boundTo = subject.quoteId`, value["boundTo"], subject["quoteId"]);
+    const deadline = value["deadlineMs"];
+    if (typeof deadline !== "number" || !Number.isFinite(deadline)) {
+      problems.push(`${label}.deadlineMs is missing or not a finite number`);
+      return undefined;
+    }
+    if (deadline <= nowMs) problems.push(`${label}.deadlineMs has passed`);
+    return deadline;
+  };
+  const subjectDeadline = approvalProblems("subject.approval", subject["approval"]);
+  const quoteDeadline = approvalProblems("quote.approval", quote["approval"]);
+  if (subjectDeadline !== undefined && quoteDeadline !== undefined && subjectDeadline !== quoteDeadline) problems.push("quote.approval.deadlineMs differs from subject.approval.deadlineMs");
   return problems;
 }
 
