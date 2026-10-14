@@ -1,4 +1,4 @@
-# 要件: 拒否・不明の理由の分類を診断の記録に残す（第 2.1 版、2026-10-15）
+# 要件: 拒否・不明の理由の分類を診断の記録に残す（第 2.2 版、2026-10-15）
 
 > owner の依頼（2026-10-15）: hosted の EVM testnet の検証（`docs/DEPLOY.md` §2g）で、受信の facilitator の拒否・Provider の拒否・宛先の `unknown`・Tempo の署名の後の失敗が起き、どれも原因を確定できなかった（理由が残っていない）。「その形で進めましょう」= 拒否・不明の理由の **分類** を残し、次に起きたときに判別できるようにする。
 > 進め方は前例どおり: 要件 → 設計 → タスク → 実装 PR。各段で Codex（`gpt-6-astra`）の独立レビューと owner の確認。本番の入れ替えは owner の確認つき。
@@ -27,7 +27,7 @@
 
 - **FR-R1 理由の値の集合**: Router が持つ版つきの表（x402 の `invalidReason`・`errorReason` の値、Circle の facilitator の既知の値、自前の facilitator の値）。出どころ（`@x402/core`・`@x402/evm`・`@x402/svm` の固定版の実装・Circle の文書）を表に書く。版を上げたら表を見直す。
 - **FR-R2 受信**: x402 受信（kind `x402`・`circle`、EVM・SVM）の verify と settle が `isValid: false`・`rejected`・`unknown` になるとき、(a) facilitator の HTTP のステータスか通信の失敗の分類（`TransportCode`）、(b) 応答の理由の分類（FR-R1）、(c) 段（verify・settle）、(d) 経過時間、(e) 結びつけの鍵（paymentId があればそれ、promotion の前の動的の verify なら quoteId・requestId と段）を残す。promotion の前の失敗も残すが、購入を promotion しない・予算を予約しない。
-- **FR-R3 宛先**: x402 送信（動的 EVM・静的・SVM）が `rejected`・`unknown`・`paid_no_data`・`not_sent` になるとき、(a) 段（challenge の読み直し・支払いつきの要求・領収の検査・本文の読み取り）、(b) HTTP のステータス **と** 本文の読み取りの通信の失敗の分類（両方あり得る）、(c) 領収の分類（`absent`・`malformed`・`failed`・`network_mismatch`・`payer_mismatch`・`ok`。どちらのヘッダを使ったか。読む順と大きさの上限は設計で決める）、(d) 拒否の応答の本文の x402 の理由（規定の欄だけを、大きさと時間の上限つきで。**結果が決まった後に** 読み、結果を遅らせない・変えない）、(e) `not_sent` は手元の理由の分類、(f) 経過時間、(g) paymentId と attempt。
+- **FR-R3 宛先**: x402 送信（動的 EVM・静的・SVM）が `rejected`・`unknown`・`paid_no_data`・`not_sent` になるとき、(a) 段（challenge の読み直し・支払いつきの要求・領収の検査・本文の読み取り）、(b) HTTP のステータス **と** 本文の読み取りの通信の失敗の分類（両方あり得る）、(c) 領収の分類（`absent`・`malformed`・`failed`・`network_mismatch`・`payer_mismatch`・`ok`。どちらのヘッダを使ったか。読む順と大きさの上限は設計で決める）、(d) 拒否の応答の x402 の理由は **ヘッダ（`PAYMENT-REQUIRED`・`PAYMENT-RESPONSE`）と既に読まれた本文だけ** から取る（新しく本文を読まない: 読み取りは通信の枠を占め、別の購入の結果を変え得る。設計 D-1 #2）、(e) `not_sent` は手元の理由の分類、(f) 経過時間、(g) paymentId と attempt。
 - **FR-R4 MPP の経路**: Tempo・Solana の MPP の受信・送信も、同じ形で分類できるもの（RPC・facilitator の HTTP のステータス、通信の失敗の分類、規定の理由）を残す。範囲は設計で決める。
 - **FR-R5 本番で見える場所**: Router の子の診断の記録はボリュームのファイル（本番の journal と同じボリューム）。通信の失敗の分類（`TransportEvent`）は、どの支払い・どの段の要求かを結びつけて診断の記録に入れる（stderr の転送だけでは支払いと結びつかない）。
 - **FR-R6 自前の facilitator**: verify の失敗の理由（SDK の `invalidReason` を FR-R1 で分類）と、RPC の失敗の分類（時間切れ・頻度制限（HTTP 429・JSON-RPC の限度のエラー）・その他）を log に出す。結びつけの鍵は、診断用に別に作る hash の識別子（network・資産・from・nonce から作る。既存の `key` は nonce をそのまま含むので診断には出さない。SR-R2）。Router の側の宛先の診断にも同じ識別子を出し、両方を結びつける。
@@ -85,3 +85,4 @@
   7. high — journal の上限と互換・結果の確定の衝突 → 診断を journal と別にし（§2）、SR-R4・AC-R2。
   8. medium — 既存の公開の欄 → SR-R1 で既存の例外として明記、AC-R4 で status・reopen に出ないこと。AC-R7 に制御した上流の失敗。
 - **R2（readback、第 2 版）: APPROVE WITH CHANGES**。R1 の 8 件のうち 6 件は解決。残りと新しい点を第 2.1 版で反映: Circle の `403` の結果は `unknown` のまま（診断の値だけ）、facilitator の結びつけは既存の `key`（nonce をそのまま含む）ではなく診断用の hash の識別子、出来事の表は「facilitator に届いて記録された場合だけ」「観測した分類で、経過時間から推定しない」。
+- **第 2.2 版（設計 D-1 の反映）**: FR-R3(d) を「ヘッダと既に読まれた本文だけ」に狭めた（新しく本文を読むと、動的の transport の枠を占めて別の購入の結果を変え得るため）。

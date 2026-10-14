@@ -1,8 +1,9 @@
-# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 1 版、2026-10-15）
+# 設計: 拒否・不明の理由の分類を診断の記録に残す（第 2 版、2026-10-15）
 
 > 要件 `docs/rejection-reasons-requirements.md` 第 2.1 版と §7 の owner の決定（Q-1 → 運用者だけ、Q-2 → 進行中の購入が無ければ本番の入れ替えは Claude の判断）。
 > コードは `origin/main`。SDK は `@x402/core`・`@x402/evm`・`@x402/fetch`・SVM の実装 2.28.0 に固定（`package.json:28-30,40`）。SDK の実装は同じ版の `node_modules` で読んだ（下の `chunk-*.mjs`）。
 > 下書きは Plan エージェント（コードを引いて作成）、親が読んで採用。進め方: 設計 → Codex のレビュー → タスク → 実装の PR。
+> 第 1 版（`985ccdc`）は Codex D-1 で **REJECT**（9 件。§11）。第 2 版の主な変更: §12 が第 1 版の該当の節に **優先する**（quoteId の hash、本文は新しく読まない、観測を判断の経路から外す、tx の hash は手元で計算した値だけ、表は確かめた一覧で照合、購入の全体の scope、署名の道具の記録と配線、SDK の事実の訂正、入れ替えの前の静止）。
 
 ## 0. 一枚で
 
@@ -323,3 +324,48 @@ export function validateDiagRecord(value: unknown): DiagRecord | undefined;     
 - **明示の欄で結びつける案**: `InboundCallContext`・`TransportContext` に id を足す。型が見える利点はあるが、port の 3 つの型と約 20 か所の ctx の literal、`guardedRpcTransport` の getter を変え、MPP の transport まで届かせるのが重い。scope（D-2）は前例があり、試験で中と外を固定できる。
 - **OpenTelemetry などの外部の仕組み**（不採用）: 依存が増え、自由な属性を防ぐ仕組みが無い。
 - **残す期間**: 自動では消さない（回すことで上限）。運用者が消してよい。
+
+## 11. 独立レビューの記録
+
+- **D-1（Codex `gpt-6-astra`、CLI read-only、第 1 版 `985ccdc`）: REJECT**（9 件）。cid の正規化は facilitator の `identify` と一致（大文字小文字の混じった試験の値を足す。cid は結びつけの hash で、匿名化の保証ではない）。Q-C（MPP の範囲を限る）は可、Q-D は先送りでよいが、その log を新しい診断の読み込みから外し「どのファイルにも nonce が無い」の主張を狭める。指摘と反映は §12。
+
+## 12. 第 2 版の変更（§0〜§10 の該当の記述に優先する）
+
+### 12.1 quoteId は hash にする（D-1 #1、Q-A → hash）
+- 動的の受信では `quoteId` が authorization の nonce と同じ（`src/core/dynamic.ts:447`、`src/adapters/inbound/x402.ts:305-308`）。診断に `quoteId` を残さない。代わりに `quoteHash = hex(sha256("subetha-diag-quote/v1|" + quoteId.toLowerCase())).slice(0,16)`。§3 の `quoteId` の欄は `quoteHash` に替える。§2.2 の上限の鍵も `quoteHash`。
+- 読む道具の `--quote <0x…>` は入力を同じ式で hash して引く。
+
+### 12.2 本文は新しく読まない（D-1 #2、Q-B → ヘッダと既に読んだ本文だけ）
+- §4.3 の「断った本文（`dest_reject_body`、D-5）」は **やめる**。動的の transport の枠（`src/net/guarded-fetch.ts:372-382,427`）は本文を読み終える・中断するまで返らず、別の購入の `admission_refused` を生み得る。`readBoundedBody` が reader を取った後の `body.cancel()` は効かない（Codex が再現）。断った応答は今どおり `discardBody`。
+- 宛先の理由は **ヘッダ**（`PAYMENT-REQUIRED.error`、`PAYMENT-RESPONSE.errorReason`。402 以外の状態でも `PAYMENT-REQUIRED` があれば見る。例: SDK の `permit2_allowance_required` は 412）と、**既に読まれた本文**（静的の Base は SDK の `processResponse` が本文を読む: `src/adapters/outbound/x402.ts:575-655`。その読んだ値の最上位の `error`・`errorReason`・`invalidReason` だけを表で分類）だけ。
+- 要件の FR-R3(d) をこれに合わせて直す（要件 第 2.2 版）。AC-R6 の HyperEVM の行: 自前の Worker の 502 の token は本文にしか無いので Router の診断には残らない。facilitator の側（同じ `cid`）で分かる。Worker が固定の token をヘッダ（例 `x-subetha-provider-error`）にも出す変更は後続（Worker の配備が要り、Provider A には効かない）。
+
+### 12.3 観測は判断の経路から外す（D-1 #3）
+- hook が同期で行うのは「すでに手元にある値（数字・ヘッダの文字列の参照・結果の code）を小さな object に写す」ことだけ。分類（表の照合・decode・hash）・検査・JSON 化・書き込みは `setImmediate` で後に回す（`DiagnosticsSink.emit` は thunk を待ち行列に積むだけ。積むのも try で包む）。
+- 期限の判定の前に hook を置かない: 動的の verify の後の記録は、昇格・settle の期限の判定（`src/core/dynamic.ts:635,677`）の **後** に置く。送信の `dest_sign` は送出の前の期限の判定（`src/adapters/outbound/x402-dynamic.ts:669`）と送出の **後** に、`paidOutcomeOf` の結果と一緒に記録する（署名の直後には置かない）。
+- 署名の道具の RPC の観測（§6 の `observeRpc`）は **応答の本文を読まない**: 要求の側（`method`、送る raw tx から手元で計算した hash）と、応答の HTTP の status・例外の分類だけ。`clone()` の読み取りはしない（大きさを偽る応答や止まる本文で、待ちが生じ得る）。
+- 試験: 期限の境界（期限の 1 ms 前に結果が決まる場面で、sink あり・投げる sink・遅い sink のどれでも送出される）、`setImmediate` に積んだ処理が支払いの応答より後に走ること、止まる・大きさを偽る RPC の応答で待ちが増えないこと。
+
+### 12.4 tx の hash は手元で計算した値だけ（D-1 #4）
+- `txRef` は署名の道具が **送る raw tx から計算した hash** だけを残す。RPC の `result` は残さず、計算した値との一致・不一致（`txRefCheck: match | mismatch | absent`）の分類だけ。§3 の `txRefSource` は `txRefCheck` に替える。
+- D-11 はそのまま: 診断は `paying`・署名の印・保留を一切変えず、再署名を許す根拠にならない。
+
+### 12.5 理由の表は確かめた一覧で照合する（D-1 #5）
+- 抽出（正規表現）では SDK の値の集合と一致しない（Codex の実測: core 1・EVM 117・SVM 53 の異なる値。core の多くは式の中の値）。表は **人が確かめた一覧（manifest）**: 各値に出どころ（package・ファイル・行・版）を付ける。
+- 照合の試験: (1) SDK の 3 つの package の版と、manifest が引く dist のファイルの sha256 が一致すること（版や中身が変わると落ちる → 表を見直す）、(2) manifest の各値が、その出どころのファイルに文字列の literal として現れること（部分集合の検査）、(3) 抽出で見つかった値のうち manifest に無いものは、明示の除外の一覧に載っていること。Worker の節も同じ形（helper の返す値・union を含めて manifest に書く）。Circle の値は出どころとして Circle の公開の文書の URL と取得日、またはこのリポジトリの観測の記録を書く。
+
+### 12.6 購入の全体を scope で包む（D-1 #6）
+- scope は adapter の呼び出しごとではなく、**購入の入口**（静的・動的の purchase の関数の最初）で作る。購入の scope は変えない値（`paymentId`・`quoteHash`・`requestHash`・`routeId`）を持ち、中で段ごとの入れ子の scope（`stage`・`attempt`）を作る。`readOffers`（`src/core/dynamic.ts:593`）・`readAndMatchDestination`（`src/core/orchestrator.ts:813`）・`awaiting(...)` の経路も購入の scope の中に入る。
+- 受信の `cid` は、facilitator に送る **前に** credential から計算して段の scope に入れる（throw の経路でも facilitator と結びつく）。
+- 試験: 2 つの購入を交互に進める（`await` を交差させる）場面、片方が throw する場面、遅れて届く callback（transport の report）で、記録がそれぞれの購入に正しく付くこと。
+
+### 12.7 署名の道具の記録と配線（D-1 #7）
+- §3 に `signerStage`（§6 の段の閉じた集合）と、`outcome` に `signed` を足す。
+- 本番の入口 `npm run sign`（`tools/sign-payment.ts:76`）に配線する: env `SUBETHA_SIGN_DIAGNOSTICS=<path>` があるときだけ file sink（`component:"signer"`、8 MiB）を作り、`runSign` の `onStage` と payer の観測に渡す。無ければ今と同じ。driver は自分の file sink を渡す。試験は実際の入口（`tools/sign-payment.ts`）を子 process で動かし、fake の RPC で段の記録が残ること・stdout と stderr が変わらないことを確かめる。
+
+### 12.8 SDK の事実の訂正（D-1 #8）
+- §1 の「verify の失敗は 402 + `PAYMENT-REQUIRED`、本文は `{}`」は **既定の場合**。資源サーバは独自の本文を返せ、`permit2_allowance_required` は 412 を返す。§1 の「simulate は RPC の例外を握りつぶして `…simulation_failed`」は **最後の手段の値**: simulate の失敗は残高不足・nonce の使用済み・token の不一致・未対応などの値にもなる（SDK の catch は 182・212 行）。
+
+### 12.9 入れ替えの前の静止（D-1 #9）
+- 「journal の末尾と 10 分の無活動」では、昇格の前の購入（journal の行が無い）と、確認の後に入る購入を除けない。入れ替えは `swap-image.sh` の手順そのもので静止を作る: (1) 入口（Caddy）を止めて新しい要求を入れない、(2) 古いコンテナの `docker stop`（graceful shutdown の中で進行中の要求が終わるのを待つ）、(3) journal の末尾に `*_pending` で止まった支払いが無いことを入れ替えの後に確かめ、あれば owner に報告する。
+- 昇格の前の購入が止められたときの扱いは、これまでの入れ替えと同じ（x402 の受信は署名だけで資金は動かない。MPP の受信は呼び出し側の送金が済んでいる場合があり、それは既存の入れ替えの性質で、この作業では変わらない）。
