@@ -293,6 +293,25 @@ describe("配線（composeRails）: 許すのは EVM testnet の静的の相手�
     expect([...plan.outbound.keys()]).toEqual([]);
     expect(plan.inboundDynamic.has("dyn-x402-to-rh")).toBe(false);
   });
+
+  test("動的プロファイルの受信: 組み上げた adapter でも、許した facilitator の 302 は別の loopback の origin へ辿らない（接続 0。Codex H-2 #2）", async () => {
+    const rails = compose(dynamicConfigOf(), capabilitiesOf(["rh"], [a.origin]));
+    a.redirectTo = `${b.origin}/elsewhere`;
+    const connections = b.connections;
+    await expect(dynamicVerifyVia(rails)).rejects.toBeDefined();
+    expect(b.connections).toBe(connections);
+  });
+
+  test("動的上流（呼び出し側の URL）は、能力に loopback の origin があっても loopback に届かない: challenge も支払いつきの要求も接続 0（Codex H-2 #1）", async () => {
+    const rails = compose(dynamicConfigOf(), capabilitiesOf(["rh"], [a.origin, b.origin]));
+    const target = { url: `${b.origin}/v1/eth/snapshot`, method: "GET" as const };
+    const connections = b.connections;
+    await expect(rails.outbound.readChallenge("dyn-x402-to-rh", target)).rejects.toBeDefined();
+    const offer = { scheme: "exact", network: RH.network, asset: RH.asset, amount: "10000", payTo: PROVIDER, maxTimeoutSeconds: 60, extra: { name: RH.domain.name, version: RH.domain.version } };
+    const paid = await rails.outbound.pay({ routeId: "dyn-x402-to-rh", offer: offer as never, paymentId: "p-loopback", attempt: 1, deadlineMs: Date.now() + 60_000, target }).catch((error: unknown) => error);
+    expect(paid).not.toMatchObject({ outcome: "paid" });
+    expect(b.connections).toBe(connections);
+  });
 });
 
 /** 動的プロファイル 2 つ（新 3 から Base へ・Base から新 3 へ）を持つ構成（facilitator は a の loopback）。 */
