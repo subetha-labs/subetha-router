@@ -71,6 +71,7 @@
 - **Q-1 → 出さない**（owner）。Ethereum Sepolia を hosted に出すか（提出物の「56 組」と揃える。Sepolia は gas が高く、ローカルで 2 回 `paid_data_unavailable`・1 回 gas 不足があった）。
 - **Q-2 → E-PROV を使い回す**（owner）。新 3 の Provider の受取先（testnet、前例 G-1 で使い捨ての受取先を本番に使った）。
 - **Q-3 → 提出期限（15:59 JST）の後ならいつでも**（owner）。G-2〜G-4 の入れ替えの時刻。
+- **Q-4 → 受信も公開する**（owner、2026-10-13、要件の確認の後）。新 3 で払うユーザーの支払いも自前 facilitator が settle し、gas は SubEtha が負担する（x402 では settle する facilitator を受け取る側が選ぶ。Base Sepolia の x402.org・Arc の Circle と同じ形）。上限は FR-H9 の gas の累計・SR-H3 の allowlist と金額の上限。上限に達したらその network の受信は止まる。「testnet なので一旦よい」（owner）。
 
 ## 8. 独立レビューの記録
 
