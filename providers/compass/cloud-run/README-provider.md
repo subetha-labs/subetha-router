@@ -5,10 +5,10 @@ Uniswap USDC/WETH spot, Exa search) for a task you describe, using the live Diff
 model on one NVIDIA L4 in Cloud Run (asia-southeast1). The service is public, scales to zero,
 and is paid per request over **x402 on Base Sepolia USDC** (testnet only).
 
-**URL: `https://crp-1dfd368b2ec1473b-mulpnxrscq-as.a.run.app`** (published 2026-10-16 00:26 JST,
-revision `-00002`). Unpaid `POST /select` returns the 402 below; `/internal/v1/select` is 404.
-Paid acceptance (direct and via the Router) is still pending; results go to
-`providers/compass/notes/cloud-run-evidence.md`.
+**URL: `https://crp-b54f8ec1c5924032-mulpnxrscq-as.a.run.app`** (published 2026-10-16 01:2x JST).
+Verified: direct paid purchases deliver live selections (ETH 12.0 s, SOL 11.8 s, settled on Base Sepolia);
+the hosted Router quotes it via `dyn-arc-to-x402`. A paid purchase through the Router is not yet run.
+Evidence: `providers/compass/notes/cloud-run-evidence.md`.
 
 ## What to expect (disclosure)
 
