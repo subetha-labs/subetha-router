@@ -748,7 +748,8 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
       }
       settleNote("settled");
-      return options.deliver(paymentId, diag);
+      // 昇格の後の送信（読み直し・支払い・遅れて届く callback を含む）は `promoted:true` の scope の中（購入の scope は昇格の前の値を持ち得る）。
+      return diag.stage({ promoted: true }, () => options.deliver(paymentId, diag));
     }
     /**
      * 昇格後の settle の失敗は**すべて `unknown`**（設計 §6.5）。facilitator・RPC は、送金の前に拒否したのか後に拒否したのかを

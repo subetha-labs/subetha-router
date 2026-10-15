@@ -787,11 +787,13 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         outcome: "rejected",
         reason: safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected"),
       });
-      settleNote("rejected", safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected"));
+      // 返す code は今までどおり append の後にもう一度読んだ値（読む回数・順序は変えない）。診断はその local だけを読む（adapter の値を読み足さない）。
+      const rejectedCode = safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected");
+      settleNote("rejected", rejectedCode);
       return {
         paymentId: intent.paymentId,
         status: "awaiting_payment",
-        code: safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected"),
+        code: rejectedCode,
       };
     }
     const txRef = isRecord(settled) ? settled["txRef"] : undefined;
@@ -954,11 +956,13 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       case "not_sent":
       case "rejected": {
         const reason = safeReason(result["reason"], "destination_rejected");
+        // journal に書く outcome は今までどおり append の引数を作る時点の 1 回の読み取り。診断はその local だけを読む（await の後に読み直さない）。
+        const failedOutcome = result["outcome"];
         await store.append(paymentId, "dest_failed", {
-          outcome: result["outcome"],
+          outcome: failedOutcome,
           reason,
         });
-        destNote(result["outcome"] as "not_sent" | "rejected", reason, { attempt, elapsedMs: payElapsedMs });
+        destNote(failedOutcome as "not_sent" | "rejected", reason, { attempt, elapsedMs: payElapsedMs });
         return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
       }
       default:

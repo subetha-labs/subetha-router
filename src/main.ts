@@ -160,12 +160,16 @@ export const DIAGNOSTICS_CLOSE_TIMEOUT_MS = 500;
  * 診断の sink を短い上限つきで閉じる（停止の経路）。`close` が無い・投げる・止まるときも上限で戻る。reject しない。
  */
 export async function closeDiagnosticsWithin(sink: ClosableDiagnosticsSink | undefined, timeoutMs: number = DIAGNOSTICS_CLOSE_TIMEOUT_MS): Promise<void> {
-  if (sink === undefined || typeof sink.close !== "function") return;
   let timer: NodeJS.Timeout | undefined;
   try {
+    // `close` の読み取り（accessor が投げ得る）と呼び出しも守った中で。receiver は sink のまま（`call`）。
+    if (sink === undefined) return;
+    const close = sink.close;
+    if (typeof close !== "function") return;
+    // close 自身の flush の上限は全体の半分ずつ（close は flush を 2 回まで待つ）。同期の throw はこの try が握る。
+    const closing = close.call(sink, { timeoutMs: Math.max(0, Math.floor(timeoutMs / 2)) });
     await Promise.race([
-      // close 自身の flush の上限は全体の半分ずつ（close は flush を 2 回まで待つ）。
-      Promise.resolve(sink.close({ timeoutMs: Math.max(0, Math.floor(timeoutMs / 2)) })).catch(() => {}),
+      Promise.resolve(closing).catch(() => {}),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
       }),

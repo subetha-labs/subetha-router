@@ -33,6 +33,7 @@ import {
   SCENARIOS,
   START_CLOCK,
   STATIC_ROUTE,
+  transportFailure,
   uuidOf,
   diagConfig,
   type CallRecord,
@@ -518,5 +519,211 @@ describe("process の配線（tools/router-diagnostics.ts・tools/remote-router-
     const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(lines[0]).toMatchObject({ component: "router", stage: "source_verify", paymentId: uuidOf(3), quoteHash: quoteHashOf("0x02"), code: "verify_failed" });
     expect(lines.at(-1)).toMatchObject({ component: "sink", stage: "counters" });
+  });
+});
+
+/**
+ * Codex R-2 #1: 診断は adapter の返した object を **読み足さない**。読む回数・順序・値は変更前（main）の判断の経路と同じで、診断はその経路が読んだ local だけを使う。
+ * 3 通りの比較はどれも変更後の core なので、ここでは main の意味（どの読み取りの値が journal と応答に入るか）を直に書いて照らす。
+ * adapter の結果は Proxy: 予定した欄は読むたびに次の値を返し、main の回数を超えて読めば throw する。全部の読み取りを記録する。
+ */
+function scripted(target: Record<string, unknown>, plan: Readonly<Record<string, readonly unknown[]>>, log: string[], onRead?: (key: string, n: number) => void): Record<string, unknown> {
+  const counts = new Map<string, number>();
+  return new Proxy(target, {
+    get(obj, key, receiver) {
+      if (typeof key !== "string") return Reflect.get(obj, key, receiver);
+      const n = (counts.get(key) ?? 0) + 1;
+      counts.set(key, n);
+      log.push(key);
+      onRead?.(key, n);
+      const values = plan[key];
+      if (values === undefined) return Reflect.get(obj, key, receiver);
+      if (n > values.length) throw new Error(`read #${n} of ${key} is beyond main's reads`);
+      return values[n - 1];
+    },
+  });
+}
+const readsOf = (log: readonly string[], key: string): number => log.filter((k) => k === key).length;
+const journalEventsOf = (journal: string): Array<{ event: string; patch: Record<string, unknown> }> =>
+  journal.split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { event: string; patch: Record<string, unknown> });
+const SINKS: Array<[string, () => DiagnosticsSink | undefined]> = [
+  ["sink 無し", () => undefined],
+  ["記録する sink", () => recordingDiagnostics()],
+  ["投げる sink", () => throwingDiagnostics()],
+];
+
+describe("Codex R-2 #1: adapter の結果を診断のために読み足さない（main の読み取りの意味のまま）", () => {
+  test.each(SINKS)("静的の settle の rejected（状態つきの getter・3 回目で throw）: journal は 1 回目、応答の code は 2 回目の値（%s）", async (_name, sinkOf) => {
+    const log: string[] = [];
+    const sink = sinkOf();
+    const run = await runScenario(
+      { name: "r1-settle-getter", kind: "static", arrange: (r) => void (r.inbound.settleImpl = async () => scripted({}, { outcome: ["rejected"], reason: ["verify_failed", "source_rejected"] }, log) as never) },
+      { ...(sink === undefined ? {} : { sink }) },
+    );
+    // main: outcome を 1 回、reason を 2 回（journal の引数・応答の code）。
+    expect(readsOf(log, "outcome")).toBe(1);
+    expect(readsOf(log, "reason")).toBe(2);
+    expect(run.purchase).toEqual({ paymentId: run.paymentId, status: "awaiting_payment", code: "source_rejected" });
+    expect(journalEventsOf(run.journal).at(-1)).toMatchObject({ event: "source_failed", patch: { outcome: "rejected", reason: "verify_failed" } });
+    if (sink !== undefined && "records" in sink) {
+      expect((sink as ReturnType<typeof recordingDiagnostics>).records().find((r) => r.stage === "source_settle")).toMatchObject({ outcome: "rejected", code: "source_rejected" });
+    }
+  });
+
+  test.each(SINKS)("静的の settle の rejected（journal の await の間に adapter が値を書き換える）: 応答は await の後の 2 回目の読み取り（%s）", async (_name, sinkOf) => {
+    const log: string[] = [];
+    const sink = sinkOf();
+    const values: string[] = [];
+    const run = await runScenario(
+      {
+        name: "r1-settle-mutation",
+        kind: "static",
+        arrange: (r) =>
+          void (r.inbound.settleImpl = async () => {
+            const target: Record<string, unknown> = { outcome: "rejected", reason: "verify_failed" };
+            return new Proxy(target, {
+              get(obj, key) {
+                if (typeof key === "string") log.push(key);
+                const value = Reflect.get(obj, key);
+                if (key === "reason") {
+                  values.push(String(value));
+                  // 1 回目（journal の引数）の後、journal の書き込み（fsync）を待つ間に書き換える。
+                  if (values.length === 1) setImmediate(() => (target["reason"] = "source_rejected"));
+                }
+                return value;
+              },
+            }) as never;
+          }),
+      },
+      { ...(sink === undefined ? {} : { sink }) },
+    );
+    expect(values).toEqual(["verify_failed", "source_rejected"]);
+    expect(readsOf(log, "reason")).toBe(2);
+    expect(run.purchase).toMatchObject({ status: "awaiting_payment", code: "source_rejected" });
+    expect(journalEventsOf(run.journal).at(-1)).toMatchObject({ event: "source_failed", patch: { reason: "verify_failed" } });
+  });
+
+  test.each(SINKS)("宛先の rejected（outcome の getter: switch は rejected、journal は not_sent、3 回目で throw）: dest_failed の後に reject しない（%s）", async (_name, sinkOf) => {
+    const log: string[] = [];
+    const sink = sinkOf();
+    const run = await runScenario(
+      { name: "r1-dest-getter", kind: "static", arrange: (r) => void (r.outbound.payImpl = async () => scripted({}, { outcome: ["rejected", "not_sent"], reason: ["destination_offer_changed"] }, log) as never) },
+      { ...(sink === undefined ? {} : { sink }) },
+    );
+    // main: receiptRef を 1 回、outcome を 2 回（switch・journal の引数）、reason を 1 回。
+    expect(readsOf(log, "outcome")).toBe(2);
+    expect(readsOf(log, "reason")).toBe(1);
+    expect(readsOf(log, "receiptRef")).toBe(1);
+    expect(run.purchase).toEqual({ paymentId: run.paymentId, status: "paid_data_unavailable", terminalReason: "destination_offer_changed" });
+    expect(journalEventsOf(run.journal).at(-1)).toMatchObject({ event: "dest_failed", patch: { outcome: "not_sent", reason: "destination_offer_changed" } });
+    if (sink !== undefined && "records" in sink) {
+      // 診断の outcome は journal に書いた値（読み直した値ではない）。
+      expect((sink as ReturnType<typeof recordingDiagnostics>).records().find((r) => r.stage === "dest_outcome")).toMatchObject({ outcome: "not_sent", code: "destination_offer_changed", attempt: 1 });
+    }
+  });
+
+  test.each(SINKS)("宛先の rejected（journal の await の間に outcome を書き換える）: 読み取りは 2 回のまま、記録は journal の値（%s）", async (_name, sinkOf) => {
+    const log: string[] = [];
+    const sink = sinkOf();
+    const run = await runScenario(
+      {
+        name: "r1-dest-mutation",
+        kind: "static",
+        arrange: (r) =>
+          void (r.outbound.payImpl = async () => {
+            const target: Record<string, unknown> = { outcome: "rejected", reason: "destination_rejected" };
+            return scripted(target, {}, log, (key, n) => {
+              if (key === "outcome" && n === 2) setImmediate(() => (target["outcome"] = "paid"));
+            }) as never;
+          }),
+      },
+      { ...(sink === undefined ? {} : { sink }) },
+    );
+    expect(readsOf(log, "outcome")).toBe(2);
+    expect(run.purchase).toEqual({ paymentId: run.paymentId, status: "paid_data_unavailable", terminalReason: "destination_rejected" });
+    expect(journalEventsOf(run.journal).at(-1)).toMatchObject({ event: "dest_failed", patch: { outcome: "rejected", reason: "destination_rejected" } });
+    if (sink !== undefined && "records" in sink) {
+      expect((sink as ReturnType<typeof recordingDiagnostics>).records().find((r) => r.stage === "dest_outcome")).toMatchObject({ outcome: "rejected" });
+    }
+  });
+
+  test.each(SINKS)("動的の settle の rejected（状態つきの getter）: reason は 1 回だけ読む（%s）", async (_name, sinkOf) => {
+    const log: string[] = [];
+    const sink = sinkOf();
+    const run = await runScenario(
+      { name: "r1-dyn-settle-getter", kind: "dynamic", arrange: (r) => void (r.inbound.settleImpl = async () => scripted({}, { outcome: ["rejected"], reason: ["verify_failed"] }, log) as never) },
+      { ...(sink === undefined ? {} : { sink }) },
+    );
+    // main: outcome 1 回・txRef 1 回・reason 1 回。昇格の後の rejected は unknown（理由は safeSettleReason の値）。
+    expect(readsOf(log, "outcome")).toBe(1);
+    expect(readsOf(log, "reason")).toBe(1);
+    expect(run.purchase).toEqual({ paymentId: run.paymentId, status: "unknown", terminalReason: "verify_failed" });
+  });
+});
+
+describe("Codex R-2 #2: 昇格の後の送信は promoted:true の scope", () => {
+  test("昇格の前に始まった動的の購入: 送信の前の読み直しの失敗・遅れて届く callback は promoted:true、昇格の前の読み直しは promoted:false", async () => {
+    const recording = recordingDiagnostics();
+    const late: Array<Promise<void>> = [];
+    const run = await runScenario(
+      {
+        name: "r2-dyn-deliver-read",
+        kind: "dynamic",
+        arrange: (r) =>
+          void (r.outbound.readChallengeImpl = async (n) => {
+            // 1: quote、2: purchase の照合（昇格の前）、3: 送信の前の読み直し（昇格の後）。
+            if (n === 2) r.outbound.report({ code: "upstream_timeout", operation: "read_challenge", policy: "p" });
+            if (n >= 3) {
+              late.push(new Promise<void>((resolve) => setTimeout(() => (r.outbound.report({ code: "aborted", operation: "read_challenge", policy: "p" }), resolve()), 20)));
+              throw transportFailure(r.outbound.report, "connect_failed", "read_challenge");
+            }
+            return r.outbound.offers;
+          }),
+      },
+      { sink: recording },
+    );
+    await Promise.all(late);
+    expect(run.purchase).toEqual({ paymentId: run.paymentId, status: "paid_data_unavailable", terminalReason: "offer_unavailable" });
+    expect(recording.rejected()).toBe(0);
+    const events = recording.records().filter((r) => r.stage === "transport_event").map((r) => ({ transport: r.transport, promoted: r.promoted, paymentId: r.paymentId }));
+    expect(events).toEqual([
+      { transport: "upstream_timeout", promoted: false, paymentId: run.paymentId },
+      { transport: "connect_failed", promoted: true, paymentId: run.paymentId },
+      { transport: "aborted", promoted: true, paymentId: run.paymentId },
+    ]);
+    expect(summary(recording.records().filter((r) => r.stage === "dest_outcome"))).toEqual([{ stage: "dest_outcome", outcome: "not_sent", code: "offer_unavailable", promoted: true }]);
+  });
+});
+
+describe("Codex R-2 #3: 停止の close の accessor が投げても reject しない", () => {
+  test("close の getter が投げる・同期に投げる・receiver を保つ", async () => {
+    const accessor = { emit() {} } as Record<string, unknown>;
+    Object.defineProperty(accessor, "close", {
+      get() {
+        throw new Error("accessor (test)");
+      },
+    });
+    await expect(closeDiagnosticsWithin(accessor as never, 50)).resolves.toBeUndefined();
+    await expect(
+      closeDiagnosticsWithin(
+        {
+          emit() {},
+          close: () => {
+            throw new Error("sync (test)");
+          },
+        },
+        50,
+      ),
+    ).resolves.toBeUndefined();
+    let receiver: unknown;
+    const sink = {
+      emit() {},
+      close(this: unknown) {
+        receiver = this;
+        return Promise.resolve();
+      },
+    };
+    await closeDiagnosticsWithin(sink, 50);
+    expect(receiver).toBe(sink);
   });
 });
