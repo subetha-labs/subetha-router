@@ -59,7 +59,7 @@ const SECTION_COUNTS: Readonly<Record<ReasonSection, number>> = {
   x402_evm: 118,
   x402_svm: 83,
   circle: 2,
-  self_facilitator: 53,
+  self_facilitator: 54,
   provider_worker: 14,
 };
 
