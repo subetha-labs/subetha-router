@@ -245,8 +245,11 @@ function payerMatches(payer: unknown, chainId: number, address: string): boolean
   );
 }
 
+/** 静的 route の challenge の読取・有料要求の期限の既定（各要求）。drain の上限の試験（タスク R-0）が読む。 */
+export const MPP_OUTBOUND_TIMEOUT_MS = 10_000;
+
 export function createMppOutbound(options: MppOutboundOptions): OutboundRail {
-  const timeoutMs = options.timeoutMs ?? 10_000;
+  const timeoutMs = options.timeoutMs ?? MPP_OUTBOUND_TIMEOUT_MS;
   const capability = options.capability;
   // 運用者の集合は静的と動的で同じ 1 つ（動的の option に無ければ adapter のものを渡す。FR-38）。
   const dynamic = options.dynamic === undefined ? undefined : createMppDynamicPath(capability, { ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }), ...options.dynamic });

@@ -682,6 +682,9 @@ function payerMatches(payer: unknown, chainId: number, address: string): boolean
   return claimed === account || claimed === `eip155:${chainId}:${account}` || claimed === `did:pkh:eip155:${chainId}:${account}`;
 }
 
+/** 期限の既定（各 option を渡さないとき）。drain の上限の試験（タスク R-0）が読む。 */
+export const MPP_DYNAMIC_DEFAULTS = Object.freeze({ unpaidTimeoutMs: 5_000, paidTimeoutMs: 30_000, rpcTimeoutMs: 5_000, rpcBudgetMs: 20_000, estimateRpcTimeoutMs: 3_000, estimateRpcBudgetMs: 6_000 });
+
 export function createMppDynamicPath(capability: MppTempoCapability, options: MppDynamicOptions): MppDynamicPath {
   const transport = options.transport;
   if (transport.allowLoopback) {
@@ -692,12 +695,12 @@ export function createMppDynamicPath(capability: MppTempoCapability, options: Mp
     throw new Error("the dynamic mpp path requires a transport with a DNS deadline");
   }
   assertCapabilityShape(capability);
-  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
-  const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
-  const rpcTimeoutMs = options.rpcTimeoutMs ?? 5_000;
-  const rpcBudgetMs = options.rpcBudgetMs ?? 20_000;
-  const estimateRpcTimeoutMs = options.estimateRpcTimeoutMs ?? 3_000;
-  const estimateRpcBudgetMs = options.estimateRpcBudgetMs ?? 6_000;
+  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? MPP_DYNAMIC_DEFAULTS.unpaidTimeoutMs;
+  const paidTimeoutMs = options.paidTimeoutMs ?? MPP_DYNAMIC_DEFAULTS.paidTimeoutMs;
+  const rpcTimeoutMs = options.rpcTimeoutMs ?? MPP_DYNAMIC_DEFAULTS.rpcTimeoutMs;
+  const rpcBudgetMs = options.rpcBudgetMs ?? MPP_DYNAMIC_DEFAULTS.rpcBudgetMs;
+  const estimateRpcTimeoutMs = options.estimateRpcTimeoutMs ?? MPP_DYNAMIC_DEFAULTS.estimateRpcTimeoutMs;
+  const estimateRpcBudgetMs = options.estimateRpcBudgetMs ?? MPP_DYNAMIC_DEFAULTS.estimateRpcBudgetMs;
   const now = options.now ?? Date.now;
   const denyHosts = options.denyHosts ?? [];
 

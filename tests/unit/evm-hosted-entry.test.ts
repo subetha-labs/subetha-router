@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
+import { hasTimeout, runSwap as runSwapIn } from "../fixtures/swap-image-harness.js";
 import { acceptanceOptionsOf } from "../../tools/rails-acceptance-run.js";
 import { activationFromEnv, activationToEnv, RAILS_ACTIVATION_ENV } from "../../tools/rails-entry.js";
 import { EVM_TESTNETS, RAILS_ACTIVATION, RAILS_NONE, type EvmRailsActivation, type RailsActivation } from "../../tools/remote-mcp-config.js";
@@ -244,72 +245,10 @@ describe("deploy/swap-image.sh: 新しいコンテナに -p 127.0.0.1:8611:8611�
   });
 
   /**
-   * 偽の docker・systemctl・curl・subetha-egress で入れ替えを実際に走らせる（前例の mock の harness を試験に移したもの）。root のパス（ボリューム・env ファイル・
-   * egress の runner）だけを一時ディレクトリに置き換えた写しを走らせる。偽の docker はコンテナを「名前 running イメージ publish」の 1 行で持ち
-   * （publish は作成時の `-p` の値。`start` は変えない = docker と同じ）、受け取った `run` の引数を残す。GNU の `stat -c` と `timeout` が要る。
+   * 偽の docker・systemctl・curl・subetha-egress で入れ替えを実際に走らせる（harness は `tests/fixtures/swap-image-harness.ts`。R-0 の drain の場面と共有）。
    * 筋（`SCN`）: 既定 = 成功、`run_fail` = 新しいコンテナの `run` が daemon のエラー（未確定）、`new_not_running` = 新しいコンテナが起動直後に止まっている。
    */
-  const hasTimeout = spawnSync("sh", ["-c", "command -v timeout"]).status === 0;
-  function runSwap(scenario: string) {
-    const dir = mkdtempSync(path.join(tmpdir(), "h4-swap-"));
-    dirs.push(dir);
-    const bin = path.join(dir, "bin");
-    const st = path.join(dir, "st");
-    const vol = path.join(dir, "vol");
-    for (const d of [bin, path.join(st, "containers"), vol]) mkdirSync(d, { recursive: true });
-    writeFileSync(path.join(st, "containers", "oldid0001"), "subetha-router true subetha-router:b-old 127.0.0.1:8787:8787\n");
-    writeFileSync(path.join(st, "caddy"), "active\n");
-    writeFileSync(path.join(st, "calls"), "");
-    writeFileSync(path.join(vol, "journal.ndjson"), "line1\nline2\n");
-    writeFileSync(path.join(dir, "env"), "");
-    const tool = (name: string, body: string): void => {
-      writeFileSync(path.join(bin, name), `#!/bin/bash\nST=${JSON.stringify(st)}\nSCN=${JSON.stringify(scenario)}\n${body}\n`);
-      chmodSync(path.join(bin, name), 0o755);
-    };
-    tool("docker", `
-echo "docker $*" >> "$ST/calls"
-cid_of_name() { grep -l "^$1 " "$ST/containers"/* 2>/dev/null | head -1 | xargs -n1 basename 2>/dev/null; }
-case "$1 $2" in "image inspect") exit 0 ;; esac
-case "$1" in
-  inspect) fmt=$3; ref=$4
-    if [ -f "$ST/containers/$ref" ]; then id=$ref; else id=$(cid_of_name "$ref"); fi
-    [ -n "$id" ] || { echo "Error: No such object: $ref" >&2; exit 1; }
-    read -r name running image ports < "$ST/containers/$id"
-    case "$fmt" in '{{.Id}}') echo "$id" ;; '{{.Name}}') echo "/$name" ;; '{{.State.Running}}') echo "$running" ;; esac ;;
-  stop) read -r n r i p < "$ST/containers/$2"; echo "$n false $i $p" > "$ST/containers/$2"; echo "$2" ;;
-  start) [ -f "$ST/containers/$2" ] || { echo "Error: No such container: $2" >&2; exit 1; }
-    read -r n r i p < "$ST/containers/$2"; echo "$n true $i $p" > "$ST/containers/$2"; echo "$2" ;;
-  rename) [ -z "$(cid_of_name "$3")" ] || { echo "Error: name $3 already in use" >&2; exit 1; }
-    read -r n r i p < "$ST/containers/$2"; echo "$3 $r $i $p" > "$ST/containers/$2" ;;
-  run) printf '%s\\n' "$@" > "$ST/run-args"
-    [ "$SCN" = run_fail ] && { echo "docker: Error response from daemon: boom" >&2; exit 125; }
-    name=; img=; ports=; while [ $# -gt 0 ]; do case $1 in --name) name=$2; shift;; -p) ports="$ports,$2"; shift;; esac; img=$1; shift; done
-    running=true; [ "$SCN" = new_not_running ] && running=false
-    echo "$name $running $img \${ports#,}" > "$ST/containers/newid0002"; echo newid0002 ;;
-  logs) [ "$SCN" = new_not_running ] && { echo "could not start the Router"; exit 0; }
-    printf 'subetha-router remote MCP on 0.0.0.0:8787/mcp\\nrouter: {"event":"listening","port":8788}\\n' ;;
-  rm) rm -f "$ST/containers/$3" ;;
-  ps) for f in "$ST/containers"/*; do read -r n r i p < "$f"; echo "$n $i running=$r"; done ;;
-  *) exit 99 ;;
-esac`);
-    tool("systemctl", `echo "systemctl $*" >> "$ST/calls"
-case "$1" in stop) echo inactive > "$ST/caddy" ;; start) echo active > "$ST/caddy" ;; is-active) [ "$(cat "$ST/caddy")" = active ] ;; esac`);
-    tool("curl", `grep -q '^subetha-router true' "$ST/containers"/* 2>/dev/null || exit 7; printf '{"router":"up"}'`);
-    tool("subetha-egress", "exit 0");
-    // GNU の `stat -c %s <file>` だけ（macOS の stat は形が違う）。
-    tool("stat", `[ "$1" = -c ] && [ "$2" = %s ] && { wc -c < "$3" | tr -d ' '; exit 0; }; exec /usr/bin/stat "$@"`);
-    const copy = script
-      .replace("VOL=/var/lib/subetha-router", `VOL=${vol}`)
-      .replace("ENVF=/etc/subetha-router.env", `ENVF=${path.join(dir, "env")}`)
-      .replace("/usr/local/sbin/subetha-egress check", "subetha-egress check");
-    expect(copy).toContain(`VOL=${vol}\n`);
-    expect(copy).not.toMatch(/^VOL=\/var\/lib\/|^ENVF=\/etc\/|\/usr\/local\/sbin\//m);
-    writeFileSync(path.join(dir, "swap-image.sh"), copy);
-    const result = spawnSync("bash", [path.join(dir, "swap-image.sh"), "subetha-router:b-new"], { env: { PATH: `${bin}:${process.env["PATH"] ?? ""}`, HOME: dir }, encoding: "utf8", timeout: 60_000 });
-    const containers = Object.fromEntries(readdirSync(path.join(st, "containers")).map((id) => [id, readFileSync(path.join(st, "containers", id), "utf8").trim()]));
-    const runArgs = existsSync(path.join(st, "run-args")) ? readFileSync(path.join(st, "run-args"), "utf8").trim().split("\n") : [];
-    return { result, containers, runArgs, calls: readFileSync(path.join(st, "calls"), "utf8").trim().split("\n"), caddy: readFileSync(path.join(st, "caddy"), "utf8").trim(), vol, envFile: path.join(dir, "env") };
-  }
+  const runSwap = (scenario: string) => runSwapIn(scenario, dirs);
 
   test.skipIf(!hasTimeout)("偽の docker: 成功の筋で docker run が -p 127.0.0.1:8787:8787 -p 127.0.0.1:8611:8611 を受け、入れ替えは swap ok で終わる", () => {
     const { result, runArgs, containers, vol, envFile } = runSwap("ok");

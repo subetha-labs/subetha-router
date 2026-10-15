@@ -121,6 +121,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** verify（と kind `x402` の settle）の HTTP の期限の既定。drain の上限の試験（タスク R-0）が読む。 */
+export const X402_INBOUND_DEFAULT_TIMEOUT_MS = 10_000;
+
 export function createX402Inbound(options: X402InboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
   const transport = options.transport;
@@ -134,7 +137,7 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
   const maxTimeoutSeconds = options.maxTimeoutSeconds ?? (kind === "circle" ? CIRCLE_DEFAULT_WIRE_TIMEOUT_SECONDS : 120);
   const offerSeconds = options.offerSeconds ?? (kind === "circle" ? CIRCLE_DEFAULT_OFFER_SECONDS : maxTimeoutSeconds);
   const assetDomain = options.assetDomain ?? { name: "USDC", version: "2" };
-  const timeoutMs = options.timeoutMs ?? 10_000;
+  const timeoutMs = options.timeoutMs ?? X402_INBOUND_DEFAULT_TIMEOUT_MS;
   const settleTimeoutMs = kind === "circle" ? (maxTimeoutSeconds + 10) * 1000 : timeoutMs;
   const issuedExtraKeys: readonly string[] = kind === "circle" ? CIRCLE_ISSUED_EXTRA_KEYS : ISSUED_EXTRA_KEYS;
 

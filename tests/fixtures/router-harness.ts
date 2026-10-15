@@ -56,6 +56,8 @@ export interface Harness {
    * 自分の workDir 配下にあり、他プロセスと共有しない。
    */
   readonly barrierPath: string;
+  /** Router の子に渡した env（同じ構成で別の入口の script を起動する試験が使う）。 */
+  readonly routerEnv: Readonly<Record<string, string>>;
   /** Router だけを止めて、同じ journal で起動し直す（再起動後の耐久性確認）。 */
   restartRouter(): Promise<void>;
   /**
@@ -79,6 +81,8 @@ export interface HarnessOptions {
   readonly verify?: string;
   /** Router に渡す追加 env（既定の上書き確認に使う）。 */
   readonly env?: Readonly<Record<string, string>>;
+  /** facilitator の settle の応答の遅れ（ms。タスク R-0 の drain の試験）。 */
+  readonly settleDelayMs?: number;
   /**
    * 最初の Router だけを、R3 の応答バイトを出す直前で止まる構成で起動する
    * （`synthetic` セクションにのみ書ける合成専用の試験用シーム）。
@@ -101,6 +105,8 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     options.settle ?? "ok",
     "--verify",
     options.verify ?? "ok",
+    "--settle-delay-ms",
+    String(options.settleDelayMs ?? 0),
   ]);
   const upstreamA = await startListening("tests/fixtures/upstream-server.ts", [
     "--pay",
@@ -190,6 +196,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     journalPath,
     configPath,
     barrierPath,
+    routerEnv,
     facilitator,
     upstreamA,
     upstreamB,

@@ -5,11 +5,12 @@
  * - `GET /<token>/supported`: `EVM_FACILITATOR_NETWORKS`（`SUBETHA_TEST_FAKE_SUPPORTED` があればその値）の kinds
  * - `GET /<token>/whoami`: pid・ppid・execArgv・受け取った env（試験が子の env と spawn の形を確かめる）
  * - 本物と同じく journal の隣の `facilitator.lock` に `flock` を process の寿命の間かける（入口の片付けの後に lock が解けていることを試験が確かめる）
+ * - `SUBETHA_TEST_EVENT_LOG`: SIGTERM を受けたら `facilitator-sigterm` を追記して終わる（タスク R-0: Router の子の後に止まることを試験が確かめる）
  * - `SUBETHA_TEST_PID_FILE`: lock を取ったら pid を書く（listen の前に止められた場合も試験が process の終了を確かめられる）
  * - `SUBETHA_TEST_FAKE_LISTEN_DELAY_MS`: listen をこの時間だけ遅らせる（入口の「facilitator の起動待ち」の段）
  * - `SUBETHA_TEST_SUPPORTED_HIT`・`SUBETHA_TEST_FAKE_SUPPORTED_DELAY_MS`: `/supported` が来たらファイルを書き、応答をこの時間だけ遅らせる（「/supported の待ち」の段）
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 
@@ -56,3 +57,11 @@ setTimeout(() => {
     process.stdout.write(`${JSON.stringify({ event: "listening", host: "127.0.0.1", port, networks: (env["EVM_FACILITATOR_NETWORKS"] ?? "").split(","), held: [] })}\n`);
   });
 }, listenDelayMs);
+
+const eventLog = env["SUBETHA_TEST_EVENT_LOG"] ?? "";
+if (eventLog !== "") {
+  process.on("SIGTERM", () => {
+    appendFileSync(eventLog, "facilitator-sigterm\n");
+    process.exit(0);
+  });
+}

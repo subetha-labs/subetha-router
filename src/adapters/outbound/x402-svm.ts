@@ -418,6 +418,9 @@ export type X402SvmOutbound = OutboundRail & {
 /** RPC の応答の上限（受信の起動時の検査と同じ 64 KiB・10 秒）。 */
 export const SVM_OUTBOUND_RPC_TIMEOUT_MS = 10_000;
 export const SVM_OUTBOUND_FETCH_TO_SIGN_MS = 5_000;
+/** 未払いの読取・有料要求の期限の既定。drain の上限の試験（タスク R-0）が読む。 */
+export const SVM_OUTBOUND_UNPAID_TIMEOUT_MS = 5_000;
+export const SVM_OUTBOUND_PAID_TIMEOUT_MS = 30_000;
 
 class SvmChallengeError extends Error {
   constructor(readonly reason: "url" | "status" | "no_header" | "undecodable" | "version" | "no_offers" | "too_many_offers" | "resource_mismatch" | "unreadable") {
@@ -434,8 +437,8 @@ interface SvmChallenge {
 
 export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmOutbound {
   const now = options.now ?? Date.now;
-  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
-  const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
+  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? SVM_OUTBOUND_UNPAID_TIMEOUT_MS;
+  const paidTimeoutMs = options.paidTimeoutMs ?? SVM_OUTBOUND_PAID_TIMEOUT_MS;
   const fetchToSignMs = options.fetchToSignMs ?? SVM_OUTBOUND_FETCH_TO_SIGN_MS;
   const rpcTimeoutMs = options.rpcTimeoutMs ?? SVM_OUTBOUND_RPC_TIMEOUT_MS;
   const hooks = options.hooksForTest ?? {};

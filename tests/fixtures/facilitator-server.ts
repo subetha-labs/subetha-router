@@ -7,7 +7,7 @@
  *        [--settle ok|pending|pending-burn|accepted-replay|rejected|rejected-200|rate-limited|error]
  *        [--verify ok|invalid]
  *        [--challenge ok|helper-only|deadline-only|helper-bad-type|deadline-bad-type|fee-bad-type]
- *        [--settle-network <caip2>]
+ *        [--settle-network <caip2>] [--settle-delay-ms <ms>]
  */
 
 import { randomBytes } from "node:crypto";
@@ -35,6 +35,8 @@ const verifyMode = arg("verify", "ok");
 const challengeMode = arg("challenge", "ok");
 /** settle 応答の `network`（発行 offer と異なる値を返す不正応答の再現）。 */
 const settleNetwork = arg("settle-network", "");
+/** settle の応答をこの時間だけ遅らせる（タスク R-0: Router の子の drain が進行中の購入を待つことの試験）。 */
+const settleDelayMs = Number(arg("settle-delay-ms", "0"));
 
 /** `helper`/`deadline`（両方あるか両方ないか）と、その型違反を作る。 */
 function challengeExtras(): Record<string, unknown> {
@@ -134,6 +136,7 @@ const server = http.createServer((request, response) => {
 
     if (url.pathname === "/settle") {
       settleCalls += 1;
+      if (settleDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, settleDelayMs));
       const requirements = (body["paymentRequirements"] ?? {}) as Record<string, unknown>;
       const requested = typeof requirements["network"] === "string" ? requirements["network"] : "";
       // 発行 offer と異なる `network` を返す不正応答も再現できるようにする。

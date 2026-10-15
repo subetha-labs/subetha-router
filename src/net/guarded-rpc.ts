@@ -27,7 +27,8 @@ export interface GuardedRpcOptions {
   readonly maxResponseBytes?: number | undefined;
 }
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+/** 1 要求の応答全体の期限の既定（`timeout` を渡さないとき）。drain の上限の試験（タスク R-0）が読む。 */
+export const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 

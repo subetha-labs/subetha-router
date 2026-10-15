@@ -315,11 +315,11 @@ describe("公開の入口には EVM testnet のものが無い（FR-E6・AC-E5�
     const config = readFileSync("tools/remote-mcp-config.ts", "utf8");
     const publicPart = config.slice(config.indexOf("export function routerConfigOf"), config.indexOf("/* ------------------------------------------------------------------ mainnet"));
     expect(publicPart).not.toMatch(/evmTestnets|SUBETHA_EVM_|EVM_PROVIDER|EVM_CHAINS_ENV/);
-    // 試験用の上書き（子の script・env）を渡すのは試験の fixture だけ。
+    // 試験用の上書き（子の script・env・drain の上限）を渡すのは試験の fixture だけ。
     for (const file of readdirSync("tools").filter((name) => name.endsWith(".ts"))) {
       const source = readFileSync(path.join("tools", file), "utf8");
       if (file === "remote-mcp.ts") continue;
-      expect(source, file).not.toMatch(/childScriptForTest|childEnvExtraForTest/);
+      expect(source, file).not.toMatch(/childScriptForTest|childEnvExtraForTest|drainTimeoutMsForTest/);
     }
     // `src/**` で localCounterparties を渡す（作る）場所は無い（能力は起動側だけが作る）。
     const main = readFileSync("src/main.ts", "utf8");
