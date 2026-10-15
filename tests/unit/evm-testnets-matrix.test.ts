@@ -44,6 +44,7 @@ import {
 import {
   buildHostedPlan,
   buildMatrixPlan,
+  driverDiagnosticsPathOf,
   hostedPairsOf,
   hostedSubjectMismatches,
   loadApprovedHostedPlan,
@@ -72,6 +73,11 @@ import { RAILS_ACTIVATION_ENV } from "../../tools/rails-entry.js";
 import { EVM_MATRIX_ACTIVATION, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmTestnetsConfigOf, MATRIX_RAILS, matrixPairsOf, OUTBOUND, OUTBOUND_X402, RAILS_NONE, UPSTREAM, UPSTREAM_ARC, UPSTREAM_SOL, UPSTREAM_SOL_MPP, UPSTREAM_X402 } from "../../tools/remote-mcp-config.js";
 import { EVM_TESTNETS_ROUTER_PROCESS, hostPlanOf, HostPlanError } from "../../tools/remote-mcp.js";
 import { createX402Payer } from "../../tools/x402-payer.js";
+import { createMppPayer } from "../../tools/mpp-payer.js";
+import { keccak256 } from "viem";
+import { quoteHashOf, validateDiagRecord, type DiagnosticsSink, type DiagRecord } from "../../src/shared/diagnostics.js";
+import { recordingDiagnostics, throwingDiagnostics } from "../fixtures/diagnostics.js";
+import { startTempoRpc } from "../fixtures/dynamic/tempo-rpc.js";
 
 /* ------------------------------------------------------------------ 定数 */
 
@@ -375,6 +381,8 @@ interface Behaviour {
   quoteTamper?: (routeId: string, response: Record<string, unknown>) => void;
   purchaseThrows?: (routeId: string) => boolean;
   sourceToOverride?: (routeId: string) => string | undefined;
+  /** Router の形の `paymentId`（UUID）。診断の記録は Router の形の id だけを残す。 */
+  uuidPaymentIds?: boolean;
 }
 class MatrixMcp implements McpCaller {
   readonly calls: { name: string; args: Record<string, unknown> }[] = [];
@@ -394,7 +402,7 @@ class MatrixMcp implements McpCaller {
     if (name === "subetha_router_quote") {
       this.#n += 1;
       const quoteId = p.source.scheme === "exact" && p.source.family === "evm" ? hex64(0xabc000 + this.#n) : `mppid${String(this.#n)}`.padEnd(43, "A");
-      const paymentId = `pay-${String(this.#n)}`;
+      const paymentId = this.behaviour.uuidPaymentIds === true ? `00000000-0000-4000-8000-${String(this.#n).padStart(12, "0")}` : `pay-${String(this.#n)}`;
       const offer = offerFor(p, quoteId);
       const approval = { required: true, boundTo: quoteId, deadlineMs: Date.now() + 600_000 };
       const quote = { quoteId, paymentId, routeId, source: { amount: p.source.amount, asset: p.source.asset, network: p.source.network, offer }, destination: { quoted: p.destination.amount, asset: p.destination.asset, network: p.destination.network, payTo: p.destination.to, quoteFingerprint: "sha256:00" }, approval };
@@ -406,7 +414,7 @@ class MatrixMcp implements McpCaller {
     if (name === "subetha_router_purchase") {
       if (this.behaviour.purchaseThrows?.(routeId) === true) throw new Error("timeout");
       const quote = args["quote"] as { paymentId: string };
-      const n = Number(quote.paymentId.slice(4));
+      const n = Number(quote.paymentId.startsWith("pay-") ? quote.paymentId.slice(4) : quote.paymentId.slice(-12));
       const srcRef = p.source.family === "svm" ? svmSignature(1000 + n) : hex64(0x5000 + n);
       const dstRef = p.destination.family === "svm" ? svmSignature(2000 + n) : hex64(0xd000 + n);
       await this.chain.pay(p.source.network, p.source.asset, p.source.from, p.source.to, 10_000n, srcRef, this.behaviour.sourceToOverride?.(routeId));
@@ -1168,6 +1176,201 @@ describe("M-2 #5/#6: a funds-moving signature is never repeated; marker fsync �
     } finally {
       setDirSyncForTest(undefined);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ 診断（`docs/rejection-reasons-design.md` §6、D-11。タスク R-6） */
+
+/** driver の記録（`<evidence-dir>/diagnostics/driver.ndjson`）を読む。どの行も検査を通ること。 */
+function driverRecordsOf(dir: string): { records: DiagRecord[]; text: string } {
+  const file = driverDiagnosticsPathOf(dir);
+  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const records = text
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => {
+      const record = validateDiagRecord(JSON.parse(line));
+      expect(record, line).toBeDefined();
+      return record!;
+    });
+  // close の数の行（component sink）は分けて、検査で捨てた行が無いことを確かめる。
+  for (const counters of records.filter((r) => r.component === "sink")) expect(counters.counters?.droppedSchema).toBe(0);
+  return { records: records.filter((r) => r.component !== "sink"), text };
+}
+
+describe("R-6: the signer's diagnostics in the matrix driver never weaken the holds (D-11)", () => {
+  /** 実の Tempo の payer（`createMppPayer`）を fake の Tempo の RPC に向ける。観測の `fetchFn` は driver の signer が渡す。 */
+  const tempoFactories = (rpcUrl: string) =>
+    ({
+      mppPayer: (key: string, scope: never, options?: { fetchFn?: typeof fetch }) => createMppPayer(key, scope, { rpcUrl, ...(options?.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }) }),
+      evmPayer: (key: string) => createX402Payer(key),
+      svmPayer: async () => {
+        throw new Error("no");
+      },
+      svmMppPayer: async () => {
+        throw new Error("no");
+      },
+    }) as never;
+  const counting = (signer: MatrixSigner): MatrixSigner & { calls: number } => {
+    const wrapped = (async (q: unknown, p: MatrixPurchase) => {
+      wrapped.calls += 1;
+      return await signer(q, p);
+    }) as MatrixSigner & { calls: number };
+    wrapped.calls = 0;
+    return wrapped;
+  };
+
+  test.each([
+    ["送出の後に receipt の待ちが失敗（broadcast accepted）", "accepted"],
+    ["送る前に RPC が失敗（broadcast not_observed）", "not_observed"],
+  ] as const)("Tempo MPP %s: funds_possibly_moved で止まり、同じ plan でも新しい plan でも二度と署名しない。証跡と driver.ndjson に診断", async (_name, expected) => {
+    const rpc = await startTempoRpc();
+    try {
+      if (expected === "accepted") rpc.failSend = true;
+      else rpc.http.status = 503;
+      const chain = new MatrixChain();
+      const plan = await matrixPlan(chain);
+      const routeId = "mx-tempo-to-rh";
+      const dir = tempDir();
+      const lines: string[] = [];
+      const signer = counting(matrixSignerOf({ SUBETHA_PAYER_PRIVATE_KEY: PAYER_KEY }, tempoFactories(rpc.url)));
+      const mcp = new MatrixMcp(plan, chain, { uuidPaymentIds: true });
+      const report = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: routeId }, runDeps(mcp, chain, signer, lines));
+      expect(report.stopped?.stage, lines.join("\n")).toBe("funds_possibly_moved");
+      expect(report.stopped?.reason).toMatch(/signing failed after a funds-moving signature was invoked \(signing failed\); funds may have moved/);
+      expect(signer.calls).toBe(1);
+      expect(mcp.count("subetha_router_purchase")).toBe(0);
+      const sent = rpc.sentRaw.slice();
+      expect(sent).toHaveLength(expected === "accepted" ? 1 : 0);
+      const computed = sent[0] === undefined ? undefined : keccak256(sent[0]).toLowerCase();
+      const evidence = evidenceOf(dir, report.runDir, routeId);
+      expect(evidence.signDiagnostic).toEqual({ signerStage: "pay_and_credential", broadcast: expected, ...(expected === "accepted" ? { rpcHttpStatus: 200, txRef: computed } : {}) });
+      expect(evidence.signTxRef).toBe(computed);
+      const quoteCall = mcp.calls.find((c) => c.name === "subetha_router_quote")!;
+      void quoteCall;
+      const { records, text } = driverRecordsOf(dir);
+      const sign = records.filter((r) => r.stage === "sign");
+      expect(sign).toHaveLength(1);
+      expect(sign[0]).toMatchObject({ component: "driver", fundsMayHaveMoved: true, signerStage: "pay_and_credential", broadcast: expected, paymentId: evidence.paymentId, quoteHash: quoteHashOf(String((evidence.subject as { quoteId: string }).quoteId)) });
+      expect(sign[0]!.txRef).toBe(computed);
+      expect(sign[0]!.outcome).toBeUndefined();
+      // canary: 鍵・raw tx・quoteId は残らない。
+      expect(text).not.toContain(PAYER_KEY.slice(2));
+      if (sent[0] !== undefined) expect(text).not.toContain(sent[0].slice(2, 200));
+      expect(text).not.toContain(String((evidence.subject as { quoteId: string }).quoteId));
+
+      // 同じ plan: 試みの印があり、署名しない。
+      rpc.failSend = false;
+      rpc.http.status = undefined;
+      const again = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: routeId }, runDeps(new MatrixMcp(plan, chain, { uuidPaymentIds: true }), chain, signer, lines));
+      expect(again.stopped?.reason).toMatch(/already attempted under this plan/);
+      // 新しい plan: 資金の動く署名の後なので保留（二度と署名しない）。
+      const plan2 = { ...plan, createdAt: "2026-10-13T13:00:00.000Z" } as MatrixPlan;
+      const report2 = await runMatrix({ plan: plan2, planSha256: planSha256(plan2), evidenceDir: dir, prefunded: true, only: routeId }, runDeps(new MatrixMcp(plan2, chain, { uuidPaymentIds: true }), chain, signer, lines));
+      expect(report2.stopped?.reason).toMatch(/never re-signed/);
+      expect(signer.calls).toBe(1);
+      expect(rpc.sentRaw).toHaveLength(sent.length);
+    } finally {
+      await rpc.close();
+    }
+  }, 60_000);
+
+  test("txRef は送った raw tx から計算した hash だけ。RPC の結果の hash（canary）は txRefCheck mismatch の分類にだけ使い、値は残さない", async () => {
+    const rpc = await startTempoRpc();
+    try {
+      const plan = await matrixPlan();
+      const p = plan.purchases.find((x) => x.routeId === "mx-tempo-to-rh")!;
+      const CANARY = `0x${"ca".repeat(32)}`;
+      // 試験の factory: 観測の fetchFn の外側で、送金の応答の tx hash を canary に書き換える（試験だけが本文を読む）。
+      const factories = (rewrite: boolean) =>
+        ({
+          mppPayer: (key: string, scope: never, options?: { fetchFn?: typeof fetch }) =>
+            createMppPayer(key, scope, {
+              rpcUrl: rpc.url,
+              fetchFn: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+                const response = await options!.fetchFn!(input, init);
+                if (!rewrite || typeof init?.body !== "string" || !init.body.includes("eth_sendRawTransactionSync")) return response;
+                const json = (await response.json()) as { result: Record<string, unknown> };
+                return new Response(JSON.stringify({ ...json, result: { ...json.result, transactionHash: CANARY } }), { status: 200, headers: { "content-type": "application/json" } });
+              }) as typeof fetch,
+            }),
+          evmPayer: () => {
+            throw new Error("no");
+          },
+          svmPayer: async () => {
+            throw new Error("no");
+          },
+          svmMppPayer: async () => {
+            throw new Error("no");
+          },
+        }) as never;
+      for (const [rewrite, check] of [[false, "match"], [true, "mismatch"]] as const) {
+        const response = await new MatrixMcp(plan, new MatrixChain()).call("subetha_router_quote", { routeId: p.routeId, requestId: `r-${check}` });
+        const signed = await matrixSignerOf({ SUBETHA_PAYER_PRIVATE_KEY: PAYER_KEY }, factories(rewrite))(response["quote"], p);
+        const computed = keccak256(rpc.sentRaw.at(-1)!).toLowerCase();
+        expect(signed.ok).toBe(true);
+        // 通常の経路（payer が credential から読む hash）は今と同じ。
+        expect(signed.txRef).toBe(rewrite ? CANARY : computed);
+        expect(signed.diagnostic).toMatchObject({ signerStage: "done", broadcast: "accepted", txRef: computed, txRefCheck: check });
+        expect(JSON.stringify({ ...signed.diagnostic, localTxRef: undefined })).not.toContain(CANARY.slice(2));
+      }
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  test("a signer whose diagnostic claims nothing was broadcast still stops as funds_possibly_moved (the decision never reads the diagnostic)", async () => {
+    const chain = new MatrixChain();
+    const plan = await matrixPlan(chain);
+    const dir = tempDir();
+    const signer = counting(async () => ({ ok: false, reason: "signing failed", fundsMayHaveMoved: false, diagnostic: { signerStage: "dispatch", broadcast: "not_observed" } }));
+    const report = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: "mx-tempo-to-rh" }, runDeps(new MatrixMcp(plan, chain), chain, signer, []));
+    expect(report.stopped?.stage).toBe("funds_possibly_moved");
+    const plan2 = { ...plan, createdAt: "2026-10-13T13:00:00.000Z" } as MatrixPlan;
+    const report2 = await runMatrix({ plan: plan2, planSha256: planSha256(plan2), evidenceDir: dir, prefunded: true, only: "mx-tempo-to-rh" }, runDeps(new MatrixMcp(plan2, chain), chain, signer, []));
+    expect(report2.stopped?.reason).toMatch(/never re-signed/);
+    expect(signer.calls).toBe(1);
+  });
+
+  test("purchase_call・status_call の記録（成功と失敗）。投げる sink でも結果・証跡は同じ", async () => {
+    const run = async (diagnostics: DiagnosticsSink | undefined, purchaseThrows: boolean) => {
+      const chain = new MatrixChain();
+      const plan = await matrixPlan(chain);
+      const dir = tempDir();
+      const lines: string[] = [];
+      const deps = { ...runDeps(new MatrixMcp(plan, chain, { uuidPaymentIds: true, purchaseThrows: () => purchaseThrows }), chain, fakeSigner(), lines), requestIdOf: () => "req-r6-fixed", ...(diagnostics === undefined ? {} : { diagnostics }) };
+      const report = await runMatrix({ plan, planSha256: planSha256(plan), evidenceDir: dir, prefunded: true, only: "mx-rh-to-tempo" }, deps);
+      const evidence = evidenceOf(dir, report.runDir, "mx-rh-to-tempo");
+      return { dir, report, lines, evidence };
+    };
+    const ok = await run(undefined, false);
+    expect(ok.report.stopped).toBeUndefined();
+    const okRecords = driverRecordsOf(ok.dir).records;
+    expect(okRecords.map((r) => r.stage)).toEqual(["sign", "purchase_call", "status_call"]);
+    expect(okRecords[0]).toMatchObject({ outcome: "signed", fundsMayHaveMoved: false, paymentId: ok.evidence.paymentId });
+    expect(okRecords[1]).toMatchObject({ outcome: "paid", fundsMayHaveMoved: true, paymentId: ok.evidence.paymentId });
+    expect(okRecords[2]).toMatchObject({ outcome: "paid", fundsMayHaveMoved: true });
+
+    const failed = await run(undefined, true);
+    expect(failed.report.stopped?.stage).toBe("purchase_call_failed");
+    const failedRecords = driverRecordsOf(failed.dir).records;
+    expect(failedRecords.map((r) => r.stage)).toEqual(["sign", "purchase_call", "status_call"]);
+    expect(failedRecords[1]).toMatchObject({ outcome: "threw", rpc: "other", fundsMayHaveMoved: true });
+
+    // 投げる sink・記録する sink: 報告・出力・証跡（時刻と run の id を除く）が同じ。
+    const thrown = await run(throwingDiagnostics(), true);
+    const recording = recordingDiagnostics("driver");
+    const recorded = await run(recording, true);
+    // 時刻・run の id・fake の MCP が付ける期限（quote の応答）は実行ごとに違うので除く。
+    const strip = (e: PurchaseEvidence) => ({ ...e, runId: "", startedAt: "", finishedAt: "", timingsMs: {}, quoteResponse: undefined, subject: undefined });
+    for (const other of [thrown, recorded]) {
+      expect(other.report.stopped).toEqual(failed.report.stopped);
+      expect(other.lines.map((l) => l.replace(/run-\S+/, "run"))).toEqual(failed.lines.map((l) => l.replace(/run-\S+/, "run")));
+      expect(strip(other.evidence)).toEqual(strip(failed.evidence));
+      expect(existsSync(driverDiagnosticsPathOf(other.dir))).toBe(false);
+    }
+    expect(recording.records().map((r) => r.stage)).toEqual(["sign", "purchase_call", "status_call"]);
+    expect(recording.rejected()).toBe(0);
   });
 });
 

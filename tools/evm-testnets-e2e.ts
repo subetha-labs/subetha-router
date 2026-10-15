@@ -34,7 +34,7 @@ import { stableJson } from "../src/core/intent.js";
 import { KNOWN_NETWORKS, knownAssetOf, knownNetworkOf } from "../src/shared/networks.js";
 import { DEFAULT_MAX_FEE_PER_GAS, DEFAULT_MAX_SETTLE_GAS, DEFAULT_RPC_URLS } from "./evm-facilitator.js";
 import { EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmInboundRouteOf, evmOutboundRouteOf, evmTestnetChainsOf, evmTestnetsConfigOf, INBOUND, type EvmTestnetChain } from "./remote-mcp-config.js";
-import { runSign } from "./sign-run.js";
+import { runSign, type SignStage } from "./sign-run.js";
 
 /* ────────────────────────────────────────────────────────────────────────────── 定数 */
 
@@ -902,7 +902,8 @@ export async function connectMcp(url: string, bearer: string | undefined): Promi
 
 /* ────────────────────────────────────────────────────────────────────────────── 署名（`npm run sign` と同じ `runSign`） */
 
-export type SignResult = { readonly ok: true; readonly credential: string; readonly chainId: number } | { readonly ok: false; readonly reason: string };
+/** `signerStage`: `runSign` の最後の段（診断。観測だけ）。 */
+export type SignResult = { readonly ok: true; readonly credential: string; readonly chainId: number; readonly signerStage?: SignStage } | { readonly ok: false; readonly reason: string; readonly signerStage?: SignStage };
 export type Signer = (quote: unknown, expectedPayer: string) => Promise<SignResult>;
 
 /** `runSign` に x402 の EVM の payer だけを渡す（MPP・Solana は拒む: この driver の経路は全部 x402 の EIP-3009 で、署名で資金は動かない）。 */
@@ -914,8 +915,14 @@ export function runSignSigner(env: Env, nowMs: () => number = Date.now): Signer 
     const refuse = (): never => {
       throw new Error("only x402 EVM offers are signed by this driver");
     };
+    // 最後の段（診断。結果の判断はこれを読まない）。
+    let lastStage: SignStage | undefined;
+    const staged = <T extends SignResult>(result: T): T => (lastStage === undefined ? result : { ...result, signerStage: lastStage });
     try {
       const outcome = await runSign(quote, {
+        onStage: (event) => {
+          lastStage = event.stage;
+        },
         nowMs,
         readEvmKey: () => key,
         readSolanaKey: refuse,
@@ -929,13 +936,13 @@ export function runSignSigner(env: Env, nowMs: () => number = Date.now): Signer 
         svmMppPayer: async () => refuse(),
         stderr: () => {},
       });
-      if (!outcome.ok) return { ok: false, reason: outcome.reason };
-      if (outcome.dispatch.kind !== "x402-evm") return { ok: false, reason: "the offer is not an x402 EVM offer" };
-      return { ok: true, credential: outcome.stdout.trim(), chainId: outcome.dispatch.chainId };
+      if (!outcome.ok) return staged({ ok: false, reason: outcome.reason });
+      if (outcome.dispatch.kind !== "x402-evm") return staged({ ok: false, reason: "the offer is not an x402 EVM offer" });
+      return staged({ ok: true, credential: outcome.stdout.trim(), chainId: outcome.dispatch.chainId });
     } catch (error) {
       // 例外の文言に鍵は入らない（x402-payer・runSign の固定文）。念のため固定文に寄せる。
       const message = error instanceof Error && /payer key does not belong|only x402 EVM/.test(error.message) ? error.message : "signing failed";
-      return { ok: false, reason: message };
+      return staged({ ok: false, reason: message });
     }
   };
 }
@@ -1148,6 +1155,11 @@ export interface PurchaseEvidence {
   fundsMoveAtSign?: boolean;
   /** 行列: Tempo MPP の署名が返した送金の tx（あれば）。 */
   signTxRef?: string;
+  /**
+   * 署名の診断（観測だけ。`docs/rejection-reasons-design.md` §6。印・保留・止める判断はこれを読まない）。
+   * 行列: 最後の段・`broadcast`・`rpc`・送る raw tx から手元で計算した `txRef`（RPC の結果ではない）。x402 の e2e: 最後の段だけ。
+   */
+  signDiagnostic?: { readonly signerStage?: string; readonly broadcast?: string; readonly rpc?: string; readonly rpcHttpStatus?: number; readonly txRef?: string; readonly txRefCheck?: string };
   stopReason?: string;
   startedAt: string;
   finishedAt?: string;
@@ -1534,6 +1546,8 @@ export async function runPurchases(opts: RunOptions, deps: RunDeps): Promise<Run
 
     // 3) 署名（`npm run sign` と同じ `runSign`。x402 の EIP-3009 は署名だけで資金は動かない）。
     const signed = await deps.sign(quoteDoc, planned.source.from);
+    // 診断: 最後の段を証跡に（観測だけ。下の判断は `signed.ok` だけを読む）。
+    if (signed.signerStage !== undefined) evidence.signDiagnostic = { signerStage: signed.signerStage };
     if (!signed.ok) return stop("sign_refused", `signing refused: ${signed.reason} (no payment started)`);
     deps.secrets.add(signed.credential);
     const expectedChainId = Number(planned.source.network.split(":")[1]);
