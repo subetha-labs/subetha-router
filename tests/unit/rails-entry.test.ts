@@ -312,6 +312,8 @@ describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入
       ROUTER_MPP_INBOUND_SECRET: baseEnv.SUBETHA_MPP_INBOUND_SECRET,
       ROUTER_MPP_INBOUND_OFFER_SECONDS: "600",
       [RAILS_ACTIVATION_ENV]: "",
+      // 診断の記録（タスク R-2）: journal の隣のファイル。
+      SUBETHA_DIAGNOSTICS_PATH: path.join(path.dirname(plan.journalPath), "diagnostics", "router.ndjson"),
     });
     expect(plan.config).toEqual(routerConfigOf(baseEnv, RECEIVER, true));
   });
@@ -328,8 +330,10 @@ describe("ホストの起動の計画（hostPlanOf。公開の入口と受け入
     expect(config.router.routes[ROUTE_SOL]).toBeUndefined();
     // 無効の計画と同じ関数・同じ env で、違うのは有効化と journal だけ。
     const publicPlan = hostPlanOf({ activation: NONE, bind: "0.0.0.0", port: 8787, journalPath: publicJournalPathOf({}) }, { ...baseEnv, [ARC_RECEIVER_KEY_ENV]: key });
-    const { ROUTER_JOURNAL_PATH: _j1, [RAILS_ACTIVATION_ENV]: _a1, [ARC_RECEIVER_KEY_ENV]: _k1, ...acceptanceRest } = plan.childEnv;
-    const { ROUTER_JOURNAL_PATH: _j2, [RAILS_ACTIVATION_ENV]: _a2, ...publicRest } = publicPlan.childEnv;
+    // 診断の記録のファイル（タスク R-2）も journal と同じく違う（それぞれの journal の隣）。
+    expect(plan.childEnv["SUBETHA_DIAGNOSTICS_PATH"]).toBe(path.resolve("/tmp/acc/diagnostics/router.ndjson"));
+    const { ROUTER_JOURNAL_PATH: _j1, [RAILS_ACTIVATION_ENV]: _a1, [ARC_RECEIVER_KEY_ENV]: _k1, SUBETHA_DIAGNOSTICS_PATH: _d1, ...acceptanceRest } = plan.childEnv;
+    const { ROUTER_JOURNAL_PATH: _j2, [RAILS_ACTIVATION_ENV]: _a2, SUBETHA_DIAGNOSTICS_PATH: _d2, ...publicRest } = publicPlan.childEnv;
     expect(acceptanceRest).toEqual(publicRest);
   });
 

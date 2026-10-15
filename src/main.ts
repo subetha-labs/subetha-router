@@ -50,6 +50,7 @@ import { DynamicGate } from "./core/dynamic-gate.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
 import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
+import { currentDiagnosticScopeFrame, NOOP_DIAGNOSTICS, safeEmit, type DiagnosticsSink } from "./shared/diagnostics.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import type {
   EvmSigningCapability,
@@ -139,6 +140,61 @@ export interface RouterCapabilities {
    * 渡されたときは、該当の URL のうち host が loopback のものが allowlist に無ければ起動しない（fetch 時の拒否に任せない）。
    */
   readonly localCounterparties?: { readonly origins: readonly string[] };
+  /**
+   * 診断の記録（`docs/rejection-reasons-design.md` §2.1・§2.3、タスク R-2）。本番では公開の子（`tools/remote-router-process.ts`）だけが、
+   * `SUBETHA_DIAGNOSTICS_PATH` があるときにファイルの sink を渡す。無ければ `NOOP`（何も記録しない。結果・journal・stderr は同じ）。
+   * `flush`・`close` があれば drain・停止の終わりに短い上限つきで呼ぶ（best effort）。
+   */
+  readonly diagnostics?: ClosableDiagnosticsSink;
+}
+
+/** 停止の前に書き出しを待てる sink（ファイルの sink）。`close` は reject しない契約。 */
+export type ClosableDiagnosticsSink = DiagnosticsSink & {
+  readonly close?: (options?: { readonly timeoutMs?: number }) => Promise<void>;
+};
+
+/** 停止の前の書き出しの上限（ms）。process の終了を長く止めない（§13.2 と同じ桁）。 */
+export const DIAGNOSTICS_CLOSE_TIMEOUT_MS = 500;
+
+/**
+ * 診断の sink を短い上限つきで閉じる（停止の経路）。`close` が無い・投げる・止まるときも上限で戻る。reject しない。
+ */
+export async function closeDiagnosticsWithin(sink: ClosableDiagnosticsSink | undefined, timeoutMs: number = DIAGNOSTICS_CLOSE_TIMEOUT_MS): Promise<void> {
+  if (sink === undefined || typeof sink.close !== "function") return;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      // close 自身の flush の上限は全体の半分ずつ（close は flush を 2 回まで待つ）。
+      Promise.resolve(sink.close({ timeoutMs: Math.max(0, Math.floor(timeoutMs / 2)) })).catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } catch {
+    // 診断の失敗は停止の経路に出さない。
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * transport の `report` を診断に結びつける（§2.3 の 2、D-12）: 元の `report` を **先にそのまま** 呼び（stderr は byte 一致、例外もそのまま）、
+ * 購入の診断の scope の中のときだけ `transport_event` を push する。scope の外（quote・起動時の検査）の出来事は記録しない。
+ * sink が無ければ元の関数をそのまま返す。
+ */
+export function diagnosticReportOf(report: (event: TransportEvent) => void, sink: DiagnosticsSink | undefined): (event: TransportEvent) => void {
+  if (sink === undefined || sink === NOOP_DIAGNOSTICS) return report;
+  return (event) => {
+    report(event);
+    try {
+      if (currentDiagnosticScopeFrame() === undefined) return;
+    } catch {
+      return;
+    }
+    const code = event.code;
+    const operation = event.operation;
+    safeEmit(sink, () => ({ stage: "transport_event", transport: code, op: operation }));
+  };
 }
 
 /** `localCounterparties` の origin の形（`http://127.0.0.1:<port>`。port は 1..65535、前ゼロなし）。 */
@@ -567,9 +623,11 @@ export interface ComposedRails {
 export function composeRails(
   config: RuntimeConfig,
   capabilities: RouterCapabilities,
-  report: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
+  reportToOperator: (event: TransportEvent) => void = reportTransportToStderr((m) => process.stderr.write(m)),
   note: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
 ): ComposedRails {
+  // 全部の transport が共有する `report`（§2.3 の 2）。元の出口を先に呼び、購入の scope の中だけ診断に残す。
+  const report = diagnosticReportOf(reportToOperator, capabilities.diagnostics);
   // loopback の相手の allowlist（設計 §3.5）。形の検査は構成によらず起動時に（fail closed）。能力が無ければ `undefined`。
   const localOrigins = localCounterpartyOriginsOf(capabilities.localCounterparties);
   // 合成レールは `synthetic` を明示したときだけ（既定では選ばれない）。
@@ -1247,6 +1305,7 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     ...(rails.dynamic === undefined ? {} : { dynamic: dynamicCoreOptionsOf(rails.dynamic, capabilities, config) }),
     // journal の消費済み署名を MPP Solana 受信に見せる（`docs/mpp-solana-design.md` §2.3）。load の直後、core が公開される前。
     onStoreLoaded: rails.bindConsumed,
+    ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
   });
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。
@@ -1309,11 +1368,15 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
       drain.close();
       server.stopListening();
       if (!(await drain.idle(drainTimeoutMs))) {
+        // 診断の書き出しは短い上限つき（best effort。`router drain: timeout` の行と exit code は今のまま）。
+        await closeDiagnosticsWithin(capabilities.diagnostics);
         process.stderr.write("router drain: timeout\n");
         process.exit(1);
       }
       // 進行中の要求は 0。残る接続（keep-alive の空き）は process の終了で閉じる（`server.close()` の完了は待たない）。
       await core.close();
+      // 診断の記録を短い上限つきで書き出して閉じる（journal を閉じた後。失敗・時間切れは無視）。
+      await closeDiagnosticsWithin(capabilities.diagnostics);
       process.stderr.write("router drain: complete\n");
       process.exit(0);
     })();

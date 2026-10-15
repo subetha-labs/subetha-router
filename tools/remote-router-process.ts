@@ -16,6 +16,7 @@
 
 import { reportStartupFailure, startRouter, type RouterCapabilities } from "../src/main.js";
 import { ProcessEntryError, routerProcessCapabilitiesOf } from "./rails-entry.js";
+import { routerDiagnosticsSinkOf } from "./router-diagnostics.js";
 
 /**
  * 能力の組み立ては純粋関数 `routerProcessCapabilitiesOf`（`tools/rails-entry.ts`）。ここは env を渡して結果を注入するだけ。
@@ -56,4 +57,10 @@ if (capabilities.mppTempo !== undefined) {
   );
 }
 
-startRouter(capabilities).catch(reportStartupFailure);
+/**
+ * 診断の記録（`docs/rejection-reasons-design.md` §2.1、タスク R-2）: 入口が `SUBETHA_DIAGNOSTICS_PATH` を渡したときだけファイルの sink を足す
+ * （`routerProcessCapabilitiesOf` は純粋なまま）。無ければ no-op。path はログに出さない。
+ */
+const diagnostics = routerDiagnosticsSinkOf(process.env);
+
+startRouter(diagnostics === undefined ? capabilities : { ...capabilities, diagnostics }).catch(reportStartupFailure);

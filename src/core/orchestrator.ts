@@ -29,6 +29,9 @@ import {
   type PublicStatus,
 } from "./intent.js";
 import { openJournal, type Journal } from "./journal.js";
+import { classifyTransportError } from "../net/guarded-fetch.js";
+import type { DiagnosticsSink } from "../shared/diagnostics.js";
+import { DISABLED_PURCHASE_DIAGNOSTICS, withPurchaseDiagnostics, type PurchaseDiagnostics } from "./purchase-diagnostics.js";
 import { IntentCollisionError, IntentStore } from "./store.js";
 
 export interface QuoteRequest {
@@ -159,6 +162,11 @@ export interface RouterCoreOptions {
    * 読むための口（`docs/mpp-solana-design.md` §2.3）。読取だけ。省略時は何もしない。
    */
   readonly onStoreLoaded?: (view: { readonly settledSourceTxRefs: ReadonlySet<string> }) => void;
+  /**
+   * 診断の記録（`docs/rejection-reasons-design.md` §2.3・§4.1、タスク R-2）。省略時は `NOOP`（何もしない）。core は push するだけで、
+   * 記録を読まない（journal・応答・判断は sink の有無で同じ）。
+   */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 export interface RouterCore {
@@ -377,6 +385,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         note: options.note,
         balanceOf: options.balanceOf ?? options.dynamic?.balanceOf,
         deliver,
+        ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
       });
       // 期限切れの控えと古いファイルの定期的な削除（設計 §6.1）。
       const sweeping = ledger;
@@ -506,6 +515,13 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     if (intent === undefined) {
       return outcomeOf("rejected", "unknown_quote");
     }
+    // 購入の全体の診断の scope（§12.6）。sink が無ければ scope を作らずそのまま動かす。
+    return withPurchaseDiagnostics(options.diagnostics, { paymentId: intent.paymentId, quoteId: intent.quoteId, routeId: intent.routeId, promoted: true }, (diag) =>
+      purchaseStatic(intent, request, diag),
+    );
+  }
+
+  async function purchaseStatic(intent: Intent, request: PurchaseRequest, diag: PurchaseDiagnostics): Promise<PurchaseOutcome> {
     // 動的の intent は静的の流れで実行しない（持ち主の証明・昇格の規則が違う）。
     if (intent.dynamic !== undefined || intent.dynamicInvalid === true) {
       return outcomeOf("rejected", "unknown_quote");
@@ -643,27 +659,34 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     await store.append(intent.paymentId, "source_pending", {});
 
     let verified: { isValid: boolean; fundsMoved?: boolean };
+    const verifyStartedAt = diag.start();
     try {
-      verified = await options.inbound.verify(intent.source.offer, credential, { routeId: intent.routeId });
-    } catch {
+      verified = await diag.stage({ promoted: true }, () => options.inbound.verify(intent.source.offer, credential, { routeId: intent.routeId }));
+    } catch (error) {
       // 受信レールの応答が取れない以上、課金有無を証明できない。
       await store.append(intent.paymentId, "unknown", {
         outcome: "none",
         reason: "source_verify_unavailable",
       });
+      const elapsedMs = diag.elapsedSince(verifyStartedAt);
+      diag.note(() => ({ stage: "source_verify", outcome: "threw", transport: classifyTransportError(error), code: "source_verify_unavailable", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
       return {
         paymentId: intent.paymentId,
         status: "unknown",
         terminalReason: "source_verify_unavailable",
       };
     }
+    const verifyElapsedMs = diag.elapsedSince(verifyStartedAt);
     if (verified === null || typeof verified !== "object" || verified.isValid !== true) {
       await store.append(intent.paymentId, "source_failed", {
         outcome: "rejected",
         reason: "verify_failed",
       });
+      diag.note(() => ({ stage: "source_verify", outcome: "invalid", code: "verify_failed", ...(verifyElapsedMs === undefined ? {} : { elapsedMs: verifyElapsedMs }) }));
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "verify_failed" };
     }
+    // verify の成立の記録も控えるだけ（push は購入の終わり = 下の期限の判定の後。§12.3）。
+    diag.note(() => ({ stage: "source_verify", outcome: "valid", ...(verifyElapsedMs === undefined ? {} : { elapsedMs: verifyElapsedMs }) }));
 
     /**
      * verify が通った credential の資金が**既に動いている**か（adapter の `fundsMoved`、無ければ offer の `fundsMoveOnCredential`）。
@@ -737,20 +760,26 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
     // 宣言型ではなく実際の値として扱う（相手の振る舞いは型では保証されない）。
     let settled: unknown;
+    const settleStartedAt = diag.start();
     try {
-      settled = await options.inbound.settle(intent.source.offer, credential, { routeId: intent.routeId });
-    } catch {
+      settled = await diag.stage({ promoted: true }, () => options.inbound.settle(intent.source.offer, credential, { routeId: intent.routeId }));
+    } catch (error) {
       // 例外・タイムアウトは必ず `unknown`。自動再 settle はしない。
       await store.append(intent.paymentId, "unknown", {
         outcome: "none",
         reason: "source_settle_unknown",
       });
+      const elapsedMs = diag.elapsedSince(settleStartedAt);
+      diag.note(() => ({ stage: "source_settle", outcome: "threw", transport: classifyTransportError(error), code: "source_settle_unknown", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
       return {
         paymentId: intent.paymentId,
         status: "unknown",
         terminalReason: "source_settle_unknown",
       };
     }
+    const settleElapsedMs = diag.elapsedSince(settleStartedAt);
+    const settleNote = (outcome: "settled" | "rejected" | "unknown", code?: string): void =>
+      diag.note(() => ({ stage: "source_settle", outcome, ...(code === undefined ? {} : { code }), ...(settleElapsedMs === undefined ? {} : { elapsedMs: settleElapsedMs }) }));
     // 応答は実行時に検査する（TypeScript の型は相手の振る舞いを保証しない）。
     const outcome = isRecord(settled) ? settled["outcome"] : undefined;
     if (outcome === "rejected") {
@@ -758,6 +787,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         outcome: "rejected",
         reason: safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected"),
       });
+      settleNote("rejected", safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected"));
       return {
         paymentId: intent.paymentId,
         status: "awaiting_payment",
@@ -775,9 +805,11 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
          * `unknown`（行なし）か `paid_undelivered`（append は成功し fsync だけ失敗 = 行あり）。どちらも再送しない。
          */
         options.note?.(`source_settled could not be journaled (paymentId=${intent.paymentId}); answering unknown`);
+        settleNote("settled", "source_settle_unknown");
         return { paymentId: intent.paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
       }
-      return deliver(intent.paymentId);
+      settleNote("settled");
+      return deliver(intent.paymentId, diag);
     }
 
     // `unknown`・契約にない outcome・証跡のない `settled` は一律 `unknown`。
@@ -786,6 +818,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       outcome: "none",
       reason: "source_settle_unknown",
     });
+    settleNote("unknown", "source_settle_unknown");
     return {
       paymentId: intent.paymentId,
       status: "unknown",
@@ -794,11 +827,23 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
   }
 
   /** 受信成立後の送信レグ。write-ahead 予約を fsync してから送出する。 */
-  async function deliver(paymentId: string): Promise<PurchaseOutcome> {
+  async function deliver(paymentId: string, diag: PurchaseDiagnostics = DISABLED_PURCHASE_DIAGNOSTICS): Promise<PurchaseOutcome> {
     const intent = store.byPaymentId(paymentId);
     if (intent === undefined) {
       return outcomeOf("rejected", "unknown_payment");
     }
+    /** 送信の段の記録（`dest_outcome`。§4.1）。控えるだけで、push は購入の終わり。 */
+    const destNote = (outcome: "paid" | "paid_no_data" | "not_sent" | "rejected" | "unknown" | "threw", code: string | undefined, extra: { readonly attempt?: number; readonly elapsedMs?: number | undefined; readonly error?: unknown } = {}): void =>
+      diag.note(() => ({
+        stage: "dest_outcome",
+        outcome,
+        // 送信は受信が成立した後だけ（動的でも昇格の後）。push は購入の scope（動的の昇格の前の値）で行うので、欄で明示する。
+        promoted: true,
+        ...(code === undefined ? {} : { code }),
+        ...(extra.attempt === undefined ? {} : { attempt: extra.attempt }),
+        ...(outcome === "threw" ? { transport: classifyTransportError(extra.error) } : {}),
+        ...(extra.elapsedMs === undefined ? {} : { elapsedMs: extra.elapsedMs }),
+      }));
 
     // 送金直前にもう一度上流の現在の challenge を読み直す（手順 4 の後に起きた
     // 変更へのレース対策）。ここで外れたら署名も送信もしない。受信レグは成立済みな
@@ -806,6 +851,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 動的の intent で上流が読めない形なら、送信しない（読めない値で払わない）。
     if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true) {
       await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason: "quote_changed" });
+      destNote("not_sent", "quote_changed");
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
     }
     let stillOffered: boolean;
@@ -817,6 +863,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         outcome: "not_sent",
         reason: "offer_unavailable",
       });
+      destNote("not_sent", "offer_unavailable");
       return { paymentId, status: "paid_data_unavailable", terminalReason: "offer_unavailable" };
     }
     if (!stillOffered) {
@@ -824,6 +871,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         outcome: "not_sent",
         reason: "quote_changed",
       });
+      destNote("not_sent", "quote_changed");
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
     }
 
@@ -832,8 +880,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
     // 宣言型ではなく実際の値として扱う。
     let result: unknown;
+    const payStartedAt = diag.start();
     try {
-      result = await options.outbound.pay({
+      result = await diag.stage({ attempt, promoted: true }, () => options.outbound.pay({
         routeId: intent.routeId,
         offer: intent.destination.selectedOffer,
         paymentId,
@@ -844,19 +893,22 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         ...(intent.upstream === undefined ? {} : { target: upstreamTargetOf(intent.upstream) }),
         // 動的 MPP 送信: quote が決めた署名時の上限（cap）。adapter は無ければ送らない。
         ...(intent.dynamic?.pricing.maxFee === undefined ? {} : { maxFee: intent.dynamic.pricing.maxFee }),
-      });
-    } catch {
+      }));
+    } catch (error) {
       // 送金有無が不明。例外文字列は残さず固定の理由コードだけ記録する。
       await store.append(paymentId, "unknown", {
         outcome: "unknown",
         reason: "destination_pay_unknown",
       });
+      destNote("threw", "destination_pay_unknown", { attempt, elapsedMs: diag.elapsedSince(payStartedAt), error });
       return { paymentId, status: "unknown", terminalReason: "destination_pay_unknown" };
     }
+    const payElapsedMs = diag.elapsedSince(payStartedAt);
 
     // `null` / `undefined` / 契約にない形も含めて、参照する前に形を検査する。
     const unknownDestination = async (reason: string): Promise<PurchaseOutcome> => {
       await store.append(paymentId, "unknown", { outcome: "unknown", reason });
+      destNote("unknown", reason, { attempt, elapsedMs: payElapsedMs });
       return { paymentId, status: "unknown", terminalReason: reason };
     };
     if (!isRecord(result)) {
@@ -879,6 +931,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           ...(typeof txRef === "string" && txRef !== "" ? { txRef } : {}),
           ...(typeof receiptRef === "string" && receiptRef !== "" ? { receiptRef } : {}),
         });
+        destNote("paid", undefined, { attempt, elapsedMs: payElapsedMs });
         // 応答は永続化済みの結果を読み戻す（adapter 所有の可変オブジェクトを返さない）。
         const stored = store.byPaymentId(paymentId);
         return {
@@ -895,6 +948,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           reason,
           ...(typeof receiptRef === "string" && receiptRef !== "" ? { receiptRef } : {}),
         });
+        destNote("paid_no_data", reason, { attempt, elapsedMs: payElapsedMs });
         return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
       }
       case "not_sent":
@@ -904,6 +958,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           outcome: result["outcome"],
           reason,
         });
+        destNote(result["outcome"] as "not_sent" | "rejected", reason, { attempt, elapsedMs: payElapsedMs });
         return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
       }
       default:
