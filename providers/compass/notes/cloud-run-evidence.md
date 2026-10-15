@@ -88,3 +88,14 @@ run `cloud-run-run-cr2-t3`、id `crp-4afa9e46035241b2`、asia-southeast1、L4 1�
 - 概算費用：build 約 USD0.7 + L4 約 28 分 約 USD0.8 ≒ USD1.5。3 回累計で約 USD3.3（請求額は未確認、credit も未確認）。
 
 既知の未修正（nonblocking）：`main()` が cleanup 後に書く `gpu_seconds_used` は cleanup lock の外で書かれ、watchdog の cleanup pass に上書きされた（manifest に値がない）。再試行経路の枠計算に使う値なので、次回変更時に lock 内へ移すこと。今回は再試行が不要だったため影響なし。
+
+## Compass Provider 公開（2026-10-16 JST）
+
+run `cloud-run-run-pub001`、id `crp-1dfd368b2ec1473b`。設計 §0.4・tasks §0.4 の P-4。
+
+- 受取アドレス（使い捨て、controller 保管、owner 指示）`0x209917d5F409440a245a2344F8144Dd5343912C1`。停止規則は owner 確認済み（8 GPU 時間または予算 90% で service 削除）。
+- build 1 回：23:47〜00:17 JST、digest `sha256:88db8ab6…`、context 16 ファイル（`x402-gate.mjs` を含む）。
+- 公開計画 hash `1174b4a5…` を親が承認 → `--publish`：nonce bucket（非公開）＋ runtime SA の objectAdmin、service create（revision `-00001`）、PUBLIC_URL を実 URL に合わせる更新（revision `-00002`）、`allUsers` invoker。00:26 JST に `/health` 200（`ready:true`、開示文付き）、`phase=retained`、削除期限 2026-10-28T15:00Z。
+- 外部からの確認：`/health` 200（0.11 秒、warm）、未払い `POST /select` → 402（`eip155:84532`、USDC `0x036C…CF7e`、`amount 10000`、`payTo` 上記、`maxTimeoutSeconds 60`、`resource.url` = 公開 URL）、`POST /internal/v1/select` → 404。service の containerConcurrency 2。
+- `--readback` 初回：GPU 稼働 600 秒（公開開始から）、warn/stop_due なし。
+- 未実施：受入 (1) 直接購入（試験用 payer `0x9f85…07Bb` が未入金）、(2) Router 経由、(3)〜(11)。Billing 予算アラート（owner の Console 操作）未設定。
