@@ -90,6 +90,21 @@ export const DIAG_OPS = [
   "solana_rpc_ata",
   "solana_rpc_balance",
   "solana_rpc_blockhash",
+  // 自前の facilitator の RPC（`tools/evm-facilitator.ts` の `FacilitatorRpcOp`。§5.3、タスク R-5）
+  "authorization_state",
+  "block_number",
+  "block_timestamp",
+  "authorization_used_logs",
+  "receipt",
+  "wait_for_receipt",
+  "fees_per_gas",
+  "estimate_transfer_gas",
+  "transfer_with_authorization",
+  "reconcile",
+  "sdk_verify",
+  "sdk_read_contract",
+  "sdk_verify_typed_data",
+  "sdk_get_code",
   "other",
 ] as const;
 export type DiagOp = (typeof DIAG_OPS)[number];
@@ -352,7 +367,79 @@ export interface DiagCapture {
   readonly rawCid?: DiagCidInput;
   /** 手元で計算した tx の hash（`localTxRefOf` の値だけ。component `signer`・`driver` だけが書ける。ほかは行ごと捨てる）。 */
   readonly txRef?: LocalTxRef;
+  /**
+   * RPC の例外の写し（`DiagRpcErrorSnapshot`。§5.3、タスク R-5）。後回しの処理で `classifyRpcSnapshot` が `rpc`・`rpcHttpStatus`・`rpcCode`・
+   * `code`（`deadline`）にする（hook では分類しない: §13.1・§15.1）。明示の `rpc` などの欄があればそちらが優先。
+   */
+  readonly rawRpc?: DiagRpcErrorSnapshot;
 }
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * RPC の例外の写しと分類（§5.3。分類は後回しの処理で）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+/** 例外の 1 段の種類（hook が型・`name` から決める）。 */
+export const DIAG_RPC_NODE_KINDS = ["http", "limit", "timeout", "deadline", "plain"] as const;
+export type DiagRpcNodeKind = (typeof DIAG_RPC_NODE_KINDS)[number];
+/** 辿る段の数（自分を含めて 5 つ）。 */
+export const DIAG_RPC_SNAPSHOT_DEPTH = 5;
+/**
+ * RPC の例外の写し: 段ごとに `[種類, 数値の status か null, 数値の code か null]` を平らに並べた primitive だけの配列（最大 5 段 = 15 要素）。
+ * 例外の object・文言は持たない。
+ */
+export type DiagRpcErrorSnapshot = readonly (DiagRpcNodeKind | number | null)[];
+
+const RPC_RATE_LIMIT_CODE = -32005;
+const rpcStatusOf = (value: unknown): number | undefined => (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined);
+const rpcCodeValueOf = (value: unknown): number | undefined => (typeof value === "number" && Number.isInteger(value) && value >= -(2 ** 31) && value <= 2 ** 31 ? value : undefined);
+
+/** RPC の失敗の分類（記録の欄）。 */
+export interface DiagRpcClass {
+  readonly rpc: (typeof DIAG_RPC_CLASSES)[number];
+  readonly rpcHttpStatus?: number;
+  readonly rpcCode?: number;
+  readonly code?: "deadline";
+}
+
+/**
+ * 写しを分類する（純粋。§5.3 の表）。各段で表の順に最初に当たったもの: `http` の 429 → `rate_limited`（status）、`limit`・code -32005 →
+ * `rate_limited`（code）、`timeout` → `timeout`、`deadline` → `timeout`（`code: "deadline"`）、ほかの `http` → `other`（status）、ほかの数値の code →
+ * `other`（code）。どの段にも当たらなければ `other`。範囲の外の status・code は写さない。
+ */
+export function classifyRpcSnapshot(snapshot: DiagRpcErrorSnapshot): DiagRpcClass {
+  for (let i = 0; i + 2 < snapshot.length && i < DIAG_RPC_SNAPSHOT_DEPTH * 3; i += 3) {
+    const kind = snapshot[i];
+    const status = kind === "http" ? rpcStatusOf(snapshot[i + 1]) : undefined;
+    const code = rpcCodeValueOf(snapshot[i + 2]);
+    if (kind === "http" && status === 429) return { rpc: "rate_limited", rpcHttpStatus: status };
+    if (kind === "limit" || code === RPC_RATE_LIMIT_CODE) return { rpc: "rate_limited", ...(code === undefined ? {} : { rpcCode: code }) };
+    if (kind === "timeout") return { rpc: "timeout" };
+    if (kind === "deadline") return { rpc: "timeout", code: "deadline" };
+    if (kind === "http") return { rpc: "other", ...(status === undefined ? {} : { rpcHttpStatus: status }) };
+    if (code !== undefined) return { rpc: "other", rpcCode: code };
+  }
+  return { rpc: "other" };
+}
+
+/** 写しの形（push の時点で確かめて凍結した写しを作る。外れれば `undefined`）。 */
+function rpcSnapshotCopyOf(value: unknown): DiagRpcErrorSnapshot | undefined {
+  if (!Array.isArray(value) || value.length > DIAG_RPC_SNAPSHOT_DEPTH * 3 || value.length % 3 !== 0) return undefined;
+  const out: Array<DiagRpcNodeKind | number | null> = [];
+  for (let i = 0; i < value.length; i += 1) {
+    const item: unknown = value[i];
+    if (i % 3 === 0) {
+      if (typeof item !== "string" || !(DIAG_RPC_NODE_KINDS as readonly string[]).includes(item)) return undefined;
+      out.push(item as DiagRpcNodeKind);
+    } else {
+      if (item !== null && typeof item !== "number") return undefined;
+      out.push(item);
+    }
+  }
+  return Object.freeze(out);
+}
+
+/** 写しの量の見積り（15 要素の固定の上限）。 */
+const DIAG_RPC_SNAPSHOT_COST = DIAG_RPC_SNAPSHOT_DEPTH * 3 * 16 + 64;
 
 /** 互換の名前（設計 §2.2 の `DiagRecordInput`）。 */
 export type DiagRecordInput = DiagCapture;
@@ -445,7 +532,7 @@ export function localTxRefOf(signedTransaction: Uint8Array | `0x${string}`): Loc
 }
 
 /** 凍結した写し（固定の欄だけ。値は primitive か印か凍結した `rawCid`）。 */
-export type CapturedValue = string | number | boolean | null | typeof OVERSIZE | typeof INVALID | Readonly<Record<"network" | "asset" | "from" | "nonce", string>>;
+export type CapturedValue = string | number | boolean | null | typeof OVERSIZE | typeof INVALID | Readonly<Record<"network" | "asset" | "from" | "nonce", string>> | DiagRpcErrorSnapshot;
 export type CapturedFields = Readonly<Record<string, CapturedValue>>;
 
 /** 凍結した写しと、その見積りの量（バイト）。 */
@@ -484,8 +571,8 @@ const CAPTURE_FIELDS: ReadonlyArray<readonly [string, FieldKind]> = [
   ["fundsMayHaveMoved", "boolean"],
   ["signerStage", "string"],
 ];
-/** 写す欄の数（固定。`rawReason`・`rawCid`・`txRef` を含む）。push の仕事はこの数の読み取りで上限がある。 */
-export const DIAG_CAPTURE_FIELD_COUNT = CAPTURE_FIELDS.length + 3;
+/** 写す欄の数（固定。`rawReason`・`rawCid`・`txRef`・`rawRpc` を含む）。push の仕事はこの数の読み取りで上限がある。 */
+export const DIAG_CAPTURE_FIELD_COUNT = CAPTURE_FIELDS.length + 4;
 
 /** 4 つの文字列だけを写す（型が違う・大きすぎれば `undefined`）。 */
 function cidCopyOf(value: unknown): { copy: Readonly<Record<"network" | "asset" | "from" | "nonce", string>>; bytes: number } | undefined {
@@ -556,6 +643,15 @@ export function snapshotCapture(capture: DiagCapture): CaptureSnapshot {
       out["txRef"] = hash;
     } else {
       out["txRef"] = INVALID;
+    }
+  }
+  const rawRpc = source["rawRpc"];
+  if (rawRpc !== undefined) {
+    const copy = rpcSnapshotCopyOf(rawRpc);
+    if (copy === undefined) out["rawRpc"] = INVALID;
+    else {
+      cost += DIAG_RPC_SNAPSHOT_COST;
+      out["rawRpc"] = copy;
     }
   }
   return { value: Object.freeze(out), cost };
@@ -827,9 +923,11 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
     out["table"] = REASON_TABLE_VERSION;
   }
   for (const key of DIRECT_KEYS_AFTER_REASON) put(key, c[key]);
-  const code = c["code"];
+  // RPC の例外の写しはここで分類する（§13.1: hook は写すだけ）。明示の欄が優先。
+  const rpcClass = c["rawRpc"] !== undefined ? (classifyRpcSnapshot(c["rawRpc"] as DiagRpcErrorSnapshot) as unknown as Record<string, unknown>) : {};
+  const code = c["code"] !== undefined ? c["code"] : rpcClass["code"];
   if (code !== undefined) out["code"] = typeof code === "string" && DIAG_CODES.has(code) ? code : "unrecognized";
-  for (const key of DIRECT_KEYS_TAIL) put(key, c[key]);
+  for (const key of DIRECT_KEYS_TAIL) put(key, c[key] !== undefined ? c[key] : rpcClass[key]);
   const elapsed = c["elapsedMs"];
   if (elapsed !== undefined) out["elapsedMs"] = typeof elapsed === "number" && Number.isFinite(elapsed) ? Math.round(elapsed) : elapsed;
   put("bytes", c["bytes"]);
@@ -872,6 +970,7 @@ const CAPTURE_KEYS: ReadonlySet<string> = new Set([
   "rawReason",
   "rawCid",
   "txRef",
+  "rawRpc",
 ]);
 
 /** 数の初期値（全部 0）。 */

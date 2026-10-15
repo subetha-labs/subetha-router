@@ -22,6 +22,7 @@ import { EVM_TESTNETS, RAILS_ACTIVATION, RAILS_NONE, type EvmRailsActivation, ty
 import {
   EVM_FACILITATOR_PORT,
   EVM_FACILITATOR_PROCESS,
+  evmFacilitatorDiagnosticsPathOf,
   evmFacilitatorJournalPathOf,
   facilitatorSupportsAll,
   HostPlanError,
@@ -81,6 +82,8 @@ describe("計画: EVM testnet のどれかが有効なら facilitator の子（h
       EVM_FACILITATOR_GAS_CAP_421614: "2000000000000000",
       EVM_FACILITATOR_RPC_421614: "https://arb.example/KEY",
       EVM_FACILITATOR_JOURNAL: path.resolve("runtime", "evm-facilitator", "journal.ndjson"),
+      // 診断の記録（rejection-reasons 設計 §2.1、タスク R-5）: journal の隣。
+      EVM_FACILITATOR_DIAGNOSTICS: path.resolve("runtime", "evm-facilitator", "diagnostics.ndjson"),
     });
     // Router の子: facilitator の URL（token を含む）はあるが、gas 鍵・facilitator の env は 1 つも無い（SR-H5）。
     expect(plan.childEnv["SUBETHA_EVM_FACILITATOR_URL"]).toBe(facilitator.url);
@@ -161,7 +164,22 @@ describe("facilitator の journal は公開と受け入れで同じ 1 つ（host
       expect(journal).toBe(publicPlan.facilitator!.env["EVM_FACILITATOR_JOURNAL"]);
       expect(journal).toBe(evmFacilitatorJournalPathOf(env));
       expect(journal).toBe(path.join(path.dirname(publicJournalPathOf(env)), "evm-facilitator", "journal.ndjson"));
+      // 診断の記録（タスク R-5）も公開と受け入れで同じ 1 つ（journal の隣）。
+      const diagnostics = acceptancePlan.facilitator!.env["EVM_FACILITATOR_DIAGNOSTICS"];
+      expect(diagnostics).toBe(publicPlan.facilitator!.env["EVM_FACILITATOR_DIAGNOSTICS"]);
+      expect(diagnostics).toBe(path.join(path.dirname(journal!), "diagnostics.ndjson"));
+      expect(diagnostics).toBe(evmFacilitatorDiagnosticsPathOf(env));
+      // 本番の env の SUBETHA_DIAGNOSTICS=off: 公開・受け入れのどちらも facilitator の子に path を渡さない（ほかの env は同じ）。
+      const offEnv = { ...env, SUBETHA_DIAGNOSTICS: "off" };
+      for (const [options, onPlan] of [[acceptance, acceptancePlan], [publicOptions(acceptance.activation), publicPlan]] as const) {
+        const off = hostPlanOf(options, offEnv).facilitator!.env;
+        expect(Object.keys(off)).not.toContain("EVM_FACILITATOR_DIAGNOSTICS");
+        const { EVM_FACILITATOR_DIAGNOSTICS: _d, ...rest } = onPlan.facilitator!.env;
+        expect(off).toEqual(rest);
+      }
+      expect(evmFacilitatorDiagnosticsPathOf(offEnv)).toBeUndefined();
     }
+    expect(evmFacilitatorDiagnosticsPathOf({ SUBETHA_JOURNAL_PATH: "/app/runtime/journal.ndjson" })).toBe("/app/runtime/evm-facilitator/diagnostics.ndjson");
     expect(evmFacilitatorJournalPathOf({ SUBETHA_JOURNAL_PATH: "/app/runtime/journal.ndjson" })).toBe("/app/runtime/evm-facilitator/journal.ndjson");
     // 受け入れの bind（コンテナの外の既定 127.0.0.1）は facilitator も同じ。公開の入口は 0.0.0.0。
     const local = acceptanceOptionsOf({ SUBETHA_ACCEPTANCE_JOURNAL_PATH: "/tmp/acc/journal.ndjson" }, ["--rails", "rh-in"]);

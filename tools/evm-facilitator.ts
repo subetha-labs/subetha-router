@@ -17,6 +17,10 @@
  *
  * 鍵・署名・token は log・応答・例外の文言に出さない。
  *
+ * 診断の記録（設計 `docs/rejection-reasons-design.md` §5、タスク R-5）: env `EVM_FACILITATOR_DIAGNOSTICS=<ファイル>` があるときだけ、verify・settle の
+ * 応答（status・理由の分類・経過時間）、settle の中の SDK の verify の理由、RPC の失敗の分類（`timeout`・`rate_limited`・`other`）を
+ * 別のファイルに残す（journal・log とは別。`cid` は authorization の hash で、生の鍵・nonce は書かない）。応答・journal・送出は変えない。
+ *
  * usage: EVM_FACILITATOR_KEY=0x... EVM_FACILITATOR_TOKEN=<32 文字以上> EVM_FACILITATOR_NETWORKS=eip155:46630,eip155:998 \
  *        EVM_FACILITATOR_PAYTO_ALLOWLIST=0x... EVM_FACILITATOR_GAS_CAP_46630=<wei> EVM_FACILITATOR_GAS_CAP_998=<wei> \
  *        EVM_FACILITATOR_JOURNAL=.claude_workflow/local/evm-testnets/run-<UTC>/facilitator-journal.ndjson tsx tools/evm-facilitator.ts
@@ -31,7 +35,23 @@ import { pathToFileURL } from "node:url";
 
 import fsExt from "fs-ext";
 
+import { HttpRequestError, LimitExceededRpcError, TimeoutError } from "viem";
+
 import { stableJson } from "../src/core/intent.js";
+import {
+  classifyRpcSnapshot,
+  DIAG_RPC_SNAPSHOT_DEPTH,
+  NOOP_DIAGNOSTICS,
+  safeEmit,
+  withDiagnosticScope,
+  type DiagCapture,
+  type DiagCidInput,
+  type DiagnosticsSink,
+  type DiagRpcClass,
+  type DiagRpcErrorSnapshot,
+  type DiagRpcNodeKind,
+} from "../src/shared/diagnostics.js";
+import { createFileDiagnosticsSink, type FileDiagnosticsSink } from "../src/shared/diagnostics-file.js";
 import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { assetKeyOf, EVM_TESTNET_NETWORKS, evmChainIdOf, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, type KnownNetwork } from "../src/shared/networks.js";
 
@@ -289,6 +309,11 @@ export interface EvmFacilitatorOptions {
   readonly log?: Logger;
   /** 表（試験は自分の表を渡せる）。既定は `KNOWN_NETWORKS`。 */
   readonly knownNetworks?: readonly KnownNetwork[];
+  /**
+   * 診断の記録（設計 `docs/rejection-reasons-design.md` §5、タスク R-5）。既定は `NOOP_DIAGNOSTICS`（何も包まない・何も積まない）。
+   * 既存の `log`（`key` を含む）とは別。診断には生の鍵・nonce・token・署名を入れない（`cid` は hash）。応答・journal・送出は sink の有無で変わらない。
+   */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -494,7 +519,7 @@ export class SerialQueue {
  * 補助
  * ────────────────────────────────────────────────────────────────────────────── */
 
-class DeadlineExceeded extends Error {
+export class DeadlineExceeded extends Error {
   constructor() {
     super("deadline exceeded");
     this.name = "DeadlineExceeded";
@@ -521,6 +546,197 @@ function withDeadline<T>(promise: Promise<T>, clock: Clock, deadlineAt: number, 
       },
     );
   });
+}
+
+/* ──────────────────────────────────────────────────────────────────────────────
+ * 診断（設計 `docs/rejection-reasons-design.md` §5・§13.1。タスク R-5）
+ * ────────────────────────────────────────────────────────────────────────────── */
+
+/** `rpc` の記録の `op`（`DIAG_OPS` の facilitator の節と同じ集合）。 */
+export type FacilitatorRpcOp =
+  | "authorization_state"
+  | "block_number"
+  | "block_timestamp"
+  | "authorization_used_logs"
+  | "receipt"
+  | "wait_for_receipt"
+  | "fees_per_gas"
+  | "estimate_transfer_gas"
+  | "transfer_with_authorization"
+  | "reconcile"
+  | "sdk_verify"
+  | "sdk_read_contract"
+  | "sdk_verify_typed_data"
+  | "sdk_get_code";
+
+/** CAIP-2 の形（長さの上限つき）。外れた network は記録に写さない（大きな文字列で行ごと捨てられないように）。 */
+const DIAG_NETWORK_SHAPE = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
+
+/**
+ * 要求の本文から `cid` の入力を読む（§5.2。`identify` とは別の純粋関数）。形どおり（network が CAIP-2、asset・from が EVM アドレス、
+ * nonce が bytes32）のときだけ値を返し、ほかは `undefined`（記録に `cid` が付かないだけ）。読むのは 4 つの欄だけで、値はそのまま
+ * （正規化は `diagCorrelationIdOf` が後回しの処理でする。Router の側と同じ関数）。
+ */
+export function diagCidInputOf(bodyJson: unknown): DiagCidInput | undefined {
+  if (!isRecord(bodyJson)) return undefined;
+  const requirements = bodyJson["paymentRequirements"];
+  const paymentPayload = bodyJson["paymentPayload"];
+  if (!isRecord(requirements) || !isRecord(paymentPayload)) return undefined;
+  const inner = paymentPayload["payload"];
+  if (!isRecord(inner)) return undefined;
+  const authorization = inner["authorization"];
+  if (!isRecord(authorization)) return undefined;
+  const network = requirements["network"];
+  const asset = requirements["asset"];
+  const from = authorization["from"];
+  const nonce = authorization["nonce"];
+  if (typeof network !== "string" || !DIAG_NETWORK_SHAPE.test(network)) return undefined;
+  if (typeof asset !== "string" || !ADDRESS.test(asset) || typeof from !== "string" || !ADDRESS.test(from) || typeof nonce !== "string" || !BYTES32.test(nonce)) return undefined;
+  return { network, asset, from, nonce };
+}
+
+/** 本文の network（記録の `network` の欄。形の外は `undefined`）。 */
+function diagNetworkOf(bodyJson: unknown): string | undefined {
+  if (!isRecord(bodyJson)) return undefined;
+  const requirements = bodyJson["paymentRequirements"];
+  const network = isRecord(requirements) ? requirements["network"] : undefined;
+  return typeof network === "string" && DIAG_NETWORK_SHAPE.test(network) ? network : undefined;
+}
+
+/** RPC の失敗の分類（§5.3）。`rpc` の記録の欄だけ（`classifyRpcSnapshot` の結果）。 */
+export type RpcFailureClass = DiagRpcClass;
+
+/**
+ * 例外の写し（§5.3、hook の時点。Codex R-5 #2）。`cause` の連鎖を深さ 5 まで（自分を含めて 5 つ）辿り、各段で読むのは `name`・
+ * （HTTP の段だけ）数値の `status`・数値の `code`・`cause` と型（`instanceof`）だけ。段ごとに `[種類, status か null, code か null]` の
+ * primitive を平らに並べた配列にする（例外の object は持たない）。**文言は読まない**（viem の message・details は RPC の URL を含み得る）。
+ * 分類（表の順の照合）は後回しの処理の `classifyRpcSnapshot`。
+ */
+export function rpcErrorSnapshotOf(error: unknown): DiagRpcErrorSnapshot {
+  const out: Array<DiagRpcNodeKind | number | null> = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < DIAG_RPC_SNAPSHOT_DEPTH && typeof current === "object" && current !== null; depth += 1) {
+    const node = current as { readonly name?: unknown; readonly status?: unknown; readonly code?: unknown; readonly cause?: unknown };
+    const name = node.name;
+    const kind: DiagRpcNodeKind =
+      current instanceof HttpRequestError || name === "HttpRequestError"
+        ? "http"
+        : current instanceof LimitExceededRpcError || name === "LimitExceededRpcError"
+          ? "limit"
+          : current instanceof TimeoutError || name === "TimeoutError"
+            ? "timeout"
+            : current instanceof DeadlineExceeded
+              ? "deadline"
+              : "plain";
+    const status = kind === "http" ? node.status : undefined;
+    const code = node.code;
+    out.push(kind, typeof status === "number" ? status : null, typeof code === "number" ? code : null);
+    current = node.cause;
+  }
+  return out;
+}
+
+/** 例外の分類（試験・運用の表示用。記録の経路は写しを積み、分類は後回しの処理で同じ `classifyRpcSnapshot`）。 */
+export function classifyRpcError(error: unknown): RpcFailureClass {
+  return classifyRpcSnapshot(rpcErrorSnapshotOf(error));
+}
+
+/** `observeRpc` が記録した例外（同じ例外を呼び出し側の `catch` で二重に記録しない）。 */
+const observedRpcErrors = new WeakSet<object>();
+
+function rpcCaptureOf(network: string, op: FacilitatorRpcOp, error: unknown): DiagCapture {
+  return { stage: "rpc", network, op, rawRpc: rpcErrorSnapshotOf(error) };
+}
+
+/**
+ * RPC の呼び出しを観測する（§5.3）。sink が `NOOP` なら `fn()` をそのまま返す。そうでなければ `fn()` が返した **同じ promise** を返し
+ * （成功も失敗も、値・例外・tick は包まないときと同じ）、横の枝の `catch` で失敗を分類して `stage:"rpc"` を 1 回 push する。
+ * 横の枝は呼び出しの時点の診断の scope で動く（`cid` が付く）。同期の throw は記録してから同じ例外を投げ直す。
+ */
+export function observeRpc<T>(sink: DiagnosticsSink, network: string, op: FacilitatorRpcOp, fn: () => Promise<T>): Promise<T> {
+  if (sink === NOOP_DIAGNOSTICS) return fn();
+  const note = (error: unknown): void => {
+    try {
+      if (typeof error === "object" && error !== null) observedRpcErrors.add(error);
+    } catch {
+      // WeakSet に入らない値（起こらない）は数えない。
+    }
+    safeEmit(sink, () => rpcCaptureOf(network, op, error));
+  };
+  let pending: Promise<T>;
+  try {
+    pending = fn();
+  } catch (error) {
+    note(error);
+    throw error;
+  }
+  pending.catch(note);
+  return pending;
+}
+
+/**
+ * 呼び出し側の `catch` での RPC の失敗の記録（§5.1 の `rpc_unavailable` などの場所）。`observeRpc` が既に記録した例外は記録しない。
+ * 締め切り（`withDeadline` の `DeadlineExceeded`）・注入の chain の I/O の例外はここで初めて見える。応答は変えない。
+ */
+function noteRpcFailure(sink: DiagnosticsSink, network: string, op: FacilitatorRpcOp, error: unknown): void {
+  if (sink === NOOP_DIAGNOSTICS) return;
+  if (typeof error === "object" && error !== null && observedRpcErrors.has(error)) return;
+  safeEmit(sink, () => rpcCaptureOf(network, op, error));
+}
+
+/** chain の I/O の読み取り 8 つと送出を `observeRpc` で包む（sink が `NOOP` ならそのまま）。SDK の verify の中は `viemChainIo` が包む。 */
+export function observedChainIo(network: string, io: ChainIo, sink: DiagnosticsSink): ChainIo {
+  if (sink === NOOP_DIAGNOSTICS) return io;
+  const r = io.reader;
+  const w = io.writer;
+  const reader: ChainReader = {
+    authorizationState: (asset, from, nonce) => observeRpc(sink, network, "authorization_state", () => r.authorizationState(asset, from, nonce)),
+    blockNumber: () => observeRpc(sink, network, "block_number", () => r.blockNumber()),
+    blockTimestamp: (blockNumber) => observeRpc(sink, network, "block_timestamp", () => r.blockTimestamp(blockNumber)),
+    authorizationUsedLogs: (asset, from, nonce, fromBlock, toBlock) => observeRpc(sink, network, "authorization_used_logs", () => r.authorizationUsedLogs(asset, from, nonce, fromBlock, toBlock)),
+    receipt: (hash) => observeRpc(sink, network, "receipt", () => r.receipt(hash)),
+    waitForReceipt: (hash, timeoutMs) => observeRpc(sink, network, "wait_for_receipt", () => r.waitForReceipt(hash, timeoutMs)),
+    feesPerGas: () => observeRpc(sink, network, "fees_per_gas", () => r.feesPerGas()),
+    estimateTransferGas: (call) => observeRpc(sink, network, "estimate_transfer_gas", () => r.estimateTransferGas(call)),
+  };
+  const writer: ChainWriter = {
+    address: w.address,
+    transferWithAuthorization: (args) => observeRpc(sink, network, "transfer_with_authorization", () => w.transferWithAuthorization(args)),
+  };
+  return { ...io, reader, writer };
+}
+
+/** 応答の本文から理由の欄（`invalidReason`・`errorReason`・`error` の順）。 */
+function reasonFieldOf(body: Record<string, unknown>): "invalidReason" | "errorReason" | "error" | undefined {
+  if (Object.prototype.hasOwnProperty.call(body, "invalidReason")) return "invalidReason";
+  if (Object.prototype.hasOwnProperty.call(body, "errorReason")) return "errorReason";
+  if (Object.prototype.hasOwnProperty.call(body, "error")) return "error";
+  return undefined;
+}
+
+/**
+ * verify・settle の応答の記録（§5.1 (3)）。手元の値（status・本文の理由の文字列の参照・経過時間）を写すだけ。理由の分類は後回しの処理で
+ * 表と完全一致（`classifyReason`）。拒否（`isValid: false`・`success: false`）で理由の欄が無ければ `absent`。
+ */
+function responseCaptureOf(op: "verify" | "settle", response: FacilitatorResponse, startedAt: number, network: string | undefined): DiagCapture {
+  const body = isRecord(response.body) ? response.body : {};
+  const field = reasonFieldOf(body);
+  const verdict =
+    op === "verify"
+      ? typeof body["isValid"] === "boolean"
+        ? { response: body["isValid"] === true ? ("valid" as const) : ("invalid" as const) }
+        : {}
+      : typeof body["success"] === "boolean"
+        ? { response: body["success"] === true ? ("ok" as const) : ("success_false" as const) }
+        : {};
+  const refused = op === "verify" ? body["isValid"] === false : body["success"] === false;
+  const reason =
+    field !== undefined
+      ? { reasonField: field, rawReason: body[field] }
+      : refused
+        ? { reasonField: op === "verify" ? ("invalidReason" as const) : ("errorReason" as const), rawReason: null }
+        : {};
+  return { stage: op, httpStatus: response.status, ...(network === undefined ? {} : { network }), ...verdict, ...reason, elapsedMs: performance.now() - startedAt };
 }
 
 function topicAddressOf(topic: string | undefined): string | undefined {
@@ -601,6 +817,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   const deadlinesOf = options.deadlinesOf ?? defaultDeadlinesOf;
   const log: Logger = options.log ?? (() => {});
   const table = options.knownNetworks ?? KNOWN_NETWORKS;
+  const diagnostics = options.diagnostics ?? NOOP_DIAGNOSTICS;
   const enabled = new Set(options.networks);
   for (const network of enabled) {
     if (!EVM_TESTNET_NETWORKS.has(network)) throw new Error(`network ${network} is not one of the EVM testnets`);
@@ -624,8 +841,12 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   const inFlight = new Map<string, { readonly fingerprint: string; readonly response: Promise<FacilitatorResponse> }>();
   let started = false;
 
+  /** 診断の sink があるときだけ、chain の I/O を `observeRpc` で包む（無ければ渡された I/O そのもの）。 */
+  const chains = new Map<string, ChainIo>();
+  for (const [network, io] of options.chains) chains.set(network, observedChainIo(network, io, diagnostics));
+
   function chainOf(network: string): ChainIo {
-    const io = options.chains.get(network);
+    const io = chains.get(network);
     if (io === undefined) throw new Error(`no chain I/O for ${network}`);
     return io;
   }
@@ -833,7 +1054,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     let used: boolean;
     try {
       used = await within(io.reader.authorizationState(id.asset, id.authorization.from, id.authorization.nonce), deadlineAt);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, id.network, "authorization_state", error);
       return failure(502, "rpc_unavailable", id.network);
     }
     if (!used) return undefined;
@@ -849,7 +1071,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       }
       log({ event: "used_authorization_unmatched", network: id.network, key: id.key });
       return failure(500, "authorization_used_unmatched", id.network);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, id.network, "reconcile", error);
       return failure(502, "rpc_unavailable", id.network);
     }
   }
@@ -909,7 +1132,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       let usedNow: boolean;
       try {
         usedNow = await within(io.reader.authorizationState(id.asset, auth.from, auth.nonce), deadlineAt);
-      } catch {
+      } catch (error) {
+        noteRpcFailure(diagnostics, network, "authorization_state", error);
         if (holdOnReadFailure) hold(network, id.key, "state_unreadable_after_intent");
         return failure(502, "rpc_unavailable", network);
       }
@@ -921,8 +1145,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     let verified: VerifyResult | undefined;
     try {
       verified = await within(io.verify(id.paymentPayload, id.requirements), deadlineAt);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, network, "sdk_verify", error);
       verified = undefined;
+    }
+    if (verified !== undefined && verified.isValid !== true) {
+      // FR-R6: settle の中の SDK の verify の理由（応答は今どおり `invalid_payment`）。
+      const sdkReason = verified.invalidReason;
+      safeEmit(diagnostics, () => ({ stage: "verify", network, response: "invalid", reasonField: "invalidReason", rawReason: sdkReason ?? null }));
     }
     if (verified?.isValid !== true) return await refuseIfStillUnused(verified === undefined ? "verify_unavailable" : "invalid_payment");
 
@@ -940,7 +1170,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     let gasEstimate: bigint;
     try {
       gasEstimate = await within(io.reader.estimateTransferGas(call), deadlineAt);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, network, "estimate_transfer_gas", error);
       return await refuseIfStillUnused("gas_estimate_unavailable");
     }
     const gasLimit = settleGasLimitOf(gasEstimate);
@@ -951,7 +1182,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     let fees: { readonly maxFeePerGas: bigint; readonly maxPriorityFeePerGas: bigint };
     try {
       fees = await within(io.reader.feesPerGas(), deadlineAt);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, network, "fees_per_gas", error);
       return await refuseIfStillUnused("fee_estimate_unavailable");
     }
     if (fees.maxFeePerGas > io.maxFeePerGas) return await refuseIfStillUnused("fee_too_high");
@@ -1025,7 +1257,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     let hash: Hex;
     try {
       hash = await within(sending, deadlineAt);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, network, "transfer_with_authorization", error);
       // 予約（意図の行）が累計に入ったまま（未解決）。
       hold(network, id.key, "send_outcome_unknown");
       // 期限の後に hash が返れば journal に残す（運用者の照合のため）。
@@ -1055,7 +1288,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     let receipt: ReceiptView | undefined;
     try {
       receipt = await within(io.reader.waitForReceipt(hash, Math.max(0, deadlineAt - clock.now())), deadlineAt);
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, network, "wait_for_receipt", error);
       receipt = undefined;
     }
     if (receipt === undefined) {
@@ -1154,7 +1388,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
         status: 200,
         body: { isValid: result.isValid === true, ...(result.isValid !== true && typeof result.invalidReason === "string" ? { invalidReason: result.invalidReason } : {}), payer: id.authorization.from },
       };
-    } catch {
+    } catch (error) {
+      noteRpcFailure(diagnostics, id.network, "sdk_verify", error);
       return { status: 502, body: { isValid: false, invalidReason: "verify_unavailable" } };
     }
   }
@@ -1264,18 +1499,38 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       return supported();
     }
     if (op !== "verify" && op !== "settle") return { status: 404, body: { error: "not_found" } };
-    if (request.method !== "POST") return { status: 405, body: { error: "method_not_allowed" } };
+    return await handleOperation(op, request, receivedAt, diagnostics === NOOP_DIAGNOSTICS ? undefined : performance.now());
+  }
+
+  /**
+   * verify・settle の本体。`startedAt` が `undefined`（sink が `NOOP`）なら今と同じ経路（scope も記録も無い）。
+   * sink があるとき（§5.1）: 本文が JSON として読めたら `cid` の入力（形どおりのときだけ）を診断の scope に入れて handler を動かし
+   * （中の RPC の記録に `cid` が付く）、応答を作った後で scope の中で `stage: verify | settle` を 1 回 push する。本文を読む前の拒否は scope の外で 1 回。
+   */
+  async function handleOperation(op: "verify" | "settle", request: FacilitatorRequest, receivedAt: number, startedAt: number | undefined): Promise<FacilitatorResponse> {
+    const early = (response: FacilitatorResponse): FacilitatorResponse => {
+      if (startedAt !== undefined) safeEmit(diagnostics, () => responseCaptureOf(op, response, startedAt, undefined));
+      return response;
+    };
+    if (request.method !== "POST") return early({ status: 405, body: { error: "method_not_allowed" } });
     const contentType = headerOf(request.headers, "content-type") ?? "";
-    if (!/^application\/json(\s*;.*)?$/i.test(contentType)) return { status: 415, body: { error: "unsupported_media_type" } };
-    if (Buffer.byteLength(request.body, "utf8") > MAX_BODY_BYTES) return { status: 413, body: { error: "payload_too_large" } };
+    if (!/^application\/json(\s*;.*)?$/i.test(contentType)) return early({ status: 415, body: { error: "unsupported_media_type" } });
+    if (Buffer.byteLength(request.body, "utf8") > MAX_BODY_BYTES) return early({ status: 413, body: { error: "payload_too_large" } });
     let bodyJson: unknown;
     try {
       bodyJson = JSON.parse(request.body);
     } catch {
-      return op === "verify" ? { status: 400, body: { isValid: false, invalidReason: "malformed_request" } } : failure(400, "malformed_request");
+      return early(op === "verify" ? { status: 400, body: { isValid: false, invalidReason: "malformed_request" } } : failure(400, "malformed_request"));
     }
-    if (op === "verify") return await handleVerify(bodyJson, receivedAt);
-    return await handleSettle(bodyJson, receivedAt, request.signal);
+    const run = (): Promise<FacilitatorResponse> => (op === "verify" ? handleVerify(bodyJson, receivedAt) : handleSettle(bodyJson, receivedAt, request.signal));
+    if (startedAt === undefined) return await run();
+    const cidInput = diagCidInputOf(bodyJson);
+    const network = diagNetworkOf(bodyJson);
+    return await withDiagnosticScope(cidInput === undefined ? {} : { cidInput }, async () => {
+      const response = await run();
+      safeEmit(diagnostics, () => responseCaptureOf(op, response, startedAt, network));
+      return response;
+    });
   }
 
   return {
@@ -1618,6 +1873,8 @@ export interface CliConfig {
   readonly logRanges: ReadonlyMap<string, bigint>;
   readonly journal: string;
   readonly logFile?: string;
+  /** 診断の記録のファイル（env `EVM_FACILITATOR_DIAGNOSTICS`。設計 rejection-reasons §2.1）。無ければ記録しない。 */
+  readonly diagnostics?: string;
 }
 
 /**
@@ -1683,11 +1940,31 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
     logRanges.set(network, range === undefined ? (DEFAULT_LOG_RANGES[network] ?? 500n) : BigInt(range));
   }
   const logFile = env["EVM_FACILITATOR_LOG"];
-  return { key: key as Hex, token, port: Number(portText), bind, networks, payToAllowlist, rpcUrls, gasCaps, maxFees, maxGas, logRanges, journal, ...(logFile === undefined || logFile === "" ? {} : { logFile }) };
+  const diagnostics = env["EVM_FACILITATOR_DIAGNOSTICS"];
+  return {
+    key: key as Hex,
+    token,
+    port: Number(portText),
+    bind,
+    networks,
+    payToAllowlist,
+    rpcUrls,
+    gasCaps,
+    maxFees,
+    maxGas,
+    logRanges,
+    journal,
+    ...(logFile === undefined || logFile === "" ? {} : { logFile }),
+    ...(diagnostics === undefined || diagnostics === "" ? {} : { diagnostics }),
+  };
 }
 
-/** viem の client で 1 network の I/O を作る（鍵は account にだけ渡す）。 */
-async function viemChainIo(network: string, config: CliConfig): Promise<ChainIo> {
+/**
+ * viem の client で 1 network の I/O を作る（鍵は account にだけ渡す）。`diagnostics` は SDK の verify に渡す signer の読み取り
+ * （`readContract`・`verifyTypedData`・`getCode`）を `observeRpc` で包む（SDK が握りつぶす simulate の失敗も先に見える。§5.3）。
+ * reader・writer は `createEvmFacilitator` が包む。
+ */
+async function viemChainIo(network: string, config: CliConfig, diagnostics: DiagnosticsSink = NOOP_DIAGNOSTICS): Promise<ChainIo> {
   const viem = await import("viem");
   const { privateKeyToAccount } = await import("viem/accounts");
   const { ExactEvmScheme } = await import("@x402/evm/exact/facilitator");
@@ -1780,12 +2057,12 @@ async function viemChainIo(network: string, config: CliConfig): Promise<ChainIo>
   };
   const signer = toFacilitatorEvmSigner({
     address: account.address,
-    readContract: (args) => publicClient.readContract(args as never) as Promise<unknown>,
-    verifyTypedData: (args) => publicClient.verifyTypedData(args as never),
+    readContract: (args) => observeRpc(diagnostics, network, "sdk_read_contract", () => publicClient.readContract(args as never) as Promise<unknown>),
+    verifyTypedData: (args) => observeRpc(diagnostics, network, "sdk_verify_typed_data", () => publicClient.verifyTypedData(args as never)),
     writeContract: async () => refuse(),
     sendTransaction: async () => refuse(),
     waitForTransactionReceipt: async () => refuse(),
-    getCode: (args) => publicClient.getCode(args),
+    getCode: (args) => observeRpc(diagnostics, network, "sdk_get_code", () => publicClient.getCode(args)),
   });
   const scheme = new ExactEvmScheme(signer);
   const verify: SdkVerify = async (paymentPayload, paymentRequirements) => {
@@ -1881,7 +2158,30 @@ export function acquireFacilitatorLock(lockPath: string, flock: FlockFn = realFl
 /** 起動の差し替え（試験）。既定は実際の `flock` と viem の I/O。 */
 export interface MainDeps {
   readonly lock?: (lockPath: string) => FacilitatorLock;
-  readonly chainIoOf?: (network: string, config: CliConfig) => Promise<ChainIo>;
+  readonly chainIoOf?: (network: string, config: CliConfig, diagnostics: DiagnosticsSink) => Promise<ChainIo>;
+  /** journal の作り方（試験: 遅い close を差し込む）。既定は `createFileJournal`。 */
+  readonly journalOf?: (file: string) => FacilitatorJournal & { close(): Promise<void> };
+  /** 診断の sink の作り方（試験）。既定は `createFileDiagnosticsSink`（component `facilitator`、16 MiB）。 */
+  readonly diagnosticsOf?: (file: string) => FileDiagnosticsSink;
+}
+
+/** drain の中で診断の記録を書き出して閉じる時間の上限（best effort。drain の成否には入れない）。 */
+export const DIAGNOSTICS_CLOSE_MS = 2_000;
+
+/** 診断の sink を `timeoutMs` まで閉じる（reject しない。時間切れは待たずに進む）。 */
+async function closeDiagnostics(sink: FileDiagnosticsSink | undefined, timeoutMs: number): Promise<void> {
+  if (sink === undefined) return;
+  const limit = Math.max(0, timeoutMs);
+  if (limit === 0) return;
+  let closing: Promise<void>;
+  try {
+    closing = Promise.resolve(sink.close({ timeoutMs: limit })).catch(() => {});
+  } catch {
+    return; // close が同期で投げても何もしない（best effort）。
+  }
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([closing, new Promise<void>((resolve) => (timer = setTimeout(resolve, limit)))]);
+  clearTimeout(timer);
 }
 
 /** listen 中の facilitator。`close` は server・journal・lock を閉じる（試験用。本番は process の終了まで持つ）。 */
@@ -1904,12 +2204,22 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
   // journal の読み書きより前に lock を取る（§2.3）。lock ファイルは journal の隣なので、そのディレクトリは先に作る。
   await orStartupError("lock_unavailable", () => void mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 }));
   const lock = await orStartupError("lock_unavailable", () => (deps.lock ?? ((p: string) => acquireFacilitatorLock(p)))(lockPath));
-  const journal = createFileJournal(config.journal);
+  const journal = (deps.journalOf ?? createFileJournal)(config.journal);
+  // 診断の記録（§2.1）: env があるときだけファイルの sink。作れなければ記録しないだけ（起動は止めない。新しい env は必須にしない）。
+  let diagnosticsSink: FileDiagnosticsSink | undefined;
+  if (config.diagnostics !== undefined) {
+    try {
+      diagnosticsSink = (deps.diagnosticsOf ?? ((file: string) => createFileDiagnosticsSink({ path: file, component: "facilitator" })))(config.diagnostics);
+    } catch {
+      diagnosticsSink = undefined;
+    }
+  }
+  const diagnostics: DiagnosticsSink = diagnosticsSink ?? NOOP_DIAGNOSTICS;
   try {
     const chains = new Map<string, ChainIo>();
     const chainIoOf = deps.chainIoOf ?? viemChainIo;
     // network は表の 4 つに確かめ済み（code に入れてよい）。RPC の URL・例外の文言は入れない。
-    for (const network of config.networks) chains.set(network, await orStartupError(`rpc_check_failed:${network}`, () => chainIoOf(network, config)));
+    for (const network of config.networks) chains.set(network, await orStartupError(`rpc_check_failed:${network}`, () => chainIoOf(network, config, diagnostics)));
     const log = await orStartupError("log_unavailable", () => fileLogger(config.logFile));
     const facilitator = createEvmFacilitator({
       networks: config.networks,
@@ -1917,6 +2227,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       journal,
       payToAllowlist: config.payToAllowlist,
       log,
+      diagnostics,
     });
     await orStartupError("journal_unavailable", () => facilitator.start());
     const { server, port, host } = await orStartupError("listen_failed", () => listenFacilitator(facilitator, config.token, config.port, config.bind));
@@ -1929,6 +2240,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       host,
       async close() {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        await closeDiagnostics(diagnosticsSink, DIAGNOSTICS_CLOSE_MS);
         await journal.close().catch(() => {});
         lock.release();
       },
@@ -1936,20 +2248,30 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
         const deadline = Date.now() + timeoutMs;
         facilitator.drain.close();
         server.close();
-        if (!(await facilitator.drain.idle(timeoutMs))) return false;
-        // journal の close（書き込みの待ち行列を空にする）も残りの時間まで。
-        let timer: NodeJS.Timeout | undefined;
-        const closed = await Promise.race([
-          journal.close().then(() => true, () => false),
-          new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())))),
-        ]);
-        clearTimeout(timer);
-        if (!closed) return false;
-        lock.release();
-        return true;
+        /**
+         * drain の結果は正しさに要る部分（進行中の要求と続きの 0・journal の close・lock の解放）だけで決める（Codex R-5 #1）。
+         * 診断の記録はその **後** に、残りの時間の内（最大 `DIAGNOSTICS_CLOSE_MS`）で best effort に閉じる。止まる・失敗する sink は
+         * 結果を変えず、journal の close の時間も使わない。
+         */
+        const complete = await (async (): Promise<boolean> => {
+          if (!(await facilitator.drain.idle(timeoutMs))) return false;
+          // journal の close（書き込みの待ち行列を空にする）も残りの時間まで。
+          let timer: NodeJS.Timeout | undefined;
+          const closed = await Promise.race([
+            journal.close().then(() => true, () => false),
+            new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())))),
+          ]);
+          clearTimeout(timer);
+          if (!closed) return false;
+          lock.release();
+          return true;
+        })();
+        await closeDiagnostics(diagnosticsSink, Math.min(DIAGNOSTICS_CLOSE_MS, deadline - Date.now()));
+        return complete;
       },
     };
   } catch (error) {
+    await closeDiagnostics(diagnosticsSink, DIAGNOSTICS_CLOSE_MS);
     await journal.close().catch(() => {});
     lock.release();
     throw error;
