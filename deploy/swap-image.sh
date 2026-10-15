@@ -10,7 +10,8 @@
 #   続いているかもしれず、docker はその順序を保証しない。復旧は最善を尽くすが、未確定の操作が 1 つでもあれば **状態不明**（exit 2）
 #   として報告し、復旧したとは言わない。復旧の各段も同じ: 確認できなければ状態不明
 # - 古いコンテナの停止は入口の drain を待つ（docker stop -t 315、外側の上限 345 秒）。停止を確認した後、今回の停止の log に入口の
-#   `drain: complete` が無ければ入れ替えをやめて復旧する（静止できなかった。戻せたと確かめられたら exit 1）
+#   `drain: complete <id>` が無ければ入れ替えをやめて復旧する（静止できなかった。戻せたと確かめられたら exit 1）。<id> は停止の前に古いコンテナの
+#   log から読んだ最後の `entry run: <id>`（入口の起動ごとの乱数。同じ秒の古い行・時計の巻き戻しで別の起動の行を拾わない）。読めなければ何も変えずに exit 1
 # - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、ループの中の各要求にも残りの予算を渡す（失敗時の診断の docker logs だけ
 #   別枠 10 秒）。コンテナのログの中身と、変更操作の docker の stderr は出さない（固定の文と行数だけ）。それ以外の docker・systemctl
 #   の stderr はそのまま出る
@@ -169,6 +170,12 @@ d image inspect "$IMG" >/dev/null
 OLD_ID=$(d inspect -f '{{.Id}}' "$NAME")
 [ -n "$OLD_ID" ]
 [ "$(d inspect -f '{{.State.Running}}' "$OLD_ID")" = true ]
+# drain の証拠を今の起動に結びつける（rejection-reasons 設計 §13.3、R-0）: 古いコンテナの log の最後の `entry run: <16 hex>`。無ければ入れ替えない。
+# log の中身は出さない（数と固定の文だけ）。
+dt 30 logs "$OLD_ID" > "$LOGTMP" 2>&1
+RUN_ID=$(sed -n 's/^entry run: \([0-9a-f]\{16\}\)$/\1/p' "$LOGTMP" | tail -n 1)
+if [ -z "$RUN_ID" ]; then echo "the running container has no 'entry run' line: the drain evidence cannot be bound to this run, not swapping (nothing was changed)" >&2; exit 1; fi
+echo "entry run id read"
 cp "$JP" "$JBEFORE"
 BYTES=$(stat -c %s "$JBEFORE")
 echo "journal bytes before: $BYTES"
@@ -186,14 +193,14 @@ esac
 
 # 変更操作は mutate で（成功と確認できるまで PENDING。失敗は ERR で restore へ）。
 # 古いコンテナの stop: 入口は SIGTERM で drain する（新しい要求を断り、進行中の MCP の要求の終わりを最長 300 秒待ってから子を止め、
-# `drain: complete` か `drain: timeout` を 1 行出す）。grace は STOP_GRACE_S、外側の上限は STOP_BOUND_S。上限に当たった・daemon のエラーは
+# `drain: complete <id>` か `drain: timeout <id>` を 1 行出す）。grace は STOP_GRACE_S、外側の上限は STOP_BOUND_S。上限に当たった・daemon のエラーは
 # 未確定（PENDING のまま restore へ → 後で /healthz が戻っても exit 2）。静止の確認は今回の停止の log だけ（停止の直前の時刻から）。
 STOP_SINCE=$(date -u +%s)
 mutate_within "$STOP_BOUND_S" stop stop -t "$STOP_GRACE_S" "$OLD_ID" >/dev/null
-# 静止の確認（rejection-reasons 設計 §14.4・§15.3）: 停止は確定した。今回の停止の log に `drain: complete` が無ければ（時間切れ・SIGKILL・行が無い・
+# 静止の確認（rejection-reasons 設計 §14.4・§15.3）: 停止は確定した。今回の停止の log に `drain: complete <RUN_ID>` が無ければ（時間切れ・SIGKILL・行が無い・別の起動の行・
 # log が読めない）入れ替えをやめ、復旧で古いコンテナを戻す（戻せたと確かめられたら exit 1、確かめられなければ exit 2）。log の中身は出さない。
 if ! dt 30 logs --since "$STOP_SINCE" "$OLD_ID" > "$LOGTMP" 2>&1; then echo "could not read the previous container's logs for this stop: quiescence is unconfirmed, not swapping" >&2; false; fi
-if ! grep -qx 'drain: complete' "$LOGTMP"; then echo "the previous container did not report 'drain: complete' for this stop (not quiescent): not swapping" >&2; false; fi
+if ! grep -qxF "drain: complete $RUN_ID" "$LOGTMP"; then echo "the previous container did not report 'drain: complete' for this stop and this run (not quiescent): not swapping" >&2; false; fi
 echo "previous container drained"
 mutate rename rename "$OLD_ID" "$PREV"
 # 8611: 自前の EVM facilitator（hosted 設計 §4）。host の loopback だけに publish し、Caddy の /evm-facilitator/* がそこへ流す。有効化が無いイメージでは何も listen しない。

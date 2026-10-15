@@ -16,6 +16,11 @@
  * - `old_drain_only`: 古い log（今回の停止より前）にだけ `drain: complete` がある
  * - `stop_bound`: stop は daemon 側で終わる（Running=false）が、外側の上限に当たった（rc 124 = 未確定）。その後の復旧で /healthz は戻る
  * - `restore_unconfirmed`: drain が時間切れで、復旧の旧コンテナの `start` が daemon のエラー（復旧を確かめられない）
+ * - `stale_same_second`: 停止と同じ秒に、別の起動の id の `drain: complete <other>` だけがある
+ * - `clock_back`: 時計が巻き戻った: 今回の停止の行は `--since` より前の時刻で載り、過去の別の起動の `drain: complete <prev>` が未来の時刻で残っている
+ * - `no_run_line`: 古いコンテナの log に `entry run:` の行が無い（古いイメージ）
+ *
+ * 古いコンテナの起動の id は `OLD_RUN_ID`（log の最初に `entry run: <id>`）。stop は（筋が許せば）`drain: complete <id>` を書く。
  */
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,6 +28,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const hasTimeout = spawnSync("sh", ["-c", "command -v timeout"]).status === 0;
+export const OLD_RUN_ID = "0123456789abcdef";
+const OTHER_RUN_ID = "fedcba9876543210";
 
 export interface SwapRun {
   readonly result: SpawnSyncReturns<string>;
@@ -46,13 +53,23 @@ export function runSwap(scenario: string, dirs: string[], timeoutMs = 60_000): S
   for (const d of [bin, path.join(st, "containers"), path.join(st, "logs"), vol]) mkdirSync(d, { recursive: true });
   writeFileSync(path.join(st, "containers", "oldid0001"), "subetha-router true subetha-router:b-old 127.0.0.1:8787:8787\n");
   // 古いコンテナの過去の log（今回の停止より前の時刻）。`old_drain_only` だけ、過去の停止の `drain: complete` を持つ。
-  writeFileSync(path.join(st, "logs", "oldid0001"), `1000\tsubetha-router remote MCP on 0.0.0.0:8787/mcp\n${scenario === "old_drain_only" ? "1001\tdrain: complete\n" : ""}`);
+  const future = Math.floor(Date.now() / 1000) + 100;
+  writeFileSync(
+    path.join(st, "logs", "oldid0001"),
+    [
+      ...(scenario === "no_run_line" ? [] : [`1000\tentry run: ${OLD_RUN_ID}`]),
+      "1000\tsubetha-router remote MCP on 0.0.0.0:8787/mcp",
+      ...(scenario === "old_drain_only" ? [`1001\tdrain: complete ${OLD_RUN_ID}`] : []),
+      ...(scenario === "clock_back" ? [`${future}\tdrain: complete ${OTHER_RUN_ID}`] : []),
+      "",
+    ].join("\n"),
+  );
   writeFileSync(path.join(st, "caddy"), "active\n");
   writeFileSync(path.join(st, "calls"), "");
   writeFileSync(path.join(vol, "journal.ndjson"), "line1\nline2\n");
   writeFileSync(path.join(dir, "env"), "");
   const tool = (name: string, body: string): void => {
-    writeFileSync(path.join(bin, name), `#!/bin/bash\nST=${JSON.stringify(st)}\nSCN=${JSON.stringify(scenario)}\n${body}\n`);
+    writeFileSync(path.join(bin, name), `#!/bin/bash\nST=${JSON.stringify(st)}\nSCN=${JSON.stringify(scenario)}\nRUN=${OLD_RUN_ID}\nOTHER=${OTHER_RUN_ID}\n${body}\n`);
     chmodSync(path.join(bin, name), 0o755);
   };
   tool("timeout", `echo "timeout $*" >> "$ST/calls"\nexec ${JSON.stringify(realTimeout)} "$@"`);
@@ -70,10 +87,12 @@ case "$1" in
     read -r n r i p < "$ST/containers/$id"; echo "$n false $i $p" > "$ST/containers/$id"
     now=$(date -u +%s)
     case "$SCN" in
-      drain_timeout|restore_unconfirmed) printf '%s\\tdrain: timeout\\n' "$now" >> "$ST/logs/$id" ;;
+      drain_timeout|restore_unconfirmed) printf '%s\\tdrain: timeout %s\\n' "$now" "$RUN" >> "$ST/logs/$id" ;;
       no_drain_line|old_drain_only) ;;
-      stop_bound) printf '%s\\tdrain: complete\\n' "$now" >> "$ST/logs/$id"; exit 124 ;;
-      *) printf '%s\\tdrain: complete\\n' "$now" >> "$ST/logs/$id" ;;
+      stale_same_second) printf '%s\\tdrain: complete %s\\n' "$now" "$OTHER" >> "$ST/logs/$id" ;;
+      clock_back) printf '%s\\tdrain: complete %s\\n' "$((now - 100))" "$RUN" >> "$ST/logs/$id" ;;
+      stop_bound) printf '%s\\tdrain: complete %s\\n' "$now" "$RUN" >> "$ST/logs/$id"; exit 124 ;;
+      *) printf '%s\\tdrain: complete %s\\n' "$now" "$RUN" >> "$ST/logs/$id" ;;
     esac
     echo "$id" ;;
   start) [ -f "$ST/containers/$2" ] || { echo "Error: No such container: $2" >&2; exit 1; }

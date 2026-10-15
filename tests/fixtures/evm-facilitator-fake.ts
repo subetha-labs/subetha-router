@@ -5,7 +5,6 @@
  * - `GET /<token>/supported`: `EVM_FACILITATOR_NETWORKS`（`SUBETHA_TEST_FAKE_SUPPORTED` があればその値）の kinds
  * - `GET /<token>/whoami`: pid・ppid・execArgv・受け取った env（試験が子の env と spawn の形を確かめる）
  * - 本物と同じく journal の隣の `facilitator.lock` に `flock` を process の寿命の間かける（入口の片付けの後に lock が解けていることを試験が確かめる）
- * - `SUBETHA_TEST_EVENT_LOG`: SIGTERM を受けたら `facilitator-sigterm` を追記して終わる（タスク R-0: Router の子の後に止まることを試験が確かめる）
  * - `SUBETHA_TEST_PID_FILE`: lock を取ったら pid を書く（listen の前に止められた場合も試験が process の終了を確かめられる）
  * - `SUBETHA_TEST_FAKE_LISTEN_DELAY_MS`: listen をこの時間だけ遅らせる（入口の「facilitator の起動待ち」の段）
  * - `SUBETHA_TEST_SUPPORTED_HIT`・`SUBETHA_TEST_FAKE_SUPPORTED_DELAY_MS`: `/supported` が来たらファイルを書き、応答をこの時間だけ遅らせる（「/supported の待ち」の段）
@@ -58,10 +57,25 @@ setTimeout(() => {
   });
 }, listenDelayMs);
 
+/**
+ * SIGTERM（タスク R-0 の drain）: 本物の CLI と同じ固定の行で終わる。`SUBETHA_TEST_FACILITATOR_DRAIN` で振る舞いを選ぶ:
+ * 空 = すぐ `facilitator drain: complete`（exit 0）、`delay:<ms>` = その時間の後に complete、`timeout` = `facilitator drain: timeout`（exit 1）、`hang` = 無視する。
+ * `SUBETHA_TEST_EVENT_LOG` があれば `facilitator-sigterm`・`facilitator-exit` を追記する（止める順を試験が確かめる）。
+ */
 const eventLog = env["SUBETHA_TEST_EVENT_LOG"] ?? "";
-if (eventLog !== "") {
-  process.on("SIGTERM", () => {
-    appendFileSync(eventLog, "facilitator-sigterm\n");
-    process.exit(0);
-  });
-}
+const event = (name: string): void => {
+  if (eventLog !== "") appendFileSync(eventLog, `${name}\n`);
+};
+const drainMode = env["SUBETHA_TEST_FACILITATOR_DRAIN"] ?? "";
+process.on("SIGTERM", () => {
+  event("facilitator-sigterm");
+  if (drainMode === "hang") return;
+  const finish = (): void => {
+    const complete = drainMode !== "timeout";
+    event("facilitator-exit");
+    process.stderr.write(complete ? "facilitator drain: complete\n" : "facilitator drain: timeout\n");
+    process.exit(complete ? 0 : 1);
+  };
+  if (drainMode.startsWith("delay:")) setTimeout(finish, Number(drainMode.slice("delay:".length)));
+  else finish();
+});

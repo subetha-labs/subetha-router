@@ -33,7 +33,11 @@ describe("swap-image.sh: 古いコンテナの停止と静止の確認（R-0）"
     const stopLine = lines.findIndex((line) => line.startsWith('mutate_within "$STOP_BOUND_S" stop'));
     expect(lines[stopLine - 1]).toBe("STOP_SINCE=$(date -u +%s)");
     expect(script).toContain('logs --since "$STOP_SINCE" "$OLD_ID"');
-    expect(script).toContain("grep -qx 'drain: complete'");
+    expect(script).toContain('grep -qxF "drain: complete $RUN_ID" "$LOGTMP"');
+    // 起動の id は事前確認（trap の前 = 何も変える前）で読む。
+    const runRead = script.indexOf("RUN_ID=$(sed -n 's/^entry run: \\([0-9a-f]\\{16\\}\\)$/\\1/p' \"$LOGTMP\" | tail -n 1)");
+    expect(runRead).toBeGreaterThan(0);
+    expect(runRead).toBeLessThan(script.indexOf("trap restore ERR INT TERM\n"));
   });
 
   test.skipIf(!hasTimeout)("drain の成功: 今回の停止の log に drain: complete → 入れ替えは swap ok（exit 0）。stop は timeout -k 5 345 docker stop -t 315", () => {
@@ -54,10 +58,12 @@ describe("swap-image.sh: 古いコンテナの停止と静止の確認（R-0）"
     ["drain の時間切れ（drain: timeout）", "drain_timeout"],
     ["drain の行が無い（SIGKILL・古いイメージ）", "no_drain_line"],
     ["古い log にだけ drain: complete（今回の停止には無い）", "old_drain_only"],
+    ["停止と同じ秒に別の起動の id の drain: complete だけがある", "stale_same_second"],
+    ["時計の巻き戻し（今回の行は --since の前、未来の時刻に別の起動の complete）", "clock_back"],
   ])("%s → 新しいコンテナを作らず、旧コンテナを元の名前で戻して入口を開け直し exit 1", (_name, scenario) => {
     const { result, containers, calls, caddy } = runSwap(scenario);
     expect(result.status, result.stderr).toBe(1);
-    expect(result.stderr).toMatch(/did not report 'drain: complete' for this stop \(not quiescent\): not swapping/);
+    expect(result.stderr).toMatch(/did not report 'drain: complete' for this stop and this run \(not quiescent\): not swapping/);
     expect(result.stderr).toMatch(/restored: subetha-router = oldid0001, ingress reopened/);
     expect(result.stderr).not.toMatch(/STATE UNKNOWN/);
     expect(result.stdout).not.toMatch(/previous container drained|swap ok/);
@@ -92,4 +98,16 @@ describe("swap-image.sh: 古いコンテナの停止と静止の確認（R-0）"
     expect(result.stderr).not.toMatch(/restored: /);
     expect(calls.filter((c) => c.startsWith("docker run "))).toHaveLength(0);
   }, 180_000);
+
+  test.skipIf(!hasTimeout)("古いコンテナの log に entry run の行が無い → 何も変えずに exit 1（stop・caddy の停止・復旧はしない）", () => {
+    const { result, calls, caddy, containers } = runSwap("no_run_line");
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toMatch(/has no 'entry run' line: the drain evidence cannot be bound to this run, not swapping \(nothing was changed\)/);
+    expect(result.stderr).not.toMatch(/swap failed|restored: |STATE UNKNOWN/);
+    expect(calls.some((c) => c.startsWith("docker stop"))).toBe(false);
+    expect(calls.some((c) => c.startsWith("systemctl stop"))).toBe(false);
+    expect(caddy).toBe("active");
+    expect(containers).toEqual(OLD_RESTORED);
+    expect(result.stdout + result.stderr).not.toMatch(/^(entry run|drain): /m);
+  }, 90_000);
 });

@@ -17,6 +17,7 @@
  */
 
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -505,8 +506,9 @@ export async function startHost(
    *   (1) 入口の listener を閉じ（新しい接続を受けない。既存の接続の上の新しい要求は 503）、進行中の MCP の要求が 0 になるのを待つ
    *   (2) Router の子に SIGTERM を送り、子の drain（新しい要求を断り、相手が切った購入も含めて進行中の処理の終わりを待つ）と終了を残りの時間まで待つ
    *       （5 秒の SIGKILL ではない。残りが尽きたら SIGKILL）
-   *   (3) facilitator を止め、最後に固定の 1 行。`drain: complete` は (1) が 0 になり、Router の子が `router drain: complete` を出して exit 0 で終わったときだけ。
-   *       それ以外は `drain: timeout`（exit 1）
+   *   (3) facilitator に SIGTERM を送り、facilitator の drain（進行中の要求と、応答の後も続く遅れた送出・journal の続き）と終了を残りの時間まで待つ
+   *   (4) 最後に固定の 1 行 `drain: complete <id>` か `drain: timeout <id>`（id は起動の最初の `entry run: <id>` と同じ）。complete は (1) が 0 になり、
+   *       Router の子が `router drain: complete`、facilitator が `facilitator drain: complete` を出して、どちらも exit 0 で終わったときだけ。それ以外は timeout（exit 1）
    *   待っている間に facilitator が落ちたら今までどおり `shutdown`（両方を止めて exit 1。drain の行は出さない = 静止の証拠にならない）。
    *   (1) の間に Router の子が落ちたときも同じ（facilitator があるとき。無いときは (2) で `drain: timeout`）
    */
@@ -518,7 +520,14 @@ export async function startHost(
   let ready = false;
   const drain = createIngressDrain();
   const drainTimeoutMs = overrides.drainTimeoutMsForTest ?? DRAIN_TIMEOUT_MS;
-  /** `finalLine`: 子を止めた後、exit の直前に出す固定の 1 行（drain の結果だけ）。 */
+  /**
+   * この起動の id（タスク R-0。16 hex の乱数）。起動の最初に `entry run: <id>` を出し、drain の最後の行にも同じ id を付ける
+   * （`drain: complete <id>`）。`deploy/swap-image.sh` は停止の前に読んだ id と最後の行の id が一致するときだけ静止とみなす
+   * （同じ秒の古い行・時計の巻き戻しで別の起動の行を拾わない）。
+   */
+  const runId = randomBytes(8).toString("hex");
+  note(`entry run: ${runId}`);
+  /** `finalLine`: 子を止めた後、exit の直前に出す固定の 1 行（drain の結果と起動の id だけ）。 */
   const shutdown = async (code: number, message?: string, finalLine?: "drain: complete" | "drain: timeout"): Promise<never> => {
     if (!shuttingDown) {
       shuttingDown = true;
@@ -529,7 +538,7 @@ export async function startHost(
       await Promise.allSettled([...pending]);
       // Router の子（後に起動した）を先に、facilitator を後に止める（終了を待ってから次）。
       for (const child of [...owned].reverse()) await child.stop().catch(() => {});
-      if (finalLine !== undefined) note(finalLine);
+      if (finalLine !== undefined) note(`${finalLine} ${runId}`);
       process.exit(code);
     }
     // 2 回目以降（片付けの途中の別の失敗）は、最初の片付けが終わらせるまで待つ。
@@ -539,6 +548,13 @@ export async function startHost(
   /** drain で止める子（その終了は「子が落ちた」として扱わない）。 */
   const expectedExits = new Set<Listening>();
   let routerChild: Listening | undefined;
+  let facilitatorChild: Listening | undefined;
+  /** 子を残りの時間まで drain させて止める。固定の行 `<label> drain: complete` を SIGTERM の後に出して exit 0 で終わったときだけ true。 */
+  const drainChild = async (child: Listening, label: string, deadline: number): Promise<boolean> => {
+    expectedExits.add(child);
+    const result = await child.stopWithin(deadline - Date.now());
+    return !result.killed && result.code === 0 && result.stderrAfter.split("\n").includes(`${label} drain: complete`);
+  };
   /** 起動の後の signal: 上の (1)〜(3)。2 回目の signal は何もしない（drain を続ける）。 */
   const drainThenShutdown = async (): Promise<void> => {
     if (draining || shuttingDown) return;
@@ -553,15 +569,13 @@ export async function startHost(
       await shutdown(1, undefined, "drain: timeout");
       return;
     }
-    let routerDrained = false;
-    const router = routerChild;
-    if (router !== undefined) {
-      expectedExits.add(router);
-      const result = await router.stopWithin(deadline - Date.now());
-      if (shuttingDown) return;
-      routerDrained = !result.killed && result.code === 0 && result.stderrAfter.split("\n").includes("router drain: complete");
-    }
-    await shutdown(routerDrained ? 0 : 1, undefined, routerDrained ? "drain: complete" : "drain: timeout");
+    // Router の子 → facilitator の順に、それぞれ残りの時間まで drain させる（facilitator は Router の子の終了の後: 進行中の settle が使い得る）。
+    const routerDrained = routerChild === undefined ? true : await drainChild(routerChild, "router", deadline);
+    if (shuttingDown) return;
+    const facilitatorDrained = facilitatorChild === undefined ? true : await drainChild(facilitatorChild, "facilitator", deadline);
+    if (shuttingDown) return;
+    const complete = routerDrained && facilitatorDrained;
+    await shutdown(complete ? 0 : 1, undefined, complete ? "drain: complete" : "drain: timeout");
   };
   const onSignal = (): void => void (ready ? drainThenShutdown() : shutdown(0));
   process.on("SIGINT", onSignal);
@@ -613,6 +627,7 @@ export async function startHost(
     try {
       // 固定文のみ（起動失敗の例外は子の出力を丸ごと含む）。原因（lock・gas の上限・RPC など）は facilitator を単体で起動して調べる（固定文の code を出す）。
       facilitator = await spawnChild(overrides.facilitatorScriptForTest ?? plan.facilitator.script, { ...(overrides.facilitatorEnvExtraForTest ?? {}), ...plan.facilitator.env }, FACILITATOR_LISTEN_TIMEOUT_MS, "the EVM facilitator", true);
+      facilitatorChild = facilitator;
     } catch {
       return startupFailed("could not start the EVM facilitator");
     }

@@ -114,7 +114,7 @@ test("上限（試験は 1 秒）に達すると router drain: timeout（exit 1�
   await harness.router.stop();
   const child = await startListening("tests/fixtures/router-drain-child.ts", [], { ...harness.routerEnv, SUBETHA_TEST_ROUTER_DRAIN_TIMEOUT_MS: "1000" });
   extra.push(child);
-  await purchaseThenDisconnectVia(harness, child, "r0-drain-2");
+  const { paymentId, resend } = await purchaseThenDisconnectVia(harness, child, "r0-drain-2");
   const sentAt = Date.now();
   const result = await child.stopWithin(20_000);
   expect(Date.now() - sentAt).toBeGreaterThanOrEqual(900);
@@ -122,23 +122,42 @@ test("上限（試験は 1 秒）に達すると router drain: timeout（exit 1�
   expect(result.code, result.stderrAfter).toBe(1);
   expect(result.stderrAfter.split("\n")).toContain("router drain: timeout");
   expect(result.stderrAfter).not.toContain("router drain: complete");
+
+  // 回帰（Codex R-0 #3）: drain の時間切れで切られた購入は、同じ journal の再起動の後、既存の中断の状態（`unknown`・`interrupted_at_restart`）で終わる。
+  // 再 settle・宛先への支払いはしない（呼び出し側が同じ要求を送り直しても）。
+  await delay(3_500); // 遅らせた settle（4 秒）が fixture の側で終わるのを待つ（Router はもう聞いていない）。
+  const restarted = await startListening("src/main.ts", [], harness.routerEnv);
+  extra.push(restarted);
+  const status = await fetch(`${restarted.baseUrl}/v1/purchases/${paymentId}`, { headers: principalHeaders(ALICE) });
+  expect(status.status).toBe(200);
+  expect(((await status.json()) as { status: string }).status).toBe("unknown");
+  const lines = (await readFile(harness.journalPath, "utf8")).split("\n").filter((line) => line.includes(paymentId)).map((line) => JSON.parse(line) as { event: string; patch?: { reason?: string } });
+  expect(lines.at(-1)).toMatchObject({ event: "unknown", patch: { reason: "interrupted_at_restart" } });
+  expect(lines.map((l) => l.event)).not.toContain("destination_pending");
+  expect(await resend(restarted.baseUrl)).not.toBe(200);
+  await delay(300);
+  expect(Number((await callsOf(harness.facilitator))["settleCalls"])).toBe(1);
+  expect(Number((await callsOf(harness.upstreamA))["payCalls"])).toBe(0);
+  expect((await readFile(harness.journalPath, "utf8")).split("\n").filter((line) => line.includes(paymentId)).length).toBe(lines.length);
 }, 60_000);
 
-async function purchaseThenDisconnectVia(harness: Harness, router: Listening, requestId: string): Promise<void> {
+async function purchaseThenDisconnectVia(harness: Harness, router: Listening, requestId: string): Promise<{ paymentId: string; resend: (base: string) => Promise<number> }> {
   const quote = await fetch(`${router.baseUrl}/v1/quotes`, {
     method: "POST",
     headers: { ...principalHeaders(ALICE), "content-type": "application/json" },
     body: JSON.stringify({ routeId: ROUTE_A, requestId }),
   });
   expect(quote.status).toBe(200);
-  const body = (await quote.json()) as { quoteId: string; source: { offer: unknown } };
-  const request = http.request(`${router.baseUrl}/v1/routes/${ROUTE_A}/resource`, {
-    headers: { ...principalHeaders(ALICE), "x-router-quote-id": body.quoteId, "x-router-request-id": requestId, "x-router-approval": body.quoteId, "x-payment": paymentHeader(body.source.offer) },
-  });
+  const body = (await quote.json()) as { quoteId: string; paymentId: string; source: { offer: unknown } };
+  const headers = { ...principalHeaders(ALICE), "x-router-quote-id": body.quoteId, "x-router-request-id": requestId, "x-router-approval": body.quoteId, "x-payment": paymentHeader(body.source.offer) };
+  const request = http.request(`${router.baseUrl}/v1/routes/${ROUTE_A}/resource`, { headers });
   request.on("error", () => {});
   request.end();
   expect(await until(async () => Number((await callsOf(harness.facilitator))["settleCalls"]) >= 1, 10_000)).toBe(true);
   request.destroy();
+  // 同じ承認・同じ credential の送り直し（呼び出し側の再試行の再現）。応答の status を返す。
+  const resend = async (base: string): Promise<number> => (await fetch(`${base}/v1/routes/${ROUTE_A}/resource`, { headers })).status;
+  return { paymentId: body.paymentId, resend };
 }
 
 test("drain の後の要求（既存の接続の上）は 503 draining で断り、処理（core）に触れない。drain を渡さなければ今までどおり", async () => {

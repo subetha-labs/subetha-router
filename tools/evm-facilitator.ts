@@ -32,6 +32,7 @@ import { pathToFileURL } from "node:url";
 import fsExt from "fs-ext";
 
 import { stableJson } from "../src/core/intent.js";
+import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { assetKeyOf, EVM_TESTNET_NETWORKS, evmChainIdOf, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, type KnownNetwork } from "../src/shared/networks.js";
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -586,6 +587,11 @@ export interface EvmFacilitator {
   gasSpent(network: string): bigint;
   /** network ごとの有効な gas の上限（wei。`gas_cap_init` + Σ `gas_cap_raise`）。`start` の前・記録の無い network は `undefined`。 */
   gasCap(network: string): bigint | undefined;
+  /**
+   * graceful drain（タスク R-0）。`close()` の後の要求は 503 `draining`。`outstanding()` は進行中の要求と、要求が返った後も続く仕事
+   * （期限の後に返る送出の結果を journal に書く続き、締め切りで見捨てた journal の書き込み）の数。`idle(ms)` は 0 になれば true、上限で false。
+   */
+  readonly drain: { close(): void; outstanding(): number; idle(timeoutMs: number): Promise<boolean> };
 }
 
 export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilitator {
@@ -709,9 +715,32 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
   }
 
-  async function append(record: JournalRecord): Promise<void> {
-    await options.journal.append(record);
-    applyRecord(record);
+  /**
+   * drain の数（タスク R-0）。要求の処理と、要求が返った後も続く仕事（遅れた送出の結果の journal、締め切りで見捨てた書き込み）を数える。
+   * 送出・journal の続きは要求の応答の後にも走り得る（`send_outcome_unknown` の後に hash が返る）。それが終わる前に process が終わると、
+   * 送出した tx の hash が journal に残らない。
+   */
+  let outstanding = 0;
+  let draining = false;
+  const idleWaiters = new Set<() => void>();
+  const track = <T>(promise: Promise<T>): Promise<T> => {
+    outstanding += 1;
+    return promise.finally(() => {
+      outstanding -= 1;
+      if (outstanding === 0) {
+        for (const wake of idleWaiters) wake();
+        idleWaiters.clear();
+      }
+    });
+  };
+
+  function append(record: JournalRecord): Promise<void> {
+    return track(
+      (async () => {
+        await options.journal.append(record);
+        applyRecord(record);
+      })(),
+    );
   }
 
   /**
@@ -1000,9 +1029,12 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       // 予約（意図の行）が累計に入ったまま（未解決）。
       hold(network, id.key, "send_outcome_unknown");
       // 期限の後に hash が返れば journal に残す（運用者の照合のため）。
-      sending.then(
-        (late) => void append({ type: "submitted", key: id.key, hash: late, at: clock.now() }).catch(() => {}),
-        () => {},
+      // 遅れた続きも drain の数に入れる（hash を journal に書き終えるまで）。
+      void track(
+        sending.then(
+          (late) => append({ type: "submitted", key: id.key, hash: late, at: clock.now() }).catch(() => {}),
+          () => {},
+        ),
       );
       return failure(500, "send_outcome_unknown", network);
     }
@@ -1211,7 +1243,13 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     return true;
   }
 
-  async function handle(request: FacilitatorRequest, guard: HttpGuard): Promise<FacilitatorResponse> {
+  function handle(request: FacilitatorRequest, guard: HttpGuard): Promise<FacilitatorResponse> {
+    // drain の後の要求は断る（数えない）。受けた要求は処理の終わりまで数える。
+    if (draining) return Promise.resolve({ status: 503, body: { error: "draining" } });
+    return track(handleRequest(request, guard));
+  }
+
+  async function handleRequest(request: FacilitatorRequest, guard: HttpGuard): Promise<FacilitatorResponse> {
     const receivedAt = clock.now();
     if (!started) return { status: 503, body: { error: "starting" } };
     if (headerOf(request.headers, "origin") !== undefined) return { status: 403, body: { error: "forbidden" } };
@@ -1246,6 +1284,27 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     heldNetworks: () => [...held.keys()],
     gasSpent: (network) => spent.get(network) ?? 0n,
     gasCap: (network) => effectiveCap(network),
+    drain: {
+      close: () => {
+        draining = true;
+      },
+      outstanding: () => outstanding,
+      // 上限の時計は実時間（試験の偽の timer ではない。drain は process の終わりの判断）。
+      idle: (timeoutMs) =>
+        outstanding === 0
+          ? Promise.resolve(true)
+          : new Promise<boolean>((resolve) => {
+              const done = (): void => {
+                clearTimeout(guard);
+                resolve(true);
+              };
+              const guard = setTimeout(() => {
+                idleWaiters.delete(done);
+                resolve(outstanding === 0);
+              }, timeoutMs);
+              idleWaiters.add(done);
+            }),
+    },
   };
 }
 
@@ -1831,6 +1890,11 @@ export interface RunningFacilitator {
   readonly port: number;
   readonly host: string;
   close(): Promise<void>;
+  /**
+   * graceful drain（タスク R-0）: listener を閉じ、新しい要求を断り、進行中の要求と遅れた送出・journal の続きが 0 になるのを `timeoutMs` まで待つ。
+   * 0 になれば journal と lock を閉じて true。上限なら何も閉じずに false（呼び出し側が process を終える）。
+   */
+  drain(timeoutMs: number): Promise<boolean>;
 }
 
 /** 起動の本体。失敗は `StartupError` だけを投げる（`runCli` が固定の文言で出す）。 */
@@ -1868,6 +1932,22 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
         await journal.close().catch(() => {});
         lock.release();
       },
+      async drain(timeoutMs: number) {
+        const deadline = Date.now() + timeoutMs;
+        facilitator.drain.close();
+        server.close();
+        if (!(await facilitator.drain.idle(timeoutMs))) return false;
+        // journal の close（書き込みの待ち行列を空にする）も残りの時間まで。
+        let timer: NodeJS.Timeout | undefined;
+        const closed = await Promise.race([
+          journal.close().then(() => true, () => false),
+          new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())))),
+        ]);
+        clearTimeout(timer);
+        if (!closed) return false;
+        lock.release();
+        return true;
+      },
     };
   } catch (error) {
     await journal.close().catch(() => {});
@@ -1876,10 +1956,33 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
   }
 }
 
-/** CLI の入口。終了 code を返す（0 = listen 中）。失敗の出力は固定の文言だけ。 */
-export async function runCli(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDeps = {}): Promise<number> {
+/**
+ * SIGTERM・SIGINT の handler（タスク R-0）: `running.drain(timeoutMs)` の結果で固定の 1 行を出して終わる。2 回目以降の呼び出しは何もしない。
+ * `facilitator drain: complete`（exit 0）か `facilitator drain: timeout`（exit 1。drain の失敗も同じ）。
+ */
+export function drainStopperOf(running: Pick<RunningFacilitator, "drain">, timeoutMs: number, write: (line: string) => void, exit: (code: number) => void): () => void {
+  let stopping = false;
+  return () => {
+    if (stopping) return;
+    stopping = true;
+    void running.drain(timeoutMs).then(
+      (complete) => {
+        write(complete ? "facilitator drain: complete\n" : "facilitator drain: timeout\n");
+        exit(complete ? 0 : 1);
+      },
+      () => {
+        write("facilitator drain: timeout\n");
+        exit(1);
+      },
+    );
+  };
+}
+
+/** CLI の入口。終了 code を返す（0 = listen 中）。失敗の出力は固定の文言だけ。`onRunning`: listen した後に 1 回（signal の handler を入れる）。 */
+export async function runCli(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDeps = {}, onRunning?: (running: RunningFacilitator) => void): Promise<number> {
   try {
-    await main(env, out, deps);
+    const running = await main(env, out, deps);
+    onRunning?.(running);
     return 0;
   } catch (error) {
     out.stderr(`evm-facilitator: ${error instanceof StartupError ? error.message : "startup_failed"}\n`);
@@ -1981,7 +2084,16 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
       process.exitCode = code;
     });
   } else {
-    void runCli(process.env, out).then((code) => {
+    /**
+     * SIGTERM・SIGINT: drain（タスク R-0）。進行中の要求と遅れた送出・journal の続きを `DRAIN_TIMEOUT_MS` まで待ち、固定の 1 行で終わる:
+     * `facilitator drain: complete`（exit 0）か `facilitator drain: timeout`（exit 1）。入口はこの行と exit code で静止を判断する。2 回目の signal は何もしない。
+     */
+    const onRunning = (running: RunningFacilitator): void => {
+      const stop = drainStopperOf(running, DRAIN_TIMEOUT_MS, (line) => process.stderr.write(line), (code) => process.exit(code));
+      process.on("SIGTERM", stop);
+      process.on("SIGINT", stop);
+    };
+    void runCli(process.env, out, {}, onRunning).then((code) => {
       if (code !== 0) process.exit(code);
     });
   }

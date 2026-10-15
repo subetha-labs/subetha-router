@@ -28,6 +28,7 @@ import {
   listenFacilitator,
   parseJournalLine,
   runCli,
+  drainStopperOf,
   TRANSFER_TOPIC,
   type JournalFs,
   type SetTimer,
@@ -1864,6 +1865,16 @@ describe("H-1 §2.3 単一の実行者の lock", () => {
     const portEnv = () => ({ EVM_FACILITATOR_PORT: String((nextPort += 1)) });
     const chainIoOf = (cap: bigint) => async () => fakeChain(USDG, cap).io;
 
+    test("drain（タスク R-0）: listen 中の facilitator の drain は listener を閉じ、journal と lock を閉じて true（同じ lock を別の process が取れる）", async () => {
+      dir = mkdtempSync(path.join(tmpdir(), "evm-fac-main-"));
+      const journalFile = envOf()["EVM_FACILITATOR_JOURNAL"]!;
+      const running = await main(envOf(portEnv()), { stdout: () => {}, stderr: () => {} }, { chainIoOf: chainIoOf(CAP) });
+      expect(running.server.listening).toBe(true);
+      expect(await running.drain(5_000)).toBe(true);
+      expect(running.server.listening).toBe(false);
+      acquireFacilitatorLock(facilitatorLockPathOf(journalFile)).release();
+    });
+
     test("最初の起動: gas_cap_init が listening の行より前に journal にあり、bind した host を出す。再起動で env の上限が違えば起動しない", async () => {
       dir = mkdtempSync(path.join(tmpdir(), "evm-fac-main-"));
       const journalFile = envOf()["EVM_FACILITATOR_JOURNAL"]!;
@@ -2018,5 +2029,103 @@ describe("H-1 §2.3 単一の実行者の lock", () => {
       expect(ok.code).toBe(0);
       expect(JSON.parse(ok.stdout)).toEqual({ event: "cap_raised", network: RH, addWei: "5", effectiveCapWei: (CAP + 5n).toString() });
     }, 90_000);
+  });
+});
+
+describe("graceful drain（タスク R-0）", () => {
+  test("送出の結果が期限の後に返る: 応答（send_outcome_unknown）の後も drain は 0 にならず、遅れた hash を journal に書いてから 0。drain の後の要求は 503 draining", async () => {
+    const h = await harness();
+    let resolveSend!: (hash: Hex) => void;
+    h.rh.send = () => new Promise<Hex>((resolve) => (resolveSend = resolve));
+    const pending = h.settle(body());
+    await flush();
+    expect(h.rh.writes).toHaveLength(1);
+    // 送出の結果を待つ期限を過ぎる → 要求は返る（送出したかもしれない）。
+    await h.advance(600_000);
+    const res = await pending;
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(res.body)).toContain("send_outcome_unknown");
+    expect(paymentTypes(h.journal)).toEqual(["submit_intent"]);
+    h.f.drain.close();
+    // 要求は返ったが、遅れた送出の続きが残っている。
+    expect(h.f.drain.outstanding()).toBe(1);
+    let idle: boolean | undefined;
+    void h.f.drain.idle(10_000).then((value) => (idle = value));
+    await flush();
+    expect(idle).toBeUndefined();
+    // drain の後の要求は断る（送出しない）。
+    expect(await h.settle(body({ nonce: nonceOf(2) }))).toEqual({ status: 503, body: { error: "draining" } });
+    expect(h.rh.writes).toHaveLength(1);
+    // 遅れて hash が返る → journal に書き終えてから 0。
+    resolveSend(hashOf(9));
+    await flush();
+    expect(payments(h.journal).at(-1)).toMatchObject({ type: "submitted", hash: hashOf(9) });
+    expect(idle).toBe(true);
+    expect(h.f.drain.outstanding()).toBe(0);
+  });
+
+  test("締め切りで見捨てた journal の書き込み（journal_timeout の応答の後も続く）も drain の数に入り、書き終えてから 0", async () => {
+    const journal = fakeJournal();
+    const h = await harness({ journal });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    journal.before = async (record) => {
+      if (record.type === "submit_intent") await gate;
+    };
+    const pending = h.settle(body());
+    await flush();
+    await h.advance(600_000);
+    const res = await pending;
+    expect(res.status).toBe(504);
+    expect(JSON.stringify(res.body)).toContain("journal_timeout");
+    h.f.drain.close();
+    expect(h.f.drain.outstanding()).toBe(1);
+    let idle: boolean | undefined;
+    void h.f.drain.idle(10_000).then((value) => (idle = value));
+    await flush();
+    expect(idle).toBeUndefined();
+    release();
+    await flush();
+    expect(paymentTypes(journal)).toEqual(["submit_intent"]);
+    expect(idle).toBe(true);
+    // 送出はしていない（意図の行の書き込みが締め切りに間に合わなかった）。
+    expect(h.rh.writes).toHaveLength(0);
+  });
+
+  test("進行中の要求が無ければ idle はすぐ true。上限に達すれば false", async () => {
+    const h = await harness();
+    expect(await h.f.drain.idle(10)).toBe(true);
+    h.rh.send = () => new Promise<Hex>(() => {});
+    void h.settle(body());
+    await flush();
+    expect(h.f.drain.outstanding()).toBe(1);
+    expect(await h.f.drain.idle(50)).toBe(false);
+  });
+});
+
+describe("drainStopperOf（タスク R-0: CLI の SIGTERM の handler）", () => {
+  test.each([
+    [true, "facilitator drain: complete\n", 0],
+    [false, "facilitator drain: timeout\n", 1],
+  ] as const)("drain の結果 %s → 固定の 1 行と exit code。2 回目の signal は何もしない。上限は渡した値", async (complete, line, code) => {
+    const calls: number[] = [];
+    const lines: string[] = [];
+    const exits: number[] = [];
+    const stop = drainStopperOf({ drain: async (ms) => (calls.push(ms), complete) }, 1234, (l) => void lines.push(l), (c) => void exits.push(c));
+    stop();
+    stop();
+    await flush();
+    expect(calls).toEqual([1234]);
+    expect(lines).toEqual([line]);
+    expect(exits).toEqual([code]);
+  });
+
+  test("drain が失敗（throw）→ timeout の行と exit 1", async () => {
+    const lines: string[] = [];
+    const exits: number[] = [];
+    drainStopperOf({ drain: async () => Promise.reject(new Error("x")) }, 1, (l) => void lines.push(l), (c) => void exits.push(c))();
+    await flush();
+    expect(lines).toEqual(["facilitator drain: timeout\n"]);
+    expect(exits).toEqual([1]);
   });
 });

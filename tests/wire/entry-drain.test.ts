@@ -6,7 +6,8 @@
  * - 上限に達すると子を止めて `drain: timeout`（exit 1）
  * - drain の間に子が落ちたら今までどおり両方を止めて exit 1（drain の行は出さない）
  * - MCP の要求の後に Router の子を drain する: SIGTERM を送り、子の drain を残りの時間まで待つ（5 秒の SIGKILL ではない）。
- *   `drain: complete` は子が `router drain: complete` を出して exit 0 のときだけ。facilitator は Router の子の終了の後に止める（順を記録で確かめる）
+ *   facilitator も同じ（遅れた送出・journal の続きを待つ）。`drain: complete <id>` は両方の子が `<label> drain: complete` を出して exit 0 のときだけ。
+ *   facilitator は Router の子の終了の後に止める（順を記録で確かめる）。id は起動の最初の `entry run: <id>` と同じ
  * - ready の前の signal は今までどおり（drain の行を出さない）
  * - 合図の届き方: イメージの `CMD`（`npx --no-install tsx <entry>`）と同じ起動の鎖の一番上の pid に SIGTERM を送ると、入口の drain が走り、
  *   一番上の process は入口が終わるまで残る（コンテナの PID 1 が先に終わると、残りは drain の途中で殺される）
@@ -133,9 +134,18 @@ interface Running {
 }
 
 /** 入口を `launcher` で spawn し、listening の行（入口の pid と port）を待つ。 */
-async function startEntry(f: Fixture, launcher: "node" | "npx"): Promise<Running> {
-  const command = launcher === "node" ? process.execPath : "npx";
-  const args = launcher === "node" ? ["--import", "tsx", HOST, "--rails", "arbsep-out"] : ["--no-install", "tsx", HOST, "--rails", "arbsep-out"];
+/** `Dockerfile` の `CMD`（JSON の形）。最後の要素が入口の script。 */
+function dockerCmd(): string[] {
+  const match = /^CMD (\[.*\])$/m.exec(readFileSync(path.join(repoRoot, "Dockerfile"), "utf8"));
+  if (match === null) throw new Error("no JSON CMD in the Dockerfile");
+  return JSON.parse(match[1]!) as string[];
+}
+
+async function startEntry(f: Fixture, launcher: "node" | "cmd"): Promise<Running> {
+  const cmd = dockerCmd();
+  if (launcher === "cmd" && cmd.at(-1) !== "tools/remote-mcp.ts") throw new Error("the Dockerfile CMD does not end with the entry script");
+  const command = launcher === "node" ? process.execPath : cmd[0]!;
+  const args = launcher === "node" ? ["--import", "tsx", HOST, "--rails", "arbsep-out"] : [...cmd.slice(1, -1), HOST, "--rails", "arbsep-out"];
   const child = spawn(command, args, { cwd: repoRoot, env: f.env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
@@ -194,6 +204,20 @@ function lastLine(text: string): string {
   return text.trim().split("\n").at(-1) ?? "";
 }
 
+/**
+ * 最後の行（`drain: complete <id>` か `drain: timeout <id>`）の種類を返す。id は起動の最初の `entry run: <id>`（16 hex）と同じでなければならない。
+ * drain の行は 1 行だけ。
+ */
+function finalOf(stderr: string): string {
+  const runs = [...stderr.matchAll(/^entry run: ([0-9a-f]{16})$/gm)].map((m) => m[1]);
+  expect(runs).toHaveLength(1);
+  const match = /^(drain: (?:complete|timeout)) ([0-9a-f]{16})$/.exec(lastLine(stderr));
+  expect(match, stderr).not.toBeNull();
+  expect(match![2]).toBe(runs[0]);
+  expect(stderr.match(/^drain: /gm)).toHaveLength(1);
+  return match![1]!;
+}
+
 describe("入口の drain（SIGTERM の後）", () => {
   test("進行中の要求が終わるまで子は止まらず、新しい接続は受けない。終わってから子を止め、最後に drain: complete（exit 0）", async () => {
     const f = await fixture();
@@ -214,7 +238,7 @@ describe("入口の drain（SIGTERM の後）", () => {
     expect(await inFlight.finish()).toBe("HTTP/1.1 200 OK");
     const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
     expect(exit?.code, entry.stderr()).toBe(0);
-    expect(lastLine(entry.stderr())).toBe("drain: complete");
+    expect(finalOf(entry.stderr())).toBe("drain: complete");
     expect(entry.stderr().match(/^drain: /gm)).toHaveLength(1);
     expect(alive(routerPid)).toBe(false);
     expect(alive(facilitatorPid)).toBe(false);
@@ -226,7 +250,7 @@ describe("入口の drain（SIGTERM の後）", () => {
     process.kill(entry.announcement.pid, "SIGTERM");
     const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
     expect(exit?.code, entry.stderr()).toBe(0);
-    expect(lastLine(entry.stderr())).toBe("drain: complete");
+    expect(finalOf(entry.stderr())).toBe("drain: complete");
   }, 90_000);
 
   test("上限（試験は 1.5 秒）に達すると子を止めて drain: timeout（exit 1。complete は出ない）。止める順は Router の子の終了 → facilitator", async () => {
@@ -241,11 +265,11 @@ describe("入口の drain（SIGTERM の後）", () => {
     const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
     expect(Date.now() - sentAt).toBeGreaterThanOrEqual(1_400);
     expect(exit?.code, entry.stderr()).toBe(1);
-    expect(lastLine(entry.stderr())).toBe("drain: timeout");
+    expect(finalOf(entry.stderr())).toBe("drain: timeout");
     expect(entry.stderr()).not.toContain("drain: complete");
     expect(alive(routerPid)).toBe(false);
     expect(alive(facilitatorPid)).toBe(false);
-    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm"]);
+    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm", "facilitator-exit"]);
   }, 90_000);
 
   test("drain の間に facilitator の子が落ちる → 今までどおり両方を止めて exit 1。drain の行は出さない", async () => {
@@ -266,12 +290,19 @@ describe("入口の drain（SIGTERM の後）", () => {
   }, 90_000);
 });
 
-describe("合図の届き方: イメージの CMD と同じ起動の鎖（npx --no-install tsx <entry>）", () => {
-  test("一番上の pid（npx）への SIGTERM で入口の drain が走り、一番上の process は入口が drain: complete で終わるまで残る", async () => {
+/**
+ * 合図の届き方（Codex R-0 #4）: イメージの `CMD` の形で起動した一番上の process が入口そのもの（コンテナでは PID 1）であること。
+ * 以前の `npx --no-install tsx` は npm → `sh -c` → tsx → 入口の鎖で、macOS の sh では SIGTERM が届いたが、イメージ（Debian の dash）では
+ * npm の子の sh が SIGTERM で終わり、npm も終わって drain が切られた（`tests/acceptance/image-drain.test.ts` で実際のイメージで確かめた）。
+ * イメージの段の証拠はその試験（既定では走らない）。ここは host の上で CMD の形を確かめる。
+ */
+describe("合図の届き方: Dockerfile の CMD の形（入口が一番上の process）", () => {
+  test("CMD の形で起動した一番上の pid は入口そのもの。SIGTERM で drain が走り、進行中の要求の後に drain: complete", async () => {
     const f = await fixture();
-    const entry = await startEntry(f, "npx");
-    // 鎖になっている（一番上は入口そのものではない）ことの確認。
-    expect(entry.topPid).not.toBe(entry.announcement.pid);
+    const entry = await startEntry(f, "cmd");
+    // 鎖になっていない（一番上が入口そのもの = コンテナでは PID 1 が入口）。
+    expect(dockerCmd().slice(0, 3)).toEqual(["node", "--import", "tsx"]);
+    expect(entry.topPid).toBe(entry.announcement.pid);
     const inFlight = await slowRequest(entry.announcement.port);
     await delay(200);
     process.kill(entry.topPid, "SIGTERM");
@@ -282,7 +313,7 @@ describe("合図の届き方: イメージの CMD と同じ起動の鎖（npx --
     expect(await inFlight.finish()).toBe("HTTP/1.1 200 OK");
     const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
     expect(exit, entry.stderr()).toBeDefined();
-    expect(entry.stderr()).toMatch(/^drain: complete$/m);
+    expect(finalOf(entry.stderr())).toBe("drain: complete");
     expect(alive(entry.announcement.pid)).toBe(false);
   }, 120_000);
 });
@@ -304,8 +335,8 @@ describe("Router の子の drain（MCP の要求の後）と止める順", () =>
     const exit = await Promise.race([entry.done, delay(30_000).then(() => undefined)]);
     expect(Date.now() - sentAt).toBeGreaterThanOrEqual(5_900);
     expect(exit?.code, entry.stderr()).toBe(0);
-    expect(lastLine(entry.stderr())).toBe("drain: complete");
-    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm"]);
+    expect(finalOf(entry.stderr())).toBe("drain: complete");
+    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm", "facilitator-exit"]);
   }, 90_000);
 
   test("Router の子が router drain: timeout（exit 1）→ 入口は drain: timeout（exit 1）。facilitator はその後に止める", async () => {
@@ -314,9 +345,9 @@ describe("Router の子の drain（MCP の要求の後）と止める順", () =>
     process.kill(entry.announcement.pid, "SIGTERM");
     const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
     expect(exit?.code, entry.stderr()).toBe(1);
-    expect(lastLine(entry.stderr())).toBe("drain: timeout");
+    expect(finalOf(entry.stderr())).toBe("drain: timeout");
     expect(entry.stderr()).not.toContain("drain: complete");
-    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm"]);
+    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm", "facilitator-exit"]);
   }, 90_000);
 
   test("Router の子が終わらない → 残りの時間（試験は 2 秒）で SIGKILL し drain: timeout。facilitator はその後に止める", async () => {
@@ -330,9 +361,10 @@ describe("Router の子の drain（MCP の要求の後）と止める順", () =>
     expect(elapsed).toBeGreaterThanOrEqual(1_800);
     expect(elapsed).toBeLessThan(4_500);
     expect(exit?.code, entry.stderr()).toBe(1);
-    expect(lastLine(entry.stderr())).toBe("drain: timeout");
+    expect(finalOf(entry.stderr())).toBe("drain: timeout");
     expect(alive(routerPid)).toBe(false);
-    expect(eventsOf(f)).toEqual(["router-sigterm", "facilitator-sigterm"]);
+    expect(eventsOf(f).slice(0, 2)).toEqual(["router-sigterm", "facilitator-sigterm"]);
+    expect(eventsOf(f)).not.toContain("router-exit");
   }, 90_000);
 
   test("Router の子の drain の間に facilitator が落ちる → 今までどおり両方を止めて exit 1。drain の行は出さない", async () => {
@@ -368,5 +400,43 @@ describe("Router の子の drain（MCP の要求の後）と止める順", () =>
     expect(code, stderr).toBe(0);
     expect(stderr).not.toMatch(/drain: /);
     expect(await waitFor(() => !alive(facilitatorPid), 5_000)).toBe(true);
+  }, 90_000);
+});
+
+describe("facilitator の drain（Router の子の後）", () => {
+  test("facilitator の drain が 5 秒より長くても残りの時間まで待ち、facilitator drain: complete で終わってから drain: complete", async () => {
+    const f = await fixture({ SUBETHA_TEST_FACILITATOR_DRAIN: "delay:6000" });
+    const entry = await startEntry(f, "node");
+    const sentAt = Date.now();
+    process.kill(entry.announcement.pid, "SIGTERM");
+    const exit = await Promise.race([entry.done, delay(30_000).then(() => undefined)]);
+    expect(Date.now() - sentAt).toBeGreaterThanOrEqual(5_900);
+    expect(exit?.code, entry.stderr()).toBe(0);
+    expect(finalOf(entry.stderr())).toBe("drain: complete");
+    expect(eventsOf(f)).toEqual(["router-sigterm", "router-exit", "facilitator-sigterm", "facilitator-exit"]);
+  }, 90_000);
+
+  test("facilitator が facilitator drain: timeout（exit 1）→ 入口は drain: timeout（Router の子は complete でも）", async () => {
+    const f = await fixture({ SUBETHA_TEST_FACILITATOR_DRAIN: "timeout" });
+    const entry = await startEntry(f, "node");
+    process.kill(entry.announcement.pid, "SIGTERM");
+    const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
+    expect(exit?.code, entry.stderr()).toBe(1);
+    expect(finalOf(entry.stderr())).toBe("drain: timeout");
+  }, 90_000);
+
+  test("facilitator が終わらない → 残りの時間（試験は 2 秒）で SIGKILL し drain: timeout", async () => {
+    const f = await fixture({ SUBETHA_TEST_FACILITATOR_DRAIN: "hang", SUBETHA_TEST_DRAIN_TIMEOUT_MS: "2000" });
+    const entry = await startEntry(f, "node");
+    const facilitatorPid = Number(readFileSync(f.facilitatorPidFile, "utf8"));
+    const sentAt = Date.now();
+    process.kill(entry.announcement.pid, "SIGTERM");
+    const exit = await Promise.race([entry.done, delay(20_000).then(() => undefined)]);
+    const elapsed = Date.now() - sentAt;
+    expect(elapsed).toBeGreaterThanOrEqual(1_800);
+    expect(elapsed).toBeLessThan(4_500);
+    expect(exit?.code, entry.stderr()).toBe(1);
+    expect(finalOf(entry.stderr())).toBe("drain: timeout");
+    expect(alive(facilitatorPid)).toBe(false);
   }, 90_000);
 });
