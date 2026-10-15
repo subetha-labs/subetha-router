@@ -56,3 +56,32 @@ test("mainnet 用の env（chain id・mainnet RPC・CID）を与えても、公�
   expect(plan.childEnv["SUBETHA_X402_OUTBOUND_NETWORK"]).toBeUndefined();
   expect(JSON.stringify(plan.config)).not.toMatch(/eip155:8453"|eip155:4217"|coingecko/);
 });
+
+/**
+ * 診断の記録（`docs/rejection-reasons-design.md` §2.1、タスク R-2）: golden の 3 つは R-2 で子の env に `SUBETHA_DIAGNOSTICS_PATH` の 1 語だけを足した
+ * （設定は不変。`git diff` の差分は 1 つの鍵の追加と、前の最後の行の末尾の `,` だけ）。ここでは追加だけであることを値で確かめる:
+ * `SUBETHA_DIAGNOSTICS=off` の計画は golden からその鍵を除いたものと一致し、`off` でない計画との差はその鍵 1 つ（値は journal の隣）。
+ */
+test.each([
+  ["public", RAILS_ACTIVATION, { ...base, ...evmFacilitatorEnv }],
+  ["public-pre-evm", { ...RAILS_ACTIVATION, evm: EVM_NONE }, base],
+  ["none", RAILS_NONE, base],
+] as const)("診断の記録の env（%s）: 足したのは SUBETHA_DIAGNOSTICS_PATH の 1 語だけ。off なら R-2 の前と同じ", (name, activation, env) => {
+  const expected = golden(name);
+  const { SUBETHA_DIAGNOSTICS_PATH: added, ...before } = expected.childEnv as Record<string, string>;
+  expect(added).toBe("/tmp/diagnostics/router.ndjson");
+  const off = planOf(activation, { ...env, SUBETHA_DIAGNOSTICS: "off" });
+  expect(off.config).toEqual(expected.config);
+  expect(off.childEnv).toEqual(before);
+  expect(Object.keys(off.childEnv).sort()).toEqual((expected.childEnvKeys as string[]).filter((key) => key !== "SUBETHA_DIAGNOSTICS_PATH"));
+  const on = planOf(activation, env);
+  expect(Object.keys(on.childEnv).filter((key) => !(key in off.childEnv))).toEqual(["SUBETHA_DIAGNOSTICS_PATH"]);
+  for (const [key, value] of Object.entries(off.childEnv)) expect(on.childEnv[key]).toBe(value);
+  // `off` 以外の値では止めない（新しい env は必須にしない、止めるのは `off` だけ）。
+  expect(planOf(activation, { ...env, SUBETHA_DIAGNOSTICS: "on" }).childEnv).toEqual(expected.childEnv);
+});
+
+test("診断の記録の env: mainnet の 1 経路の計画には足さない", () => {
+  const mainnet = hostPlanOf({ activation: RAILS_NONE, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden-mainnet.ndjson", mainnetFirstRoute: true }, { ...base });
+  expect(mainnet.childEnv["SUBETHA_DIAGNOSTICS_PATH"]).toBeUndefined();
+});

@@ -22,6 +22,9 @@ import type { DynamicGate, GateLease } from "./dynamic-gate.js";
 import { fingerprintOf, isTerminal, stableJson, toPublicStatus, type Intent } from "./intent.js";
 import { credentialDigestOf, LedgerDuplicateError, LedgerRecordTooLargeError, type LedgerQuote, type QuoteLedger } from "./quote-ledger.js";
 import { capCoversFee, IntentCollisionError, intentFromCreated, type IntentStore } from "./store.js";
+import { classifyTransportError } from "../net/guarded-fetch.js";
+import type { DiagnosticsSink } from "../shared/diagnostics.js";
+import { withPurchaseDiagnostics, type PurchaseDiagnostics } from "./purchase-diagnostics.js";
 
 const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
 const MAX_AMOUNT_DIGITS = 30;
@@ -141,8 +144,10 @@ export interface DynamicCoreOptions {
   readonly note?: ((message: string) => void) | undefined;
   /** 支払い元の残高（base units）。省略時は検査しない。`undefined` を返した資産は「検査なし」（送信の設計 §2.6）。 */
   readonly balanceOf?: ((profileId: string, asset: string) => Promise<bigint | undefined>) | undefined;
-  /** 受信 settle が成立した後の送信レグ（静的と共通）。 */
-  readonly deliver: (paymentId: string) => Promise<DynamicPurchaseOutcome>;
+  /** 受信 settle が成立した後の送信レグ（静的と共通）。診断の記録は同じ購入の控え（`diag`）に足す。 */
+  readonly deliver: (paymentId: string, diag?: PurchaseDiagnostics) => Promise<DynamicPurchaseOutcome>;
+  /** 診断の記録（`docs/rejection-reasons-design.md` §4.1、タスク R-2）。省略時は何もしない。 */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 export interface DynamicPurchaseOutcome {
@@ -500,6 +505,20 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     if (intent === undefined) {
       return missing();
     }
+    /**
+     * 購入の全体の診断の scope（§12.6）。`requestId` は記録では `principalId` と合わせた hash、`quoteId` も hash（§12.1）。
+     * `promoted` は昇格の前か後か（昇格の後の段は入れ子の scope と記録の欄で `true`）。
+     */
+    return withPurchaseDiagnostics(
+      options.diagnostics,
+      { paymentId: intent.paymentId, quoteId: intent.quoteId, principalId: intent.principalId, requestId: intent.requestId, routeId: intent.routeId, promoted: promoted !== undefined },
+      (diag) => purchaseOfIntent(request, intent, promoted !== undefined, diag),
+    );
+  }
+
+  async function purchaseOfIntent(request: DynamicPurchaseRequest, intent: Intent, isPromoted: boolean, diag: PurchaseDiagnostics): Promise<DynamicPurchaseOutcome> {
+    /** 事前の検査で `awaiting_payment` に終わった記録（`dynamic_precheck`。§4.1）。控えるだけ。 */
+    const precheck = (code: string): void => diag.note(() => ({ stage: "dynamic_precheck", outcome: "awaiting", code }));
     // 持ち主の証明。合わなければ存在しない場合と同じ応答（principal の違いも同じ）。
     if (intent.dynamic === undefined || intent.principalId !== request.principalId || !ownerKeyMatches(request.ownerKey, intent.dynamic.ownerKeyHash)) {
       return missing();
@@ -539,14 +558,18 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     // 門: ここから settle・送信まで枠を持つ。通らなければ、上流・facilitator・RPC のどれにも接続しない。
     const admitted = gate.admitPurchase(request.source);
     if (!admitted.ok) {
+      precheck("rate_limited");
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: admitted.reason };
     }
-    return withLease(admitted.lease, () => purchaseAdmitted(intent, profile, credential, promoted !== undefined));
+    return withLease(admitted.lease, () => purchaseAdmitted(intent, profile, credential, isPromoted, diag, precheck));
   }
 
-  async function purchaseAdmitted(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean): Promise<DynamicPurchaseOutcome> {
+  async function purchaseAdmitted(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, diag: PurchaseDiagnostics, precheck: (code: string) => void): Promise<DynamicPurchaseOutcome> {
     const paymentId = intent.paymentId;
-    const awaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
+    const awaiting = (code: string): DynamicPurchaseOutcome => {
+      precheck(code);
+      return { paymentId, status: "awaiting_payment", code };
+    };
     const url = intent.upstream!.url;
     const parsed = parseUpstreamUrl(url, { denyHosts: config.dynamic?.denyHosts ?? [] });
     if (!parsed.ok) {
@@ -580,14 +603,19 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     // 宛先ホストの枠は、ここから送信の終わりまで持つ（settle 後の読み直し・送信もこの枠の中。設計 §7.3）。
     const host = gate.admitHost(parsed.host);
     if (!host.ok) {
+      precheck("rate_limited");
       return { paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: host.reason };
     }
-    return withLease(host.lease, () => purchaseWithHost(intent, profile, credential, isPromoted, upstreamTargetOf(intent.upstream!)));
+    return withLease(host.lease, () => purchaseWithHost(intent, profile, credential, isPromoted, upstreamTargetOf(intent.upstream!), diag, precheck));
   }
 
-  async function purchaseWithHost(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, target: UpstreamTarget): Promise<DynamicPurchaseOutcome> {
+  async function purchaseWithHost(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, target: UpstreamTarget, diag: PurchaseDiagnostics, precheck: (code: string) => void): Promise<DynamicPurchaseOutcome> {
     const paymentId = intent.paymentId;
-    const awaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
+    const awaiting = (code: string): DynamicPurchaseOutcome => {
+      precheck(code);
+      return { paymentId, status: "awaiting_payment", code };
+    };
+    const plainAwaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
     // 読み直しは記録の要求（URL・方法・本文）そのもので行う（FR-P2）。
     const read = await readOffers(profile.profileId, target);
     if (!read.ok) {
@@ -622,14 +650,22 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       }
     }
     let verified: { isValid: boolean; fundsMoved?: boolean };
+    const verifyStartedAt = diag.start();
     try {
-      verified = await inbound.verify(intent.source.offer, credential, { routeId: intent.routeId });
-    } catch {
-      return awaiting("source_verify_unavailable");
+      verified = await diag.stage({ promoted: isPromoted }, () => inbound.verify(intent.source.offer, credential, { routeId: intent.routeId }));
+    } catch (error) {
+      // 昇格の前なら journal・予算・ledger の予約には何も書かない（記録は診断の控えだけ。AC-R3）。
+      const elapsedMs = diag.elapsedSince(verifyStartedAt);
+      diag.note(() => ({ stage: "source_verify", outcome: "threw", promoted: isPromoted, transport: classifyTransportError(error), code: "source_verify_unavailable", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
+      return plainAwaiting("source_verify_unavailable");
     }
+    const verifyElapsedMs = diag.elapsedSince(verifyStartedAt);
     if (verified === null || typeof verified !== "object" || verified.isValid !== true) {
-      return awaiting("verify_failed");
+      diag.note(() => ({ stage: "source_verify", outcome: "invalid", promoted: isPromoted, code: "verify_failed", ...(verifyElapsedMs === undefined ? {} : { elapsedMs: verifyElapsedMs }) }));
+      return plainAwaiting("verify_failed");
     }
+    // 成立の記録も控えるだけ（push は購入の終わり = 昇格・settle の期限の判定の後。§12.3）。
+    diag.note(() => ({ stage: "source_verify", outcome: "valid", promoted: isPromoted, ...(verifyElapsedMs === undefined ? {} : { elapsedMs: verifyElapsedMs }) }));
 
     // 4. 期限の再検査
     const beforeSettleMs = now();
@@ -679,18 +715,27 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       const fundsMoved = verified.fundsMoved ?? current.source.offer.extra["fundsMoveOnCredential"] === true;
       if (fundsMoved) {
         await store.append(paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled" });
+        diag.note(() => ({ stage: "dynamic_precheck", outcome: "unknown", promoted: true, code: "source_paid_unsettled" }));
         return { paymentId, status: "unknown", terminalReason: "source_paid_unsettled" };
       }
       await store.append(paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired" });
-      return awaiting("approval_expired");
+      // 昇格の後の期限切れ（記録の欄で `promoted:true`。push は購入の scope の値なので明示する）。
+      diag.note(() => ({ stage: "dynamic_precheck", outcome: "awaiting", promoted: true, code: "approval_expired" }));
+      return plainAwaiting("approval_expired");
     }
     let settled: unknown;
+    const settleStartedAt = diag.start();
     try {
-      settled = await inbound.settle(current.source.offer, credential, { routeId: current.routeId });
-    } catch {
+      settled = await diag.stage({ promoted: true }, () => inbound.settle(current.source.offer, credential, { routeId: current.routeId }));
+    } catch (error) {
       await store.append(paymentId, "unknown", { outcome: "none", reason: "source_settle_unknown" });
+      const elapsedMs = diag.elapsedSince(settleStartedAt);
+      diag.note(() => ({ stage: "source_settle", outcome: "threw", promoted: true, transport: classifyTransportError(error), code: "source_settle_unknown", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
       return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
     }
+    const settleElapsedMs = diag.elapsedSince(settleStartedAt);
+    const settleNote = (outcome: "settled" | "rejected" | "unknown", code?: string): void =>
+      diag.note(() => ({ stage: "source_settle", outcome, promoted: true, ...(code === undefined ? {} : { code }), ...(settleElapsedMs === undefined ? {} : { elapsedMs: settleElapsedMs }) }));
     const outcome = isRecord(settled) ? settled["outcome"] : undefined;
     const txRef = isRecord(settled) ? settled["txRef"] : undefined;
     if (outcome === "settled" && typeof txRef === "string" && txRef !== "") {
@@ -699,9 +744,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       } catch {
         // 静的と同じ（`orchestrator.ts` の settle）: 記録できなければ `unknown` を返し、別の行を書かず、送信を始めない。
         note?.(`source_settled could not be journaled (paymentId=${paymentId}); answering unknown`);
+        settleNote("settled", "source_settle_unknown");
         return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
       }
-      return options.deliver(paymentId);
+      settleNote("settled");
+      // 昇格の後の送信（読み直し・支払い・遅れて届く callback を含む）は `promoted:true` の scope の中（購入の scope は昇格の前の値を持ち得る）。
+      return diag.stage({ promoted: true }, () => options.deliver(paymentId, diag));
     }
     /**
      * 昇格後の settle の失敗は**すべて `unknown`**（設計 §6.5）。facilitator・RPC は、送金の前に拒否したのか後に拒否したのかを
@@ -709,6 +757,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
      */
     const reason = outcome === "rejected" ? safeSettleReason(isRecord(settled) ? settled["reason"] : undefined) : "source_settle_unknown";
     await store.append(paymentId, "unknown", { outcome: "none", reason });
+    settleNote(outcome === "rejected" ? "rejected" : "unknown", reason);
     return { paymentId, status: "unknown", terminalReason: reason };
   }
 

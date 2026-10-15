@@ -28,6 +28,7 @@ import { createIngressDrain, createMcpIngress } from "../src/mcp/ingress.js";
 import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
+import { diagnosticsChildEnvOf } from "./router-diagnostics.js";
 import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
@@ -336,6 +337,8 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ...railsChildEnvOf(options.activation, env),
       // 自前の facilitator の URL と token だけ（gas 鍵は渡さない。hosted 設計 §4）。子はこの origin だけで `localCounterparties` を作る。
       ...(facilitator === undefined ? {} : { [EVM_FACILITATOR_URL_ENV]: facilitator.url }),
+      // 診断の記録のファイル（`docs/rejection-reasons-design.md` §2.1、タスク R-2）: journal の隣。`SUBETHA_DIAGNOSTICS=off` なら足さない。
+      ...diagnosticsChildEnvOf(journalPath, env),
   };
   return { config, childEnv, journalPath, childScript: PUBLIC_ROUTER_PROCESS, ...(facilitator === undefined ? {} : { facilitator }) };
 }
