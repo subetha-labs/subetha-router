@@ -1,0 +1,40 @@
+import { it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { loadCatalog, buildRequest } from '../src/catalog.js';
+const raw=readFileSync(new URL('../catalog/selection.json',import.meta.url));
+const data=()=>JSON.parse(raw.toString());
+const load=(x:unknown)=>loadCatalog(Buffer.from(JSON.stringify(x)));
+it('creates immutable snapshot with deterministic content hash',()=> {
+ const x=data(), c=load(x); x.entries[0].capabilities[0]='changed';
+ expect(c.entries[0]!.capabilities[0]).not.toBe('changed');
+ expect(()=>{(c.entries[0]!.capabilities as string[])[0]='changed';}).toThrow();
+ expect(c.sha256).toMatch(/^[a-f0-9]{64}$/); expect(load(data()).sha256).toBe(c.sha256);
+ expect(load({entries:data().entries,version:'directory-v1'}).sha256).toBe(c.sha256);
+ expect(load(x).sha256).not.toBe(c.sha256);
+});
+it.each(['duplicate','sentinel','bad-id','extra','version','count','empty','too-long','unicode','too-many','purchase','evidence'])('rejects %s',kind=> {
+ const x=data(); const e=x.entries[0];
+ if(kind==='duplicate') e.id=x.entries[1].id;
+ if(kind==='sentinel') e.id='none';
+ if(kind==='bad-id') e.id='https://x';
+ if(kind==='extra') e.url='x';
+ if(kind==='version') x.version='other';
+ if(kind==='count') x.entries.pop();
+ if(kind==='empty') e.capabilities=[];
+ if(kind==='too-long') e.requiredInputs=['x'.repeat(301)];
+ if(kind==='unicode') e.capabilities=['e\u0301'];
+ if(kind==='too-many') e.requiredInputs=Array(9).fill('x');
+ if(kind==='purchase') e.purchaseEnabled=true;
+ if(kind==='evidence') e.evidence='verified';
+ expect(()=>load(x)).toThrow();
+});
+it('bounds file size and rejects duplicate JSON keys',()=> {expect(()=>loadCatalog(Buffer.alloc(65537,32))).toThrow();expect(()=>loadCatalog(Buffer.from('{"version":"directory-v1","version":"directory-v1","entries":[]}'))).toThrow();});
+it('builds common metadata instructions for renamed candidate IDs',()=> {
+ const x=data(); x.entries.forEach((e:any,i:number)=>{e.id=`candidate_${i}`;});
+ const c=load(x), wire=buildRequest(c,'untrusted " task');
+ expect(wire.questions.selection.type).toBe('choice');
+ expect(wire.questions.selection.criteria).toEqual({candidate_0:null,candidate_1:null,candidate_2:null,needs_clarification:null,none:null});
+ expect(JSON.parse(wire.state)).toEqual({task:'untrusted " task',catalog:{version:c.version,entries:c.entries}});
+ expect(wire.questions.selection.instructions).toContain('requiredInputs');
+ expect(wire.questions.selection.instructions).toContain('none');
+});

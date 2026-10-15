@@ -1,0 +1,8 @@
+{
+  "version": "directory-v1",
+  "entries": [
+    {"id":"exa_search","capabilities":["Search the web for pages about a specified subject."],"requiredInputs":["Search subject"],"evidence":"directory_listing_only","purchaseEnabled":false},
+    {"id":"coingecko_price","capabilities":["Retrieve the current simple price of a cryptocurrency in a specified currency."],"requiredInputs":["Cryptocurrency asset","Quote currency"],"evidence":"directory_listing_only","purchaseEnabled":false},
+    {"id":"openweather_current","capabilities":["Retrieve current weather conditions for a specified location."],"requiredInputs":["Location"],"evidence":"directory_listing_only","purchaseEnabled":false}
+  ]
+}

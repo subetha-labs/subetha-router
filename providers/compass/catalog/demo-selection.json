@@ -1,0 +1,49 @@
+{
+  "version": "existing-resources-v1",
+  "entries": [
+    {
+      "id": "hyperliquid_eth_perp",
+      "capabilities": [
+        "Retrieve the Hyperliquid ETH perpetual mark price and 24-hour change."
+      ],
+      "requiredInputs": [
+        "An explicit request for the ETH perpetual mark price or 24-hour change."
+      ],
+      "evidence": "candidate_metadata_only",
+      "purchaseEnabled": false
+    },
+    {
+      "id": "hyperliquid_sol_perp",
+      "capabilities": [
+        "Retrieve the Hyperliquid SOL perpetual mark price and 24-hour change."
+      ],
+      "requiredInputs": [
+        "An explicit request for the SOL perpetual mark price or 24-hour change."
+      ],
+      "evidence": "candidate_metadata_only",
+      "purchaseEnabled": false
+    },
+    {
+      "id": "uniswap_usdc_weth_spot",
+      "capabilities": [
+        "Retrieve the Uniswap Ethereum USDC/WETH pool spot reference price."
+      ],
+      "requiredInputs": [
+        "An explicit request for the Uniswap USDC/WETH pool spot reference price."
+      ],
+      "evidence": "candidate_metadata_only",
+      "purchaseEnabled": false
+    },
+    {
+      "id": "exa_search",
+      "capabilities": [
+        "Search the web for information about a specified topic, including general topic questions and recent news or updates; this does not provide a direct exact current price feed or execute trades."
+      ],
+      "requiredInputs": [
+        "A topic to search for."
+      ],
+      "evidence": "candidate_metadata_only",
+      "purchaseEnabled": false
+    }
+  ]
+}
