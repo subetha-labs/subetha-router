@@ -214,10 +214,10 @@ describe("buildDiagRecord（後回しの処理）", () => {
     for (const extra of [{ message: "x" }, { cid: "0123456789abcdef" }, { quoteHash: "0123456789abcdef" }, { table: REASON_TABLE_VERSION }, { reason: "absent" }, { counters: zeroCounters() }, { seq: 99 }, { v: 2 }, { component: "sink" }]) {
       const r = await entryOf({ stage: "source_verify", httpStatus: 400, ...extra } as unknown as DiagCapture);
       // `at` は積んだ時刻（ミリ秒）なので、別々に積んだ 2 つは境目で 1 ms ずれ得る（Linux の実行で観測）。時刻以外を比べる。
-      const { at: _plainAt, ...plainRest } = plain as Record<string, unknown>;
-      const { at: _at, ...rest } = (r ?? {}) as Record<string, unknown>;
+      const { at: _plainAt, ...plainRest } = plain as unknown as Record<string, unknown>;
+      const { at: _at, ...rest } = (r ?? {}) as unknown as Record<string, unknown>;
       expect(rest, JSON.stringify(extra)).toEqual(plainRest);
-      expect(typeof (r as Record<string, unknown>)?.["at"]).toBe("string");
+      expect(typeof (r as unknown as Record<string, unknown> | undefined)?.["at"]).toBe("string");
     }
   });
 
