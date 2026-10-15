@@ -10,7 +10,7 @@ COPY --from=model /model/model-00002-of-00002.safetensors /opt/model/model-00002
 COPY --from=model /model/.gitattributes /model/.quant_summary.txt /model/README.md /model/apache_2.0_license.md /model/chat_template.jinja /model/config.json /model/generation_config.json /model/hf_quant_config.json /model/model.safetensors.index.json /model/processor_config.json /model/tokenizer.json /model/tokenizer_config.json /model/.ready /opt/model/
 COPY patch_entrypoint.py images.json /opt/compass/
 RUN python3 -I -B /opt/compass/patch_entrypoint.py /entrypoint.sh /opt/compass/images.json /opt/compass/model-entrypoint.sh
-COPY launcher.mjs package.json /opt/compass/
+COPY launcher.mjs x402-gate.mjs package.json /opt/compass/
 COPY src/ /opt/compass/src/
 COPY catalog/ /opt/compass/catalog/
 COPY config/ /opt/compass/config/
