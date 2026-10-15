@@ -1,5 +1,51 @@
 # SubEtha Compass 設計
 
+## 0.4 Compass Provider の設計（wake 方式・公開 x402、2026-10-28 まで、改訂 3）
+
+要件 §0.4（改訂 5、Codex r5 APPROVE）を満たす最小の設計。設計レビュー r1（REJECT 9 MUST）・r2（REJECT、7 件未解消）（`.claude_workflow/local/compass-provider-review-design-r{1,2}-result.md`）を反映。§0.2/§0.3 の image・launcher・harness を土台にし、変更は **launcher への公開モード（x402 ゲート）の追加、nonce 記録、service 設定、harness の公開段** に限る。製品 `src/`・catalog・model wire・Router 本体は変えない。
+
+**構成。** 同じ Cloud Run service／container。`launcher.mjs` の ingress（0.0.0.0:$PORT）が唯一の公開面で、内部 API（127.0.0.1:8081）とモデル（8082）は非公開のまま。新規ファイルは `providers/compass/cloud-run/x402-gate.mjs`（402 封筒・credential 検査・nonce 状態・facilitator・領収・期限。純粋関数＋注入 fetch/clock）と `providers/compass/cloud-run/README-provider.md`。SDK は同梱しない。wire は Router の受信 adapter（`src/adapters/inbound/x402.ts`）と `providers/x402-workers/src/{requirements,receipt,facilitator-client}.ts` の形を手書きで最小実装し、**fixture は両ソースの試験 fixture から写す**（`PAYMENT-REQUIRED`＝base64 JSON `{x402Version:2, accepts:[req], resource:{url, description, mimeType:"application/json"}}`、`PAYMENT-SIGNATURE`＝base64 JSON `{x402Version:2, accepted, payload:{signature, authorization:{from,to,value,validAfter,validBefore,nonce}}}`（文字列の整数・hex）、facilitator 本文 `{x402Version:2, paymentPayload, paymentRequirements}`、`PAYMENT-RESPONSE`＝base64 JSON `{success:true, transaction, network, payer?}`）。decode は厳格（base64 → UTF-8 → JSON、8 KiB、`stableJson` 深さ 4）。
+
+**公開モードの分岐（PROVIDER_MODE=public のときだけ）。** 以下はすべて env `PROVIDER_MODE==='public'` で分岐し、未設定なら §0.3 で検証済みの経路（path 表・health 本文・70 秒・4 秒 stop・認証付き `/internal/v1/select`）を **一行も変えずに** 通る。公開モードでは (i) `POST /internal/v1/select` は **404**（公開 service で無料推論の経路を残さない）、(ii) `POST /select` だけが推論に至り、支払い必須、(iii) `GET /health` 本文に `disclosure` を含める、(iv) 終了経路は下記 drain、(v) service spec は concurrency 2・`allUsers` invoker・env 追加。既存試験は未設定経路で不変、公開モードの試験は別 fixture。
+
+**`GET /health`（無料・無認証・推論なし）。** launcher が model `/health`（1.5 秒）を既存どおり確認し、200 のときだけ `{"status":"ok","ready":true,"bootId","disclosure":<開示文>}`、未準備は 503 と同じ `disclosure`。起動中（startup probe 前）は platform が保留する（アプリは応答できない）。
+
+**`POST /select`（公開・有料）の順序。** 要求の開始で **絶対期限 D = start + 28 秒**（Router の有料要求 30 秒に 2 秒の transport 余裕）を 1 つ決め、各段は `min(段の上限, D − now)` で切る。
+1. framing／body 8 KiB（既存）。**受付判定を 402 より先に行う（要件 (a)）**: `draining` → 503 `Retry-After: 60`；child 不在または直前の model `/health`（この要求内で 1.5 秒）が 200 でない → 503 `Retry-After: 60`；推論枠が使用中 → 503 `busy` `Retry-After: 15`。いずれも credential の有無に関わらず、facilitator・GCS・推論を呼ばない。
+2. `PAYMENT-SIGNATURE` 無し → 402 + `PAYMENT-REQUIRED`（`accepts` 1 件：`{scheme:"exact", network:"eip155:84532", asset:"0x036CbD53842c5426634e7929541eC2318f3dCF7e", amount:"10000", payTo:<PAY_TO>, maxTimeoutSeconds:60, extra:{name:"USDC",version:"2"}}`、`resource.url = PUBLIC_URL+"/select"`、無状態）。
+3. 有り → 厳格 decode。`x402Version===2`、`accepted` が 2 の requirements と `stableJson` で完全一致、`authorization.{from,to,value,validAfter,validBefore,nonce}` と `signature` の形（EVM address 正規表現、`to` が `payTo` と大文字小文字無視で一致、`value==="10000"`、`nonce` が 0x + 64 hex、`signature` が 0x hex）。不一致 → 402 `payment_invalid`。ここで **key = sha256(lower(network)|lower(from)|lower(nonce))** を決める。
+4. **durable 状態の照会（stale／verify より前）**: GCS `GET …/o/nonce%2F<key>?alt=media`（2 秒）。200 → 記録あり → **409** `{recorded:<state>, nonce, paid:<"no"|"possibly"|"yes">, note}`：`accepted`/`failed` → `paid:"no"`（支払い未成立・新 nonce で可）、`settling`/`unknown` → `paid:"possibly"`（settle 送出後の結果不明。自動再試行なし、手動突合）、`settled` → `paid:"yes"`（配信済み）。404 → なし。他 → 503（支払い前）。
+5. stale: `validBefore < now + 30 秒`（要求全体＋settle を覆う）→ 402 `payment_invalid`。body を既存の入力検査（不正 400）。
+6. **枠の取得**（同一 tick で 1 の条件を再確認してから取る）。解放は **全経路で 1 回だけ**：`release()` を冪等にし、以降の各段の失敗（verify 失敗・GCS 失敗・gate 拒否）は `finally` で即時解放、推論を開始した場合は内部要求の socket `close`（正常・中断とも）で解放する。内部 API 自体も単一受付なので二重推論は起きない。
+7. facilitator `POST /verify`（5 秒、64 KiB、redirect なし、HTTP 200 かつ JSON object を要求）。`typeof isValid === "boolean"` を要求し、**`false` だけが 402** `payment_invalid`；`true` で続行；欠落・型違い・非 200・不正形・timeout → 503（記録なし・課金なし）。
+8. GCS `nonce/<key>` を **create-only**（`ifGenerationMatch=0`、2 秒）。**記録 schema（全遷移で保持）**: `{"state", "at", "network", "from", "nonce", "validBefore", "value", "payTo", "bootId", "transaction"?, "reconciled"?}`（credential の署名は保存しない）。手動突合に必要な `from/nonce/validBefore` は最初の書込から含める。412 → 4 と 8 の間に他要求が取った → 409（4 と同じ応答）。他の失敗 → 503。以降の状態遷移は **同じ object の `ifGenerationMatch=<直前の generation>` 付き上書き**（線形：accepted → settling → settled | unknown | failed）。
+9. 推論（内部 127.0.0.1:8081、`min(15, D−now−R)` 秒、**R = 14 秒**＝settling 2 ＋ settle 8 ＋ settled 1.5 ＋ 応答送出 1 ＋ 余裕 1.5。残りが R 未満なら推論せず 503）。失敗／timeout → 503（状態は `accepted` のまま。損失なし）。
+10. settle 前の gate: `draining` でない、`D − now ≥ R`、`validBefore ≥ now + R`。満たさなければ 503（課金なし、`accepted` のまま）。GCS を `settling` に遷移（2 秒）。**遷移が 2xx でなければ（412 含む）settle を送らない** → 503。遷移の完了後、**settle 送出の直前に `draining` と残り時間をもう一度確認**し、満たさなければ settle を送らず `accepted` へ戻さずに（`settling` のまま）503 と `nonce_not_settled` ログ：この状態は突合で `failed` に閉じる（settle 未送出なので資金は動かない）。
+11. facilitator `POST /settle`（8 秒、1 回、再試行なし）。(a) 200・JSON・`success===true`・領収検査 OK（`network` 一致、`transaction` が 0x+64 hex、`payer` があれば EVM address かつ `from` と大文字小文字無視で一致）→ `settled` に遷移（1.5 秒、失敗はログのみ）→ 200 + `PAYMENT-RESPONSE`（検証済み欄だけで再構成）+ 本文（9 の JSON そのまま）。(b) 200・`success===false`・`errorReason !== "settlement_pending"` → `failed` に遷移 → 402 `payment_invalid`。(c) それ以外すべて（`settlement_pending`、非 200、不正形、timeout、領収不正、payer 不一致）→ `unknown` に遷移 → 502 `{status:"unknown", nonce}`。`unknown` への遷移が失敗したら、それでも 502 を返し、ログに `nonce_write_failed` と key を残す（controller が突合する）。
+12. drain（公開モードの SIGTERM）: `draining=true`、新規は 503。進行中が 10 より前なら中断して 503。settle 送出後は最大 6 秒待ち、応答なしなら `unknown` 遷移（2 秒）→ 終了（計 ≤ 9.5 秒、Cloud Run の猶予 10 秒内）。10 の gate により **drain 開始後に settle を新たに送らない**。未設定モードは既存の 4 秒 stop のまま。
+
+**残存 `settling`／`unknown` の突合（手動）。** controller が `--reconcile <run> <key>` で、記録の `from`/`nonce` を使い Base Sepolia USDC の `authorizationState(from, nonce)` を RPC で読み（read-only）、消費済みなら `settled`（`reconciled:true`）、未消費かつ `validBefore` 経過なら `failed`（`reconciled:true`）に遷移する。自動化しない。
+
+**ログ。** 公開モードの支払いログは 1 行 JSON `{event:"compass_pay", bootId, key, stage, outcome, httpStatus, elapsedMs}` に限る。header・body・credential・例外文は書かない（例外は固定コードへ写像）。試験で、全ログ行に credential の部分文字列・prompt が含まれないことを assert する。
+
+**nonce 記録の bucket。** 専用の非公開 bucket（`compass-nonce-<id>`、uniform、public access prevention、soft-delete 0、versioning off）。runtime SA に `roles/storage.objectAdmin` をこの bucket だけ。認証は Cloud Run metadata server のトークン（鍵ファイルなし、2 秒）。bucket は service 停止後も **delete_on まで保持**（突合に要る）。
+
+**service 設定（§0.2 からの変更点）。** `maxInstanceRequestConcurrency: 2`、env `PROVIDER_MODE=public`、`PUBLIC_URL`、`PAY_TO`（owner が新規に作る受取アドレス。Provider は鍵を持たない）、`FACILITATOR_URL=https://www.x402.org/facilitator`、`NONCE_BUCKET`。IAM: `allUsers` に `roles/run.invoker`。min 0／max 1、L4、startup probe は既存。
+
+**harness の公開段。** `run_cloud_run_probe.py` に次を追加（gates は `--gpu` と**別**に定義）。
+- `--publish <run>`: gates ＝ 新しい承認記録 `compass-provider-authorization-20261015.json` の hash 固定、`stop_rule.owner_confirmed===true`（**false の間は拒否**：実装・公開の blocker）、baseline、親 plan 承認、context hash、worker.lock。watchdog は要らない（期限付き試行ではない）。予算欄は新記録（USD30、retain_until、delete_on）に差し替えた plan を使う。動作：nonce bucket 作成＋IAM → service create（公開設定）→ `allUsers` invoker → `/health` を 60 秒間隔・最大 15 分確認 → `phase=retained`、manifest に `retained_resources`（service, repository, runtime_sa, nonce bucket）、`delete_on` を記録。推論はしない。失敗時は service と bucket を削除し image は残す（再 publish 可）。
+- `--readback <run>`: Monitoring `container/instance_count` を `active` と `idle` の両 state で公開時刻から現在まで 60 秒粒度で読み、**各分を「active>0 または idle>0 または sample 欠測」なら GPU-on と数える（保守的：欠測は稼働扱い）**。`Σ × 60 秒` を累積 GPU 秒として manifest に追記（単調増加のみ）。しきい値：6 時間で `warn`、8 時間で `stop_due`。**要件 §0.4 からの変更（要件側に追記）**: gcloud から請求実績は読めないため、「Billing 実績の定期読取」は (i) この GPU 時間積算（実行可能な停止判断の根拠）と (ii) Billing 予算アラート（50/90/100%、owner 宛、通知のみ）に置き換える。90% の通知を owner が受けたら controller に伝え、controller が `--stop` する。controller は 6 時間以内の間隔で `--readback` を実行し、6 時間以上読取できない見込みなら事前に停止する。
+- `--stop <run>`: `stop_due`／owner 指示で service と `allUsers` binding を削除、image・runtime SA・bucket は保持、`phase=stopped`。
+- `--cleanup-only`: 対象に nonce bucket を加え、delete_on 以降は全削除。
+
+**期限の配分。** 1 要求 D=28 秒、決済後 reserve R=14 秒。最悪（lookup 2 ＋ verify 5 ＋ accepted 2 = 9 秒）では推論に 5 秒しか残らず、readiness 後の初回推論 11.1 秒は **settle 前の gate で止まる（課金なし）**。通常（lookup・GCS 各 0.3 秒、verify 約 1 秒）では推論に約 13 秒残り、初回 11.1 秒も warm 0.3〜3.1 秒も収まる。gate で止まった要求は client が同じ nonce を再提示すると 409 になるので、**新しい credential で再試行**する（README に明記）。cold は必ず `/health` で先に起こす。
+
+**README-provider.md の内容。** 開示文（実測 161.3 秒／deploy 時 8.5 分の区別、約 11.5 分後の停止観測、推定と未実測の明示、600 秒 timeout の観測結果）、wake 手順（60 秒間隔・最大 15 分・1 セッション 2 回）、直接購入の手順、Router 経由の手順（他レールの testnet 資金が要る、`dyn-*-to-x402`、POST body、**health 200 → quote → 直ちに purchase**）、返金なしの 2 つの窓（Router inbound；Compass settle 送出→配信）、409 の意味、`paid:false`／`purchaseEnabled:false` の意味、削除日。
+
+**試験（socket-free、偽 facilitator・偽 GCS・偽 clock 注入）。** 2〜12 の各分岐（402 の形、decode 厳格、accepted 不一致、stale、409 の各 state と本文、lookup 失敗 503、verify 200/false・非 200・timeout、create 412→409、推論失敗→settle なし、settle 前 gate（残り時間・validBefore・draining）、settle (a)(b)(c) の各遷移、`unknown` 書込失敗、drain の各段、PROVIDER_MODE 未設定で既存 fixture 全件不変、公開モードで `/internal/v1/select` 404、ログの credential 不在）。harness: `--publish` の gate（`owner_confirmed` false で拒否、watchdog 不要）、`--readback` の積算、`--stop` の対象。
+
+**受入の実施順（要件 (1)〜(11)）。** `owner_confirmed` → build（新 image、約 40 分）→ `--publish` → (6) → (11)/(5)（cold：platform 保留の観測と 600 秒 timeout 後の再確認。**要件 (11) の「アプリ到達後の model 未準備 503」は本設計に再現経路がなく（model child 停止は ingress の終了＝platform 側の失敗になる）、未解決の gate として記録する**。アプリ到達後の 503 は busy（手順 1）で観測する）→ (1) 直接購入（controller の `npm run sign` 相当）→ (2) Router 経由 `dyn-arc-to-x402`（controller の Arc testnet USDC）→ (3)(4) → (8)（`settling` だけ・`accepted` だけの記録は controller が bucket に置く）→ (9) → (10b) ローカル偽 facilitator ＋ 実 bucket への staging 書込 1 回 → (10a) は service 削除を伴うため `--stop` 時または 10/29 → (7) 10/29。
+
 ## 0.3 Cloud Run L4試行の実測と設計の訂正（2026-10-15）
 
 §0.2の設計は3回目の試行で実機で成立した。実測と訂正は次のとおり（証跡 `providers/compass/notes/cloud-run-evidence.md`、run `cloud-run-run-cr2-t3`）。
