@@ -13,11 +13,32 @@ if (frozen !== undefined && frozen !== "") {
   Date.now = () => value;
 }
 
+/** http の loopback（`127.0.0.1`）の URL だけを受ける（向け直しの先も同じ規則。Codex R-6 #1）。 */
+function isLoopbackHttp(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" && url.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
 const original = globalThis.fetch;
+const blocked = (): Promise<Response> => Promise.reject(new TypeError("network blocked by the test preload"));
 globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> => {
   const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  const url = new URL(href);
-  if (url.hostname === "rpc.moderato.tempo.xyz" && target !== undefined && target !== "") return original(target, init);
-  if (url.hostname === "127.0.0.1") return original(input, init);
-  return Promise.reject(new TypeError("network blocked by the test preload"));
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return blocked();
+  }
+  // 自動の redirect は辿らない（loopback から外への redirect で外に出ない）。
+  // `signal` は展開では引き継がれない場合があるので明示して渡す（viem の期限はこの signal で切れる）。
+  const noRedirect: RequestInit = init === undefined ? { redirect: "manual" } : { ...init, redirect: "manual", ...(init.signal === undefined || init.signal === null ? {} : { signal: init.signal }) };
+  if (url.hostname === "rpc.moderato.tempo.xyz") {
+    if (target === undefined || target === "" || !isLoopbackHttp(target)) return blocked();
+    return original(target, noRedirect);
+  }
+  if (isLoopbackHttp(url.href)) return original(input, noRedirect);
+  return blocked();
 }) as typeof fetch;
