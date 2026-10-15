@@ -543,6 +543,8 @@ let publicModeDone=false; process.on('exit',()=>{if(!publicModeDone){console.err
   let pres=await invoke2('POST','/select',{'content-type':'application/json','payment-signature':'SIG'},'{"task":"t"}'); assert.equal(pres.statusCode,402);assert.equal(pres.headers['payment-required'],'X');assert.deepEqual(gateCalls,[{body:'{"task":"t"}',header:'SIG'}]);
   assert.equal((await invoke2('GET','/health')).statusCode,200);
   assert.equal((await invoke2('GET','/select')).statusCode,404);
+  // Node fetch (undici) sends sec-fetch-mode: public mode must accept it (Router and fetch clients); unset mode still refuses.
+  gateCalls.length=0; pres=await invoke2('POST','/select',{'content-type':'application/json','sec-fetch-mode':'cors','origin':'null'},'{"task":"t"}'); assert.equal(pres.statusCode,402); assert.equal(gateCalls.length,1);
   publicModeDone=true;
   console.log('PASS public mode: gate admission/challenge/decode/duplicate/verify/record/infer/reserve/settle/drain paths, log allowlist, GCS and facilitator wire, ingress branch');
 })().catch(e=>{console.error(e);process.exitCode=1;});

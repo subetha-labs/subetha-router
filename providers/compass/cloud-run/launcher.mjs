@@ -13,7 +13,9 @@ export function createIngress({bootId, request=http.request, healthy=()=>true, p
     let done=false, upstream, timer, readTimer;
     const started=performance.now();
     res.once('finish',()=>console.log(JSON.stringify({event:'compass_request',bootId,status:res.statusCode,elapsedMs:performance.now()-started})));
-    if(Object.keys(req.headers).some(k=>k==='origin'||k==='referer'||k.startsWith('sec-fetch-'))){res.statusCode=403;res.end('{}');return;}
+    // Browser-origin guard protects the authenticated internal API from ambient-credential requests. Public mode has no
+    // ambient credentials (payment is an explicit header) and Node's fetch sends sec-fetch-mode, so it is not applied there.
+    if(!publicGate&&Object.keys(req.headers).some(k=>k==='origin'||k==='referer'||k.startsWith('sec-fetch-'))){res.statusCode=403;res.end('{}');return;}
     const finish=(status,body)=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(readTimer);upstream?.destroy();res.statusCode=status;res.setHeader('content-type','application/json');res.end(body);};
     const abort=()=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(readTimer);upstream?.destroy();res.destroy();};
     req.once('error',abort);req.once('aborted',abort);
