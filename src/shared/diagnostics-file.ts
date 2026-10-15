@@ -3,12 +3,12 @@
  *
  * 流れ:
  * 1. **push**（`emit`。hook の同期の部分はこれだけ）: `snapshotCapture` で凍結した写し・その時点の scope の参照・時刻・連番を
- *    有界の環（既定 1,000 件、1 件 16 KiB、総量 2 MiB。長さは UTF-16 の code unit で数える）に積む。満杯・上限なら捨てて数える。
+ *    有界の環（既定 1,000 件、1 件 16 KiB、総量 2 MiB。量はバイトの見積り: 文字列は 2 × UTF-16 の長さ、object は固定の見積り）に積む。満杯・上限なら捨てて数える。
  *    throw しない・待たない・I/O をしない。
  * 2. **後回しの処理**（`setImmediate`。主の thread、1 回に 16 件まで、残りは次の `setImmediate` に譲る）: 分類・hash・検査
  *    （`buildDiagRecord`）→ JSON 化 → 上限（1 行 2,048 バイト・1 つの鍵 32 行（鍵 10,000 個、古い順に忘れる）・600 行 / 分）→ 書き込みの待ち。
- *    環から外した時点で 1 件を手放す（処理・捨てる・失敗のどの経路でも）。書き込みの待ちが詰まっている（256 KiB 超）間は環から取り出さない
- *    （環が満杯になれば push が捨てて数える = メモリは環と待ちの上限で止まる）。
+ *    環から外した時点で 1 件を手放す（処理・捨てる・失敗のどの経路でも）。書き込みの待ち（書いている途中の 1 回分を含む）が 256 KiB 以上の間は
+ *    環から取り出さない（環が満杯になれば push が捨てて数える = メモリは環と `writeBacklogBoundOf` の上限で止まる）。
  * 3. **書き込み**: 1 本の promise の連鎖。ディレクトリ 0700、`open(path, "a", 0o600)`。上限（既定 32 MiB）を超える前に `path` → `path.1` に
  *    rename して開き直す（1 世代）。rename の失敗は `rotateFailed`、以後は書かずに数えるだけ。書き込み・開く失敗は `writeFailed`（次の書き込みで開き直す）。
  *    fsync はしない（D-1: best effort）。
@@ -45,13 +45,16 @@ export interface DiagLimits {
   readonly linesPerMinute: number;
   /** 環の件数。 */
   readonly maxEntries: number;
-  /** 1 件の量（固定の見積り ＋ 文字列の長さ）。 */
+  /** 1 件の量（バイトの見積り: 固定の見積り ＋ 2 × 文字列の長さ ＋ scope の量）。 */
   readonly maxEntryCost: number;
   /** 環の総量。 */
   readonly maxRingCost: number;
   /** 1 回の後回しの処理の件数。 */
   readonly perTick: number;
-  /** 書き込みの待ちの上限（UTF-8 のバイト）。超えている間は環から取り出さない。 */
+  /**
+   * 書き込みの待ちの上限（UTF-8 のバイト。待ち行列と **書いている途中の 1 回分** の両方を数える）。これ以上の間は環から取り出さない。
+   * 1 回の後回しの処理は判定の後に最大 `perTick` 行と数の行 1 つを足すので、待ちは `writeBacklogBoundOf(limits)` を超えない。
+   */
   readonly maxWriteBacklogBytes: number;
   /** ファイルの大きさ（超える前に 1 世代回す）。 */
   readonly maxFileBytes: number;
@@ -73,6 +76,11 @@ export const DEFAULT_DIAG_LIMITS: DiagLimits = Object.freeze({
   maxFileBytes: 32 * 1024 * 1024,
   countersIntervalMs: 60_000,
 });
+
+/** 書き込みの待ち（待ち行列 ＋ 書いている途中の 1 回分）の上限: 判定の値 ＋ 1 回の処理の行 ＋ 数の行 1 つ。 */
+export function writeBacklogBoundOf(limits: DiagLimits): number {
+  return limits.maxWriteBacklogBytes + (limits.perTick + 1) * limits.maxLineBytes;
+}
 
 export const DIAG_FILE_BYTES: Readonly<Record<"router" | "facilitator" | "driver" | "signer", number>> = Object.freeze({
   router: 32 * 1024 * 1024,
@@ -135,7 +143,7 @@ export interface FileDiagnosticsSink extends DiagnosticsSink {
   flush(options?: { readonly timeoutMs?: number }): Promise<boolean>;
   /** 受付を止め、数の行を足して flush し、ファイルを閉じる。reject しない。 */
   close(options?: { readonly timeoutMs?: number }): Promise<void>;
-  /** 今の量（試験・運用の表示用）: 環の件数と量、書き込みの待ちのバイト数。 */
+  /** 今の量（試験・運用の表示用）: 環の件数と量（バイトの見積り）、書き込みの待ちのバイト数（書いている途中の 1 回分を含む）。 */
   inspect(): { readonly ringEntries: number; readonly ringCost: number; readonly pendingBytes: number; readonly writing: boolean };
 }
 
@@ -387,7 +395,7 @@ export function createFileDiagnosticsSink(options: FileDiagnosticsSinkOptions): 
   function tick(): void {
     scheduled = false;
     try {
-      if (pendingBytes > limits.maxWriteBacklogBytes) {
+      if (pendingBytes >= limits.maxWriteBacklogBytes) {
         blockedOnWrites = true;
         return;
       }
@@ -501,18 +509,27 @@ export function createFileDiagnosticsSink(options: FileDiagnosticsSinkOptions): 
     }
   }
 
+  /** 書き終えた（または失敗した）1 回分を待ちの量から外す。 */
+  function settleBatch(lines: readonly Uint8Array[]): void {
+    let bytes = 0;
+    for (const line of lines) bytes += line.byteLength;
+    pendingBytes = Math.max(0, pendingBytes - bytes);
+  }
+
   function drainWrites(): void {
     if (writing) return;
     writing = true;
     void (async () => {
       try {
         while (pending.length > 0) {
+          // 取り出した 1 回分も、書き終えるまで `pendingBytes` に数えたまま（止まる fs でも待ちの量が上限で止まる）。
           const lines = pending.splice(0, pending.length);
-          pendingBytes = 0;
           try {
             await writeBatch(lines);
           } catch {
             counters.writeFailed += lines.length;
+          } finally {
+            settleBatch(lines);
           }
         }
       } finally {

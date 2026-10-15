@@ -8,10 +8,11 @@
  *   後回しの処理（`buildDiagRecord`）で行う。生の値は環の中のメモリにだけあり、処理・捨てる・失敗のどの経路でも手放す。
  * - scope は `AsyncLocalStorage`（§2.3 D-2、§12.6）。購入の入口で作り、段ごとに入れ子にする。**積む時点** の scope を写す（後の処理で今の scope を読まない）。
  *
- * 純粋（`node:fs` を使わない。`node:crypto` の hash と `node:async_hooks` だけ）。ファイルの sink は `diagnostics-file.ts`。
+ * 純粋（`node:fs` を使わない。`node:crypto` の hash・`node:async_hooks`・viem の keccak256 だけ）。ファイルの sink は `diagnostics-file.ts`。
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { keccak256 } from "viem";
 
 import { assetKeyOf, KNOWN_NETWORKS } from "./networks.js";
 import { classifyReason, REASON_MANIFEST, REASON_TABLE_VERSION, REASON_TOKENS, type ReasonClass } from "./payment-reasons.js";
@@ -349,8 +350,8 @@ export interface DiagCapture {
   readonly rawReason?: unknown;
   /** `cid` の入力（scope の `cidInput` より優先）。 */
   readonly rawCid?: DiagCidInput;
-  /** 手元で計算した tx の hash（`0x`＋64 hex。形が違えば欄を書かない）。 */
-  readonly rawTxRef?: string;
+  /** 手元で計算した tx の hash（`localTxRefOf` の値だけ。component `signer`・`driver` だけが書ける。ほかは行ごと捨てる）。 */
+  readonly txRef?: LocalTxRef;
 }
 
 /** 互換の名前（設計 §2.2 の `DiagRecordInput`）。 */
@@ -397,64 +398,174 @@ export function safeEmit(sink: DiagnosticsSink | undefined, build: () => DiagCap
  * 量の上限（push の入力。§14.2 のうち主の thread の分）
  * ────────────────────────────────────────────────────────────────────────────── */
 
-/** 文字列の欄の上限（長さ = UTF-16 の code unit の数で数える）。超えたら写さず「大きすぎ」の印だけにする。 */
-export const DIAG_MAX_STRING_CHARS = 8 * 1024;
-/** 1 件の固定の見積り（object・数値・参照の分）。 */
-export const DIAG_ENTRY_OVERHEAD = 256;
+/**
+ * 量は **バイトの見積り** で数える（保守的な上限）: 文字列は `2 × UTF-16 の長さ`（V8 の 2 バイトの表現の大きさ。UTF-8 にしたときの
+ * 大きさではなく、メモリに持つ量の上限）、object は固定の見積り。長さを見るだけなので O(1)（大きな文字列を encode しない）。
+ */
+export const DIAG_BYTES_PER_CODE_UNIT = 2;
+/** 文字列の欄の上限（バイトの見積り）。8 KiB = 4,096 code unit。超えたら写さず印だけにする。 */
+export const DIAG_MAX_STRING_BYTES = 8 * 1024;
+/** 1 件の固定の見積り（凍結した object・固定の欄の数値と参照・環の枠）。 */
+export const DIAG_ENTRY_OVERHEAD = 512;
+/** 入れ子の object（`rawCid`・`cidInput`）1 つの固定の見積り。 */
+export const DIAG_OBJECT_OVERHEAD = 64;
+/** scope の 1 枠の固定の見積り。 */
+export const DIAG_SCOPE_OVERHEAD = 256;
+
+/** 文字列のバイトの見積り（O(1)）。 */
+export function diagStringBytes(value: string): number {
+  return DIAG_BYTES_PER_CODE_UNIT * value.length;
+}
 
 /** 大きすぎた文字列の印（写さない。分類では `malformed`、hash の入力なら欄を書かない）。 */
 export const OVERSIZE: unique symbol = Symbol("diag-oversize");
+/** 型の違う値の印（閉じた欄なら後回しの処理で行ごと捨てる。生の理由なら `malformed`）。値そのもの（関数・object）は持たない。 */
+export const INVALID: unique symbol = Symbol("diag-invalid");
 
-type Snapshot<T> = { -readonly [K in keyof T]: T[K] | typeof OVERSIZE };
+declare const LOCAL_TX_REF: unique symbol;
+/**
+ * 手元で計算した tx の hash（§12.4）。`localTxRefOf` だけが作れる（型の brand と、作った object を覚える WeakSet の両方で縛る）。
+ * 記録に `txRef` を書けるのは component `signer`・`driver` だけ。
+ */
+export interface LocalTxRef {
+  readonly [LOCAL_TX_REF]: true;
+  readonly hash: string;
+}
+const issuedTxRefs = new WeakSet<object>();
+const SIGNED_TX_HEX = /^0x(?:[0-9a-fA-F]{2})+$/;
 
-/** 凍結した写しと、その見積りの量（固定の分 + 文字列の長さの和）。 */
+/** 送る署名済みの raw tx（bytes か `0x` の hex）から keccak256 を計算して、`txRef` に渡せる唯一の値を作る。 */
+export function localTxRefOf(signedTransaction: Uint8Array | `0x${string}`): LocalTxRef {
+  if (typeof signedTransaction === "string" ? !SIGNED_TX_HEX.test(signedTransaction) : !(signedTransaction instanceof Uint8Array) || signedTransaction.byteLength === 0) {
+    throw new TypeError("localTxRefOf needs the signed transaction bytes");
+  }
+  const ref = Object.freeze({ hash: keccak256(signedTransaction).toLowerCase() }) as unknown as LocalTxRef;
+  issuedTxRefs.add(ref);
+  return ref;
+}
+
+/** 凍結した写し（固定の欄だけ。値は primitive か印か凍結した `rawCid`）。 */
+export type CapturedValue = string | number | boolean | null | typeof OVERSIZE | typeof INVALID | Readonly<Record<"network" | "asset" | "from" | "nonce", string>>;
+export type CapturedFields = Readonly<Record<string, CapturedValue>>;
+
+/** 凍結した写しと、その見積りの量（バイト）。 */
 export interface CaptureSnapshot {
-  readonly value: Readonly<Snapshot<DiagCapture>>;
+  readonly value: CapturedFields;
   readonly cost: number;
 }
 
-function sizedString(value: string, acc: { cost: number }): string | typeof OVERSIZE {
-  if (value.length > DIAG_MAX_STRING_CHARS) return OVERSIZE;
-  acc.cost += value.length;
-  return value;
+type FieldKind = "string" | "number" | "boolean";
+/** 写す欄（固定）。これ以外の欄は読まない（列挙もしない）。 */
+const CAPTURE_FIELDS: ReadonlyArray<readonly [string, FieldKind]> = [
+  ["stage", "string"],
+  ["paymentId", "string"],
+  ["attempt", "number"],
+  ["promoted", "boolean"],
+  ["routeId", "string"],
+  ["network", "string"],
+  ["facilitator", "string"],
+  ["op", "string"],
+  ["httpStatus", "number"],
+  ["transport", "string"],
+  ["response", "string"],
+  ["receipt", "string"],
+  ["receiptHeader", "string"],
+  ["reasonField", "string"],
+  ["reasonSource", "string"],
+  ["outcome", "string"],
+  ["code", "string"],
+  ["rpc", "string"],
+  ["rpcHttpStatus", "number"],
+  ["rpcCode", "number"],
+  ["elapsedMs", "number"],
+  ["bytes", "number"],
+  ["txRefCheck", "string"],
+  ["broadcast", "string"],
+  ["fundsMayHaveMoved", "boolean"],
+  ["signerStage", "string"],
+];
+/** 写す欄の数（固定。`rawReason`・`rawCid`・`txRef` を含む）。push の仕事はこの数の読み取りで上限がある。 */
+export const DIAG_CAPTURE_FIELD_COUNT = CAPTURE_FIELDS.length + 3;
+
+/** 4 つの文字列だけを写す（型が違う・大きすぎれば `undefined`）。 */
+function cidCopyOf(value: unknown): { copy: Readonly<Record<"network" | "asset" | "from" | "nonce", string>>; bytes: number } | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const source = value as Record<string, unknown>;
+  const network = source["network"];
+  const asset = source["asset"];
+  const from = source["from"];
+  const nonce = source["nonce"];
+  if (typeof network !== "string" || typeof asset !== "string" || typeof from !== "string" || typeof nonce !== "string") return undefined;
+  const bytes = diagStringBytes(network) + diagStringBytes(asset) + diagStringBytes(from) + diagStringBytes(nonce);
+  for (const s of [network, asset, from, nonce]) if (diagStringBytes(s) > DIAG_MAX_STRING_BYTES) return undefined;
+  return { copy: Object.freeze({ network, asset, from, nonce }), bytes: bytes + DIAG_OBJECT_OVERHEAD };
 }
 
 /**
- * push の時点の写し（O(欄の数)。欄は 30 程度で固定）。文字列は不変なので参照の写しで足りる。入れ子は `rawCid` だけで、
- * その 4 つの文字列も写す（呼び出し側が後で object を変えても写しは変わらない）。
+ * push の時点の写し。**固定の欄だけ** を名前で読み（列挙しない。余分な欄・proxy の余分な鍵は読まない）、期待する primitive の型の値だけを写す。
+ * 型の違う値は `INVALID`（関数・object を持たない）、大きすぎる文字列は `OVERSIZE`。生の理由は文字列か `null`（欄なし）だけを写し、
+ * それ以外は `INVALID`（分類で `malformed`）。`txRef` は `localTxRefOf` が作った値だけ。読み取りの例外（getter・proxy）はそのまま投げる
+ * （sink の push が握って数える）。仕事は `DIAG_CAPTURE_FIELD_COUNT` 回の読み取りと長さの比較だけ。
  */
 export function snapshotCapture(capture: DiagCapture): CaptureSnapshot {
-  const acc = { cost: DIAG_ENTRY_OVERHEAD };
-  const out: Record<string, unknown> = {};
-  for (const key in capture) {
-    if (!Object.prototype.hasOwnProperty.call(capture, key)) continue;
-    const value = (capture as unknown as Record<string, unknown>)[key];
-    if (key === "rawCid") {
-      if (typeof value === "object" && value !== null) {
-        const cid = value as Record<string, unknown>;
-        const copy: Record<string, unknown> = {};
-        for (const k of ["network", "asset", "from", "nonce"] as const) {
-          const v = cid[k];
-          copy[k] = typeof v === "string" ? sizedString(v, acc) : OVERSIZE;
-        }
-        out[key] = Object.freeze(copy);
+  if (typeof capture !== "object" || capture === null) return { value: Object.freeze({ stage: INVALID }), cost: DIAG_ENTRY_OVERHEAD };
+  const source = capture as unknown as Record<string, unknown>;
+  let cost = DIAG_ENTRY_OVERHEAD;
+  const out: Record<string, CapturedValue> = {};
+  for (const [key, kind] of CAPTURE_FIELDS) {
+    const value = source[key];
+    if (value === undefined) continue;
+    if (typeof value !== kind) {
+      out[key] = INVALID;
+    } else if (kind === "string") {
+      const bytes = diagStringBytes(value as string);
+      if (bytes > DIAG_MAX_STRING_BYTES) {
+        out[key] = INVALID; // 閉じた欄に大きな文字列は来ない
       } else {
-        out[key] = OVERSIZE;
+        cost += bytes;
+        out[key] = value as string;
       }
-      continue;
+    } else {
+      out[key] = value as number | boolean;
     }
-    if (typeof value === "string") out[key] = sizedString(value, acc);
-    else if (typeof value === "object" && value !== null) out[key] = OVERSIZE; // 閉じた欄に object は来ない（生の理由の object は malformed）
-    else out[key] = value;
   }
-  return { value: Object.freeze(out) as Readonly<Snapshot<DiagCapture>>, cost: acc.cost };
+  const reason = source["rawReason"];
+  if (reason !== undefined || Object.prototype.hasOwnProperty.call(source, "rawReason")) {
+    if (reason === null || reason === undefined) out["rawReason"] = null;
+    else if (typeof reason !== "string") out["rawReason"] = INVALID;
+    else if (diagStringBytes(reason) > DIAG_MAX_STRING_BYTES) out["rawReason"] = OVERSIZE;
+    else {
+      cost += diagStringBytes(reason);
+      out["rawReason"] = reason;
+    }
+  }
+  const rawCid = source["rawCid"];
+  if (rawCid !== undefined) {
+    const cid = cidCopyOf(rawCid);
+    if (cid === undefined) out["rawCid"] = OVERSIZE;
+    else {
+      cost += cid.bytes;
+      out["rawCid"] = cid.copy;
+    }
+  }
+  const txRef = source["txRef"];
+  if (txRef !== undefined) {
+    if (typeof txRef === "object" && txRef !== null && issuedTxRefs.has(txRef)) {
+      const hash = (txRef as LocalTxRef).hash;
+      cost += diagStringBytes(hash);
+      out["txRef"] = hash;
+    } else {
+      out["txRef"] = INVALID;
+    }
+  }
+  return { value: Object.freeze(out), cost };
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
  * scope（AsyncLocalStorage）
  * ────────────────────────────────────────────────────────────────────────────── */
 
-/** 積む時点の scope（凍結。量の見積りつき）。 */
+/** 積む時点の scope（凍結。固定の欄だけ。量の見積りつき）。 */
 export interface DiagScopeFrame {
   readonly values: Readonly<DiagScope>;
   readonly cost: number;
@@ -462,38 +573,49 @@ export interface DiagScopeFrame {
 
 const scopeStorage = new AsyncLocalStorage<DiagScopeFrame>();
 
-function sanitizeScope(scope: DiagScope): DiagScopeFrame {
-  const acc = { cost: 0 };
+const SCOPE_STRING_FIELDS = ["paymentId", "quoteId", "principalId", "requestId", "routeId"] as const;
+
+/**
+ * scope を固定の欄だけにする（型の違う値・大きすぎる文字列・知らない欄は入れない。object は `cidInput` の 4 つの文字列の写しだけ）。
+ * `base` は今の scope（既に固定の欄だけ）。
+ */
+function sanitizeScope(scope: DiagScope, base: Readonly<DiagScope> | undefined): DiagScopeFrame {
+  const source = (typeof scope === "object" && scope !== null ? scope : {}) as Record<string, unknown>;
+  const prior = (base ?? {}) as Record<string, unknown>;
+  let cost = DIAG_SCOPE_OVERHEAD;
   const out: Record<string, unknown> = {};
-  for (const key in scope) {
-    if (!Object.prototype.hasOwnProperty.call(scope, key)) continue;
-    const value = (scope as Record<string, unknown>)[key];
-    if (value === undefined) continue;
-    if (key === "cidInput") {
-      const cid = value as Record<string, unknown>;
-      const parts = ["network", "asset", "from", "nonce"].map((k) => cid[k]);
-      if (parts.every((p) => typeof p === "string" && p.length <= DIAG_MAX_STRING_CHARS)) {
-        for (const p of parts) acc.cost += (p as string).length;
-        out[key] = Object.freeze({ network: parts[0], asset: parts[1], from: parts[2], nonce: parts[3] });
-      }
-      continue;
-    }
+  for (const key of SCOPE_STRING_FIELDS) {
+    const given = source[key];
+    const value = typeof given === "string" && diagStringBytes(given) <= DIAG_MAX_STRING_BYTES ? given : given === undefined ? prior[key] : undefined;
     if (typeof value === "string") {
-      // 大きすぎる文字列は scope に入れない（その hash の欄が書かれないだけ）。
-      if (value.length > DIAG_MAX_STRING_CHARS) continue;
-      acc.cost += value.length;
+      cost += diagStringBytes(value);
+      out[key] = value;
     }
-    out[key] = value;
   }
-  return Object.freeze({ values: Object.freeze(out) as Readonly<DiagScope>, cost: acc.cost });
+  const promoted = source["promoted"] === undefined ? prior["promoted"] : source["promoted"];
+  if (typeof promoted === "boolean") out["promoted"] = promoted;
+  const attempt = source["attempt"] === undefined ? prior["attempt"] : source["attempt"];
+  if (typeof attempt === "number") out["attempt"] = attempt;
+  const givenCid = source["cidInput"];
+  const cid = givenCid === undefined ? (prior["cidInput"] === undefined ? undefined : cidCopyOf(prior["cidInput"])) : cidCopyOf(givenCid);
+  if (cid !== undefined) {
+    cost += cid.bytes;
+    out["cidInput"] = cid.copy;
+  }
+  return Object.freeze({ values: Object.freeze(out) as Readonly<DiagScope>, cost });
 }
 
 /**
  * 今の scope に `scope` を重ねて `fn` を動かす（`AsyncLocalStorage.run`）。返り値と例外はそのまま（同期の throw も同期のまま）。
  */
 export function withDiagnosticScope<T>(scope: DiagScope, fn: () => Promise<T>): Promise<T> {
-  const current = scopeStorage.getStore();
-  const merged = sanitizeScope(current === undefined ? scope : { ...current.values, ...scope });
+  let merged: DiagScopeFrame;
+  try {
+    merged = sanitizeScope(scope, scopeStorage.getStore()?.values);
+  } catch {
+    // getter・proxy が投げても支払いの経路は止めない（今の scope のまま動かす）。
+    return fn();
+  }
   return scopeStorage.run(merged, fn);
 }
 
@@ -628,6 +750,8 @@ export function validateDiagRecord(value: unknown): DiagRecord | undefined {
   if (!(STAGES_OF_COMPONENT[component] as readonly string[]).includes(record["stage"] as string)) return undefined;
   if (("reason" in record) !== ("table" in record)) return undefined;
   if ((component === "sink") !== ("counters" in record)) return undefined;
+  // §12.4: tx の hash（と RPC の結果との一致）は署名の道具・driver の手元の計算だけ。Router・facilitator の行には置けない。
+  if (("txRef" in record || "txRefCheck" in record) && component !== "signer" && component !== "driver") return undefined;
   return record as unknown as DiagRecord;
 }
 
@@ -637,7 +761,7 @@ export function validateDiagRecord(value: unknown): DiagRecord | undefined {
 
 /** 環の 1 件（push の時点の写し）。 */
 export interface DiagEntry {
-  readonly capture: Readonly<Snapshot<DiagCapture>>;
+  readonly capture: CapturedFields;
   readonly scope: DiagScopeFrame | undefined;
   /** push の時刻（epoch ms）。 */
   readonly at: number;
@@ -670,10 +794,11 @@ function cidOf(input: unknown): string | undefined {
  */
 export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): DiagRecord | undefined {
   const c = entry.capture as Record<string, unknown>;
-  // capture の鍵は DiagCapture の欄だけ。知らない鍵（記録の欄の名前を含む: `cid`・`quoteHash`・`table` など）が 1 つでもあれば行ごと捨てる
-  // （hash・分類を迂回した値を書かせない）。
+  // 写しは固定の欄だけ（`snapshotCapture`）。型の違った欄（`INVALID`）・大きすぎた閉じた欄があれば行ごと捨てる（読み替えない）。
+  // 知らない鍵は写しに入らないので、記録の欄の名前（`cid`・`quoteHash`・`table` など）で hash・分類を迂回することもできない。
   for (const key of Object.keys(c)) {
     if (!CAPTURE_KEYS.has(key)) return undefined;
+    if (c[key] === INVALID && key !== "rawReason") return undefined;
   }
   const s = (entry.scope?.values ?? {}) as Record<string, unknown>;
   const out: Record<string, unknown> = { v: 1, at: new Date(entry.at).toISOString(), seq: entry.seq, component, stage: c["stage"] };
@@ -698,7 +823,7 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
   for (const key of DIRECT_KEYS) put(key, c[key]);
   if ("rawReason" in c) {
     const raw = c["rawReason"];
-    out["reason"] = raw === OVERSIZE ? "malformed" : classifyReason(raw);
+    out["reason"] = raw === OVERSIZE || raw === INVALID ? "malformed" : classifyReason(raw);
     out["table"] = REASON_TABLE_VERSION;
   }
   for (const key of DIRECT_KEYS_AFTER_REASON) put(key, c[key]);
@@ -708,8 +833,8 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
   const elapsed = c["elapsedMs"];
   if (elapsed !== undefined) out["elapsedMs"] = typeof elapsed === "number" && Number.isFinite(elapsed) ? Math.round(elapsed) : elapsed;
   put("bytes", c["bytes"]);
-  const txRef = c["rawTxRef"];
-  if (typeof txRef === "string" && /^0x[0-9a-fA-F]{64}$/.test(txRef)) out["txRef"] = txRef.toLowerCase();
+  // txRef は `localTxRefOf` が作った値の hash だけ（写しの時点で確かめた）。component の縛りは検査で。
+  put("txRef", c["txRef"]);
   put("txRefCheck", c["txRefCheck"]);
   put("broadcast", c["broadcast"]);
   put("fundsMayHaveMoved", c["fundsMayHaveMoved"]);
@@ -746,7 +871,7 @@ const CAPTURE_KEYS: ReadonlySet<string> = new Set([
   "signerStage",
   "rawReason",
   "rawCid",
-  "rawTxRef",
+  "txRef",
 ]);
 
 /** 数の初期値（全部 0）。 */

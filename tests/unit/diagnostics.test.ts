@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
+import { hexToBytes, keccak256 } from "viem";
 import { describe, expect, test } from "vitest";
 
 import type { TransportCode } from "../../src/net/guarded-fetch.js";
@@ -17,7 +18,10 @@ import {
   DIAG_CODES,
   DIAG_COUNTER_KEYS,
   DIAG_FACILITATORS,
-  DIAG_MAX_STRING_CHARS,
+  DIAG_CAPTURE_FIELD_COUNT,
+  DIAG_MAX_STRING_BYTES,
+  INVALID,
+  localTxRefOf,
   DIAG_NETWORKS,
   DIAG_OPS,
   DIAG_OUTCOMES,
@@ -41,6 +45,7 @@ import {
   withDiagnosticScope,
   zeroCounters,
   type DiagCapture,
+  type DiagCidInput,
   type DiagComponent,
   type DiagTransportCode,
 } from "../../src/shared/diagnostics.js";
@@ -109,9 +114,11 @@ describe("validateDiagRecord: 許す形", () => {
       ["routeId", ["md-mpp-eth-snapshot", "dyn-x402-to-mpp", "a", "A.b_c@d:e-f"]],
       ["txRef", [`0x${"0a".repeat(32)}`]],
     ];
+    // txRef・txRefCheck は署名の道具・driver の行だけ（§12.4）。
+    const signerOnly = new Set(["txRef", "txRefCheck"]);
     for (const [key, values] of sets) {
       for (const value of values) {
-        const record = { ...base(), [key]: value };
+        const record = { ...(signerOnly.has(key) ? base("signer", "sign") : base()), [key]: value };
         expect(validateDiagRecord(record), `${key}=${String(value)}`).toEqual(record);
       }
     }
@@ -166,8 +173,11 @@ describe("validateDiagRecord: 拒む形（行ごと捨てる。読み替えな�
     ["elapsedMs が小数", { ...base(), elapsedMs: 1.5 }],
     ["elapsedMs が 1 時間超", { ...base(), elapsedMs: 3_600_001 }],
     ["elapsedMs が NaN", { ...base(), elapsedMs: Number.NaN }],
-    ["txRef が大文字", { ...base(), txRef: `0x${"0A".repeat(32)}` }],
-    ["txRef が短い", { ...base(), txRef: "0x1234" }],
+    ["txRef が大文字", { ...base("signer", "sign"), txRef: `0x${"0A".repeat(32)}` }],
+    ["txRef が短い", { ...base("signer", "sign"), txRef: "0x1234" }],
+    ["txRef が Router の行", { ...base(), txRef: `0x${"0a".repeat(32)}` }],
+    ["txRef が facilitator の行", { ...base("facilitator", "rpc"), txRef: `0x${"0a".repeat(32)}` }],
+    ["txRefCheck が Router の行", { ...base(), txRefCheck: "match" }],
     ["promoted が文字列", { ...base(), promoted: "true" }],
     ["counters が sink 以外", { ...base(), counters: zeroCounters() }],
     ["sink に counters が無い", base("sink", "counters")],
@@ -184,12 +194,12 @@ describe("validateDiagRecord: 拒む形（行ごと捨てる。読み替えな�
   });
 });
 
-function entryOf(capture: DiagCapture, scope?: Parameters<typeof withDiagnosticScope>[0]): Promise<ReturnType<typeof buildDiagRecord>> {
-  const sink = recordingDiagnostics();
+function entryOf(capture: DiagCapture, scope?: Parameters<typeof withDiagnosticScope>[0], component: Exclude<DiagComponent, "sink"> = "router"): Promise<ReturnType<typeof buildDiagRecord>> {
+  const sink = recordingDiagnostics(component);
   const run = async (): Promise<void> => {
     sink.emit(capture);
   };
-  return (scope === undefined ? run() : withDiagnosticScope(scope, run)).then(() => buildDiagRecord(sink.entries[0]!, "router"));
+  return (scope === undefined ? run() : withDiagnosticScope(scope, run)).then(() => buildDiagRecord(sink.entries[0]!, component));
 }
 
 describe("buildDiagRecord（後回しの処理）", () => {
@@ -198,10 +208,18 @@ describe("buildDiagRecord（後回しの処理）", () => {
     expect(r).toMatchObject({ network: "unrecognized", op: "other", code: "unrecognized" });
   });
 
-  test("知らない鍵・記録の欄の名前の鍵（hash・分類の迂回）は行ごと落ちる", async () => {
-    for (const extra of [{ message: "x" }, { cid: "0123456789abcdef" }, { quoteHash: "0123456789abcdef" }, { table: REASON_TABLE_VERSION }, { reason: "absent" }, { txRef: `0x${"0a".repeat(32)}` }, { counters: zeroCounters() }, { seq: 1 }]) {
-      const r = await entryOf({ stage: "source_verify", ...extra } as unknown as DiagCapture);
-      expect(r, JSON.stringify(extra)).toBeUndefined();
+  test("知らない鍵・記録の欄の名前の鍵は写さない（hash・分類を迂回できない。書かれない）", async () => {
+    const plain = await entryOf({ stage: "source_verify", httpStatus: 400 });
+    expect(plain).toBeDefined();
+    for (const extra of [{ message: "x" }, { cid: "0123456789abcdef" }, { quoteHash: "0123456789abcdef" }, { table: REASON_TABLE_VERSION }, { reason: "absent" }, { counters: zeroCounters() }, { seq: 99 }, { v: 2 }, { component: "sink" }]) {
+      const r = await entryOf({ stage: "source_verify", httpStatus: 400, ...extra } as unknown as DiagCapture);
+      expect(r, JSON.stringify(extra)).toEqual(plain);
+    }
+  });
+
+  test("知っている欄の型違い（数の欄に文字列・関数・object）は行ごと落ちる", async () => {
+    for (const bad of [{ httpStatus: "500" }, { outcome: () => "rejected" }, { code: { toString: () => "verify_failed" } }, { promoted: "true" }, { stage: 1 }, { elapsedMs: 10n }]) {
+      expect(await entryOf({ stage: "source_verify", ...bad } as unknown as DiagCapture), String(Object.keys(bad))).toBeUndefined();
     }
   });
 
@@ -217,16 +235,34 @@ describe("buildDiagRecord（後回しの処理）", () => {
     expect(await entryOf({ stage: "source_verify", rawReason: null })).toMatchObject({ reason: "absent" });
     expect(await entryOf({ stage: "source_verify", rawReason: 42 })).toMatchObject({ reason: "malformed" });
     expect(await entryOf({ stage: "source_verify", rawReason: { nested: "x" } })).toMatchObject({ reason: "malformed" });
-    expect(await entryOf({ stage: "source_verify", rawReason: "x".repeat(DIAG_MAX_STRING_CHARS + 1) })).toMatchObject({ reason: "malformed" });
+    expect(await entryOf({ stage: "source_verify", rawReason: () => "invalid_exact_evm_insufficient_balance" })).toMatchObject({ reason: "malformed" });
+    expect(await entryOf({ stage: "source_verify", rawReason: Symbol("x") })).toMatchObject({ reason: "malformed" });
+    expect(await entryOf({ stage: "source_verify", rawReason: undefined })).toMatchObject({ reason: "absent" });
+    expect(await entryOf({ stage: "source_verify", rawReason: "x".repeat(DIAG_MAX_STRING_BYTES / 2 + 1) })).toMatchObject({ reason: "malformed" });
     expect(await entryOf({ stage: "source_verify", rawReason: "Invalid_exact_evm_insufficient_balance" })).toMatchObject({ reason: "unrecognized" });
     const none = await entryOf({ stage: "source_verify" });
     expect(none).not.toHaveProperty("reason");
     expect(none).not.toHaveProperty("table");
   });
 
-  test("txRef は形どおりのときだけ（小文字にする）。elapsedMs は整数に丸める", async () => {
-    expect(await entryOf({ stage: "dest_sign", rawTxRef: `0x${"AB".repeat(32)}`, elapsedMs: 12.6 })).toMatchObject({ txRef: `0x${"ab".repeat(32)}`, elapsedMs: 13 });
-    expect(await entryOf({ stage: "dest_sign", rawTxRef: "0x1234" })).not.toHaveProperty("txRef");
+  test("txRef は localTxRefOf（手元で keccak256）の値だけ、signer・driver の行だけ。elapsedMs は整数に丸める", async () => {
+    const signed = `0x02${"ab".repeat(100)}` as const;
+    const ref = localTxRefOf(signed);
+    expect(ref.hash).toBe(keccak256(signed));
+    expect(localTxRefOf(hexToBytes(signed)).hash).toBe(ref.hash);
+    expect(await entryOf({ stage: "sign", txRef: ref, elapsedMs: 12.6 }, undefined, "signer")).toMatchObject({ txRef: ref.hash, elapsedMs: 13 });
+    expect(await entryOf({ stage: "sign", txRef: ref }, undefined, "driver")).toMatchObject({ txRef: ref.hash });
+    // Router の行は、正しく作った値でも落ちる
+    expect(await entryOf({ stage: "dest_sign", txRef: ref })).toBeUndefined();
+    // nonce・鍵の形の値を偽った object・文字列は、signer の行でも落ちる（値は書かれない）
+    const nonceShaped = `0x${"c4".repeat(32)}`;
+    for (const forged of [{ hash: nonceShaped }, Object.freeze({ hash: nonceShaped }), nonceShaped, { ...ref }]) {
+      expect(await entryOf({ stage: "dest_sign", txRef: forged } as unknown as DiagCapture), JSON.stringify(forged)).toBeUndefined();
+      expect(await entryOf({ stage: "sign", txRef: forged } as unknown as DiagCapture, undefined, "signer"), JSON.stringify(forged)).toBeUndefined();
+    }
+    expect(() => localTxRefOf("0x" as `0x${string}`)).toThrow();
+    expect(() => localTxRefOf("0xabc" as `0x${string}`)).toThrow();
+    expect(() => localTxRefOf(new Uint8Array(0))).toThrow();
   });
 
   test("scope の quoteId・requestId は hash だけ、cid は capture の rawCid が scope に優先", async () => {
@@ -418,7 +454,7 @@ describe("scope（AsyncLocalStorage、積む時点の scope）", () => {
 
   test("大きすぎる scope の文字列は scope に入れない（hash の欄が書かれないだけ）", async () => {
     const sink = recordingDiagnostics();
-    await withDiagnosticScope({ quoteId: "q".repeat(DIAG_MAX_STRING_CHARS + 1), paymentId: PAYMENT_ID }, async () => {
+    await withDiagnosticScope({ quoteId: "q".repeat(DIAG_MAX_STRING_BYTES / 2 + 1), paymentId: PAYMENT_ID }, async () => {
       sink.emit({ stage: "source_verify" });
     });
     const [r] = sink.records();
@@ -506,5 +542,128 @@ describe("code の集合は Router の固定の literal を含む（ソースか
 
   test("TransportCode の型と一致（型の検査）", () => {
     expect(transportCodesMatch).toBe(true);
+  });
+});
+
+describe("敵対的な入力: push は固定の欄だけを読み、余分なものを持たない（O(固定)）", () => {
+  /** 読み取りを数える proxy（`ownKeys`・列挙が呼ばれたら記録する）。 */
+  function counting<T extends object>(target: T): { proxy: T; reads: string[]; enumerated: number } {
+    const log = { reads: [] as string[], enumerated: 0 };
+    const proxy = new Proxy(target, {
+      get(t, key, receiver) {
+        log.reads.push(String(key));
+        return Reflect.get(t, key, receiver);
+      },
+      has(t, key) {
+        log.reads.push(`has:${String(key)}`);
+        return Reflect.has(t, key);
+      },
+      getOwnPropertyDescriptor(t, key) {
+        log.reads.push(`own:${String(key)}`);
+        return Reflect.getOwnPropertyDescriptor(t, key);
+      },
+      ownKeys(t) {
+        log.enumerated += 1;
+        return Reflect.ownKeys(t);
+      },
+    });
+    return { proxy, get reads() { return log.reads; }, get enumerated() { return log.enumerated; } };
+  }
+
+  const isRetainable = (v: unknown): boolean => typeof v === "function" || (typeof v === "object" && v !== null && !Object.isFrozen(v));
+
+  test("10 万の余分な欄: 列挙しない・読まない・写さない・量に入らない", () => {
+    const plain = snapshotCapture({ stage: "source_verify", httpStatus: 400, rawReason: "invalid_exact_evm_insufficient_balance" });
+    const big: Record<string, unknown> = { stage: "source_verify", httpStatus: 400, rawReason: "invalid_exact_evm_insufficient_balance" };
+    for (let i = 0; i < 100_000; i += 1) big[`extra${i}`] = i % 2 === 0 ? "x".repeat(100) : i;
+    const c = counting(big);
+    const snap = snapshotCapture(c.proxy as unknown as DiagCapture);
+    expect(c.enumerated).toBe(0);
+    expect(c.reads.length).toBeLessThanOrEqual(DIAG_CAPTURE_FIELD_COUNT + 1);
+    expect(c.reads.every((k) => !k.includes("extra"))).toBe(true);
+    expect(snap).toEqual(plain);
+  });
+
+  test("関数・object・getter・proxy の値は持たない（印か primitive だけ）", () => {
+    let unknownGetterCalls = 0;
+    const closureHeavy = (() => {
+      const retained = new Uint8Array(1_000_000);
+      return () => retained.length;
+    })();
+    const capture = Object.defineProperty(
+      {
+        stage: "source_verify",
+        rawReason: closureHeavy,
+        code: { toString: () => "verify_failed" },
+        outcome: new String("rejected"),
+        httpStatus: new Proxy({}, {}),
+        rawCid: { network: "eip155:84532", asset: "0xa", from: "0xb", nonce: "0xc", extra: closureHeavy, more: new Uint8Array(10) },
+      },
+      "zzz",
+      { enumerable: true, get: () => ((unknownGetterCalls += 1), "x") },
+    ) as unknown as DiagCapture;
+    const snap = snapshotCapture(capture);
+    expect(unknownGetterCalls).toBe(0);
+    expect(snap.value["rawReason"]).toBe(INVALID);
+    expect(snap.value["code"]).toBe(INVALID);
+    expect(snap.value["outcome"]).toBe(INVALID);
+    expect(snap.value["httpStatus"]).toBe(INVALID);
+    expect(Object.keys(snap.value).sort()).toEqual(["code", "httpStatus", "outcome", "rawCid", "rawReason", "stage"]);
+    expect(snap.value["rawCid"]).toEqual({ network: "eip155:84532", asset: "0xa", from: "0xb", nonce: "0xc" });
+    expect(snap.value["rawCid"]).not.toBe((capture as unknown as { rawCid: unknown }).rawCid);
+    for (const v of Object.values(snap.value)) expect(isRetainable(v)).toBe(false);
+    expect(Object.isFrozen(snap.value)).toBe(true);
+  });
+
+  test("rawCid の proxy・型違い: 4 つの欄だけを読み、違えば cid を書かない", async () => {
+    const c = counting({ network: "eip155:84532", asset: "0xa", from: "0xb", nonce: "0xc", ...Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`k${i}`, i])) });
+    const snap = snapshotCapture({ stage: "source_verify", rawCid: c.proxy as unknown as DiagCidInput });
+    expect(c.enumerated).toBe(0);
+    expect(c.reads.sort()).toEqual(["asset", "from", "network", "nonce"]);
+    expect(Object.keys(snap.value["rawCid"] as object)).toHaveLength(4);
+    const r = await entryOf({ stage: "source_verify", rawCid: { network: "eip155:84532", asset: 1, from: "0xb", nonce: "0xc" } as unknown as DiagCidInput });
+    expect(r).toBeDefined();
+    expect(r).not.toHaveProperty("cid");
+  });
+
+  test("scope: 固定の欄・primitive の型だけを持つ。関数・object・余分な欄・proxy の余分な鍵は持たない", async () => {
+    const heavy = new Uint8Array(1_000_000);
+    const scope = { paymentId: PAYMENT_ID, quoteId: () => heavy, requestId: { big: heavy }, principalId: "p", routeId: 5, promoted: "yes", attempt: 2, cidInput: { network: "eip155:84532", asset: "0xa", from: "0xb", nonce: "0xc", heavy }, extra: heavy, ...Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`k${i}`, heavy])) };
+    const c = counting(scope);
+    await withDiagnosticScope(c.proxy as unknown as Parameters<typeof withDiagnosticScope>[0], async () => {
+      const current = currentDiagnosticScope()!;
+      expect(Object.keys(current).sort()).toEqual(["attempt", "cidInput", "paymentId", "principalId"]);
+      expect(current.cidInput).toEqual({ network: "eip155:84532", asset: "0xa", from: "0xb", nonce: "0xc" });
+      for (const v of Object.values(current)) expect(isRetainable(v)).toBe(false);
+      // 入れ子の scope は前の値を引き継ぎ、型の違う上書きは入れない
+      await withDiagnosticScope({ attempt: 3, paymentId: 7 as unknown as string }, async () => {
+        expect(currentDiagnosticScope()).toMatchObject({ attempt: 3, principalId: "p" });
+        expect(currentDiagnosticScope()).not.toHaveProperty("paymentId");
+      });
+    });
+    expect(c.enumerated).toBe(0);
+    expect(c.reads.length).toBeLessThanOrEqual(12);
+  });
+
+  test("scope の getter が投げても fn はそのまま動く", async () => {
+    const evil = Object.defineProperty({}, "paymentId", { enumerable: true, get() { throw new Error("getter"); } });
+    await expect(withDiagnosticScope(evil, async () => 5)).resolves.toBe(5);
+  });
+
+  test("push の仕事は欄の数で決まり、余分な欄の数に依らない（時間）", () => {
+    const small = { stage: "source_verify", httpStatus: 400 } as DiagCapture;
+    const big: Record<string, unknown> = { stage: "source_verify", httpStatus: 400 };
+    for (let i = 0; i < 50_000; i += 1) big[`e${i}`] = i;
+    const time = (c: DiagCapture): number => {
+      const t = performance.now();
+      for (let i = 0; i < 500; i += 1) snapshotCapture(c);
+      return performance.now() - t;
+    };
+    time(small);
+    time(big as unknown as DiagCapture);
+    const a = Math.min(time(small), time(small), time(small));
+    const b = Math.min(time(big as unknown as DiagCapture), time(big as unknown as DiagCapture), time(big as unknown as DiagCapture));
+    // 列挙すれば 500 × 50,000 回の仕事で桁が違う。読み取りだけなら同じ桁。
+    expect(b).toBeLessThan(a * 10 + 5);
   });
 });
