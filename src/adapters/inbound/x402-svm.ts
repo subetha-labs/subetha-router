@@ -264,6 +264,8 @@ import { readBoundedBody } from "../../net/bounded-body.js";
 import { followSvmSignature, svmFollowUpRequestTimeoutOf as followUpRequestTimeoutOf, svmSignatureStatusOf as followUpStatusOf } from "./svm-follow-up.js";
 import type { GuardedTransport, TransportContext } from "../../net/guarded-fetch.js";
 import type { CreateOfferRequest, InboundCallContext, InboundRail, SettleResult } from "../../ports/inbound.js";
+import type { DiagnosticsSink } from "../../shared/diagnostics.js";
+import { emitInboundRoundTrip, inboundDiagnosticsOn, verifyResponseClassOf, type SettleResponseClass } from "./inbound-diagnostics.js";
 
 /** wire の `maxTimeoutSeconds`（facilitator が settle を待つ窓）の既定。settle の HTTP 期限はこれ＋10 秒。 */
 export const SVM_DEFAULT_WIRE_TIMEOUT_SECONDS = 40;
@@ -295,6 +297,11 @@ export interface X402SvmInboundOptions {
   readonly offerSeconds?: number;
   /** verify の HTTP 期限（ms）。既定 10 秒。settle は `(maxTimeoutSeconds + 10) * 1000`。 */
   readonly timeoutMs?: number;
+  /**
+   * 運用者だけが読む診断の記録（設計 `docs/rejection-reasons-design.md` §4.2、タスク R-3）。EVM と同じ形で、`cid` は書かない（EIP-3009 ではない）。
+   * 無ければ（既定）今までと 1 つも変わらない。
+   */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 const BASE58_SIGNATURE_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
@@ -367,6 +374,8 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
   const rpc = options.rpc;
   const clock = options.followUp?.clock ?? ((): number => performance.now());
   const sleep = options.followUp?.sleep ?? ((ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)));
+  const diagnostics = options.diagnostics;
+  const diagOn = inboundDiagnosticsOn(diagnostics);
 
   /**
    * settle の応答の後の期限つきの追跡（設計 §5.8）。設定の RPC に `getSignatureStatuses` だけを、間隔ごとに、期限まで。
@@ -395,7 +404,9 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
     return { outcome: "unknown", reason: "source_settle_unknown" };
   }
 
-  async function post(path: string, requestText: string, context: TransportContext, deadlineMs: number): Promise<{ status: number; json: unknown }> {
+  async function post(path: string, requestText: string, context: TransportContext, deadlineMs: number): Promise<{ status: number; json: unknown; elapsedMs: number | undefined }> {
+    // 診断の経過（fetch の前から本文を読み終えるまで）。無効なら時刻を読まない。追跡の時間は含めない。
+    const startedAt = diagOn ? performance.now() : 0;
     const response = await transport.fetch(
       `${base}${path}`,
       { method: "POST", headers: { "content-type": "application/json" }, body: requestText, redirect: "error", signal: AbortSignal.timeout(deadlineMs) },
@@ -409,13 +420,24 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
       transport.report(error, context);
       throw error;
     }
+    const elapsedMs = diagOn ? Math.max(0, performance.now() - startedAt) : undefined;
     let json: unknown;
     try {
       json = text === "" ? undefined : JSON.parse(text);
     } catch {
       json = undefined;
     }
-    return { status: response.status, json };
+    return { status: response.status, json, elapsedMs };
+  }
+
+  /** settle の応答の分類（診断だけ。結果の決め方と同じ順の条件で、どこで形どおりの成功でなくなったか）。 */
+  function settleResponseClassOf(offer: InboundOffer, status: number, json: unknown): SettleResponseClass {
+    if (status !== 200) return "http_error";
+    if (typeof json !== "object" || json === null || Array.isArray(json)) return "not_json";
+    const record = json as Record<string, unknown>;
+    if (record["success"] !== true) return "success_false";
+    if (record["network"] !== offer.network) return "network_mismatch";
+    return isSvmSignature(record["transaction"]) ? "ok" : "tx_malformed";
   }
 
   /** facilitator へ送る requirements。**Router 発行の offer からのみ組む。** */
@@ -465,18 +487,22 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
     },
 
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
-      const { status, json } = await post("/verify", requestTextOf(offer, credential), { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, verifyTimeoutMs);
-      if (status !== 200 || typeof json !== "object" || json === null || Array.isArray(json)) {
-        return { isValid: false };
-      }
-      // `invalidReason` 等は読まない（転送しない）。
-      return { isValid: (json as Record<string, unknown>)["isValid"] === true };
+      const { status, json, elapsedMs } = await post("/verify", requestTextOf(offer, credential), { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, verifyTimeoutMs);
+      // `invalidReason` 等は結果に使わない（転送しない）。診断の記録は `invalidReason` を表で分類した token だけ（結果を作った後）。
+      const result = status !== 200 || typeof json !== "object" || json === null || Array.isArray(json) ? { isValid: false } : { isValid: (json as Record<string, unknown>)["isValid"] === true };
+      if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_verify", facilitator: "x402", network: offer.network, response: verifyResponseClassOf(status, json), httpStatus: status, json, elapsedMs });
+      return result;
     },
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは core が `unknown` にする。自動再 settle はしない。
       const routeId = context?.routeId ?? "-";
-      const { status, json } = await post("/settle", requestTextOf(offer, credential), { routeId, operation: "facilitator_settle" }, settleTimeoutMs);
+      const { status, json, elapsedMs } = await post("/settle", requestTextOf(offer, credential), { routeId, operation: "facilitator_settle" }, settleTimeoutMs);
+      // 診断の記録は結果を作った後（追跡があればその後）に 1 回。分類は facilitator の応答の形だけ（追跡の結果は core の記録が持つ）。
+      const record = (result: SettleResult): SettleResult => {
+        if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: "x402", network: offer.network, response: settleResponseClassOf(offer, status, json), httpStatus: status, json, elapsedMs });
+        return result;
+      };
       const wellFormedSuccess =
         status === 200 && typeof json === "object" && json !== null && !Array.isArray(json)
           ? ((): string | undefined => {
@@ -487,14 +513,14 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
             })()
           : undefined;
       if (wellFormedSuccess !== undefined) {
-        return { outcome: "settled", txRef: wellFormedSuccess };
+        return record({ outcome: "settled", txRef: wellFormedSuccess });
       }
       // 形どおりの成功でない。署名を含むなら期限つきの追跡（設計 §5.8）。含まなければ `unknown`。
       const signature = svmFollowUpSignatureOf(json, offer);
       if (signature === undefined) {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
+        return record({ outcome: "unknown", reason: "source_settle_unknown" });
       }
-      return followSignature(signature, routeId);
+      return record(await followSignature(signature, routeId));
     },
   };
 }

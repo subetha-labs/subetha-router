@@ -283,7 +283,7 @@ export const REASON_MANIFEST = [
   { section: "x402_svm", raw: "invalid_upto_svm_payload_nonce", token: "invalid_upto_svm_payload_nonce", source: { file: "dist/esm/upto/facilitator/index.mjs", line: 1037 } },
   { section: "x402_svm", raw: "invalid_upto_svm_payload_open_transaction", token: "invalid_upto_svm_payload_open_transaction", source: { file: "dist/esm/upto/facilitator/index.mjs", line: 1057 } },
   // ── circle（Circle の facilitator。このリポジトリが読む値・観測の記録）。
-  { section: "circle", raw: "registration_required", token: "registration_required", source: { file: "src/adapters/inbound/x402.ts", line: 396 } },
+  { section: "circle", raw: "registration_required", token: "registration_required", source: { file: "src/adapters/inbound/x402.ts", line: 427 } },
   { section: "circle", raw: "settlement_pending", token: "settlement_pending", source: { file: "docs/multirail-design.md", line: 218 } },
   // ── self_facilitator（tools/evm-facilitator.ts の `fail`・`failure`・`refuseIfStillUnused`・`invalidReason`・`error` と送出の前の時間の検査）。
   { section: "self_facilitator", raw: "malformed_request", token: "malformed_request", source: { file: "tools/evm-facilitator.ts", line: 356 } },
