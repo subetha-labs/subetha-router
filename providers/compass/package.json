@@ -1,0 +1,1 @@
+{"name":"@subetha/compass","private":true,"type":"module","scripts":{"test":"node ../../node_modules/vitest/vitest.mjs run --config vitest.config.ts","types":"node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json","test:tcp":"node --import tsx test/tcp-smoke.ts"}}

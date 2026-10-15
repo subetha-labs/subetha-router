@@ -1,0 +1,60 @@
+{
+  "catalogVersion": "existing-resources-v1",
+  "cases": [
+    {
+      "id": "eth-perp",
+      "task": "Get the Hyperliquid ETH perpetual mark price and 24-hour change.",
+      "expected": "hyperliquid_eth_perp"
+    },
+    {
+      "id": "sol-perp",
+      "task": "Get the Hyperliquid SOL perpetual mark price and 24-hour change.",
+      "expected": "hyperliquid_sol_perp"
+    },
+    {
+      "id": "uniswap-spot",
+      "task": "Get the Uniswap Ethereum USDC/WETH pool spot reference price.",
+      "expected": "uniswap_usdc_weth_spot"
+    },
+    {
+      "id": "topic-search",
+      "task": "Search the web for information about account abstraction.",
+      "expected": "exa_search"
+    },
+    {
+      "id": "ambiguous-eth",
+      "task": "What is the ETH price?",
+      "expected": "needs_clarification"
+    },
+    {
+      "id": "ambiguous-price",
+      "task": "What is the price?",
+      "expected": "needs_clarification"
+    },
+    {
+      "id": "unsupported-btc",
+      "task": "Get the exact current BTC price.",
+      "expected": "none"
+    },
+    {
+      "id": "missing-topic",
+      "task": "Search the web.",
+      "expected": "needs_clarification"
+    },
+    {
+      "id": "topic-question",
+      "task": "What is account abstraction?",
+      "expected": "exa_search"
+    },
+    {
+      "id": "topic-updates",
+      "task": "Find recent updates about Ethereum scaling.",
+      "expected": "exa_search"
+    },
+    {
+      "id": "unsupported-trade",
+      "task": "Buy ETH for me.",
+      "expected": "none"
+    }
+  ]
+}

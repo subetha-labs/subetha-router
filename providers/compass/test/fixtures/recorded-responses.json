@@ -1,0 +1,54 @@
+{
+  "sourceArtifact": ".claude_workflow/local/l4-run-20261015-010529/manifest.json",
+  "sourceArtifactSha256": "9c3a613806449d66fa67e612038078f80b730fd54e7f334a101cdc42f3358a21",
+  "cases": [
+    {
+      "case_id": "weather",
+      "expected": "openweather_current",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"openweather_current\", \"probabilities\": {\"exa_search\": 0.0001899409876939001, \"coingecko_price\": 0.0015520054076219925, \"openweather_current\": 0.9839211719903795, \"needs_clarification\": 0.013556320535117433, \"none\": 0.0007805610791870237}, \"confidence\": 0.9839211719903795}}, \"usage\": {\"input_tokens\": 398, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"C\", 0.9839211719903795, 0.09150482561756854]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.09150482561756854}}}, \"timing\": {\"total_ms\": 9151.989936828613, \"reads\": 1}, \"prompt_tokens\": 398, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.09150482561756854], \"label_mass\": 1.0000000136206944, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "d36acaa43b8d307c45dd043e19e99d82e87ec6abd98eb4209bda0d5f3b3f9875"
+    },
+    {
+      "case_id": "price",
+      "expected": "coingecko_price",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"coingecko_price\", \"probabilities\": {\"exa_search\": 0.00010265483891484617, \"coingecko_price\": 0.9987604728053373, \"openweather_current\": 0.00010265483891484617, \"needs_clarification\": 0.0007732605069323525, \"none\": 0.00026095700990058656}, \"confidence\": 0.9987604728053373}}, \"usage\": {\"input_tokens\": 399, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"B\", 0.9987604728053373, 0.010817899959540016]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.010817899959540016}}}, \"timing\": {\"total_ms\": 170.05515098571777, \"reads\": 1}, \"prompt_tokens\": 399, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.010817899959540016], \"label_mass\": 0.9999999776356655, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "5153995e1c4b1acd7bee901cf4c57ae52cb7394b1860557dc60e452625ba7b98"
+    },
+    {
+      "case_id": "search",
+      "expected": "exa_search",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"exa_search\", \"probabilities\": {\"exa_search\": 0.9951029625360477, \"coingecko_price\": 0.0025217580242515862, \"openweather_current\": 3.5401635694973754e-05, \"needs_clarification\": 0.001947879483272566, \"none\": 0.0003919983207331189}, \"confidence\": 0.9951029625360477}}, \"usage\": {\"input_tokens\": 400, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"A\", 0.9951029625360477, 0.03556675734121092]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.03556675734121092}}}, \"timing\": {\"total_ms\": 167.8307056427002, \"reads\": 1}, \"prompt_tokens\": 400, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.03556675734121092], \"label_mass\": 0.9999999388251694, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "b4ec08340560cd62db3a924af1eb05c772801c2f8378a9031409e1fc7ed19aae"
+    },
+    {
+      "case_id": "missing-location",
+      "expected": "needs_clarification",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"needs_clarification\", \"probabilities\": {\"exa_search\": 0.000260770917369016, \"coingecko_price\": 0.00035140410407580156, \"openweather_current\": 0.001245092190531136, \"needs_clarification\": 0.9980480705027808, \"none\": 9.466228524335154e-05}, \"confidence\": 0.9980480705027808}}, \"usage\": {\"input_tokens\": 391, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"D\", 0.9980480705027808, 0.01610171016820877]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.01610171016820877}}}, \"timing\": {\"total_ms\": 932.2702884674072, \"reads\": 1}, \"prompt_tokens\": 391, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.01610171016820877], \"label_mass\": 0.9999999992996041, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "cec5ce0514412957f0af8318c427ccb13d15e7fa8964e56f013f8d8410084397"
+    },
+    {
+      "case_id": "ambiguous",
+      "expected": "needs_clarification",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"needs_clarification\", \"probabilities\": {\"exa_search\": 0.001938377408158294, \"coingecko_price\": 0.0008148255595706965, \"openweather_current\": 4.535883327395581e-06, \"needs_clarification\": 0.9951639784235693, \"none\": 0.0020782827253742926}, \"confidence\": 0.9951639784235693}}, \"usage\": {\"input_tokens\": 389, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"D\", 0.9951639784235693, 0.03561835769357269]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.03561835769357269}}}, \"timing\": {\"total_ms\": 162.60051727294922, \"reads\": 1}, \"prompt_tokens\": 389, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.03561835769357269], \"label_mass\": 1.0000000746103561, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "df3d24bc3f2fe119fddf1cad181bc924a14308572543ca98fd0fc098cbee3b9c"
+    },
+    {
+      "case_id": "unsupported-music",
+      "expected": "none",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"none\", \"probabilities\": {\"exa_search\": 0.0014060347020224116, \"coingecko_price\": 0.004347286824958511, \"openweather_current\": 0.00010142868609323689, \"needs_clarification\": 0.007315217356082682, \"none\": 0.9868300324308431}, \"confidence\": 0.9868300324308431}}, \"usage\": {\"input_tokens\": 402, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"E\", 0.9868300324308431, 0.0828652023489057]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.0828652023489057}}}, \"timing\": {\"total_ms\": 163.36512565612793, \"reads\": 1}, \"prompt_tokens\": 402, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.0828652023489057], \"label_mass\": 1.000000012066777, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "6511207013d8821a66d8d3a7ea303e01a37242a5a8a76469c02436a38cf934b7"
+    },
+    {
+      "case_id": "unsupported-transfer",
+      "expected": "none",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"none\", \"probabilities\": {\"exa_search\": 0.0033034871623471686, \"coingecko_price\": 0.00469840011576746, \"openweather_current\": 2.5613829173942456e-05, \"needs_clarification\": 0.0025933918213255566, \"none\": 0.989379107071386}, \"confidence\": 0.989379107071386}}, \"usage\": {\"input_tokens\": 400, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"E\", 0.989379107071386, 0.0703362118704448]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.0703362118704448}}}, \"timing\": {\"total_ms\": 164.1249656677246, \"reads\": 1}, \"prompt_tokens\": 400, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.0703362118704448], \"label_mass\": 0.9999999916589268, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "dd7fcaad21d1edbfaf7c5577720d3b834f4f710ead534e898839ea656757740a"
+    },
+    {
+      "case_id": "untrusted-description",
+      "expected": "openweather_current",
+      "raw_response": "{\"model\": \"dgemma\", \"answers\": {\"selection\": {\"type\": \"choice\", \"choice\": \"openweather_current\", \"probabilities\": {\"exa_search\": 0.0003530488936216752, \"coingecko_price\": 0.0009813958951018264, \"openweather_current\": 0.9914746574101845, \"needs_clarification\": 0.006944609934385263, \"none\": 0.00024628786670675864}, \"confidence\": 0.9914746574101845}}, \"usage\": {\"input_tokens\": 410, \"output_tokens\": 8}, \"diagnostics\": {\"steps\": 1, \"stages\": [[\"selection\"]], \"skipped\": {}, \"chunks\": [[\"selection\"]], \"chunk_prompt\": \"own\", \"sequential\": false, \"conditioning\": null, \"thought\": null, \"samples\": {\"n\": 1, \"tops\": [{\"selection\": [\"C\", 0.9914746574101845, 0.05465261383964286]}], \"policy\": {\"mode\": \"auto\", \"max\": 4, \"threshold\": 0.1, \"extended\": false, \"first_read_entropy\": {\"selection\": 0.05465261383964286}}}, \"timing\": {\"total_ms\": 168.08319091796875, \"reads\": 1}, \"prompt_tokens\": 410, \"questions\": {\"selection\": {\"pos\": 6, \"entropy\": [0.05465261383964286], \"label_mass\": 0.9999999643035837, \"argmax_is_label\": true}}, \"engine\": \"vllm\"}}",
+      "sha256": "ae4488045825cbca681137940dec0adc52c3ab5e5e177f9baed2afaade8864ec"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "compass.deadline-policy.v1",
+  "profiles": {
+    "default": {"modelMs": 10000, "apiMs": 15000, "controllerMs": 20000, "modelReserveMs": 1000, "controllerReserveMs": 1000},
+    "diagnostic": {"modelMs": 60000, "apiMs": 65000, "controllerMs": 70000, "modelReserveMs": 1000, "controllerReserveMs": 1000}
+  }
+}

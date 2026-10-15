@@ -1,0 +1,85 @@
+{
+  "schema": "compass.selection-probe.catalog.v1",
+  "purpose": "Model-only feasibility dataset; NOT production catalog or payment quote",
+  "retrievedAt": "2026-10-15T07:45:12.286743+09:00",
+  "entries": [
+    {
+      "id": "exa_search",
+      "provider": "Exa",
+      "description": "Neural web search across all search types (instant, auto, fast, deep, deep-reasoning)",
+      "serviceDescription": "Neural web search and page-content retrieval for AI agents, paid per request with no API key.",
+      "integration": "first-party",
+      "url": "https://api.exa.ai/search",
+      "method": "POST",
+      "directoryPaymentMetadata": {
+        "intent": "charge",
+        "method": "tempo",
+        "currency": "0x20c000000000000000000000b9537d11c60e8b50",
+        "decimals": 6,
+        "description": "Neural web search across all search types (instant, auto, fast, deep, deep-reasoning)",
+        "dynamic": true,
+        "amountHint": "$0.007 – $0.015 per request"
+      },
+      "source": "https://mpp.dev/api/services",
+      "docs": {
+        "homepage": "https://docs.exa.ai/reference/mpp-guide",
+        "llmsTxt": "https://docs.exa.ai/llms.txt"
+      },
+      "evidence": "directory_listing_only",
+      "routerPurchaseVerified": false,
+      "purchaseEnabled": false
+    },
+    {
+      "id": "coingecko_price",
+      "provider": "CoinGecko",
+      "description": "Simple Price",
+      "serviceDescription": "Cryptocurrency market data — prices, charts, market cap, exchanges, trending coins, global stats, NFTs, derivatives, and on-chain data.",
+      "integration": "third-party",
+      "url": "https://coingecko.mpp.paywithlocus.com/coingecko/simple-price",
+      "method": "POST",
+      "directoryPaymentMetadata": {
+        "intent": "charge",
+        "method": "tempo",
+        "currency": "0x20c000000000000000000000b9537d11c60e8b50",
+        "decimals": 6,
+        "description": "Simple Price",
+        "amount": "60000",
+        "unitType": "request"
+      },
+      "source": "https://mpp.dev/api/services",
+      "docs": {
+        "homepage": "https://docs.coingecko.com",
+        "llmsTxt": "https://paywithlocus.com/mpp/coingecko.md"
+      },
+      "evidence": "directory_listing_only",
+      "routerPurchaseVerified": false,
+      "purchaseEnabled": false
+    },
+    {
+      "id": "openweather_current",
+      "provider": "OpenWeather",
+      "description": "Current Weather",
+      "serviceDescription": "Global weather data — current conditions, 5-day forecasts, hourly forecasts, air quality index with pollutants, geocoding, and One Call 3.0 with full weather suite and government alerts.",
+      "integration": "third-party",
+      "url": "https://openweather.mpp.paywithlocus.com/openweather/current-weather",
+      "method": "POST",
+      "directoryPaymentMetadata": {
+        "intent": "charge",
+        "method": "tempo",
+        "currency": "0x20c000000000000000000000b9537d11c60e8b50",
+        "decimals": 6,
+        "description": "Current Weather",
+        "amount": "6000",
+        "unitType": "request"
+      },
+      "source": "https://mpp.dev/api/services",
+      "docs": {
+        "homepage": "https://openweathermap.org/api",
+        "llmsTxt": "https://paywithlocus.com/mpp/openweather.md"
+      },
+      "evidence": "directory_listing_only",
+      "routerPurchaseVerified": false,
+      "purchaseEnabled": false
+    }
+  ]
+}
