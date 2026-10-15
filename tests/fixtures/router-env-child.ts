@@ -5,9 +5,12 @@
  * - `SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS`: listen をこの時間だけ遅らせる（入口の「Router の起動待ち」の段）
  * - `SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE=1`: listen の前に入口の証拠のファイルのパス（設定の隣の `router-listening.log`）をディレクトリにする
  *   （入口の書き込みが EISDIR で失敗する。root でも同じ: 権限ではなくファイルの種類で失敗させる）
+ * - SIGTERM（タスク R-0 の drain）: 本物の子と同じ固定の行で終わる。`SUBETHA_TEST_ROUTER_DRAIN` で振る舞いを選ぶ:
+ *   空 = すぐ `router drain: complete`（exit 0）、`delay:<ms>` = その時間の後に complete、`timeout` = `router drain: timeout`（exit 1）、`hang` = SIGTERM を無視する
+ * - `SUBETHA_TEST_EVENT_LOG`: SIGTERM を受けた・終わる直前に 1 行ずつ追記する（facilitator の偽物と同じファイル。止める順を試験が確かめる）
  * - 127.0.0.1 の使い捨ての port に listen し、listening の行を書く。`GET /env`: 受け取った env・pid・ppid・設定ファイルの mode
  */
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 
@@ -41,6 +44,25 @@ if (env["SUBETHA_TEST_ROUTER_BLOCK_EVIDENCE"] === "1" && configPath !== undefine
 setTimeout(() => {
   server.listen(0, "127.0.0.1", () => {
     const address = server.address();
-    process.stdout.write(`${JSON.stringify({ event: "listening", port: typeof address === "object" && address !== null ? address.port : 0 })}\n`);
+    // `label`: 入口の MCP が証拠の行から rail の名乗りを読む（無いと MCP の要求が 500 になる。drain の試験が要求を最後まで通す）。
+    process.stdout.write(`${JSON.stringify({ event: "listening", port: typeof address === "object" && address !== null ? address.port : 0, label: "fake-router-env-child" })}\n`);
   });
 }, Number(env["SUBETHA_TEST_ROUTER_LISTEN_DELAY_MS"] ?? "0"));
+
+const eventLog = env["SUBETHA_TEST_EVENT_LOG"] ?? "";
+const event = (name: string): void => {
+  if (eventLog !== "") appendFileSync(eventLog, `${name}\n`);
+};
+const drainMode = env["SUBETHA_TEST_ROUTER_DRAIN"] ?? "";
+process.on("SIGTERM", () => {
+  event("router-sigterm");
+  if (drainMode === "hang") return;
+  const finish = (): void => {
+    const complete = drainMode !== "timeout";
+    event("router-exit");
+    process.stderr.write(complete ? "router drain: complete\n" : "router drain: timeout\n");
+    process.exit(complete ? 0 : 1);
+  };
+  if (drainMode.startsWith("delay:")) setTimeout(finish, Number(drainMode.slice("delay:".length)));
+  else finish();
+});

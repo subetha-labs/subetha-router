@@ -484,6 +484,10 @@ export interface X402DynamicPath {
   pay(request: PayRequest & { readonly target: UpstreamTarget }): Promise<PayResult>;
 }
 
+/** 未払いの読取・有料要求の期限の既定。drain の上限の試験（タスク R-0）が読む。 */
+export const X402_DYNAMIC_UNPAID_TIMEOUT_MS = 5_000;
+export const X402_DYNAMIC_PAID_TIMEOUT_MS = 30_000;
+
 export function createX402DynamicPath(capability: EvmSigningCapability, options: X402DynamicOptions): X402DynamicPath {
   const transport = options.transport;
   if (transport.allowLoopback) {
@@ -493,8 +497,8 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
     // 名前解決に期限が無いと、未払い 5 秒・有料 30 秒の期限が効かない（止まった解決を待ち続ける）。
     throw new Error("the dynamic x402 path requires a transport with a DNS deadline");
   }
-  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? 5_000;
-  const paidTimeoutMs = options.paidTimeoutMs ?? 30_000;
+  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? X402_DYNAMIC_UNPAID_TIMEOUT_MS;
+  const paidTimeoutMs = options.paidTimeoutMs ?? X402_DYNAMIC_PAID_TIMEOUT_MS;
   const now = options.now ?? Date.now;
   const denyHosts = options.denyHosts ?? [];
 

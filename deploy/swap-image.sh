@@ -9,6 +9,9 @@
 #   （失敗の種類は見分けない: daemon のエラー応答も、上限も、割り込みも、接続の切断も、すべて未確定）。未確定の操作は daemon 側で
 #   続いているかもしれず、docker はその順序を保証しない。復旧は最善を尽くすが、未確定の操作が 1 つでもあれば **状態不明**（exit 2）
 #   として報告し、復旧したとは言わない。復旧の各段も同じ: 確認できなければ状態不明
+# - 古いコンテナの停止は入口の drain を待つ（docker stop -t 315、外側の上限 345 秒）。停止を確認した後、今回の停止の log に入口の
+#   `drain: complete <id>` が無ければ入れ替えをやめて復旧する（静止できなかった。戻せたと確かめられたら exit 1）。<id> は停止の前に古いコンテナの
+#   log から読んだ最後の `entry run: <id>`（入口の起動ごとの乱数。同じ秒の古い行・時計の巻き戻しで別の起動の行を拾わない）。読めなければ何も変えずに exit 1
 # - 検証はすべて致命。待ちは経過時間（$SECONDS）で切り、ループの中の各要求にも残りの予算を渡す（失敗時の診断の docker logs だけ
 #   別枠 10 秒）。コンテナのログの中身と、変更操作の docker の stderr は出さない（固定の文と行数だけ）。それ以外の docker・systemctl
 #   の stderr はそのまま出る
@@ -25,7 +28,9 @@ PUBLIC_HEALTH=https://router.subethalabs.com/healthz
 LISTEN_WAIT_S=180   # 子の Router の起動（Solana の検査 ≤ 20 秒・Tempo の probe ≤ 18 秒・replay）を待つ経過時間の上限。入口の起動待ち 120 秒より長い
 PUBLIC_WAIT_S=30    # 入口（caddy）を開けた後、公開の /healthz が答えるまでの経過時間の上限
 RESTORE_WAIT_S=60   # 復旧で旧コンテナの /healthz を待つ経過時間の上限
-STOP_SETTLE_S=30    # 上限に当たった docker stop の完了（daemon の grace 10 秒 + kill）を復旧で待つ上限
+STOP_GRACE_S=315    # 古いコンテナの docker stop -t: 入口の drain の上限（tools/remote-mcp.ts の DRAIN_TIMEOUT_MS 300 秒）＋ 15 秒（rejection-reasons 設計 §15.2）
+STOP_BOUND_S=345    # その docker stop だけの外側の上限（timeout -k）。ほかの変更操作は今までどおり 30 秒
+STOP_SETTLE_S=345   # 上限に当たった docker stop の完了（grace 315 秒 + kill）を復旧で待つ上限
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 PREV="$NAME-prev-$TS"
 LOGTMP=$(mktemp)
@@ -55,11 +60,12 @@ capped() { # <budget> <t0> <cap> → 残りの秒数を 1..cap に収める
 }
 is_timeout() { [[ "$1" == 124 || "$1" == 137 ]]; }
 # 変更操作（この shell で実行。$(...) の中では PENDING が親に残らないので使わない）。成功したときだけ未確定を解く。
-# docker の stderr は出さない（env-file の行などが混じりうる）。
-mutate() { # <op> <docker args...>; stdout は透過
-  local op=$1 rc=0; shift
+# docker の stderr は出さない（env-file の行などが混じりうる）。上限は 30 秒（古いコンテナの stop だけ mutate_within で STOP_BOUND_S）。
+mutate() { mutate_within 30 "$@"; }
+mutate_within() { # <上限の秒数> <op> <docker args...>; stdout は透過
+  local bound=$1 op=$2 rc=0; shift 2
   PENDING=$op
-  timeout -k 5 30 docker "$@" 2>"$ERRTMP" || rc=$?
+  timeout -k 5 "$bound" docker "$@" 2>"$ERRTMP" || rc=$?
   if [ "$rc" = 0 ]; then PENDING=; return 0; fi
   echo "docker $op failed (rc=$rc): its outcome is unconfirmed" >&2
   return "$rc"
@@ -164,6 +170,12 @@ d image inspect "$IMG" >/dev/null
 OLD_ID=$(d inspect -f '{{.Id}}' "$NAME")
 [ -n "$OLD_ID" ]
 [ "$(d inspect -f '{{.State.Running}}' "$OLD_ID")" = true ]
+# drain の証拠を今の起動に結びつける（rejection-reasons 設計 §13.3、R-0）: 古いコンテナの log の最後の `entry run: <16 hex>`。無ければ入れ替えない。
+# log の中身は出さない（数と固定の文だけ）。
+dt 30 logs "$OLD_ID" > "$LOGTMP" 2>&1
+RUN_ID=$(sed -n 's/^entry run: \([0-9a-f]\{16\}\)$/\1/p' "$LOGTMP" | tail -n 1)
+if [ -z "$RUN_ID" ]; then echo "the running container has no 'entry run' line: the drain evidence cannot be bound to this run, not swapping (nothing was changed)" >&2; exit 1; fi
+echo "entry run id read"
 cp "$JP" "$JBEFORE"
 BYTES=$(stat -c %s "$JBEFORE")
 echo "journal bytes before: $BYTES"
@@ -180,7 +192,16 @@ case $rc in
 esac
 
 # 変更操作は mutate で（成功と確認できるまで PENDING。失敗は ERR で restore へ）。
-mutate stop stop "$OLD_ID" >/dev/null
+# 古いコンテナの stop: 入口は SIGTERM で drain する（新しい要求を断り、進行中の MCP の要求の終わりを最長 300 秒待ってから子を止め、
+# `drain: complete <id>` か `drain: timeout <id>` を 1 行出す）。grace は STOP_GRACE_S、外側の上限は STOP_BOUND_S。上限に当たった・daemon のエラーは
+# 未確定（PENDING のまま restore へ → 後で /healthz が戻っても exit 2）。静止の確認は今回の停止の log だけ（停止の直前の時刻から）。
+STOP_SINCE=$(date -u +%s)
+mutate_within "$STOP_BOUND_S" stop stop -t "$STOP_GRACE_S" "$OLD_ID" >/dev/null
+# 静止の確認（rejection-reasons 設計 §14.4・§15.3）: 停止は確定した。今回の停止の log に `drain: complete <RUN_ID>` が無ければ（時間切れ・SIGKILL・行が無い・別の起動の行・
+# log が読めない）入れ替えをやめ、復旧で古いコンテナを戻す（戻せたと確かめられたら exit 1、確かめられなければ exit 2）。log の中身は出さない。
+if ! dt 30 logs --since "$STOP_SINCE" "$OLD_ID" > "$LOGTMP" 2>&1; then echo "could not read the previous container's logs for this stop: quiescence is unconfirmed, not swapping" >&2; false; fi
+if ! grep -qxF "drain: complete $RUN_ID" "$LOGTMP"; then echo "the previous container did not report 'drain: complete' for this stop and this run (not quiescent): not swapping" >&2; false; fi
+echo "previous container drained"
 mutate rename rename "$OLD_ID" "$PREV"
 # 8611: 自前の EVM facilitator（hosted 設計 §4）。host の loopback だけに publish し、Caddy の /evm-facilitator/* がそこへ流す。有効化が無いイメージでは何も listen しない。
 mutate run run -d --name "$NAME" --restart unless-stopped --network "$NET" -p 127.0.0.1:8787:8787 -p 127.0.0.1:8611:8611 -v "$VOL:/app/runtime" --env-file "$ENVF" "$IMG" > "$OUTTMP"

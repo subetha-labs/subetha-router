@@ -7,7 +7,7 @@
  * 入口が**どこで止まるか**（多レールの段か、その後の probe か）と出力の固定文・鍵の不在を確かめる。起動の成功（能力の束縛・offer）は
  * `tests/unit/rails-entry.test.ts` がプロセス内の同じ関数で、実際の起動は T10 の G-3 で確かめる。
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
@@ -199,22 +199,41 @@ describe("Router の process（本番の能力の組み立て＋fixture への t
   }, 60_000);
 });
 
+
+/**
+ * この試験の起動が作った作業領域（`runtime/remote-*`）だけを返す（R-0: 並列に走るほかの入口の試験も同じ場所に作る）。
+ * 起動ごとに乱数の受取先（`marker`）を渡し、その値を設定に持つものだけを自分のものとする。ほかの試験の領域は数えず、消さない。
+ */
+function ownCreated(before: ReadonlySet<string>, marker: string): string[] {
+  return readdirSync(runtimeRoot).filter((name) => {
+    if (!name.startsWith("remote-") || before.has(name)) return false;
+    try {
+      return readFileSync(path.join(runtimeRoot, name, "router.config.json"), "utf8").toLowerCase().includes(marker.toLowerCase());
+    } catch {
+      return false;
+    }
+  });
+}
+/** 起動ごとの乱数の受取先（作業領域の持ち主の印）。 */
+const freshReceiver = (): string => privateKeyToAccount(generatePrivateKey()).address;
+
 describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
   test("Arc だけ有効: 同じ設定生成で activation true の設定を書き、別の journal のディレクトリを作り、同じ process を起動する（probe で止まる）。鍵は出ない", async () => {
     const dir = workDir("t8b-acceptance-");
     const key = generatePrivateKey();
     const journalPath = path.join(dir, "acceptance", "journal.ndjson");
+    const receiver = freshReceiver();
     const before = new Set(readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-")));
     const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "arc-in"], {
       SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
-      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_ROUTER_RECEIVER: receiver,
       SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-t8b-acceptance",
       SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
       [ARC_RECEIVER_KEY_ENV]: key,
       SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
       SUBETHA_ACCEPTANCE_PORT: "0",
     });
-    const created = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    const created = ownCreated(before, receiver);
     for (const name of created) dirs.push(path.join(runtimeRoot, name));
     // Router は probe で止まるので、ホストは固定文で終わる（鍵・URL は出ない）。
     expect(result.code).not.toBe(0);
@@ -319,10 +338,11 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
     const seed = getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(32)));
     const owner = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
     const journalPath = path.join(dir, "acceptance", "journal.ndjson");
+    const receiver = freshReceiver();
     const before = new Set(readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-")));
     const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "arc-in,arc-out,solana-in,solana-out,arc-to-sol,sol-to-arc"], {
       SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
-      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_ROUTER_RECEIVER: receiver,
       SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-t8b-acceptance-pairs",
       SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
       [ARC_RECEIVER_KEY_ENV]: key,
@@ -334,7 +354,7 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
       SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
       SUBETHA_ACCEPTANCE_PORT: "0",
     });
-    const created = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    const created = ownCreated(before, receiver);
     for (const name of created) dirs.push(path.join(runtimeRoot, name));
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("could not start the Router");
@@ -355,17 +375,18 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
     const dir = workDir("t8b-acceptance-solmpp-");
     const journalPath = path.join(dir, "acceptance", "journal.ndjson");
     const owner = "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5";
+    const receiver = freshReceiver();
     const before = new Set(readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-")));
     const result = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "solana-mpp-in"], {
       SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
-      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_ROUTER_RECEIVER: receiver,
       SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-t8b-acceptance-solmpp",
       SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
       SUBETHA_SOLANA_RECEIVER: owner,
       SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
       SUBETHA_ACCEPTANCE_PORT: "0",
     });
-    const created = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    const created = ownCreated(before, receiver);
     for (const name of created) dirs.push(path.join(runtimeRoot, name));
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("could not start the Router");
@@ -380,7 +401,7 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
     // 秘密が無ければ、計画の段で止まる（Router を起動しない）。
     const noSecret = await runToExit("tools/rails-acceptance-run.ts", ["--rails", "solana-mpp-in"], {
       SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
-      SUBETHA_ROUTER_RECEIVER: RECEIVER,
+      SUBETHA_ROUTER_RECEIVER: receiver,
       SUBETHA_TEMPO_RPC_URL: UNRESOLVABLE_RPC,
       SUBETHA_SOLANA_RECEIVER: owner,
       SUBETHA_ACCEPTANCE_JOURNAL_PATH: journalPath,
@@ -388,9 +409,14 @@ describe("Router の process: Solana の MPP（solana-mpp-in / solana-mpp-out）
     });
     expect(noSecret.code).not.toBe(0);
     expect(noSecret.stdout).not.toContain("listening");
-    const after = readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name));
+    const after = ownCreated(before, receiver);
     for (const name of after) if (!created.includes(name)) dirs.push(path.join(runtimeRoot, name));
     expect(after).toHaveLength(created.length);
+    // 設定を書く前に作業領域だけ作って止まった場合も見逃さない: 新しい領域で、1 秒たっても設定の無いもの（ほかの入口の試験は作った直後に設定を書く）。
+    const strays = (): string[] => readdirSync(runtimeRoot).filter((name) => name.startsWith("remote-") && !before.has(name) && !created.includes(name) && !existsSync(path.join(runtimeRoot, name, "router.config.json")));
+    const candidates = strays();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(strays().filter((name) => candidates.includes(name))).toEqual([]);
     // 公開の定数は G-4″ で solanaMpp も両方 true（受け入れ用の起動は定数を読まず --rails で決める）。
     expect(readFileSync("tools/remote-mcp-config.ts", "utf8")).toMatch(/solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),/);
   }, 60_000);

@@ -17,13 +17,15 @@
  */
 
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { createMcpIngress } from "../src/mcp/ingress.js";
+import { createIngressDrain, createMcpIngress } from "../src/mcp/ingress.js";
+import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
@@ -420,6 +422,9 @@ const SUPPORTED_TIMEOUT_MS = 10_000;
 /** facilitator の listening の行を待つ上限（起動時に chain ごとの RPC で chain id を確かめ、journal を照合する）。 */
 const FACILITATOR_LISTEN_TIMEOUT_MS = 60_000;
 
+/** drain の上限（`src/shared/drain.ts`。入口と Router の子で同じ値）。 */
+export { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
+
 /**
  * facilitator の `/<token>/supported` を loopback で 1 回読み、`networks` が全部（x402 v2・`exact`）載っているか（hosted 設計 §4）。
  * 失敗（接続・期限・redirect・200 以外・大きすぎる・JSON でない・欠け）はすべて `false`（理由・値は返さない）。
@@ -476,6 +481,8 @@ export async function startHost(
     /** facilitator の子の script と、足す env（計画の env を上書きしない）。試験専用（上と同じ規則）。 */
     readonly facilitatorScriptForTest?: string;
     readonly facilitatorEnvExtraForTest?: Readonly<Record<string, string>>;
+    /** drain の上限（ms）。試験専用（上と同じ規則。本番は `DRAIN_TIMEOUT_MS`）。 */
+    readonly drainTimeoutMsForTest?: number;
   } = {},
 ): Promise<RunningHost> {
   let plan: HostPlan;
@@ -494,6 +501,16 @@ export async function startHost(
    * - 起動した子は `owned` に入れ、そのときから終了を見る（facilitator が Router の起動待ちの間に落ちても、その時点で全体を止める）
    * - 起動の後の失敗（`/supported`・Router の起動・証拠の書き込み・MCP の bind）と signal と子の終了は、すべて `shutdown` を通る:
    *   取り消し → 入口を閉じる → 起動待ちと起動済みの子の **終了を待ってから** `process.exit`。facilitator が入口より長く lock を持つことはない
+   * - 子を止める順は Router の子 → facilitator（Router の子の進行中の settle が facilitator を使い得る）。facilitator は Router の子の終了の後に止める
+   * - 起動の後（`ready`）の signal は先に drain（§13.3・§15.2、タスク R-0）。上限は signal から `DRAIN_TIMEOUT_MS` の 1 つの期限:
+   *   (1) 入口の listener を閉じ（新しい接続を受けない。既存の接続の上の新しい要求は 503）、進行中の MCP の要求が 0 になるのを待つ
+   *   (2) Router の子に SIGTERM を送り、子の drain（新しい要求を断り、相手が切った購入も含めて進行中の処理の終わりを待つ）と終了を残りの時間まで待つ
+   *       （5 秒の SIGKILL ではない。残りが尽きたら SIGKILL）
+   *   (3) facilitator に SIGTERM を送り、facilitator の drain（進行中の要求と、応答の後も続く遅れた送出・journal の続き）と終了を残りの時間まで待つ
+   *   (4) 最後に固定の 1 行 `drain: complete <id>` か `drain: timeout <id>`（id は起動の最初の `entry run: <id>` と同じ）。complete は (1) が 0 になり、
+   *       Router の子が `router drain: complete`、facilitator が `facilitator drain: complete` を出して、どちらも exit 0 で終わったときだけ。それ以外は timeout（exit 1）
+   *   待っている間に facilitator が落ちたら今までどおり `shutdown`（両方を止めて exit 1。drain の行は出さない = 静止の証拠にならない）。
+   *   (1) の間に Router の子が落ちたときも同じ（facilitator があるとき。無いときは (2) で `drain: timeout`）
    */
   const lifecycle = new AbortController();
   const owned: Listening[] = [];
@@ -501,20 +518,66 @@ export async function startHost(
   let http: Server | undefined;
   let shuttingDown = false;
   let ready = false;
-  const shutdown = async (code: number, message?: string): Promise<never> => {
+  const drain = createIngressDrain();
+  const drainTimeoutMs = overrides.drainTimeoutMsForTest ?? DRAIN_TIMEOUT_MS;
+  /**
+   * この起動の id（タスク R-0。16 hex の乱数）。起動の最初に `entry run: <id>` を出し、drain の最後の行にも同じ id を付ける
+   * （`drain: complete <id>`）。`deploy/swap-image.sh` は停止の前に読んだ id と最後の行の id が一致するときだけ静止とみなす
+   * （同じ秒の古い行・時計の巻き戻しで別の起動の行を拾わない）。
+   */
+  const runId = randomBytes(8).toString("hex");
+  note(`entry run: ${runId}`);
+  /** `finalLine`: 子を止めた後、exit の直前に出す固定の 1 行（drain の結果と起動の id だけ）。 */
+  const shutdown = async (code: number, message?: string, finalLine?: "drain: complete" | "drain: timeout"): Promise<never> => {
     if (!shuttingDown) {
       shuttingDown = true;
       if (message !== undefined) note(message);
       lifecycle.abort();
+      drain.close();
       http?.close();
       await Promise.allSettled([...pending]);
-      await Promise.allSettled(owned.map((child) => child.stop()));
+      // Router の子（後に起動した）を先に、facilitator を後に止める（終了を待ってから次）。
+      for (const child of [...owned].reverse()) await child.stop().catch(() => {});
+      if (finalLine !== undefined) note(`${finalLine} ${runId}`);
       process.exit(code);
     }
     // 2 回目以降（片付けの途中の別の失敗）は、最初の片付けが終わらせるまで待つ。
     return new Promise<never>(() => {});
   };
-  const onSignal = (): void => void shutdown(0);
+  let draining = false;
+  /** drain で止める子（その終了は「子が落ちた」として扱わない）。 */
+  const expectedExits = new Set<Listening>();
+  let routerChild: Listening | undefined;
+  let facilitatorChild: Listening | undefined;
+  /** 子を残りの時間まで drain させて止める。固定の行 `<label> drain: complete` を SIGTERM の後に出して exit 0 で終わったときだけ true。 */
+  const drainChild = async (child: Listening, label: string, deadline: number): Promise<boolean> => {
+    expectedExits.add(child);
+    const result = await child.stopWithin(deadline - Date.now());
+    return !result.killed && result.code === 0 && result.stderrAfter.split("\n").includes(`${label} drain: complete`);
+  };
+  /** 起動の後の signal: 上の (1)〜(3)。2 回目の signal は何もしない（drain を続ける）。 */
+  const drainThenShutdown = async (): Promise<void> => {
+    if (draining || shuttingDown) return;
+    draining = true;
+    const deadline = Date.now() + drainTimeoutMs;
+    drain.close();
+    http?.close();
+    const idle = await drain.idle(drainTimeoutMs);
+    // 待っている間に子が落ちて `shutdown` が始まっていれば、ここは何もしない（その片付けが exit する）。
+    if (shuttingDown) return;
+    if (!idle) {
+      await shutdown(1, undefined, "drain: timeout");
+      return;
+    }
+    // Router の子 → facilitator の順に、それぞれ残りの時間まで drain させる（facilitator は Router の子の終了の後: 進行中の settle が使い得る）。
+    const routerDrained = routerChild === undefined ? true : await drainChild(routerChild, "router", deadline);
+    if (shuttingDown) return;
+    const facilitatorDrained = facilitatorChild === undefined ? true : await drainChild(facilitatorChild, "facilitator", deadline);
+    if (shuttingDown) return;
+    const complete = routerDrained && facilitatorDrained;
+    await shutdown(complete ? 0 : 1, undefined, complete ? "drain: complete" : "drain: timeout");
+  };
+  const onSignal = (): void => void (ready ? drainThenShutdown() : shutdown(0));
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   /** 子を起動する（取り消し可能）。起動したらすぐ `owned` に入れて終了を見る（`watch` が true の子）。 */
@@ -524,7 +587,7 @@ export async function startHost(
     try {
       const child = await starting;
       owned.push(child);
-      if (watch) void child.exited.then(() => void shutdown(1, `${label} exited: stopping the entry`));
+      if (watch) void child.exited.then(() => (expectedExits.has(child) ? undefined : void shutdown(1, `${label} exited: stopping the entry`)));
       return child;
     } finally {
       pending.delete(starting);
@@ -564,6 +627,7 @@ export async function startHost(
     try {
       // 固定文のみ（起動失敗の例外は子の出力を丸ごと含む）。原因（lock・gas の上限・RPC など）は facilitator を単体で起動して調べる（固定文の code を出す）。
       facilitator = await spawnChild(overrides.facilitatorScriptForTest ?? plan.facilitator.script, { ...(overrides.facilitatorEnvExtraForTest ?? {}), ...plan.facilitator.env }, FACILITATOR_LISTEN_TIMEOUT_MS, "the EVM facilitator", true);
+      facilitatorChild = facilitator;
     } catch {
       return startupFailed("could not start the EVM facilitator");
     }
@@ -583,6 +647,7 @@ export async function startHost(
     // 固定文のみ（起動失敗の例外は子プロセスの出力を丸ごと含む）。原因は Router を単体で起動して調べる。
     return startupFailed("could not start the Router");
   }
+  routerChild = router;
   const listening = router.stdout().trim();
   note(`router: ${listening}`);
 
@@ -609,6 +674,7 @@ export async function startHost(
    */
   const ingress = createMcpIngress({
     note,
+    drain,
     handle: async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
       // ステートレス。セッションを跨いで状態を持たない。
       // リモートはステートレス: 呼び出し側が quote を持ち回る（慣行に合わせる）。

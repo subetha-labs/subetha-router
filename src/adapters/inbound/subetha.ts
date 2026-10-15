@@ -139,10 +139,13 @@ function requireFee(json: Record<string, unknown>): Record<string, unknown> | un
   return fee;
 }
 
+/** verify・settle の HTTP の期限の既定。drain の上限の試験（タスク R-0）が読む。 */
+export const SUBETHA_INBOUND_DEFAULT_TIMEOUT_MS = 5_000;
+
 export function createSubethaInbound(options: SubethaInboundOptions): InboundRail {
   const base = options.facilitatorUrl.replace(/\/$/, "");
   const transport = options.transport;
-  const timeoutMs = options.timeoutMs ?? 5_000;
+  const timeoutMs = options.timeoutMs ?? SUBETHA_INBOUND_DEFAULT_TIMEOUT_MS;
   const maxTimeoutSeconds = options.maxTimeoutSeconds ?? 120;
 
   /** 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。 */

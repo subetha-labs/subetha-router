@@ -101,6 +101,11 @@ export interface Listening {
    * 応答前クラッシュの再現に使う（graceful shutdown ではない）。
    */
   kill(signal: NodeJS.Signals): Promise<void>;
+  /**
+   * SIGTERM を送り、`graceMs` まで終了を待つ。過ぎたら SIGKILL して終了を待つ（入口の drain が Router の子を残りの時間で待つ。タスク R-0）。
+   * 終了の code・signal と、SIGKILL したか、SIGTERM の後に出た stderr を返す。既に終わっていれば SIGTERM は送らない。
+   */
+  stopWithin(graceMs: number): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null; readonly killed: boolean; readonly stderrAfter: string }>;
   /** 子が終わったら解ける（理由を問わない。入口が「どちらかの子が落ちたら両方を止める」ために見る）。 */
   readonly exited: Promise<void>;
 }
@@ -129,8 +134,10 @@ export async function startListening(
   child.stderr.on("data", (chunk: string) => (stderr += chunk));
 
   let closed = false;
-  const closing = closedOf(child).then(() => {
+  let exit: [number | null, NodeJS.Signals | null] = [null, null];
+  const closing = closedOf(child).then((result) => {
     closed = true;
+    exit = result;
   });
   let settleListening!: () => void;
   const listeningDone = new Promise<void>((resolve) => (settleListening = resolve));
@@ -215,6 +222,20 @@ export async function startListening(
         child.kill(signal);
         await closing;
       }
+    },
+    async stopWithin(graceMs: number) {
+      const from = stderr.length;
+      let killed = false;
+      if (!closed) {
+        child.kill("SIGTERM");
+        const guard = setTimeout(() => {
+          killed = true;
+          child.kill("SIGKILL");
+        }, Math.max(0, graceMs));
+        await closing;
+        clearTimeout(guard);
+      }
+      return { code: exit[0], signal: exit[1], killed, stderrAfter: stderr.slice(from) };
     },
   };
 }

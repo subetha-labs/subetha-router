@@ -65,4 +65,7 @@ ENV PORT=8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["npx", "--no-install", "tsx", "tools/remote-mcp.ts"]
+# 入口を PID 1 にする（rejection-reasons 設計 §13.3、R-0）。`npx --no-install tsx` は npm → `sh -c tsx …` → tsx → 入口の鎖になり、
+# `docker stop` の SIGTERM で npm の子の sh（Debian の dash）が終わり、npm も終わって PID 1 が消える（入口の drain が途中で殺される。
+# `tests/acceptance/image-drain.test.ts` で実際のイメージで確かめた）。`node --import tsx` なら入口そのものが PID 1 で SIGTERM を受けて drain する。
+CMD ["node", "--import", "tsx", "tools/remote-mcp.ts"]

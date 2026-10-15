@@ -68,7 +68,7 @@ export interface ReasonExclusion {
 }
 
 /**
- * manifest（人が確かめた一覧）。数: x402_core 6・x402_evm 118・x402_svm 83・circle 2・self_facilitator 53・provider_worker 14。
+ * manifest（人が確かめた一覧）。数: x402_core 6・x402_evm 118・x402_svm 83・circle 2・self_facilitator 54・provider_worker 14。
  * 同じ生の値が複数の節に現れてよい（token は必ず同じ。試験で固定）。
  */
 export const REASON_MANIFEST = [
@@ -314,6 +314,8 @@ export const REASON_MANIFEST = [
   { section: "self_facilitator", raw: "queue_timeout", token: "queue_timeout", source: { file: "tools/evm-facilitator.ts", line: 852 } },
   { section: "self_facilitator", raw: "network_held", token: "network_held", source: { file: "tools/evm-facilitator.ts", line: 634 } },
   { section: "self_facilitator", raw: "verify_unavailable", token: "verify_unavailable", source: { file: "tools/evm-facilitator.ts", line: 898 } },
+  // R-0: 停止の drain の間の新しい要求への 503（`tools/evm-facilitator.ts` の drain）。
+  { section: "self_facilitator", raw: "draining", token: "draining", source: { file: "tools/evm-facilitator.ts", line: 1248 } },
   { section: "self_facilitator", raw: "invalid_payment", token: "invalid_payment", source: { file: "tools/evm-facilitator.ts", line: 898 } },
   { section: "self_facilitator", raw: "gas_estimate_unavailable", token: "gas_estimate_unavailable", source: { file: "tools/evm-facilitator.ts", line: 915 } },
   { section: "self_facilitator", raw: "gas_limit_too_high", token: "gas_limit_too_high", source: { file: "tools/evm-facilitator.ts", line: 919 } },
@@ -389,19 +391,19 @@ export const REASON_EXCLUSIONS: readonly ReasonExclusion[] = Object.freeze([
   { section: "x402_svm", raw: "handler_failed", why: "hook", source: { file: "dist/esm/upto/server/index.mjs", line: 70 } },
   { section: "x402_svm", raw: "handler_threw", why: "hook", source: { file: "dist/esm/upto/server/index.mjs", line: 70 } },
   { section: "x402_svm", raw: "after_verify_aborted", why: "hook", source: { file: "dist/esm/upto/server/index.mjs", line: 70 } },
-  { section: "self_facilitator", raw: "accepted", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 422 } },
-  { section: "self_facilitator", raw: "eip3009", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 405 } },
-  { section: "self_facilitator", raw: "exact", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 397 } },
-  { section: "self_facilitator", raw: "host", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1218 } },
-  { section: "self_facilitator", raw: "name", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 403 } },
-  { section: "self_facilitator", raw: "network", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 411 } },
-  { section: "self_facilitator", raw: "origin", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1217 } },
-  { section: "self_facilitator", raw: "scheme", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 397 } },
-  { section: "self_facilitator", raw: "settle", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1228 } },
-  { section: "self_facilitator", raw: "string", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 363 } },
-  { section: "self_facilitator", raw: "utf8", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1232 } },
-  { section: "self_facilitator", raw: "verify", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1228 } },
-  { section: "self_facilitator", raw: "version", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 403 } },
+  { section: "self_facilitator", raw: "accepted", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 423 } },
+  { section: "self_facilitator", raw: "eip3009", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 406 } },
+  { section: "self_facilitator", raw: "exact", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 398 } },
+  { section: "self_facilitator", raw: "host", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1256 } },
+  { section: "self_facilitator", raw: "name", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 404 } },
+  { section: "self_facilitator", raw: "network", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 412 } },
+  { section: "self_facilitator", raw: "origin", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1255 } },
+  { section: "self_facilitator", raw: "scheme", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 398 } },
+  { section: "self_facilitator", raw: "settle", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1266 } },
+  { section: "self_facilitator", raw: "string", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 364 } },
+  { section: "self_facilitator", raw: "utf8", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1270 } },
+  { section: "self_facilitator", raw: "verify", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 1266 } },
+  { section: "self_facilitator", raw: "version", why: "not_a_reason", source: { file: "tools/evm-facilitator.ts", line: 404 } },
   { section: "provider_worker", raw: "settle", why: "not_a_reason", source: { file: "providers/x402-workers/src/index.ts", line: 81 } },
   { section: "provider_worker", raw: "verify", why: "not_a_reason", source: { file: "providers/x402-workers/src/index.ts", line: 81 } },
   { section: "provider_worker", raw: "boolean", why: "not_a_reason", source: { file: "providers/x402-workers/src/facilitator-client.ts", line: 163 } },

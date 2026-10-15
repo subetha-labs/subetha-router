@@ -49,6 +49,7 @@ import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 import { DynamicGate } from "./core/dynamic-gate.js";
 import { createRouterCore } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
+import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import type {
   EvmSigningCapability,
@@ -123,6 +124,8 @@ export interface RouterCapabilities {
    * 表の外の network・資産で起動するために渡す。本番の入口は渡さない（既定は `KNOWN_NETWORKS`）。
    */
   readonly knownNetworksForTest?: readonly KnownNetwork[];
+  /** drain の上限（ms）。試験専用（本番は `DRAIN_TIMEOUT_MS`）。 */
+  readonly drainTimeoutMsForTest?: number;
   /**
    * Circle の facilitator（kind `circle`）を使う network ごとの売り手証明の能力（multirail 設計 §3）。起動側が
    * `tools/real-seller-proof-capability.ts` で作る。route／プロファイルの `source.payTo` と一致しなければ起動しない。
@@ -1257,9 +1260,13 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
           await new Promise<never>(() => {});
         };
 
+  // graceful drain（タスク R-0）: SIGTERM の後は新しい要求を 503 で断り、進行中の要求（購入・quote・status の読み取り。相手が切った購入も、
+  // HTTP の処理が終わるまで）が 0 になるのを待ってから閉じる。
+  const drain = createDrainGate();
   let server;
   try {
     server = await startHttpServer({
+      drain,
       core,
       config: config.router,
       canonicalBaseUrl: config.http.canonicalBaseUrl,
@@ -1285,15 +1292,29 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     })}\n`,
   );
 
+  /**
+   * SIGTERM・SIGINT: drain（タスク R-0）。listener を閉じ（新しい接続を受けない）、既存の接続の上の新しい要求は 503 `draining`、
+   * 進行中の要求が 0 になるのを `DRAIN_TIMEOUT_MS` まで待つ。0 になれば journal を閉じて `router drain: complete`（exit 0）。
+   * 上限に達したら journal を閉じずに `router drain: timeout`（exit 1。進行中の処理は process の終了で止まる: 再起動後は core が
+   * `interrupted_at_restart` で終える）。入口はこの行と exit code で静止を判断する。2 回目の signal は何もしない。
+   */
   let stopping = false;
+  const drainTimeoutMs = capabilities.drainTimeoutMsForTest ?? DRAIN_TIMEOUT_MS;
   const shutdown = (): void => {
     if (stopping) {
       return;
     }
     stopping = true;
     void (async () => {
-      await server.close();
+      drain.close();
+      server.stopListening();
+      if (!(await drain.idle(drainTimeoutMs))) {
+        process.stderr.write("router drain: timeout\n");
+        process.exit(1);
+      }
+      // 進行中の要求は 0。残る接続（keep-alive の空き）は process の終了で閉じる（`server.close()` の完了は待たない）。
       await core.close();
+      process.stderr.write("router drain: complete\n");
       process.exit(0);
     })();
   };

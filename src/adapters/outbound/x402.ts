@@ -284,9 +284,11 @@ type Challenge = X402Challenge;
 
 /** 静的 route の有料要求の期限（既定）。動的経路・Solana の `paidTimeoutMs` の既定と同じ値。 */
 export const X402_STATIC_PAID_TIMEOUT_MS = 30_000;
+/** 静的 route の未払いの読取（challenge）の期限（既定）。drain の上限の試験（タスク R-0）が読む。 */
+export const X402_STATIC_CHALLENGE_TIMEOUT_MS = 5_000;
 
 export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
-  const timeoutMs = options.timeoutMs ?? 5_000;
+  const timeoutMs = options.timeoutMs ?? X402_STATIC_CHALLENGE_TIMEOUT_MS;
   const paidTimeoutMs = options.paidTimeoutMs ?? X402_STATIC_PAID_TIMEOUT_MS;
   const capability = options.capability;
   const transport = options.transport;

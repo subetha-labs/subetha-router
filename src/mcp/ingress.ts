@@ -10,6 +10,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
+import { createDrainGate, type DrainGate } from "../shared/drain.js";
+
 export interface McpIngressLimits {
   /** 要求本文の上限（バイト）。超過は読み切らずに 413。 */
   readonly maxBodyBytes: number;
@@ -44,7 +46,13 @@ export interface McpIngressOptions {
   readonly note?: (message: string) => void;
   /** MCP を受けるパス。 */
   readonly path?: string;
+  /** 入口の graceful drain（`createIngressDrain`）。渡せば、要求を数え、drain の始まりの後の要求は 503 で断る。 */
+  readonly drain?: IngressDrain;
 }
+
+/** 入口の graceful drain の数え方（`src/shared/drain.ts`。Router の子の HTTP と共有）。 */
+export type IngressDrain = DrainGate;
+export const createIngressDrain = createDrainGate;
 
 function sendJson(
   response: ServerResponse,
@@ -168,6 +176,14 @@ export function createMcpIngress(options: McpIngressOptions): Server {
     },
     (request, response) => {
     const startedAt = Date.now();
+    const drain = options.drain;
+    if (drain !== undefined && !drain.admit()) {
+      // drain の後の要求（既存の接続の上の新しい要求）。数えずに断り、接続を閉じる（本文は読まない）。
+      const hasBody = request.headers["content-length"] !== undefined || request.headers["transfer-encoding"] !== undefined;
+      if (hasBody) rejectAndClose(request, response, 503, "draining");
+      else sendJson(response, 503, "draining", { connection: "close" });
+      return;
+    }
     // 要求 1 件が接続を使える時間の上限。応答が終われば解除する。
     const lifetime = setTimeout(() => {
       note("mcp ingress: request exceeded its lifetime");
@@ -175,6 +191,13 @@ export function createMcpIngress(options: McpIngressOptions): Server {
     }, limits.maxRequestMs);
     lifetime.unref();
     response.once("close", () => clearTimeout(lifetime));
+    // drain の数: 処理の終わりと応答の close の両方が来たら 1 回だけ外す。
+    let open = 2;
+    const release = (): void => {
+      open -= 1;
+      if (open === 0) drain?.finished();
+    };
+    response.once("close", release);
     void (async () => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       // 本文を持つ要求を、本文を読まずに終える経路では接続ごと閉じる（読み残しを Node に読ませ続けない）。
@@ -239,7 +262,7 @@ export function createMcpIngress(options: McpIngressOptions): Server {
       // 例外の文字列は出さない（上流 URL・トークン・要求の内容が混ざり得る）。
       note("mcp ingress: request failed");
       sendJson(response, 500, "internal_error");
-    });
+    }).finally(release);
     },
   );
 

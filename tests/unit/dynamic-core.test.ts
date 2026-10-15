@@ -8,6 +8,8 @@ import { mkdir, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { DRAIN_MODEL } from "../fixtures/drain-model.js";
+
 import { DEFAULT_DYNAMIC_LIMITS, type DynamicProfile, type RouterConfig } from "../../src/config.js";
 import { bodySha256Of, capOf, dynamicBindingOf, ownerKeyHashOf, perPurchaseLimitOf, priceOf, reservationOf } from "../../src/core/dynamic.js";
 import { DynamicGate } from "../../src/core/dynamic-gate.js";
@@ -1037,6 +1039,30 @@ describe("MPP 送信: quote 時の見積りで cap と手数料を決める（dy
       pricing: { fee: "3000", maxFee: "3000", estimate: { bound: "1500" } },
       reservation: { legs: [{ amount: "8000" }, { amount: "5000" }, { asset: SRC_ASSET, amount: "3000" }] },
     });
+  });
+
+  test("drain の上限のモデル（R-0、`tests/fixtures/drain-model.ts`）: 購入 1 件の readChallenge・estimateFee の回数を実際の core で数える（静的・動的・手数料の上限つき）", async () => {
+    const core = await boot();
+    // 静的。
+    const s = (await core.quote({ principalId: "alice", requestId: "m-s", routeId: STATIC_ROUTE })) as OkQuote;
+    let before = outbound.readChallengeCalls;
+    expect((await core.purchase({ principalId: "alice", requestId: "m-s", quoteId: s.quoteId, approval: s.quoteId, credential: inbound.credentialFor(s.source.offer) })).status).toBe("delivered");
+    expect(outbound.readChallengeCalls - before).toBe(DRAIN_MODEL.rereadsPerPurchase);
+    // 動的（x402）。
+    const d = await quoteOk(core, "m-d");
+    before = outbound.readChallengeCalls;
+    expect((await core.purchase(purchaseArgs(d, { requestId: "m-d" }))).status).toBe("delivered");
+    expect(outbound.readChallengeCalls - before).toBe(DRAIN_MODEL.rereadsPerPurchase);
+    await core.close();
+    // 動的（手数料の上限つき = 見積りあり）。
+    outbound.offers = [mppOffer()];
+    const mpp = await boot(baseConfig({ profile: MPP }));
+    const m = (await quoteMpp(mpp, "m-m")) as OkQuote;
+    before = outbound.readChallengeCalls;
+    const estimates = outbound.estimateCalls;
+    expect((await mpp.purchase({ ...purchaseArgs(m), requestId: "m-m" })).status).toBe("delivered");
+    expect(outbound.readChallengeCalls - before).toBe(DRAIN_MODEL.rereadsPerPurchase);
+    expect(outbound.estimateCalls - estimates).toBe(DRAIN_MODEL.estimatesPerPurchase);
   });
 
   test("x402 送信の pay には maxFee を渡さない", async () => {

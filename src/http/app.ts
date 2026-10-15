@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { canonicalPathOf, resolveProfile, resolveRoute, type RouterConfig } from "../config.js";
 import type { PurchaseOutcome, RouterCore } from "../core/orchestrator.js";
 import type { InboundOffer, PaymentCredential } from "../ports/inbound.js";
+import type { DrainGate } from "../shared/drain.js";
 import { authenticate, singleHeader } from "./auth.js";
 import { dynamicQuoteBody, paymentRequiredBody, projectionBody, quoteBody, routeListBody } from "./projection.js";
 
@@ -23,6 +24,11 @@ export interface AppOptions {
    * 合成構成からのみ渡され、既定では `undefined`（通常経路に分岐は残らない）。
    */
   readonly beforeDeliveredResponse?: (paymentId: string) => Promise<void>;
+  /**
+   * graceful drain（`src/shared/drain.ts`、タスク R-0）。渡せば要求を数え（処理の終わりと応答の close の両方で外す。相手が切っても
+   * 購入・settle・宛先への支払いが続く間は数に残る）、drain の始まりの後の要求は 503 `draining` で断る（core に触れない）。
+   */
+  readonly drain?: DrainGate;
 }
 
 /** R2 の body 上限。これを超える要求は読み切らずに切る。 */
@@ -194,6 +200,19 @@ export function createRequestListener(options: AppOptions): http.RequestListener
   };
 
   return (request, response) => {
+    const drain = options.drain;
+    if (drain !== undefined && !drain.admit()) {
+      // drain の後の要求: 固定の拒否。本文は読まず、接続を閉じる。
+      sendError(response, 503, "draining", {}, { connection: "close" });
+      return;
+    }
+    // drain の数: 処理の終わりと応答の close の両方が来たら 1 回だけ外す。
+    let open = 2;
+    const release = (): void => {
+      open -= 1;
+      if (open === 0) drain?.finished();
+    };
+    response.once("close", release);
     void handle(request, response).catch(() => {
       // 例外の文字列は外に出さない（上流 URL・トークンが混ざり得る）。
       if (!response.headersSent) {
@@ -201,7 +220,7 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       } else {
         response.destroy();
       }
-    });
+    }).finally(release);
   };
 
   async function handle(
@@ -488,6 +507,8 @@ export interface RunningServer {
   readonly port: number;
   /** 実際に適用された受信期限（試験で確かめる）。 */
   readonly timeouts: { readonly headersTimeoutMs: number; readonly requestTimeoutMs: number };
+  /** listener を閉じる（新しい接続を受けない）。既存の接続の終わりは待たない（drain が数で待つ）。 */
+  stopListening(): void;
   close(): Promise<void>;
 }
 
@@ -504,6 +525,9 @@ export async function startHttpServer(
   return {
     port: typeof address === "object" && address !== null ? address.port : options.port,
     timeouts: { headersTimeoutMs: server.headersTimeout, requestTimeoutMs: server.requestTimeout },
+    stopListening(): void {
+      server.close();
+    },
     async close(): Promise<void> {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
