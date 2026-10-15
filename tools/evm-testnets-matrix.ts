@@ -23,6 +23,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { stableJson } from "../src/core/intent.js";
+import { NOOP_DIAGNOSTICS, safeEmit, withDiagnosticScope, type DiagCapture, type DiagnosticsSink, type DiagScope, type DiagSignerStage, type LocalTxRef } from "../src/shared/diagnostics.js";
+import { createFileDiagnosticsSink } from "../src/shared/diagnostics-file.js";
 import { KNOWN_NETWORKS, knownAssetOf, knownNetworkOf } from "../src/shared/networks.js";
 import { DEFAULT_MAX_FEE_PER_GAS, DEFAULT_MAX_SETTLE_GAS } from "./evm-facilitator.js";
 import {
@@ -70,6 +72,7 @@ import {
 import { EVM_TESTNETS, evmTestnetsConfigOf, INBOUND, isMatrixNewChain, MATRIX_NEW_CHAINS, MATRIX_RAILS, matrixPairsOf,
   matrixRerunsOf, OUTBOUND, OUTBOUND_X402, UPSTREAM, UPSTREAM_ARC, UPSTREAM_SOL, UPSTREAM_SOL_MPP, UPSTREAM_X402, type MatrixEndpoint, type MatrixNewChain, type MatrixRail } from "./remote-mcp-config.js";
 import { checkTempoChallenge } from "./sign-check-tempo.js";
+import { createSignTracker, observedRpcFetch, type SignBroadcast } from "./sign-diagnostics.js";
 import { runSign, type SignDeps } from "./sign-run.js";
 import { checkSvmMppChallenge } from "./svm-mpp-payer.js";
 
@@ -616,13 +619,32 @@ export function sourceOfferProblems(subject: Record<string, unknown>, quote: Rec
 
 /* ────────────────────────────────────────────────────────────────────────────── 署名（`npm run sign` と同じ `runSign`、全レール） */
 
+/**
+ * 署名の診断（設計 `docs/rejection-reasons-design.md` §6・§12.4。**観測だけ**: 印・`paying`・`fundsMayHaveMoved`・止める判断はこれを読まない。D-11）。
+ * `txRef` は送る raw tx から手元で計算した hash（RPC の結果ではない）。`txRefCheck` は payer の通常の経路が tx の hash を返したときだけ（計算した値との一致）。
+ */
+export interface MatrixSignDiagnostic {
+  readonly signerStage?: DiagSignerStage;
+  readonly broadcast: SignBroadcast;
+  readonly rpc?: "timeout" | "rate_limited" | "other";
+  readonly rpcHttpStatus?: number;
+  readonly txRef?: string;
+  readonly txRefCheck?: "match" | "mismatch" | "absent";
+  /** driver の記録に渡す値（`localTxRefOf` の値。証跡には写さない）。 */
+  readonly localTxRef?: LocalTxRef;
+}
 export type MatrixSignResult =
-  | { readonly ok: true; readonly credential: string; readonly kind: ExpectedSign; readonly chainId?: number; readonly txRef?: string }
-  | { readonly ok: false; readonly reason: string; readonly fundsMayHaveMoved: boolean; readonly txRef?: string };
+  | { readonly ok: true; readonly credential: string; readonly kind: ExpectedSign; readonly chainId?: number; readonly txRef?: string; readonly diagnostic?: MatrixSignDiagnostic }
+  | { readonly ok: false; readonly reason: string; readonly fundsMayHaveMoved: boolean; readonly txRef?: string; readonly diagnostic?: MatrixSignDiagnostic };
 export type MatrixSigner = (quote: unknown, planned: MatrixPurchase) => Promise<MatrixSignResult>;
 
-/** payer の作り方（試験が差し替える）。本番は `runSignMatrixSigner`。 */
-export type MatrixPayerFactories = Pick<SignDeps, "mppPayer" | "evmPayer" | "svmPayer" | "svmMppPayer">;
+/**
+ * payer の作り方（試験が差し替える）。本番は `runSignMatrixSigner`。Tempo の payer は 3 つ目の引数で RPC の `fetchFn`（観測の包み）を受け取れる
+ * （`tools/mpp-payer.ts` の既存の差し替え口。要求は変わらない）。
+ */
+export type MatrixPayerFactories = Pick<SignDeps, "evmPayer" | "svmPayer" | "svmMppPayer"> & {
+  readonly mppPayer: (key: string, scope: Parameters<SignDeps["mppPayer"]>[1], options?: { readonly fetchFn?: typeof fetch }) => ReturnType<SignDeps["mppPayer"]>;
+};
 
 /**
  * `runSign` に全レールの payer を渡す。payer の address が plan の払い手と違えば **署名・送金の前に** 止める（EVM は大文字小文字を無視、Solana は完全一致）。
@@ -638,8 +660,32 @@ export function matrixSignerOf(env: Env, factories: MatrixPayerFactories, nowMs:
     };
     let paying = false;
     let txRef: string | undefined;
+    // 診断（観測だけ。下の `paying`・`fundsMayHaveMoved`・結果はこれを読まない）。
+    const tracker = createSignTracker();
+    const diagnosticOf = (): MatrixSignDiagnostic | undefined => {
+      try {
+        const state = tracker.snapshot();
+        const computed = state.txRef?.hash;
+        const check = txRef === undefined || computed === undefined ? undefined : txRef === "" ? "absent" : txRef.toLowerCase() === computed ? "match" : "mismatch";
+        return {
+          ...(state.signerStage === undefined ? {} : { signerStage: state.signerStage }),
+          broadcast: state.broadcast,
+          ...(state.rpc === undefined ? {} : { rpc: state.rpc }),
+          ...(state.rpcHttpStatus === undefined ? {} : { rpcHttpStatus: state.rpcHttpStatus }),
+          ...(computed === undefined ? {} : { txRef: computed, localTxRef: state.txRef }),
+          ...(check === undefined ? {} : { txRefCheck: check }),
+        };
+      } catch {
+        return undefined;
+      }
+    };
+    const withDiagnostic = <T extends MatrixSignResult>(result: T): T => {
+      const diagnostic = diagnosticOf();
+      return diagnostic === undefined ? result : { ...result, diagnostic };
+    };
     try {
       const outcome = await runSign(quote, {
+        onStage: tracker.onStage,
         nowMs,
         readEvmKey: () => {
           if (evmKey === undefined || evmKey === "") throw new MatrixSignBlocked("SUBETHA_PAYER_PRIVATE_KEY is not set");
@@ -651,7 +697,7 @@ export function matrixSignerOf(env: Env, factories: MatrixPayerFactories, nowMs:
         },
         ...(rpc === undefined || rpc === "" ? {} : { solanaRpcUrl: rpc }),
         mppPayer: (key, scope) => {
-          const payer = factories.mppPayer(key, scope);
+          const payer = factories.mppPayer(key, scope, { fetchFn: observedRpcFetch(tracker.observer) });
           expectFrom(payer.address);
           return {
             address: payer.address,
@@ -681,13 +727,13 @@ export function matrixSignerOf(env: Env, factories: MatrixPayerFactories, nowMs:
         },
         stderr: () => {},
       });
-      if (!outcome.ok) return { ok: false, reason: outcome.reason, fundsMayHaveMoved: paying, ...(txRef === undefined ? {} : { txRef }) };
+      if (!outcome.ok) return withDiagnostic({ ok: false, reason: outcome.reason, fundsMayHaveMoved: paying, ...(txRef === undefined ? {} : { txRef }) });
       const kind = outcome.dispatch.kind as ExpectedSign;
-      return { ok: true, credential: outcome.stdout.trim(), kind, ...(outcome.dispatch.kind === "x402-evm" ? { chainId: outcome.dispatch.chainId } : {}), ...(txRef === undefined ? {} : { txRef }) };
+      return withDiagnostic({ ok: true, credential: outcome.stdout.trim(), kind, ...(outcome.dispatch.kind === "x402-evm" ? { chainId: outcome.dispatch.chainId } : {}), ...(txRef === undefined ? {} : { txRef }) });
     } catch (error) {
       // 例外の文言に鍵は入らない（固定文）。知らない例外は固定文に寄せる。
       const reason = error instanceof MatrixSignBlocked ? error.message : "signing failed";
-      return { ok: false, reason, fundsMayHaveMoved: paying, ...(txRef === undefined ? {} : { txRef }) };
+      return withDiagnostic({ ok: false, reason, fundsMayHaveMoved: paying, ...(txRef === undefined ? {} : { txRef }) });
     }
   };
 }
@@ -697,7 +743,7 @@ class MatrixSignBlocked extends Error {}
 export async function runSignMatrixSigner(env: Env): Promise<MatrixSigner> {
   const [{ createMppPayer }, { createX402Payer }, { createSvmPayer }, { createSvmMppPayer }] = await Promise.all([import("./mpp-payer.js"), import("./x402-payer.js"), import("./svm-payer.js"), import("./svm-mpp-payer.js")]);
   return matrixSignerOf(env, {
-    mppPayer: (key, scope) => createMppPayer(key, scope),
+    mppPayer: (key, scope, options) => createMppPayer(key, scope, options?.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }),
     evmPayer: (key) => createX402Payer(key),
     svmPayer: (key, options) => createSvmPayer(key, options),
     svmMppPayer: (key, options) => createSvmMppPayer(key, options),
@@ -898,7 +944,56 @@ export interface MatrixRunDeps {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly receiptWaitMs?: number;
   readonly requestIdOf?: (routeId: string) => string;
+  /** 診断の記録（既定は `<evidence-dir>/diagnostics/driver.ndjson` の file sink。試験が差し替える）。観測だけで、判断はこれを読まない。 */
+  readonly diagnostics?: DiagnosticsSink;
 }
+
+/** driver の診断のファイル（設計 §2.1。8 MiB、1 世代）。 */
+export function driverDiagnosticsPathOf(evidenceDir: string): string {
+  return path.join(evidenceDir, "diagnostics", "driver.ndjson");
+}
+/** 終わる前の flush の上限（best effort）。 */
+const DRIVER_DIAG_FLUSH_MS = 500;
+const DIAG_PAYMENT_ID = /^[0-9a-f-]{36}$/;
+
+/** driver の 1 行（購入の scope: `paymentId` は Router の形のときだけ、`quoteId` は hash になって残る）。例外は全部握る。 */
+function driverRecord(sink: DiagnosticsSink, ids: { readonly paymentId?: string | undefined; readonly quoteId?: unknown }, build: () => DiagCapture): void {
+  if (sink === NOOP_DIAGNOSTICS) return;
+  try {
+    const scope: DiagScope = {
+      ...(typeof ids.paymentId === "string" && DIAG_PAYMENT_ID.test(ids.paymentId) ? { paymentId: ids.paymentId } : {}),
+      ...(typeof ids.quoteId === "string" && ids.quoteId !== "" ? { quoteId: ids.quoteId } : {}),
+    };
+    void withDiagnosticScope(scope, async () => safeEmit(sink, build)).catch(() => {});
+  } catch {
+    // 診断の失敗は driver の経路に出さない。
+  }
+}
+
+/** MCP の呼び出しの失敗の分類（名前・数値の code だけ。文言は読まない）。 */
+function callFailureOf(error: unknown): Pick<DiagCapture, "rpc" | "httpStatus"> {
+  try {
+    const e = error as { name?: unknown; code?: unknown } | null;
+    if (e?.name === "AbortError" || e?.name === "TimeoutError" || e?.code === -32001) return { rpc: "timeout" };
+    if (typeof e?.code === "number" && Number.isInteger(e.code) && e.code >= 100 && e.code <= 599) return { rpc: "other", httpStatus: e.code };
+  } catch {
+    // 分類できない。
+  }
+  return { rpc: "other" };
+}
+
+/** status の応答の写し（保存された状態と終わりの理由の code だけ）。 */
+function statusDiagOf(read: Record<string, unknown>): Pick<DiagCapture, "outcome" | "code"> {
+  const projection = isRecord(read["projection"]) ? read["projection"] : undefined;
+  return { ...diagOutcomeOf(projection?.["status"]), ...diagCodeOf(projection?.["terminalReason"]) };
+}
+
+/** Router の結果の写し（閉じた集合だけ。集合の外は書かない）。 */
+function diagOutcomeOf(value: unknown): Pick<DiagCapture, "outcome"> {
+  const table: Record<string, NonNullable<DiagCapture["outcome"]>> = { delivered: "paid", rejected: "rejected", unknown: "unknown", awaiting_payment: "awaiting", paid_data_unavailable: "paid_no_data" };
+  return typeof value === "string" && Object.hasOwn(table, value) ? { outcome: table[value]! } : {};
+}
+const diagCodeOf = (value: unknown): Pick<DiagCapture, "code"> => (typeof value === "string" && value !== "" && value.length <= 96 ? { code: value } : {});
 
 
 /** 実行が使う plan の部分（帳簿・残高の検査。静的の行列と hosted 動的モードで共有）。 */
@@ -1063,6 +1158,26 @@ export async function runMatrix(opts: MatrixRunOptions, deps: MatrixRunDeps): Pr
 }
 
 async function runMatrixLoop<P extends MatrixPurchase>(opts: LoopOptions<P>, deps: MatrixRunDeps, mode: RunMode<P>): Promise<RunReport> {
+  // 診断の記録（観測だけ）。作れなければ記録しない。終わる前に上限つきで書き出す（best effort）。
+  let owned: ReturnType<typeof createFileDiagnosticsSink> | undefined;
+  let diag: DiagnosticsSink = NOOP_DIAGNOSTICS;
+  if (deps.diagnostics !== undefined) diag = deps.diagnostics;
+  else {
+    try {
+      owned = createFileDiagnosticsSink({ path: driverDiagnosticsPathOf(opts.evidenceDir), component: "driver" });
+      diag = owned;
+    } catch {
+      owned = undefined;
+    }
+  }
+  try {
+    return await runMatrixLoopBody(opts, deps, mode, diag);
+  } finally {
+    if (owned !== undefined) await owned.close({ timeoutMs: DRIVER_DIAG_FLUSH_MS }).catch(() => {});
+  }
+}
+
+async function runMatrixLoopBody<P extends MatrixPurchase>(opts: LoopOptions<P>, deps: MatrixRunDeps, mode: RunMode<P>, diag: DiagnosticsSink): Promise<RunReport> {
   const now = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const out = (line: string): void => deps.out(deps.secrets.redact(line));
@@ -1199,6 +1314,28 @@ async function runMatrixLoop<P extends MatrixPurchase>(opts: LoopOptions<P>, dep
       signed = { ok: false, reason: "the signer threw", fundsMayHaveMoved: fundsMoveAtSign };
     }
     if (signed.txRef !== undefined) evidence.signTxRef = signed.txRef;
+    // 診断（観測だけ。下の止める判断は `signed.ok`・`fundsMoveAtSign`・`signed.fundsMayHaveMoved` だけを読む。D-11）。
+    // payer が tx を返さずに失敗したときは、送る raw tx から手元で計算した hash を `signTxRef` に残す（印・保留の扱いは同じ）。
+    const signDiag = signed.diagnostic;
+    if (signDiag !== undefined) {
+      const { localTxRef: _local, ...plain } = signDiag;
+      evidence.signDiagnostic = { ...plain };
+      if (!signed.ok && signed.txRef === undefined && plain.txRef !== undefined) evidence.signTxRef = plain.txRef;
+    }
+    const signFundsMayHaveMoved = signed.ok ? fundsMoveAtSign : fundsMoveAtSign || signed.fundsMayHaveMoved;
+    driverRecord(diag, { paymentId: evidence.paymentId, quoteId: subject["quoteId"] }, () => ({
+      stage: "sign",
+      fundsMayHaveMoved: signFundsMayHaveMoved,
+      ...(signed.ok ? { outcome: "signed" as const } : {}),
+      ...(signDiag?.signerStage === undefined ? {} : { signerStage: signDiag.signerStage }),
+      ...(signDiag === undefined ? {} : { broadcast: signDiag.broadcast }),
+      ...(signDiag?.rpc === undefined ? {} : { rpc: signDiag.rpc }),
+      ...(signDiag?.rpcHttpStatus === undefined ? {} : { rpcHttpStatus: signDiag.rpcHttpStatus }),
+      ...(signDiag?.txRefCheck === undefined ? {} : { txRefCheck: signDiag.txRefCheck }),
+      ...(signDiag?.localTxRef === undefined ? {} : { txRef: signDiag.localTxRef }),
+    }));
+    const purchaseIds = { paymentId: evidence.paymentId, quoteId: subject["quoteId"] };
+    const signTxRefDiag = signDiag?.localTxRef;
     if (!signed.ok) {
       // Tempo MPP: 署名を呼んだ後の失敗は全部「資金が動いた可能性」（§8.5 #1）。
       if (fundsMoveAtSign || signed.fundsMayHaveMoved) return stop("funds_possibly_moved", `signing failed after a funds-moving signature was invoked (${signed.reason}); funds may have moved${signed.txRef === undefined ? "" : ` (tx ${signed.txRef})`} — not retried, never re-signed`);
@@ -1223,16 +1360,21 @@ async function runMatrixLoop<P extends MatrixPurchase>(opts: LoopOptions<P>, dep
     let purchased: Record<string, unknown>;
     try {
       purchased = await deps.mcp.call("subetha_router_purchase", { quoteId, requestId, approval: quoteId, quote: quoteDoc, credential: signed.credential });
-    } catch {
+    } catch (error) {
       evidence.outcome = "unknown";
+      driverRecord(diag, purchaseIds, () => ({ stage: "purchase_call", fundsMayHaveMoved: true, outcome: "threw", ...callFailureOf(error), ...(signTxRefDiag === undefined ? {} : { txRef: signTxRefDiag }) }));
       try {
-        evidence.status = withStatusDigest(await deps.mcp.call("subetha_router_status", mode.statusArgs(evidence)));
-      } catch {
+        const read = await deps.mcp.call("subetha_router_status", mode.statusArgs(evidence));
+        evidence.status = withStatusDigest(read);
+        driverRecord(diag, purchaseIds, () => ({ stage: "status_call", fundsMayHaveMoved: true, ...statusDiagOf(read) }));
+      } catch (statusError) {
         evidence.status = "status call failed";
+        driverRecord(diag, purchaseIds, () => ({ stage: "status_call", fundsMayHaveMoved: true, outcome: "threw", ...callFailureOf(statusError) }));
       }
       return stop(fundsMoveAtSign ? "funds_possibly_moved" : "purchase_call_failed", "the purchase call failed or timed out; funds may have moved — not retried");
     }
     (evidence.timingsMs as Record<string, number>)["purchase"] = Date.now() - t1;
+    driverRecord(diag, purchaseIds, () => ({ stage: "purchase_call", fundsMayHaveMoved: true, elapsedMs: Math.max(0, Math.min(3_600_000, Date.now() - t1)), ...diagOutcomeOf(purchased["outcome"]), ...diagCodeOf(purchased["reason"] ?? purchased["error"]), ...(signTxRefDiag === undefined ? {} : { txRef: signTxRefDiag }) }));
     evidence.purchase = mode.purchaseRecord(purchased);
     evidence.outcome = typeof purchased["outcome"] === "string" ? purchased["outcome"] : "unknown";
     evidence.stage = "purchased";
@@ -1243,8 +1385,11 @@ async function runMatrixLoop<P extends MatrixPurchase>(opts: LoopOptions<P>, dep
     try {
       status = await deps.mcp.call("subetha_router_status", mode.statusArgs(evidence));
       evidence.status = withStatusDigest(status);
-    } catch {
+      const read = status;
+      driverRecord(diag, purchaseIds, () => ({ stage: "status_call", fundsMayHaveMoved: true, ...statusDiagOf(read) }));
+    } catch (statusError) {
       evidence.status = "status call failed";
+      driverRecord(diag, purchaseIds, () => ({ stage: "status_call", fundsMayHaveMoved: true, outcome: "threw", ...callFailureOf(statusError) }));
     }
     save();
     const projection = status !== undefined && isRecord(status["projection"]) ? status["projection"] : undefined;

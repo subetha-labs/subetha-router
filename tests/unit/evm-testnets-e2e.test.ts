@@ -31,6 +31,7 @@ import {
   type McpCaller,
   type Plan,
   type PlanPurchase,
+  type PurchaseEvidence,
   type ReceiptInfo,
   type Signer,
 } from "../../tools/evm-testnets-e2e.js";
@@ -551,6 +552,8 @@ describe("run", () => {
     expect(one.body.matches).toBe(true);
     expect(one.body.head.length).toBeLessThanOrEqual(200);
     expect(one.legs.every((l) => l.ok)).toBe(true);
+    // R-6: 署名の最後の段（診断。観測だけ）が証跡に残る。
+    expect((one as { signDiagnostic?: unknown }).signDiagnostic).toEqual({ signerStage: "done" });
   });
 
   test("the real signer refuses a key that does not belong to the plan's payer (before purchase)", async () => {
@@ -558,6 +561,9 @@ describe("run", () => {
     const report = await runPurchases({ plan: h.plan, planSha256: h.sha, evidenceDir: h.evidenceDir }, deps(h, realSigner()));
     expect(report.stopped).toMatchObject({ stage: "sign_refused" });
     expect(h.mcp.count("subetha_router_purchase")).toBe(0);
+    // R-6: 拒否は payer を作った段（鍵の持ち主の照合）で起きた。
+    const evidence = JSON.parse(readFileSync(path.join(report.runDir, "purchases", `${report.stopped!.routeId}.json`), "utf8")) as PurchaseEvidence;
+    expect(evidence.signDiagnostic).toEqual({ signerStage: "payer_create" });
   });
 });
 
