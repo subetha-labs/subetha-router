@@ -38,7 +38,19 @@ import fsExt from "fs-ext";
 import { HttpRequestError, LimitExceededRpcError, TimeoutError } from "viem";
 
 import { stableJson } from "../src/core/intent.js";
-import { NOOP_DIAGNOSTICS, safeEmit, withDiagnosticScope, type DiagCapture, type DiagCidInput, type DiagnosticsSink } from "../src/shared/diagnostics.js";
+import {
+  classifyRpcSnapshot,
+  DIAG_RPC_SNAPSHOT_DEPTH,
+  NOOP_DIAGNOSTICS,
+  safeEmit,
+  withDiagnosticScope,
+  type DiagCapture,
+  type DiagCidInput,
+  type DiagnosticsSink,
+  type DiagRpcClass,
+  type DiagRpcErrorSnapshot,
+  type DiagRpcNodeKind,
+} from "../src/shared/diagnostics.js";
 import { createFileDiagnosticsSink, type FileDiagnosticsSink } from "../src/shared/diagnostics-file.js";
 import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { assetKeyOf, EVM_TESTNET_NETWORKS, evmChainIdOf, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, type KnownNetwork } from "../src/shared/networks.js";
@@ -591,57 +603,49 @@ function diagNetworkOf(bodyJson: unknown): string | undefined {
   return typeof network === "string" && DIAG_NETWORK_SHAPE.test(network) ? network : undefined;
 }
 
-/** RPC の失敗の分類（§5.3）。`rpc` の記録の欄だけ。 */
-export interface RpcFailureClass {
-  readonly rpc: "timeout" | "rate_limited" | "other";
-  readonly rpcHttpStatus?: number;
-  readonly rpcCode?: number;
-  readonly code?: "deadline";
-}
-
-const RPC_CAUSE_DEPTH = 5;
-const RATE_LIMIT_RPC_CODE = -32005;
-
-function httpStatusOf(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? value : undefined;
-}
-function rpcCodeOf(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= -(2 ** 31) && value <= 2 ** 31 ? value : undefined;
-}
+/** RPC の失敗の分類（§5.3）。`rpc` の記録の欄だけ（`classifyRpcSnapshot` の結果）。 */
+export type RpcFailureClass = DiagRpcClass;
 
 /**
- * 例外を分類する（§5.3）。`cause` の連鎖を深さ 5 まで（自分を含めて 5 つ）辿り、各段で表の順に最初に当たったもの:
- * `HttpRequestError` の 429 → `rate_limited`（status）、`LimitExceededRpcError`・数値の code -32005 → `rate_limited`（code）、
- * viem の `TimeoutError` → `timeout`、facilitator の `DeadlineExceeded` → `timeout`（`code: "deadline"`）、ほかの `HttpRequestError` → `other`（status）、
- * ほかの数値の code → `other`（code）。どこにも当たらなければ `other`。
- * **文言は読まない**（viem の message・details は RPC の URL を含み得る）。読むのは `name`・`status`・`code`・`cause` と型だけ。
+ * 例外の写し（§5.3、hook の時点。Codex R-5 #2）。`cause` の連鎖を深さ 5 まで（自分を含めて 5 つ）辿り、各段で読むのは `name`・
+ * （HTTP の段だけ）数値の `status`・数値の `code`・`cause` と型（`instanceof`）だけ。段ごとに `[種類, status か null, code か null]` の
+ * primitive を平らに並べた配列にする（例外の object は持たない）。**文言は読まない**（viem の message・details は RPC の URL を含み得る）。
+ * 分類（表の順の照合）は後回しの処理の `classifyRpcSnapshot`。
  */
-export function classifyRpcError(error: unknown): RpcFailureClass {
+export function rpcErrorSnapshotOf(error: unknown): DiagRpcErrorSnapshot {
+  const out: Array<DiagRpcNodeKind | number | null> = [];
   let current: unknown = error;
-  for (let depth = 0; depth < RPC_CAUSE_DEPTH && typeof current === "object" && current !== null; depth += 1) {
+  for (let depth = 0; depth < DIAG_RPC_SNAPSHOT_DEPTH && typeof current === "object" && current !== null; depth += 1) {
     const node = current as { readonly name?: unknown; readonly status?: unknown; readonly code?: unknown; readonly cause?: unknown };
     const name = node.name;
-    const isHttp = current instanceof HttpRequestError || name === "HttpRequestError";
-    const status = isHttp ? httpStatusOf(node.status) : undefined;
-    if (isHttp && status === 429) return { rpc: "rate_limited", rpcHttpStatus: status };
-    const code = rpcCodeOf(node.code);
-    if (current instanceof LimitExceededRpcError || name === "LimitExceededRpcError" || code === RATE_LIMIT_RPC_CODE) {
-      return { rpc: "rate_limited", ...(code === undefined ? {} : { rpcCode: code }) };
-    }
-    if (current instanceof TimeoutError || name === "TimeoutError") return { rpc: "timeout" };
-    if (current instanceof DeadlineExceeded) return { rpc: "timeout", code: "deadline" };
-    if (isHttp) return { rpc: "other", ...(status === undefined ? {} : { rpcHttpStatus: status }) };
-    if (code !== undefined) return { rpc: "other", rpcCode: code };
+    const kind: DiagRpcNodeKind =
+      current instanceof HttpRequestError || name === "HttpRequestError"
+        ? "http"
+        : current instanceof LimitExceededRpcError || name === "LimitExceededRpcError"
+          ? "limit"
+          : current instanceof TimeoutError || name === "TimeoutError"
+            ? "timeout"
+            : current instanceof DeadlineExceeded
+              ? "deadline"
+              : "plain";
+    const status = kind === "http" ? node.status : undefined;
+    const code = node.code;
+    out.push(kind, typeof status === "number" ? status : null, typeof code === "number" ? code : null);
     current = node.cause;
   }
-  return { rpc: "other" };
+  return out;
+}
+
+/** 例外の分類（試験・運用の表示用。記録の経路は写しを積み、分類は後回しの処理で同じ `classifyRpcSnapshot`）。 */
+export function classifyRpcError(error: unknown): RpcFailureClass {
+  return classifyRpcSnapshot(rpcErrorSnapshotOf(error));
 }
 
 /** `observeRpc` が記録した例外（同じ例外を呼び出し側の `catch` で二重に記録しない）。 */
 const observedRpcErrors = new WeakSet<object>();
 
 function rpcCaptureOf(network: string, op: FacilitatorRpcOp, error: unknown): DiagCapture {
-  return { stage: "rpc", network, op, ...classifyRpcError(error) };
+  return { stage: "rpc", network, op, rawRpc: rpcErrorSnapshotOf(error) };
 }
 
 /**
@@ -2155,6 +2159,8 @@ export function acquireFacilitatorLock(lockPath: string, flock: FlockFn = realFl
 export interface MainDeps {
   readonly lock?: (lockPath: string) => FacilitatorLock;
   readonly chainIoOf?: (network: string, config: CliConfig, diagnostics: DiagnosticsSink) => Promise<ChainIo>;
+  /** journal の作り方（試験: 遅い close を差し込む）。既定は `createFileJournal`。 */
+  readonly journalOf?: (file: string) => FacilitatorJournal & { close(): Promise<void> };
   /** 診断の sink の作り方（試験）。既定は `createFileDiagnosticsSink`（component `facilitator`、16 MiB）。 */
   readonly diagnosticsOf?: (file: string) => FileDiagnosticsSink;
 }
@@ -2166,11 +2172,15 @@ export const DIAGNOSTICS_CLOSE_MS = 2_000;
 async function closeDiagnostics(sink: FileDiagnosticsSink | undefined, timeoutMs: number): Promise<void> {
   if (sink === undefined) return;
   const limit = Math.max(0, timeoutMs);
+  if (limit === 0) return;
+  let closing: Promise<void>;
+  try {
+    closing = Promise.resolve(sink.close({ timeoutMs: limit })).catch(() => {});
+  } catch {
+    return; // close が同期で投げても何もしない（best effort）。
+  }
   let timer: NodeJS.Timeout | undefined;
-  await Promise.race([
-    sink.close({ timeoutMs: limit }).catch(() => {}),
-    new Promise<void>((resolve) => (timer = setTimeout(resolve, limit))),
-  ]);
+  await Promise.race([closing, new Promise<void>((resolve) => (timer = setTimeout(resolve, limit)))]);
   clearTimeout(timer);
 }
 
@@ -2194,7 +2204,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
   // journal の読み書きより前に lock を取る（§2.3）。lock ファイルは journal の隣なので、そのディレクトリは先に作る。
   await orStartupError("lock_unavailable", () => void mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 }));
   const lock = await orStartupError("lock_unavailable", () => (deps.lock ?? ((p: string) => acquireFacilitatorLock(p)))(lockPath));
-  const journal = createFileJournal(config.journal);
+  const journal = (deps.journalOf ?? createFileJournal)(config.journal);
   // 診断の記録（§2.1）: env があるときだけファイルの sink。作れなければ記録しないだけ（起動は止めない。新しい env は必須にしない）。
   let diagnosticsSink: FileDiagnosticsSink | undefined;
   if (config.diagnostics !== undefined) {
@@ -2238,19 +2248,26 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
         const deadline = Date.now() + timeoutMs;
         facilitator.drain.close();
         server.close();
-        if (!(await facilitator.drain.idle(timeoutMs))) return false;
-        // 診断の記録は drain の残りの時間の内（最大 `DIAGNOSTICS_CLOSE_MS`）で書き出して閉じる。best effort（結果は drain の成否に入れない）。
+        /**
+         * drain の結果は正しさに要る部分（進行中の要求と続きの 0・journal の close・lock の解放）だけで決める（Codex R-5 #1）。
+         * 診断の記録はその **後** に、残りの時間の内（最大 `DIAGNOSTICS_CLOSE_MS`）で best effort に閉じる。止まる・失敗する sink は
+         * 結果を変えず、journal の close の時間も使わない。
+         */
+        const complete = await (async (): Promise<boolean> => {
+          if (!(await facilitator.drain.idle(timeoutMs))) return false;
+          // journal の close（書き込みの待ち行列を空にする）も残りの時間まで。
+          let timer: NodeJS.Timeout | undefined;
+          const closed = await Promise.race([
+            journal.close().then(() => true, () => false),
+            new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())))),
+          ]);
+          clearTimeout(timer);
+          if (!closed) return false;
+          lock.release();
+          return true;
+        })();
         await closeDiagnostics(diagnosticsSink, Math.min(DIAGNOSTICS_CLOSE_MS, deadline - Date.now()));
-        // journal の close（書き込みの待ち行列を空にする）も残りの時間まで。
-        let timer: NodeJS.Timeout | undefined;
-        const closed = await Promise.race([
-          journal.close().then(() => true, () => false),
-          new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())))),
-        ]);
-        clearTimeout(timer);
-        if (!closed) return false;
-        lock.release();
-        return true;
+        return complete;
       },
     };
   } catch (error) {

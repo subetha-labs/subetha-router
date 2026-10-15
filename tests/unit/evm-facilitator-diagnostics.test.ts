@@ -14,15 +14,20 @@ import path from "node:path";
 import { HttpRequestError, LimitExceededRpcError, RpcRequestError, TimeoutError } from "viem";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { diagCorrelationIdOf, DIAG_OPS, NOOP_DIAGNOSTICS, validateDiagRecord, withDiagnosticScope, type DiagnosticsSink, type DiagRecord } from "../../src/shared/diagnostics.js";
+import { classifyRpcSnapshot, diagCorrelationIdOf, DIAG_OPS, NOOP_DIAGNOSTICS, validateDiagRecord, withDiagnosticScope, type DiagnosticsSink, type DiagRecord } from "../../src/shared/diagnostics.js";
+import type { FileDiagnosticsSink } from "../../src/shared/diagnostics-file.js";
 import { REASON_TABLE_VERSION } from "../../src/shared/payment-reasons.js";
 import {
+  acquireFacilitatorLock,
   classifyRpcError,
   cliConfigOf,
+  facilitatorLockPathOf,
+  rpcErrorSnapshotOf,
   createEvmFacilitator,
   DeadlineExceeded,
   DEFAULT_MAX_SETTLE_GAS,
   diagCidInputOf,
+  createFileJournal,
   main,
   observeRpc,
   type ChainIo,
@@ -356,6 +361,43 @@ describe("AC-R5: RPC の失敗の分類（§5.3）", () => {
   });
 });
 
+describe("Codex R-5 #2: hook は例外の写し（primitive だけ）を積み、分類は後回しの処理（§13.1・§15.1）", () => {
+  test("積んだ写しに rpc の分類の欄は無く、rawRpc は段ごとの [種類, status, code] の primitive だけ（例外の object・文言を持たない）", async () => {
+    const sink = recordingDiagnostics("facilitator");
+    const h = await harness(sink, (c) => void (c.authorizationState = async () => Promise.reject(new Error("outer", { cause: httpError(429) }))));
+    await h.settle(body());
+    const entry = sink.entries.find((e) => e.capture["stage"] === "rpc")!;
+    expect(Object.keys(entry.capture).sort()).toEqual(["network", "op", "rawRpc", "stage"]);
+    expect(entry.capture["rawRpc"]).toEqual(["plain", null, null, "http", 429, null]);
+    expect(Object.isFrozen(entry.capture["rawRpc"])).toBe(true);
+    for (const v of entry.capture["rawRpc"] as unknown[]) expect(v === null || typeof v === "string" || typeof v === "number").toBe(true);
+    expect(JSON.stringify(entry.capture)).not.toContain("SECRET");
+    // 分類は記録にする時（後回しの処理）。
+    expect(recordsOf(sink).find((r) => r.stage === "rpc")).toMatchObject({ rpc: "rate_limited", rpcHttpStatus: 429 });
+  });
+
+  test("rpcErrorSnapshotOf は深さ 5 まで（文言を読まないことは上の Proxy の試験）。classifyRpcSnapshot は純粋で範囲の外を写さない", () => {
+    let e: unknown = new DeadlineExceeded();
+    for (let i = 0; i < 7; i += 1) e = new Error("wrap", { cause: e });
+    expect(rpcErrorSnapshotOf(e)).toHaveLength(15);
+    expect(rpcErrorSnapshotOf("x")).toEqual([]);
+    expect(rpcErrorSnapshotOf(new LimitExceededRpcError(new Error("m")))).toEqual(["limit", null, -32005, "plain", null, null]);
+    expect(classifyRpcSnapshot(["http", 999, 2 ** 40])).toEqual({ rpc: "other" });
+    expect(classifyRpcSnapshot(["plain", null, -32005])).toEqual({ rpc: "rate_limited", rpcCode: -32005 });
+    expect(classifyRpcSnapshot(["plain", null, null, "deadline", null, null])).toEqual({ rpc: "timeout", code: "deadline" });
+  });
+
+  test("形の違う写し（object・知らない種類・長すぎる）は行ごと捨てる（記録の欄に入らない）", () => {
+    const sink = recordingDiagnostics("facilitator");
+    for (const rawRpc of [[{}, null, null], ["weird", null, null], new Array(18).fill(null), ["http", "429", null]]) {
+      sink.emit({ stage: "rpc", network: RH, op: "receipt", rawRpc: rawRpc as never });
+    }
+    sink.emit({ stage: "rpc", network: RH, op: "receipt", rawRpc: ["timeout", null, null] });
+    expect(sink.records().map((r) => r.rpc)).toEqual(["timeout"]);
+    expect(sink.rejected()).toBe(4);
+  });
+});
+
 describe("FR-R6: verify の理由・settle の応答の記録", () => {
   test("/verify: SDK の invalidReason は表で完全一致（表の値・表に無い値・欄なし）", async () => {
     const cases: ReadonlyArray<readonly [VerifyResult, string]> = [
@@ -569,6 +611,87 @@ describe("CLI（main）: EVM_FACILITATOR_DIAGNOSTICS のファイルの sink（�
     expect(journalKey).toContain("gas_cap_init");
     expect(path.dirname(diagnosticsFile)).toBe(path.dirname(journalFile));
   }, 30_000);
+
+  /** drain の結果を sink の差し替えごとに比べる（Codex R-5 #1）。 */
+  async function drainWith(sink: "none" | "stalled" | "rejected" | "throwing", timeoutMs: number, journalCloseMs = 0): Promise<{ complete: boolean; elapsed: number; lockFree: boolean }> {
+    const d = mkdtempSync(path.join(tmpdir(), "evm-fac-drain-"));
+    try {
+      const journalFile = path.join(d, "evm-facilitator", "journal.ndjson");
+      const fakeSink = (close: () => Promise<void>): FileDiagnosticsSink => ({
+        emit: () => {},
+        counters: () => ({}) as never,
+        flush: async () => true,
+        close,
+        inspect: () => ({ ringEntries: 0, ringCost: 0, pendingBytes: 0, writing: false }),
+      });
+      const sinks = {
+        stalled: () => fakeSink(() => new Promise<void>(() => {})),
+        rejected: () => fakeSink(() => Promise.reject(new Error("close failed (test)"))),
+        throwing: () =>
+          fakeSink(() => {
+            throw new Error("close threw (test)");
+          }),
+      };
+      const running = await main(
+        {
+          EVM_FACILITATOR_KEY: DUMMY_KEY,
+          EVM_FACILITATOR_TOKEN: TOKEN,
+          EVM_FACILITATOR_NETWORKS: RH,
+          EVM_FACILITATOR_PAYTO_ALLOWLIST: PAYTO,
+          EVM_FACILITATOR_GAS_CAP_46630: "1000000",
+          EVM_FACILITATOR_JOURNAL: journalFile,
+          EVM_FACILITATOR_PORT: String(44_200 + Math.floor(Math.random() * 1_500)),
+          EVM_FACILITATOR_LOG: path.join(d, "log.ndjson"),
+          ...(sink === "none" ? {} : { EVM_FACILITATOR_DIAGNOSTICS: path.join(d, "evm-facilitator", "diagnostics.ndjson") }),
+        },
+        { stdout: () => {}, stderr: () => {} },
+        {
+          chainIoOf: async () => fakeChain().io,
+          ...(sink === "none" ? {} : { diagnosticsOf: sinks[sink] }),
+          // journal の close を遅くする（上限の近くで、診断の close が journal の時間を食わないことを見る）。
+          journalOf: (file) => {
+            const real = createFileJournal(file);
+            return { load: () => real.load(), append: (r) => real.append(r), close: async () => (await new Promise((r) => setTimeout(r, journalCloseMs)), await real.close()) };
+          },
+        },
+      );
+      const t0 = Date.now();
+      const complete = await running.drain(timeoutMs);
+      const elapsed = Date.now() - t0;
+      let lockFree = true;
+      try {
+        acquireFacilitatorLock(facilitatorLockPathOf(journalFile)).release();
+      } catch {
+        lockFree = false;
+      }
+      return { complete, elapsed, lockFree };
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  }
+
+  test("drain の結果は診断の sink によらない: 止まる・reject する・同期で投げる close でも、短い上限（200 ms）で complete・lock は解ける", async () => {
+    const baseline = await drainWith("none", 200);
+    expect(baseline).toMatchObject({ complete: true, lockFree: true });
+    for (const kind of ["stalled", "rejected", "throwing"] as const) {
+      const r = await drainWith(kind, 200);
+      expect({ kind, complete: r.complete, lockFree: r.lockFree }).toEqual({ kind, complete: baseline.complete, lockFree: true });
+      // 止まる close は残りの時間で打ち切る（上限を大きく超えない）。
+      expect(r.elapsed, kind).toBeLessThan(200 + 500);
+    }
+  });
+
+  test("上限の近く: journal の close が 150 ms かかる（上限 300 ms）。止まる・reject する close でも complete（sink 無しと同じ）", async () => {
+    const baseline = await drainWith("none", 300, 150);
+    expect(baseline).toMatchObject({ complete: true, lockFree: true });
+    for (const kind of ["stalled", "rejected", "throwing"] as const) {
+      const r = await drainWith(kind, 300, 150);
+      expect({ kind, complete: r.complete, lockFree: r.lockFree }).toEqual({ kind, complete: true, lockFree: true });
+    }
+    // 対照: journal の close が上限を超えれば sink 無しでも false（結果は journal で決まる）。
+    expect((await drainWith("none", 100, 400)).complete).toBe(false);
+    expect((await drainWith("stalled", 100, 400)).complete).toBe(false);
+  });
 
   test("env が無ければファイルを作らない", async () => {
     dir = mkdtempSync(path.join(tmpdir(), "evm-fac-diag-"));
