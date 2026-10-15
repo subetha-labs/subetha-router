@@ -90,6 +90,21 @@ export const DIAG_OPS = [
   "solana_rpc_ata",
   "solana_rpc_balance",
   "solana_rpc_blockhash",
+  // 自前の facilitator の RPC（`tools/evm-facilitator.ts` の `FacilitatorRpcOp`。§5.3、タスク R-5）
+  "authorization_state",
+  "block_number",
+  "block_timestamp",
+  "authorization_used_logs",
+  "receipt",
+  "wait_for_receipt",
+  "fees_per_gas",
+  "estimate_transfer_gas",
+  "transfer_with_authorization",
+  "reconcile",
+  "sdk_verify",
+  "sdk_read_contract",
+  "sdk_verify_typed_data",
+  "sdk_get_code",
   "other",
 ] as const;
 export type DiagOp = (typeof DIAG_OPS)[number];

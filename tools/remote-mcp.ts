@@ -151,6 +151,16 @@ export function evmFacilitatorJournalPathOf(env: Readonly<Record<string, string 
   return path.join(path.dirname(publicJournalPathOf(env)), "evm-facilitator", "journal.ndjson");
 }
 
+/**
+ * 自前の EVM facilitator の診断の記録（設計 `docs/rejection-reasons-design.md` §2.1、タスク R-5）: journal と同じディレクトリの
+ * `diagnostics.ndjson`（コンテナでは `/app/runtime/evm-facilitator/diagnostics.ndjson`）。公開と受け入れで同じ 1 つ（facilitator は 1 つ、lock で同時に 1 つ）。
+ * 本番の env の `SUBETHA_DIAGNOSTICS=off` なら `undefined`（facilitator の子に path を渡さない = 記録しない）。
+ */
+export function evmFacilitatorDiagnosticsPathOf(env: Readonly<Record<string, string | undefined>>): string | undefined {
+  if (env["SUBETHA_DIAGNOSTICS"] === "off") return undefined;
+  return path.join(path.dirname(evmFacilitatorJournalPathOf(env)), "diagnostics.ndjson");
+}
+
 /** 有効な（受信か送信の）EVM testnet。 */
 function evmUsedChainsOf(activation: RailsActivation): readonly HostedEvmChain[] {
   const evm = evmOf(activation);
@@ -184,6 +194,7 @@ function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string,
     if (rpc !== undefined && rpc !== "") perChain[`EVM_FACILITATOR_RPC_${chainId}`] = rpc;
   }
   const log = env[EVM_FACILITATOR_HOST_ENV.log];
+  const diagnostics = evmFacilitatorDiagnosticsPathOf(env);
   return {
     script: EVM_FACILITATOR_PROCESS,
     port,
@@ -199,6 +210,7 @@ function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string,
       ...perChain,
       EVM_FACILITATOR_JOURNAL: evmFacilitatorJournalPathOf(env),
       ...(log === undefined || log === "" ? {} : { EVM_FACILITATOR_LOG: log }),
+      ...(diagnostics === undefined ? {} : { EVM_FACILITATOR_DIAGNOSTICS: diagnostics }),
     },
   };
 }
