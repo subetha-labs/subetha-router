@@ -188,9 +188,53 @@ writer は 1 つなので順に T1 → T2 → T3 → T4 → T5 → T6。
 | §9 | G-5 |
 | §11 のゲート | G-1〜G-5 |
 
-## 4. T0 の結果
+## 4. T0 の結果（2026-10-16）
 
-（T0 の実行後に追記する）
+### (a) facilitator と SDK の外への接続（O-8 の前提）
+
+facilitator `1aeac60`（`F:`）と SDK（owner の checkout `b890773` の `sdk/dist`。以下 `SDK:`）を読んだ。**daemon と `check` のどちらでも、外への接続先は
+`rpc_url`・`hub_rpc_url`・`indexer_url`・`decider_url`（batch・Nova の経路だけ）の 4 つと、wasm・証明の資産のローカルの `file://` の読み込みだけ。**
+
+| 箇所 | 仕組み | URL の出所 |
+|---|---|---|
+| `F:apps/facilitator/src/daemon.ts:47`・`:52` | viem `http()` の `getChainId` | `rpc_url`・`hub_rpc_url` |
+| `F:apps/facilitator/src/check.ts:81-82`・`:111` | viem、`fetch(${indexerUrl}/events)` | `rpc_url`・`hub_rpc_url`・`indexer_url`（`check` のときだけ） |
+| `F:packages/zerc20-backend/src/redeem.ts:80`・`:419, 602, 738, 773, 878` | viem の public・wallet client | `rpc_url` |
+| `F:…/redeem.ts:310`（`:318-330` から） | `fetch`（`/events`・`/all-events`） | `indexer_url` |
+| `F:…/index.ts:2567-2577`、`redeem.ts:354, 359, 492, 497` | SDK の `collectRedeemContext` | `indexer_url`、token の `rpcUrls=[rpc_url]`、hub の `rpcUrls=[hub_rpc_url]`（`F:…/zerc20-backend/src/config.ts:84, 90`） |
+| `F:…/sdkRuntime.ts:288` → `redeem.ts:571, 580` | SDK の `HttpDeciderClient` | `decider_url`（batch だけ） |
+| `F:…/sdkRuntime.ts:32-54` | `globalThis.fetch` の差し替え | `file://` はローカルの読み込み、それ以外は本物の `fetch` |
+| `SDK:wasm/index.js:6, 136-166`、`zkerc20_wasm.js:1193, 1198`、`wasm/artifacts.js:16, 67, 74` | wasm と `.bin` の読み込み | ローカルの `file://`（`configureWasmLocator` は呼ばれない） |
+| `SDK:zkerc20_wasm.js:704, 708`（Rust の reqwest・alloy） | `fetch(arg0)` | JS の引数: indexer は `indexer_url`、hub・verifier・token の provider は `hub_rpc_url`・`rpc_url`。wasm の Rust のソースに http の literal は無い |
+
+- 決め打ちの URL は `F:…/zerc20-backend/src/config.ts:33-35` の loopback の既定値だけで、`config.env` が無いときにしか使われない。facilitator は常に `env: config.network` を渡す（`F:apps/facilitator/src/backend.ts:18`）ので daemon では届かない。
+- `x402-scheme` の client（`client.ts:131, 218`）は module として読まれるが facilitator からは呼ばれない。payment-history に network の code は無い。
+- `@dfinity`・vetkeys は SDK の barrel（`dist/index.js`）からしか届かず、facilitator の deep import（`sdkRuntime.ts:13-15`）からは届かない。
+- **設計 §1 の訂正が要る**: `sdkRuntime.ts:9-12` の「global の Groth16 の鍵が無いので local に alias する」は、owner の checkout では当たらない（`withdraw_global_groth16_{pk,vk}.bin` は `src/assets`・`dist/assets` に commit されている）。alias はファイルが無いときだけ働く。設計 v5 のレビューの後に §1 を直す。
+
+### (b) SDK の build に要るもの（G-1 の owner の作業）
+
+- `dist/` は commit されていない（`.gitignore:24`）。**wasm も commit されていない**（`sdk/src/assets/wasm/{web,node}/.gitignore` が `*`）。wasm は Rust から
+  `scripts/setup_sdk.sh:25-42`（`wasm-pack build --release --target web|nodejs`）で作り、`:84-86` で `sdk/src/assets` に写す。**要るもの: Rust stable・wasm-pack・rsync**。
+  実行時に使うのは web の target だけ（Node でも。だから `fetch` を差し替える）。wasm は architecture に依存しないので、**owner の Mac で build して owner がホストへ写す**こともできる（BUSL の再配布ではなく、owner 自身の配備）。
+- Groth16・Nova の資産は commit されている（LFS ではない）。大きさ: `withdraw_local_groth16_pk.bin` 5,285,296、`withdraw_global_groth16_pk.bin` 5,755,696、vk 各 712、
+  Nova の pp 各 8,519,824・vp 各 131,528 バイト。合計 約 55 MB。
+- SDK の build: `pnpm install && pnpm build`（zerc20-work の root。`pnpm --filter sdk build` = `tsc` と資産の copy）。SDK の `node_modules`（viem・poseidon-lite・pako・base64-arraybuffer）が要る。
+- SubEtha の build: `pnpm -r build`（SDK は workspace の外なので先に SDK を build する）。`bin` は `subetha-facilitator` → `./dist/cli.js`。
+- 版: SubEtha pnpm@10.15.1、SDK pnpm@10.20.0・TypeScript ^5.6.2・viem ^2.38.6。`engines` も `.nvmrc` も無い。zERC20 の CI は Node 18、手元は Node 22.23.1 で動いている。**ホストは Node 22** にする（手元と同じ）。
+
+### (c) 購入全体の外側の期限
+
+静的の zUSDC 購入の最悪: 上流の読み直し（約 5 秒）＋ verify 50 秒 ＋ settle 50 秒 ＋ Provider A への有料要求 30 秒（`X402_STATIC_PAID_TIMEOUT_MS`、`src/adapters/outbound/x402.ts:293`）＝ **約 135 秒**。
+client の購入の期限 `DEFAULT_EXECUTE_TIMEOUT_MS` 180 秒（`src/client/index.ts:229`）と MCP の受付の要求の寿命 `maxRequestMs` 180 秒（`src/mcp/ingress.ts:30-35`）に収まる。
+`HTTP_INGRESS_TIMEOUT_MS` 10 秒（`src/http/app.ts:504`）は要求の受信の期限で、応答には効かない。**変更は要らない**（T3 の範囲は増えない）。`npm run sign` の receipt 待ち 120 秒は購入とは別の process。
+
+### (d) AL2023 の dnsmasq
+
+`docker run --rm amazonlinux:2023`（2026-10-16）: `dnf info dnsmasq` → 2.90、`1.amzn2023.0.3`、repo `amazonlinux`。`dnsmasq --version` の compile options:
+`IPv6 GNU-getopt DBus no-UBus no-i18n IDN2 DHCP DHCPv6 no-Lua TFTP conntrack ipset no-nftset auth cryptohash DNSSEC loop-detect inotify dumpfile`。
+**`no-nftset`**。`ipset` 7.11 と `iptables-nft` 1.8.8 は repo にある。→ 規則どおり設計に戻し、§2.4 を dnsmasq の `ipset=` と ipset・iptables の方式に変えた（設計 v5、§15）。
+kernel の module（`ip_set`・`xt_set`・`xt_owner`）は G-1 の最初にホストで確かめる。
 
 ## 5. 第 1 版のレビュー（2026-10-16、Codex CLI 0.157.1、`gpt-6-astra`、read-only）への対応
 
