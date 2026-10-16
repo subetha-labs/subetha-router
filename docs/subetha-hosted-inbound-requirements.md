@@ -180,7 +180,7 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 
 ## 8. 段階とゲート
 
-1. 本書 → Codex 独立レビュー → 親の読み返し → **owner の確認**
+1. 本書 → Codex 独立レビュー → 親の読み返し → **owner の確認**（**2026-10-16 承認済み**: v3 の内容、§1 の決定、§7 の範囲を owner が本作業の対話で承認した）
 2. 設計（Q-1 の確定、facilitator の配置と設定、route と切り替え、burn 参照の journal、sign の試行記録、額）→ レビュー → owner の確認
 3. タスク分解 → レビュー
 4. 実装（Router・sign・facilitator の配置）。各 PR は Codex の承認と実テストでマージ
