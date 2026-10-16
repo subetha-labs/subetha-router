@@ -472,6 +472,12 @@ export interface DiagScope {
   readonly promoted?: boolean;
   readonly attempt?: number;
   readonly cidInput?: DiagCidInput;
+  /**
+   * `cid` の入力のもう 1 つの形（§12.6・§13.1、タスク R-3）: facilitator に **送った要求の本文の文字列** そのもの（参照。文字列は変わらないので
+   * 写しは作らない）。hot path では読まず、後回しの処理で `JSON.parse` して `diagCidInputOf`（自前の facilitator と同じ関数）で cid の入力にする。
+   * 上限（`DIAG_CID_REQUEST_MAX_BYTES`）を超える文字列は scope に入れない。同じ scope の `cidInput` と両方は持たない（後から重ねた方が勝つ）。
+   */
+  readonly cidRequestText?: string;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -514,6 +520,11 @@ export const DIAG_ENTRY_OVERHEAD = 512;
 export const DIAG_OBJECT_OVERHEAD = 64;
 /** scope の 1 枠の固定の見積り。 */
 export const DIAG_SCOPE_OVERHEAD = 256;
+/**
+ * scope に入れる要求の本文（`cidRequestText`）の上限（バイトの見積り。文字列の欄と同じ 8 KiB = 4,096 code unit）。1 件の上限（16 KiB）に
+ * 収まる量で、後回しの処理の 1 回の parse の量の上限でもある。EIP-3009 の verify・settle の要求は 1〜2 KB。
+ */
+export const DIAG_CID_REQUEST_MAX_BYTES = DIAG_MAX_STRING_BYTES;
 
 /** 文字列のバイトの見積り（O(1)）。 */
 export function diagStringBytes(value: string): number {
@@ -723,10 +734,20 @@ function sanitizeScope(scope: DiagScope, base: Readonly<DiagScope> | undefined):
   const attempt = source["attempt"] === undefined ? prior["attempt"] : source["attempt"];
   if (typeof attempt === "number") out["attempt"] = attempt;
   const givenCid = source["cidInput"];
-  const cid = givenCid === undefined ? (prior["cidInput"] === undefined ? undefined : cidCopyOf(prior["cidInput"])) : cidCopyOf(givenCid);
+  const givenText = source["cidRequestText"];
+  // 後から重ねた方が勝つ（`cidInput` と `cidRequestText` は片方だけ）。
+  const textGiven = givenText !== undefined;
+  const cid = givenCid !== undefined ? cidCopyOf(givenCid) : textGiven || prior["cidInput"] === undefined ? undefined : cidCopyOf(prior["cidInput"]);
   if (cid !== undefined) {
     cost += cid.bytes;
     out["cidInput"] = cid.copy;
+  } else {
+    const text = textGiven ? givenText : givenCid === undefined ? prior["cidRequestText"] : undefined;
+    // 長さを見るだけ（O(1)）。上限を超える・文字列でないなら入れない（cid が付かないだけ）。
+    if (typeof text === "string" && diagStringBytes(text) <= DIAG_CID_REQUEST_MAX_BYTES) {
+      cost += diagStringBytes(text);
+      out["cidRequestText"] = text;
+    }
   }
   return Object.freeze({ values: Object.freeze(out) as Readonly<DiagScope>, cost });
 }
@@ -777,6 +798,39 @@ export function quoteHashOf(quoteId: string): string {
 }
 
 /** §3: `requestId` は呼び出し側の自由な文字列なので hash にする。 */
+/** CAIP-2 の形（長さの上限つき）。`diagCidInputOf` と自前の facilitator の記録の `network` が使う。 */
+export const DIAG_NETWORK_SHAPE = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
+const DIAG_CID_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const DIAG_CID_BYTES32 = /^0x[0-9a-fA-F]{64}$/;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 要求の本文から `cid` の入力を読む（§5.2。`identify` とは別の純粋関数）。形どおり（network が CAIP-2、asset・from が EVM アドレス、
+ * nonce が bytes32）のときだけ値を返し、ほかは `undefined`（記録に `cid` が付かないだけ）。読むのは 4 つの欄だけで、値はそのまま
+ * （正規化は `diagCorrelationIdOf` が後回しの処理でする）。
+ * **自前の facilitator（受け取った本文）と Router の受信（送った本文、後回しの処理）が同じこの関数を使う**（タスク R-5 から移した。振る舞いは同じ）。
+ */
+export function diagCidInputOf(bodyJson: unknown): DiagCidInput | undefined {
+  if (!isPlainRecord(bodyJson)) return undefined;
+  const requirements = bodyJson["paymentRequirements"];
+  const paymentPayload = bodyJson["paymentPayload"];
+  if (!isPlainRecord(requirements) || !isPlainRecord(paymentPayload)) return undefined;
+  const inner = paymentPayload["payload"];
+  if (!isPlainRecord(inner)) return undefined;
+  const authorization = inner["authorization"];
+  if (!isPlainRecord(authorization)) return undefined;
+  const network = requirements["network"];
+  const asset = requirements["asset"];
+  const from = authorization["from"];
+  const nonce = authorization["nonce"];
+  if (typeof network !== "string" || !DIAG_NETWORK_SHAPE.test(network)) return undefined;
+  if (typeof asset !== "string" || !DIAG_CID_ADDRESS.test(asset) || typeof from !== "string" || !DIAG_CID_ADDRESS.test(from) || typeof nonce !== "string" || !DIAG_CID_BYTES32.test(nonce)) return undefined;
+  return { network, asset, from, nonce };
+}
+
 export function requestHashOf(principalId: string, requestId: string): string {
   return hash16(`subetha-diag-req/v1|${principalId}|${requestId}`);
 }
@@ -907,6 +961,19 @@ const DIRECT_KEYS = [
 const DIRECT_KEYS_AFTER_REASON = ["outcome"] as const;
 const DIRECT_KEYS_TAIL = ["rpc", "rpcHttpStatus", "rpcCode"] as const;
 
+/**
+ * 後回しの処理: scope の要求の本文（`cidRequestText`）から cid の入力を読む。上限の中の文字列だけを parse し、自前の facilitator と同じ
+ * `diagCidInputOf` で取り出す（同じ bytes なら同じ cid）。parse の失敗・形の違いは `undefined`（cid が付かないだけ。投げない）。
+ */
+function cidInputOfRequestText(text: unknown): DiagCidInput | undefined {
+  if (typeof text !== "string" || diagStringBytes(text) > DIAG_CID_REQUEST_MAX_BYTES) return undefined;
+  try {
+    return diagCidInputOf(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
 function cidOf(input: unknown): string | undefined {
   if (typeof input !== "object" || input === null) return undefined;
   const { network, asset, from, nonce } = input as Record<string, unknown>;
@@ -941,7 +1008,7 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
   const principalId = s["principalId"];
   const requestId = s["requestId"];
   if (typeof principalId === "string" && typeof requestId === "string") out["requestHash"] = requestHashOf(principalId, requestId);
-  put("cid", c["rawCid"] !== undefined ? cidOf(c["rawCid"]) : cidOf(s["cidInput"]));
+  put("cid", c["rawCid"] !== undefined ? cidOf(c["rawCid"]) : s["cidInput"] !== undefined ? cidOf(s["cidInput"]) : cidOf(cidInputOfRequestText(s["cidRequestText"])));
   put("promoted", pick("promoted"));
   put("routeId", pick("routeId"));
   const network = c["network"];

@@ -18,12 +18,13 @@ import { getBase58Decoder } from "@solana/kit";
 import { describe, expect, test, vi } from "vitest";
 
 import { createX402Inbound, type X402FacilitatorKind } from "../../src/adapters/inbound/x402.js";
+import { withInboundDiagScope } from "../../src/adapters/inbound/inbound-diagnostics.js";
 import { createX402SvmInbound } from "../../src/adapters/inbound/x402-svm.js";
 import { stableJson } from "../../src/core/intent.js";
 import { diagnosticReportOf } from "../../src/main.js";
 import { formatTransportEvent, TransportError, type GuardedTransport, type TransportCode, type TransportContext, type TransportEvent } from "../../src/net/guarded-fetch.js";
 import type { InboundCallContext, InboundOffer, InboundRail, PaymentCredential, SellerProofCapability, SettleResult } from "../../src/ports/inbound.js";
-import { diagCorrelationIdOf, DIAG_RECORD_KEYS, type DiagnosticsSink, type DiagRecord } from "../../src/shared/diagnostics.js";
+import { buildDiagRecord, currentDiagnosticScope, DIAG_CID_REQUEST_MAX_BYTES, diagCorrelationIdOf, DIAG_RECORD_KEYS, withDiagnosticScope, type DiagnosticsSink, type DiagRecord } from "../../src/shared/diagnostics.js";
 import { REASON_TABLE_VERSION } from "../../src/shared/payment-reasons.js";
 import {
   createEvmFacilitator,
@@ -469,13 +470,24 @@ describe("cid の入力（§5.2・§12.6）", () => {
       const authorization = { from: FROM, nonce: NONCE };
       return { authorization, again: authorization };
     }, "cid"],
+    [
+      "同じ object がもう一度現れ、nonce が 1 回目は null・2 回目は正しい値（Codex R-3 第 3 回 #1: 送った位置は null なので両方とも cid 無し）",
+      () => {
+        let n = 0;
+        const authorization = { from: FROM };
+        Object.defineProperty(authorization, "nonce", { enumerable: true, get: () => ((n += 1) === 1 ? null : NONCE) });
+        return { authorization, again: authorization };
+      },
+      "none",
+    ],
+    ["from が String の wrapper（JSON は primitive を送る。Codex R-3 第 3 回 #2: 両方とも cid）", () => ({ authorization: { from: new String(FROM), nonce: new String(NONCE) } }), "cid"],
     ["nonce が文字列でない", () => ({ authorization: { from: FROM, nonce: 42 } }), "none"],
     ["nonce が大きすぎる", () => ({ authorization: { from: FROM, nonce: `0x${"a".repeat(1_000_000)}` } }), "none"],
     ["from の形が違う（長さは同じ）", () => ({ authorization: { from: `0x${"g".repeat(40)}`, nonce: NONCE } }), "none"],
     ["authorization が別の位置にだけある", () => ({ inner: { authorization: { from: FROM, nonce: NONCE } } }), "none"],
   ];
 
-  test.each(PAYLOAD_SHAPES)("直列化の中で写す cid: %s → bytes は sink の有無で同じ、cid は送った本文の cid", async (_name, payloadOf, expected) => {
+  test.each(PAYLOAD_SHAPES)("送った本文から後回しで取り出す cid: %s → bytes は sink の有無で同じ、cid は自前の facilitator が同じ bytes から作る cid", async (_name, payloadOf, expected) => {
     for (const kind of ["x402", "circle"] as const) {
       for (const stage of ["verify", "settle"] as const) {
         const offer = offerOf(kind);
@@ -490,40 +502,122 @@ describe("cid の入力（§5.2・§12.6）", () => {
         const sink = recordingDiagnostics("router");
         const withSink = build(kind, { sink, reply });
         expect(await call(withSink.rail, stage, offer, credentialWith())).toEqual(before);
-        // 送る bytes は 1 byte も変わらない（replacer は値をそのまま返す）。
+        // 送る bytes は 1 byte も変わらない（診断の有無で直列化は同じ）。
         expect(withSink.transport.bodies).toEqual(plain.transport.bodies);
         expect(withSink.transport.log).toEqual(plain.transport.log);
         const input = diagCidInputOf(JSON.parse(withSink.transport.bodies[0]!));
         const records = recordsOf(sink);
         expect(records).toHaveLength(1);
-        if (expected === "cid") {
-          expect(input).toBeDefined();
-          expect(records[0]!.cid).toBe(diagCorrelationIdOf(input!.network, input!.asset, input!.from, input!.nonce));
-        } else {
-          expect(records[0]!.cid).toBeUndefined();
-        }
+        // 構成で同じ: 送った bytes を自前の facilitator の `diagCidInputOf` に通した結果と一致する（両方あるか、両方無いか）。
+        expect(records[0]!.cid).toBe(input === undefined ? undefined : diagCorrelationIdOf(input.network, input.asset, input.from, input.nonce));
+        expect(records[0]!.cid !== undefined).toBe(expected === "cid");
       }
     }
   });
 
-  test("要求の本文を 2 回目に parse しない（大きい credential でも JSON.parse は応答の本文だけ）", async () => {
+  test("hot path の追加の仕事が無い: 要求の直列化は引数 1 つの JSON.stringify 1 回、後回しの処理の前に要求の本文を parse しない", async () => {
     const offer = offerOf("x402");
-    const big = "z".repeat(512 * 1024);
-    const credential: PaymentCredential = { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, authorization: { from: FROM, nonce: NONCE }, signature: SIGNATURE, padding: big } };
     for (const stage of ["verify", "settle"] as const) {
       const sink = recordingDiagnostics("router");
       const built = build("x402", { sink, reply: () => ({ status: 200, text: json(stage === "verify" ? { isValid: true } : { success: true, network: BASE, transaction: EVM_TX }) }) });
-      const spy = vi.spyOn(JSON, "parse");
+      const stringify = vi.spyOn(JSON, "stringify");
+      const parse = vi.spyOn(JSON, "parse");
+      let requestStringifies: unknown[][];
+      let parsed: string[];
       try {
-        await call(built.rail, stage, offer, credential);
-        const parsed = spy.mock.calls.map(([text]) => String(text));
-        // adapter が parse するのは facilitator の応答（小さい）だけ。要求の本文（`paymentPayload` を含む大きな文字列）は parse されない。
-        expect(parsed.some((text) => text.includes("paymentPayload") || text.length > 1024)).toBe(false);
+        await call(built.rail, stage, offer, credentialOf("x402", offer));
+        requestStringifies = stringify.mock.calls.filter(([value]) => typeof value === "object" && value !== null && "paymentPayload" in value);
+        parsed = parse.mock.calls.map(([text]) => String(text));
       } finally {
-        spy.mockRestore();
+        stringify.mockRestore();
+        parse.mockRestore();
       }
-      expect(recordsOf(sink).map((r) => r.cid)).toEqual([diagCorrelationIdOf(BASE, BASE_USDC, FROM, NONCE)]);
+      // replacer も space も無い（診断の有無で同じ呼び出し）。
+      expect(requestStringifies.map((args) => args.length)).toEqual([1]);
+      // adapter が parse するのは facilitator の応答だけ。要求の本文は後回しの処理まで parse されない。
+      expect(parsed.some((text) => text.includes("paymentPayload"))).toBe(false);
+      // 後回しの処理（records）で初めて parse され、cid が付く。
+      const deferred = vi.spyOn(JSON, "parse");
+      try {
+        expect(recordsOf(sink).map((r) => r.cid)).toEqual([diagCorrelationIdOf(BASE, BASE_USDC, FROM, NONCE)]);
+        expect(deferred.mock.calls.some(([text]) => String(text).includes("paymentPayload"))).toBe(true);
+      } finally {
+        deferred.mockRestore();
+      }
     }
+  });
+
+  test("上限を超える要求の本文は scope に入れない: cid は付かず、後回しの処理でも parse しない（結果・bytes は同じ）", async () => {
+    const offer = offerOf("x402");
+    const credential: PaymentCredential = { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, authorization: { from: FROM, nonce: NONCE }, signature: SIGNATURE, padding: "z".repeat(DIAG_CID_REQUEST_MAX_BYTES) } };
+    for (const stage of ["verify", "settle"] as const) {
+      const reply = (): Reply => ({ status: 200, text: json(stage === "verify" ? { isValid: true } : { success: true, network: BASE, transaction: EVM_TX }) });
+      const plain = build("x402", { sink: undefined, reply });
+      const before = await call(plain.rail, stage, offer, credential);
+      const sink = recordingDiagnostics("router");
+      const built = build("x402", { sink, reply });
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        expect(await call(built.rail, stage, offer, credential)).toEqual(before);
+        expect(built.transport.bodies).toEqual(plain.transport.bodies);
+        const records = recordsOf(sink);
+        expect(records).toHaveLength(1);
+        expect(records[0]!.cid).toBeUndefined();
+        expect(parse.mock.calls.some(([text]) => String(text).includes("paymentPayload"))).toBe(false);
+      } finally {
+        parse.mockRestore();
+      }
+      // 参照だけを持つ: scope に入ったのは上限の中の本文だけ（この本文は上限を超える）。
+      expect(built.transport.bodies[0]!.length * 2).toBeGreaterThan(DIAG_CID_REQUEST_MAX_BYTES);
+    }
+  });
+
+  test("adapter の scope: 上限の中の本文は参照のまま scope に入り、上限を超える本文・診断が無効なら scope を作らない", async () => {
+    const sink = recordingDiagnostics("router");
+    const small = JSON.stringify({ a: 1 });
+    const big = "x".repeat(DIAG_CID_REQUEST_MAX_BYTES / 2 + 1);
+    expect(await withInboundDiagScope(sink, small, async () => currentDiagnosticScope()?.cidRequestText)).toBe(small);
+    expect(await withInboundDiagScope(sink, big, async () => currentDiagnosticScope())).toBeUndefined();
+    expect(await withInboundDiagScope(undefined, small, async () => currentDiagnosticScope())).toBeUndefined();
+    expect(await withInboundDiagScope(sink, undefined, async () => currentDiagnosticScope())).toBeUndefined();
+  });
+
+  test("後回しの処理: scope の本文が壊れている・形が違う・上限を超える → cid 無し、投げない。cidInput と本文は後から重ねた方が勝つ", async () => {
+    const sink = recordingDiagnostics("router");
+    const good = JSON.stringify({ paymentPayload: { payload: { authorization: { from: FROM, nonce: NONCE } } }, paymentRequirements: { network: BASE, asset: BASE_USDC } });
+    const other = { network: BASE, asset: BASE_USDC, from: FROM, nonce: `0x${"0d".repeat(32)}` };
+    const emitIn = (scope: Parameters<typeof withDiagnosticScope>[0]) => withDiagnosticScope(scope, async () => sink.emit({ stage: "source_verify" }));
+    await emitIn({ cidRequestText: "{not json" });
+    await emitIn({ cidRequestText: JSON.stringify([1, 2, 3]) });
+    await emitIn({ cidRequestText: JSON.stringify({ paymentPayload: { payload: { authorization: { from: FROM, nonce: 7 } } }, paymentRequirements: { network: BASE, asset: BASE_USDC } }) });
+    await emitIn({ cidRequestText: good.padEnd(DIAG_CID_REQUEST_MAX_BYTES, " ") });
+    await emitIn({ cidRequestText: good });
+    await withDiagnosticScope({ cidInput: other }, () => emitIn({ cidRequestText: good }));
+    await withDiagnosticScope({ cidRequestText: good }, () => emitIn({ cidInput: other }));
+    await withDiagnosticScope({ cidRequestText: good }, () => emitIn({ paymentId: "00000000-0000-4000-8000-000000000001" }));
+    const fromGood = diagCorrelationIdOf(BASE, BASE_USDC, FROM, NONCE);
+    const fromOther = diagCorrelationIdOf(other.network, other.asset, other.from, other.nonce);
+    expect(recordsOf(sink).map((r) => r.cid)).toEqual([undefined, undefined, undefined, undefined, fromGood, fromGood, fromOther, fromGood]);
+  });
+
+  test("後回しの処理の量: 上限の大きさの本文の parse を含む 16 件の記録の組み立てが 1 ms 未満（§15.1 の 1 回の setImmediate の上限）", () => {
+    const base = { x402Version: 2, paymentPayload: { x402Version: 2, scheme: "exact", network: BASE, accepted: offerOf("x402"), payload: { challengeNonce: NONCE, authorization: { from: FROM, to: PAY_TO, value: "10000", validAfter: "0", validBefore: "1900000000", nonce: NONCE }, signature: SIGNATURE, pad: "" } }, paymentRequirements: { scheme: "exact", network: BASE, asset: BASE_USDC, amount: "10000", payTo: PAY_TO, maxTimeoutSeconds: 120, extra: offerOf("x402").extra } };
+    const room = DIAG_CID_REQUEST_MAX_BYTES / 2 - JSON.stringify(base).length;
+    base.paymentPayload.payload.pad = "p".repeat(room);
+    const text = JSON.stringify(base);
+    expect(text.length * 2).toBe(DIAG_CID_REQUEST_MAX_BYTES);
+    const scope = { values: Object.freeze({ cidRequestText: text, paymentId: "00000000-0000-4000-8000-000000000001" }), cost: 0 };
+    const entry = (seq: number) => ({ capture: Object.freeze({ stage: "source_verify", httpStatus: 200, response: "invalid", rawReason: "invalid_exact_evm_insufficient_balance" }), scope, at: Date.now(), seq });
+    // 温める（JIT）。
+    for (let i = 0; i < 200; i += 1) buildDiagRecord(entry(i), "router");
+    const samples: number[] = [];
+    for (let round = 0; round < 51; round += 1) {
+      const t0 = performance.now();
+      for (let i = 0; i < 16; i += 1) expect(buildDiagRecord(entry(i), "router")?.cid).toBe(diagCorrelationIdOf(BASE, BASE_USDC, FROM, NONCE));
+      samples.push(performance.now() - t0);
+    }
+    samples.sort((a, b) => a - b);
+    expect(samples[25]!).toBeLessThan(1);
   });
 
   test("adapter の cid は自前の facilitator の `diagCidInputOf` が送った本文から作る cid と同じ", async () => {
