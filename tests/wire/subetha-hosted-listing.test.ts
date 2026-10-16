@@ -3,7 +3,8 @@
  * 一覧に出し、quote できる。無効の生成では一覧に無く、quote は `unknown_route`。**無課金**: 相手はすべて loopback の合成 fixture（facilitator・上流）で、
  * 送信レグは署名しない spy（`tests/fixtures/router-rails-process.ts`）。
  *
- * 生成した文書は全体をそのまま使い、外の宛先（上流・facilitator・RPC）だけを loopback の fixture に差し替える（本番の Provider・facilitator を指すため）。
+ * 生成した文書は動的の節（`router.dynamic`）を除いてそのまま使い、外の宛先（上流・facilitator・RPC）だけを loopback の fixture に差し替える（理由は `start` の注釈）。
+ * 動的の節を含む hosted の合成の全体と、動的上流の宛先の拒否の実行時の確認は AC-6（G-2）の範囲で、この試験はその証拠にならない。
  */
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -128,7 +129,7 @@ describe("AC-1: hosted の生成の zUSDC route（実の composition、無課金
       expect(source, routeId).toMatchObject({ rail: "subetha", amount: "10000", asset: INBOUND_ZUSDC.asset, network: INBOUND_ZUSDC.network, payTo: BURN_ADDRESS });
       expect((source["offer"] as Record<string, unknown>)["scheme"], routeId).toBe("subetha-zerc20");
     }
-    // 既存の route も同じ起動で一覧に残る（生成した文書の全体で起動している）。
+    // 既存の静的の route も同じ起動で一覧に残る（動的の節を除く生成した文書で起動している）。
     expect(routes.map((route) => route.routeId)).toEqual(expect.arrayContaining(["md-mpp-eth-snapshot", "md-x402-eth-snapshot"]));
     const calls = (await (await fetch(`${facilitator.baseUrl}/calls`)).json()) as Record<string, number>;
     expect(calls["verifyCalls"] ?? 0).toBe(0);
