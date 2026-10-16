@@ -1,8 +1,8 @@
-# 要件 v3: hosted Router の受信レグで SubEtha（zERC20）決済を受ける
+# 要件 v4: hosted Router の受信レグで SubEtha（zERC20）決済を受ける
 
-> 対象: `router.subethalabs.com`（hosted）が、呼び出し側の **Sepolia zETH の SubEtha 決済**（`scheme: subetha-zerc20`）を受信レグとして受け、
+> 対象: `router.subethalabs.com`（hosted）が、呼び出し側の **Sepolia zUSDC の SubEtha 決済**（`scheme: subetha-zerc20`）を受信レグとして受け、
 > 既存の Provider A（x402）・Provider B（MPP）に支払って配信すること。本書は要件フェーズの成果物であり、設計・実装は含まない。
-> v1 は独立レビューで REJECT（7 件）。v2 はその指摘を反映した版（§9）。v2 は APPROVE WITH CHANGES で、v3 はその中・低の指摘を反映した版である（§10）。
+> v1 は独立レビューで REJECT（7 件）。v2 はその指摘を反映した版（§9）。v2 は APPROVE WITH CHANGES で、v3 はその中・低の指摘を反映した版（§10）。**v4 は owner の決定（2026-10-16）で受ける資産を zETH から zUSDC に変え、AC-3 を直した版である（§11）。**
 
 ## 0. 出発点（実測済みの事実）
 
@@ -25,8 +25,11 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 `docs/evidence/subetha-hosted-inbound-probe-2026-10-16.md`。
 
 - **zERC20 公式に公開の x402 facilitator は見当たらない**（公式文書・公式リポジトリに記載なし、公式 API ホストの facilitator 系パスは 404）。
-- **公式 testnet v1 が公開しているのは indexer と decider**（`https://beta-v1.api.zerc20.io/indexer/zeth`、`/decider/healthz`）。indexer は Sepolia zETH
-  （token `0xADAb5CaB352fb1eBF24CD951de224f9e952C82Ed`、verifier `0xD19b79cE0C2821158aDBDEf9cC8c8D858c9ef0Cc`）を同期している。
+- **公式 testnet v1 が公開しているのは indexer と decider**（`https://beta-v1.api.zerc20.io/indexer/<token>`、`/decider/healthz`）。indexer は Sepolia の zETH と zUSDC を同期している。
+  **v4 で受けるのは zUSDC**: token `0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF`（6 桁、symbol `zUSDC`）、verifier `0xb199A85463Bc5c0009c058E80b8A0d3D5e0025D6`（`redeemFeeBps()` = 10）、
+  Hub は Base Sepolia の `0xF64Bd0a90120611b0c941e3eF546f2F82F1eaB44`、indexer は `https://beta-v1.api.zerc20.io/indexer/zusdc`（公式文書 `reference/addresses.md`、2026-10-16 の on-chain 読取。§11）。
+  zUSDC の元の token は LiquidityManager `0xB9f41F93882c2ddC212a4EcC776BBd9D97D2F3C6` の `underlyingToken()` = `0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590`（試験用の USDC、6 桁）で、
+  `mint(address,uint256)` は任意の送り主で成功する（`eth_call` の模擬。Circle の Sepolia USDC とは別の token）。
 - **過去の testnet 決済の facilitator は SubEtha 自身の実装をローカル起動したもの**（§0）。外部の facilitator URL の記録は無い。
 - SubEtha の facilitator は `network.indexer_url` / `network.decider_url` を設定で受け、`profile = "testnet"` で支払い受付と finalize を行う。
   `decider_url` は **batch（Nova）経路専用**で `check` も検査しない（SubEtha `docs/FACILITATOR.md` 構成表、`apps/facilitator/src/check.ts`）。
@@ -49,7 +52,7 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 | # | 内容 |
 |---|---|
 | S-1 | SubEtha の facilitator を hosted 用に 1 つ動かす（testnet profile、公式 indexer） |
-| S-2 | hosted Router に**静的 route 2 本**を追加: Sepolia zETH（SubEtha）→ Provider A（x402）、→ Provider B（MPP）。operator のスイッチの後ろに置く |
+| S-2 | hosted Router に**静的 route 2 本**を追加: Sepolia zUSDC（SubEtha）→ Provider A（x402）、→ Provider B（MPP）。operator のスイッチの後ろに置く |
 | S-3 | Router の journal と status に、payer が提出した burn の参照を残す（FR-7） |
 | S-4 | `npm run sign` に `subetha-zerc20` の分岐（自己 transfer 経路）を追加 |
 | S-5 | `@subetha/payer` の対応（S-4 の後。publish は owner） |
@@ -57,8 +60,8 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 
 ### やらないこと
 
-- 動的プロファイル `dyn-subetha-to-*`（zETH と USDC の換算規則が要る）
-- 送信レグを SubEtha にすること、permit（gasless）経路、mainnet、Sepolia 以外のチェーン、zUSDC・zBNB
+- 動的プロファイル `dyn-subetha-to-*`
+- 送信レグを SubEtha にすること、permit（gasless）経路、mainnet、Sepolia 以外のチェーン、zETH・zBNB・zJPYC
 - facilitator の私設ネットワーク配置のための SSRF 防御の例外（FR-1.5）
 - `unknown` からの自動・手動の回復手順（FR-7.4）
 
@@ -67,8 +70,7 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 ### FR-1 facilitator の運用（S-1）
 
 - **FR-1.1** SubEtha の facilitator を**無改変のリリース**から起動し、commit を固定して記録する。以降の挙動の記述（再送・保持期間）はその commit について確認する。
-- **FR-1.2** 設定: `profile = "testnet"`、`chain_id = 11155111`、token・verifier は §1 の公式アドレス、`hub` は Base Sepolia の
-  `0xD18b503B335656C05dC516366C0C8FD6e3b13856`（`hub_chain_id = 84532`）、`indexer_url` は公式 testnet v1、`finalize_timeout_ms` は公式の周期に合わせて伸ばす。journal は永続ボリューム。
+- **FR-1.2** 設定: `profile = "testnet"`、`chain_id = 11155111`、token・verifier・`hub`（`hub_chain_id = 84532`）は §1 の zUSDC の公式アドレス、`indexer_url` は公式 testnet v1 の `zusdc`、`finalize_timeout_ms` は公式の周期に合わせて伸ばす。journal は永続ボリューム。
 - **FR-1.3** 秘密（`SUBETHA_TREASURY_PK`・`SUBETHA_RELAYER_PK`・`SUBETHA_ADMIN_TOKEN`）は**新しい testnet 専用の値**とし、Router の鍵と共有しない。値も所在も本書・リポジトリに書かない。
 - **FR-1.4** `settlement.treasury`（mint 先）は operator の受取アドレス。受取は facilitator の構成で決まり、Router の route 構成には現れない（`src/config.ts:551`）。
 - **FR-1.5** **公開 HTTPS のホスト名**で待ち受ける。Router の実構成の transport は私設アドレスを拒むので（§0）、P1 は SSRF 防御を変えずに公開アドレス経由で届かせる。
@@ -83,15 +85,16 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 - **FR-2.2** 用語を分ける: **list price** = route の `source.amount`、**burn 総額** = challenge の `amount`（P1 では list price と同じ）、
   **treasury の正味受取** = burn 総額 − verifier の redeem 手数料（on-chain の `redeemFeeBps` 等）。FR-2.1 により facilitator の手数料は 0 なので、mint の入金額と正味受取は一致する。承認・sign の上限・予算は**burn 総額**に束縛する。
 - **FR-2.3** facilitator が payer 課金の手数料付きで動いていた場合、quote は `orchestrator.ts:458-466` の一致検査で**成立しない**（fail closed）。これを試験で固定する。
-- **FR-2.4** `source.amount` は route ごとの固定値（運用者が決める換算。オラクルは持たない）。redeem 手数料で正味受取が 0 以下にならない額にする。
+- **FR-2.4** `source.amount` は **10,000（0.01 zUSDC）**。他の静的 route の受信額（0.01 USDC、`tools/remote-mcp-config.ts:27`）と Provider の価格にそろえる（owner の決定 2026-10-16、O-2）。
+  正味受取は 10,000 − ⌈10,000 × 10 / 10,000⌉ = 9,990（`redeemFeeBps()` = 10 のとき）。
 
 ### FR-3 Router の構成（S-2）
 
 - **FR-3.1** `ROUTER_SUBETHA_FACILITATOR_URL` に FR-1 の facilitator を入れる。x402 受信は既存どおり `ROUTER_X402_INBOUND_FACILITATOR_URL`。
-- **FR-3.2** 静的 route 2 本。`sourceRail: "subetha"`、`source.network: "eip155:11155111"`、`source.asset` は zETH、`decimals: 18`、`source.amount` は FR-2.4。
+- **FR-3.2** 静的 route 2 本。`sourceRail: "subetha"`、`source.network: "eip155:11155111"`、`source.asset` は zUSDC、`decimals: 6`、`source.amount` は FR-2.4。
 - **FR-3.3** operator の定数（既存の `RAILS_ACTIVATION` と同じ型）で出し入れできる。切っている間は一覧に出ず quote も受けない。
 - **FR-3.4** 動的上流の宛先拒否に facilitator のホストが含まれる（`docs/DEPLOY.md` の `SUBETHA_DENY_HOSTS` 行: facilitator のホスト名は設定に関係なく拒否）。
-- **FR-3.5** 受信の予算に Sepolia zETH の区分を加える。1 件の上限は burn 総額。
+- **FR-3.5** 受信の予算に Sepolia zUSDC の区分を加える。1 件の上限は burn 総額。
 
 ### FR-4 一覧と quote の提示
 
@@ -101,9 +104,9 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 
 ### FR-5 `npm run sign` の分岐（S-4）
 
-- **FR-5.1** `scheme: "subetha-zerc20"` を振り分ける。**鍵に触れる前に**拒む: network が `eip155:11155111` でない、asset が表の zETH でない、`payTo` の形が不正、
+- **FR-5.1** `scheme: "subetha-zerc20"` を振り分ける。**鍵に触れる前に**拒む: network が `eip155:11155111` でない、asset が表の zUSDC でない、`payTo` の形が不正、
   `challengeNonce` の欠落・形違い、challenge の期限切れ、額が上限超え、offer の額が quote の `subject` の burn 総額と違う。
-- **FR-5.2** 残高の事前確認: zETH が burn 総額に足りない、または Sepolia ETH がガスに足りない場合は broadcast 前に拒む。
+- **FR-5.2** 残高の事前確認: zUSDC が burn 総額に足りない、または Sepolia ETH がガスに足りない場合は broadcast 前に拒む。
 - **FR-5.3** **送出の前に耐久記録する**: transfer を自分の鍵で署名して tx hash を確定させ、`challengeNonce`・送信元・account nonce・tx hash を
   ローカルの試行記録に書き込んでから raw tx を送る。応答喪失やプロセス中断があっても hash が残る。
 - **FR-5.4** 同じ `challengeNonce`（または同じ quote）に試行記録があれば、**新しい burn を作らない**。記録の tx hash で receipt を確かめるか、`unknown` で止まる。
@@ -116,7 +119,7 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 
 - **FR-6.1** FR-5 と同じ検査・耐久記録・`unknown` 扱いを daemon で行う。ネイティブダイアログの rail 行に「Approve で burn transfer を送る（取り消せない）」と出す。
 - **FR-6.2** ダイアログで Cancel・時間切れのとき broadcast は 0 回。
-- **FR-6.3** `find_routes` が新 route を `fundsMoveOnCredential: true`・必要資産（zETH と Sepolia ETH）付きで返す。
+- **FR-6.3** `find_routes` が新 route を `fundsMoveOnCredential: true`・必要資産（zUSDC と Sepolia ETH）付きで返す。
 
 ### FR-7 Router の burn 参照と未確定（S-3）
 
@@ -134,11 +137,11 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 |---|---|---|
 | AC-1 | 新 route が切り替え off で一覧・quote に出ず、on で出る。`source` が `rail: subetha`・`scheme: subetha-zerc20` | wire（無課金） |
 | AC-2 | challenge の `amount` が route と違う（手数料付き facilitator）と quote が成立しない | wire（合成 facilitator） |
-| AC-3 | `npm run sign` が FR-5.1・5.2 の各条件で**鍵に触れる前に**拒む | unit（無課金）＋ sabotage |
+| AC-3 | `npm run sign` が FR-5.1 の各条件で**鍵に触れる前に**拒む。FR-5.2 の残高不足では鍵は読むが**署名も送出もしない**（payer の address は鍵からしか得られないため。owner の決定 2026-10-16、O-7） | unit（無課金）＋ sabotage |
 | AC-4 | 送出の失敗注入: 送出エラー・receipt の時間切れでは出力が `unknown` で hash を示す。送出後のプロセス中断では、中断したプロセスの出力ではなく**試行記録に hash が残っていること**を観測する。いずれも再実行で 2 本目の transfer を作らず、記録の hash で確認するか `unknown` で止まる | unit／wire（偽 RPC、無課金） |
 | AC-5 | burn の後に verify 失敗・期限切れ・**上流の変化（verify より前に拒む経路を含む、`src/core/orchestrator.ts:634-639`）**・settle 応答の喪失・Router の再起動が起きても、status が申告された burn 参照を返し、送信レグは 0 回または 1 回。同じ quote・`requestId` に対して Router が新しい challenge（2 本目の burn の要求）を出さない | wire（合成 facilitator、無課金） |
 | AC-6 | **hosted と同じ構成生成**で起動したローカル Router の実 adapter が、FR-1 の facilitator（公開 HTTPS）から `/challenge` を 1 件取得する。同じ Router で、動的上流の宛先に facilitator のホストと私設アドレスを指定すると拒否される | 無課金 |
-| AC-7 | AC-6 の Router で zETH → Provider A、zETH → Provider B が各 1 件 `delivered` | testnet 実決済（§7 の範囲内） |
+| AC-7 | AC-6 の Router で zUSDC → Provider A、zUSDC → Provider B が各 1 件 `delivered` | testnet 実決済（§7 の範囲内） |
 | AC-8 | AC-7 の 2 件が facilitator で `finalized`（treasury に mint、正味受取が burn 総額 − redeem 手数料と一致、FR-2.2） | testnet、観測のみ。配信とは別ゲート。Q-1 を確定する |
 | AC-9 | 配備後の hosted で同じ 2 件が `delivered` | testnet 実決済 |
 | AC-10 | payer 0.3.0 から 1 件 `delivered`。Cancel では broadcast 0 回 | owner ゲート（ネイティブダイアログ） |
@@ -152,7 +155,8 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 | R-1 | 公式 testnet v1 に SLA が無い。止まると finalize が遅れる | 配信は `accepted` で行うので購入は止まらない。AC-8 で遅延を観測し運用文書に書く |
 | R-2 | `accepted` から `finalized` までの失敗は operator（treasury 側）が負う | FR-4.3 で開示。testnet のみ |
 | R-3 | facilitator の記録は保持期間後に消える。応答喪失は `unknown` で終わる | FR-7。回復手順は別要件 |
-| R-4 | payer の burn に Sepolia ETH のガスが要る（実測 約 0.00009 ETH/回、`docs/u01r-requirements.md` §29.3） | FR-5.2、README に faucet を書く |
+| R-4 | payer の burn に Sepolia ETH のガスが要る（zETH の実測 約 0.00009 ETH/回、`docs/u01r-requirements.md` §29.3）。zUSDC を得るには試験用 USDC の mint・approve・wrap のガスも要る | FR-5.2、README に faucet と mint・wrap の手順を書く |
+| R-7 | SubEtha の facilitator で zUSDC を受けた実績は無い（ローカル実証は zETH） | AC-6・AC-7 が最初の確認。facilitator の挙動が token に依存する点は設計で facilitator のソースから確かめる |
 | R-5 | Sepolia は遅い（`SLOW_EVM_TESTNETS`）。challenge の TTL（既定 300 秒）内に burn が確定しないことがある | 設計で TTL と receipt 待ちの時間を決める |
 | R-6 | facilitator の money endpoint が公開になる（FR-1.5） | facilitator 自身のレート制限と上限。burn アドレスは一回限りで、facilitator は資金を預からない（自己 transfer 経路） |
 
@@ -160,8 +164,11 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 
 | ID | 判断 | 推奨 |
 |---|---|---|
-| O-1 | facilitator を置く場所 | Q-1 の答え次第。証明の計算が不要なら **Router と同じホストの別コンテナ**（公開ホスト名を別に付ける）、要るなら別ホスト |
-| O-2 | `source.amount` の値 | Provider の価格（0.01 USDC）と釣り合う少額。設計で具体値を提示する |
+| O-1 | facilitator を置く場所 | **決定（2026-10-16）: 別ホスト（EC2 1 台）＋公開 HTTPS**（設計 §2.1 の案 A。同じホストは egress 制御で不可） |
+| O-2 | 受ける資産と `source.amount` | **決定（2026-10-16）: zUSDC、10,000（0.01 zUSDC）**（FR-2.4） |
+| O-5 | facilitator の公開ホスト名 | **決定（2026-10-16）: `zerc20-facilitator.subethalabs.com`** |
+| O-6 | facilitator の RPC | **決定（2026-10-16）: Router と別のキー** |
+| O-7 | AC-3 の文言 | **決定（2026-10-16）: 残高の確認は鍵を読んだ後、署名・送出の前**（AC-3） |
 | O-3 | §7 の支払い範囲の確定 | 下表のとおり |
 | O-4 | zERC20 の許諾の記録 | 許諾文面の所在だけを `.claude_workflow/local/` に記録する |
 
@@ -173,8 +180,8 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 | 項目 | 範囲 |
 |---|---|
 | アカウント | 新しい使い捨て payer 鍵 1 本、facilitator の treasury・relayer 各 1 本（FR-1.3）。既存の Router 送信鍵（Provider への支払い） |
-| ネットワーク・資産 | Sepolia（ETH、zETH）、Base Sepolia（ETH、USDC）、Tempo testnet（pathUSD） |
-| 資金供給の上限 | payer: Sepolia ETH 0.05 以下（うち zETH への wrap 0.001 ETH 以下）。relayer: Sepolia ETH・Base Sepolia ETH 各 0.05 以下 |
+| ネットワーク・資産 | Sepolia（ETH、試験用 USDC `0x2f6f…7590`、zUSDC）、Base Sepolia（ETH、USDC）、Tempo testnet（pathUSD） |
+| 資金供給の上限 | payer: Sepolia ETH 0.05 以下、試験用 USDC の mint 1,000,000（1 USDC）以下、zUSDC への wrap 1 USDC 以下。relayer: Sepolia ETH・Base Sepolia ETH 各 0.05 以下 |
 | 購入の件数 | AC-7・AC-9・AC-10 で合計 10 件以下（失敗の調査を含む） |
 | 送信レグの総額 | Base Sepolia USDC 0.10 以下、Tempo pathUSD 0.10 以下 |
 
@@ -212,3 +219,15 @@ owner の当初の想定は「testnet・v1 では zERC20 公式が用意した f
 | 6 | 2026-10-08 の承認に文書の記録が無い | §7。段階 1 の owner 確認で範囲を記録 |
 | 7 | owner の決定に記録の参照が無い。公式 endpoint の応答はレビュー側で再現できていない | §1 に注記。証跡は作成者の観測として扱う |
 | 他 | Q-1 の AC 参照の誤り、AC-4 の中断時の観測対象 | §1 Q-1、AC-4 |
+
+## 11. v4 の変更（2026-10-16、owner の決定）
+
+| 変更 | 内容 | 理由 |
+|---|---|---|
+| 受ける資産 | zETH → **zUSDC**（§1、FR-1.2、FR-2.4、FR-3.2、FR-3.5、FR-5、FR-6.3、AC-7、§7） | owner: 実際に使われるのは zUSDC が多い |
+| 額 | 10,000（0.01 zUSDC） | owner: 他のサンプルの Provider の額を参考に（静的 route の受信額 0.01 USDC） |
+| AC-3 | 残高不足は鍵を読んだ後・署名と送出の前に拒む | owner の決定 O-7（設計 v3 §7 の提案） |
+| §7 の範囲 | 試験用 USDC の mint と wrap を加え、zETH の wrap を外した | 資産の変更に伴う |
+| R-7 | zUSDC の実績が無いことを加えた | 資産の変更に伴う |
+
+zETH のローカル実証（§0）は参考の事実として残す（Router の adapter と facilitator の経路が動くことの証拠）。

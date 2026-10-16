@@ -42,3 +42,24 @@
 
 Router の記録（`docs/u01r-requirements.md` §23–27）と、作業セッションの記録に出る facilitator URL を検索した。
 外部の facilitator URL は無く、testnet 決済は**SubEtha 自身の facilitator をローカルで起動**して行っていた（`127.0.0.1` の待ち受け）。
+
+## 4. zUSDC（要件 v4、2026-10-16 の追加の観測）
+
+公式文書 `https://zerc20.gitbook.io/zerc20/reference/addresses.md` の Testnet / zUSDC の節: Hub（Base Sepolia）`0xF64Bd0a90120611b0c941e3eF546f2F82F1eaB44`、
+Sepolia の zERC20 `0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF`、Verifier `0xb199A85463Bc5c0009c058E80b8A0d3D5e0025D6`、
+LiquidityManager `0xB9f41F93882c2ddC212a4EcC776BBd9D97D2F3C6`、Adaptor `0xC14A0a1381e455f89a31eDB00F562F5a6F8780Ad`。
+
+Sepolia の `eth_call`（公開 RPC `ethereum-sepolia-rpc.publicnode.com`、latest。読取と模擬だけで transaction は送っていない）:
+
+| 呼び出し | 結果 |
+|---|---|
+| zUSDC `decimals()` | 6 |
+| zUSDC `symbol()` | `zUSDC` |
+| Verifier `redeemFeeBps()` | 10 |
+| Verifier `token()` | `0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF` |
+| LiquidityManager `zerc20()` | `0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF` |
+| LiquidityManager `underlyingToken()` | `0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590` |
+| 元の token の `symbol()`・`decimals()` | `USDC`・6 |
+| 元の token の `mint(0x…dEaD, 1000000)`（from `0x1111…1111`、模擬） | 成功（戻り値なし）。`faucet()`・`drip(address)`・`faucet(address)` は revert |
+
+SubEtha facilitator（`1aeac60`）の token 依存の検索: `zerc20-backend` と `apps/facilitator` に zETH・18 桁の決め打ちは無い（`redeem.ts:74` の 18 は chain の native ETH の定義）。
