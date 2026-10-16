@@ -7,7 +7,7 @@
  * `Authorization`（`Payment` scheme）、成功応答は `Payment-Receipt`。
  *
  * usage: mpp-upstream.ts [--pay ok|paid-no-data|error|reject|abort|no-receipt|html]
- *        [--amount 1200] [--change-after N] [--change-field amount|unknown|recipient]
+ *        [--amount 1200] [--change-after N] [--change-field amount|unknown|recipient] [--recipient <0x…>]
  *        [--receipt-method tempo] [--payer <did>] [--realm router-b-fixture]
  */
 
@@ -50,7 +50,8 @@ const realm = arg("realm", "router-b-fixture");
 /** Tempo **testnet** の公開値（mainnet 4217 / USDC.e とは混同しない）。 */
 const CHAIN_ID = 42_431;
 const CURRENCY = "0x20c0000000000000000000000000000000000000";
-const RECIPIENT = "0x00000000000000000000000000000000000000b1";
+/** `--recipient` で差し替えられる（既定は今までの合成の値。hosted の設定生成の宛先で quote する試験が本番の受取先を渡す）。 */
+const RECIPIENT = arg("recipient", "0x00000000000000000000000000000000000000b1");
 const SNAPSHOT_PATH = "/v1/eth/snapshot";
 
 let challengeCalls = 0;

@@ -107,6 +107,20 @@ describe("T1: 無効（off）", () => {
     }
   });
 
+  test("無効なら facilitator の env を 1 度も読まない（getter で読み取りを数える）", () => {
+    let reads = 0;
+    const env = new Proxy({} as Record<string, string | undefined>, {
+      get(_target, key) {
+        if (key === SUBETHA_FACILITATOR_URL_ENV) reads += 1;
+        return undefined;
+      },
+    });
+    routerConfigOf(env, RECEIVER, true, RAILS_DISABLED);
+    expect(reads).toBe(0);
+    expect(() => routerConfigOf(env, RECEIVER, true, ON)).toThrow();
+    expect(reads).toBeGreaterThan(0);
+  });
+
   test("公開の定数（RAILS_ACTIVATION）の生成にも zUSDC の route は無く、拒否ホストには入る", () => {
     const document = routerConfigOf({ SUBETHA_EVM_FACILITATOR_URL: "http://127.0.0.1:8611/t1-subetha-test-token_0123456789abcdef" }, RECEIVER, true, {
       activation: RAILS_ACTIVATION,
@@ -163,6 +177,21 @@ describe("T1: 有効（on）", () => {
     ["query 付き", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com/?x=1" }],
     ["userinfo 付き", { [SUBETHA_FACILITATOR_URL_ENV]: "https://user:pw@zerc20-facilitator.subethalabs.com" }],
     ["port 付き", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com:8443" }],
+    ["既定の port を明示", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com:443" }],
+    ["fragment 付き", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com/#x" }],
+    ["空の query", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com/?" }],
+    ["空の fragment", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com/#" }],
+    ["username だけ", { [SUBETHA_FACILITATOR_URL_ENV]: "https://user@zerc20-facilitator.subethalabs.com" }],
+    ["password だけ", { [SUBETHA_FACILITATOR_URL_ENV]: "https://:pw@zerc20-facilitator.subethalabs.com" }],
+    ["dot segment", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com/admin/.." }],
+    ["percent-encoded の dot", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com/%2e" }],
+    ["大文字の host", { [SUBETHA_FACILITATOR_URL_ENV]: "https://ZERC20-facilitator.subethalabs.com" }],
+    ["percent-encoded の host", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.c%6Fm" }],
+    ["全角の文字を含む host", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.ｃom" }],
+    ["末尾の dot の host", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com." }],
+    ["末尾の / が 2 つ", { [SUBETHA_FACILITATOR_URL_ENV]: "https://zerc20-facilitator.subethalabs.com//" }],
+    ["前後の空白", { [SUBETHA_FACILITATOR_URL_ENV]: " https://zerc20-facilitator.subethalabs.com" }],
+    ["URL でない", { [SUBETHA_FACILITATOR_URL_ENV]: "not a url" }],
   ])("env が %s なら固定文で止まる（値を含まない）", (_name, env) => {
     let message = "";
     try {
@@ -171,6 +200,7 @@ describe("T1: 有効（on）", () => {
       message = (error as Error).message;
     }
     expect(message).toBe(`${SUBETHA_FACILITATOR_URL_ENV} must be exactly https://${SUBETHA_FACILITATOR_HOSTNAME} when the SubEtha inbound rail is activated`);
+    expect(message).not.toContain("443");
     expect(message).not.toContain("evil");
     expect(message).not.toContain("pw");
   });

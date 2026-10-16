@@ -142,33 +142,20 @@ export const SUBETHA_FACILITATOR_HOSTNAME = "zerc20-facilitator.subethalabs.com"
 /** SubEtha の facilitator の URL の env（`subetha.inbound` のときだけ読む）。値は `https://<SUBETHA_FACILITATOR_HOSTNAME>` だけ。 */
 export const SUBETHA_FACILITATOR_URL_ENV = "SUBETHA_ZERC20_FACILITATOR_URL";
 
+/** 受け付ける facilitator の origin（文字列の完全一致。末尾の `/` 1 つだけ許す）。 */
+const SUBETHA_FACILITATOR_ORIGIN = `https://${SUBETHA_FACILITATOR_HOSTNAME}`;
+
 /**
- * `subetha.inbound` のときの facilitator の URL。`https:`、host が定数、port・userinfo・path（`/` 以外）・query・fragment が無いことだけを受け、origin を返す。
- * 違えば固定文で止める（値は出さない）。無効なら env を読まない。
+ * `subetha.inbound` のときの facilitator の URL。env の**文字列そのもの**が `https://<SUBETHA_FACILITATOR_HOSTNAME>`（末尾の `/` 1 つは可）と一致するときだけ受け、origin を返す。
+ * URL の解析の後の部品では比べない（`:443`・`/%2e`・大文字・全角などの正規化で同じ origin になる綴りも拒む）。違えば固定文で止める（値は出さない）。無効なら env を読まない。
  */
 export function subethaFacilitatorUrlOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): string | undefined {
   if (!subethaOf(activation).inbound) return undefined;
   const raw = env[SUBETHA_FACILITATOR_URL_ENV];
-  let url: URL | undefined;
-  try {
-    url = raw === undefined || raw === "" ? undefined : new URL(raw);
-  } catch {
-    url = undefined;
+  if (raw !== SUBETHA_FACILITATOR_ORIGIN && raw !== `${SUBETHA_FACILITATOR_ORIGIN}/`) {
+    throw new Error(`${SUBETHA_FACILITATOR_URL_ENV} must be exactly ${SUBETHA_FACILITATOR_ORIGIN} when the SubEtha inbound rail is activated`);
   }
-  const exact =
-    url !== undefined &&
-    url.protocol === "https:" &&
-    url.hostname === SUBETHA_FACILITATOR_HOSTNAME &&
-    url.port === "" &&
-    url.username === "" &&
-    url.password === "" &&
-    url.pathname === "/" &&
-    url.search === "" &&
-    url.hash === "";
-  if (!exact) {
-    throw new Error(`${SUBETHA_FACILITATOR_URL_ENV} must be exactly https://${SUBETHA_FACILITATOR_HOSTNAME} when the SubEtha inbound rail is activated`);
-  }
-  return url!.origin;
+  return SUBETHA_FACILITATOR_ORIGIN;
 }
 
 /** MPP Solana の宛先の `scheme`（`src/config.ts` の `MPP_SOLANA_SCHEME` と同じ文字列。このファイルは Router の SDK に依存しない）。 */
