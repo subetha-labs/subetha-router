@@ -385,7 +385,7 @@ payer の address は鍵（env `SUBETHA_PAYER_PRIVATE_KEY`、`tools/sign-payment
 | O-5 | facilitator の公開ホスト名 | **決定（2026-10-16）: `zerc20-facilitator.subethalabs.com`** |
 | O-6 | facilitator の Sepolia・Base Sepolia RPC | **決定（2026-10-16）: Router と別のキー** |
 | O-7 | AC-3 の修正（§7） | **決定（2026-10-16）**。要件 v4 の AC-3 |
-| O-8 | FR-1.6 の保証の範囲（§2.4: 名前は排他、接続は許可名が解決した IP まで） | 提案 |
+| O-8 | FR-1.6 の保証の範囲（§2.4: 名前は排他、接続は許可名が解決した IP まで） | **決定（2026-10-16）: この範囲で可**（owner「一旦テストネットでの検証なので、その制限で良い」） |
 
 ## 11. ゲートの名前（要件 §8 の段階 5 との対応）
 
@@ -401,7 +401,7 @@ payer の address は鍵（env `SUBETHA_PAYER_PRIVATE_KEY`、`tools/sign-payment
 
 ## 12. 次の段階
 
-本書 → Codex 独立レビュー → 親の読み返し → **owner の確認**（O-8）→ タスク分解。
+本書 → Codex 独立レビュー（v4 APPROVE）→ 親の読み返し → owner の確認（O-8 を含め 2026-10-16 に完了）→ **タスク分解**。
 
 ## 12. v1 レビュー（2026-10-16、Codex CLI 0.157.1、`gpt-6-astra`、read-only）への対応
 
