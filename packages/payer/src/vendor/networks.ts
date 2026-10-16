@@ -172,6 +172,14 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
  */
 export const EVM_TESTNET_NETWORKS: ReadonlySet<string> = Object.freeze(new Set(["eip155:46630", "eip155:421614", "eip155:998", "eip155:11155111"]));
 
+/**
+ * SubEtha（`subetha-zerc20`）で払える zERC20 の表（`docs/subetha-hosted-inbound-design.md` §6.1）。受信の表（`KNOWN_NETWORKS`）とは別: Sepolia は x402 の USDC を受ける行で、
+ * zUSDC は x402 では受けない。`npm run sign` は鍵に触れる前にこの表で network・token・額の上限を確かめる（上限は `SIGN_MAX_AMOUNT` と同じ 20,000 = 0.02 zUSDC）。
+ */
+export const SUBETHA_ZERC20_ASSETS: readonly { readonly network: string; readonly token: string; readonly decimals: number; readonly maxAmount: bigint }[] = Object.freeze([
+  Object.freeze({ network: "eip155:11155111", token: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF", decimals: 6, maxAmount: 20_000n }),
+]);
+
 /** 遅いチェーン（block ~12 秒）。期限の表（設計 §3.6）の右の列。 */
 const SLOW_EVM_TESTNETS: ReadonlySet<string> = Object.freeze(new Set(["eip155:11155111"]));
 

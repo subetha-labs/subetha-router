@@ -267,6 +267,8 @@ export const EVM_NONE: EvmRailsActivation = Object.freeze({ rh: RAIL_OFF, arbsep
 /**
  * 公開の process の有効化。受信は **2026-10-07 に両方 `true`**（T10 の G-4。`docs/DEPLOY.md` §2c の記録）。
  * 送信は **2026-10-08 に両方 `true`**（UG-A・UG-S の G-4′。`docs/DEPLOY.md` §2c の記録。送信の設計 §6.1）。env からは変えられない。戻すのはここ（イメージを作り直して入れ替える）。
+ * SubEtha（zUSDC）の受信（`docs/subetha-hosted-inbound-design.md` §4.1）は欄が無い = `false`（`subethaOf`）。G-4（`docs/subetha-hosted-inbound-tasks.md`）で
+ * `subetha: Object.freeze({ inbound: true })` を足す。欄は使うときだけ持つ（`pairs`・`evm` と同じ。内部の env の往復が恒等になる）。
  */
 export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   arc: Object.freeze({ inbound: true, outbound: true }),
@@ -284,8 +286,6 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
     arbsep: Object.freeze({ inbound: true, outbound: true }),
     hyperevm: Object.freeze({ inbound: true, outbound: true }),
   }),
-  // SubEtha（zUSDC）の受信（`docs/subetha-hosted-inbound-design.md` §4.1）: 欄が無い = `false`（`subethaOf`）。G-4（`docs/subetha-hosted-inbound-tasks.md`）で
-  // `subetha: Object.freeze({ inbound: true })` を足す。欄は使うときだけ持つ（`pairs`・`evm` と同じ。内部の env の往復が恒等になる）。
 });
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });
