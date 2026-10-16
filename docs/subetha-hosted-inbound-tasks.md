@@ -2,6 +2,7 @@
 
 > 2026-10-16、第 2 版（第 1 版は独立レビューで REJECT、11 件。§5）。入力は `docs/subetha-hosted-inbound-requirements.md`（要件 v4、owner 承認）と `docs/subetha-hosted-inbound-design.md`（設計 v4、Codex APPROVE、
 > O-1〜O-8 は owner 決定済み）。以下「設計 §x」「要件 FR-x」はそれらを指す。本書はタスクフェーズの成果物で、コード・実行結果・合格の主張は含まない。記載のコマンドは**計画であり未実行**。
+> **owner の承認**: 2026-10-16「進めて良いです」（実行フェーズ開始）。
 > 形は先行の `docs/mpp-solana-tasks.md` と同じ（§0 の規則、1 タスク 1 PR、sabotage、独立レビュー）。
 
 ## 0. 全タスク共通
