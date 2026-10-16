@@ -36,6 +36,8 @@ import { assertAtaAccount, svmFetchJson } from "../inbound/x402-svm-startup.js";
 import { createSvmOutboundCommon, type SvmStaticDestination } from "./svm-outbound-common.js";
 import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
 import { paidOutcomeOf, SVM_RECEIPT_FORM } from "./x402-dynamic.js";
+import { diagStart, outboundDiagnosticsEnabled, recordChallengeFailure, recordPayTransportFailure, recordSignNotSent, type PayDiagnostics } from "./outbound-diagnostics.js";
+import type { DiagnosticsSink } from "../../shared/diagnostics.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -401,6 +403,8 @@ export interface X402SvmOutboundOptions {
   /** blockhash を取ってから署名するまでの上限（FR-34）。既定 5,000。 */
   readonly fetchToSignMs?: number;
   readonly rpcTimeoutMs?: number;
+  /** 診断の記録（設計 `docs/rejection-reasons-design.md` §4.3、タスク R-4。`cid` は書かない: EIP-3009 ではない）。無ければ何も記録しない。 */
+  readonly diagnostics?: DiagnosticsSink;
   /** 試験だけ（§7 の停止点・改変）。 */
   readonly hooksForTest?: {
     afterReserve?(): void;
@@ -442,6 +446,7 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
   const fetchToSignMs = options.fetchToSignMs ?? SVM_OUTBOUND_FETCH_TO_SIGN_MS;
   const rpcTimeoutMs = options.rpcTimeoutMs ?? SVM_OUTBOUND_RPC_TIMEOUT_MS;
   const hooks = options.hooksForTest ?? {};
+  const diagnostics = options.diagnostics;
   const capability = options.capability;
   const operators = options.operatorAddresses;
   if (capability.network !== options.network) throw new Error("svm outbound: the signing capability is for a different network");
@@ -623,9 +628,12 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
 
       // 2. 読み直して、保存した offer と完全一致する accepts があること。
       let challenge: SvmChallenge;
+      const challengeStartedAt = diagStart(diagnostics);
       try {
         challenge = await challengeOf(routeId, request.target, "pay_challenge");
-      } catch {
+      } catch (error) {
+        // 固定の分類だけ（`SvmChallengeError.reason` のうち動的の 9 つと同じ名前のもの、`TransportError.code`、ほかは `challenge_invalid`）。
+        recordChallengeFailure(diagnostics, error, error instanceof SvmChallengeError && error.reason !== "unreadable" ? error.reason : undefined, challengeStartedAt);
         return notSent("destination_challenge_unreadable");
       }
       const current = challenge.accepts.find((entry) => stableJson(entry) === approvedJson);
@@ -670,37 +678,50 @@ export function createX402SvmOutbound(options: X402SvmOutboundOptions): X402SvmO
       try {
         signature = Uint8Array.from(capability.sign(Uint8Array.from(snapshot)));
       } catch {
+        recordSignNotSent(diagnostics, "destination_not_signed");
         return notSent("destination_not_signed");
       }
-      if (!verifySvmSignature(signature, snapshot, capability.address)) return notSent("destination_not_signed");
+      if (!verifySvmSignature(signature, snapshot, capability.address)) {
+        recordSignNotSent(diagnostics, "destination_not_signed");
+        return notSent("destination_not_signed");
+      }
       hooks.afterSign?.();
 
       // 11. wire の組み立てと再検査（snapshot との一致＋受信の検査）。
       let wire = assembleSvmWire(snapshot, expected, signature);
       if (hooks.wire !== undefined) wire = hooks.wire(wire);
       const recheck = recheckSvmWire(wire, snapshot, signature, expected, approved.payTo);
-      if (!recheck.ok) return notSent("destination_payload_mismatch");
+      if (!recheck.ok) {
+        recordSignNotSent(diagnostics, "destination_payload_mismatch");
+        return notSent("destination_payload_mismatch");
+      }
 
       // 13 の封筒を先に組み（ヘッダの符号化）、12. **送出の委譲の直前**に承認の期限（FR-36）。署名だけでは資金は動かない。
       const accepted = JSON.parse(JSON.stringify(current)) as Record<string, unknown>;
       const payload = { x402Version: 2, resource: challenge.resource, accepted, payload: { transaction: Buffer.from(wire).toString("base64") } };
       const paymentHeaders = new x402HTTPClient(new x402Client()).encodePaymentSignatureHeader(payload as never);
-      if (!(now() < request.deadlineMs)) return notSent("destination_deadline");
+      if (!(now() < request.deadlineMs)) {
+        recordSignNotSent(diagnostics, "destination_deadline");
+        return notSent("destination_deadline");
+      }
       hooks.beforeSend?.();
 
       // 13. 送出（1 回だけ）。
       const payCtx = { routeId, operation: "pay" };
       const transport = request.target === undefined ? options.transport : dynamic!.transport;
       const url = request.target === undefined ? options.upstreams[routeId]! : request.target.url;
+      const payDiagnostics: PayDiagnostics | undefined = outboundDiagnosticsEnabled(diagnostics) ? { sink: diagnostics, startedAt: diagStart(diagnostics) } : undefined;
       let response: Response;
       try {
         response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(paidTimeoutMs) }, payCtx);
-      } catch {
+      } catch (error) {
+        // 結果は変えず、分類だけを積む（送出の後。§12.3）。
+        recordPayTransportFailure(payDiagnostics, error, approved.network);
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
 
-      // 14. 領収（共有の表、SVM の form）。
-      return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
+      // 14. 領収（共有の表、SVM の form）。`dest_sign`・`dest_pay_request` は結果を決めた後で積む。
+      return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx, diagnostics: payDiagnostics });
     },
   };
 }

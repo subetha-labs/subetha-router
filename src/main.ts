@@ -785,6 +785,8 @@ export function composeRails(
         rebuildSignatures: rebuild,
         ...(rebuild ? { tokenDomains: tokenDomainsFor(pair.network) } : {}),
         ...dynamicOptionsFor("x402", pair.network),
+        // 送信の段の診断（タスク R-4）。動的の経路にも同じ sink が渡る。無ければ何も記録しない。
+        ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       });
       continue;
     }
@@ -820,6 +822,7 @@ export function composeRails(
         tokenProgram: known.tokenProgram,
         ...(dynamicTransport === undefined || Object.keys(ownProfiles).length === 0 ? {} : { dynamic: { profiles: ownProfiles, transport: dynamicTransport, denyHosts } }),
         ...(capabilities.svmOutboundHooksForTest === undefined ? {} : { hooksForTest: capabilities.svmOutboundHooksForTest }),
+        ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       });
       rails[key] = svmRail;
       // 起動時の非同期の準備（Router の ATA・運用者の ATA・静的の宛先 ATA の検査）。`startRouter` が core を作る前に待つ。

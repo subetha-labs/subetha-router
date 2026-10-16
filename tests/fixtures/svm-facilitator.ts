@@ -8,6 +8,7 @@ import https from "node:https";
 
 import {
   address,
+  createKeyPairFromPrivateKeyBytes,
   generateKeyPair,
   getAddressFromPublicKey,
   getBase64Decoder,
@@ -74,14 +75,14 @@ export function supportedKind(network: string, feePayer: string, extra: Record<s
   return { x402Version: 2, scheme: "exact", network, extra: { feePayer, ...extra } };
 }
 
-/** fee payer の鍵を毎回の乱数で作る（返すのはアドレスと、署名の closure）。 */
-async function feePayerKeys(): Promise<{ address: Address; keyPair: Awaited<ReturnType<typeof generateKeyPair>> }> {
-  const keyPair = await generateKeyPair();
+/** fee payer の鍵を毎回の乱数で作る（返すのはアドレスと、署名の closure）。`seed` があればその 32 バイトから（決定的な比較の試験用）。 */
+async function feePayerKeys(seed?: Uint8Array): Promise<{ address: Address; keyPair: Awaited<ReturnType<typeof generateKeyPair>> }> {
+  const keyPair = seed === undefined ? await generateKeyPair() : await createKeyPairFromPrivateKeyBytes(Uint8Array.from(seed));
   return { address: await getAddressFromPublicKey(keyPair.publicKey), keyPair };
 }
 
-export async function startSvmFacilitator(tls: TlsMaterial, network: string, feePayerOverride?: string, host = "facilitator.provider.test"): Promise<SvmFacilitator> {
-  const keys = await feePayerKeys();
+export async function startSvmFacilitator(tls: TlsMaterial, network: string, feePayerOverride?: string, host = "facilitator.provider.test", feePayerSeed?: Uint8Array): Promise<SvmFacilitator> {
+  const keys = await feePayerKeys(feePayerSeed);
   const feePayer = feePayerOverride ?? String(keys.address);
   const state: SvmFacilitatorState = {
     kinds: [supportedKind(network, feePayer)],

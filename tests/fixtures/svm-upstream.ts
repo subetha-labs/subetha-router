@@ -40,7 +40,7 @@ export interface SvmUpstreamState {
   /** この回数までの 402 は待たない（例: 2 なら quote と purchase の受信前の読取は即答し、deliver の読み直し（3 回目）だけ待つ）。 */
   challengeDelayAfter: number;
   /** 支払いつきの要求の扱い。 */
-  payMode: "settle" | "verify-only" | "status-500" | "status-404" | "no-receipt-200" | "receipt-then-502" | "drop-after-settle" | "payer-mismatch" | "receipt-only";
+  payMode: "settle" | "verify-only" | "status-500" | "status-404" | "no-receipt-200" | "receipt-then-502" | "drop-after-settle" | "payer-mismatch" | "receipt-only" | "receipt-then-reset";
   /** 200 の本文。 */
   body: unknown;
   /** 支払いつきの要求に答えるまでの待ち（ミリ秒）。 */
@@ -194,6 +194,13 @@ export async function startSvmUpstream(tls: TlsMaterial, facilitator: { port: nu
       const receipt: Record<string, unknown> = { success: true, transaction, network, ...(payer === undefined ? {} : { payer }) };
       if (state.payMode === "receipt-then-502") return reply(502, receipt, JSON.stringify({ error: "no data" }));
       if (state.payMode === "receipt-only") return reply(200, receipt, "");
+      if (state.payMode === "receipt-then-reset") {
+        // 整合した領収の 200 の headers と本文の一部を送り、接続を切る（本文の読み取りの失敗。タスク R-4）。
+        response.writeHead(200, { "content-type": "application/json", "PAYMENT-RESPONSE": encodePaymentResponseHeader(receipt as never) });
+        response.write('{"ok":true,"pad":"');
+        setTimeout(() => request.socket.destroy(), 20);
+        return;
+      }
       return reply(200, receipt, JSON.stringify(state.body));
     })();
   });
