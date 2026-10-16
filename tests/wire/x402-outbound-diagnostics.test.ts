@@ -196,57 +196,113 @@ describe("動的 EVM（本番の guarded transport と門）: §8.2 の 3 通り
 
 /* ──────────────────────────────────────────────────────────────────────────────
  * SVM（共有の paidOutcomeOf、cid は書かない）
+ *
+ * 1 つの harness（facilitator・RPC・Provider・署名器の seed・transport が同じ）の上に sink だけを替えた 3 つの rail を作り、同じ paymentId・
+ * 同じ時計・新しい予約の口で 1 回ずつ払う。ed25519 の署名は決定的なので、PayResult の全体（本文・txRef・receiptRef）と、transport の要求の
+ * 記録（順・方法・path・ヘッダの名前・ヘッダの値と本文の hash）と report の呼び出しが 3 通りで同じであることを比べる。
  * ────────────────────────────────────────────────────────────────────────────── */
 
-async function svmHarness(sink: DiagnosticsSink | undefined, staticRoute = true): Promise<SvmHarness> {
-  return svmHarnessIn({ TLS, closers }, { staticRoute, ...(sink === undefined ? {} : { diagnostics: sink }) });
-}
+const SVM_PAYMENT_ID = "11111111-2222-4333-8444-000000000999";
 
 type SvmMode = SvmHarness["upstream"]["state"]["payMode"];
 
-async function runSvm(sink: DiagnosticsSink | undefined, arrange: (h: SvmHarness) => void, dynamic = false): Promise<{ result: PayResult; paid: number; challenges: number }> {
-  const h = await svmHarness(sink, !dynamic);
-  const routeId = dynamic ? SVM_PROFILE_ID : ROUTE;
-  const target = dynamic ? { url: SVM_URL_A, method: "GET" as const } : undefined;
-  const offer = (await h.rail.readChallenge(routeId, target))[0]!;
-  arrange(h);
-  const result = await h.rail.pay(requestOf(h, offer, { routeId, ...(target === undefined ? {} : { target }) }));
-  return { result, paid: h.upstream.seen.paid.length, challenges: h.upstream.seen.challenges };
+interface SvmRun {
+  readonly result: PayResult;
+  readonly trace: readonly string[];
+  readonly paid: number;
+  readonly signs: number;
 }
 
-describe("SVM: dest_sign・dest_pay_request（3 通りで結果と要求の数が同じ）", () => {
-  const cases: ReadonlyArray<readonly [string, SvmMode, PayResult["outcome"], Record<string, unknown>]> = [
-    ["成功", "settle", "paid", { httpStatus: 200, receipt: "ok", receiptHeader: "payment-response" }],
-    ["500", "status-500", "unknown", { httpStatus: 500, receipt: "absent", receiptHeader: "none" }],
-    ["領収の無い 200", "no-receipt-200", "unknown", { httpStatus: 200, receipt: "absent", receiptHeader: "none" }],
-    ["payer 違い", "payer-mismatch", "unknown", { httpStatus: 200, receipt: "payer_mismatch", receiptHeader: "payment-response" }],
-    ["verify の後の 402", "verify-only", "rejected", { httpStatus: 402, receipt: "absent", receiptHeader: "none" }],
+interface SvmScenario {
+  readonly mode?: SvmMode;
+  readonly dynamic?: boolean;
+  /** 払う直前の準備（署名器の mode・hook・challenge の状態）。毎回の run で呼ぶ。 */
+  readonly arrange?: (h: SvmHarness, baseNow: number) => void;
+}
+
+/** 3 通りで同じ鍵（試験用の決まった seed。資金は無い）。 */
+const SVM_SEEDS = { router: new Uint8Array(32).fill(0x31), provider: new Uint8Array(32).fill(0x32), feePayer: new Uint8Array(32).fill(0x33) };
+
+async function runSvmThreeWay(scenario: SvmScenario): Promise<{ runs: SvmRun[]; recorder: ReturnType<typeof recordingDiagnostics>; thrower: ReturnType<typeof throwingDiagnostics> }> {
+  const dynamic = scenario.dynamic === true;
+  const recorder = recordingDiagnostics();
+  const thrower = throwingDiagnostics();
+  const baseNow = Date.now();
+  const routeId = dynamic ? SVM_PROFILE_ID : ROUTE;
+  const target = dynamic ? { url: SVM_URL_A, method: "GET" as const } : undefined;
+  const runs: SvmRun[] = [];
+  for (const sink of [undefined, recorder, thrower]) {
+    // run ごとに新しい fixture（facilitator の二重決済の検査を持ち越さない）。鍵・fee payer・Provider は seed で同じ。
+    const h = await svmHarnessIn({ TLS, closers }, { staticRoute: !dynamic, seeds: SVM_SEEDS, ...(sink === undefined ? {} : { diagnostics: sink }) });
+    h.clock.now = baseNow;
+    h.upstream.state.payMode = scenario.mode ?? "settle";
+    h.trace.on = true;
+    const offer = (await h.rail.readChallenge(routeId, target))[0]!;
+    scenario.arrange?.(h, baseNow);
+    const result = await h.rail.pay(requestOf(h, offer, { routeId, paymentId: SVM_PAYMENT_ID, deadlineMs: baseNow + 600_000, ...(target === undefined ? {} : { target }) }));
+    // 本文の読み取りの失敗の report などが届くのを待つ。
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    h.trace.on = false;
+    runs.push({ result, trace: [...h.trace.lines], paid: h.upstream.seen.paid.length, signs: h.signer.signCount() });
+  }
+  return { runs, recorder, thrower };
+}
+
+describe("SVM: §8.2 の 3 通り（PayResult の全体・要求の記録・report が同じ）と記録", () => {
+  const signed = { stage: "dest_sign", outcome: "signed" };
+  const cases: ReadonlyArray<readonly [string, SvmScenario, Partial<PayResult> & { outcome: PayResult["outcome"] }, Array<Record<string, unknown>>]> = [
+    ["成功（静的）", {}, { outcome: "paid" }, [signed, { stage: "dest_pay_request", httpStatus: 200, receipt: "ok", receiptHeader: "payment-response" }]],
+    ["成功（動的）", { dynamic: true }, { outcome: "paid" }, [signed, { stage: "dest_pay_request", httpStatus: 200, receipt: "ok", receiptHeader: "payment-response" }]],
+    ["500", { mode: "status-500" }, { outcome: "unknown", reason: "destination_pay_unknown" }, [signed, { stage: "dest_pay_request", httpStatus: 500, receipt: "absent", receiptHeader: "none" }]],
+    ["領収の無い 200", { mode: "no-receipt-200" }, { outcome: "unknown", reason: "destination_receipt_unverified" }, [signed, { stage: "dest_pay_request", httpStatus: 200, receipt: "absent", receiptHeader: "none" }]],
+    ["payer 違い", { mode: "payer-mismatch" }, { outcome: "unknown", reason: "destination_receipt_payer_mismatch" }, [signed, { stage: "dest_pay_request", httpStatus: 200, receipt: "payer_mismatch", receiptHeader: "payment-response" }]],
+    ["verify の後の 402", { mode: "verify-only" }, { outcome: "rejected", reason: "destination_rejected" }, [signed, { stage: "dest_pay_request", httpStatus: 402, receipt: "absent", receiptHeader: "none" }]],
+    ["署名の拒否（署名器が投げる）", { arrange: (h) => void (h.signer.mode = "throw") }, { outcome: "not_sent", reason: "destination_not_signed" }, [{ stage: "dest_sign", outcome: "not_sent", code: "destination_not_signed" }]],
+    [
+      "payload の食い違い（wire の改変）",
+      {
+        arrange: (h) =>
+          void (h.hooks.wire = (bytes) => {
+            const copy = Uint8Array.from(bytes);
+            copy[copy.length - 1] = (copy[copy.length - 1] ?? 0) ^ 1;
+            return copy;
+          }),
+      },
+      { outcome: "not_sent", reason: "destination_payload_mismatch" },
+      [{ stage: "dest_sign", outcome: "not_sent", code: "destination_payload_mismatch" }],
+    ],
+    ["署名の後・送出の前の期限", { arrange: (h, baseNow) => void (h.hooks.afterSign = () => void (h.clock.now = baseNow + 700_000)) }, { outcome: "not_sent", reason: "destination_deadline" }, [{ stage: "dest_sign", outcome: "not_sent", code: "destination_deadline" }]],
+    ["有料の要求の transport の失敗（settle の後に接続を切る）", { mode: "drop-after-settle" }, { outcome: "unknown", reason: "destination_pay_unknown" }, [signed, { stage: "dest_pay_request", transport: "transport_failed" }]],
+    ["本文の読み取りの失敗（領収の 200 の本文の途中で切る）", { mode: "receipt-then-reset" }, { outcome: "paid_no_data", reason: "paid_data_unavailable" }, [signed, { stage: "dest_pay_request", httpStatus: 200, receipt: "ok", receiptHeader: "payment-response", transport: "transport_failed", code: "paid_data_unavailable" }]],
   ];
-  test.each(cases)("%s", async (_name, mode, outcome, record) => {
-    const arrange = (h: SvmHarness): void => void (h.upstream.state.payMode = mode);
-    const a = await runSvm(undefined, arrange);
-    const recorder = recordingDiagnostics();
-    const b = await runSvm(recorder, arrange);
-    const c = await runSvm(throwingDiagnostics(), arrange);
-    expect(a.result.outcome).toBe(outcome);
-    // SVM の結果は署名（乱数の seed）ごとに txRef・receiptRef が変わる。outcome・reason と要求の数を比べる。
-    const shape = (run: typeof a) => ({ outcome: run.result.outcome, reason: (run.result as { reason?: string }).reason, paid: run.paid, challenges: run.challenges });
-    expect(shape(b)).toEqual(shape(a));
-    expect(shape(c)).toEqual(shape(a));
+
+  test.each(cases)("%s", async (_name, scenario, result, expected) => {
+    const { runs, recorder, thrower } = await runSvmThreeWay(scenario);
+    const [a, b, c] = runs as [SvmRun, SvmRun, SvmRun];
+    expect(a.result).toMatchObject(result);
+    // 比べる PayResult は全体（本文・txRef・receiptRef を含む）。
+    if (a.result.outcome === "paid") expect(a.result).toMatchObject({ body: expect.anything(), txRef: expect.any(String), receiptRef: expect.any(String) });
+    if (a.result.outcome === "paid_no_data") expect(a.result).toMatchObject({ receiptRef: expect.any(String) });
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
+    expect(a.trace.length).toBeGreaterThan(0);
     expect(recorder.rejected()).toBe(0);
     const records = recorder.records();
-    expect(view(records)).toEqual([{ stage: "dest_sign", outcome: "signed" }, { stage: "dest_pay_request", ...record }]);
+    expect(view(records)).toEqual(expected);
     for (const r of records) expect(r.cid).toBeUndefined();
+    expect(thrower.calls).toBe(expected.length);
   });
 
   test.each([
     ["静的（読み取りの失敗は challenge_invalid）", false, { code: "challenge_invalid" }],
     ["動的（固定の理由 status）", true, { code: "status" }],
-  ] as const)("challenge の読み直しの失敗: %s", async (_name, dynamic, expected) => {
-    const recorder = recordingDiagnostics();
-    const run = await runSvm(recorder, (h) => void (h.upstream.state.challengeStatus = 500), dynamic);
-    expect(run.result).toEqual({ outcome: "not_sent", reason: "destination_challenge_unreadable" });
-    expect(run.paid).toBe(0);
+  ] as const)("challenge の読み直しの失敗: %s（3 通りで同じ）", async (_name, dynamic, expected) => {
+    const { runs, recorder } = await runSvmThreeWay({ dynamic, arrange: (h) => void (h.upstream.state.challengeStatus = 500) });
+    const [a, b, c] = runs as [SvmRun, SvmRun, SvmRun];
+    expect(a.result).toEqual({ outcome: "not_sent", reason: "destination_challenge_unreadable" });
+    expect(a.paid).toBe(0);
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
     expect(view(recorder.records())).toEqual([{ stage: "dest_challenge", ...expected }]);
   });
 });

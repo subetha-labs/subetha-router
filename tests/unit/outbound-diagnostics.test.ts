@@ -486,6 +486,22 @@ describe("静的 Base: SDK が既に読んだ本文の理由と processResponse 
     expect(view(records)[1]).toMatchObject({ httpStatus: 402, receipt: "absent", reasonField: "error", reasonSource: "response_body", reason: "payment_invalid" });
   });
 
+  test("402 + errorReason の無い success:false の領収 + 本文 {error} → 本文の理由に落ちる（absent で隠さない）", async () => {
+    const { records } = await threeWay(baseRail, (env) => {
+      env.upstream.pay = () => ({ status: 402, receipt: { success: false }, body: JSON.stringify({ error: "payment_invalid" }) });
+    });
+    expect(view(records)[1]).toMatchObject({ receipt: "failed", reasonField: "error", reasonSource: "response_body", reason: "payment_invalid" });
+  });
+
+  test("402 + errorReason の無い success:false の領収 + PAYMENT-REQUIRED.error → PAYMENT-REQUIRED の理由（共有の表の経路でも）", async () => {
+    for (const make of [baseRail, dynamicRail, arcRail]) {
+      const { records } = await threeWay(make, (env) => {
+        env.upstream.pay = () => ({ status: 402, receipt: { success: false }, paymentRequired: required("payment_invalid") });
+      });
+      expect(view(records)[1]).toMatchObject({ receipt: "failed", reasonSource: "payment_required_header", reason: "payment_invalid" });
+    }
+  });
+
   test("502 + 本文 {invalidReason}（PAYMENT-REQUIRED 無し）", async () => {
     const { run, records } = await threeWay(baseRail, (env) => {
       env.upstream.pay = () => ({ status: 502, body: JSON.stringify({ invalidReason: "invalid_exact_evm_insufficient_balance", other: CANARY }) });

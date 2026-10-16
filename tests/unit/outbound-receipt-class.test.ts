@@ -195,6 +195,27 @@ describe("理由の後回しの分類（§4.3・§12.2）", () => {
     expect(deferredReason({ ...evm, receiptHeader: "payment-response", rawReceiptHeader: enc({ success: false }) })).toMatchObject({ reason: "absent" });
   });
 
+  test("failed の領収に errorReason が無い: PAYMENT-REQUIRED.error → 本文の理由 → absent の順に落ちる", () => {
+    const failedNoReason = { ...evm, receiptHeader: "payment-response" as const, rawReceiptHeader: enc({ success: false }) };
+    const failedNullReason = { ...evm, receiptHeader: "payment-response" as const, rawReceiptHeader: enc({ success: false, errorReason: null }) };
+    const body = { reasonField: "error" as const, reasonSource: "response_body" as const, rawReason: "facilitator_unavailable" };
+    for (const failed of [failedNoReason, failedNullReason]) {
+      // PAYMENT-REQUIRED.error に値がある → それ
+      expect(deferredReason({ ...failed, rawPaymentRequired: required("payment_invalid"), ...body })).toEqual({ receipt: "failed", reasonField: "error", reasonSource: "payment_required_header", reason: "payment_invalid" });
+      // PAYMENT-REQUIRED に error が無い → 本文の理由
+      expect(deferredReason({ ...failed, rawPaymentRequired: required(), ...body })).toEqual({ receipt: "failed", reasonField: "error", reasonSource: "response_body", reason: "facilitator_unavailable" });
+      // PAYMENT-REQUIRED が壊れている → 本文の理由
+      expect(deferredReason({ ...failed, rawPaymentRequired: "%%", ...body })).toEqual({ receipt: "failed", reasonField: "error", reasonSource: "response_body", reason: "facilitator_unavailable" });
+      // PAYMENT-REQUIRED 無し → 本文の理由
+      expect(deferredReason({ ...failed, ...body })).toEqual({ receipt: "failed", reasonField: "error", reasonSource: "response_body", reason: "facilitator_unavailable" });
+      // どれにも値が無い → 領収の errorReason の absent
+      expect(deferredReason({ ...failed, rawPaymentRequired: required() })).toEqual({ receipt: "failed", reasonField: "errorReason", reasonSource: "payment_response_header", reason: "absent" });
+      expect(deferredReason({ ...failed })).toEqual({ receipt: "failed", reasonField: "errorReason", reasonSource: "payment_response_header", reason: "absent" });
+    }
+    // 値のある errorReason は PAYMENT-REQUIRED・本文より先
+    expect(deferredReason({ ...evm, receiptHeader: "payment-response", rawReceiptHeader: enc({ success: false, errorReason: "invalid_exact_evm_transaction_failed" }), rawPaymentRequired: required("payment_invalid"), ...body })).toMatchObject({ reasonSource: "payment_response_header", reason: "invalid_exact_evm_transaction_failed" });
+  });
+
   test("既に読んだ本文の理由: ヘッダに理由が無いときだけ（PAYMENT-REQUIRED に error があればそちら）", () => {
     const body = { reasonField: "error" as const, reasonSource: "response_body" as const, rawReason: "facilitator_unavailable" };
     expect(deferredReason({ ...evm, ...body })).toEqual({ receipt: "absent", reasonField: "error", reasonSource: "response_body", reason: "facilitator_unavailable" });
@@ -202,9 +223,32 @@ describe("理由の後回しの分類（§4.3・§12.2）", () => {
     expect(deferredReason({ ...evm, ...body, rawPaymentRequired: required("payment_invalid") })).toEqual({ receipt: "absent", reasonField: "error", reasonSource: "payment_required_header", reason: "payment_invalid" });
   });
 
-  test("領収のヘッダが 8 KiB を超えたら receipt を書かない（分類しない）。型の違う値は malformed", () => {
-    expect(deferredReason({ ...evm, receiptHeader: "payment-response", rawReceiptHeader: "A".repeat(5000) })).toEqual({});
+  test("領収のヘッダが写しの上限（8 KiB の見積り = 4,096 code unit）を超えたら §14.2 の印で malformed（写さない・decode しない）。型の違う値も malformed", () => {
+    // 上限ちょうどは写して分類する（4,096 code unit = 8,192 バイトの見積り）。1 つ超えたら印だけ。
+    const atLimit = "A".repeat(4096);
+    expect(snapshotCapture({ stage: "dest_pay_request", rawReceiptHeader: atLimit }).value["rawReceiptHeader"]).toBe(atLimit);
+    expect(deferredReason({ ...evm, receiptHeader: "payment-response", rawReceiptHeader: atLimit })).toEqual({ receipt: "malformed" });
+    const over = "A".repeat(4097);
+    expect(typeof snapshotCapture({ stage: "dest_pay_request", rawReceiptHeader: over }).value["rawReceiptHeader"]).toBe("symbol");
+    expect(deferredReason({ ...evm, receiptHeader: "payment-response", rawReceiptHeader: over })).toEqual({ receipt: "malformed" });
     expect(deferredReason({ ...evm, receiptHeader: "payment-response", rawReceiptHeader: 5 as unknown as string })).toEqual({ receipt: "malformed" });
+  });
+
+  test("大きすぎた領収は ok・payer_mismatch にならない（receiptOf が settled でも none でも。transport の上限 32 KiB の内側の大きさ）", () => {
+    const pad = "p".repeat(6_000);
+    const settled = enc({ success: true, network: EVM_OFFER.network, transaction: EVM_TX, payer: EVM_SIGNER, pad });
+    const none = enc({ success: true, network: "eip155:84532", transaction: EVM_TX, pad });
+    const payerMismatch = enc({ success: true, network: EVM_OFFER.network, transaction: EVM_TX, payer: "0x00000000000000000000000000000000000000C1", pad });
+    for (const [header, kind] of [
+      [settled, "settled"],
+      [none, "none"],
+      [payerMismatch, "payer_mismatch"],
+    ] as const) {
+      expect(header.length).toBeGreaterThan(4096);
+      expect(header.length).toBeLessThan(32 * 1024);
+      expect(receiptOf(responseWith({ "PAYMENT-RESPONSE": header }), EVM_OFFER, EVM_FORM).kind).toBe(kind);
+      expect(deferredClass(header, "evm", "payment-response")).toBe("malformed");
+    }
   });
 
   test("形の外の receiptForm・署名者だけの写しは行ごと捨てる", () => {

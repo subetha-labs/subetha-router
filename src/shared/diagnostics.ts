@@ -986,10 +986,12 @@ interface DerivedDestinationFields {
 
 /**
  * 送信の領収と理由を、写した生の値から分類する（§4.3、§12.2。後回しの処理だけで呼ぶ）。
- * - `receiptForm` があれば `receipt`: ヘッダが無ければ `absent`、8 KiB を超えていれば書かない、ほかは `receiptClassOfHeader`（`receiptOf` と同じ decoder・順）。
- * - 理由は 1 つだけ（優先の順）: (1) 領収が `failed` → その `errorReason`（`payment_response_header`）、(2) `PAYMENT-REQUIRED` を写していれば
- *   その `error`（`payment_required_header`。欄が無く、本文の理由を写していればそちら）、(3) 写した `rawReason`（静的の Base の既に読んだ本文など。
- *   欄・出どころは hook が書いたもの）。
+ * - `receiptForm` があれば `receipt`: ヘッダが無ければ `absent`、8 KiB を超えていれば（§14.2 の印 `OVERSIZE`。写していない・decode しない）
+ *   `malformed`、ほかは `receiptClassOfHeader`（`receiptOf` と同じ decoder・順）。大きすぎたヘッダは `ok` にも `payer_mismatch` にもならない。
+ * - 理由は 1 つだけ。値のある理由を優先する: (1) 領収が `failed` で `errorReason` に値がある → それ（`payment_response_header`）、
+ *   (2) `PAYMENT-REQUIRED` の `error` に値がある → それ（`payment_required_header`）、(3) 写した `rawReason`（静的の Base の既に読んだ本文など。
+ *   欄・出どころは hook が書いたもの）。どれにも値が無ければ、(4) 領収が `failed` なら `errorReason` の `absent`、(5) `PAYMENT-REQUIRED` を
+ *   写していればその `absent`・`malformed`。
  * 形の外（`receiptForm` が集合の外・署名者が無い）なら `undefined`（行ごと捨てる）。
  */
 function derivedDestinationFieldsOf(c: Record<string, unknown>): DerivedDestinationFields | undefined {
@@ -1001,33 +1003,30 @@ function derivedDestinationFieldsOf(c: Record<string, unknown>): DerivedDestinat
     if (form === undefined || typeof network !== "string") return undefined;
     const header = c["rawReceiptHeader"];
     if (header === undefined) out.receipt = "absent";
-    else if (header === INVALID) out.receipt = "malformed";
+    else if (header === INVALID || header === OVERSIZE) out.receipt = "malformed"; // §14.2: 大きすぎたヘッダは写さず印だけ（decode しない）
     else if (typeof header === "string") {
       const result = receiptClassOfHeader(header, network, form);
       out.receipt = result.receipt;
       if (result.receipt === "failed") failedReason = { raw: result.errorReason };
-    }
-    // OVERSIZE: 分類できない（`receipt` を書かない）。
+    } else return undefined;
   } else if (c["rawReceiptHeader"] !== undefined || c["receiptSigner"] !== undefined) {
     return undefined;
   }
-  if (failedReason !== undefined) {
-    return { ...out, reasonField: "errorReason", reasonSource: "payment_response_header", hasReason: true, rawReason: failedReason.raw };
-  }
+  const hasValue = (value: unknown): boolean => value !== undefined && value !== null;
+  const fromReceipt = (raw: unknown): DerivedDestinationFields => ({ ...out, reasonField: "errorReason", reasonSource: "payment_response_header", hasReason: true, rawReason: raw });
+  // (1) 値のある領収の errorReason
+  if (failedReason !== undefined && hasValue(failedReason.raw)) return fromReceipt(failedReason.raw);
   const required = c["rawPaymentRequired"];
-  if (required !== undefined) {
-    const header = required === OVERSIZE || required === INVALID ? undefined : (required as string);
-    const decoded = header === undefined ? ({ kind: "malformed" } as const) : paymentRequiredErrorOf(header);
-    const bodyReason = "rawReason" in c;
-    if (decoded.kind === "decoded" && !decoded.present && bodyReason) return out; // 本文の理由（hook が書いた欄・出どころ）を使う
-    return {
-      ...out,
-      reasonField: "error",
-      reasonSource: "payment_required_header",
-      hasReason: true,
-      rawReason: decoded.kind === "malformed" ? INVALID : decoded.present ? decoded.value : undefined,
-    };
-  }
+  const decoded =
+    required === undefined ? undefined : typeof required === "string" ? paymentRequiredErrorOf(required) : ({ kind: "malformed" } as const); // OVERSIZE・INVALID は decode しない
+  const fromRequired = (raw: unknown): DerivedDestinationFields => ({ ...out, reasonField: "error", reasonSource: "payment_required_header", hasReason: true, rawReason: raw });
+  // (2) 値のある PAYMENT-REQUIRED.error
+  if (decoded !== undefined && decoded.kind === "decoded" && decoded.present && hasValue(decoded.value)) return fromRequired(decoded.value);
+  // (3) 既に読んだ本文の理由（欄・出どころは hook が書いたもの）
+  if ("rawReason" in c && hasValue(c["rawReason"])) return out;
+  // (4)・(5) 値のある理由が無い: 見た欄の absent・malformed
+  if (failedReason !== undefined) return fromReceipt(failedReason.raw);
+  if (decoded !== undefined) return fromRequired(decoded.kind === "malformed" ? INVALID : decoded.value);
   return out;
 }
 
