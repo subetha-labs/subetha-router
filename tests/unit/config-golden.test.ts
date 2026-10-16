@@ -10,6 +10,10 @@
  *   同じ書き方で evm を `EVM_NONE` にすると `public-pre-evm.json` と byte 一致することを確かめてから書いた。
  *   G-4 の前との差分が追加だけ（36 本・3 区分・3 facilitator、子の env は 6 語と facilitator の URL）であることは `tests/unit/evm-hosted-config.test.ts`（SR-H2）が見る。
  * facilitator の env の値も試験用の固定値（gas 鍵 0x44…。Router の子の env にも golden にも出ない）。
+ *
+ * SubEtha（zUSDC）の受信のタスク T1（`docs/subetha-hosted-inbound-tasks.md`）: 3 つの golden を同じ入力・同じ書き方で書き直した。差分は 3 つとも
+ * `router.dynamic.denyHosts` に `zerc20-facilitator.subethalabs.com` が 1 語増えただけ（有効化に関係なく拒否する。要件 FR-3.4）。`subetha` は公開の定数で `false` なので、
+ * route・区分・子の env は変わらない。
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";

@@ -14,7 +14,7 @@ import { createRealEvmCapability } from "./real-evm-capability.js";
 import { KNOWN_NETWORKS, knownNetworkOf } from "../src/shared/networks.js";
 import { createRealMppCapability, defaultTempoRpcUrl, TEMPO_MODERATO_CHAIN_ID } from "./real-mpp-capability.js";
 import { createRealSvmCapability } from "./real-svm-capability.js";
-import { EVM_FACILITATOR_URL_ENV, EVM_TESTNETS, evmOf, HOSTED_EVM_CHAINS, INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, type EvmRailsActivation, type HostedEvmChain, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
+import { EVM_FACILITATOR_URL_ENV, EVM_TESTNETS, evmOf, HOSTED_EVM_CHAINS, INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, subethaOf, type EvmRailsActivation, type HostedEvmChain, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
 /** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`ACTIVATION_TOKENS` の部分集合。空 = すべて無効）。 */
@@ -48,7 +48,9 @@ const PAIR_TOKENS = [
 /** EVM testnet 3 つの token（hosted 設計 §5。`<短縮名>-in`・`<短縮名>-out`）。組の後ろに付ける（`evm` が全部 false なら 1 語も出ないので、既存の値は変わらない）。 */
 const EVM_TOKENS = HOSTED_EVM_CHAINS.flatMap((chain) => [`${chain}-in`, `${chain}-out`]);
 /** 内部 env の token（方向別。送信の設計 §6.1。組の 2 語は §13.1、EVM testnet 3 つの 6 語は hosted 設計 §5）。旧い `arc`・`solana` は受け付けない。 */
-const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc", ...EVM_TOKENS] as const;
+/** SubEtha（zUSDC）の受信の token（`docs/subetha-hosted-inbound-design.md` §4.1）。EVM の後ろに付ける（無効なら 1 語も出ないので、既存の値は変わらない）。送信の語は無い。 */
+const SUBETHA_TOKEN = "subetha-in";
+const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc", ...EVM_TOKENS, SUBETHA_TOKEN] as const;
 const ACTIVATION_TOKENS_TEXT = ACTIVATION_TOKENS.join(",");
 
 export function activationToEnv(activation: RailsActivation): string {
@@ -64,6 +66,7 @@ export function activationToEnv(activation: RailsActivation): string {
     if (evm[chain].inbound) tokens.push(`${chain}-in`);
     if (evm[chain].outbound) tokens.push(`${chain}-out`);
   }
+  if (subethaOf(activation).inbound) tokens.push(SUBETHA_TOKEN);
   return tokens.join(",");
 }
 
@@ -89,6 +92,8 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
     ...(pairs.arcToSol || pairs.solToArc ? { pairs } : {}),
     // EVM testnet 3 つも token があるときだけ欄を持つ（無い = 全部 false。`evmOf`）。
     ...(EVM_TOKENS.some((token) => seen.has(token)) ? { evm: evm as EvmRailsActivation } : {}),
+    // SubEtha の受信も token があるときだけ欄を持つ（無い = false。`subethaOf`）。
+    ...(seen.has(SUBETHA_TOKEN) ? { subetha: { inbound: true } } : {}),
   };
 }
 

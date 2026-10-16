@@ -675,7 +675,7 @@ describe("Solana の MPP の有効化（solanaMpp）: token・受取 owner・鍵
     expect(activationToEnv(RAILS_ACTIVATION)).toBe(PUBLIC_TOKENS);
     expect(activationFromEnv("")).toEqual(RAILS_NONE);
     for (const bad of ["solana-mpp", "solanampp-in", "solana-mpp-in,solana-mpp-in", "mpp-in"]) {
-      expect(() => activationFromEnv(bad), bad).toThrow(/must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc,rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out"/);
+      expect(() => activationFromEnv(bad), bad).toThrow(/must be a comma-separated subset of "arc-in,arc-out,solana-in,solana-out,solana-mpp-in,solana-mpp-out,arc-to-sol,sol-to-arc,rh-in,rh-out,arbsep-in,arbsep-out,hyperevm-in,hyperevm-out,subetha-in"/);
     }
   });
 

@@ -23,7 +23,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { activationFromEnv, activationToEnv } from "./rails-entry.js";
-import { evmOf, HOSTED_EVM_CHAINS, railActive, type RailsActivation } from "./remote-mcp-config.js";
+import { evmOf, HOSTED_EVM_CHAINS, railActive, subethaOf, type RailsActivation } from "./remote-mcp-config.js";
 import { publicJournalPathOf, startHost, type HostOptions, type RunningHost } from "./remote-mcp.js";
 
 export const ACCEPTANCE_PORT_ENV = "SUBETHA_ACCEPTANCE_PORT";
@@ -99,8 +99,9 @@ export function acceptanceOptionsOf(env: Readonly<Record<string, string | undefi
   // EVM testnet 3 つの token（`rh-in`・`rh-out`・`arbsep-in`・`arbsep-out`・`hyperevm-in`・`hyperevm-out`。hosted 設計 §4・§8.2 の G-3）も方向に数える。
   // どれかがあれば、公開の入口と同じく facilitator の子を Router の子より先に起動する（journal と lock は公開と同じ 1 つ: `evmFacilitatorJournalPathOf`）。
   const evm = evmOf(activation);
-  if (!railActive(activation) && !HOSTED_EVM_CHAINS.some((chain) => evm[chain].inbound || evm[chain].outbound)) {
-    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out, solana-mpp-in, solana-mpp-out, rh-in, rh-out, arbsep-in, arbsep-out, hyperevm-in, hyperevm-out (arc-to-sol / sol-to-arc only add the pair profiles)");
+  // SubEtha の受信（`subetha-in`。`docs/subetha-hosted-inbound-design.md` §4.1）も方向に数える（受け入れの AC-6・AC-7 は hosted の設定生成で subetha だけを有効にして起動する）。
+  if (!railActive(activation) && !HOSTED_EVM_CHAINS.some((chain) => evm[chain].inbound || evm[chain].outbound) && !subethaOf(activation).inbound) {
+    throw new Error("--rails must activate at least one of arc-in, arc-out, solana-in, solana-out, solana-mpp-in, solana-mpp-out, rh-in, rh-out, arbsep-in, arbsep-out, hyperevm-in, hyperevm-out, subetha-in (arc-to-sol / sol-to-arc only add the pair profiles)");
   }
   const journalPath = path.resolve(env[ACCEPTANCE_JOURNAL_ENV] ?? path.join(path.resolve("runtime"), "acceptance", "journal.ndjson"));
   if (sameJournal(journalPath, publicJournalPathOf(env))) {

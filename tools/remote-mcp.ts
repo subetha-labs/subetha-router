@@ -29,7 +29,7 @@ import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 import { diagnosticsChildEnvOf } from "./router-diagnostics.js";
-import { INBOUND, RAILS_ACTIVATION, routerConfigOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
+import { INBOUND, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
 function note(message: string): void {
@@ -313,7 +313,8 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
       ROUTER_PRINCIPAL_TOKENS: "judge:public",
       ROUTER_ADAPTER_MODE: "real",
-      ROUTER_SUBETHA_FACILITATOR_URL: INBOUND.facilitator,
+      // SubEtha（zUSDC）の受信が有効なら、その facilitator（設定生成が形を確かめ済み。設計 §4.1）。無効なら今までどおりの埋め草（subetha の route が無いので使われない）。
+      ROUTER_SUBETHA_FACILITATOR_URL: subethaFacilitatorUrlOf(env, options.activation) ?? INBOUND.facilitator,
       ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
       // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
       // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
