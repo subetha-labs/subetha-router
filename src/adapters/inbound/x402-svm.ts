@@ -499,8 +499,11 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
       const routeId = context?.routeId ?? "-";
       const { status, json, elapsedMs } = await post("/settle", requestTextOf(offer, credential), { routeId, operation: "facilitator_settle" }, settleTimeoutMs);
       // 診断の記録は結果を作った後（追跡があればその後）に 1 回。分類は facilitator の応答の形だけ（追跡の結果は core の記録が持つ）。
-      const record = (result: SettleResult): SettleResult => {
+      const emitResponse = (): void => {
         if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: "x402", network: offer.network, response: settleResponseClassOf(offer, status, json), httpStatus: status, json, elapsedMs });
+      };
+      const record = (result: SettleResult): SettleResult => {
+        emitResponse();
         return result;
       };
       const wellFormedSuccess =
@@ -520,7 +523,15 @@ export function createX402SvmInbound(options: X402SvmInboundOptions): InboundRai
       if (signature === undefined) {
         return record({ outcome: "unknown", reason: "source_settle_unknown" });
       }
-      return record(await followSignature(signature, routeId));
+      // 追跡が投げても（sleep・report・onDiagnostic の失敗）、既に受け取った facilitator の応答の記録は残す。例外はそのまま投げ直す。
+      let followed: SettleResult;
+      try {
+        followed = await followSignature(signature, routeId);
+      } catch (error) {
+        emitResponse();
+        throw error;
+      }
+      return record(followed);
     },
   };
 }

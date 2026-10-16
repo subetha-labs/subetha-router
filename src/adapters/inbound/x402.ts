@@ -35,7 +35,7 @@ import type {
 } from "../../ports/inbound.js";
 import { readBoundedBody } from "../../net/bounded-body.js";
 import type { DiagnosticsSink } from "../../shared/diagnostics.js";
-import { emitInboundRoundTrip, evmInboundCidInputOf, inboundDiagnosticsOn, verifyResponseClassOf, withInboundDiagScope, type SettleResponseClass } from "./inbound-diagnostics.js";
+import { emitInboundRoundTrip, evmInboundCidInputOfRequest, inboundDiagnosticsOn, verifyResponseClassOf, withInboundDiagScope, type SettleResponseClass } from "./inbound-diagnostics.js";
 import { bodyHashOf } from "./seller-proof.js";
 
 /** kind `circle` の facilitator の応答の上限（バイト）。verify・settle の JSON は数百バイト。 */
@@ -349,8 +349,8 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
       });
-      // 診断の cid の入力は facilitator を呼ぶ前に作り、段の scope に入れる（設計 §12.6。無効なら読まない）。
-      return withInboundDiagScope(diagnostics, diagOn ? evmInboundCidInputOf(offer, credential) : undefined, async () => {
+      // 診断の cid の入力は facilitator を呼ぶ前に、送る bytes（requestText）から作って段の scope に入れる（設計 §12.6。無効なら作らない）。
+      return withInboundDiagScope(diagnostics, diagOn ? evmInboundCidInputOfRequest(requestText) : undefined, async () => {
         const proof = await proofFor("verify", requestText);
         if (!proof.ok) {
           // 証明が作れない: 要求を出さない（接続 0）。
@@ -374,7 +374,7 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
       });
-      return withInboundDiagScope(diagnostics, diagOn ? evmInboundCidInputOf(offer, credential) : undefined, async () => {
+      return withInboundDiagScope(diagnostics, diagOn ? evmInboundCidInputOfRequest(requestText) : undefined, async () => {
         const proof = await proofFor("settle", requestText);
         if (!proof.ok) {
           // 要求を**出す前**の失敗だけが `rejected`（設計 §6）。

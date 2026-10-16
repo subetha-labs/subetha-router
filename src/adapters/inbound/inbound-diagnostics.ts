@@ -5,13 +5,12 @@
  * - **本文は新しく読まない**（§12.2）: 使うのは `post` が既に読んで parse した JSON と HTTP の status だけ。
  * - **hook は固定の欄の写しを 1 回 push するだけ**（§13.1・§15.1）: 理由の生の値（`invalidReason`・`errorReason` の参照）を `rawReason` に置き、
  *   表の分類・hash は後回しの処理（`buildDiagRecord`）に任せる。`invalidMessage`・`errorMessage`・`error` など自由な文の欄は読まない（SR-R1）。
- * - **cid の入力は facilitator を呼ぶ前に** credential から作って段の scope に入れる（§12.6）。throw の経路（transport の出来事）も
+ * - **cid の入力は facilitator を呼ぶ前に** 送る要求の bytes から作って段の scope に入れる（§12.6）。throw の経路（transport の出来事）も
  *   facilitator の記録と結びつく。形が違えば入れない（欄を書かない）。
- * - sink が無い（`undefined`・`NOOP`）なら何もしない: scope を作らず、時刻も読まず、credential も追加で読まない（§8.2 の比較）。
+ * - sink が無い（`undefined`・`NOOP`）なら何もしない: scope を作らず、時刻も読まず、要求の本文も parse しない（§8.2 の比較）。credential は有効でも読み直さない。
  * - `post` が throw したとき adapter は記録しない（core が `transport` の分類を残す。§4.2）。
  */
 import { NOOP_DIAGNOSTICS, safeEmit, withDiagnosticScope, type DiagCapture, type DiagCidInput, type DiagnosticsSink } from "../../shared/diagnostics.js";
-import type { InboundOffer, PaymentCredential } from "../../ports/inbound.js";
 
 /** 診断が有効か（`undefined`・`NOOP` は無効）。 */
 export function inboundDiagnosticsOn(sink: DiagnosticsSink | undefined): sink is DiagnosticsSink {
@@ -36,15 +35,24 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 
 /**
- * EVM の受信の cid の入力（§5.2）: facilitator に送る要求と同じ値（`paymentRequirements` の `network`・`asset` は Router 発行の offer、
- * `authorization` の `from`・`nonce` は credential の payload そのまま）。形が違えば `undefined`。getter・proxy が投げても `undefined`。
+ * EVM の受信の cid の入力（§5.2）: **送る要求の bytes**（1 度だけ直列化した `requestText`）から読む。自前の facilitator の `diagCidInputOf` が
+ * 受け取った本文から読むのと同じ値・同じ形の検査（`paymentRequirements` の `network`・`asset`、`paymentPayload.payload.authorization` の
+ * `from`・`nonce`）。credential を読み直さない（getter・proxy が読むたびに違う値を返しても、cid は送った bytes に束縛される）。
+ * 呼ぶのは診断が有効なときだけ（parse はそのときだけ）。形が違えば・parse できなければ `undefined`。
  */
-export function evmInboundCidInputOf(offer: InboundOffer, credential: PaymentCredential): DiagCidInput | undefined {
+export function evmInboundCidInputOfRequest(requestText: string): DiagCidInput | undefined {
   try {
-    const network = offer.network;
-    const asset = offer.asset;
-    const authorization = credential.payload["authorization"];
+    const body: unknown = JSON.parse(requestText);
+    if (!isRecord(body)) return undefined;
+    const requirements = body["paymentRequirements"];
+    const paymentPayload = body["paymentPayload"];
+    if (!isRecord(requirements) || !isRecord(paymentPayload)) return undefined;
+    const inner = paymentPayload["payload"];
+    if (!isRecord(inner)) return undefined;
+    const authorization = inner["authorization"];
     if (!isRecord(authorization)) return undefined;
+    const network = requirements["network"];
+    const asset = requirements["asset"];
     const from = authorization["from"];
     const nonce = authorization["nonce"];
     if (typeof network !== "string" || !DIAG_NETWORK_SHAPE.test(network)) return undefined;

@@ -299,6 +299,11 @@ const CASES: readonly Case[] = [
   { name: "settle 200 で JSON でない", stage: "settle", reply: () => ({ status: 200, text: `${CANARY}` }), result: () => unknownSettle, record: () => ({ stage: "source_settle", httpStatus: 200, response: "not_json" }), requests: 1 },
   { name: "settle 表にある理由（success:false、errorMessage は読まない）", stage: "settle", reply: (k) => ({ status: 200, text: json({ success: false, errorReason: settleToken(k), errorMessage: CANARY, network: networkOf(k) }) }), result: (k) => settleFailure(k, rejectedSettle), record: (k) => ({ stage: "source_settle", httpStatus: 200, response: "success_false", ...reason(settleToken(k), "errorReason") }), requests: 1 },
   { name: "settle 表に無い理由", stage: "settle", reply: () => ({ status: 200, text: json({ success: false, errorReason: CANARY, errorMessage: CANARY }) }), result: (k) => settleFailure(k, rejectedSettle), record: () => ({ stage: "source_settle", httpStatus: 200, response: "success_false", ...reason("unrecognized", "errorReason") }), requests: 1 },
+  { name: "settle 200 で形の違う JSON（配列）", stage: "settle", reply: () => ({ status: 200, text: json([CANARY]) }), result: () => unknownSettle, record: () => ({ stage: "source_settle", httpStatus: 200, response: "not_json" }), requests: 1 },
+  { name: "settle 200 で形の違う JSON（数）", stage: "settle", reply: () => ({ status: 200, text: "42" }), result: () => unknownSettle, record: () => ({ stage: "source_settle", httpStatus: 200, response: "not_json" }), requests: 1 },
+  { name: "settle 200 で形の違う JSON（文字列）", stage: "settle", reply: () => ({ status: 200, text: json(CANARY) }), result: () => unknownSettle, record: () => ({ stage: "source_settle", httpStatus: 200, response: "not_json" }), requests: 1 },
+  { name: "settle 理由が文字列でない", stage: "settle", reply: () => ({ status: 200, text: json({ success: false, errorReason: { message: CANARY } }) }), result: (k) => settleFailure(k, rejectedSettle), record: () => ({ stage: "source_settle", httpStatus: 200, response: "success_false", ...reason("malformed", "errorReason") }), requests: 1 },
+  { name: "settle 理由が大きすぎる（R-1 の 8 KiB の上限 → malformed）", stage: "settle", reply: () => ({ status: 200, text: json({ success: false, errorReason: `${CANARY}${"x".repeat(5_000)}` }) }), result: (k) => settleFailure(k, rejectedSettle), record: () => ({ stage: "source_settle", httpStatus: 200, response: "success_false", ...reason("malformed", "errorReason") }), requests: 1 },
   { name: "settle 理由の欄なし", stage: "settle", reply: () => ({ status: 200, text: json({ success: false }) }), result: (k) => settleFailure(k, rejectedSettle), record: () => ({ stage: "source_settle", httpStatus: 200, response: "success_false", ...reason("absent", "errorReason") }), requests: 1 },
   { name: "settle network 違い", stage: "settle", reply: (k) => ({ status: 200, text: json({ success: true, network: "eip155:1", transaction: settledTx(k) }) }), result: () => unknownSettle, record: () => ({ stage: "source_settle", httpStatus: 200, response: "network_mismatch", ...reason("absent", "errorReason") }), requests: 1 },
   { name: "settle tx の形違い", stage: "settle", reply: (k) => ({ status: 200, text: json({ success: true, network: networkOf(k), transaction: k === "x402" ? "" : CANARY }) }), result: () => unknownSettle, record: () => ({ stage: "source_settle", httpStatus: 200, response: "tx_malformed", ...reason("absent", "errorReason") }), requests: 1 },
@@ -395,30 +400,48 @@ describe("cid の入力（§5.2・§12.6）", () => {
     }
   });
 
-  test("credential の getter が投げても結果・要求は sink 無しと同じ（cid は書かない）", async () => {
+  test.each(["verify", "settle"] as const)("credential の getter が読むたびに違う値・2 回目から投げる: %s の cid は送った bytes の cid（credential を読み直さない）、結果・要求は sink 無しと同じ", async (stage) => {
     const offer = offerOf("x402");
-    const hostile = (): PaymentCredential => {
-      let reads = 0;
-      const payload = { challengeNonce: offer.extra.challengeNonce, signature: SIGNATURE } as Record<string, unknown>;
-      // 直列化（JSON.stringify）の 1 回目の読み取りは値を返し、それ以降（診断の読み取り）は投げる。
-      Object.defineProperty(payload, "authorization", {
-        enumerable: true,
-        get() {
-          reads += 1;
-          if (reads > 1) throw new Error(CANARY);
-          return { from: FROM, nonce: NONCE };
-        },
-      });
-      return { x402Version: 2, accepted: offer, payload: payload as PaymentCredential["payload"] };
-    };
-    const plain = build("x402", { sink: undefined, reply: () => ({ status: 200, text: json({ isValid: true }) }) });
-    const before = await call(plain.rail, "verify", offer, hostile());
-    const sink = recordingDiagnostics("router");
-    const withSink = build("x402", { sink, reply: () => ({ status: 200, text: json({ isValid: true }) }) });
-    expect(await call(withSink.rail, "verify", offer, hostile())).toEqual(before);
-    expect(withSink.transport.log).toEqual(plain.transport.log);
-    const records = recordsOf(sink);
-    expect(records.map((r) => r.cid)).toEqual([undefined]);
+    const NONCE_B = `0x${"0b".repeat(32)}`;
+    const variants = [
+      // 1 回目は nonce A、2 回目以降は nonce B（Codex R-3 #1 の再現）。
+      (reads: number) => ({ from: FROM, nonce: reads === 1 ? NONCE : NONCE_B }),
+      // 1 回目は値、2 回目以降は投げる。
+      (reads: number) => {
+        if (reads > 1) throw new Error(CANARY);
+        return { from: FROM, nonce: NONCE };
+      },
+    ];
+    for (const valueAt of variants) {
+      const readsOf: number[] = [];
+      const hostile = (): PaymentCredential => {
+        let reads = 0;
+        const payload = { challengeNonce: offer.extra.challengeNonce, signature: SIGNATURE } as Record<string, unknown>;
+        Object.defineProperty(payload, "authorization", {
+          enumerable: true,
+          get() {
+            reads += 1;
+            readsOf.push(reads);
+            return valueAt(reads);
+          },
+        });
+        return { x402Version: 2, accepted: offer, payload: payload as PaymentCredential["payload"] };
+      };
+      const reply = (): Reply => ({ status: 200, text: json(stage === "verify" ? { isValid: true } : { success: true, network: BASE, transaction: EVM_TX }) });
+      const plain = build("x402", { sink: undefined, reply });
+      const before = await call(plain.rail, stage, offer, hostile());
+      const plainReads = readsOf.length;
+      const sink = recordingDiagnostics("router");
+      const withSink = build("x402", { sink, reply });
+      expect(await call(withSink.rail, stage, offer, hostile())).toEqual(before);
+      expect(withSink.transport.log).toEqual(plain.transport.log);
+      // credential の読み取りの回数も sink 無しと同じ（直列化の 1 回だけ）。
+      expect(readsOf.length - plainReads).toBe(plainReads);
+      const input = diagCidInputOf(JSON.parse(withSink.transport.bodies[0]!));
+      expect(input).toBeDefined();
+      expect(input!.nonce).toBe(NONCE);
+      expect(recordsOf(sink).map((r) => r.cid)).toEqual([diagCorrelationIdOf(input!.network, input!.asset, input!.from, input!.nonce)]);
+    }
   });
 
   test("adapter の cid は自前の facilitator の `diagCidInputOf` が送った本文から作る cid と同じ", async () => {
@@ -533,6 +556,58 @@ describe("記録の位置", () => {
     expect(rpcAtEmit).toBe(1);
     expect(recordsOf(inner).map(strip)).toEqual([{ v: 1, component: "router", stage: "source_settle", network: SOL, facilitator: "x402", httpStatus: 200, response: "success_false", ...reason("invalid_exact_svm_transaction_failed", "errorReason") }]);
     expect(built.onDiagnostic).toEqual(["svm_settle_followed_up"]);
+    // 投げる sink でも結果・RPC の要求・onDiagnostic は同じ。
+    rpcLog.length = 0;
+    const throwing = throwingDiagnostics();
+    const thrownBuilt = build("svm", { sink: throwing, reply: () => reply, rpc: { transport: rpcTransport } });
+    expect(await call(thrownBuilt.rail, "settle", offer, credentialOf("svm", offer))).toEqual(before);
+    expect(rpcLog).toEqual(["getSignatureStatuses"]);
+    expect(thrownBuilt.transport.log).toEqual(plainBuilt.transport.log);
+    expect(thrownBuilt.onDiagnostic).toEqual(plainBuilt.onDiagnostic);
+    expect(throwing.calls).toBe(1);
+  });
+
+  test("SVM の settle: 追跡が投げても（RPC の失敗の報告が投げる）facilitator の応答の記録は残り、例外は 3 通りで同じ", async () => {
+    const reportFailure = new Error("follow-up report failed (test)");
+    const rpcLog: string[] = [];
+    const rpcTransport = fakeTransport(() => {
+      rpcLog.push("getSignatureStatuses");
+      return { fail: "upstream_timeout" };
+    }, () => {
+      throw reportFailure;
+    });
+    const reply: Reply = { status: 200, text: json({ success: false, errorReason: "invalid_exact_svm_transaction_failed", errorMessage: CANARY, network: SOL, transaction: SVM_SIG }) };
+    const offer = offerOf("svm");
+    const runWith = async (sink: DiagnosticsSink | undefined) => {
+      rpcLog.length = 0;
+      const built = build("svm", { sink, reply: () => reply, rpc: { transport: rpcTransport } });
+      let caught: unknown;
+      let value: unknown;
+      try {
+        value = await built.rail.settle(offer, credentialOf("svm", offer), { routeId: ROUTE_ID });
+      } catch (error) {
+        caught = error;
+      }
+      return { caught, value, log: [...built.transport.log], rpc: [...rpcLog], onDiagnostic: [...built.onDiagnostic], events: [...built.events] };
+    };
+    const plain = await runWith(undefined);
+    // 元の例外がそのまま（同じ object）投げ直される。
+    expect(plain.caught).toBe(reportFailure);
+    expect(plain.value).toBeUndefined();
+    expect(plain.rpc).toEqual(["getSignatureStatuses"]);
+    const sink = recordingDiagnostics("router");
+    const recorded = await runWith(sink);
+    const throwing = throwingDiagnostics();
+    const thrown = await runWith(throwing);
+    for (const run of [recorded, thrown]) {
+      expect(run.caught).toBe(reportFailure);
+      expect({ ...run, caught: undefined }).toEqual({ ...plain, caught: undefined });
+    }
+    const records = recordsOf(sink);
+    expectNoFreeStrings(records);
+    expect(records.map(strip)).toEqual([{ v: 1, component: "router", stage: "source_settle", network: SOL, facilitator: "x402", httpStatus: 200, response: "success_false", ...reason("invalid_exact_svm_transaction_failed", "errorReason") }]);
+    expect(typeof records[0]!.elapsedMs).toBe("number");
+    expect(throwing.calls).toBe(1);
   });
 
   test("push の時点で facilitator の応答は読み終わっている（要求は 1 回、push は 1 回）", async () => {
