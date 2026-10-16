@@ -15,6 +15,8 @@
  *
  * facilitator は想定外の形に対して 500 と内部例外文字列を返すことがあるため、
  * **`isValid` 以外のフィールド（`invalidMessage` / `error`）は読まない・転送しない。**
+ * 例外は運用者だけが読む診断の記録（`diagnostics` があるときだけ。タスク R-3）: `invalidReason`・`errorReason` の値を Router の表で分類した
+ * token だけを残す（`invalidMessage`・`errorMessage`・`error` は読まない。結果と応答には何も足さない）。
  */
 
 import { randomBytes } from "node:crypto";
@@ -32,6 +34,8 @@ import type {
   InboundCallContext,
 } from "../../ports/inbound.js";
 import { readBoundedBody } from "../../net/bounded-body.js";
+import type { DiagnosticsSink } from "../../shared/diagnostics.js";
+import { emitInboundRoundTrip, inboundDiagnosticsOn, verifyResponseClassOf, withInboundDiagScope, type SettleResponseClass } from "./inbound-diagnostics.js";
 import { bodyHashOf } from "./seller-proof.js";
 
 /** kind `circle` の facilitator の応答の上限（バイト）。verify・settle の JSON は数百バイト。 */
@@ -115,6 +119,11 @@ export interface X402InboundOptions {
    * **既定は無効**（静的 route は、乱数の nonce を使う標準のクライアントを従来どおり受け付ける）。
    */
   readonly bindAuthorizationNonce?: boolean;
+  /**
+   * 運用者だけが読む診断の記録（設計 `docs/rejection-reasons-design.md` §4.2、タスク R-3）。verify・settle の結果を作った後に固定の欄を 1 回 push する。
+   * 無ければ（既定）今までと 1 つも変わらない。結果・要求・journal は sink の有無で変わらない。
+   */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -140,6 +149,8 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
   const timeoutMs = options.timeoutMs ?? X402_INBOUND_DEFAULT_TIMEOUT_MS;
   const settleTimeoutMs = kind === "circle" ? (maxTimeoutSeconds + 10) * 1000 : timeoutMs;
   const issuedExtraKeys: readonly string[] = kind === "circle" ? CIRCLE_ISSUED_EXTRA_KEYS : ISSUED_EXTRA_KEYS;
+  const diagnostics = options.diagnostics;
+  const diagOn = inboundDiagnosticsOn(diagnostics);
 
   /**
    * 自動リトライをしない 1 回きりの POST。リダイレクトは追わない。
@@ -152,7 +163,9 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
     context: TransportContext,
     deadlineMs: number,
     proof: string | undefined,
-  ): Promise<{ status: number; json: unknown }> {
+  ): Promise<{ status: number; json: unknown; elapsedMs: number | undefined }> {
+    // 診断の経過（fetch の前から本文を読み終えるまで）。無効なら時刻を読まない。
+    const startedAt = diagOn ? performance.now() : 0;
     const response = await transport.fetch(`${base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...(proof === undefined ? {} : { "facilitator-seller-proof": proof }) },
@@ -173,13 +186,14 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
       transport.report(error, context);
       throw error;
     }
+    const elapsedMs = diagOn ? Math.max(0, performance.now() - startedAt) : undefined;
     let json: unknown;
     try {
       json = text === "" ? undefined : JSON.parse(text);
     } catch {
       json = undefined;
     }
-    return { status: response.status, json };
+    return { status: response.status, json, elapsedMs };
   }
 
   /**
@@ -335,18 +349,22 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
       });
-      const proof = await proofFor("verify", requestText);
-      if (!proof.ok) {
-        // 証明が作れない: 要求を出さない（接続 0）。
-        return { isValid: false };
-      }
-      const { status, json } = await post("/verify", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, timeoutMs, proof.proof);
-      // 検証できないまま settle へ進まない（この時点では課金が起きていない）。
-      // `invalidMessage` / `error` は読まない（facilitator の内部実装を転送しない）。
-      if (status !== 200 || !isRecord(json)) {
-        return { isValid: false };
-      }
-      return { isValid: json["isValid"] === true };
+      // 診断が有効なら、送るこの文字列の参照を段の scope に入れる（設計 §12.6。cid の取り出しは後回しの処理）。
+      return withInboundDiagScope(diagnostics, diagOn ? requestText : undefined, async () => {
+        const proof = await proofFor("verify", requestText);
+        if (!proof.ok) {
+          // 証明が作れない: 要求を出さない（接続 0）。
+          const refused = { isValid: false };
+          if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_verify", facilitator: kind, network: offer.network, response: "proof_refused" });
+          return refused;
+        }
+        const { status, json, elapsedMs } = await post("/verify", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_verify" }, timeoutMs, proof.proof);
+        // 検証できないまま settle へ進まない（この時点では課金が起きていない）。
+        // `invalidMessage` / `error` は読まない（facilitator の内部実装を転送しない）。診断も `invalidReason` だけ（表で分類）。
+        const result = status !== 200 || !isRecord(json) ? { isValid: false } : { isValid: json["isValid"] === true };
+        if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_verify", facilitator: kind, network: offer.network, response: verifyResponseClassOf(status, json), httpStatus: status, json, elapsedMs });
+        return result;
+      });
     },
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
@@ -356,56 +374,69 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
         paymentPayload: payloadOf(offer, credential),
         paymentRequirements: requirementsOf(offer),
       });
-      const proof = await proofFor("settle", requestText);
-      if (!proof.ok) {
-        // 要求を**出す前**の失敗だけが `rejected`（設計 §6）。
-        return { outcome: "rejected", reason: "source_rejected" };
-      }
-      const { status, json } = await post("/settle", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs, proof.proof);
-      if (kind === "circle") {
-        return settleOutcomeCircle(offer, status, json);
-      }
-      if (status >= 500) {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
-      }
-      if (status >= 400) {
-        return { outcome: "rejected", reason: "source_rejected" };
-      }
-      if (!isRecord(json)) {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
-      }
-      if (json["success"] !== true) {
-        return { outcome: "rejected", reason: "source_rejected" };
-      }
-      // 発行 offer と違う network の応答は不正。課金有無を断定できないので `unknown`。
-      if (json["network"] !== offer.network) {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
-      }
-      const txRef = json["transaction"];
-      if (typeof txRef !== "string" || txRef === "") {
-        return { outcome: "unknown", reason: "source_settle_unknown" };
-      }
-      return { outcome: "settled", txRef };
+      return withInboundDiagScope(diagnostics, diagOn ? requestText : undefined, async () => {
+        const proof = await proofFor("settle", requestText);
+        if (!proof.ok) {
+          // 要求を**出す前**の失敗だけが `rejected`（設計 §6）。
+          const refused: SettleResult = { outcome: "rejected", reason: "source_rejected" };
+          if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: kind, network: offer.network, response: "proof_refused" });
+          return refused;
+        }
+        const { status, json, elapsedMs } = await post("/settle", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs, proof.proof);
+        const { result, response } = kind === "circle" ? settleOutcomeCircle(offer, status, json) : settleOutcomeX402(offer, status, json);
+        if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: kind, network: offer.network, response, httpStatus: status, json, elapsedMs });
+        return result;
+      });
     },
   };
+
+  /**
+   * kind `x402` の決済の結果の表（今までの順のまま）。`response` は診断の分類だけで、結果の決め方には入らない。
+   */
+  function settleOutcomeX402(offer: InboundOffer, status: number, json: unknown): { result: SettleResult; response: SettleResponseClass } {
+    if (status >= 500) {
+      return { result: { outcome: "unknown", reason: "source_settle_unknown" }, response: "http_error" };
+    }
+    if (status >= 400) {
+      return { result: { outcome: "rejected", reason: "source_rejected" }, response: "http_error" };
+    }
+    if (!isRecord(json)) {
+      return { result: { outcome: "unknown", reason: "source_settle_unknown" }, response: "not_json" };
+    }
+    if (json["success"] !== true) {
+      return { result: { outcome: "rejected", reason: "source_rejected" }, response: "success_false" };
+    }
+    // 発行 offer と違う network の応答は不正。課金有無を断定できないので `unknown`。
+    if (json["network"] !== offer.network) {
+      return { result: { outcome: "unknown", reason: "source_settle_unknown" }, response: "network_mismatch" };
+    }
+    const txRef = json["transaction"];
+    if (typeof txRef !== "string" || txRef === "") {
+      return { result: { outcome: "unknown", reason: "source_settle_unknown" }, response: "tx_malformed" };
+    }
+    return { result: { outcome: "settled", txRef }, response: "ok" };
+  }
 
   /**
    * kind `circle` の決済の結果の表（設計 §6、FR-19・FR-20）: 要求を出した後の失敗は**すべて `unknown`**
    * （4xx・5xx・`success: false`・`settlement_pending`・network 違い・`transaction` の形違い）。
    * `success: true`、network 一致、`transaction` が 0x＋64 hex のときだけ `settled`。
-   * `payer`・`amount`・`extensions`・`errorReason` の文字列は読まない（診断の code だけ）。
+   * `payer`・`amount`・`extensions`・`errorReason` の文字列は結果に使わない（診断の code だけ。診断の記録は `errorReason` を表で分類した token だけ）。
    */
-  function settleOutcomeCircle(offer: InboundOffer, status: number, json: unknown): SettleResult {
+  function settleOutcomeCircle(offer: InboundOffer, status: number, json: unknown): { result: SettleResult; response: SettleResponseClass } {
     if (status === 403 && isRecord(json) && json["errorReason"] === "registration_required") {
       options.onDiagnostic?.("facilitator_trial_exhausted");
     }
-    if (status !== 200 || !isRecord(json) || json["success"] !== true || json["network"] !== offer.network) {
-      return { outcome: "unknown", reason: "source_settle_unknown" };
-    }
+    const unknown: SettleResult = { outcome: "unknown", reason: "source_settle_unknown" };
+    // 診断の分類は結果の条件と同じ順（どの条件で `unknown` になったか）。結果は今までどおり。
+    if (status !== 200) return { result: unknown, response: "http_error" };
+    if (!isRecord(json)) return { result: unknown, response: "not_json" };
+    if (json["success"] !== true) return { result: unknown, response: "success_false" };
+    if (json["network"] !== offer.network) return { result: unknown, response: "network_mismatch" };
     const txRef = json["transaction"];
     if (typeof txRef !== "string" || !EVM_TX_HASH_PATTERN.test(txRef)) {
-      return { outcome: "unknown", reason: "source_settle_unknown" };
+      return { result: unknown, response: "tx_malformed" };
     }
-    return { outcome: "settled", txRef };
+    return { result: { outcome: "settled", txRef }, response: "ok" };
   }
 }

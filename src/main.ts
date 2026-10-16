@@ -966,6 +966,8 @@ export function composeRails(
         rpc: { url: solanaRpcUrl!, transport: shared.transport },
         onDiagnostic: (code) => note(`router: facilitator diagnostic ${code} (${at})`),
         ...(offerSeconds === undefined ? {} : { offerSeconds }),
+        // 運用者だけが読む診断の記録（設計 rejection-reasons §4.2、タスク R-3）。無ければ今までどおり。
+        ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       });
     };
     const evmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitator: { url: string; kind: X402FacilitatorKind }, offerSeconds: number | undefined, bindAuthorizationNonce: boolean): InboundRail => {
@@ -981,6 +983,7 @@ export function composeRails(
           ...(offerSeconds === undefined ? {} : { offerSeconds }),
           ...(bindAuthorizationNonce ? { bindAuthorizationNonce: true } : {}),
           onDiagnostic: (code) => note(`router: facilitator diagnostic ${code} (${at})`),
+          ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
         });
       }
       // kind `x402`（Base Sepolia、既存）: 今までどおり（`maxTimeoutSeconds` が有効期間を兼ねる）。
@@ -993,6 +996,7 @@ export function composeRails(
         ...(bindAuthorizationNonce ? { bindAuthorizationNonce: true } : {}),
         ...(offerSeconds === undefined ? {} : { maxTimeoutSeconds: offerSeconds }),
         ...(testnet === undefined ? {} : { timeoutMs: testnet.inboundFacilitatorMs, ...(known.domain === undefined ? {} : { assetDomain: known.domain }) }),
+        ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       });
     };
     // 受取先は route ごとに違い得るので、route 単位で adapter を作る。

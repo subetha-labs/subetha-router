@@ -40,6 +40,8 @@ import { HttpRequestError, LimitExceededRpcError, TimeoutError } from "viem";
 import { stableJson } from "../src/core/intent.js";
 import {
   classifyRpcSnapshot,
+  diagCidInputOf,
+  DIAG_NETWORK_SHAPE,
   DIAG_RPC_SNAPSHOT_DEPTH,
   NOOP_DIAGNOSTICS,
   safeEmit,
@@ -569,31 +571,9 @@ export type FacilitatorRpcOp =
   | "sdk_verify_typed_data"
   | "sdk_get_code";
 
-/** CAIP-2 の形（長さの上限つき）。外れた network は記録に写さない（大きな文字列で行ごと捨てられないように）。 */
-const DIAG_NETWORK_SHAPE = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
-
-/**
- * 要求の本文から `cid` の入力を読む（§5.2。`identify` とは別の純粋関数）。形どおり（network が CAIP-2、asset・from が EVM アドレス、
- * nonce が bytes32）のときだけ値を返し、ほかは `undefined`（記録に `cid` が付かないだけ）。読むのは 4 つの欄だけで、値はそのまま
- * （正規化は `diagCorrelationIdOf` が後回しの処理でする。Router の側と同じ関数）。
- */
-export function diagCidInputOf(bodyJson: unknown): DiagCidInput | undefined {
-  if (!isRecord(bodyJson)) return undefined;
-  const requirements = bodyJson["paymentRequirements"];
-  const paymentPayload = bodyJson["paymentPayload"];
-  if (!isRecord(requirements) || !isRecord(paymentPayload)) return undefined;
-  const inner = paymentPayload["payload"];
-  if (!isRecord(inner)) return undefined;
-  const authorization = inner["authorization"];
-  if (!isRecord(authorization)) return undefined;
-  const network = requirements["network"];
-  const asset = requirements["asset"];
-  const from = authorization["from"];
-  const nonce = authorization["nonce"];
-  if (typeof network !== "string" || !DIAG_NETWORK_SHAPE.test(network)) return undefined;
-  if (typeof asset !== "string" || !ADDRESS.test(asset) || typeof from !== "string" || !ADDRESS.test(from) || typeof nonce !== "string" || !BYTES32.test(nonce)) return undefined;
-  return { network, asset, from, nonce };
-}
+// `cid` の入力の取り出し（`diagCidInputOf`）と CAIP-2 の形は `src/shared/diagnostics.ts` に移した（Router の受信の後回しの処理と同じ関数。タスク R-3）。
+// 振る舞いは同じ。既存の import のために re-export する。
+export { diagCidInputOf };
 
 /** 本文の network（記録の `network` の欄。形の外は `undefined`）。 */
 function diagNetworkOf(bodyJson: unknown): string | undefined {

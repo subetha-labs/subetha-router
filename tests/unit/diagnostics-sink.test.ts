@@ -16,6 +16,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import {
   DIAG_BYTES_PER_CODE_UNIT,
+  DIAG_CID_REQUEST_MAX_BYTES,
   DIAG_ENTRY_OVERHEAD,
   DIAG_MAX_STRING_BYTES,
   DIAG_OBJECT_OVERHEAD,
@@ -606,20 +607,50 @@ describe("時間の上限（§15.1）", () => {
     return s[Math.floor(s.length / 2)]!;
   };
   const scopeOf = (i: number) => ({ paymentId: pid(i), quoteId: `0x${i.toString(16).padStart(64, "0")}`, principalId: "principal", requestId: `request-${i}`, routeId: "dyn-x402-to-mpp", attempt: 1 });
+  /**
+   * 受信の adapter（タスク R-3）が段の scope に入れる、上限の大きさ（4,096 文字 = 8 KiB の見積り）の要求の本文。形どおりの EIP-3009 の
+   * verify の要求に詰め物を足して、ちょうど上限にする（後回しの処理で parse され、cid になる）。
+   */
+  const capSizedRequestText = (i: number): string => {
+    const nonce = `0x${i.toString(16).padStart(64, "0")}`;
+    const body = {
+      x402Version: 2,
+      paymentPayload: { x402Version: 2, scheme: "exact", network: "eip155:46630", payload: { challengeNonce: nonce, authorization: { from: "0xfCea8a897Af225BD00cf815Bf41966CA6Bf60bF1", to: "0xf8243d93F339807CA9846Aa31155A2B2262D08db", value: "10000", validAfter: "0", validBefore: "1900000000", nonce }, signature: `0x${"7c".repeat(65)}`, pad: "" } },
+      paymentRequirements: { scheme: "exact", network: "eip155:46630", asset: "0x7E955252E15c84f5768B83c41a71F9eba181802F", amount: "10000", payTo: "0xf8243d93F339807CA9846Aa31155A2B2262D08db", maxTimeoutSeconds: 60 },
+    };
+    body.paymentPayload.payload.pad = "p".repeat(DIAG_CID_REQUEST_MAX_BYTES / DIAG_BYTES_PER_CODE_UNIT - JSON.stringify(body).length);
+    const text = JSON.stringify(body);
+    expect(text.length * DIAG_BYTES_PER_CODE_UNIT).toBe(DIAG_CID_REQUEST_MAX_BYTES);
+    return text;
+  };
+  /** 受信の adapter の記録の形（`rawCid` 無し: cid は scope の本文から後回しの処理で取り出す）。 */
+  const inboundCapture = (i: number): DiagCapture => ({
+    stage: "source_verify",
+    facilitator: "x402",
+    network: "eip155:46630",
+    response: "invalid",
+    httpStatus: 200,
+    reasonField: "invalidReason",
+    reasonSource: "facilitator_body",
+    rawReason: "invalid_exact_evm_insufficient_balance",
+    elapsedMs: 12.5 + i,
+  });
 
   /**
    * 100 件の偽の購入を同時に進め（各購入は await をまたいで記録を積む: 段の結果・transport の出来事・宛先の結果）、
    * その間の event loop の遅れの p99（ms）を返す。sink の後回しの処理と書き込みは同じ event loop で走る。
    */
-  async function loadP99(sink: DiagnosticsSink, durationMs: number): Promise<number> {
+  async function loadP99(sink: DiagnosticsSink, durationMs: number, withRequestText = false): Promise<number> {
     const histogram = monitorEventLoopDelay({ resolution: 1 });
     const end = performance.now() + durationMs;
+    // 本文つきの場面: 購入ごとに上限の大きさの本文を 1 つ作って（測る前に）、段の scope に参照で入れる（R-3 の adapter と同じ）。
+    const texts = withRequestText ? Array.from({ length: 100 }, (_, i) => capSizedRequestText(i)) : [];
     histogram.enable();
     const purchase = (i: number): Promise<void> =>
-      withDiagnosticScope(scopeOf(i), async () => {
+      withDiagnosticScope(withRequestText ? { ...scopeOf(i), cidRequestText: texts[i]! } : scopeOf(i), async () => {
         let step = 0;
         while (performance.now() < end) {
-          safeEmit(sink, () => typical(step));
+          safeEmit(sink, () => (withRequestText ? inboundCapture(step) : typical(step)));
           await new Promise<void>((r) => setImmediate(r));
           safeEmit(sink, () => ({ stage: "transport_event", op: "pay", transport: "upstream_timeout" }));
           await new Promise<void>((r) => setTimeout(r, 1));
@@ -633,8 +664,7 @@ describe("時間の上限（§15.1）", () => {
   }
 
   type FsMode = "memory" | "slow" | "failing";
-  function sinkWith(mode: FsMode): FileDiagnosticsSink {
-    const mem = memoryDiagFs();
+  function sinkWith(mode: FsMode, mem: MemoryDiagFs = memoryDiagFs()): FileDiagnosticsSink {
     if (mode === "slow") mem.writeDelay = () => new Promise((r) => setTimeout(r, 20));
     if (mode === "failing") mem.writeError = errnoError("ENOSPC");
     return createFileDiagnosticsSink({ path: FILE, component: "router", fs: mem.fs });
@@ -704,5 +734,120 @@ describe("時間の上限（§15.1）", () => {
     expect(h.sink.counters().droppedSchema).toBe(0);
     expect(h.sink.counters().written).toBe(1_600);
     expect(median(samples)).toBeLessThan(1);
+  });
+
+  /*
+   * 受信の adapter の scope の本文（タスク R-3、Codex R-3 第 4 回）: 上限の大きさの `cidRequestText` を持つ scope で、本物の sink の
+   * 後回しの処理（本文の parse・cid・分類・hash・検査・JSON 化・書き込み）と上限の検査を通す。
+   */
+
+  test("本文つきの scope: 後回しの 1 回（16 件、各 1 回の上限の大きさの parse を含む）の中央値 < 1 ms。全部が書かれ、cid が付く", async () => {
+    const samples: number[] = [];
+    const h = harness({ manual: true, limits: { linesPerMinute: 1_000_000, perKeyLines: 1_000_000 } });
+    const texts = Array.from({ length: 16 }, (_, i) => capSizedRequestText(i));
+    for (let round = 0; round < 100; round += 1) {
+      for (let i = 0; i < 16; i += 1) {
+        await withDiagnosticScope({ ...scopeOf(round * 16 + i), cidRequestText: texts[i]! }, async () => h.sink.emit(inboundCapture(i)));
+      }
+      expect(h.sink.inspect().ringEntries).toBe(16);
+      const t = performance.now();
+      h.defer!.runOne();
+      samples.push(performance.now() - t);
+      expect(h.sink.inspect().ringEntries).toBe(0);
+      await h.sink.flush();
+    }
+    const c = h.sink.counters();
+    expect(c.droppedEntryTooLarge + c.droppedRingBytes + c.droppedQueueFull + c.droppedSchema + c.droppedLineTooLarge + c.processFailed + c.pushFailed).toBe(0);
+    expect(c.written).toBe(1_600);
+    const rows = data(h);
+    expect(rows).toHaveLength(1_600);
+    expect(rows.every((r) => typeof r.cid === "string")).toBe(true);
+    // 本文は記録に入らない（cid の hash だけ）。
+    expect(h.mem.files.get(FILE)!.includes("paymentPayload")).toBe(false);
+    expect(median(samples)).toBeLessThan(1);
+  });
+
+  test.each(["memory", "slow", "failing"] as FsMode[])(
+    "本文つきの scope: 100 件の同時の購入で、sink の有無の event loop の遅れの p99 の差 < 1 ms（fs: %s）。捨てるのは頻度・鍵の上限の分だけ",
+    async (mode) => {
+      const deltas: number[] = [];
+      const pairs: Array<[number, number]> = [];
+      for (let rep = 0; rep < 5; rep += 1) {
+        const mem = memoryDiagFs();
+        const sink = sinkWith(mode, mem);
+        let without: number;
+        let withSink: number;
+        if (rep % 2 === 0) {
+          without = await loadP99(NOOP_DIAGNOSTICS, 300, true);
+          withSink = await loadP99(sink, 300, true);
+        } else {
+          withSink = await loadP99(sink, 300, true);
+          without = await loadP99(NOOP_DIAGNOSTICS, 300, true);
+        }
+        // 環と書き込みの待ちを空にしてから数える（失敗する fs でも flush は返る）。
+        await sink.flush({ timeoutMs: 5_000 });
+        const c = sink.counters();
+        // 1 件の量の上限（16 KiB）で捨てた分は無い（本文つきの scope でも 1 件に収まる）。後回しの処理の失敗も無い。
+        expect(c.droppedEntryTooLarge).toBe(0);
+        expect(c.droppedSchema + c.processFailed + c.pushFailed + c.droppedLineTooLarge).toBe(0);
+        // 処理された（書いた・書けずに数えた）のは文書の上限（600 行 / 分）まで。残りは頻度・鍵の上限・環の上限で数えて捨てた。
+        const handled = c.written + c.writeFailed;
+        if (mode === "failing") {
+          expect(c.writeFailed).toBeGreaterThan(0);
+        } else {
+          // 書いた記録の行はちょうど頻度の上限（数の行は別に数える）。
+          const rows = mem.lines(FILE).map((line) => JSON.parse(line) as DiagRecord).filter((r) => r.component !== "sink");
+          expect(rows).toHaveLength(DEFAULT_DIAG_LIMITS.linesPerMinute);
+          expect(c.written).toBeGreaterThanOrEqual(DEFAULT_DIAG_LIMITS.linesPerMinute);
+          expect(rows.filter((r) => r.stage === "source_verify").every((r) => typeof r.cid === "string")).toBe(true);
+        }
+        expect(handled + c.droppedRate + c.droppedPerKey + c.droppedQueueFull + c.droppedRingBytes).toBeGreaterThan(1_000);
+        await sink.close({ timeoutMs: 100 });
+        pairs.push([without, withSink]);
+        deltas.push(withSink - without);
+      }
+      expect(median(deltas), JSON.stringify(pairs)).toBeLessThan(1);
+    },
+    60_000,
+  );
+
+  test("1 件の量: 上限の大きさの本文 ＋ いちばん大きい受信の記録 ＋ 典型的な購入の scope は 16 KiB に収まる（数えて捨てない）。余裕も固定する", () => {
+    const h = harness({ manual: true });
+    // 典型的な購入の scope の最大: paymentId 36・quoteId 66・principalId 64・requestId 128・routeId 96（設定の id の上限）・attempt・promoted。
+    const scope = { paymentId: pid(1), quoteId: `0x${"f".repeat(64)}`, principalId: "p".repeat(64), requestId: "r".repeat(128), routeId: "r".repeat(96), attempt: 1000, promoted: true, cidRequestText: capSizedRequestText(1) };
+    const maximal: DiagCapture = {
+      ...inboundCapture(1),
+      stage: "source_settle",
+      network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      facilitator: "circle",
+      response: "network_mismatch",
+      httpStatus: 599,
+      reasonField: "errorReason",
+      // 表の中でいちばん長い理由の値の桁。
+      rawReason: "invalid_exact_svm_payload_transaction_instructions_compute_price_instruction_too_high",
+      elapsedMs: 3_600_000,
+    };
+    return withDiagnosticScope(scope, async () => {
+      h.sink.emit(maximal);
+      const { ringEntries, ringCost } = h.sink.inspect();
+      expect(ringEntries).toBe(1);
+      expect(h.sink.counters().droppedEntryTooLarge).toBe(0);
+      expect(ringCost).toBeLessThanOrEqual(DEFAULT_DIAG_LIMITS.maxEntryCost);
+      // 余裕（バイトの見積り）。本文の上限 8 KiB と固定の見積りを足しても 16 KiB の 4 分の 1 以上が残る。
+      expect(DEFAULT_DIAG_LIMITS.maxEntryCost - ringCost).toBeGreaterThan(DEFAULT_DIAG_LIMITS.maxEntryCost / 4);
+      h.defer!.runOne();
+      await h.sink.flush();
+      expect(data(h).map((r) => typeof r.cid)).toEqual(["string"]);
+    });
+  });
+
+  test("限界の場面（記録として残す）: scope の自由な文字列が自分の上限（8 KiB）いっぱいだと、本文と合わせて 16 KiB を超え、その 1 件は数えて捨てる（push は throw しない）", () => {
+    const h = harness({ manual: true });
+    const chars = DIAG_MAX_STRING_BYTES / DIAG_BYTES_PER_CODE_UNIT;
+    return withDiagnosticScope({ paymentId: pid(1), requestId: "r".repeat(chars), cidRequestText: capSizedRequestText(1) }, async () => {
+      expect(() => h.sink.emit(inboundCapture(1))).not.toThrow();
+      expect(h.sink.counters().droppedEntryTooLarge).toBe(1);
+      expect(h.sink.inspect().ringEntries).toBe(0);
+    });
   });
 });
