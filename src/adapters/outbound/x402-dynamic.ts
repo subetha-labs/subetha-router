@@ -14,7 +14,6 @@ import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from "@x402/
 import { ExactEvmScheme, type ClientEvmSigner } from "@x402/evm";
 import { x402Client, x402HTTPClient } from "@x402/fetch";
 import type { Network, PaymentRequired } from "@x402/fetch";
-import { getBase58Encoder } from "@solana/kit";
 import { getAddress } from "viem";
 
 import type { DynamicProfile } from "../../config.js";
@@ -22,25 +21,14 @@ import { stableJson } from "../../core/intent.js";
 import { DYNAMIC_RESPONSE_LIMITS, readJsonObjectBody } from "../../net/bounded-body.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
 import { parseUpstreamUrl } from "../../net/upstream-url.js";
+import { base58ByteLength, EVM_RECEIPT_FORM, receiptClassOfHeader, type ReceiptClassResult, type ReceiptForm } from "../../shared/x402-receipt.js";
 import type { DestinationOffer, EvmSigningCapability, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
+import type { DiagnosticsSink } from "../../shared/diagnostics.js";
+import { diagStart, evmCidInputOf, outboundDiagnosticsEnabled, recordChallengeFailure, recordPaid, recordPayTransportFailure, recordSignNotSent, type PayDiagnostics } from "./outbound-diagnostics.js";
 
-/** 領収の形（送信の設計 §5）。EVM は bytes32 の tx hash と `0x` のアドレス、SVM は base58 の 64 バイトの署名と base58 のアドレス。 */
-export interface ReceiptForm {
-  readonly transactionPattern: RegExp;
-  /** SVM: `transaction` を base58 で復号したときのバイト数（署名は 64）。EVM は無し（bytes32 は pattern で決まる）。 */
-  readonly transactionBytes?: number;
-  readonly payerForm: "evm" | "svm";
-  readonly signerAddress: string;
-}
-
-/** base58 を復号したバイト数（復号できなければ `undefined`）。 */
-function base58ByteLength(text: string): number | undefined {
-  try {
-    return getBase58Encoder().encode(text).length;
-  } catch {
-    return undefined;
-  }
-}
+// 領収の形は診断の後回しの処理と共有する（`src/shared/x402-receipt.ts`。値は従来と同じ）。
+export type { ReceiptForm } from "../../shared/x402-receipt.js";
+export { EVM_RECEIPT_FORM, SVM_RECEIPT_FORM } from "../../shared/x402-receipt.js";
 
 export type Receipt =
   | { readonly kind: "none" }
@@ -84,11 +72,34 @@ export function receiptOf(response: Response, approved: DestinationOffer, form: 
   return { kind: "settled", header, transaction };
 }
 
+/**
+ * 領収の 7 分類（診断。設計 `docs/rejection-reasons-design.md` §4.3）。`receiptOf` と同じヘッダを同じ順に読み、同じ decoder で分ける（純粋）。
+ * 不変条件（試験で固定）: `ok` ⇔ `receiptOf` が `settled`、`payer_mismatch` ⇔ `payer_mismatch`、それ以外 ⇔ `none`。
+ * **判断の経路では呼ばない**（hook はヘッダの文字列を写すだけで、分類は後回しの処理が同じ `receiptClassOfHeader` でする）。
+ */
+export function receiptClassOf(response: Response, approved: DestinationOffer, form: ReceiptForm): ReceiptClassResult {
+  return receiptClassOfHeader(response.headers.get("PAYMENT-RESPONSE") ?? response.headers.get("X-PAYMENT-RESPONSE"), approved.network, form);
+}
+
+/** 送出の後の判断に渡す依存。`diagnostics` があれば結果を決めた後で `dest_sign`・`dest_pay_request` を積む（タスク R-4）。 */
+export interface PaidOutcomeDeps {
+  readonly maxBodyBytes: number;
+  readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void;
+  readonly ctx: { routeId: string; operation: string };
+  readonly diagnostics?: PayDiagnostics | undefined;
+}
+
 /** receipt が整合した 200 の本文。対応するのは `application/json` の JSON object だけ（設計 §3.4）。 */
 export async function deliveredBodyOf(
   response: Response,
   receipt: { readonly header: string; readonly transaction: string },
-  deps: { readonly maxBodyBytes: number; readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void; readonly ctx: { routeId: string; operation: string } },
+  deps: {
+    readonly maxBodyBytes: number;
+    readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void;
+    readonly ctx: { routeId: string; operation: string };
+    /** 本文の読み取りの失敗を診断に渡す（`report` の後。結果は変えない）。 */
+    readonly onReadError?: (error: unknown) => void;
+  },
 ): Promise<PayResult> {
   const noData = (reason: string): PayResult => ({ outcome: "paid_no_data", reason, receiptRef: receipt.header });
   let delivered;
@@ -97,6 +108,7 @@ export async function deliveredBodyOf(
   } catch (error) {
     // 支払いは receipt で確かめてある。取れなかったのはデータだけ。
     deps.report(error, deps.ctx);
+    deps.onReadError?.(error);
     return noData("paid_data_unavailable");
   }
   if (delivered.kind === "too_large") {
@@ -108,26 +120,31 @@ export async function deliveredBodyOf(
   return { outcome: "paid", body: delivered.body, contentType: "application/json", txRef: receipt.transaction, receiptRef: receipt.header };
 }
 
-/** EVM の領収の形（bytes32 の tx hash）。 */
-export const EVM_RECEIPT_FORM = (signerAddress: string): ReceiptForm => ({ transactionPattern: BYTES32_PATTERN, payerForm: "evm", signerAddress });
-/** SVM の領収の形（base58 で 64 バイトに復号できる署名。`payer` は base58 32 バイトの公開鍵）。 */
-export const SVM_RECEIPT_FORM = (signerAddress: string): ReceiptForm => ({ transactionPattern: /^[1-9A-HJ-NP-Za-km-z]{64,88}$/, transactionBytes: 64, payerForm: "svm", signerAddress });
-
 /**
  * 送出した後の応答から結果を決める（送信の設計 §5 の 1 枚の表。動的 EVM・静的 Arc・SVM が共有する）。
  * 整合した領収 ∧ 200 → 本文（`deliveredBodyOf`）、整合 ∧ 200 以外 → `paid_no_data`、`payer` だけ違う → `unknown`、
  * 領収なし: 2xx → `unknown`、≥ 500 → `unknown`、それ以外 → `rejected`。本文は整合した 200 のときだけ読む。
  */
-export async function paidOutcomeOf(
-  response: Response,
-  approved: DestinationOffer,
-  form: ReceiptForm,
-  deps: { readonly maxBodyBytes: number; readonly report: (error: unknown, ctx: { routeId: string; operation: string }) => void; readonly ctx: { routeId: string; operation: string } },
-): Promise<PayResult> {
+export async function paidOutcomeOf(response: Response, approved: DestinationOffer, form: ReceiptForm, deps: PaidOutcomeDeps): Promise<PayResult> {
   const receipt = receiptOf(response, approved, form);
+  const diagnostics = deps.diagnostics;
+  if (diagnostics === undefined || !outboundDiagnosticsEnabled(diagnostics.sink)) {
+    return paidOutcomeDecisionOf(response, receipt, deps, undefined);
+  }
+  let bodyReadError: { error: unknown; code: string } | undefined;
+  const result = await paidOutcomeDecisionOf(response, receipt, deps, (error) => {
+    bodyReadError = { error, code: "paid_data_unavailable" };
+  });
+  // 結果を決めた後（本文の読み取り・discardBody の後）に積む。ヘッダの文字列を写すだけで、分類は後回しの処理（§13.1）。
+  recordPaid(diagnostics, { response, approved, form, receiptNotOk: receipt.kind !== "settled", ...(bodyReadError === undefined ? {} : { bodyReadError }) });
+  return result;
+}
+
+/** `paidOutcomeOf` の判断（sink の有無で同じ道）。 */
+async function paidOutcomeDecisionOf(response: Response, receipt: Receipt, deps: PaidOutcomeDeps, onReadError: ((error: unknown) => void) | undefined): Promise<PayResult> {
   if (receipt.kind === "settled") {
     if (response.status === 200) {
-      return deliveredBodyOf(response, receipt, deps);
+      return deliveredBodyOf(response, receipt, { maxBodyBytes: deps.maxBodyBytes, report: deps.report, ctx: deps.ctx, ...(onReadError === undefined ? {} : { onReadError }) });
     }
     // 整合した receipt があるのに 200 でない。支払いは成立していて、データは無い。
     discardBody(response);
@@ -167,6 +184,8 @@ export interface X402DynamicOptions {
   /** 支払いヘッダを付けた要求の期限。既定 30 秒（暫定の方針。設計 §3.3）。 */
   readonly paidTimeoutMs?: number;
   readonly now?: () => number;
+  /** 診断の記録（設計 `docs/rejection-reasons-design.md` §4.3、タスク R-4）。無ければ何も記録しない（結果・要求は同じ）。 */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 /** 署名してから `validBefore` までの長さの上限（秒）。`maxTimeoutSeconds` の上限 600 ＋余裕。 */
@@ -501,6 +520,7 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
   const paidTimeoutMs = options.paidTimeoutMs ?? X402_DYNAMIC_PAID_TIMEOUT_MS;
   const now = options.now ?? Date.now;
   const denyHosts = options.denyHosts ?? [];
+  const diagnostics = options.diagnostics;
 
   const profiles = new Map<string, DynamicProfile>();
   for (const [profileId, profile] of Object.entries(options.profiles)) {
@@ -620,10 +640,13 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       }
 
       let challenge: DynamicChallenge;
+      const challengeStartedAt = diagStart(diagnostics);
       try {
         // 送金直前に読み直す。
         challenge = await getChallenge(request.target, { routeId: request.routeId, operation: "pay_challenge" });
-      } catch {
+      } catch (error) {
+        // 分類は固定の値だけ（`DynamicChallengeError.reason`・`TransportError.code`。message は読まない）。
+        recordChallengeFailure(diagnostics, error, error instanceof DynamicChallengeError ? error.reason : undefined, challengeStartedAt);
         return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
       }
       // 一致の定義（設計 §3.2）: 保存した offer の全体が、今の accepts のどれかと一致すること。
@@ -661,9 +684,14 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
         payload = await httpClient.createPaymentPayload({ x402Version: 2, resource: challenge.resource, accepts: [selected] } as PaymentRequired);
       } catch (error) {
         // payload 生成の失敗は送信前。署名の境界で止めた場合もここに来る。期限の拒否は理由をそのまま出す。
-        return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
+        const reason = isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed";
+        recordSignNotSent(diagnostics, reason);
+        return { outcome: "not_sent", reason };
       }
+      // `cid` の入力は署名した authorization の値の参照だけ（hash は後回しの処理で。記録は送出の後、§12.3）。
+      const cid = outboundDiagnosticsEnabled(diagnostics) ? evmCidInputOf(payload, approved) : undefined;
       if (guard.signatures() !== 1 || stableJson((payload as { accepted?: unknown }).accepted) !== approvedJson || payload.x402Version !== 2) {
+        recordSignNotSent(diagnostics, "destination_payload_mismatch", cid);
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };
       }
 
@@ -671,19 +699,22 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。署名だけでは資金は動かない。
       const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
       if (!(now() < request.deadlineMs)) {
+        recordSignNotSent(diagnostics, "destination_deadline", cid);
         return { outcome: "not_sent", reason: "destination_deadline" };
       }
+      const payDiagnostics: PayDiagnostics | undefined = outboundDiagnosticsEnabled(diagnostics) ? { sink: diagnostics, startedAt: diagStart(diagnostics), cid } : undefined;
       let response: Response;
       try {
         // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。
         // 有料要求も記録の方法・本文そのもので（同じバイト列。FR-P2）。
         response = await transport.fetch(url, requestInitOf(request.target, paymentHeaders, paidTimeoutMs), payCtx);
-      } catch {
-        // 送ったかどうか分からない（期限・ヘッダの上限超過・リダイレクトを含む）。自動再送しない。
+      } catch (error) {
+        // 送ったかどうか分からない（期限・ヘッダの上限超過・リダイレクトを含む）。自動再送しない。結果は変えず、分類だけを積む。
+        recordPayTransportFailure(payDiagnostics, error, approved.network);
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
 
-      return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
+      return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx, diagnostics: payDiagnostics });
     },
   };
 }

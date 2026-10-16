@@ -12,6 +12,7 @@ import type { DynamicProfile } from "../../src/config.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../src/net/bounded-body.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
 import type { DestinationOffer, MessageReservation, PayRequest } from "../../src/ports/outbound.js";
+import type { DiagnosticsSink } from "../../src/shared/diagnostics.js";
 import { dialTo, publicLookup } from "./dynamic/dial.js";
 import { startSolanaRpc, type SolanaRpcFixture } from "./solana-rpc.js";
 import { startSvmFacilitator, type SvmFacilitator } from "./svm-facilitator.js";
@@ -63,7 +64,7 @@ export async function ataOf(owner: string): Promise<string> {
   return String((await findAssociatedTokenPda({ mint: address(MINT), owner: address(owner), tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
 }
 
-export async function harness(env: { TLS: TlsMaterial; closers: Array<() => Promise<void>> }, options: { startup?: boolean; staticRoute?: boolean; providerAtaExists?: boolean; routerBalance?: string; rpcTransport?: (real: GuardedTransport) => GuardedTransport; rpcUrl?: (rpc: SolanaRpcFixture) => string } = {}): Promise<Harness> {
+export async function harness(env: { TLS: TlsMaterial; closers: Array<() => Promise<void>> }, options: { startup?: boolean; staticRoute?: boolean; providerAtaExists?: boolean; routerBalance?: string; rpcTransport?: (real: GuardedTransport) => GuardedTransport; rpcUrl?: (rpc: SolanaRpcFixture) => string; diagnostics?: DiagnosticsSink } = {}): Promise<Harness> {
   const signer = createSvmSignerFixture(SOL);
   const router = signer.address;
   const routerAta = await ataOf(router);
@@ -113,6 +114,8 @@ export async function harness(env: { TLS: TlsMaterial; closers: Array<() => Prom
     dynamic: { profiles: { [PROFILE_ID]: PROFILE }, transport: dynamicTransport, denyHosts: [] },
     now: () => clock.now,
     hooksForTest: hooks,
+    // 診断の記録（タスク R-4 の試験だけが渡す）。
+    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
   });
   if (options.startup !== false) await rail.startup();
   return { rail, signer, router, routerAta, provider, providerAta, fac, rpc, upstream, dialed, clock, hooks, reservations: new Set(), operators, rpcTransport };

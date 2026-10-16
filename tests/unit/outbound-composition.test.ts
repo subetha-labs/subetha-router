@@ -14,11 +14,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** adapter の工場を包んで、合成が**何を何回**作り、どの経路がどの adapter に届くかを記録する（adapter の実装はそのまま）。 */
 const observed = vi.hoisted(() => ({
-  x402: [] as { network: string; upstreams: string[]; profiles: string[]; operatorAddresses: readonly string[] | undefined; rebuild: boolean | undefined; dispatched: string[] }[],
+  x402: [] as { network: string; upstreams: string[]; profiles: string[]; operatorAddresses: readonly string[] | undefined; rebuild: boolean | undefined; dispatched: string[]; diagnostics?: unknown }[],
   mpp: [] as { upstreams: string[]; profiles: string[]; operatorAddresses: readonly string[] | undefined; dispatched: string[] }[],
   /** Arc の rail に残高を持たせる（rail → 能力 の優先の試験）。 */
   arcRailBalance: undefined as bigint | undefined,
-  svm: [] as { network: string; upstreams: string[]; destinations: Record<string, { payTo: string; asset: string; scheme: string }>; profiles: string[]; mint: string; decimals: number; tokenProgram: string; rpcUrl: string; operatorAddresses: Set<string>; startupCalls: number; dispatched: string[] }[],
+  svm: [] as { network: string; upstreams: string[]; destinations: Record<string, { payTo: string; asset: string; scheme: string }>; profiles: string[]; mint: string; decimals: number; tokenProgram: string; rpcUrl: string; operatorAddresses: Set<string>; startupCalls: number; dispatched: string[]; diagnostics?: unknown }[],
 }));
 vi.mock("../../src/adapters/outbound/x402-svm.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/adapters/outbound/x402-svm.js")>();
@@ -26,7 +26,7 @@ vi.mock("../../src/adapters/outbound/x402-svm.js", async (importOriginal) => {
     ...actual,
     createX402SvmOutbound: (options: Parameters<typeof actual.createX402SvmOutbound>[0]) => {
       const rail = actual.createX402SvmOutbound(options);
-      const record = { network: options.network, upstreams: Object.keys(options.upstreams), destinations: { ...options.destinations }, profiles: Object.keys(options.dynamic?.profiles ?? {}), mint: options.mint, decimals: options.decimals, tokenProgram: options.tokenProgram, rpcUrl: options.rpc.url, operatorAddresses: options.operatorAddresses, startupCalls: 0, dispatched: [] as string[] };
+      const record = { network: options.network, upstreams: Object.keys(options.upstreams), destinations: { ...options.destinations }, profiles: Object.keys(options.dynamic?.profiles ?? {}), mint: options.mint, decimals: options.decimals, tokenProgram: options.tokenProgram, rpcUrl: options.rpc.url, operatorAddresses: options.operatorAddresses, startupCalls: 0, dispatched: [] as string[], diagnostics: options.diagnostics };
       observed.svm.push(record);
       return {
         ...rail,
@@ -43,7 +43,7 @@ vi.mock("../../src/adapters/outbound/x402.js", async (importOriginal) => {
     ...actual,
     createX402Outbound: (options: Parameters<typeof actual.createX402Outbound>[0]) => {
       const rail = actual.createX402Outbound(options);
-      const record = { network: options.capability.network, upstreams: Object.keys(options.upstreams), profiles: Object.keys(options.dynamic?.profiles ?? {}), operatorAddresses: options.operatorAddresses, rebuild: options.rebuildSignatures, dispatched: [] as string[] };
+      const record = { network: options.capability.network, upstreams: Object.keys(options.upstreams), profiles: Object.keys(options.dynamic?.profiles ?? {}), operatorAddresses: options.operatorAddresses, rebuild: options.rebuildSignatures, dispatched: [] as string[], diagnostics: options.diagnostics };
       observed.x402.push(record);
       const wrapped = { ...rail, readChallenge: (routeId: string, target?: { url: string, method: "GET" }) => { record.dispatched.push(routeId); return rail.readChallenge(routeId, target); } };
       return options.capability.network === "eip155:5042002" && observed.arcRailBalance !== undefined ? { ...wrapped, balanceOf: async () => observed.arcRailBalance! } : wrapped;
@@ -329,6 +329,31 @@ describe("composeRails: 組ごとの adapter と選択", () => {
   });
   it("組の鍵は rail と network", () => {
     expect(outboundPairKeyOf("x402", ARC)).toBe(`x402:${ARC}`);
+  });
+});
+
+describe("composeRails: 送信の診断の配線（タスク R-4）", () => {
+  const all = (): RouterCapabilities => ({ evmSigning: evm(BASE, "0x0000000000000000000000000000000000000501"), evmSigningByNetwork: { [ARC]: evm(ARC, "0x0000000000000000000000000000000000000503", "non-signing-fixture") }, mppTempo: MPP, svmSigning: { [SOL]: svm(SOL, SOL_OWNER) } });
+  it("capabilities.diagnostics の sink が x402（静的・動的を持つ組）と SVM の送信 adapter に渡る。無ければ渡さない", () => {
+    const sink = { emit: () => {} };
+    compose({ ...all(), diagnostics: sink }, envFor({ solRoute: true, solProfile: true }));
+    expect(observed.x402).toHaveLength(2);
+    for (const record of observed.x402) expect(record.diagnostics).toBe(sink);
+    expect(observed.svm).toHaveLength(1);
+    expect(observed.svm[0]!.diagnostics).toBe(sink);
+    observed.x402.length = 0;
+    observed.svm.length = 0;
+    compose(all(), envFor({ solRoute: true, solProfile: true }));
+    for (const record of [...observed.x402, ...observed.svm]) expect(record.diagnostics).toBeUndefined();
+  });
+
+  it("合成した静的 Arc の送金の前の読み直しの失敗が dest_challenge（transport の分類）として届く", async () => {
+    const captures: Array<Record<string, unknown>> = [];
+    const { rails } = compose({ ...all(), diagnostics: { emit: (capture) => void captures.push({ ...capture }) } });
+    const offer = { scheme: "exact", network: ARC, asset: ARC_USDC, amount: "1000", payTo: ARC_PROVIDER, maxTimeoutSeconds: 60, extra: { name: "USDC", version: "2" } };
+    const result = await rails.outbound.pay({ routeId: "r-arc", offer, paymentId: "00000000-0000-4000-8000-000000000001", attempt: 1, deadlineMs: Date.now() + 60_000 });
+    expect(result).toEqual({ outcome: "not_sent", reason: "destination_challenge_unreadable" });
+    expect(captures.map((c) => [c["stage"], c["transport"]])).toEqual([["dest_challenge", "connect_failed"]]);
   });
 });
 

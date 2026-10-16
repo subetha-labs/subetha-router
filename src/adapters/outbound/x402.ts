@@ -24,6 +24,8 @@ import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
 import { createRebuildingSigner, createX402DynamicPath, EVM_RECEIPT_FORM, isSigningRefusal, paidOutcomeOf, type X402DynamicOptions } from "./x402-dynamic.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "../../net/bounded-body.js";
+import type { DiagnosticsSink } from "../../shared/diagnostics.js";
+import { diagStart, evmCidInputOf, outboundDiagnosticsEnabled, recordChallengeFailure, recordPaid, recordPayTransportFailure, recordSignNotSent, type PayDiagnostics } from "./outbound-diagnostics.js";
 
 export interface SyntheticX402Options {
   /** `routeId` → 上流 canonical URL（loopback の fixture に限る）。 */
@@ -228,6 +230,11 @@ export interface X402OutboundOptions {
    * 静的 route は `tokenDomain` を持たないので、合成が表から渡す。
    */
   readonly tokenDomains?: Readonly<Record<string, { readonly name: string; readonly version: string }>>;
+  /**
+   * 診断の記録（設計 `docs/rejection-reasons-design.md` §4.3、タスク R-4）。静的・組み直し・動的（`dynamic` に別の sink が無ければこれ）の
+   * 送信の段を記録する。無ければ何も記録しない（結果・要求の数・順序・期限は同じ）。
+   */
+  readonly diagnostics?: DiagnosticsSink;
 }
 
 /** 照合に使う承認済み offer の必須フィールド（field 単位で見る）。 */
@@ -303,7 +310,15 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   const operatorAddresses = new Set([capability.signer.address, ...(options.operatorAddresses ?? [])].map((address) => address.toLowerCase()));
   const isOperator = (address: string): boolean => operatorAddresses.has(address.toLowerCase());
   // 運用者の集合は静的と動的で同じ 1 つ（動的の option に無ければ adapter のものを渡す。FR-38）。
-  const dynamic = options.dynamic === undefined ? undefined : createX402DynamicPath(capability, { ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }), ...options.dynamic });
+  const diagnostics = options.diagnostics;
+  const dynamic =
+    options.dynamic === undefined
+      ? undefined
+      : createX402DynamicPath(capability, {
+          ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }),
+          ...(diagnostics === undefined ? {} : { diagnostics }),
+          ...options.dynamic,
+        });
 
   // 接続先は起動時に固定する（要求ごとに URL を組み立てない）。
   const upstreams = new Map<string, string>();
@@ -379,31 +394,39 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
     try {
       payload = await httpClient.createPaymentPayload({ ...challenge.parsed, accepts: [selected] });
     } catch (error) {
-      return { outcome: "not_sent", reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
+      const reason = isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed";
+      recordSignNotSent(diagnostics, reason);
+      return { outcome: "not_sent", reason };
     }
+    // `cid` の入力は署名した authorization の値の参照だけ（記録は送出の後、§12.3）。
+    const cid = outboundDiagnosticsEnabled(diagnostics) ? evmCidInputOf(payload, approved) : undefined;
     const accepted = (payload as { accepted?: unknown }).accepted;
     // SDK が返した payload そのものを検査する（入力の検査では返り値を保証しない）: 署名 1 回・accepted の一致・v2。
     if (guard.signatures() !== 1 || accepted === undefined || !sameOfferFields(approved, accepted as PaymentRequirements) || stableJson(accepted) !== stableJson(selected) || payload.x402Version !== 2) {
+      recordSignNotSent(diagnostics, "destination_payload_mismatch", cid);
       return { outcome: "not_sent", reason: "destination_payload_mismatch" };
     }
     const payCtx = { routeId: request.routeId, operation: "pay" };
     // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。
     const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
     if (!(now() < request.deadlineMs)) {
+      recordSignNotSent(diagnostics, "destination_deadline", cid);
       return { outcome: "not_sent", reason: "destination_deadline" };
     }
+    const payDiagnostics: PayDiagnostics | undefined = outboundDiagnosticsEnabled(diagnostics) ? { sink: diagnostics, startedAt: diagStart(diagnostics), cid } : undefined;
     let response: Response;
     try {
       // 期限は有料要求のもの（Provider の verify と settle を含む）。
       response = await transport.fetch(url, { method: "GET", headers: paymentHeaders, redirect: "error", signal: AbortSignal.timeout(paidTimeoutMs) }, payCtx);
-    } catch {
+    } catch (error) {
+      recordPayTransportFailure(payDiagnostics, error, approved.network);
       return { outcome: "unknown", reason: "destination_pay_unknown" };
     }
     void approvedJson;
-    return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx });
+    return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx, diagnostics: payDiagnostics });
   }
 
-  return {
+  const rail: OutboundRail = {
     /** 上流の現在の 402 challenge を読む（純粋読取・無課金）。 */
     async readChallenge(routeId: string, target?: UpstreamTarget): Promise<readonly DestinationOffer[]> {
       if (target !== undefined) {
@@ -429,11 +452,13 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       }
 
       let challenge: Challenge;
+      const challengeStartedAt = diagStart(diagnostics);
       try {
         // 送金直前に読み直す（凍結した accepts をそのまま渡さない）。
         challenge = await getChallenge(url, { routeId: request.routeId, operation: "pay_challenge" });
-      } catch {
-        // まだ何も送っていない。
+      } catch (error) {
+        // まだ何も送っていない。分類は `TransportError.code` か `challenge_invalid` だけ（message は読まない）。
+        recordChallengeFailure(diagnostics, error, undefined, challengeStartedAt);
         return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
       }
 
@@ -539,11 +564,15 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         });
       } catch (error) {
         // payload 生成の失敗は**送信前**。署名も送信もしていない。期限の拒否は理由をそのまま出す（他の拒否は固定の理由）。
-        return { outcome: "not_sent", reason: isDeadlineRefusal(error) ? "destination_deadline" : "destination_not_signed" };
+        const reason = isDeadlineRefusal(error) ? "destination_deadline" : "destination_not_signed";
+        recordSignNotSent(diagnostics, reason);
+        return { outcome: "not_sent", reason };
       } finally {
         armed = false;
       }
 
+      // `cid` の入力は署名した authorization の値の参照だけ（記録は送出の後、§12.3）。
+      const cid = outboundDiagnosticsEnabled(diagnostics) ? evmCidInputOf(payload, approved) : undefined;
       // 署名済み payload が主張する `accepted` が承認値と一致しなければ送らない。
       const accepted = (payload as { accepted?: unknown }).accepted;
       if (
@@ -551,6 +580,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         !sameOfferFields(approved, accepted as PaymentRequirements) ||
         stableJson(accepted) !== stableJson(selected)
       ) {
+        recordSignNotSent(diagnostics, "destination_payload_mismatch", cid);
         return { outcome: "not_sent", reason: "destination_payload_mismatch" };
       }
 
@@ -558,8 +588,10 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。署名だけでは資金は動かない。
       const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
       if (!(now() < request.deadlineMs)) {
+        recordSignNotSent(diagnostics, "destination_deadline", cid);
         return { outcome: "not_sent", reason: "destination_deadline" };
       }
+      const payDiagnostics: PayDiagnostics | undefined = outboundDiagnosticsEnabled(diagnostics) ? { sink: diagnostics, startedAt: diagStart(diagnostics), cid } : undefined;
       let response: Response;
       try {
         // 1 要求 1 回だけ。402 を受けても再署名・再送信をしない。期限は有料要求のもの（Provider の settle を含む）。
@@ -569,92 +601,135 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
           redirect: "error",
           signal: AbortSignal.timeout(paidTimeoutMs),
         }, payCtx);
-      } catch {
-        // 送ったかどうか分からない。自動再送しない（durable unknown）。transport は既に報告済み。
-        return { outcome: "unknown", reason: "destination_pay_unknown" };
-      }
-
-      const receiptHeader =
-        response.headers.get("PAYMENT-RESPONSE") ?? response.headers.get("X-PAYMENT-RESPONSE");
-      const contentType = response.headers.get("content-type") ?? "application/json";
-      let parsedResult;
-      try {
-        parsedResult = await httpClient.processResponse(response);
       } catch (error) {
-        // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
-        transport.report(error, payCtx);
+        // 送ったかどうか分からない。自動再送しない（durable unknown）。transport は既に報告済み。結果は変えず、分類だけを積む。
+        recordPayTransportFailure(payDiagnostics, error, approved.network);
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
-      const header = parsedResult.header;
-      /** SDK が解釈した決済レシートが、承認済み network と整合しているか。 */
-      const settled =
-        header !== undefined &&
-        "success" in header &&
-        header.success === true &&
-        header.network === approved.network &&
-        typeof header.transaction === "string" &&
-        header.transaction !== "";
+      if (payDiagnostics === undefined) return baseOutcomeOf(httpClient, response, approved, payCtx, undefined);
+      let processError: unknown;
+      let processFailed = false;
+      let readBody: unknown;
+      let receiptOk = false;
+      const result = await baseOutcomeOf(httpClient, response, approved, payCtx, {
+        onProcessError: (error) => {
+          processFailed = true;
+          processError = error;
+        },
+        onDecided: (facts) => {
+          readBody = facts.body;
+          receiptOk = facts.receiptOk;
+        },
+      });
+      // 返す値を決めた後: ヘッダの領収・`PAYMENT-REQUIRED` と、SDK が既に読んだ本文の理由を写すだけ（本文は新しく読まない。§12.2）。
+      recordPaid(payDiagnostics, {
+        response,
+        approved,
+        form: receiptForm,
+        receiptNotOk: !receiptOk,
+        ...(processFailed ? { bodyReadError: { error: processError } } : {}),
+        ...(readBody === undefined ? {} : { readBody }),
+      });
+      return result;
+    },
+  };
 
-      /**
-       * レシートが購入者を名乗る場合、それは**この Router が注入された署名者**でなければ
-       * ならない。別 payer の決済を自分の支払いの証拠にしない（提示が無い場合は
-       * network / transaction の整合だけで判断する）。
-       */
-      const claimedPayer = settled
-        ? (header as unknown as Record<string, unknown>)["payer"]
-        : undefined;
-      const payerMatches =
-        claimedPayer === undefined ||
-        (typeof claimedPayer === "string" &&
-          ADDRESS_PATTERN.test(claimedPayer) &&
-          getAddress(claimedPayer) === getAddress(capability.signer.address));
+  /**
+   * 静的の Base の送出の後の判断（従来の処理のまま。SDK の `processResponse` が本文を先に読む）。`observe` は診断だけが使い、
+   * 判断の値を写すだけ（結果を変えない）。
+   */
+  async function baseOutcomeOf(
+    httpClient: x402HTTPClient,
+    response: Response,
+    approved: DestinationOffer,
+    payCtx: { routeId: string; operation: string },
+    observe: { readonly onProcessError: (error: unknown) => void; readonly onDecided: (facts: { readonly body: unknown; readonly receiptOk: boolean }) => void } | undefined,
+  ): Promise<PayResult> {
+    const receiptHeader =
+      response.headers.get("PAYMENT-RESPONSE") ?? response.headers.get("X-PAYMENT-RESPONSE");
+    const contentType = response.headers.get("content-type") ?? "application/json";
+    let parsedResult;
+    try {
+      parsedResult = await httpClient.processResponse(response);
+    } catch (error) {
+      // body の読み取り（headers 後）の失敗は adapter が報告する（設計 A §3.3-7）。
+      transport.report(error, payCtx);
+      observe?.onProcessError(error);
+      return { outcome: "unknown", reason: "destination_pay_unknown" };
+    }
+    const header = parsedResult.header;
+    /** SDK が解釈した決済レシートが、承認済み network と整合しているか。 */
+    const settled =
+      header !== undefined &&
+      "success" in header &&
+      header.success === true &&
+      header.network === approved.network &&
+      typeof header.transaction === "string" &&
+      header.transaction !== "";
 
-      /** 配信データとして使えるのは JSON 本文を実際に取得できたときだけ。 */
-      const jsonDelivered =
-        contentType.includes("application/json") &&
-        typeof parsedResult.body === "object" &&
-        parsedResult.body !== null;
+    /**
+     * レシートが購入者を名乗る場合、それは**この Router が注入された署名者**でなければ
+     * ならない。別 payer の決済を自分の支払いの証拠にしない（提示が無い場合は
+     * network / transaction の整合だけで判断する）。
+     */
+    const claimedPayer = settled
+      ? (header as unknown as Record<string, unknown>)["payer"]
+      : undefined;
+    const payerMatches =
+      claimedPayer === undefined ||
+      (typeof claimedPayer === "string" &&
+        ADDRESS_PATTERN.test(claimedPayer) &&
+        getAddress(claimedPayer) === getAddress(capability.signer.address));
 
-      if (response.status === 200) {
-        // HTTP 200 だけでは支払いの証拠にしない（レシートが整合して初めて `paid`）。
-        if (!settled || receiptHeader === null) {
-          return { outcome: "unknown", reason: "destination_receipt_unverified" };
-        }
-        if (!payerMatches) {
-          // 課金されたのが誰の支払いか確定できない。再送も再署名もしない。
-          return { outcome: "unknown", reason: "destination_receipt_payer_mismatch" };
-        }
-        if (!jsonDelivered) {
-          // 決済証跡は保持したまま「支払い済み・データ未取得」として終端する。
-          return {
-            outcome: "paid_no_data",
-            reason: "paid_data_unavailable",
-            receiptRef: receiptHeader,
-          };
-        }
+    observe?.onDecided({ body: parsedResult.body, receiptOk: settled && payerMatches && receiptHeader !== null });
+
+    /** 配信データとして使えるのは JSON 本文を実際に取得できたときだけ。 */
+    const jsonDelivered =
+      contentType.includes("application/json") &&
+      typeof parsedResult.body === "object" &&
+      parsedResult.body !== null;
+
+    if (response.status === 200) {
+      // HTTP 200 だけでは支払いの証拠にしない（レシートが整合して初めて `paid`）。
+      if (!settled || receiptHeader === null) {
+        return { outcome: "unknown", reason: "destination_receipt_unverified" };
+      }
+      if (!payerMatches) {
+        // 課金されたのが誰の支払いか確定できない。再送も再署名もしない。
+        return { outcome: "unknown", reason: "destination_receipt_payer_mismatch" };
+      }
+      if (!jsonDelivered) {
+        // 決済証跡は保持したまま「支払い済み・データ未取得」として終端する。
         return {
-          outcome: "paid",
-          body: parsedResult.body,
-          contentType,
-          txRef: (header as { transaction: string }).transaction,
+          outcome: "paid_no_data",
+          reason: "paid_data_unavailable",
           receiptRef: receiptHeader,
         };
       }
-      if (response.status === 502) {
-        // 「支払い済み・データなし」を主張するには整合した実レシートが必要。
-        if (!settled || receiptHeader === null || !payerMatches) {
-          return { outcome: "unknown", reason: "destination_pay_unknown" };
-        }
-        return { outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: receiptHeader };
-      }
-      if (response.status === 402) {
-        // 上流が支払いを受け付けなかった。再署名はしない。
-        return { outcome: "rejected", reason: "destination_rejected" };
-      }
-      if (response.status >= 500) {
+      return {
+        outcome: "paid",
+        body: parsedResult.body,
+        contentType,
+        txRef: (header as { transaction: string }).transaction,
+        receiptRef: receiptHeader,
+      };
+    }
+    if (response.status === 502) {
+      // 「支払い済み・データなし」を主張するには整合した実レシートが必要。
+      if (!settled || receiptHeader === null || !payerMatches) {
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
+      return { outcome: "paid_no_data", reason: "paid_data_unavailable", receiptRef: receiptHeader };
+    }
+    if (response.status === 402) {
+      // 上流が支払いを受け付けなかった。再署名はしない。
       return { outcome: "rejected", reason: "destination_rejected" };
-    },
-  };
+    }
+    if (response.status >= 500) {
+      return { outcome: "unknown", reason: "destination_pay_unknown" };
+    }
+    return { outcome: "rejected", reason: "destination_rejected" };
+  }
+
+  return rail;
 }

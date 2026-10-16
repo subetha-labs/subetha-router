@@ -16,6 +16,7 @@ import { keccak256 } from "viem";
 
 import { assetKeyOf, KNOWN_NETWORKS } from "./networks.js";
 import { classifyReason, REASON_MANIFEST, REASON_TABLE_VERSION, REASON_TOKENS, type ReasonClass } from "./payment-reasons.js";
+import { paymentRequiredErrorOf, receiptClassOfHeader, receiptFormOf } from "./x402-receipt.js";
 
 /* ──────────────────────────────────────────────────────────────────────────────
  * 閉じた値の集合
@@ -372,6 +373,21 @@ export interface DiagCapture {
    * `code`（`deadline`）にする（hook では分類しない: §13.1・§15.1）。明示の `rpc` などの欄があればそちらが優先。
    */
   readonly rawRpc?: DiagRpcErrorSnapshot;
+  /**
+   * 送信の領収の分類の入力（§4.3、タスク R-4）。hook はヘッダの文字列（`PAYMENT-RESPONSE` → `X-PAYMENT-RESPONSE` の順に選んだもの）を写すだけで、
+   * decode と 7 つの分類（`receiptClassOfHeader`）は後回しの処理でする。`receiptForm` があるときだけ `receipt` を書く（ヘッダが無ければ `absent`）。
+   * 8 KiB を超えたら写さず印だけ（`receipt` を書かない）。比べる network は `network` の欄（生の値）、署名者は `receiptSigner`。
+   */
+  readonly rawReceiptHeader?: string;
+  /** 領収の形（`"evm"`・`"svm"`）。記録の欄にはならない。 */
+  readonly receiptForm?: "evm" | "svm";
+  /** 領収の `payer` と比べる署名者のアドレス（公開の値。記録の欄にはならない）。 */
+  readonly receiptSigner?: string;
+  /**
+   * `PAYMENT-REQUIRED` のヘッダの文字列（§12.2: 402 以外の状態でも）。後回しの処理で decode して最上位の `error` だけを理由の表で分類する
+   * （`reasonSource: "payment_required_header"`）。8 KiB を超えた・decode できない → `malformed`。
+   */
+  readonly rawPaymentRequired?: string;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -570,9 +586,13 @@ const CAPTURE_FIELDS: ReadonlyArray<readonly [string, FieldKind]> = [
   ["broadcast", "string"],
   ["fundsMayHaveMoved", "boolean"],
   ["signerStage", "string"],
+  ["receiptForm", "string"],
+  ["receiptSigner", "string"],
 ];
-/** 写す欄の数（固定。`rawReason`・`rawCid`・`txRef`・`rawRpc` を含む）。push の仕事はこの数の読み取りで上限がある。 */
-export const DIAG_CAPTURE_FIELD_COUNT = CAPTURE_FIELDS.length + 4;
+/** 生の文字列の欄（型の違う値は `INVALID`、8 KiB を超えたら `OVERSIZE`。分類は後回しの処理で）。 */
+const RAW_STRING_FIELDS = ["rawReceiptHeader", "rawPaymentRequired"] as const;
+/** 写す欄の数（固定。`rawReason`・`rawCid`・`txRef`・`rawRpc`・`rawReceiptHeader`・`rawPaymentRequired` を含む）。push の仕事はこの数の読み取りで上限がある。 */
+export const DIAG_CAPTURE_FIELD_COUNT = CAPTURE_FIELDS.length + 4 + RAW_STRING_FIELDS.length;
 
 /** 4 つの文字列だけを写す（型が違う・大きすぎれば `undefined`）。 */
 function cidCopyOf(value: unknown): { copy: Readonly<Record<"network" | "asset" | "from" | "nonce", string>>; bytes: number } | undefined {
@@ -624,6 +644,16 @@ export function snapshotCapture(capture: DiagCapture): CaptureSnapshot {
     else {
       cost += diagStringBytes(reason);
       out["rawReason"] = reason;
+    }
+  }
+  for (const key of RAW_STRING_FIELDS) {
+    const raw = source[key];
+    if (raw === undefined) continue;
+    if (typeof raw !== "string") out[key] = INVALID;
+    else if (diagStringBytes(raw) > DIAG_MAX_STRING_BYTES) out[key] = OVERSIZE;
+    else {
+      cost += diagStringBytes(raw);
+      out[key] = raw;
     }
   }
   const rawCid = source["rawCid"];
@@ -894,8 +924,10 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
   // 知らない鍵は写しに入らないので、記録の欄の名前（`cid`・`quoteHash`・`table` など）で hash・分類を迂回することもできない。
   for (const key of Object.keys(c)) {
     if (!CAPTURE_KEYS.has(key)) return undefined;
-    if (c[key] === INVALID && key !== "rawReason") return undefined;
+    if (c[key] === INVALID && !MALFORMED_WHEN_INVALID.has(key)) return undefined;
   }
+  const derived = derivedDestinationFieldsOf(c);
+  if (derived === undefined) return undefined;
   const s = (entry.scope?.values ?? {}) as Record<string, unknown>;
   const out: Record<string, unknown> = { v: 1, at: new Date(entry.at).toISOString(), seq: entry.seq, component, stage: c["stage"] };
   const pick = (key: string): unknown => (c[key] !== undefined ? c[key] : s[key]);
@@ -916,10 +948,10 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
   if (network !== undefined) out["network"] = typeof network === "string" && DIAG_NETWORKS.includes(network) ? network : "unrecognized";
   const op = c["op"];
   if (op !== undefined) out["op"] = typeof op === "string" && (DIAG_OPS as readonly string[]).includes(op) ? op : "other";
-  for (const key of DIRECT_KEYS) put(key, c[key]);
-  if ("rawReason" in c) {
-    const raw = c["rawReason"];
-    out["reason"] = raw === OVERSIZE || raw === INVALID ? "malformed" : classifyReason(raw);
+  for (const key of DIRECT_KEYS) put(key, key in derived ? derived[key as keyof DerivedDestinationFields] : c[key]);
+  const reasonRaw = derived.hasReason ? derived.rawReason : c["rawReason"];
+  if (derived.hasReason || "rawReason" in c) {
+    out["reason"] = reasonRaw === OVERSIZE || reasonRaw === INVALID ? "malformed" : classifyReason(reasonRaw);
     out["table"] = REASON_TABLE_VERSION;
   }
   for (const key of DIRECT_KEYS_AFTER_REASON) put(key, c[key]);
@@ -938,6 +970,65 @@ export function buildDiagRecord(entry: DiagEntry, component: DiagComponent): Dia
   put("fundsMayHaveMoved", c["fundsMayHaveMoved"]);
   put("signerStage", c["signerStage"]);
   return validateDiagRecord(out);
+}
+
+/** 型の違う値でも行を捨てず、`malformed` として分類する生の欄。 */
+const MALFORMED_WHEN_INVALID: ReadonlySet<string> = new Set(["rawReason", "rawReceiptHeader", "rawPaymentRequired"]);
+
+/** 送信の領収・理由の後回しの分類の結果（記録の欄。`hasReason` なら `rawReason` を理由の表に掛ける）。 */
+interface DerivedDestinationFields {
+  receipt?: string;
+  reasonField?: string;
+  reasonSource?: string;
+  hasReason?: boolean;
+  rawReason?: unknown;
+}
+
+/**
+ * 送信の領収と理由を、写した生の値から分類する（§4.3、§12.2。後回しの処理だけで呼ぶ）。
+ * - `receiptForm` があれば `receipt`: ヘッダが無ければ `absent`、8 KiB を超えていれば書かない、ほかは `receiptClassOfHeader`（`receiptOf` と同じ decoder・順）。
+ * - 理由は 1 つだけ（優先の順）: (1) 領収が `failed` → その `errorReason`（`payment_response_header`）、(2) `PAYMENT-REQUIRED` を写していれば
+ *   その `error`（`payment_required_header`。欄が無く、本文の理由を写していればそちら）、(3) 写した `rawReason`（静的の Base の既に読んだ本文など。
+ *   欄・出どころは hook が書いたもの）。
+ * 形の外（`receiptForm` が集合の外・署名者が無い）なら `undefined`（行ごと捨てる）。
+ */
+function derivedDestinationFieldsOf(c: Record<string, unknown>): DerivedDestinationFields | undefined {
+  const out: DerivedDestinationFields = {};
+  let failedReason: { raw: unknown } | undefined;
+  if (c["receiptForm"] !== undefined) {
+    const form = receiptFormOf(c["receiptForm"], c["receiptSigner"]);
+    const network = c["network"];
+    if (form === undefined || typeof network !== "string") return undefined;
+    const header = c["rawReceiptHeader"];
+    if (header === undefined) out.receipt = "absent";
+    else if (header === INVALID) out.receipt = "malformed";
+    else if (typeof header === "string") {
+      const result = receiptClassOfHeader(header, network, form);
+      out.receipt = result.receipt;
+      if (result.receipt === "failed") failedReason = { raw: result.errorReason };
+    }
+    // OVERSIZE: 分類できない（`receipt` を書かない）。
+  } else if (c["rawReceiptHeader"] !== undefined || c["receiptSigner"] !== undefined) {
+    return undefined;
+  }
+  if (failedReason !== undefined) {
+    return { ...out, reasonField: "errorReason", reasonSource: "payment_response_header", hasReason: true, rawReason: failedReason.raw };
+  }
+  const required = c["rawPaymentRequired"];
+  if (required !== undefined) {
+    const header = required === OVERSIZE || required === INVALID ? undefined : (required as string);
+    const decoded = header === undefined ? ({ kind: "malformed" } as const) : paymentRequiredErrorOf(header);
+    const bodyReason = "rawReason" in c;
+    if (decoded.kind === "decoded" && !decoded.present && bodyReason) return out; // 本文の理由（hook が書いた欄・出どころ）を使う
+    return {
+      ...out,
+      reasonField: "error",
+      reasonSource: "payment_required_header",
+      hasReason: true,
+      rawReason: decoded.kind === "malformed" ? INVALID : decoded.present ? decoded.value : undefined,
+    };
+  }
+  return out;
 }
 
 const CAPTURE_KEYS: ReadonlySet<string> = new Set([
@@ -971,6 +1062,10 @@ const CAPTURE_KEYS: ReadonlySet<string> = new Set([
   "rawCid",
   "txRef",
   "rawRpc",
+  "receiptForm",
+  "receiptSigner",
+  "rawReceiptHeader",
+  "rawPaymentRequired",
 ]);
 
 /** 数の初期値（全部 0）。 */
