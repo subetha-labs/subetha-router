@@ -1,4 +1,4 @@
-# 設計 v4: hosted Router の受信レグで SubEtha（zERC20）決済を受ける
+# 設計 v5: hosted Router の受信レグで SubEtha（zERC20）決済を受ける
 
 > 入力: `docs/subetha-hosted-inbound-requirements.md` v4（2026-10-16 owner 承認）。本書は設計フェーズの成果物で、実装は含まない。
 > facilitator の記述は SubEtha リポジトリ origin/develop `1aeac6005430d436dd8ae58d2aa343a6eea3b89d`（以下 `F:`）、
@@ -25,7 +25,8 @@
 - finalize は `F:apps/facilitator/src/loop.ts:59` → `finalizeOnce`（`F:packages/zerc20-backend/src/index.ts:2589-2953`）。
 - root は**自分で証明しない**。SDK の `collectRedeemContext`（`useLocalRoot: true`、`F:…/redeem.ts:354-361`）が「証明済みでない」と返す間は pending のまま待つ（`F:index.ts:2727-2740`）。
 - 証明は `generateSingleTeleportProof`（Groth16、`F:redeem.ts:387-406`）。読むのは SDK の `withdraw_local_groth16_{pk,vk}.bin` だけで、
-  **global の鍵は SDK に無く、local に alias される**（単一 teleport は local scope なので global は読み込まれるが使われない。`F:…/sdkRuntime.ts:7-12, 24-27`）。
+  global の鍵は、**ファイルが無いときだけ** local に alias される（`F:…/sdkRuntime.ts:7-12, 24-27`。単一 teleport は local scope なので global は読み込まれるが使われない）。
+  owner の checkout `b890773` には `withdraw_global_groth16_{pk,vk}.bin` が commit されている（タスク §4 (b)。`sdkRuntime.ts` の注釈はこの checkout では古い）ので、alias は働かない。
   実行時のダウンロードは無い。資産の大きさと証明の時間はここでは主張しない。AC-8 で配備先の値を測って記録する（SDK の commit と host の型と一緒に）。
 - 送出は relayer の鍵で `Verifier.singleTeleport`（Sepolia、`F:redeem.ts:409-431`）。receipt で treasury への mint がちょうど 1 件あることを確かめて `finalized`（`F:index.ts:2881-2920`）。
 - `decider_url` は設定の検査で必須だが、batch（Nova）経路でしか使わない（`F:config.ts:253`、`F:redeem.ts:580`）。
@@ -109,23 +110,44 @@ max_open_challenges       = 200
 
 facilitator の process（user `subetha-fac`）だけを対象にする。Caddy の ACME（Let's Encrypt）と OS の更新は別の user で、対象外。
 
-- **名前の制限（dnsmasq）**: loopback の 5353 で待ち受ける dnsmasq を `subetha-fac` 専用の resolver にする。nftables の `nat` の output で
-  `meta skuid subetha-fac` の UDP・TCP 53 を `127.0.0.1:5353` へ DNAT する（`/etc/resolv.conf` は共有のままで、`subetha-fac` の DNS だけがここに来る）。
-  dnsmasq が上流へ転送するのは O-6 の 2 つの RPC のホスト名と `beta-v1.api.zerc20.io` だけで、ほかの名前は NXDOMAIN（`address=/#/` と許可名ごとの `server=`）。
-- **接続の制限（nftables）**: set `fac_allowed4`（`type ipv4_addr; flags timeout; timeout 1h`）。dnsmasq の `nftset=/<許可名>/4#inet#fac#fac_allowed4` で、許可名の解決結果の
-  IPv4 を set に入れる（解決のたびに timeout が更新される）。filter の output で `meta skuid subetha-fac` について: loopback 宛て（dnsmasq、4032 の応答）を許可、
-  `ip daddr @fac_allowed4 tcp dport 443` を **counter と log（接頭辞 `fac-allow`）つき**で許可、ほかは counter つきで DROP。IPv6 は DROP。
-- **保証の範囲（O-8）**: これは「`subetha-fac` は許可した名前しか解決できず、接続できるのは許可した名前が解決した IPv4 の 443 だけ」という保証で、
+> **v5 の変更**: T0 (d) で、AL2023 の dnsmasq 2.90（`1.amzn2023.0.3`）は **`no-nftset`**（`ipset` はあり）と分かった（タスク §4）。nftables の set を dnsmasq から埋める
+> v4 の方式は使えないので、**dnsmasq の `ipset=` と ipset（7.11）と iptables-nft（1.8.8）の `-m set`** に置き換える。保証の範囲（O-8）と観測は v4 と同じ。
+
+- **名前の制限（dnsmasq）**: dnsmasq を `listen-address=127.0.0.2` と **`bind-interfaces`** で `127.0.0.2:53` にだけ bind させ（systemd-resolved の `127.0.0.53` と衝突しない）、
+  `subetha-fac` 専用の resolver にする。**`cache-size=0`**（毎回の問い合わせが上流へ行き、そのたびに ipset に入る。cache の hit では ipset が更新されないため）。
+  facilitator の systemd の unit で `BindReadOnlyPaths=/etc/subetha-facilitator/resolv.conf:/etc/resolv.conf`（中身は `nameserver 127.0.0.2` だけ）と
+  `BindReadOnlyPaths=/etc/subetha-facilitator/nsswitch.conf:/etc/nsswitch.conf`（`hosts: files dns`。`resolve` の NSS module を使わせない）、
+  `InaccessiblePaths=/run/systemd/resolve /run/dbus`（systemd-resolved の Unix socket・D-Bus に届かせない）とする。ホストの他の process の設定は変えない。
+  **既定の resolver を変えるだけでは強制にならない**ので、強制は下の iptables が持つ（`127.0.0.53` などへの直接の問い合わせも落ちる）。dnsmasq が上流へ転送するのは O-6 の 2 つの RPC のホスト名と
+  `beta-v1.api.zerc20.io` だけで、ほかの名前は NXDOMAIN（`address=/#/` と許可名ごとの `server=`）。
+- **接続の制限（ipset + iptables）**: ipset `fac_allowed4`（`hash:ip family inet timeout 3600`）。dnsmasq の `ipset=/<許可名>/fac_allowed4` で、許可名の解決結果の IPv4 を
+  set に入れる（dnsmasq が上流の応答を処理するたびに入れ直し、timeout が戻る。`cache-size=0` なので問い合わせのたび）。iptables の `OUTPUT` の**先頭**（既存の広い ACCEPT より前）に
+  `-m owner --uid-owner subetha-fac -j FAC-EGRESS` を挿し、chain `FAC-EGRESS` の順は:
+  1. `-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`（4032 への Caddy の接続への応答、確立済みの接続）
+  2. `-o lo -d 127.0.0.2 -p udp --dport 53 -j ACCEPT`、同じく tcp（dnsmasq だけ。**loopback の他の宛先は許さない**）
+  3. `-m set --match-set fac_allowed4 dst -p tcp --dport 443 -m conntrack --ctstate NEW -j LOG --log-prefix fac-allow`、続けて同じ条件で `-j ACCEPT`
+  4. counter つきの `-j DROP`
+  ip6tables は `OUTPUT` の先頭で同じ uid を DROP。
+  **確立済みの接続の扱い**: 1. があるので、set の要素が timeout で消えても**既に確立した接続**（keep-alive）は続く。新しい接続は 3. の set の照合を通る。log は NEW のときだけなので、
+  keep-alive の再利用は log に出ない（観測 (c) は新しい接続の宛先の記録）。
+- **起動の順**: `subetha-fac-egress.service`（set と規則を作る。oneshot、`RemainAfterExit=yes`）→ `dnsmasq.service`（`Requires=`・`After=` egress）→ facilitator の unit
+  （`Requires=`・`After=` の両方に egress と dnsmasq）。dnsmasq が待ち受けるまで facilitator を起動しない（dnsmasq の unit が `Type=forking` で bind の後に戻る既定の形を使う。
+  G-1 で `ss -lunp` で確かめる）。規則が無ければ facilitator は起動しない。
+- **前提の確認**: kernel の module `ip_set`・`xt_set`・`xt_owner` が AL2023 の kernel で読めることを、G-1 の最初にホストで確かめる（container の kernel は Colima のものなので T0 では確かめられない）。
+  読めなければ設計に戻す。
+- **保証の範囲（O-8、owner 決定）**: これは「`subetha-fac` は許可した名前しか解決できず、接続できるのは許可した名前が解決した IPv4 の 443 だけ」という保証で、
   **ホスト名そのものの排他ではない**。許可した IP を共有する別のホスト名（CDN）への HTTPS は、IP では区別できない。facilitator の
-  コードが接続先に使う URL は設定の 4 つ（`rpc_url`・`hub_rpc_url`・`indexer_url`・`decider_url`）だけである（T-段階で facilitator と SDK のソースで確かめて記録する）ことと合わせて、
-  FR-1.6 をこの範囲で満たすものとする。owner の確認を O-8 として求める。
+  コードが接続先に使う URL は設定の 4 つ（`rpc_url`・`hub_rpc_url`・`indexer_url`・`decider_url`）だけである（タスク T0 (a) の記録）ことと合わせて、
+  FR-1.6 をこの範囲で満たすものとする。
 - **観測（受け入れの証拠）**:
-  - (a) 名前の拒否: `sudo -u subetha-fac getent hosts example.com` が失敗し、dnsmasq の query log に NXDOMAIN が出る。
-  - (b) IP の拒否: `sudo -u subetha-fac curl --resolve example.com:443:<許可外の IPv4> https://example.com` が失敗し、DROP の counter が増える。
+  - (a) 名前の拒否: facilitator と同じ設定（`systemd-run --uid=subetha-fac -p BindReadOnlyPaths=… -p InaccessiblePaths=…`）で `getent hosts example.com` が失敗し、
+    dnsmasq の query log に NXDOMAIN が出る。**直接の問い合わせも拒否**: 同じ条件で `dig @127.0.0.53 example.com` と `dig @<VPC の resolver> example.com` が失敗し、DROP の counter が増える。
+    `resolvectl query example.com` が socket に届かず失敗する。
+    TCP の DNS（`dig +tcp @127.0.0.53 example.com`）も同じく失敗する。set の期限の後の再接続: set の要素を手で消し（`ipset del`）、新しい解決 → set への再登録 → 新しい接続が通ることを確かめる。
+  - (b) IP の拒否: 同じ条件で `curl --resolve example.com:443:<許可外の IPv4> https://example.com` が失敗し、DROP の counter が増える。
   - (c) 実際の依存先: 起動時（daemon は起動時に `hub_rpc_url` を呼ぶ: `F:apps/facilitator/src/daemon.ts:46-56`）と AC-7・AC-8 の間を**分けて**、`fac-allow` の log の宛先 IP と
     dnsmasq の query log の名前を記録する。DROP の counter が増えたら宛先を記録し、許可するかを判断する。IP は共有されうるので、通信を SDK の呼び出しに帰属させるのは
-    ソースの呼び出し箇所（T-段階で確かめる）と合わせたときだけ（log だけでは「SDK が Hub RPC を呼ぶ」とは言わない）。
-- AL2023 での dnsmasq の `nftset=` の可否は T-段階の最初に確かめる。使えなければ、代替（timer で許可名を解決して set を更新する）を設計に戻して決める。
+    ソースの呼び出し箇所（T0 (a)）と合わせたときだけ。
 
 ### 2.5 監視（R-1・R-2）
 
@@ -454,3 +476,23 @@ payer の address は鍵（env `SUBETHA_PAYER_PRIVATE_KEY`、`tools/sign-payment
 ### 14.3 v4 レビュー（2026-10-16、同じ reviewer）
 
 判定 **APPROVE**。v3 の high は RESOLVED、zUSDC への変更は要件・証跡と一致、新しい critical・high は無し。non-blocking 2 件（§3 の「100 回」は token の量で購入は 10 件まで、`mint` の観測は模擬 1 回）を §3 に反映した。
+
+## 15. v5 の変更（2026-10-16、タスク T0 (d) の結果）
+
+| 箇所 | v4 | v5 | 理由 |
+|---|---|---|---|
+| §2.4 の set の埋め方 | dnsmasq の `nftset=` と nftables の set | dnsmasq の `ipset=` と ipset、iptables-nft の `-m set` | AL2023 の dnsmasq 2.90 は `no-nftset`（`ipset` はあり）。ipset 7.11・iptables-nft 1.8.8 は AL2023 の repo にある |
+| §2.4 の resolver の付け方 | nftables の `nat` で uid の 53 を DNAT | systemd の `BindReadOnlyPaths` で facilitator だけに別の `resolv.conf` | DNAT を使わずに済み、他の process の DNS を変えない |
+| §2.4 の前提 | — | kernel の `ip_set`・`xt_set`・`xt_owner` を G-1 の最初に確かめる | container では host の kernel を確かめられない |
+
+保証の範囲（O-8）は v4 と同じ。v4 との違い: (1) 名前の制限の**強制**は uid の loopback の DNS を `127.0.0.2:53` だけにする iptables の規則が持つ（v4 は DNAT が持っていた）。
+`BindReadOnlyPaths` は既定の resolver を変えるだけ。(2) 確立済みの接続は set の timeout の後も続く（v4 の nftables の規則も `ct state established` を先に許すなら同じ）。
+(3) log は新しい接続だけ。観測 (a) に直接の問い合わせの拒否を足した。
+
+### 15.1 v5 のレビュー（2026-10-16、同じ reviewer）
+
+判定 **APPROVE WITH CHANGES**。high 1 件（`BindReadOnlyPaths` は強制にならず、loopback の全許可で `127.0.0.53` や NSS の `resolve` を経由して許可外の名前を引ける）を反映した:
+loopback は `127.0.0.2:53` だけ、`nsswitch.conf` の差し替えと `InaccessiblePaths`、観測 (a) に直接の問い合わせ。non-blocking 3 件（`bind-interfaces`・起動の順、cache が ipset を更新しない →
+`cache-size=0`、確立済みの接続と NEW の log の意味・規則の位置）も反映した。
+
+判定（修正の再レビュー）**APPROVE**。high は RESOLVED、新しい critical・high は無し。軽微な 2 件（TCP の DNS の拒否、set の期限の後の再接続）を観測 (a) に足した。
