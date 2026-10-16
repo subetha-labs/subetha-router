@@ -789,7 +789,8 @@
      ]
     },
     "denyHosts": [
-     "router.subethalabs.com"
+     "router.subethalabs.com",
+     "zerc20-facilitator.subethalabs.com"
     ]
    }
   },

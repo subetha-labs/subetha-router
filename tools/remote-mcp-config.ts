@@ -121,6 +121,43 @@ export const ROUTE_SOLMPP_TO_MPP = "md-mpp-eth-snapshot-solmpp";
 export const ROUTE_SOLMPP_OUT = "md-solmpp-eth-snapshot";
 /** 静的 route（設計 §6.3）: Tempo pathUSD（MPP）で払って Provider D（Solana の MPP）に届く。 */
 export const ROUTE_SOLMPP_OUT_MPP = "md-solmpp-eth-snapshot-mpp";
+/* ------------------------------------------------------------------ SubEtha（zERC20）の受信（`docs/subetha-hosted-inbound-design.md` §4.1、タスク T1） */
+
+/**
+ * Sepolia の zUSDC を SubEtha（`subetha-zerc20`）で受ける。額は他の静的 route の受信額と同じ 0.01（要件 v4 FR-2.4、owner の決定 O-2）。
+ * 受取先（一回限りの burn address）は facilitator が challenge で決めるので、route は `payTo` を持たない（`src/config.ts` の subetha の規則）。
+ */
+export const INBOUND_ZUSDC = {
+  network: "eip155:11155111",
+  asset: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF",
+  decimals: 6,
+  amount: "10000",
+} as const;
+/** 静的 route: zUSDC（SubEtha）で払って Provider A（x402）に届く。 */
+export const ROUTE_ZUSDC_TO_X402 = "md-x402-eth-snapshot-zusdc";
+/** 静的 route: zUSDC（SubEtha）で払って Provider B（MPP）に届く。 */
+export const ROUTE_ZUSDC_TO_MPP = "md-mpp-eth-snapshot-zusdc";
+/** SubEtha の facilitator の公開ホスト名（O-5）。動的上流の宛先として、**有効化に関係なく常に**拒否する（要件 FR-3.4、設計 §4.1）。 */
+export const SUBETHA_FACILITATOR_HOSTNAME = "zerc20-facilitator.subethalabs.com";
+/** SubEtha の facilitator の URL の env（`subetha.inbound` のときだけ読む）。値は `https://<SUBETHA_FACILITATOR_HOSTNAME>` だけ。 */
+export const SUBETHA_FACILITATOR_URL_ENV = "SUBETHA_ZERC20_FACILITATOR_URL";
+
+/** 受け付ける facilitator の origin（文字列の完全一致。末尾の `/` 1 つだけ許す）。 */
+const SUBETHA_FACILITATOR_ORIGIN = `https://${SUBETHA_FACILITATOR_HOSTNAME}`;
+
+/**
+ * `subetha.inbound` のときの facilitator の URL。env の**文字列そのもの**が `https://<SUBETHA_FACILITATOR_HOSTNAME>`（末尾の `/` 1 つは可）と一致するときだけ受け、origin を返す。
+ * URL の解析の後の部品では比べない（`:443`・`/%2e`・大文字・全角などの正規化で同じ origin になる綴りも拒む）。違えば固定文で止める（値は出さない）。無効なら env を読まない。
+ */
+export function subethaFacilitatorUrlOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): string | undefined {
+  if (!subethaOf(activation).inbound) return undefined;
+  const raw = env[SUBETHA_FACILITATOR_URL_ENV];
+  if (raw !== SUBETHA_FACILITATOR_ORIGIN && raw !== `${SUBETHA_FACILITATOR_ORIGIN}/`) {
+    throw new Error(`${SUBETHA_FACILITATOR_URL_ENV} must be exactly ${SUBETHA_FACILITATOR_ORIGIN} when the SubEtha inbound rail is activated`);
+  }
+  return SUBETHA_FACILITATOR_ORIGIN;
+}
+
 /** MPP Solana の宛先の `scheme`（`src/config.ts` の `MPP_SOLANA_SCHEME` と同じ文字列。このファイルは Router の SDK に依存しない）。 */
 const SOLANA_MPP_SCHEME = "solana/charge";
 
@@ -153,7 +190,17 @@ export interface RailsActivation {
    * 出すのは動的プロファイルだけ（静的 route は足さない）。Ethereum Sepolia は対象外。
    */
   readonly evm?: EvmRailsActivation;
+  /**
+   * SubEtha（zERC20）の**受信**（`docs/subetha-hosted-inbound-design.md` §4.1）。送信は範囲外なので欄を持たない。無ければ `false`（`subethaOf`）。
+   * 有効なら route 2 本（zUSDC → Provider A・B）と予算の区分が出て、env `SUBETHA_ZERC20_FACILITATOR_URL` が要る。
+   */
+  readonly subetha?: { readonly inbound: boolean };
 }
+/** `subetha` の既定（無ければ `false`）。 */
+export function subethaOf(activation: RailsActivation): { readonly inbound: boolean } {
+  return activation.subetha ?? SUBETHA_OFF;
+}
+const SUBETHA_OFF: { readonly inbound: boolean } = Object.freeze({ inbound: false });
 /** hosted に出す EVM testnet 3 つの短縮名（プロファイル id・内部 env の token の語幹）。値は `EVM_TESTNETS` の同じ名前。 */
 export type HostedEvmChain = "rh" | "arbsep" | "hyperevm";
 export const HOSTED_EVM_CHAINS: readonly HostedEvmChain[] = Object.freeze(["rh", "arbsep", "hyperevm"]);
@@ -207,6 +254,8 @@ export const EVM_NONE: EvmRailsActivation = Object.freeze({ rh: RAIL_OFF, arbsep
 /**
  * 公開の process の有効化。受信は **2026-10-07 に両方 `true`**（T10 の G-4。`docs/DEPLOY.md` §2c の記録）。
  * 送信は **2026-10-08 に両方 `true`**（UG-A・UG-S の G-4′。`docs/DEPLOY.md` §2c の記録。送信の設計 §6.1）。env からは変えられない。戻すのはここ（イメージを作り直して入れ替える）。
+ * SubEtha（zUSDC）の受信（`docs/subetha-hosted-inbound-design.md` §4.1）は欄が無い = `false`（`subethaOf`）。G-4（`docs/subetha-hosted-inbound-tasks.md`）で
+ * `subetha: Object.freeze({ inbound: true })` を足す。欄は使うときだけ持つ（`pairs`・`evm` と同じ。内部の env の往復が恒等になる）。
  */
 export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   arc: Object.freeze({ inbound: true, outbound: true }),
@@ -578,6 +627,9 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
       : [{ network: INBOUND_SOL.network, asset: INBOUND_SOL.asset, maxTotal, maxPerPurchase: solMaxPerPurchase }]),
   ];
   const profiles = dynamicProfilesOf(env, receiver, mppInboundEnabled, rails);
+  // SubEtha（zUSDC）の受信（設計 §4.1）: 有効なときだけ env を読み、URL の形を確かめる（違えば固定文で止まる）。
+  const subethaUrl = subethaFacilitatorUrlOf(env, rails.activation);
+  const zusdcBucket = { network: INBOUND_ZUSDC.network, asset: INBOUND_ZUSDC.asset, maxTotal: env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000", maxPerPurchase: INBOUND_ZUSDC.amount };
   return {
     router: {
       /**
@@ -728,6 +780,27 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                   }
                 : {}),
             }),
+        // SubEtha（zUSDC）の受信（設計 §4.1）: zUSDC で払って Provider A（x402）・Provider B（MPP）に届く。受取先は facilitator の challenge が決める（`payTo` 無し）。
+        ...(subethaUrl === undefined
+          ? {}
+          : {
+              [ROUTE_ZUSDC_TO_X402]: {
+                routeId: ROUTE_ZUSDC_TO_X402,
+                canonicalPath: `/v1/routes/${ROUTE_ZUSDC_TO_X402}/resource`,
+                rail: "x402",
+                sourceRail: "subetha",
+                source: { amount: INBOUND_ZUSDC.amount, asset: INBOUND_ZUSDC.asset, decimals: INBOUND_ZUSDC.decimals, network: INBOUND_ZUSDC.network },
+                destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
+              },
+              [ROUTE_ZUSDC_TO_MPP]: {
+                routeId: ROUTE_ZUSDC_TO_MPP,
+                canonicalPath: `/v1/routes/${ROUTE_ZUSDC_TO_MPP}/resource`,
+                rail: "mpp",
+                sourceRail: "subetha",
+                source: { amount: INBOUND_ZUSDC.amount, asset: INBOUND_ZUSDC.asset, decimals: INBOUND_ZUSDC.decimals, network: INBOUND_ZUSDC.network },
+                destination: { scheme: "tempo/charge", network: OUTBOUND.network, asset: OUTBOUND.asset, payTo: OUTBOUND.payTo },
+              },
+            }),
       },
       // 「予算の続く限り」使えるように大きく取るが、暴走時に止まるようゼロにはしない。
       // bucket は (network, asset) 単位。2 経路は同じ 2 組を向きだけ変えて使うので、
@@ -748,6 +821,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
             maxPerPurchase: "10000",
           },
           ...railBuckets("10000", env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000"),
+          // SubEtha（zUSDC）の受信の区分（要件 FR-3.5）: 1 件の上限 = burn 総額。総額は既存の静的の受信と同じ env。
+          ...(subethaUrl === undefined ? [] : [zusdcBucket]),
         ],
       },
       /**
@@ -781,7 +856,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                 ],
               },
               // 自分の公開ホスト名（Caddy の後ろ。canonical は内部の URL なので main.ts はこれを知らない）と、運用者が足すもの。
-              denyHosts: [PUBLIC_HOSTNAME, ...(env["SUBETHA_DENY_HOSTS"] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter((host) => host !== "")],
+              // SubEtha の facilitator のホスト名は**有効化に関係なく**拒否する（要件 FR-3.4。無効のとき子の env の facilitator は埋め草なので、`src/main.ts` の自動の拒否には入らない）。
+              denyHosts: [PUBLIC_HOSTNAME, SUBETHA_FACILITATOR_HOSTNAME, ...(env["SUBETHA_DENY_HOSTS"] ?? "").split(",").map((host) => host.trim().toLowerCase()).filter((host) => host !== "")],
             },
           }),
     },
@@ -797,6 +873,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         // Solana の MPP（設計 §6.3）: 受信 2 本は Provider A・B の URL、送信 2 本は Provider D の URL。
         ...(solMppReceiver === undefined ? {} : { [ROUTE_SOLMPP_TO_X402]: UPSTREAM_X402, [ROUTE_SOLMPP_TO_MPP]: UPSTREAM }),
         ...(solMppProvider === undefined ? {} : { [ROUTE_SOLMPP_OUT]: upstreamSolMpp, ...(mppInboundEnabled ? { [ROUTE_SOLMPP_OUT_MPP]: upstreamSolMpp } : {}) }),
+        // SubEtha（zUSDC）の受信 2 本は Provider A・B の URL。
+        ...(subethaUrl === undefined ? {} : { [ROUTE_ZUSDC_TO_X402]: UPSTREAM_X402, [ROUTE_ZUSDC_TO_MPP]: UPSTREAM }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
       // EVM testnet 3 つの受信（hosted 設計 §5）は自前の facilitator（kind `x402`）。HTTP の期限はチェーン別に Router が決める（`evmTestnetDeadlinesOf`。ローカル版 §3.6 の 20 秒）。
