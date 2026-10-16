@@ -34,8 +34,8 @@ import type {
   InboundCallContext,
 } from "../../ports/inbound.js";
 import { readBoundedBody } from "../../net/bounded-body.js";
-import type { DiagnosticsSink } from "../../shared/diagnostics.js";
-import { emitInboundRoundTrip, evmInboundCidInputOfRequest, inboundDiagnosticsOn, verifyResponseClassOf, withInboundDiagScope, type SettleResponseClass } from "./inbound-diagnostics.js";
+import type { DiagCidInput, DiagnosticsSink } from "../../shared/diagnostics.js";
+import { emitInboundRoundTrip, inboundDiagnosticsOn, serializeEvmInboundRequest, verifyResponseClassOf, withInboundDiagScope, type SettleResponseClass } from "./inbound-diagnostics.js";
 import { bodyHashOf } from "./seller-proof.js";
 
 /** kind `circle` の facilitator の応答の上限（バイト）。verify・settle の JSON は数百バイト。 */
@@ -239,6 +239,20 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
     };
   }
 
+  /**
+   * verify・settle の要求本体を 1 度だけ直列化する。診断が無効なら今までと同じ `JSON.stringify`（replacer 無し）、有効なら同じ bytes を
+   * 作る replacer つきの直列化で cid の入力も写す（`serializeEvmInboundRequest`）。
+   */
+  function serializeRequest(offer: InboundOffer, credential: PaymentCredential): { readonly requestText: string; readonly cidInput: DiagCidInput | undefined } {
+    const request = {
+      x402Version: 2,
+      paymentPayload: payloadOf(offer, credential) as object,
+      paymentRequirements: requirementsOf(offer) as object,
+    };
+    if (!diagOn) return { requestText: JSON.stringify(request), cidInput: undefined };
+    return serializeEvmInboundRequest(request);
+  }
+
   return {
     async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
       // nonce は CSPRNG。一意性・発行済み性の担保は core 側（quoteId = challengeNonce）。
@@ -344,13 +358,9 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
 
     async verify(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<{ isValid: boolean }> {
       // **1 度だけ直列化**し、証明も送信もこの文字列に束縛する（設計 §4.2）。
-      const requestText = JSON.stringify({
-        x402Version: 2,
-        paymentPayload: payloadOf(offer, credential),
-        paymentRequirements: requirementsOf(offer),
-      });
-      // 診断の cid の入力は facilitator を呼ぶ前に、送る bytes（requestText）から作って段の scope に入れる（設計 §12.6。無効なら作らない）。
-      return withInboundDiagScope(diagnostics, diagOn ? evmInboundCidInputOfRequest(requestText) : undefined, async () => {
+      // 診断が有効なら同じ直列化の中で cid の入力を写し、facilitator を呼ぶ前に段の scope に入れる（設計 §12.6。無効なら今までどおり）。
+      const { requestText, cidInput } = serializeRequest(offer, credential);
+      return withInboundDiagScope(diagnostics, cidInput, async () => {
         const proof = await proofFor("verify", requestText);
         if (!proof.ok) {
           // 証明が作れない: 要求を出さない（接続 0）。
@@ -369,12 +379,8 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
 
     async settle(offer: InboundOffer, credential: PaymentCredential, context?: InboundCallContext): Promise<SettleResult> {
       // 例外・タイムアウトは呼び出し側（core）が `unknown` として確定する。自動再 settle はしない。
-      const requestText = JSON.stringify({
-        x402Version: 2,
-        paymentPayload: payloadOf(offer, credential),
-        paymentRequirements: requirementsOf(offer),
-      });
-      return withInboundDiagScope(diagnostics, diagOn ? evmInboundCidInputOfRequest(requestText) : undefined, async () => {
+      const { requestText, cidInput } = serializeRequest(offer, credential);
+      return withInboundDiagScope(diagnostics, cidInput, async () => {
         const proof = await proofFor("settle", requestText);
         if (!proof.ok) {
           // 要求を**出す前**の失敗だけが `rejected`（設計 §6）。

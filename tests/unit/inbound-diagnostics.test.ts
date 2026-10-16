@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 
 import { getBase58Decoder } from "@solana/kit";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createX402Inbound, type X402FacilitatorKind } from "../../src/adapters/inbound/x402.js";
 import { createX402SvmInbound } from "../../src/adapters/inbound/x402-svm.js";
@@ -441,6 +441,88 @@ describe("cid の入力（§5.2・§12.6）", () => {
       expect(input).toBeDefined();
       expect(input!.nonce).toBe(NONCE);
       expect(recordsOf(sink).map((r) => r.cid)).toEqual([diagCorrelationIdOf(input!.network, input!.asset, input!.from, input!.nonce)]);
+    }
+  });
+
+  /** 送る bytes が sink の有無で同じで、cid が送った本文から自前の facilitator と同じ式で作った値と一致すること（または形が違えば cid 無し）。 */
+  const NONCE_C = `0x${"cC".repeat(32)}`;
+  const PAYLOAD_SHAPES: ReadonlyArray<readonly [string, () => Record<string, unknown>, "cid" | "none"]> = [
+    ["普通の object", () => ({ authorization: { from: FROM, nonce: NONCE } }), "cid"],
+    [
+      "authorization の toJSON（書かれる値は toJSON の値）",
+      () => ({ authorization: { from: "0x0000000000000000000000000000000000000001", nonce: NONCE, toJSON: () => ({ from: FROM, nonce: NONCE_C }) } }),
+      "cid",
+    ],
+    ["payload の toJSON（新しい object を返す）", () => ({ toJSON: () => ({ challengeNonce: "x", authorization: { from: FROM, nonce: NONCE_C } }) }), "cid"],
+    [
+      "from・nonce の getter（読むたびに違う値）",
+      () => {
+        let n = 0;
+        const authorization = {};
+        Object.defineProperty(authorization, "from", { enumerable: true, get: () => FROM });
+        Object.defineProperty(authorization, "nonce", { enumerable: true, get: () => ((n += 1) === 1 ? NONCE_C : NONCE) });
+        return { authorization };
+      },
+      "cid",
+    ],
+    ["同じ authorization の object が後でもう一度現れる", () => {
+      const authorization = { from: FROM, nonce: NONCE };
+      return { authorization, again: authorization };
+    }, "cid"],
+    ["nonce が文字列でない", () => ({ authorization: { from: FROM, nonce: 42 } }), "none"],
+    ["nonce が大きすぎる", () => ({ authorization: { from: FROM, nonce: `0x${"a".repeat(1_000_000)}` } }), "none"],
+    ["from の形が違う（長さは同じ）", () => ({ authorization: { from: `0x${"g".repeat(40)}`, nonce: NONCE } }), "none"],
+    ["authorization が別の位置にだけある", () => ({ inner: { authorization: { from: FROM, nonce: NONCE } } }), "none"],
+  ];
+
+  test.each(PAYLOAD_SHAPES)("直列化の中で写す cid: %s → bytes は sink の有無で同じ、cid は送った本文の cid", async (_name, payloadOf, expected) => {
+    for (const kind of ["x402", "circle"] as const) {
+      for (const stage of ["verify", "settle"] as const) {
+        const offer = offerOf(kind);
+        const credentialWith = (): PaymentCredential => {
+          const payload = payloadOf();
+          Object.defineProperty(payload, "challengeNonce", { value: offer.extra.challengeNonce, enumerable: false });
+          return { x402Version: 2, accepted: offer, payload: payload as PaymentCredential["payload"] };
+        };
+        const reply = (): Reply => ({ status: 200, text: json(stage === "verify" ? { isValid: true } : { success: true, network: networkOf(kind), transaction: EVM_TX }) });
+        const plain = build(kind, { sink: undefined, reply });
+        const before = await call(plain.rail, stage, offer, credentialWith());
+        const sink = recordingDiagnostics("router");
+        const withSink = build(kind, { sink, reply });
+        expect(await call(withSink.rail, stage, offer, credentialWith())).toEqual(before);
+        // 送る bytes は 1 byte も変わらない（replacer は値をそのまま返す）。
+        expect(withSink.transport.bodies).toEqual(plain.transport.bodies);
+        expect(withSink.transport.log).toEqual(plain.transport.log);
+        const input = diagCidInputOf(JSON.parse(withSink.transport.bodies[0]!));
+        const records = recordsOf(sink);
+        expect(records).toHaveLength(1);
+        if (expected === "cid") {
+          expect(input).toBeDefined();
+          expect(records[0]!.cid).toBe(diagCorrelationIdOf(input!.network, input!.asset, input!.from, input!.nonce));
+        } else {
+          expect(records[0]!.cid).toBeUndefined();
+        }
+      }
+    }
+  });
+
+  test("要求の本文を 2 回目に parse しない（大きい credential でも JSON.parse は応答の本文だけ）", async () => {
+    const offer = offerOf("x402");
+    const big = "z".repeat(512 * 1024);
+    const credential: PaymentCredential = { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, authorization: { from: FROM, nonce: NONCE }, signature: SIGNATURE, padding: big } };
+    for (const stage of ["verify", "settle"] as const) {
+      const sink = recordingDiagnostics("router");
+      const built = build("x402", { sink, reply: () => ({ status: 200, text: json(stage === "verify" ? { isValid: true } : { success: true, network: BASE, transaction: EVM_TX }) }) });
+      const spy = vi.spyOn(JSON, "parse");
+      try {
+        await call(built.rail, stage, offer, credential);
+        const parsed = spy.mock.calls.map(([text]) => String(text));
+        // adapter が parse するのは facilitator の応答（小さい）だけ。要求の本文（`paymentPayload` を含む大きな文字列）は parse されない。
+        expect(parsed.some((text) => text.includes("paymentPayload") || text.length > 1024)).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(recordsOf(sink).map((r) => r.cid)).toEqual([diagCorrelationIdOf(BASE, BASE_USDC, FROM, NONCE)]);
     }
   });
 
