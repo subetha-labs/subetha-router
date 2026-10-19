@@ -254,5 +254,7 @@ export function projectionBody(projection: Projection): unknown {
             awaitingPaymentDoesNotMeanUnpaid: projection.dynamic.fundsMoveOnCredential && projection.status === "awaiting_payment",
           },
         }),
+    // 秘匿購入だけ（`docs/zktls-router-design.md` §7.3）。値・record 本体・封筒は core の射影に無い。
+    ...(projection.private === undefined ? {} : { private: projection.private }),
   };
 }

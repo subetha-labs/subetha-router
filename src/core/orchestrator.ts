@@ -32,6 +32,9 @@ import { openJournal, type Journal } from "./journal.js";
 import { classifyTransportError } from "../net/guarded-fetch.js";
 import type { DiagnosticsSink } from "../shared/diagnostics.js";
 import { DISABLED_PURCHASE_DIAGNOSTICS, withPurchaseDiagnostics, type PurchaseDiagnostics } from "./purchase-diagnostics.js";
+import { createPrivateCore, type AttestOutcome, type HandoverView, type PrivateCore, type PrivateHooksForTest, type PrivateQuoteFields, type RecordOutcome } from "./private.js";
+import type { PrivateOutboundRail } from "../ports/private-outbound.js";
+import type { VerifierRunner } from "../private/verifier.js";
 import { IntentCollisionError, IntentStore } from "./store.js";
 
 export interface QuoteRequest {
@@ -99,7 +102,13 @@ export interface PurchaseOutcome {
   readonly body?: unknown;
   readonly contentType?: string;
   readonly terminalReason?: string;
+  /** 秘匿購入の引き渡し（`status === "awaiting_session"` のときだけ。credential の値を含む: 認証済みの応答にだけ載せる）。 */
+  readonly handover?: HandoverView;
 }
+
+/** 秘匿 quote の文書（`docs/zktls-router-design.md` §2・§2.1）。`ownerKey` はこの応答にしか載らない。 */
+export type PrivateQuoteDocument = QuoteDocument & PrivateQuoteFields;
+export type PrivateQuoteOutcome = ({ readonly ok: true } & PrivateQuoteDocument) | { readonly ok: false; readonly code: string; readonly reason?: string };
 
 export interface Projection {
   readonly paymentId: string;
@@ -127,6 +136,43 @@ export interface Projection {
   /** 動的購入だけ。 */
   readonly upstream?: { readonly url: string; readonly method: "GET" | "POST"; readonly body?: string; readonly bodySha256?: string };
   readonly dynamic?: { readonly profileId: string; readonly pricing: DynamicPricing; readonly fundsMoveOnCredential: boolean; readonly promoted: boolean };
+  /** 秘匿購入だけ（`docs/zktls-router-design.md` §7.3、要件 FR-Z04）。credential 値・record 本体・封筒は決して含めない。 */
+  readonly private?: PrivateProjection;
+}
+
+export interface PrivateProjection {
+  readonly intentSha256: string;
+  readonly headerSha256?: string;
+  readonly outbound: { readonly issued: boolean; readonly expectedRef?: string };
+  readonly verifier?: Readonly<Record<string, unknown>>;
+  readonly proof?: { readonly delivery: boolean; readonly requestBinding: boolean; readonly onChainFinality: "not_checked" };
+  readonly deadlines: { readonly credentialExpiresAt?: number; readonly sessionBy?: number; readonly attestBy?: number };
+  readonly artifacts: { readonly record: "none" | "available" | "expired"; readonly recordAvailableUntil?: number; readonly late?: boolean };
+  readonly attest?: { readonly bundleSha256: string; readonly result: "delivered_private" | "unknown"; readonly reason?: string };
+}
+
+/** 秘匿購入の射影の欄（§7.3）。復元した `Intent.private` だけから組む（値・record 本体・封筒は出さない）。 */
+export function privateProjectionOf(intent: Intent): PrivateProjection | undefined {
+  const priv = intent.private;
+  if (priv === undefined) return undefined;
+  const record = priv.record;
+  return {
+    intentSha256: priv.intentSha256,
+    ...(priv.issuance === undefined ? {} : { headerSha256: priv.issuance.headerSha256 }),
+    outbound: { issued: priv.issuance !== undefined, ...(priv.issuance?.expectedRef === undefined ? {} : { expectedRef: priv.issuance.expectedRef }) },
+    ...(record === undefined ? {} : { verifier: { ...record.summary } }),
+    ...(intent.status === "delivered_private" ? { proof: { delivery: true, requestBinding: priv.method === "POST", onChainFinality: "not_checked" as const } } : {}),
+    deadlines: {
+      ...(priv.issuance === undefined ? {} : { credentialExpiresAt: priv.issuance.expiresAtMs, sessionBy: priv.issuance.sessionBy }),
+      ...(record?.attestBy === undefined ? {} : { attestBy: record.attestBy }),
+    },
+    artifacts: {
+      record: record === undefined ? "none" : record.expired === true ? "expired" : "available",
+      ...(record === undefined ? {} : { recordAvailableUntil: record.recordAvailableUntil }),
+      ...(record?.late === true ? { late: true } : {}),
+    },
+    ...(priv.attest === undefined ? {} : { attest: { ...priv.attest } }),
+  };
 }
 
 export interface RouterCoreOptions {
@@ -167,6 +213,16 @@ export interface RouterCoreOptions {
    * 記録を読まない（journal・応答・判断は sink の有無で同じ）。
    */
   readonly diagnostics?: DiagnosticsSink;
+  /**
+   * 秘匿購入（`docs/zktls-router-design.md`）。`config.private` と両方があるときだけ口が開く。`trust` は合成が決める（本番 `mozilla`、試験能力だけ `lab-fixture-ca`）。
+   */
+  readonly private?: {
+    readonly rails: Readonly<Record<string, PrivateOutboundRail>>;
+    readonly runner: VerifierRunner;
+    readonly trust: "mozilla" | "lab-fixture-ca";
+    readonly hooksForTest?: PrivateHooksForTest;
+    readonly workDir?: string;
+  };
 }
 
 export interface RouterCore {
@@ -178,6 +234,10 @@ export interface RouterCore {
    * 所有 principal・経路一致・未開始の quote のときだけ返し、**journal には何も書かない**。
    */
   offerFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): InboundOffer | undefined;
+  /** 秘匿購入（設計 §2）。設定が無ければ `private_disabled`。 */
+  privateQuote(request: { readonly principalId: string; readonly requestId: string; readonly profileId: string; readonly intentB64: string; readonly source?: string }): Promise<PrivateQuoteOutcome>;
+  privateAttest(paymentId: string, principalId: string, ownerKey: string | undefined, bundleB64: string): Promise<AttestOutcome>;
+  privateRecord(paymentId: string, principalId: string, ownerKey: string | undefined): RecordOutcome;
   close(): Promise<void>;
 }
 
@@ -221,6 +281,7 @@ function projectionOf(intent: Intent): Projection {
             promoted: intent.dynamic.reservation !== undefined,
           },
         }),
+    ...(intent.private === undefined ? {} : { private: privateProjectionOf(intent)! }),
   };
   return projection;
 }
@@ -313,6 +374,29 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "destination_payload_mismatch",
   "destination_receipt_unverified",
   "destination_receipt_payer_mismatch",
+  // 秘匿購入（`docs/zktls-router-design.md` §7.1。固定文字列で、credential・上流の値は含まない）。
+  "private_capacity",
+  "private_disabled",
+  "private_unavailable",
+  "attest_foreign",
+  "private_inbound_identity_missing",
+  "private_issuance_duplicate",
+  "private_issuance_unknown",
+  "private_issue_failed",
+  "private_header_invalid",
+  "private_credential_lifetime",
+  "private_release_unknown",
+  "private_verifier_unavailable",
+  "private_handover_unknown",
+  "private_session_timeout",
+  "private_record_unknown",
+  "private_attest_timeout",
+  "private_attest_invalid",
+  "private_receipt_mismatch",
+  "private_verify_timeout",
+  "interrupted_before_release",
+  "interrupted_before_handover",
+  "interrupted_after_release",
 ]);
 
 /** adapter が返してよい preflight 理由。これ以外は固定コードに置き換える。 */
@@ -360,6 +444,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
   /** 動的上流 URL（設定にあるときだけ）。控え・動的予算・門はここで持つ。 */
   let dynamicCore: DynamicCore | undefined;
+  let privateCore: PrivateCore | undefined;
   let ledger: QuoteLedger | undefined;
   let sweepTimer: NodeJS.Timeout | undefined;
   if (config.dynamic !== undefined) {
@@ -372,6 +457,24 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       });
       const dynamicBudget = Budget.loadDynamic(config.dynamic.budget, journal);
       const gate = options.dynamic?.gate ?? new DynamicGate({ limits: config.dynamic.limits, now });
+      // 秘匿購入（設定と依存の両方があるときだけ）。dynamic core の受信レグに依存を渡す。
+      if (config.private !== undefined && options.private !== undefined) {
+        privateCore = createPrivateCore({
+          config,
+          store,
+          ledger,
+          gate,
+          inbound: options.inbound,
+          rails: options.private.rails,
+          runner: options.private.runner,
+          trust: options.private.trust,
+          now,
+          nextPaymentId,
+          note: options.note,
+          hooksForTest: options.private.hooksForTest,
+          ...(options.private.workDir === undefined ? {} : { workDir: options.private.workDir }),
+        });
+      }
       dynamicCore = createDynamicCore({
         config,
         store,
@@ -386,11 +489,14 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         balanceOf: options.balanceOf ?? options.dynamic?.balanceOf,
         deliver,
         ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+        ...(privateCore === undefined ? {} : { private: privateCore.dynamicDeps }),
       });
       // 期限切れの控えと古いファイルの定期的な削除（設計 §6.1）。
       const sweeping = ledger;
       sweepTimer = setInterval(() => sweeping.sweep(), 60 * 60 * 1000);
       sweepTimer.unref();
+      // 秘匿購入の再構成（起動門の取り消し → 棚卸し → record の回収 → 掃除 → 容量）。公開の前に 1 回。
+      await privateCore?.start();
     } catch (error) {
       await ledger?.close();
       await journal.close();
@@ -850,8 +956,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 送金直前にもう一度上流の現在の challenge を読み直す（手順 4 の後に起きた
     // 変更へのレース対策）。ここで外れたら署名も送信もしない。受信レグは成立済みな
     // ので終了状態は `paid_undelivered`（理由 `quote_changed`）で、再課金も再購入もしない。
-    // 動的の intent で上流が読めない形なら、送信しない（読めない値で払わない）。
-    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true) {
+    // 動的の intent で上流が読めない形なら、送信しない（読めない値で払わない）。秘匿購入の intent は静的・動的の送信レグに**決して**流さない
+    // （dispatch は privateCore へ渡す。ここに届くのは到達し得ない経路。未発行なので `paid_undelivered`）。
+    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true || intent.private !== undefined || intent.privateInvalid === true) {
       await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason: "quote_changed" });
       destNote("not_sent", "quote_changed");
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
@@ -1028,14 +1135,20 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
 
   async function purchaseDispatch(input: PurchaseRequest): Promise<PurchaseOutcome> {
     const intent = store.byQuoteId(input.quoteId);
-    const dynamic = intent === undefined ? dynamicCore?.ledgerIntent(input.quoteId) !== undefined : intent.dynamic !== undefined || intent.dynamicInvalid === true;
+    // 秘匿購入の記録も `dynamic` 欄を持つので動的の経路へ（記録のメタデータで dispatch。設計 §3.0）。
+    const dynamic = intent === undefined ? dynamicCore?.ledgerIntent(input.quoteId) !== undefined : intent.dynamic !== undefined || intent.dynamicInvalid === true || intent.private !== undefined || intent.privateInvalid === true;
     if (!dynamic) {
       return purchaseLocked(input);
     }
     if (dynamicCore === undefined) {
       return outcomeOf("rejected", "unknown_quote");
     }
-    return dynamicCore.purchase({ ...input, source: input.source ?? input.principalId });
+    const outcome = await dynamicCore.purchase({ ...input, source: input.source ?? input.principalId });
+    if (outcome.status === "awaiting_session" && outcome.paymentId !== undefined && privateCore !== undefined) {
+      const handover = privateCore.takeHandover(outcome.paymentId);
+      return handover === undefined ? outcome : { ...outcome, handover };
+    }
+    return outcome;
   }
 
   return {
@@ -1064,8 +1177,27 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       // 再提示しない（Router が断ると分かっている記録に向けて払わせない。`docs/dynamic-gas-fee-design.md` §3.2）。
       return intent.status === "created" && intent.dynamicCapInvalid !== true ? intent.source.offer : undefined;
     },
+    async privateQuote(request): Promise<PrivateQuoteOutcome> {
+      if (privateCore === undefined) return { ok: false, code: "private_disabled" };
+      const input = snapshotInput(request);
+      return withKey(`quote\u0000${input.principalId}\u0000${input.requestId}`, async () => {
+        if (store.quoteIdFor(input.principalId, input.requestId) !== undefined) return { ok: false, code: "request_id_conflict" };
+        const outcome = await privateCore!.quote({ principalId: input.principalId, requestId: input.requestId, profileId: input.profileId, intentB64: input.intentB64, source: input.source ?? input.principalId });
+        if (!outcome.ok) return outcome;
+        return { ok: true, ...quoteDocumentOf(outcome.intent), ...outcome.fields };
+      });
+    },
+    privateAttest(paymentId, principalId, ownerKey, bundleB64): Promise<AttestOutcome> {
+      if (privateCore === undefined) return Promise.resolve({ ok: false, code: "not_found" });
+      return privateCore.attest(paymentId, principalId, ownerKey, bundleB64);
+    },
+    privateRecord(paymentId, principalId, ownerKey): RecordOutcome {
+      if (privateCore === undefined) return { ok: false, code: "not_found" };
+      return privateCore.record(paymentId, principalId, ownerKey);
+    },
     async close(): Promise<void> {
       if (sweepTimer !== undefined) clearInterval(sweepTimer);
+      await privateCore?.close();
       await ledger?.close();
       await journal.close();
     },

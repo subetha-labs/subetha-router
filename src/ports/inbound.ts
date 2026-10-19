@@ -36,7 +36,11 @@ export interface CreateOfferRequest {
 export type PreflightResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
 export type SettleResult =
-  | { readonly outcome: "settled"; readonly txRef: string }
+  /**
+   * `eventId`（任意）: 支払いイベントの識別子（x402 受信 = 検証済み payload の authorization `nonce`、小文字）。秘匿購入の二重一意性（FR-Z06 (b)）の材料で、
+   * core は `source_settled` の行に写す。返さない rail では秘匿購入が fail closed になる（黙って `txRef` だけに落とさない）。
+   */
+  | { readonly outcome: "settled"; readonly txRef: string; readonly eventId?: string }
   | { readonly outcome: "rejected"; readonly reason: string }
   | { readonly outcome: "unknown"; readonly reason: string };
 

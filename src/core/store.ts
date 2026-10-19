@@ -13,10 +13,12 @@ import {
   type DestinationOutcome,
   type Intent,
   type IntentDynamic,
+  type IntentPrivate,
   type IntentUpstream,
   type InternalStatus,
 } from "./intent.js";
 import type { Journal } from "./journal.js";
+import { parseIntent } from "../private/intent.js";
 
 type Patch = Readonly<Record<string, unknown>>;
 
@@ -182,6 +184,107 @@ export function dynamicFieldsOf(
   return { upstream: upstreamRecordOf(rawUpstream), dynamic };
 }
 
+const HEX64 = /^[0-9a-f]{64}$/;
+const PROBE_BODY = "{}";
+const PROBE_BODY_SHA256 = createHash("sha256").update(PROBE_BODY, "utf8").digest("hex");
+
+function positiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * 秘匿購入の欄を**生の値から**復元する（`docs/zktls-router-design.md` §7.2。`dynamicFieldsOf` と同じ考え方）。
+ *
+ * - `private` 欄が無い → 通常の購入（何も足さない）
+ * - あって形が正しい → 復元する: 封筒のバイト列が `parseIntent` を通り、その sha256 が `intentSha256`、受信 offer の `routeBinding` が
+ *   `private|<profileId>|<METHOD>|<url>|<intentSha256>`、`upstream` が探りの形（GET は本文無し、POST は `{}`）、方針と上限が正の整数
+ * - **形が違う → `privateInvalid`**（`dynamic` は保つ: 状態の照会・予算の集計は通るが、この intent は実行しない）
+ */
+export function privateFieldsOf(patch: Patch): { readonly private?: IntentPrivate; readonly privateInvalid?: boolean } {
+  const raw = patch["private"];
+  if (raw === undefined) return {};
+  const invalid = { privateInvalid: true } as const;
+  if (!isPlainRecord(raw) || !isPlainRecord(patch["dynamic"]) || !isPlainRecord(patch["upstream"])) return invalid;
+  const intentB64 = raw["intentB64"];
+  const intentSha256 = raw["intentSha256"];
+  if (typeof intentB64 !== "string" || typeof intentSha256 !== "string" || !HEX64.test(intentSha256)) return invalid;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(intentB64, "base64");
+  } catch {
+    return invalid;
+  }
+  if (bytes.toString("base64") !== intentB64) return invalid;
+  const parsed = parseIntent(bytes, { maxBytes: Number.MAX_SAFE_INTEGER });
+  if (!parsed.ok || parsed.intent.sha256 !== intentSha256) return invalid;
+  const intent = parsed.intent;
+  const order = intent.order;
+  // 記録の写し（orderId など）は封筒と一致していなければならない（封筒が権威）。
+  if (
+    raw["orderId"] !== order.order_id ||
+    raw["method"] !== intent.method ||
+    raw["framing"] !== intent.framing ||
+    raw["bodyLen"] !== order.request.body_len ||
+    raw["bodyCommitmentHex"] !== order.request.body_commitment_hex
+  ) {
+    return invalid;
+  }
+  const policy = raw["policy"];
+  const limits = raw["limits"];
+  if (
+    !isPlainRecord(policy) ||
+    !["minCredentialLifetimeMs", "sessionTimeoutMs", "attestTimeoutMs", "retentionMs"].every((key) => positiveInt(policy[key])) ||
+    !isPlainRecord(limits) ||
+    !["maxIntentBytes", "maxBundleBytes", "maxRecordBytes"].every((key) => positiveInt(limits[key]))
+  ) {
+    return invalid;
+  }
+  // 探りの要求（本文を見せない発見。FR-Z16）の形。
+  const upstream = patch["upstream"] as Record<string, unknown>;
+  if (upstream["url"] !== intent.url) return invalid;
+  if (intent.method === "GET") {
+    if (upstream["method"] !== "GET" || Object.hasOwn(upstream, "body")) return invalid;
+  } else if (upstream["method"] !== "POST" || upstream["body"] !== PROBE_BODY || upstream["bodySha256"] !== PROBE_BODY_SHA256) {
+    return invalid;
+  }
+  // 受信 offer の束縛（`private|…`）。
+  const source = isPlainRecord(patch["source"]) ? patch["source"] : {};
+  const offer = isPlainRecord(source["offer"]) ? source["offer"] : {};
+  const extra = isPlainRecord(offer["extra"]) ? offer["extra"] : {};
+  const binding = extra["routeBinding"];
+  const dynamic = patch["dynamic"] as Record<string, unknown>;
+  if (typeof binding !== "string" || binding !== privateBindingOf(String(dynamic["profileId"]), intent.method, intent.url, intentSha256)) return invalid;
+  return {
+    private: {
+      intentSha256,
+      intentB64,
+      orderId: order.order_id,
+      payerPk: { x: order.payer_pk.x, y: order.payer_pk.y },
+      target: { host: order.target.host, port: 443, path: order.target.path },
+      method: intent.method,
+      framing: intent.framing,
+      bodyLen: order.request.body_len,
+      bodyCommitmentHex: order.request.body_commitment_hex,
+      executorHeader: order.request.executor_header,
+      maxExecutorValueLen: order.request.max_executor_value_len,
+      outbound: { ...intent.outbound },
+      inbound: { ...intent.inbound },
+      policy: {
+        minCredentialLifetimeMs: policy["minCredentialLifetimeMs"] as number,
+        sessionTimeoutMs: policy["sessionTimeoutMs"] as number,
+        attestTimeoutMs: policy["attestTimeoutMs"] as number,
+        retentionMs: policy["retentionMs"] as number,
+      },
+      limits: { maxIntentBytes: limits["maxIntentBytes"] as number, maxBundleBytes: limits["maxBundleBytes"] as number, maxRecordBytes: limits["maxRecordBytes"] as number },
+    },
+  };
+}
+
+/** 秘匿購入の受信 offer の束縛（`dynamicBindingOf` と同じ形で先頭語と 5 要素目だけ違う。設計 §3.1 7）。 */
+export function privateBindingOf(profileId: string, method: "GET" | "POST", url: string, intentSha256: string): string {
+  return ["private", profileId, method, url, intentSha256].map(encodeURIComponent).join("|");
+}
+
 /** `pricing.maxFee`・`pricing.estimate` を形どおりに読む。片方でも形が違えば `undefined`（両方無いのも `undefined`）。 */
 function capFieldsOf(pricing: Record<string, unknown>): { maxFee: string; estimate: NonNullable<IntentDynamic["pricing"]["estimate"]> } | undefined {
   const maxFee = pricing["maxFee"];
@@ -301,6 +404,8 @@ export function intentFromCreated(paymentId: string, at: string, patch: Patch, o
     ...routeFingerprintOf(patch),
     // 動的購入の欄も明示的に復元する（足し忘れると、上流 URL と条件が消えた intent になる）。
     ...dynamicFieldsOf(patch, { requireReservation: options.requireReservation !== false }),
+    // 秘匿購入の欄も明示的に復元する（読めない形は `privateInvalid`: 実行しない）。
+    ...privateFieldsOf(patch),
     approvalDeadlineMs: asNumber(patch["approvalDeadlineMs"]),
     updatedAt: at,
   };
@@ -312,12 +417,14 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
   switch (event) {
     case "source_pending":
       return { ...base, status: "source_pending" };
-    case "source_settled":
+    case "source_settled": {
+      const eventId = patch["eventId"];
       return {
         ...base,
         status: "source_settled",
-        source: { ...current.source, txRef: asString(patch["txRef"]), outcome: "settled" },
+        source: { ...current.source, txRef: asString(patch["txRef"]), outcome: "settled", ...(typeof eventId === "string" && eventId !== "" ? { eventId } : {}) },
       };
+    }
     case "source_failed":
       return {
         ...base,
@@ -370,7 +477,9 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
         },
         terminalReason: asString(patch["reason"], "destination_failed"),
       };
-    case "unknown":
+    case "unknown": {
+      const attest = patch["attest"];
+      const bundleSha256 = isPlainRecord(attest) ? attest["bundleSha256"] : undefined;
       return {
         ...base,
         status: "unknown",
@@ -379,9 +488,77 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
           outcome: asString(patch["outcome"], current.destination.outcome) as DestinationOutcome,
         },
         terminalReason: asString(patch["reason"], "unknown"),
+        // attest の失敗の耐久結果（秘匿購入。同じ bundle の再送に同じ結果を返すため）。
+        ...(current.private !== undefined && typeof bundleSha256 === "string"
+          ? { private: { ...current.private, attest: { bundleSha256, result: "unknown", reason: asString(patch["reason"], "unknown") } } }
+          : {}),
       };
+    }
     default:
-      // budget レジャー行など intent 状態を持たない行。
+      return reducePrivate(current, event, patch, base);
+  }
+}
+
+/** 秘匿購入の行（`docs/zktls-router-design.md` §7.1）。`private` 欄の無い intent には効かない。 */
+function reducePrivate(current: Intent, event: string, patch: Patch, base: Intent): Intent {
+  const priv = current.private;
+  if (priv === undefined) {
+    // budget レジャー行など intent 状態を持たない行。
+    return current;
+  }
+  switch (event) {
+    case "private_issuance_reserved":
+      return { ...base, status: "private_issuance_reserved", private: { ...priv, reservation: { intentSha256: asString(patch["intentSha256"]), inboundIdentity: asString(patch["inboundIdentity"]) } } };
+    case "private_released": {
+      const expectedRef = patch["expectedRef"];
+      return {
+        ...base,
+        status: "private_released",
+        destination: { ...current.destination, outcome: "unknown" },
+        private: {
+          ...priv,
+          issuance: {
+            headerName: asString(patch["headerName"]),
+            headerSha256: asString(patch["headerSha256"]),
+            expiresAtMs: asNumber(patch["expiresAtMs"]),
+            ...(typeof expectedRef === "string" && expectedRef !== "" ? { expectedRef } : {}),
+            releaseB64: asString(patch["releaseB64"]),
+            sessionBy: asNumber(patch["sessionBy"]),
+          },
+        },
+      };
+    }
+    case "private_handed_over":
+      return { ...base, status: "private_awaiting_session", private: { ...priv, handover: { handedOverAtMs: asNumber(patch["handedOverAtMs"]), verifierAddress: asString(patch["verifierAddress"]) } } };
+    case "private_recorded": {
+      const attestBy = patch["attestBy"];
+      const record: NonNullable<IntentPrivate["record"]> = {
+        sha256: asString(patch["recordSha256"]),
+        bytes: asNumber(patch["recordBytes"]),
+        completedAtMs: asNumber(patch["recordCompletedAtMs"]),
+        summary: asObject(patch["summary"]),
+        ...(typeof attestBy === "number" ? { attestBy } : {}),
+        recordAvailableUntil: asNumber(patch["recordAvailableUntil"]),
+        ...(patch["recoveredAtRestart"] === true ? { recoveredAtRestart: true } : {}),
+        ...(patch["late"] === true ? { late: true } : {}),
+      };
+      // 終端の後の回収・遅い record の行は状態を変えない（取得の対象を足すだけ）。
+      const status: InternalStatus = current.status === "private_awaiting_session" && patch["late"] !== true ? "private_recorded" : current.status;
+      return { ...base, status, private: { ...priv, record } };
+    }
+    case "private_attested": {
+      const txRef = asString(patch["txRef"]);
+      const receiptRef = asString(patch["receiptRef"]);
+      return {
+        ...base,
+        status: "delivered_private",
+        destination: { ...current.destination, outcome: "paid", ...(txRef === "" ? {} : { txRef }), ...(receiptRef === "" ? {} : { receiptRef }) },
+        private: { ...priv, attest: { bundleSha256: asString(patch["bundleSha256"]), result: "delivered_private" } },
+      };
+    }
+    case "private_record_expired":
+      return priv.record === undefined ? current : { ...base, private: { ...priv, record: { ...priv.record, expired: true } } };
+    default:
       return current;
   }
 }
@@ -400,6 +577,15 @@ export class IntentCollisionError extends Error {
 const MESSAGE_HASH_PATTERN = /^[0-9a-f]{64}$/;
 /** 署名する message の hash を署名の前に予約する行（送信の設計 §2.5）。intent の状態は変えない。 */
 export const MESSAGE_RESERVED_EVENT = "destination_message_reserved";
+/** 秘匿購入の発行予約の行（設計 §7.1）。状態を `private_issuance_reserved` に進め、二重一意性の集合に入れる。 */
+export const PRIVATE_RESERVED_EVENT = "private_issuance_reserved";
+/** 再起動時の秘匿購入の途中状態 → `unknown` の理由（設計 §7.1 の「再起動」列）。 */
+const PRIVATE_INTERRUPTED_REASONS: Partial<Record<InternalStatus, string>> = {
+  private_issuance_reserved: "interrupted_before_release",
+  private_released: "interrupted_before_handover",
+  private_awaiting_session: "interrupted_after_release",
+  private_recorded: "interrupted_after_release",
+};
 
 export class IntentStore {
   readonly #journal: Journal;
@@ -413,6 +599,12 @@ export class IntentStore {
    * （`docs/mpp-solana-design.md` §2.3、要件 SR-M2）。記録そのものは `source_settled` の行で、別の行は書かない。
    */
   readonly #settledSourceTxRefs = new Set<string>();
+  /**
+   * 秘匿購入の発行予約（`private_issuance_reserved` の行から復元・追記で更新。永続。要件 FR-Z06）: 1 つの intent に発行は高々 1 回、
+   * 1 つの受信支払い（レール・network・txRef・イベント id）が資金源になる発行は高々 1 回。成否不明の予約も消費済みのまま。
+   */
+  readonly #issuedIntents = new Set<string>();
+  readonly #consumedInbound = new Set<string>();
   /** 追記の直列化（同一性検査 → append → 反映を不可分にする）。 */
   #queue: Promise<void> = Promise.resolve();
 
@@ -452,6 +644,12 @@ export class IntentStore {
   async #resolveInterrupted(): Promise<void> {
     const pending = [...this.#intents.values()].filter((intent) => isInterrupted(intent.status));
     for (const intent of pending) {
+      const privateReason = PRIVATE_INTERRUPTED_REASONS[intent.status];
+      if (privateReason !== undefined) {
+        // 秘匿購入: 発行予約の後はすべて `unknown`（署名したか・Payer に届いたか・使われたかは不明。credential は再発行しない。設計 §7.1、要件 FR-Z25）。
+        await this.append(intent.paymentId, "unknown", { outcome: "unknown", reason: privateReason });
+        continue;
+      }
       if (intent.status === "source_settled") {
         // 受信は確定、送信は始めていない（`destination_pending` の前）: 不明ではなく「課金は成立・未送出」の終端。再送も再購入もしない。
         // メモリ上だけの確定にせず、journal にも残す（SR-3 SVM レビュー #2、2026-10-08）。
@@ -483,6 +681,17 @@ export class IntentStore {
       }
       this.#messageHashes.add(hash);
       return;
+    }
+    if (event === PRIVATE_RESERVED_EVENT) {
+      // 形の壊れた予約の行は無視しない（復元できない予約は二重一意性を破る）。起動を止める。
+      const intentSha256 = patch["intentSha256"];
+      const inboundIdentity = patch["inboundIdentity"];
+      if (typeof intentSha256 !== "string" || !HEX64.test(intentSha256) || typeof inboundIdentity !== "string" || inboundIdentity === "") {
+        throw new Error("journal: malformed private_issuance_reserved row");
+      }
+      this.#issuedIntents.add(intentSha256);
+      this.#consumedInbound.add(inboundIdentity);
+      // 状態の遷移は下の reduce で（intent が無ければ集合だけ）。
     }
     if (event === "created") {
       this.#assertFreshIdentity(paymentId, asString(patch["quoteId"]));
@@ -569,6 +778,43 @@ export class IntentStore {
     return "reserved";
   }
 
+  /**
+   * 秘匿購入の発行予約（設計 §7.1、要件 FR-Z06）: 同じ `#queue` の中で、intent と受信支払いの両方の未使用を検査 → journal への追記（fsync）→ 両集合の更新を
+   * 不可分に行う。どちらかが使用済みなら `collision`（別の発行が既にある）。journal に書けなければ `unavailable`（集合には入れない。呼び出し側は `unknown` に写す）。
+   * 対象の intent が `source_settled` で `private` 欄を持つのでなければ `unavailable`。
+   */
+  reservePrivateIssuance(paymentId: string, intentSha256: string, inboundIdentity: string): Promise<MessageReservation> {
+    const reserved = this.#queue.then(() => this.#reservePrivateLocked(paymentId, intentSha256, inboundIdentity));
+    this.#queue = reserved.then(
+      () => undefined,
+      () => undefined,
+    );
+    return reserved;
+  }
+
+  async #reservePrivateLocked(paymentId: string, intentSha256: string, inboundIdentity: string): Promise<MessageReservation> {
+    if (!HEX64.test(intentSha256) || inboundIdentity === "") return "unavailable";
+    const intent = this.#intents.get(paymentId);
+    if (intent === undefined || intent.status !== "source_settled" || intent.private === undefined || intent.private.intentSha256 !== intentSha256) return "unavailable";
+    if (this.#issuedIntents.has(intentSha256) || this.#consumedInbound.has(inboundIdentity)) return "collision";
+    try {
+      await this.#appendLocked(paymentId, PRIVATE_RESERVED_EVENT, { intentSha256, inboundIdentity });
+    } catch {
+      return "unavailable";
+    }
+    return "reserved";
+  }
+
+  /** 発行予約済みの intent か（試験と診断のため）。 */
+  hasIssuedIntent(intentSha256: string): boolean {
+    return this.#issuedIntents.has(intentSha256);
+  }
+
+  /** 発行の資金源として消費済みの受信支払いか（試験と診断のため）。 */
+  hasConsumedInbound(inboundIdentity: string): boolean {
+    return this.#consumedInbound.has(inboundIdentity);
+  }
+
   /** 予約済みの message の hash か（試験と診断のため。予約はこれを見ずに `reserveMessage` で行う）。 */
   hasReservedMessage(messageHash: string): boolean {
     return this.#messageHashes.has(messageHash);
@@ -624,8 +870,18 @@ function upstreamMatchesBinding(rawUpstream: Record<string, unknown>, raw: Recor
   const extra = isPlainRecord(offer) ? offer["extra"] : undefined;
   const binding = isPlainRecord(extra) ? extra["routeBinding"] : undefined;
   // 束縛が無い・動的の形でない記録（合成の試験・旧形式）はここでは判定しない: 受信 offer の束縛そのものは受信 adapter が検証する。
-  // 動的の形（`dynamic|…`）のときだけ、復元した upstream と食い違えば fail closed。
-  if (typeof binding !== "string" || !binding.startsWith("dynamic|")) return true;
+  // 動的の形（`dynamic|…`）のときだけ、復元した upstream と食い違えば fail closed。秘匿の形（`private|…`）は `privateFieldsOf` が検査する（探りの要求は記録の `upstream`）。
+  if (typeof binding !== "string" || !binding.startsWith("dynamic|")) {
+    if (typeof binding === "string" && binding.startsWith("private|")) {
+      const parts = binding.split("|");
+      try {
+        return parts.length === 5 && (parts[2] === "GET" || parts[2] === "POST") && parts[2] === rawUpstream["method"] && decodeURIComponent(parts[3]!) === rawUpstream["url"];
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
   const parts = binding.split("|");
   try {
     const method = rawUpstream["method"];

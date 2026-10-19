@@ -238,12 +238,81 @@ export interface DynamicConfig {
   readonly denyHosts: readonly string[];
 }
 
+/**
+ * 秘匿購入（`docs/zktls-router-design.md` §9、要件 FR-Z12・FR-Z13・FR-Z24）。**省略時は機能そのものが無い**（口は 404 `private_disabled`）。
+ * trust は設定にない（`mozilla` 固定。試験 trust はテスト能力の注入だけ）。
+ */
+export interface PrivateConfig {
+  readonly deliveryBin: string;
+  readonly deliveryBinSha256: string;
+  readonly srsPath: string;
+  readonly srsSha256: string;
+  /** 秘匿購入を許す動的プロファイル ID の allowlist（受信 x402 Base Sepolia、送信 x402 EVM か MPP Tempo）。 */
+  readonly profiles: readonly string[];
+  /** `127.0.0.1:0` 固定（loopback 以外は起動しない）。 */
+  readonly verifierListen: string;
+  readonly sessionTimeoutMs: number;
+  readonly attestTimeoutMs: number;
+  readonly verifyTimeoutMs: number;
+  readonly minCredentialLifetimeMs: { readonly x402: number; readonly mpp: number };
+  readonly minSessionRemainingMs: number;
+  readonly workDir: string;
+  readonly retentionMs: number;
+  readonly maxConcurrentSessions: number;
+  readonly maxConcurrentVerifications: number;
+  readonly maxQueuedVerifications: number;
+  readonly maxIntentBytes: number;
+  readonly maxBundleBytes: number;
+  readonly maxRecordBytes: number;
+  readonly maxChildOutputBytes: number;
+  readonly maxRetainedBytes: number;
+  readonly maxRetainedPurchases: number;
+}
+
+export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
+  verifierListen: "127.0.0.1:0",
+  sessionTimeoutMs: 180_000,
+  attestTimeoutMs: 600_000,
+  verifyTimeoutMs: 60_000,
+  minCredentialLifetimeMs: Object.freeze({ x402: 40_000, mpp: 12_000 }),
+  minSessionRemainingMs: 5_000,
+  workDir: "runtime/private",
+  retentionMs: 3_600_000,
+  maxConcurrentSessions: 2,
+  maxConcurrentVerifications: 1,
+  maxQueuedVerifications: 4,
+  maxIntentBytes: 2048,
+  maxBundleBytes: 262_144,
+  maxRecordBytes: 65_536,
+  maxChildOutputBytes: 65_536,
+  maxRetainedBytes: 67_108_864,
+  maxRetainedPurchases: 256,
+});
+
+/**
+ * 秘匿購入の**承認の権威**（設計 §3.1 7）: allowlist・trust・バイナリと SRS の指紋・方針・上限。動的の権威（`dynamicAuthoritativeTermsOf`）と合成して
+ * `routeFingerprint` に入れる。変われば（profiles からの除外を含む）既存の quote は `quote_changed` で止まる。
+ */
+export function privateAuthoritativeTermsOf(config: PrivateConfig, profileId: string, rail: "x402" | "mpp", trust: "mozilla" | "lab-fixture-ca"): unknown {
+  return {
+    private: true,
+    allowlisted: config.profiles.includes(profileId),
+    trust,
+    deliveryBinSha256: config.deliveryBinSha256,
+    srsSha256: config.srsSha256,
+    policy: { minCredentialLifetimeMs: config.minCredentialLifetimeMs[rail], sessionTimeoutMs: config.sessionTimeoutMs, attestTimeoutMs: config.attestTimeoutMs, retentionMs: config.retentionMs },
+    limits: { maxIntentBytes: config.maxIntentBytes, maxBundleBytes: config.maxBundleBytes, maxRecordBytes: config.maxRecordBytes },
+  };
+}
+
 export interface RouterConfig {
   readonly routes: Readonly<Record<string, RouteConfig>>;
   readonly budget: BudgetLimits;
   readonly approvalTtlMs: number;
   /** 動的上流 URL。**省略時は機能そのものが無い。** */
   readonly dynamic?: DynamicConfig;
+  /** 秘匿購入。**省略時は機能そのものが無い。** */
+  readonly private?: PrivateConfig;
 }
 
 /**

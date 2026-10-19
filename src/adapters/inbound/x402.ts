@@ -229,6 +229,13 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
    * 実 facilitator は `paymentPayload` のトップレベルに `scheme` / `network` が無いと
    * 内部例外で 500 を返す（親が実測）。`PaymentCredential` 型は変えずにここで補う。
    */
+  /** 検証済み payload の authorization `nonce`（bytes32、小文字）。形が違えば `undefined`（core が fail closed にする）。 */
+  function authorizationNonceOf(credential: PaymentCredential): string | undefined {
+    const authorization = credential.payload["authorization"];
+    const nonce = isRecord(authorization) ? authorization["nonce"] : undefined;
+    return typeof nonce === "string" && /^0x[0-9a-fA-F]{64}$/.test(nonce) ? nonce.toLowerCase() : undefined;
+  }
+
   function payloadOf(offer: InboundOffer, credential: PaymentCredential): unknown {
     return {
       x402Version: credential.x402Version,
@@ -383,7 +390,10 @@ export function createX402Inbound(options: X402InboundOptions): InboundRail {
           return refused;
         }
         const { status, json, elapsedMs } = await post("/settle", requestText, { routeId: context?.routeId ?? "-", operation: "facilitator_settle" }, settleTimeoutMs, proof.proof);
-        const { result, response } = kind === "circle" ? settleOutcomeCircle(offer, status, json) : settleOutcomeX402(offer, status, json);
+        const outcome = kind === "circle" ? settleOutcomeCircle(offer, status, json) : settleOutcomeX402(offer, status, json);
+        // 支払いイベントの識別子（秘匿購入の二重一意性 FR-Z06 (b)）: facilitator に送った payload の authorization `nonce`。結果の決め方は変えない。
+        const eventId = authorizationNonceOf(credential);
+        const { result, response } = outcome.result.outcome === "settled" && eventId !== undefined ? { ...outcome, result: { ...outcome.result, eventId } } : outcome;
         if (diagOn) emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: kind, network: offer.network, response, httpStatus: status, json, elapsedMs });
         return result;
       });

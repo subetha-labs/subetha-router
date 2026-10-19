@@ -61,7 +61,7 @@ export function feePerGasOf(baseFee: bigint): bigint {
 }
 
 /** `eth_getBlockByNumber("latest")` の応答から baseFee を読む。無い・形が違う・0 以下は失敗。 */
-function baseFeeOf(block: unknown): bigint {
+export function baseFeeOf(block: unknown): bigint {
   const raw = isRecord(block) ? block["baseFeePerGas"] : undefined;
   if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(raw)) throw new Error("block has no baseFeePerGas");
   const baseFee = BigInt(raw);
@@ -97,7 +97,7 @@ class AdapterDeadlineError extends Error {
   }
 }
 
-function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new AdapterDeadlineError()), ms);
     work.then(
@@ -121,7 +121,7 @@ function sameAddress(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
-function chainIdOf(network: string): number {
+export function chainIdOf(network: string): number {
   const match = /^eip155:([1-9][0-9]{0,15})$/.exec(network);
   if (match === null) {
     throw new Error("dynamic mpp profile network is not eip155:<chainId>");
@@ -142,6 +142,8 @@ export type ChallengeRejection =
   | "recipient"
   | "method_details"
   | "pull_only"
+  | "push_only"
+  | "fee_payer"
   | "expired"
   | "opaque_undecodable"
   | "scope";
@@ -160,7 +162,14 @@ export function checkDynamicMppChallenge(
   operatorAddresses: readonly string[],
   url: string,
   nowMs: number,
+  /**
+   * 既定は従来の動的 push（`{mode: "push", method: "GET"}`。挙動不変）。秘匿購入の pull 経路（`docs/zktls-router-design.md` §6.2）は
+   * `{mode: "pull", method}`: `supportedModes` が無いか `pull` を含むものだけを候補にし、`feePayer: true` は候補外、scope は `${method} ${url}`。
+   */
+  options: { readonly mode?: "push" | "pull"; readonly method?: "GET" | "POST" } = {},
 ): ChallengeCheck {
+  const mode = options.mode ?? "push";
+  const httpMethod = options.method ?? "GET";
   const no = (reason: ChallengeRejection): ChallengeCheck => ({ ok: false, reason });
   if (!isRecord(challenge)) return no("not_an_object");
   for (const key of Object.keys(challenge)) {
@@ -188,11 +197,12 @@ export function checkDynamicMppChallenge(
   if (details["chainId"] !== chainIdOf(destination.network)) return no("chain");
   const modes = details["supportedModes"];
   if (modes !== undefined) {
-    if (!Array.isArray(modes) || !modes.every((mode) => typeof mode === "string")) return no("method_details");
-    if (!modes.includes("push")) return no("pull_only");
+    if (!Array.isArray(modes) || !modes.every((entry) => typeof entry === "string")) return no("method_details");
+    if (!modes.includes(mode)) return no(mode === "push" ? "pull_only" : "push_only");
   }
-  // 申し出としては許すが、Router は使わない（push で自分で手数料を払う）。
+  // push: 申し出としては許すが、Router は使わない（push で自分で手数料を払う）。pull（秘匿購入）: 肩代わり（sponsored）の challenge は候補にしない（手数料は Router が払う）。
   if (Object.hasOwn(details, "feePayer") && typeof details["feePayer"] !== "boolean") return no("method_details");
+  if (mode === "pull" && details["feePayer"] === true) return no("fee_payer");
   const currency = request["currency"];
   if (typeof currency !== "string" || !ADDRESS_PATTERN.test(currency) || !sameAddress(currency, destination.asset)) return no("currency");
   const amount = request["amount"];
@@ -226,7 +236,7 @@ export function checkDynamicMppChallenge(
       // 中身を確かめられないものは送り返さない。
       return no("opaque_undecodable");
     }
-    if (Object.hasOwn(meta, SCOPE_META_KEY) && meta[SCOPE_META_KEY] !== `GET ${url}`) return no("scope");
+    if (Object.hasOwn(meta, SCOPE_META_KEY) && meta[SCOPE_META_KEY] !== `${httpMethod} ${url}`) return no("scope");
   }
   return {
     ok: true,
@@ -266,6 +276,11 @@ export interface ApprovedTransfer {
   readonly feeAsset: string;
   readonly maxFee: bigint;
   readonly sender: string;
+  /**
+   * 秘匿購入の pull（`docs/zktls-router-design.md` §6.2）だけ: call の `data` は Router が組んだこの calldata と**完全一致**しなければならない
+   * （challenge に束縛した Attribution memo を含む `transferWithMemo`）。無ければ従来の検査（`transfer`／`transferWithMemo` の受取先と額）= 既存の push 経路は不変。
+   */
+  readonly expectedData?: Hex;
 }
 
 interface CheckedTransfer {
@@ -288,6 +303,12 @@ function feeBoundOf(gas: bigint, maxFeePerGas: bigint): bigint {
 function checkedTransferData(data: unknown, approved: ApprovedTransfer): Hex {
   if (typeof data !== "string" || !/^0x[0-9a-fA-F]*$/.test(data)) {
     throw new TempoSigningRefusedError("destination_signing_args_mismatch");
+  }
+  if (approved.expectedData !== undefined) {
+    if (data.toLowerCase() !== approved.expectedData.toLowerCase()) {
+      throw new TempoSigningRefusedError("destination_signing_args_mismatch");
+    }
+    return approved.expectedData;
   }
   let rebuilt: Hex;
   try {
@@ -392,12 +413,14 @@ export function createGuardedTempoAccount(args: {
   readonly now: () => number;
   /** 承認の絶対期限（FR-36）。実署名の委譲の直前に見る。無ければ期限なし（試験用）。 */
   readonly deadlineMs?: number;
+  /** 秘匿購入の pull だけ: call の `data` が完全一致しなければならない calldata（`ApprovedTransfer.expectedData`）。 */
+  readonly expectedData?: Hex;
 }): GuardedTempoAccount {
   const inner = args.account as Account & { signTransaction?: (transaction: unknown, options?: unknown) => Promise<Hex> };
   if (inner.type !== "local" || typeof inner.signTransaction !== "function") {
     throw new Error("dynamic mpp capability must be a local account");
   }
-  const approved = approvedTransferOf(args.profile, args.offer, inner.address, args.maxFee);
+  const approved = approvedTransferOf(args.profile, args.offer, inner.address, args.maxFee, args.expectedData);
   let used = false;
   let signatures = 0;
   let signedRaw: Hex | undefined;
@@ -496,7 +519,7 @@ export function createGuardedTempoAccount(args: {
   return { account, approved, signatures: () => signatures, signedRaw: () => signedRaw, deadlineRefused: () => deadlineRefused };
 }
 
-export function approvedTransferOf(profile: DynamicProfile, offer: DestinationOffer, sender: string, maxFee: bigint): ApprovedTransfer {
+export function approvedTransferOf(profile: DynamicProfile, offer: DestinationOffer, sender: string, maxFee: bigint, expectedData?: Hex): ApprovedTransfer {
   const { feeAsset } = profile.destination;
   if (feeAsset === undefined || profile.destination.maxFee === undefined) {
     throw new Error("dynamic mpp profile has no feeAsset/maxFee");
@@ -513,6 +536,7 @@ export function approvedTransferOf(profile: DynamicProfile, offer: DestinationOf
     feeAsset,
     maxFee,
     sender,
+    ...(expectedData === undefined ? {} : { expectedData }),
   };
 }
 
@@ -585,7 +609,7 @@ const RAW_SEND_METHODS: ReadonlySet<string> = new Set(["eth_sendRawTransactionSy
  * 送金・署名にあたる RPC メソッドか。raw の送信 2 つ以外は通さない（`eth_sendTransaction`・`wallet_sendCalls`・
  * `eth_signTransaction`・`eth_sign`・`personal_sign` など）。読取はそのまま通す。
  */
-function isSendOrSignMethod(method: string): boolean {
+export function isSendOrSignMethod(method: string): boolean {
   return method.startsWith("eth_send") || method.startsWith("eth_sign") || method.startsWith("wallet_") || method.startsWith("personal_");
 }
 
@@ -593,7 +617,7 @@ type RpcRequest = (args: { method: string; params?: unknown }, options?: Record<
 const guardedSendOf = (request: RpcRequest) => (args: { method: string; params?: unknown }): Promise<unknown> => request(args, { retryCount: 0 });
 
 /** 能力の client が、SSRF 防御 A に乗せ直せる viem の素の `http` transport か。 */
-function plainHttpTransportOf(client: Client): { url: string; fetchOptions?: RequestInit; retryCount?: number; retryDelay?: number; timeout?: number } | undefined {
+export function plainHttpTransportOf(client: Client): { url: string; fetchOptions?: RequestInit; retryCount?: number; retryDelay?: number; timeout?: number } | undefined {
   const t = client.transport as { type?: unknown; key?: unknown; url?: unknown; fetchOptions?: RequestInit; retryCount?: number; retryDelay?: number; timeout?: number };
   if (t.type !== "http" || t.key !== "http" || typeof t.url !== "string") return undefined;
   return {
@@ -609,7 +633,7 @@ function plainHttpTransportOf(client: Client): { url: string; fetchOptions?: Req
  * SDK に渡す client の chain。能力の client が chain を持てばそれ（ID が一致すること）、無ければ viem の既知の Tempo chain
  * （serializer・formatter が要る。受信 adapter と同じ選び方）。どちらも無ければ `undefined`（動的経路は使えない）。
  */
-function chainFor(client: Client, chainId: number): Client["chain"] | undefined {
+export function chainFor(client: Client, chainId: number): Client["chain"] | undefined {
   if (client.chain !== undefined) {
     return client.chain.id === chainId ? client.chain : undefined;
   }
@@ -674,7 +698,7 @@ function refusedBeforeDispatch(error: unknown): boolean {
 }
 
 /** receipt が payer を名乗る場合の厳密照合（静的経路と同じ形）。 */
-function payerMatches(payer: unknown, chainId: number, address: string): boolean {
+export function payerMatches(payer: unknown, chainId: number, address: string): boolean {
   if (payer === undefined) return true;
   if (typeof payer !== "string") return false;
   const claimed = payer.trim().toLowerCase();
