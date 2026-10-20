@@ -581,3 +581,11 @@ wire の証跡は `lab-fixture-ca` の **synthetic**。実 Provider（C/F/A/B）
 | 診断の code・op の集合 | `src/shared/diagnostics.ts` に秘匿購入の固定 code（SAFE_REASONS の追加分・終端理由・attest/record の code）と op `private_probe`/`private_rpc` を登録（既存の抽出テストが要求） |
 | x402 受信の `eventId` | credential のオブジェクトを 2 度読まない（`payloadOf` の写しから `nonce` を取る。hot path は `JSON.stringify` 1 回・要求本文の parse 無し、既存の cid の試験が要求） |
 
+### 14.2 Codex 最終レビュー 2 回目（2026-10-20）の指摘と対応
+| 指摘 | 対応 |
+|---|---|
+| 1 受入テストが同じ起動で quote と承認を続け、owner が quote を読む機会が無い | `tests/acceptance/private-live.test.ts` は **1 回の起動で 1 つの操作**（`PRIVATE_LIVE_MODE=quote|approve|recover`）。approve/recover は owner が明示する `PRIVATE_LIVE_EVIDENCE_DIR`（`checkpoint.json` のあるディレクトリ）を再開し、新しい quote・本文を作らない。approve の test は再開点の paymentId・intentSha256・`quote.json` の sha256 が買われたものと一致することを確かめる。手順書 §5 |
+| 2 拒否された起動が証跡を上書きする・引き渡し後に status が読めないと受信決済が false のまま・回復が証跡を初期化する | 証跡は既存を読み**単調に**更新（`loadEvidence`）。購入に触れる前の拒否は `evidence.json` を触らず `refusals.json` に追記。引き渡し = 受信決済 済みを status の可否によらず記録（tx は読めた分）。`--recover` は既存の証跡を引き継ぎ、提出済みで結果不明なら両決済を `uncertain`。wire で拒否後の証跡不変・CLI 別プロセスの `--recover` を試験 |
+| 3 応答を失った購入のあとで再承認が可能（二度署名し得る） | 署名・提出の**前**に再開点へ `purchaseAttempted` を書く（耐久の latch）。以後の `--approve` は拒否し `--recover` へ。wire で latch 後の承認が署名も購入要求も起こさないこと（facilitator の verify 回数不変）、期限切れ・`quote.json` 削除の拒否を試験 |
+| `allowUnissuedQuotes` の注記 | 再開は client の控え照合を飛ばすので、保証は再開点（ローカルの権威、`quote.json` の sha256 で改変検出）と Router 側の束縛の検査による旨をコードの注記に明記 |
+

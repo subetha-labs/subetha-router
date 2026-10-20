@@ -116,7 +116,7 @@ F は `--profile priv-f-tempo-post --host provider-mpp-post.subethalabs.com --ou
 
 ## 5. 受入テスト（`tests/acceptance/private-live.test.ts`）
 
-同じ手順をテストとして走らせ、ゲートごとに別の `test` で判定する。env:
+同じ手順をテストとして走らせ、ゲートごとに別の `test` で判定する。**1 回の起動で 1 つの操作**（`PRIVATE_LIVE_MODE`）: `quote`（承認対象と再開点を書いて止まる。何も払わない）→ owner が `<dir>/quote.json` を読む → `approve`（**同じ** `PRIVATE_LIVE_EVIDENCE_DIR` を指す。再開点の quote そのものを買い、新しい quote も本文も作らない）→ 必要なら `recover`。env:
 
 | env | 意味 |
 |---|---|
@@ -125,13 +125,19 @@ F は `--profile priv-f-tempo-post --host provider-mpp-post.subethalabs.com --ou
 | `PRIVATE_LIVE_ROUTER_URL`, `PRIVATE_LIVE_PRINCIPAL`, `PRIVATE_LIVE_TOKEN`, `PRIVATE_LIVE_PROFILE` | 実合成の Router と allowlist のプロファイル |
 | `PRIVATE_LIVE_SCOPE_FILE` | §2 の記録（必須。欠けていれば何も払わない） |
 | `SUBETHA_PAYER_PRIVATE_KEY` | Payer の鍵（env だけ） |
-| `PRIVATE_LIVE_APPROVE=1` | 承認。テストは quote（1 回目）→ 同じ証跡ディレクトリの再開点を承認（2 回目）の順に走る。無ければ quote で止まる（支払い無し） |
-| `PRIVATE_LIVE_EVIDENCE_DIR`, `PRIVATE_LIVE_INBOUND_MAX_TOTAL`, `PRIVATE_LIVE_BODY` | 任意 |
+| `PRIVATE_LIVE_MODE` | `quote`（既定）/ `approve` / `recover`。approve と recover は `PRIVATE_LIVE_EVIDENCE_DIR`（quote が書いた `checkpoint.json` のあるディレクトリ）が必須 |
+| `PRIVATE_LIVE_EVIDENCE_DIR` | quote では任意（既定 `runtime/private-live/<provider>-<時刻>`）、approve / recover では必須 |
+| `PRIVATE_LIVE_INBOUND_MAX_TOTAL`, `PRIVATE_LIVE_BODY` | 任意（quote のときだけ効く） |
 
 ```sh
-PRIVATE_LIVE_AC=1 PRIVATE_LIVE_PROVIDER=C PRIVATE_LIVE_ROUTER_URL=http://127.0.0.1:8500 PRIVATE_LIVE_PRINCIPAL=owner PRIVATE_LIVE_TOKEN=<token> \
-PRIVATE_LIVE_PROFILE=priv-c-x402-post PRIVATE_LIVE_SCOPE_FILE=runtime/private-live/scope.json SUBETHA_PAYER_PRIVATE_KEY=0x… PRIVATE_LIVE_APPROVE=1 \
+# 1) quote: 承認対象と再開点を書いて止まる（何も払わない）
+PRIVATE_LIVE_AC=1 PRIVATE_LIVE_MODE=quote PRIVATE_LIVE_PROVIDER=C PRIVATE_LIVE_EVIDENCE_DIR=runtime/private-live/c1 PRIVATE_LIVE_ROUTER_URL=http://127.0.0.1:8500 \
+PRIVATE_LIVE_PRINCIPAL=owner PRIVATE_LIVE_TOKEN=<token> PRIVATE_LIVE_PROFILE=priv-c-x402-post PRIVATE_LIVE_SCOPE_FILE=runtime/private-live/scope.json SUBETHA_PAYER_PRIVATE_KEY=0x… \
 npx vitest run tests/acceptance/private-live.test.ts
+# 2) runtime/private-live/c1/quote.json を読む
+# 3) approve: 同じディレクトリの再開点を買う（ここで実送金）
+PRIVATE_LIVE_AC=1 PRIVATE_LIVE_MODE=approve PRIVATE_LIVE_PROVIDER=C PRIVATE_LIVE_EVIDENCE_DIR=runtime/private-live/c1 …同じ env… npx vitest run tests/acceptance/private-live.test.ts
+# 応答を失ったら: PRIVATE_LIVE_MODE=recover（何も払わない）
 ```
 
 ## 6. ゲートと証跡（`evidence.json`）

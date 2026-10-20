@@ -10,6 +10,8 @@
  * - `--trust mozilla`（実 Provider）では **支払い範囲の記録**（`--scope-file`、AGENTS.md）が無いと走らない。`lab-fixture-ca` の証跡は synthetic。
  * - 鍵は env `SUBETHA_PAYER_PRIVATE_KEY` だけから読み、出力・証跡・例外に出さない。bearer は 0600 のファイル（`payment_header.json`・`order_final.json`）にだけ。
  * - 証跡 `evidence.json` は **5 つのゲートを別々に**、分かった時点で記録する（受信決済は引き渡し直後の status から。失敗しても分かっている分は残し、不明は `uncertain`）。
+ *   既にある証跡は**単調に**しか更新しない（分かったことを消さない）。承認が拒否された起動は証跡を触らず `refusals.json` に追記する。
+ * - 署名・提出の**前**に再開点へ `purchaseAttempted` を書く（耐久の latch）。以後の `--approve` は拒み、`--recover` に回す（応答を失っても二度署名しない）。
  *
  * usage: SUBETHA_PAYER_PRIVATE_KEY=0x… PRIVATE_PAYER_TOKEN=… npx tsx tools/private-payer.ts --router http://127.0.0.1:<port> --principal <id> --profile <profileId> \
  *          --method POST --host provider-x402-post.subethalabs.com --path /select --body-file body.json \
@@ -103,7 +105,7 @@ interface Checkpoint {
   readonly orderId: string;
   readonly args: { readonly routerBaseUrl: string; readonly principalId: string; readonly profileId: string; readonly method: string; readonly host: string; readonly path: string; readonly outbound: PrivatePayerOptions["outbound"]; readonly inbound: NonNullable<PrivatePayerOptions["inbound"]>; readonly trust: string };
   /** 進んだ段（再開・回復の判断用）。 */
-  progress?: { paymentId?: string; handedOver?: boolean; sessionDone?: boolean; attested?: boolean };
+  progress?: { paymentId?: string; purchaseAttempted?: boolean; handedOver?: boolean; sessionDone?: boolean; attested?: boolean };
 }
 
 export function defaultLabDir(): string {
@@ -160,6 +162,30 @@ function newEvidence(options: { readonly trust: "mozilla" | "lab-fixture-ca"; re
   };
 }
 
+/** 既にある証跡を読む（無ければ新規）。ゲートは単調にしか進めない（分かったことを消さない）。 */
+function loadEvidence(outDir: string, fresh: PrivatePayerEvidence): PrivatePayerEvidence {
+  const file = path.join(outDir, "evidence.json");
+  if (!existsSync(file)) return fresh;
+  try {
+    const previous = JSON.parse(readFileSync(file, "utf8")) as PrivatePayerEvidence;
+    return { ...previous, runId: fresh.runId, startedAt: fresh.startedAt, gates: { ...fresh.gates, ...previous.gates } };
+  } catch {
+    return fresh;
+  }
+}
+/** 承認が拒否された起動の記録（証跡とは別。証跡を上書きしない）。 */
+function recordRefusal(outDir: string, stage: string, reason: string): void {
+  const file = path.join(outDir, "refusals.json");
+  let entries: unknown[] = [];
+  try {
+    if (existsSync(file)) entries = JSON.parse(readFileSync(file, "utf8")) as unknown[];
+  } catch {
+    entries = [];
+  }
+  entries.push({ at: new Date().toISOString(), stage, reason });
+  writePrivate(file, `${JSON.stringify(entries, null, 2)}\n`);
+}
+
 /** Router の status（読み取り専用）から分かるゲートを証跡に写す。失敗しても投げない。 */
 async function fillFromStatus(client: RouterClient & PrivateRouterClient, paymentId: string, ownerKey: string, evidence: PrivatePayerEvidence): Promise<void> {
   try {
@@ -197,12 +223,18 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const bin = path.join(labDir, "phase5/runner/target/release/delivery");
   const srs = options.srsPath ?? defaultSrsPath();
   const inbound = options.inbound ?? { network: PRIVATE_INBOUND_NETWORK, asset: PRIVATE_INBOUND_ASSET, maxTotal: String(BigInt(options.outbound.maxAmount) + 1000n) };
-  const evidence = newEvidence(options);
   mkdirSync(options.outDir, { recursive: true, mode: 0o700 });
+  const evidence = loadEvidence(options.outDir, newEvidence(options));
   const persistEvidence = (): void => writePrivate(path.join(options.outDir, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
+  /** 購入に触れる前の拒否（前提・再開点の検査）は証跡を上書きしない。 */
+  const REFUSAL_STAGES = new Set(["prerequisites", "review", "approve", "keygen", "quote"]);
   const fail = (stage: string, reason: string): PrivatePayerRun => {
-    evidence.stage = stage;
     log(`private-payer: ${stage}: ${reason}`);
+    if (REFUSAL_STAGES.has(stage) && existsSync(path.join(options.outDir, "evidence.json"))) {
+      recordRefusal(options.outDir, stage, reason);
+      return { ok: false, stage, reason, evidence };
+    }
+    evidence.stage = stage;
     persistEvidence();
     return { ok: false, stage, reason, evidence };
   };
@@ -215,7 +247,8 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     evidence.scopeFileSha256 = sha256Hex(readFileSync(options.scopeFile));
   }
   if (!/^0x[0-9a-fA-F]{64}$/.test(options.payerPrivateKey)) return fail("prerequisites", "SUBETHA_PAYER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string");
-  // 承認は別の起動で再開するので、client が自分で発行した quote でなくても受け付ける（束縛の照合は client がする）。
+  // 承認は別の起動で再開するので、client が自分で発行した quote でなくても受け付ける（`allowUnissuedQuotes`: client は自分の控えとの照合を飛ばす。
+  // 読んだ quote が買われることの保証は、この道具の再開点（0600 のローカルの権威。`quote.json` の sha256 で改変を検出）と Router 側の束縛の検査による）。
   const client = createRouterClient({ baseUrl: options.routerBaseUrl, principalId: options.principalId, token: options.token, allowUnissuedQuotes: true });
   const keys = path.join(options.outDir, "keys");
   const exec = path.join(options.outDir, "executor");
@@ -266,6 +299,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   if (stableJson(checkpoint.args) !== stableJson(argsOf(options, inbound))) return fail("approve", "the arguments differ from the reviewed quote (router/principal/profile/method/host/path/outbound/inbound/trust); quote again in a new --out");
   if (!existsSync(quoteFile) || sha256Hex(readFileSync(quoteFile)) !== checkpoint.quoteFileSha256) return fail("approve", "quote.json was modified or removed after the review; quote again in a new --out");
   if (checkpoint.progress?.handedOver === true) return fail("approve", "this purchase was already handed over; use --recover to read its status/record");
+  if (checkpoint.progress?.purchaseAttempted === true) return fail("approve", "a purchase was already attempted for this quote (its outcome may be unknown); never re-sign — use --recover to read status/record");
   const quote = checkpoint.quote;
   if (now() >= quote.approval.deadlineMs) return fail("approve", "the reviewed quote has expired; quote again in a new --out and review it again");
   evidence.intentSha256 = checkpoint.intentSha256;
@@ -274,7 +308,12 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const requestId = checkpoint.requestId;
   mkdirSync(path.join(exec, "private_inbox"), { recursive: true, mode: 0o700 });
 
-  // 3. 受信 credential（自分の鍵。EIP-3009。資金はこの後の Router の settle で動く）。
+  // 3. 署名・提出の前に耐久の latch（応答を失っても、以後の承認は拒み --recover に回す）。
+  checkpoint.progress = { ...checkpoint.progress, paymentId: quote.paymentId, purchaseAttempted: true };
+  writeCheckpoint(options.outDir, checkpoint);
+  evidence.stage = "purchase";
+  persistEvidence();
+  // 受信 credential（自分の鍵。EIP-3009。資金はこの後の Router の settle で動く）。
   const offer = quote.source.offer as { network: string; extra: Record<string, unknown> } & Record<string, unknown>;
   const chainId = Number(String(offer.network).replace(/^eip155:/, ""));
   const credential = await createX402Payer(options.payerPrivateKey).credentialFor(offer as never, chainId);
@@ -303,7 +342,8 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const paymentId = handover.paymentId;
   checkpoint.progress = { ...checkpoint.progress, paymentId, handedOver: true };
   writeCheckpoint(options.outDir, checkpoint);
-  // 引き渡し = 受信決済は済み、送信 credential は発行済み。status から受信 tx を写す（この時点で分かる分）。
+  // 引き渡し = 受信決済は済み（Router は決済の後にだけ発行する）、送信 credential は発行済み。tx は status から（読めなければ `settled: true` だけ残る）。
+  evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, settled: true };
   evidence.gates.outbound_settlement.issued = true;
   await fillFromStatus(client, paymentId, quote.ownerKey, evidence);
   evidence.stage = "handover";
@@ -420,15 +460,28 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
   if (checkpoint.args.routerBaseUrl !== options.routerBaseUrl || checkpoint.args.principalId !== options.principalId) return { ok: false, reason: "the checkpoint belongs to another Router/principal" };
   const client = createRouterClient({ baseUrl: options.routerBaseUrl, principalId: options.principalId, token: options.token, allowUnissuedQuotes: true });
   const paymentId = checkpoint.progress?.paymentId ?? checkpoint.quote.paymentId;
-  const evidence = newEvidence({ trust: checkpoint.args.trust as "mozilla" | "lab-fixture-ca", method: checkpoint.args.method, host: checkpoint.args.host, path: checkpoint.args.path });
+  // 既にある証跡を引き継ぐ（分かったことを消さない）。提出したが結果が分からない購入は、status が読めるまで両決済を uncertain とする。
+  const evidence = loadEvidence(options.outDir, newEvidence({ trust: checkpoint.args.trust as "mozilla" | "lab-fixture-ca", method: checkpoint.args.method, host: checkpoint.args.host, path: checkpoint.args.path }));
   evidence.paymentId = paymentId;
   evidence.intentSha256 = checkpoint.intentSha256;
   evidence.orderId = checkpoint.orderId;
   evidence.stage = "recover";
-  if (checkpoint.progress?.handedOver === true) evidence.gates.outbound_settlement.issued = true;
+  if (checkpoint.progress?.handedOver === true) {
+    evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, settled: true };
+    evidence.gates.outbound_settlement.issued = true;
+  } else if (checkpoint.progress?.purchaseAttempted === true && !evidence.gates.inbound_settlement.settled) {
+    evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, uncertain: true };
+    evidence.gates.outbound_settlement = { ...evidence.gates.outbound_settlement, uncertain: true };
+  }
   await fillFromStatus(client, paymentId, checkpoint.quote.ownerKey, evidence);
-  const status = await client.status(paymentId, checkpoint.quote.ownerKey);
+  let status: Awaited<ReturnType<typeof client.status>>;
+  try {
+    status = await client.status(paymentId, checkpoint.quote.ownerKey);
+  } catch {
+    status = { found: false, status: 0, reason: "transport_failed" };
+  }
   const projection = status.found ? (status.projection as unknown as Record<string, unknown>) : undefined;
+  if (projection !== undefined && evidence.gates.inbound_settlement.txRef !== undefined) delete (evidence.gates.inbound_settlement as { uncertain?: true }).uncertain;
   const record = await client.privateRecord({ paymentId, ownerKey: checkpoint.quote.ownerKey });
   let decrypted = false;
   if (record.ok) {

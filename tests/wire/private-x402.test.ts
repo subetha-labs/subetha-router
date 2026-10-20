@@ -731,11 +731,40 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     expect(evidenceText).not.toContain(canary);
     expect(evidenceText).not.toContain(quoted.quote.ownerKey);
     expect(statSync(path.join(d, "payment_header.json")).mode & 0o777).toBe(0o600);
-    // 引き渡し済みの再承認は拒否（二重の支払いを作らない）。--recover は読むだけ。
+    // 引き渡し済みの再承認は拒否（二重の支払いを作らない）。拒否は証跡を上書きせず `refusals.json` に残る。--recover は読むだけ。
     expect(await runPrivatePayer({ ...base, outDir: d, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    expect(readFileSync(path.join(d, "evidence.json"), "utf8")).toBe(evidenceText);
+    // 拒否の記録: 再 quote 1 + 引数違い 1 + 改変 1 + 引き渡し済み 1。
+    const refusals = JSON.parse(readFileSync(path.join(d, "refusals.json"), "utf8")) as { stage: string }[];
+    expect(refusals.map((r) => r.stage)).toEqual(["review", "approve", "approve", "approve"]);
     const recovered = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: d, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
     expect(recovered).toMatchObject({ ok: true, paymentId: run.paymentId, recordAvailable: true, decrypted: true, evidence: { gates: { inbound_settlement: { settled: true }, private_delivery: { status: "delivered_private" }, payer_receipt: { ok: true } } } });
+    // 別プロセスの CLI からの --recover（checkpoint の ownerKey だけで status・record を読み、復号する）。
+    const cli = execFileSync(process.execPath, ["--import", "tsx", path.join(repoRoot, "tools/private-payer.ts"), "--recover", "--router", world.router!.baseUrl, "--principal", ALICE.id, "--out", d, "--lab-dir", lab.labDir], { cwd: repoRoot, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "", PRIVATE_PAYER_TOKEN: ALICE.token, SUBETHA_ZKTLS_SRS_DAT: lab.srs }, stdio: ["ignore", "pipe", "pipe"] });
+    expect(JSON.parse(cli.trim().split("\n").at(-1)!)).toMatchObject({ ok: true, paymentId: run.paymentId, status: "delivered_private", recordAvailable: true, decrypted: true });
     expectCanaries(world, { public: evidenceText }, [canary], [headerValue]);
+    // 再開点の検査: quote の期限切れ・quote.json の削除・提出済みの latch はどれも承認を拒み、署名も購入要求も起きない。
+    for (const [name, mutate] of [
+      ["expired", (c: Record<string, unknown>) => ({ ...c, quote: { ...(c["quote"] as Record<string, unknown>), approval: { ...((c["quote"] as Record<string, unknown>)["approval"] as Record<string, unknown>), deadlineMs: Date.now() - 1 } } })],
+      ["attempted", (c: Record<string, unknown>) => ({ ...c, progress: { ...(c["progress"] as Record<string, unknown>), purchaseAttempted: true } })],
+    ] as const) {
+      const g = path.join(outDir, `g-${name}`);
+      expect(await runPrivatePayer({ ...base, outDir: g, approve: false })).toMatchObject({ ok: true, stage: "quoted" });
+      const file = path.join(g, "checkpoint.json");
+      writeFileSync(file, JSON.stringify(mutate(JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>)));
+      const verifyBefore = facilitator.calls.verify;
+      expect(await runPrivatePayer({ ...base, outDir: g, approve: true }), name).toMatchObject({ ok: false, stage: "approve" });
+      expect(facilitator.calls.verify, name).toBe(verifyBefore);
+      // recover は提出済み（結果不明）の購入を uncertain とし、Router の status（awaiting_payment）を読む。
+      if (name === "attempted") {
+        const r = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: g, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
+        expect(r).toMatchObject({ ok: true, recordAvailable: false, status: { status: "awaiting_payment" }, evidence: { gates: { inbound_settlement: { settled: false, uncertain: true }, outbound_settlement: { uncertain: true } } } });
+      }
+    }
+    const removed = path.join(outDir, "g-removed");
+    expect(await runPrivatePayer({ ...base, outDir: removed, approve: false })).toMatchObject({ ok: true, stage: "quoted" });
+    unlinkSync(path.join(removed, "quote.json"));
+    expect(await runPrivatePayer({ ...base, outDir: removed, approve: true })).toMatchObject({ ok: false, stage: "approve" });
     // 引き渡しの後で失敗（executor が Provider に届かない）: 受信決済と発行は証跡に残り、stage は session。別プロセスからの --recover は checkpoint の ownerKey で status を読める。
     const f = path.join(outDir, "f");
     const quotedF = await runPrivatePayer({ ...base, outDir: f, approve: false });
