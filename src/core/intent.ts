@@ -116,6 +116,8 @@ export interface IntentDestination {
   readonly outcome: DestinationOutcome;
   readonly txRef?: string;
   readonly receiptRef?: string;
+  /** 秘匿購入: Provider の領収ヘッダの sha256（原本は認証済みの record にだけ。§3.4）。 */
+  readonly receiptSha256?: string;
 }
 
 export interface IntentResult {

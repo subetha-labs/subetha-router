@@ -550,3 +550,24 @@ v5 → v5.1（Codex 設計レビュー 5 回目、APPROVE WITH CHANGES）:
 | 2 wrapper の境界は到着の確認と解放で | §11（`launchHooksForTest`）|
 | 3 timeout の丸めの説明 | §3.2 8（CLI の timeout は相対・正、強制は watchdog と資格）|
 | 前提の明示 | §4（列挙と取り消しの成功、門の再作成なし、単一 Router）|
+
+## 14. v5.1 → 実装（T-Z1〜T-Z8、2026-10-20。Codex 実装レビュー 1・2 回目の指摘と、wire で見つかった差分）
+
+実装は v5.1 の設計どおりで、次の点だけ設計の文面より具体化・修正した（設計の意図は変えていない）。
+
+| 事項 | 実装 | 由来 |
+|---|---|---|
+| 受信 rail の解決 | `profileIdOfBinding`（`src/main.ts`）が `private\|<profileId>\|<METHOD>\|<url>\|<intentSha256>` の束縛からもプロファイルを引く（§3.1 の束縛は受信レグの rail を同じプロファイルの受信 rail に写す）。これが無いと実合成で purchase が 500 になった | wire（実合成）で発見 |
+| verify の check 文字列 | `CHECK_DELIVERY_PROOF` / `CHECK_REQUEST_PROOF`（`src/private/attest.ts`）は lab バイナリの実際の文字列 `UltraHonk delivery proof verified against verifier-derived VK` / `UltraHonk request-binding proof verified against verifier-derived VK` | wire で発見（偽バイナリの文字列が実物と違っていた）|
+| MCP の出力 schema | 秘匿 4 ツールに専用の `outputSchema`（`privateQuote`/`privatePurchase`/`privateAttest`/`privateRecord`）。attest の `status` は文字列（`delivered_private`/`unknown`）で、失敗の HTTP 状態は `httpStatus`。流用していた `purchase` の schema（`status: number`）では SDK の出力検証で isError になった | 実 stdio の MCP 子を通す wire で発見 |
+| 保持期限と検証の競合（§3.5・§3.7） | 保持期限が来たら取得は 410（`private_record_expired` を先に追記）にするが、受理済み（待ち行列・実行中）の検証があれば**入力ファイルと容量の計上は検証ジョブの終わりまで残す**（`expiredDuringAttest`）。期限切れの record には attest できない（`attest_closed`）。設定は `retentionMs ≥ attestTimeoutMs + verifyTimeoutMs` を要求（`ConfigError`） | Codex 実装レビュー 2 回目 1 |
+| 領収の生ヘッダ | journal・射影には Provider の領収ヘッダの **sha256**（`destination.receiptSha256`、射影 `private.outbound.receiptSha256`）と検証済みの tx 参照だけ。生のヘッダは認証済みの record にだけ（Provider が反射した文字列を Router 側の面に出さない） | 同 2 |
+| 検証の例外 | `runner.verify` が例外を投げた・起動できない・シグナルで終わった（結果が無い）ときは、受理した digest の結果として固定の `unknown/private_verifier_unavailable` を他の検証失敗と同じ経路で永続化する（`attesting` のまま残らない）。非 0 終了・形の不一致は `private_attest_invalid`、期限は `private_verify_timeout` | 同 5 |
+| 再構成の停止点 | `duringRecoveryInventory` は `runner.inventory(workDir, onGatesCancelled)` の callback（門を外した後・pid の棚卸しの前。§4・§11 の文面どおり） | 同 3 |
+| 予約の追記失敗 | `reservePrivateIssuance` が `unavailable` なら、もう一度追記せず固定の `unknown/private_issuance_unknown` を返して受付を閉じる（`persistenceLost`。成果物と計上は残す） | 同（前回 2 の残り）|
+| 通常の動的購入の journal | `source_settled` の `eventId` は秘匿購入だけ（通常の行は不変。`dynamic-integration.test.ts` に回帰の assert） | 実装レビュー 1 回目 8 |
+| wire の範囲（§11） | GET の全経路、実 stdio の MCP 子、verify の wrapper 3 段 + 公開と exec の間の kill、遅れた公開の不在、棚卸し中（門の後・pid の前）の kill、否定ケースの固定コード（`intent_mismatch`/`in_progress`/`nonce_mismatch`/`attest_not_ready`/`attest_foreign`/`attest_closed`/`attest_expired`/`private_session_timeout`/`private_attest_invalid`）、掃除前の作業ディレクトリの写しと符号化を解いた canary、診断ファイル、executor の秘密（salt・blinder・eph 鍵）の走査 | 同 3・4 |
+| 受入（T-Z8） | `tools/private-payer.ts`（Payer 側の手順、支払い範囲の記録が無ければ実 Provider に払わない、5 ゲート別の証跡）、`tests/acceptance/private-live.test.ts`（`PRIVATE_LIVE_AC=1`、owner 実行、ゲートごとの test）、`docs/zktls-router-acceptance.md` | タスク T-Z8 |
+
+wire の証跡は `lab-fixture-ca` の **synthetic**。実 Provider（C/F/A/B）の受入は owner のゲート（`docs/zktls-router-acceptance.md`）で、本フェーズでは**未実行**。
+

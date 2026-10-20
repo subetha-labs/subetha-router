@@ -325,6 +325,11 @@ and the following remain behind separate gates, **not done**.
   production since 2026-10-06 on the **testnet** assumption that a 1-wei priority fee is included (block
   utilization is far below capacity); it is not a mainnet assumption. Gates are
   recorded in `docs/dynamic-upstream-tasks.md`.
+- **Private purchases (zkTLS)** -- the Router issues the outbound credential without seeing the request or response body and
+  verifies, through the lab's TLSNotary/UltraHonk `delivery` binary, that the approved request reached the approved Provider
+  (`docs/zktls-router-design.md`). Wired end to end against the real binary with a fixture CA (`tests/wire/private-x402.test.ts`,
+  synthetic evidence). **Live acceptance against the lab's testnet Providers is an owner gate and has not been run**
+  (`docs/zktls-router-acceptance.md`); the hosted Router does not enable it.
 
 ## Where the detail went
 
@@ -335,6 +340,7 @@ This file is the entry point. The working records live next to it:
 | [`docs/ENGINEERING.md`](docs/ENGINEERING.md) | HTTP contract, purchase lifecycle, journal, env wiring, commands, settlement evidence with transaction hashes, MCP tool reference, running it locally |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | Deploying the hosted Router (EC2 + Docker + TLS) |
 | [`CLAUDE.md`](CLAUDE.md) | The steps an agent follows to pay through this Router |
+| [`docs/zktls-router-requirements.md`](docs/zktls-router-requirements.md), [`docs/zktls-router-design.md`](docs/zktls-router-design.md), [`docs/zktls-router-tasks.md`](docs/zktls-router-tasks.md), [`docs/zktls-router-acceptance.md`](docs/zktls-router-acceptance.md) | Private purchases (zkTLS): requirements, design (+§14 implementation deltas), task record, owner-run acceptance procedure (Japanese) |
 | [`docs/`](docs/) | Requirements and design per phase (Japanese) |
 
 ## Sources and license

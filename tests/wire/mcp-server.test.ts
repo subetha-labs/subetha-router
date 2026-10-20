@@ -31,6 +31,11 @@ const TOOLS = [
   "subetha_router_quote_url",
   "subetha_router_purchase",
   "subetha_router_status",
+  // 秘匿購入の 4 ツール（`docs/zktls-router-design.md` §8.3。既存 5 ツールは不変）
+  "subetha_router_private_quote",
+  "subetha_router_private_purchase",
+  "subetha_router_private_attest",
+  "subetha_router_private_record",
 ];
 
 async function withHarness(
@@ -53,7 +58,7 @@ async function expectNoUpstreamPay(h: McpHarness): Promise<void> {
 
 describe("T6-mcp-nopay: Router の MCP ラッパ", () => {
   it(
-    "T6-01: tools/list に 5 つの tool が出る",
+    "T6-01: tools/list に 9 つの tool が出る（既存 5 + 秘匿 4）",
     async () => {
       await withHarness({}, async (h) => {
         const listed = await h.client.listTools();

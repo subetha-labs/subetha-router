@@ -548,11 +548,12 @@ function reducePrivate(current: Intent, event: string, patch: Patch, base: Inten
     }
     case "private_attested": {
       const txRef = asString(patch["txRef"]);
-      const receiptRef = asString(patch["receiptRef"]);
+      // 領収は digest だけ（生のヘッダは journal・射影に写さない。原本は認証済みの record）。
+      const receiptSha256 = asString(patch["receiptSha256"]);
       return {
         ...base,
         status: "delivered_private",
-        destination: { ...current.destination, outcome: "paid", ...(txRef === "" ? {} : { txRef }), ...(receiptRef === "" ? {} : { receiptRef }) },
+        destination: { ...current.destination, outcome: "paid", ...(txRef === "" ? {} : { txRef }), ...(/^[0-9a-f]{64}$/.test(receiptSha256) ? { receiptSha256 } : {}) },
         private: { ...priv, attest: { bundleSha256: asString(patch["bundleSha256"]), result: "delivered_private" } },
       };
     }

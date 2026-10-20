@@ -6,6 +6,8 @@ import { describe, expect, test } from "vitest";
 
 import type { PrivateQuoteView, PrivateRouterClient, RouterClient } from "../../src/client/types.js";
 import { createToolHandlers, TOOL_NAMES, type Evidence } from "../../src/mcp/tools.js";
+import { OUTPUT_SCHEMAS } from "../../src/mcp/server.js";
+import { z } from "zod";
 
 const EVIDENCE: Evidence = { label: "unit", source: "operator_asserted", verified: false };
 const HEADER_VALUE = "eyJ4NDAyVmVyc2lvbiI6MiwicGF5bG9hZCI6eyJzaWduYXR1cmUiOiIweGRlYWRiZWVmIn19";
@@ -87,3 +89,39 @@ describe("subetha_router_private_attest / record", () => {
     expect(await failing.privateRecord({ paymentId: "pay-1", ownerKey: "k" })).toMatchObject({ ok: false, error: "record_expired", httpStatus: 410 });
   });
 });
+
+describe("outputSchema（SDK が structuredContent を検証する。形が合わないと tool の結果が isError になる）", () => {
+  const handover = { paymentId: "pay-1", verifier: { address: "127.0.0.1:40001" }, releasedHeader: { name: "PAYMENT-SIGNATURE", value: HEADER_VALUE }, headerFile: { order_id: "b".repeat(64), intent_sha256: "a".repeat(64), name: "PAYMENT-SIGNATURE", value: HEADER_VALUE }, releaseB64: "e30=", deadlines: { credentialExpiresAt: 1, sessionBy: 2 } };
+  test("4 ツールの成功・失敗の出力が各 schema を通る（attest の status は文字列）", async () => {
+    const ok = handlers({
+      privateQuote: async () => ({ ok: true, quote: quote() }),
+      privatePurchase: async () => ({ outcome: "awaiting_session", handover }),
+      privateAttest: async () => ({ ok: true, paymentId: "pay-1", status: "delivered_private", private: { proof: { delivery: true } } }),
+      privateRecord: async () => ({ ok: true, paymentId: "pay-1", recordB64: "e30=", releaseB64: "e30=", recordAvailableUntil: 3 }),
+    });
+    const failing = handlers({
+      privateQuote: async () => ({ ok: false, error: "unknown_route", status: 404 }),
+      privatePurchase: async () => ({ outcome: "rejected", error: "in_progress", status: 409, paymentId: "pay-1" }),
+      privateAttest: async () => ({ ok: false, error: "attest_closed", status: 409 }),
+      privateRecord: async () => ({ ok: false, error: "record_expired", status: 410 }),
+    });
+    const unknownAttest = handlers({ privateAttest: async () => ({ ok: true, paymentId: "pay-1", status: "unknown", terminalReason: "private_attest_invalid" }) });
+    const cases: [string, Record<string, unknown>, z.ZodRawShape][] = [
+      ["quote ok", await ok.privateQuote({ profileId: "p", requestId: "r", intentB64: "AAAA" }), OUTPUT_SCHEMAS.privateQuote],
+      ["quote fail", await failing.privateQuote({ profileId: "p", requestId: "r", intentB64: "AAAA" }), OUTPUT_SCHEMAS.privateQuote],
+      ["purchase ok", await ok.privatePurchase({ quoteId: "0xq1", requestId: "r", approval: "0xq1", credential: "c", quote: quote() }), OUTPUT_SCHEMAS.privatePurchase],
+      ["purchase fail", await failing.privatePurchase({ quoteId: "0xq1", requestId: "r", approval: "0xq1", credential: "c", quote: quote() }), OUTPUT_SCHEMAS.privatePurchase],
+      ["attest ok", await ok.privateAttest({ paymentId: "pay-1", ownerKey: "k", bundleB64: "e30=" }), OUTPUT_SCHEMAS.privateAttest],
+      ["attest unknown", await unknownAttest.privateAttest({ paymentId: "pay-1", ownerKey: "k", bundleB64: "e30=" }), OUTPUT_SCHEMAS.privateAttest],
+      ["attest fail", await failing.privateAttest({ paymentId: "pay-1", ownerKey: "k", bundleB64: "e30=" }), OUTPUT_SCHEMAS.privateAttest],
+      ["record ok", await ok.privateRecord({ paymentId: "pay-1", ownerKey: "k" }), OUTPUT_SCHEMAS.privateRecord],
+      ["record fail", await failing.privateRecord({ paymentId: "pay-1", ownerKey: "k" }), OUTPUT_SCHEMAS.privateRecord],
+      ["disabled", await handlers({}).privateAttest({ paymentId: "pay-1", ownerKey: "k", bundleB64: "e30=" }), OUTPUT_SCHEMAS.privateAttest],
+    ];
+    for (const [name, output, shape] of cases) {
+      const parsed = z.object(shape).safeParse(output);
+      expect(parsed.success, `${name}: ${parsed.success ? "" : JSON.stringify(parsed.error.issues)}`).toBe(true);
+    }
+  });
+});
+

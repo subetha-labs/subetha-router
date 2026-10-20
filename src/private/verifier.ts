@@ -85,8 +85,8 @@ export type InventoryOutcome = { readonly ok: true; readonly terminated: number 
 export interface VerifierRunner {
   serve(args: ServeArgs): Promise<ServeOutcome>;
   verify(args: VerifyArgs): Promise<VerifyOutcome>;
-  /** 再構成・drain の前: 起動門を取り消し、前世代の子を終了させる。`workDir` 配下の `<paymentId>/` を全部見る。 */
-  inventory(workDir: string): Promise<InventoryOutcome>;
+  /** 再構成・drain の前: 起動門を取り消し、前世代の子を終了させる。`workDir` 配下の `<paymentId>/` を全部見る。`onGatesCancelled` は試験の停止点（門を外した後・棚卸しの前）。 */
+  inventory(workDir: string, onGatesCancelled?: () => Promise<void>): Promise<InventoryOutcome>;
   /** 登録表の子を全部終わらせる（drain）。 */
   closeAll(): Promise<void>;
   /** 期待する `--timeout-secs`（起動前の検査で使う）。 */
@@ -438,7 +438,7 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
       return { ok: true, result: parsed, exitCode: finished.code };
     },
 
-    async inventory(workDir: string): Promise<InventoryOutcome> {
+    async inventory(workDir: string, onGatesCancelled?: () => Promise<void>): Promise<InventoryOutcome> {
       let dirs: string[];
       try {
         mkdirSync(workDir, { recursive: true, mode: 0o700 });
@@ -458,6 +458,7 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
           }
         }
       }
+      await onGatesCancelled?.();
       // 2. pid の棚卸し: 生きていれば OS 由来の同一性を確かめて終了させ、終了を待つ。
       let terminated = 0;
       for (const dir of dirs) {

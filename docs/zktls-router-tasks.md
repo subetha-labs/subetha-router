@@ -65,3 +65,15 @@ worktree `subetha-router/zktls-router-20261020`（branch `task/zktls-router`）�
 | 5 一意性の独立した試験 | T-Z2（4 ケース）、実装済みタスクの表記 |
 | 6 対応表と門 | 設計の節 → タスク → 試験、レビューの門 |
 | 7 受入の証跡 | T-Z8（静的検査、別々の証跡、未検証の表記）|
+
+## 実施の記録（2026-10-20）
+| タスク | 状態 | 証跡 |
+|---|---|---|
+| T-Z0〜T-Z4c | 済（commit 80e134c） | `tests/unit/private-*.test.ts`、Codex 実装レビュー 1 回目（REJECT → 全指摘を修正、2 回目で確認）|
+| T-Z5・T-Z6 | 済（commit f088e70） | `private-config`・`private-http`・`private-client`・`mcp-private` |
+| T-Z7 | 済（commit e385c53 + レビュー 2 回目の拡張） | `tests/wire/private-x402.test.ts`: lab 実バイナリで全件 pass（HTTP/GET/MCP 全経路、payer ツール、否定、改変・期限、停止点の kill、wrapper の段、record/attest の途中の kill）。証跡は synthetic（fixture CA）。実行ログは `.claude_workflow/local/zktls-wire-run*.log`（git 管理外）|
+| T-Z8 | 雛形 済・**owner 実行は未** | `tools/private-payer.ts`、`tests/acceptance/private-live.test.ts`（lab 無し・gate 無しでは skip = 未検証）、`docs/zktls-router-acceptance.md` |
+| T-Z9 | 文書 済、最終レビュー → 本節に追記 | `docs/zktls-router-design.md` §14 |
+
+wire で見つかった実合成の不具合 3 件（受信 rail の解決、verify の check 文字列、MCP の出力 schema）は設計 §14 に記録した。
+

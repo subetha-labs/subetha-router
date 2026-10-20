@@ -143,7 +143,7 @@ export interface Projection {
 export interface PrivateProjection {
   readonly intentSha256: string;
   readonly headerSha256?: string;
-  readonly outbound: { readonly issued: boolean; readonly expectedRef?: string };
+  readonly outbound: { readonly issued: boolean; readonly expectedRef?: string; readonly receiptSha256?: string };
   readonly verifier?: Readonly<Record<string, unknown>>;
   readonly proof?: { readonly delivery: boolean; readonly requestBinding: boolean; readonly onChainFinality: "not_checked" };
   readonly deadlines: { readonly credentialExpiresAt?: number; readonly sessionBy?: number; readonly attestBy?: number };
@@ -159,7 +159,7 @@ export function privateProjectionOf(intent: Intent): PrivateProjection | undefin
   return {
     intentSha256: priv.intentSha256,
     ...(priv.issuance === undefined ? {} : { headerSha256: priv.issuance.headerSha256 }),
-    outbound: { issued: priv.issuance !== undefined, ...(priv.issuance?.expectedRef === undefined ? {} : { expectedRef: priv.issuance.expectedRef }) },
+    outbound: { issued: priv.issuance !== undefined, ...(priv.issuance?.expectedRef === undefined ? {} : { expectedRef: priv.issuance.expectedRef }), ...(intent.destination.receiptSha256 === undefined ? {} : { receiptSha256: intent.destination.receiptSha256 }) },
     ...(record === undefined ? {} : { verifier: { ...record.summary } }),
     ...(intent.status === "delivered_private" ? { proof: { delivery: true, requestBinding: priv.method === "POST", onChainFinality: "not_checked" as const } } : {}),
     deadlines: {

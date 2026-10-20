@@ -6,7 +6,9 @@
  * - 停止点（設計 §11）: `<control>/stops.json` `{"points":[...]}` に載る点で `<control>/arrive.<point>.<paymentId>` を書き、`<control>/release.<point>` が現れるまで待つ（その間に試験が SIGKILL する）
  * - wrapper の段: `<control>/launch.json` `{"stages":{"<stage>":{"arrive","release"}}}`（起動時に 1 回読む。無ければ段なし）
  *
- * usage: node --import tsx tests/fixtures/private/router-private-process.ts --control <dir> --dial host=port[,host=port...] --ca <pem> [--ca <pem>]
+ * - `--diagnostics <file>`: 診断の sink（運用の入口と同じ `routerDiagnosticsSinkOf`）。canary の走査の対象にする。
+ *
+ * usage: node --import tsx tests/fixtures/private/router-private-process.ts --control <dir> --dial host=port[,host=port...] --ca <pem> [--ca <pem>] [--diagnostics <file>]
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -16,6 +18,7 @@ import { generatePrivateKey } from "viem/accounts";
 import { reportStartupFailure, startRouter, type DynamicTransportHooks, type RouterCapabilities } from "../../../src/main.js";
 import type { LaunchHooksForTest } from "../../../src/private/verifier.js";
 import { createRealEvmCapability } from "../../../tools/real-evm-capability.js";
+import { routerDiagnosticsSinkOf } from "../../../tools/router-diagnostics.js";
 import { FIXTURE_PUBLIC_ADDRESS, UnmappedFixtureHostError } from "../dynamic/dial.js";
 
 function argAll(name: string): string[] {
@@ -77,7 +80,10 @@ try {
 }
 
 const evm = createRealEvmCapability(generatePrivateKey());
+const diagnosticsFile = argAll("diagnostics")[0];
+const diagnostics = diagnosticsFile === undefined ? undefined : routerDiagnosticsSinkOf({ SUBETHA_DIAGNOSTICS_PATH: diagnosticsFile });
 const capabilities: RouterCapabilities = {
+  ...(diagnostics === undefined ? {} : { diagnostics }),
   evmSigning: evm.capability("eip155:84532"),
   dynamicTransportHooksForTest: hooks,
   transportHooksForTest: hooks,

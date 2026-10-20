@@ -1058,7 +1058,7 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
     throw new ConfigError(`${at}.minCredentialLifetimeMs must be an object`);
   }
   const defaults = DEFAULT_PRIVATE_CONFIG;
-  return {
+  const parsed: PrivateConfig = {
     deliveryBin,
     deliveryBinSha256,
     srsPath,
@@ -1082,6 +1082,11 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
     maxRetainedBytes: requirePositiveInt(raw, "maxRetainedBytes", at, defaults.maxRetainedBytes),
     maxRetainedPurchases: requirePositiveInt(raw, "maxRetainedPurchases", at, defaults.maxRetainedPurchases),
   };
+  // record は attest と検証が終わるまで取得できること（設計 §3.5）: 保持期限 ≥ attest の期限 + 検証の上限。
+  if (parsed.retentionMs < parsed.attestTimeoutMs + parsed.verifyTimeoutMs) {
+    throw new ConfigError(`${at}.retentionMs must be at least attestTimeoutMs + verifyTimeoutMs`);
+  }
+  return parsed;
 }
 
 /** `id:token,id:token` 形式。token は解析するだけで、どこにも出力しない。 */

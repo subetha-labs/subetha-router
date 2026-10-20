@@ -280,17 +280,18 @@ describe("private_* 行の reduce と再起動の帰結（§7.1）", () => {
     expect(intent.status).toBe("private_recorded");
     expect(toPublicStatus(intent.status)).toBe("attesting");
     expect(intent.private?.record).toEqual({ sha256: "b".repeat(64), bytes: 5000, completedAtMs: 1_800_000_150_000, summary: recordPatch.summary, attestBy: recordPatch.attestBy, recordAvailableUntil: recordPatch.recordAvailableUntil });
-    await store.append("pay-1", "private_attested", { bundleSha256: "c".repeat(64), txRef: "0xdst", receiptRef: "receipt-header", recordSha256: "b".repeat(64), proof: { delivery: true, requestBinding: true } });
+    await store.append("pay-1", "private_attested", { bundleSha256: "c".repeat(64), txRef: "0xdst", receiptSha256: "e".repeat(64), recordSha256: "b".repeat(64), proof: { delivery: true, requestBinding: true } });
     intent = store.byPaymentId("pay-1")!;
     expect(intent.status).toBe("delivered_private");
     expect(toPublicStatus(intent.status)).toBe("delivered_private");
-    expect(intent.destination).toMatchObject({ outcome: "paid", txRef: "0xdst", receiptRef: "receipt-header" });
+    expect(intent.destination).toMatchObject({ outcome: "paid", txRef: "0xdst", receiptSha256: "e".repeat(64) });
+    expect(intent.destination).not.toHaveProperty("receiptRef");
     expect(intent.private?.attest).toEqual({ bundleSha256: "c".repeat(64), result: "delivered_private" });
     const projection = privateProjectionOf(intent)!;
     expect(projection).toEqual({
       intentSha256: INTENT_SHA,
       headerSha256: "a".repeat(64),
-      outbound: { issued: true },
+      outbound: { issued: true, receiptSha256: "e".repeat(64) },
       verifier: recordPatch.summary,
       proof: { delivery: true, requestBinding: true, onChainFinality: "not_checked" },
       deadlines: { credentialExpiresAt: releasePatch.expiresAtMs, sessionBy: releasePatch.sessionBy, attestBy: recordPatch.attestBy },

@@ -29,6 +29,8 @@ export interface ZktlsProvider {
   readonly seen: { probes: { method: string; path: string; body: string }[]; paid: { method: string; path: string; body: string; payer: string; credentialHeader: string | undefined }[]; rejected: string[]; responses: string[] };
   /** 支払いつき要求の応答本文を差し替える（既定は lab.select.v1 の選択結果）。 */
   respond: (context: { method: string; path: string; body: string }) => string;
+  /** 領収（`PAYMENT-RESPONSE`）に足す欄（Provider が書ける文字列の反射の試験用）。 */
+  receiptExtra: Record<string, unknown> | undefined;
   close(): Promise<void>;
 }
 
@@ -59,6 +61,7 @@ export async function startZktlsProvider(options: ZktlsProviderOptions): Promise
       return JSON.stringify({ providerId: method === "POST" ? "select-post-fixture" : "snapshot-fixture", schema: method === "POST" ? "lab.select.v1" : "lab.snapshot.v1", method, path, received_len: Buffer.byteLength(body, "utf8"), received_sha256: digest, selection: method === "POST" ? { selected: ["lab-echo", "lab-sum", "lab-mini"][Number.parseInt(digest.slice(0, 2), 16) % 3], route: "cpu-deterministic" } : undefined, payment: { protocol: "x402", network: options.network } });
     },
     close: async () => {},
+    receiptExtra: undefined,
   };
   const server = https.createServer({ cert: readFileSync(options.certPath), key: readFileSync(options.keyPath), minVersion: "TLSv1.2", maxVersion: "TLSv1.2" }, (request, response) => {
     const chunks: Buffer[] = [];
@@ -142,7 +145,7 @@ export async function startZktlsProvider(options: ZktlsProviderOptions): Promise
         seen.paid.push({ method, path, body, payer: getAddress(a["from"]!), credentialHeader: typeof credentialHeader === "string" ? credentialHeader : undefined });
         const text = provider.respond({ method, path, body });
         if (Buffer.byteLength(text, "utf8") > 704) throw new Error("fixture response over the delivery cap");
-        const receipt = { success: true, network: options.network, transaction: `0x${randomBytes(32).toString("hex")}`, payer: getAddress(a["from"]!) };
+        const receipt = { success: true, network: options.network, transaction: `0x${randomBytes(32).toString("hex")}`, payer: getAddress(a["from"]!), ...provider.receiptExtra };
         send(200, text, { "PAYMENT-RESPONSE": encodePaymentResponseHeader(receipt as never) });
       })().catch(() => {
         if (!response.headersSent) response.writeHead(500);
@@ -151,12 +154,10 @@ export async function startZktlsProvider(options: ZktlsProviderOptions): Promise
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  return {
-    ...provider,
-    port: (server.address() as AddressInfo).port,
-    close: () => {
-      server.closeAllConnections();
-      return new Promise<void>((resolve) => server.close(() => resolve()));
-    },
+  (provider as { port: number }).port = (server.address() as AddressInfo).port;
+  (provider as { close: () => Promise<void> }).close = () => {
+    server.closeAllConnections();
+    return new Promise<void>((resolve) => server.close(() => resolve()));
   };
+  return provider;
 }

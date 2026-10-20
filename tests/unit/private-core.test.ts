@@ -307,7 +307,12 @@ describe("purchase → session → attest → record（全経路）", () => {
     expect(attested).toEqual({ ok: true, status: "delivered_private" });
     const final = core.status(q.paymentId, "alice", q.ownerKey)!;
     expect(final.status).toBe("delivered_private");
-    expect(final.destination).toMatchObject({ outcome: "paid", txRef: DST_TX, receiptRef: RECEIPT_VALUE });
+    // 領収は tx 参照と digest だけ（生のヘッダは journal・射影に無い。原本は record）。
+    expect(final.destination).toMatchObject({ outcome: "paid", txRef: DST_TX });
+    expect(final.destination).not.toHaveProperty("receiptRef");
+    expect(final.private).toMatchObject({ outbound: { receiptSha256: createHash("sha256").update(RECEIPT_VALUE).digest("hex") } });
+    expect(await journalText()).not.toContain(RECEIPT_VALUE);
+    expect(JSON.stringify(final)).not.toContain(RECEIPT_VALUE);
     expect(final.private).toMatchObject({ proof: { delivery: true, requestBinding: true, onChainFinality: "not_checked" }, attest: { result: "delivered_private" } });
     // attest 完了で record 以外のファイルが消える（bearer の最終注文も）。
     expect(readdirSync(dir)).toEqual(["record.json"]);
@@ -688,3 +693,132 @@ describe("再起動（§3.6）", () => {
     expect(existsSync(path.join(privateDir, q.paymentId))).toBe(false);
   });
 });
+
+describe("Codex 実装レビュー 2 回目の指摘（保持期限と検証の競合・領収の生ヘッダ・検証の例外・待ち行列の取り消し）", () => {
+  test("保持期限が検証の最中（実行中・待ち行列）に来ても、入力と容量は検証の終わりまで残る。取得は 410、結果は永続化され、その後に掃除", async () => {
+    // 検証（偽バイナリ）は 2.5 s、保持期限は record 完成から 1.2 s。1 枠なので 2 件目は待ち行列。
+    control({ delayMs: 2_500 });
+    const core = await boot(config({ retentionMs: 1_200, attestTimeoutMs: 20_000, verifyTimeoutMs: 10_000, maxConcurrentVerifications: 1, maxQueuedVerifications: 2 }));
+    const envA = envelopeFor();
+    const envB = envelopeFor("0".repeat(32) + "a".repeat(32));
+    const qA = await quote(core, "r1", envA.b64);
+    const qB = await quote(core, "r2", envB.b64);
+    await purchase(core, qA, "r1");
+    await purchase(core, qB, "r2");
+    await waitFor(() => core.status(qA.paymentId, "alice", qA.ownerKey)?.status === "attesting" && core.status(qB.paymentId, "alice", qB.ownerKey)?.status === "attesting", 10_000);
+    const attestA = core.privateAttest(qA.paymentId, "alice", qA.ownerKey, bundleFor(envA.order));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const attestB = core.privateAttest(qB.paymentId, "alice", qB.ownerKey, bundleFor(envB.order));
+    // 保持期限が来る: 取得は 410（expired）になるが、ディレクトリと入力は残っている（検証が使う）。
+    await waitFor(() => core.status(qA.paymentId, "alice", qA.ownerKey)?.private?.artifacts.record === "expired" && core.status(qB.paymentId, "alice", qB.ownerKey)?.private?.artifacts.record === "expired", 5_000);
+    expect(core.privateRecord(qA.paymentId, "alice", qA.ownerKey)).toEqual({ ok: false, code: "record_expired" });
+    expect(existsSync(path.join(privateDir, qA.paymentId, "bundle.json"))).toBe(true);
+    expect(existsSync(path.join(privateDir, qB.paymentId, "record.json"))).toBe(true);
+    expect(await attestA).toEqual({ ok: true, status: "delivered_private" });
+    expect(await attestB).toEqual({ ok: true, status: "delivered_private" });
+    // 検証の終わりで初めて掃除（ディレクトリごと）。容量も戻る（3 件目の購入が通る）。
+    await waitFor(() => !existsSync(path.join(privateDir, qA.paymentId)) && !existsSync(path.join(privateDir, qB.paymentId)), 5_000);
+    expect(core.status(qA.paymentId, "alice", qA.ownerKey)).toMatchObject({ status: "delivered_private", private: { artifacts: { record: "expired" } } });
+    expect(events().filter((event) => event === "private_attested")).toHaveLength(2);
+    const envC = envelopeFor("0".repeat(32) + "c".repeat(32));
+    const qC = await quote(core, "r3", envC.b64);
+    expect((await purchase(core, qC, "r3")).status).toBe("awaiting_session");
+  }, 30_000);
+
+  test("期限切れの record には attest できない（attest_closed、状態不変）", async () => {
+    control({});
+    const core = await boot(config({ retentionMs: 1_000, attestTimeoutMs: 20_000, verifyTimeoutMs: 5_000 }));
+    const env = envelopeFor();
+    const q = await quote(core, "r1", env.b64);
+    await purchase(core, q);
+    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.private?.artifacts.record === "expired", 5_000);
+    expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order))).toEqual({ ok: false, code: "attest_closed" });
+    expect(existsSync(path.join(privateDir, q.paymentId))).toBe(false);
+  }, 15_000);
+
+  test("Provider の領収ヘッダに反射された値は journal・射影に写らない（digest だけ）", async () => {
+    const canary = "reflected-plaintext-canary-7f3a9c";
+    const reflected = Buffer.from(JSON.stringify({ success: true, transaction: DST_TX, network: NETWORK, payer: "0xpayer", note: canary }), "utf8").toString("base64url");
+    control({ receiptHeader: { name: "PAYMENT-RESPONSE", value: reflected } });
+    rail.checkReceipt = (headerValue: string) => ({ ok: true, txRef: DST_TX, receiptRef: headerValue });
+    const core = await boot();
+    const env = envelopeFor();
+    const q = await quote(core, "r1", env.b64);
+    await purchase(core, q);
+    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "attesting");
+    expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order))).toEqual({ ok: true, status: "delivered_private" });
+    const scan = scanArtifacts(core, q.paymentId, q.ownerKey);
+    for (const text of [scan.journal, scan.projection]) {
+      expect(text).not.toContain(reflected);
+      expect(text).not.toContain(canary);
+      // 符号化を解いても無い。
+      for (const token of text.match(/[A-Za-z0-9_-]{40,}/g) ?? []) expect(Buffer.from(token, "base64url").toString("latin1")).not.toContain(canary);
+    }
+    expect(core.status(q.paymentId, "alice", q.ownerKey)?.private?.outbound).toMatchObject({ receiptSha256: createHash("sha256").update(reflected).digest("hex") });
+    expect(core.status(q.paymentId, "alice", q.ownerKey)?.destination).not.toHaveProperty("receiptRef");
+    // 原本は認証済みの record にだけ。
+    expect(Buffer.from((core.privateRecord(q.paymentId, "alice", q.ownerKey) as { recordB64: string }).recordB64, "base64").toString("utf8")).toContain(reflected);
+  });
+
+  test("ランナーの verify が例外を投げても、受理した digest の結果として固定の unknown（private_verifier_unavailable）が永続化され、attesting のまま残らない（attestBy の前・後）", async () => {
+    control({});
+    for (const after of [false, true]) {
+      inbound = new SyntheticInbound();
+      rail = new FakePrivateRail();
+      ids = 0;
+      const core = await boot(config({ attestTimeoutMs: after ? 1_000 : 20_000, retentionMs: 60_000 }), {
+        runner: (base) => ({
+          ...base,
+          verify: async () => {
+            if (after) await new Promise((resolve) => setTimeout(resolve, 1_500));
+            throw new Error("boom");
+          },
+        }),
+      });
+      const env = envelopeFor();
+      const q = await quote(core, "r1", env.b64);
+      await purchase(core, q);
+      await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "attesting");
+      const first = await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order));
+      expect(first, `after=${after}`).toEqual({ ok: true, status: "unknown", terminalReason: "private_verifier_unavailable" });
+      expect(core.status(q.paymentId, "alice", q.ownerKey), `after=${after}`).toMatchObject({ status: "unknown", terminalReason: "private_verifier_unavailable", private: { attest: { result: "unknown" }, artifacts: { record: "available" } } });
+      // 同じ digest の再提出は耐久結果、別の digest は閉じている。record は取得できる。
+      expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order))).toEqual({ ok: true, status: "unknown", terminalReason: "private_verifier_unavailable" });
+      expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order, { payload_len: 197 }))).toEqual({ ok: false, code: "attest_closed" });
+      expect(core.privateRecord(q.paymentId, "alice", q.ownerKey).ok).toBe(true);
+      expect(readdirSync(path.join(privateDir, q.paymentId))).toEqual(["record.json"]);
+      await core.close();
+      opened.pop();
+      rmSync(journalPath, { force: true });
+      rmSync(path.join(workDir, "dynamic-quotes"), { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("drain は待ち行列の検証も取り消す（容量 1、待ち 1）: どちらも永続化せず、再起動で unknown/interrupted_after_release と record の取得", async () => {
+    control({ delayMs: 3_000 });
+    const core = await boot(config({ maxConcurrentVerifications: 1, maxQueuedVerifications: 1, verifyTimeoutMs: 10_000 }));
+    const envA = envelopeFor();
+    const envB = envelopeFor("0".repeat(32) + "a".repeat(32));
+    const qA = await quote(core, "r1", envA.b64);
+    const qB = await quote(core, "r2", envB.b64);
+    await purchase(core, qA, "r1");
+    await purchase(core, qB, "r2");
+    await waitFor(() => core.status(qA.paymentId, "alice", qA.ownerKey)?.status === "attesting" && core.status(qB.paymentId, "alice", qB.ownerKey)?.status === "attesting", 10_000);
+    const first = core.privateAttest(qA.paymentId, "alice", qA.ownerKey, bundleFor(envA.order));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const second = core.privateAttest(qB.paymentId, "alice", qB.ownerKey, bundleFor(envB.order));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const closing = core.close();
+    opened.pop();
+    expect(await second).toEqual({ ok: false, code: "private_unavailable" });
+    expect(await first).toEqual({ ok: false, code: "private_unavailable" });
+    await closing;
+    expect(events()).not.toContain("private_attested");
+    const reopened = await boot();
+    for (const q of [qA, qB]) {
+      expect(reopened.status(q.paymentId, "alice", q.ownerKey)).toMatchObject({ status: "unknown", terminalReason: "interrupted_after_release", private: { artifacts: { record: "available" } } });
+      expect(reopened.privateRecord(q.paymentId, "alice", q.ownerKey).ok).toBe(true);
+    }
+  }, 30_000);
+});
+

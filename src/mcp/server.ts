@@ -136,7 +136,7 @@ const EVIDENCE_FIELDS = {
  * `outputSchema`（H-1、要件 FR-A26）: **既存の出力の形を変えない**ので、成功・失敗・`internal_error` を 1 つの緩い object で覆う
  * （SDK は `structuredContent` をこの schema で検証するため、欠けた欄で落とさない）。欄の説明に結果の契約を書く。
  */
-const OUTPUT_SCHEMAS = {
+export const OUTPUT_SCHEMAS = {
   listRoutes: { ...FAILURE_FIELDS, ...EVIDENCE_FIELDS, ok: z.boolean().optional(), routes: z.array(z.record(z.unknown())).optional(), dynamic: z.record(z.unknown()).optional() },
   quote: {
     ...FAILURE_FIELDS,
@@ -166,6 +166,48 @@ const OUTPUT_SCHEMAS = {
     status: z.number().optional(),
     projection: z.record(z.unknown()).optional().describe("The Router's saved projection (reopening it later gives the same). Both legs' txRef appear when the Router has them; finality is not asserted."),
     proof: z.record(z.unknown()).optional(),
+  },
+  // 秘匿購入（`docs/zktls-router-design.md` §8.3）。成功・失敗を 1 つの緩い object で覆う（failure の `httpStatus` と区別するため、attest の `status` は文字列）。
+  privateQuote: {
+    ...FAILURE_FIELDS,
+    ...EVIDENCE_FIELDS,
+    ok: z.boolean().optional(),
+    approvalRequired: z.boolean().optional(),
+    quote: z.record(z.unknown()).optional().describe("The private quote document (carries ownerKey). Pass it unchanged to subetha_router_private_purchase."),
+    subject: z.record(z.unknown()).optional().describe("What the human approves: both legs, target host/path/method, body commitment and length, payer key, deadlines, disclosures."),
+    nextStep: z.string().optional(),
+  },
+  privatePurchase: {
+    ...FAILURE_FIELDS,
+    ...EVIDENCE_FIELDS,
+    ok: z.boolean().optional(),
+    outcome: z.string().optional().describe("awaiting_session = the credential was released to you (handover); run the executor before deadlines.sessionBy. unknown = possibly paid."),
+    paymentId: z.string().optional(),
+    handover: z.record(z.unknown()).optional().describe("Payer file contract: verifier.address, releasedHeader (bearer), headerFile, releaseB64, deadlines. Give the bearer only to the executor."),
+    nextStep: z.string().optional(),
+    status: z.number().optional(),
+    terminalReason: z.string().optional(),
+  },
+  privateAttest: {
+    ...FAILURE_FIELDS,
+    ...EVIDENCE_FIELDS,
+    ok: z.boolean().optional(),
+    paymentId: z.string().optional(),
+    status: z.string().optional().describe("delivered_private = verified delivery to the approved payer key; unknown = the attestation did not succeed (terminalReason)."),
+    terminalReason: z.string().optional(),
+    private: z.record(z.unknown()).optional(),
+    proof: z.record(z.unknown()).optional(),
+    nextStep: z.string().optional(),
+  },
+  privateRecord: {
+    ...FAILURE_FIELDS,
+    ...EVIDENCE_FIELDS,
+    ok: z.boolean().optional(),
+    paymentId: z.string().optional(),
+    recordB64: z.string().optional().describe("The Verifier record (contains the released bearer in its revealed prefix). Pass to payer-decrypt; do not log."),
+    releaseB64: z.string().optional(),
+    recordAvailableUntil: z.number().optional(),
+    note: z.string().optional(),
   },
 } as const;
 
@@ -389,7 +431,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         requestId: z.string().min(1),
         intentB64: z.string().min(1).describe("Base64 of the exact phase5-intent-v1 envelope bytes (compact JSON). The Router hashes these bytes as intentSha256."),
       },
-      outputSchema: OUTPUT_SCHEMAS.quote,
+      outputSchema: OUTPUT_SCHEMAS.privateQuote,
     },
     async (args) => guarded(() => handlers.privateQuote(args)),
   );
@@ -408,7 +450,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         quote: z.unknown().optional().describe("The private quote document returned by subetha_router_private_quote (required for remote/stateless use)"),
         credential: z.string().optional().describe("The inbound X-Payment value (base64) signed with your own key (npm run sign)"),
       },
-      outputSchema: OUTPUT_SCHEMAS.purchase,
+      outputSchema: OUTPUT_SCHEMAS.privatePurchase,
       _meta: { "anthropic/requiresUserInteraction": true },
     },
     async (args) => guarded(() => handlers.privatePurchase(args)),
@@ -422,7 +464,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "delivered_private = verified delivery to the approved payer key (not human receipt, not on-chain finality). A failed or foreign bundle never changes a different purchase; " +
         "a foreign bundle is rejected without changing this purchase.",
       inputSchema: { paymentId: z.string().min(1), ownerKey: z.string().min(1), bundleB64: z.string().min(1).describe("Base64 of bundle.json") },
-      outputSchema: OUTPUT_SCHEMAS.purchase,
+      outputSchema: OUTPUT_SCHEMAS.privateAttest,
     },
     async (args) => guarded(() => handlers.privateAttest(args)),
   );
@@ -434,7 +476,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "Fetch the Verifier record and release bytes of a PRIVATE purchase (needed by `payer-decrypt`). Repeatable until `recordAvailableUntil`; survives Router restarts. " +
         "The record contains the released header in its revealed prefix (bearer): pass it to payer-decrypt and do not log it.",
       inputSchema: { paymentId: z.string().min(1), ownerKey: z.string().min(1) },
-      outputSchema: OUTPUT_SCHEMAS.status,
+      outputSchema: OUTPUT_SCHEMAS.privateRecord,
     },
     async (args) => guarded(() => handlers.privateRecord(args)),
   );
