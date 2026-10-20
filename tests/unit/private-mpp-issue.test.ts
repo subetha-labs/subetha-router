@@ -54,7 +54,7 @@ afterEach(async () => {
 });
 
 /** 実 `mppx/server` の challenge（pull だけ・scope 付き）。 */
-async function challengeHeaderOf(rpcUrl: string, options: { modes?: readonly string[]; feePayer?: boolean; scope?: string; amount?: string; meta?: Record<string, unknown> } = {}): Promise<string> {
+async function challengeHeaderOf(rpcUrl: string, options: { modes?: readonly string[]; feePayer?: boolean; scope?: string; amount?: string; meta?: Record<string, unknown>; expiresInMs?: number } = {}): Promise<string> {
   const client = createClient({ chain: { ...tempoModerato, id: MPP_FIXTURE_CHAIN_ID } as never, transport: viemHttp(rpcUrl, { retryCount: 0 }) });
   const server = Mppx.create({
     secretKey: "fixture-secret-0123456789abcdef0123456789abcdef",
@@ -71,7 +71,7 @@ async function challengeHeaderOf(rpcUrl: string, options: { modes?: readonly str
     ],
   }) as unknown as { challenge: { tempo: { charge(parameters: Record<string, unknown>): Promise<Record<string, unknown>> } } };
   const scope = options.scope ?? `POST ${URL_POST}`;
-  const challenge = await server.challenge.tempo.charge({ amount: options.amount ?? "1000", chainId: MPP_FIXTURE_CHAIN_ID, expires: new Date(Date.now() + 600_000).toISOString(), scope, meta: { _mppx_scope: scope, ...options.meta } });
+  const challenge = await server.challenge.tempo.charge({ amount: options.amount ?? "1000", chainId: MPP_FIXTURE_CHAIN_ID, expires: new Date(Date.now() + (options.expiresInMs ?? 600_000)).toISOString(), scope, meta: { _mppx_scope: scope, ...options.meta } });
   return Challenge.serialize(challenge as never);
 }
 
@@ -182,10 +182,22 @@ describe("再照合の比較条件（offer の `extra.terms`）: 402 ごとに�
     expect(JSON.stringify(ca.offer)).toBe(JSON.stringify(cb.offer));
     expect(JSON.stringify(ca.offer)).not.toContain("_mppx_nonce");
     expect(JSON.stringify(ca.offer)).toContain("_mppx_scope");
-    // 発行時は承認した offer と一致する**新しい** challenge（新しい id・opaque）が選ばれる（discover → issueCredential の経路）。
-    h.challenge = await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], meta: { _mppx_nonce: `0x${"c3".repeat(32)}` } });
+    // 発行時は承認した offer（a）と一致する**新しい** challenge（新しい id・opaque・expires）が選ばれ、credential はその新しい id と opaque を運ぶ（discover → issueCredential の経路）。
+    h.challenge = await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], meta: { _mppx_nonce: `0x${"c3".repeat(32)}` }, expiresInMs: 300_000 });
     const found = await h.rail.discover(PROFILE_ID, { url: URL_POST, method: "POST", body: "{}" });
     expect(found.offers.map((o) => JSON.stringify(o))).toEqual([JSON.stringify(ca.offer)]);
+    const [fresh] = Challenge.deserializeList(h.challenge) as unknown as { id: string; opaque: string; expires: string }[];
+    expect(fresh!.id).not.toBe((a as unknown as { id: string }).id);
+    expect(fresh!.expires).not.toBe((a as unknown as { expires: string }).expires);
+    const issued = await h.rail.issueCredential({ profileId: PROFILE_ID, offer: ca.offer, target: { url: URL_POST, method: "POST", body: "{}" }, challenge: found.challenge, deadlineMs: Date.now() + 60_000, maxFee: "5000" });
+    expect(issued.ok, JSON.stringify(issued)).toBe(true);
+    if (!issued.ok) return;
+    const credential = Credential.deserialize(issued.issued.value) as unknown as { challenge: { id: string; opaque: string }; payload: { signature: Hex } };
+    expect(credential.challenge.id).toBe(fresh!.id);
+    expect(credential.challenge.opaque).toBe(fresh!.opaque);
+    // memo は新しい challenge の id に束縛される。
+    const envelope = TxEnvelopeTempo.deserialize(credential.payload.signature as never) as unknown as { calls: { data: Hex }[] };
+    expect(envelope.calls[0]!.data.toLowerCase()).toBe(expectedTransferDataOf(MPP_FIXTURE_RECIPIENT, 1000n, attributionMemoOf(fresh!.id, REALM)).toLowerCase());
     const [other] = Challenge.deserializeList(await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], scope: "POST https://provider.test/other", meta: { _mppx_nonce: `0x${"d4".repeat(32)}` } }));
     expect(checkDynamicMppChallenge(other, PROFILE, [], URL_POST, Date.now(), { mode: "pull", method: "POST" })).toEqual({ ok: false, reason: "scope" });
     expect(comparableMetaOf(null)).toBeNull();
