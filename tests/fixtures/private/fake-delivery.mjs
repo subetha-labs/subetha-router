@@ -158,7 +158,7 @@ if (sub === "verifier-serve") {
   } else {
     setTimeout(() => {
       const src = control.verifyResultSrc;
-      const result = src ? readFileSync(src) : Buffer.from(JSON.stringify({ ok: mode !== "verify-fail", error: mode === "verify-fail" ? "outer_consistency: fake" : null, verify_ms: 1, num_public_inputs: 774, verifier_vk_sha256: "fake", checks: mode === "verify-fail" ? [] : ["UltraHonk delivery proof verified", "request-binding proof verified"] }));
+      const result = src ? readFileSync(src) : Buffer.from(JSON.stringify({ ok: mode !== "verify-fail", error: mode === "verify-fail" ? "outer_consistency: fake" : null, verify_ms: 1, num_public_inputs: 774, verifier_vk_sha256: "fake", checks: mode === "verify-fail" ? [] : ["UltraHonk delivery proof verified against verifier-derived VK", "UltraHonk request-binding proof verified against verifier-derived VK"] }));
       writeNew(path.join(dir, "verify_result.json"), result);
       process.exit(mode === "verify-fail" ? 1 : 0);
     }, delayMs);

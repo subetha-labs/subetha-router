@@ -126,7 +126,7 @@ function expectation(rail: "x402" | "mpp", order: IntentOrder, header: { name: s
   };
 }
 
-const verifyOkPost = { ok: true, checks: ["UltraHonk delivery proof verified", "request-binding proof verified"] };
+const verifyOkPost = { ok: true, checks: ["UltraHonk delivery proof verified against verifier-derived VK", "UltraHonk request-binding proof verified against verifier-derived VK"] };
 
 describe("checkAttest（POST の golden）", () => {
   const bundle = parseBundlePublic({ ...(golden("post-bundle-public.json") as Record<string, unknown>), proof_hex: "00", request: { ...((golden("post-bundle-public.json") as { request: Record<string, unknown> }).request), proof_hex: "00" } });
@@ -173,7 +173,7 @@ describe("checkAttest（POST の golden）", () => {
     expect(checkAttest({ ...base(), rail: "x402" }, postRecord(), verifyOkPost, bundle)).toEqual({ ok: false, reason: "receipt_header" });
     // verify_result
     expect(checkAttest(base(), postRecord(), { ok: false, checks: [] }, bundle)).toEqual({ ok: false, reason: "verify_result" });
-    expect(checkAttest(base(), postRecord(), { ok: true, checks: ["UltraHonk delivery proof verified"] }, bundle)).toEqual({ ok: false, reason: "verify_checks" });
+    expect(checkAttest(base(), postRecord(), { ok: true, checks: ["UltraHonk delivery proof verified against verifier-derived VK"] }, bundle)).toEqual({ ok: false, reason: "verify_checks" });
   });
   test("別購入・別セッションの bundle は束縛で止まる（attest_foreign の判定）", () => {
     const order = postOrder();
@@ -193,7 +193,7 @@ describe("checkAttest（POST の golden）", () => {
 });
 
 describe("checkAttest（GET の golden）", () => {
-  const verifyOkGet = { ok: true, checks: ["UltraHonk delivery proof verified"] };
+  const verifyOkGet = { ok: true, checks: ["UltraHonk delivery proof verified against verifier-derived VK"] };
   const bundle = { public: { order_id: getRecord().order_id, payer_pk: { x: "1".repeat(64), y: "2".repeat(64) }, committed_hash_hex: getRecord().committed_hash_hex, payload_len: getRecord().body_len } };
   test("GET の record は intent_binding を持たないので実運用の期待では通らず、束縛付きの record だけが通る", () => {
     const record = getRecord();
@@ -204,7 +204,7 @@ describe("checkAttest（GET の golden）", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.summary).toMatchObject({ requestLine: "GET /v1/paid-snapshot HTTP/1.1", lenSent: 1176, credLen: 0, receiptHeaderName: "payment-response" });
     // GET に要求束縛証明があれば wrong-mode
-    expect(checkAttest({ ...base, intentSha256: "a".repeat(64), releaseSha256: "b".repeat(64), inboundTx: "0x02" }, bound, { ok: true, checks: ["UltraHonk delivery proof verified", "request-binding proof verified"] }, bundle)).toEqual({ ok: false, reason: "verify_checks" });
+    expect(checkAttest({ ...base, intentSha256: "a".repeat(64), releaseSha256: "b".repeat(64), inboundTx: "0x02" }, bound, { ok: true, checks: ["UltraHonk delivery proof verified against verifier-derived VK", "UltraHonk request-binding proof verified against verifier-derived VK"] }, bundle)).toEqual({ ok: false, reason: "verify_checks" });
     expect(checkBundleBinding(getOrder(), bound, { ...bundle, request: { public: { tls_body_hash_hex: "", tls_cred_hash_hex: "", payer_commitment_hex: "", body_len: 0, cred_len: 0 } } })).toBe("bundle_request_forbidden");
   });
 });

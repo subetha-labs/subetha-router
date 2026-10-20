@@ -16,8 +16,8 @@ export const SEP_LEN = 4;
 export const HTTP_FRAMING = "content-length-identity-single-response";
 export const TRUST_MOZILLA = "mozilla-webpki-roots";
 export const TRUST_LAB_FIXTURE = "lab-fixture-ca";
-export const CHECK_DELIVERY_PROOF = "UltraHonk delivery proof verified";
-export const CHECK_REQUEST_PROOF = "request-binding proof verified";
+export const CHECK_DELIVERY_PROOF = "UltraHonk delivery proof verified against verifier-derived VK";
+export const CHECK_REQUEST_PROOF = "UltraHonk request-binding proof verified against verifier-derived VK";
 export const PAYMENT_HEADER_NAMES = ["PAYMENT-SIGNATURE", "Authorization"] as const;
 
 export type HeaderRejection = "header_name" | "header_value_length" | "header_value_chars" | "header_authorization_scheme";

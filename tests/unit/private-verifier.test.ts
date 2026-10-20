@@ -144,7 +144,7 @@ describe("verify", () => {
     const base = { dir: p.dir, orderPath: p.order, bundlePath: p.bundle, intentPath: p.intent, releasePath: p.release, host: "test-server.io", path: "/select", timeoutMs: 5_000, requireExternalGate: false };
     const verified = await r.verify(base);
     expect(verified.ok).toBe(true);
-    if (verified.ok) expect(verified.result).toMatchObject({ ok: true, checks: ["UltraHonk delivery proof verified", "request-binding proof verified"] });
+    if (verified.ok) expect(verified.result).toMatchObject({ ok: true, checks: ["UltraHonk delivery proof verified against verifier-derived VK", "UltraHonk request-binding proof verified against verifier-derived VK"] });
     const args = JSON.parse(readFileSync(path.join(p.dir, "fake-args.verifier-verify.json"), "utf8")) as { kv: Record<string, string>; flags: string[] };
     expect(args.kv).toMatchObject({ bundle: p.bundle, "expect-port": "443" });
     expect(args.flags).toEqual([]);

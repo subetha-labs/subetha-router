@@ -904,6 +904,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
         });
         if (!verified.ok || verified.exitCode !== 0) {
           reason = verified.ok === false && verified.reason === "timeout" ? "private_verify_timeout" : "private_attest_invalid";
+          // 運用者向けの固定文（値は出さない）: ランナーの失敗の種別か終了コード。
+          note?.(`private: verifier-verify did not succeed (${verified.ok ? `exit ${String(verified.exitCode)}` : verified.reason})`);
         } else {
           const result = parseVerifyResult(verified.result);
           const headerValue = headerValueOf(dir);
@@ -911,6 +913,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
           const rail = profile === undefined ? undefined : railFor(profile);
           if (result === undefined || headerValue === undefined || priv.issuance === undefined || rail === undefined || profile === undefined) {
             reason = "private_attest_invalid";
+            note?.(`private: attest rejected (${result === undefined ? "verify_result_shape" : headerValue === undefined ? "order_final_missing" : "profile_missing"})`);
           } else {
             const checked = checkAttest(
               {
@@ -928,6 +931,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
             );
             if (!checked.ok) {
               reason = "private_attest_invalid";
+              note?.(`private: attest rejected (${checked.reason})`);
             } else {
               const intent = store.byPaymentId(paymentId)!;
               const issued: IssuedCredential = { name: priv.issuance.headerName as IssuedCredential["name"], value: headerValue, expiresAtMs: priv.issuance.expiresAtMs, ...(priv.issuance.expectedRef === undefined ? {} : { expectedRef: priv.issuance.expectedRef }) };

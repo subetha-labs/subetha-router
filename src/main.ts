@@ -395,12 +395,16 @@ export interface DynamicWiring {
   readonly verify: () => Promise<void>;
 }
 
-/** 受信 offer の束縛から動的プロファイルの ID を読む（`dynamicBindingOf` の逆）。動的でなければ `undefined`。 */
-function profileIdOfBinding(binding: string): string | undefined {
+/**
+ * 受信 offer の束縛からプロファイルの ID を読む（`dynamicBindingOf` / `privateBindingOf` の逆）。動的・秘匿でなければ `undefined`。
+ * - 動的: GET は 4 要素、POST は本文の sha256 を足した 5 要素（`docs/dynamic-upstream-post-design.md` FR-P2）
+ * - 秘匿: `private|<profileId>|<METHOD>|<url>|<intentSha256>` の 5 要素（`docs/zktls-router-design.md` §3.1。受信レグは同じプロファイルの受信 rail）
+ */
+export function profileIdOfBinding(binding: string): string | undefined {
   const parts = binding.split("|");
-  // GET は 4 要素、POST は本文の sha256 を足した 5 要素（`docs/dynamic-upstream-post-design.md` FR-P2）。
-  const shape = parts.length === 4 && parts[2] === "GET" ? "GET" : parts.length === 5 && parts[2] === "POST" ? "POST" : undefined;
-  if (shape === undefined || parts[0] !== "dynamic") return undefined;
+  const dynamicShape = parts[0] === "dynamic" && ((parts.length === 4 && parts[2] === "GET") || (parts.length === 5 && parts[2] === "POST"));
+  const privateShape = parts[0] === "private" && parts.length === 5 && (parts[2] === "GET" || parts[2] === "POST");
+  if (!dynamicShape && !privateShape) return undefined;
   try {
     return decodeURIComponent(parts[1]!);
   } catch {

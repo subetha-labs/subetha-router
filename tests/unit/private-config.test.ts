@@ -7,7 +7,8 @@ import { generatePrivateKey } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, type RuntimeConfig } from "../../src/config.js";
-import { composeRails, type RouterCapabilities } from "../../src/main.js";
+import { composeRails, profileIdOfBinding, type RouterCapabilities } from "../../src/main.js";
+import { privateBindingOf } from "../../src/core/store.js";
 import { sha256File } from "../../src/private/verifier.js";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { createRealMppCapability } from "../../tools/real-mpp-capability.js";
@@ -128,5 +129,18 @@ describe("合成（composeRails）", () => {
     expect(() => composeRails(runtime(router(), "synthetic"), {}, quiet, quiet)).toThrow(/not available with the synthetic rails/);
     const { mppTempo: _m, ...withoutTempo } = capabilities();
     expect(() => composeRails(runtime(router()), withoutTempo, quiet, quiet)).toThrow(/signer_not_authorized/);
+  });
+});
+
+describe("受信 offer の束縛 → プロファイル（`profileIdOfBinding`）", () => {
+  test("秘匿の束縛（private|profile|METHOD|url|intentSha256）から受信 rail のプロファイルを引ける。動的の形は従来どおり、他は undefined", () => {
+    expect(profileIdOfBinding(privateBindingOf("priv-x402", "POST", "https://test-server.io/select", "a".repeat(64)))).toBe("priv-x402");
+    expect(profileIdOfBinding(privateBindingOf("priv tempo", "GET", "https://test-server.io/v1/paid-snapshot", "b".repeat(64)))).toBe("priv tempo");
+    expect(profileIdOfBinding(["dynamic", "dyn", "GET", encodeURIComponent("https://p.test/x")].join("|"))).toBe("dyn");
+    expect(profileIdOfBinding(["dynamic", "dyn", "POST", encodeURIComponent("https://p.test/x"), "sha256:00"].join("|"))).toBe("dyn");
+    expect(profileIdOfBinding("private|p|PUT|u|s")).toBeUndefined();
+    expect(profileIdOfBinding("private|p|POST|u")).toBeUndefined();
+    expect(profileIdOfBinding("x402|r1|https://p.test/x")).toBeUndefined();
+    expect(profileIdOfBinding("")).toBeUndefined();
   });
 });
