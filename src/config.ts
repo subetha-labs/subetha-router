@@ -986,6 +986,8 @@ function parseRouterConfigUnchecked(raw: unknown): RouterConfig {
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 /** 秘匿購入の受信レグは本 v1 では x402 の Base Sepolia USDC だけ（要件 FR-Z13、Z1〜Z3）。 */
 export const PRIVATE_INBOUND_NETWORK = "eip155:84532";
+/** Node の setTimeout の上限（2^31−1 ms）。秘匿購入の期限はこれ以下。 */
+export const MAX_TIMER_DURATION_MS = 2_147_483_647;
 export const PRIVATE_INBOUND_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 
 function requirePositiveInt(source: Record<string, unknown>, key: string, at: string, fallback: number | undefined): number {
@@ -1085,6 +1087,12 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
   // record は attest と検証が終わるまで取得できること（設計 §3.5）: 保持期限 ≥ attest の期限 + 検証の上限。
   if (parsed.retentionMs < parsed.attestTimeoutMs + parsed.verifyTimeoutMs) {
     throw new ConfigError(`${at}.retentionMs must be at least attestTimeoutMs + verifyTimeoutMs`);
+  }
+  // 期限は Node の timer の上限（2^31−1 ms ≈ 24.8 日）の内側（上限を越える値は即座の満了に化ける。core は刻んで待つが、設定でも閉じる）。
+  for (const [key, value] of [["sessionTimeoutMs", parsed.sessionTimeoutMs], ["attestTimeoutMs", parsed.attestTimeoutMs], ["verifyTimeoutMs", parsed.verifyTimeoutMs], ["retentionMs", parsed.retentionMs], ["minSessionRemainingMs", parsed.minSessionRemainingMs], ["minCredentialLifetimeMs.x402", parsed.minCredentialLifetimeMs.x402], ["minCredentialLifetimeMs.mpp", parsed.minCredentialLifetimeMs.mpp]] as const) {
+    if (value > MAX_TIMER_DURATION_MS) {
+      throw new ConfigError(`${at}.${key} must be at most ${String(MAX_TIMER_DURATION_MS)} ms`);
+    }
   }
   return parsed;
 }

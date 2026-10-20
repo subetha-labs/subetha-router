@@ -69,6 +69,8 @@ describe("parse", () => {
     ["minCredentialLifetimeMs の形", { minCredentialLifetimeMs: { x402: "40000" } }, /positive integer/],
     ["workDir が空", { workDir: "" }, /non-empty string/],
     ["保持期限が attest + 検証の上限より短い（record が検証の途中で消え得る）", { retentionMs: 600_000, attestTimeoutMs: 600_000, verifyTimeoutMs: 60_000 }, /retentionMs must be at least attestTimeoutMs \+ verifyTimeoutMs/],
+    ["timer の上限を越える保持期限（30 日）", { retentionMs: 30 * 24 * 3_600_000 }, /retentionMs must be at most 2147483647 ms/],
+    ["timer の上限を越える attest の期限", { attestTimeoutMs: 2_147_483_648, verifyTimeoutMs: 1, retentionMs: 2_147_483_649 }, /attestTimeoutMs must be at most 2147483647 ms/],
   ])("拒否: %s", (_name, patch, message) => {
     expect(() => parseRouterConfig(router(patch))).toThrow(message);
     expect(() => parseRouterConfig(router(patch))).toThrow(ConfigError);

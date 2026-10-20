@@ -822,3 +822,19 @@ describe("Codex 実装レビュー 2 回目の指摘（保持期限と検証の�
   }, 30_000);
 });
 
+describe("Codex 実装レビュー 3 回目の指摘（timer の上限）", () => {
+  test("Node の timer の上限（2^31−1 ms）を越える保持期限でも record は即座に満了しない（刻んで待ち、絶対時刻で判定する）", async () => {
+    control({});
+    const core = await boot(config({ retentionMs: 30 * 24 * 3_600_000, attestTimeoutMs: 20_000, verifyTimeoutMs: 5_000 }));
+    const env = envelopeFor();
+    const q = await quote(core, "r1", env.b64);
+    await purchase(core, q);
+    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "attesting");
+    expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order))).toEqual({ ok: true, status: "delivered_private" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(core.status(q.paymentId, "alice", q.ownerKey)).toMatchObject({ status: "delivered_private", private: { artifacts: { record: "available" } } });
+    expect(core.privateRecord(q.paymentId, "alice", q.ownerKey).ok).toBe(true);
+    expect(existsSync(path.join(privateDir, q.paymentId, "record.json"))).toBe(true);
+  });
+});
+

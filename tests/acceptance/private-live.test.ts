@@ -50,7 +50,7 @@ describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・te
     writeFileSync(path.join(evidenceDir, "scope.sha256"), `${createHash("sha256").update(readFileSync(scopeFile)).digest("hex")}\n`, { mode: 0o600 });
     const bodyFile = provider.method === "POST" ? path.join(evidenceDir, "approved_body.json") : undefined;
     if (bodyFile !== undefined) writeFileSync(bodyFile, process.env["PRIVATE_LIVE_BODY"] ?? JSON.stringify({ schema: "lab.select.v1", model: "lab-echo", prompt: `acceptance-${providerKey}-${Date.now()}` }), { mode: 0o600 });
-    run = await runPrivatePayer({
+    const base = {
       routerBaseUrl: env("PRIVATE_LIVE_ROUTER_URL"),
       principalId: env("PRIVATE_LIVE_PRINCIPAL"),
       token: env("PRIVATE_LIVE_TOKEN"),
@@ -61,12 +61,15 @@ describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・te
       ...(bodyFile === undefined ? {} : { bodyFile }),
       outbound: provider.outbound,
       ...(process.env["PRIVATE_LIVE_INBOUND_MAX_TOTAL"] === undefined ? {} : { inbound: { network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", maxTotal: process.env["PRIVATE_LIVE_INBOUND_MAX_TOTAL"] } }),
-      trust: "mozilla",
+      trust: "mozilla" as const,
       outDir: evidenceDir,
       payerPrivateKey: env("SUBETHA_PAYER_PRIVATE_KEY"),
-      approve: process.env["PRIVATE_LIVE_APPROVE"] === "1",
       scopeFile,
-    });
+    };
+    // 1 回目: quote で止まる（承認対象 `quote.json` と再開点 `checkpoint.json`）。何も払わない。
+    run = await runPrivatePayer({ ...base, approve: false });
+    // 2 回目（PRIVATE_LIVE_APPROVE=1）: 同じ out の再開点を承認して最後まで。
+    if (run.ok && run.stage === "quoted" && process.env["PRIVATE_LIVE_APPROVE"] === "1") run = await runPrivatePayer({ ...base, approve: true });
     writeFileSync(path.join(evidenceDir, "run.json"), `${JSON.stringify(run.ok ? { ok: true, stage: run.stage, evidence: run.evidence } : { ok: false, stage: run.stage, reason: run.reason, evidence: run.evidence }, null, 2)}\n`, { mode: 0o600 });
   }, 1_800_000);
 

@@ -571,3 +571,13 @@ v5 → v5.1（Codex 設計レビュー 5 回目、APPROVE WITH CHANGES）:
 
 wire の証跡は `lab-fixture-ca` の **synthetic**。実 Provider（C/F/A/B）の受入は owner のゲート（`docs/zktls-router-acceptance.md`）で、本フェーズでは**未実行**。
 
+### 14.1 Codex 実装レビュー 3 回目（最終 1 回目、2026-10-20）の指摘と対応
+| 指摘 | 対応 |
+|---|---|
+| 1 承認の 2 回起動が、見た quote を買っていない（毎回 keygen と quote をやり直す） | `tools/private-payer.ts`: quote 止まりの起動が `checkpoint.json`（0600: quote 文書・ownerKey・requestId・注文・引数・`quote.json` の sha256）を書き、`--approve` は同じ `--out` の再開点を**再開**する（keygen・quote 無し）。別 `--out`・引数違い・`quote.json` の改変・quote の期限切れ・引き渡し済みは拒否。wire で 2 回起動と各拒否を試験 |
+| 2 失敗時の証跡が受信決済を「未決済」と書く・ownerKey が残らない | ゲートは分かった時点で書く（引き渡し直後に status から受信 tx、attest・復号の後にそれぞれ）。失敗後は読み取り専用の status で補い、purchase の応答喪失・`unknown` は両決済に `uncertain: true`。ownerKey は `checkpoint.json` に。`--recover`（`recoverPrivatePayer`）が別プロセスから status・record を読み直し、bundle があれば復号。wire で引き渡し後の失敗と回復を試験 |
+| 3 私的 x402 の領収が payer 欠落を通す | `createPrivateX402Rail.checkReceipt` は領収に **payer が存在し署名者と一致**することを要求（欠落・null・別アドレスは `destination_receipt_payer_mismatch` → core は `unknown/private_receipt_mismatch`）。動的経路は不変 |
+| 4 timer の上限（2^31−1 ms）を越える期限が即座に満了する | `scheduleAt(untilMs)`: 上限で刻んで待ち、発火のたびに絶対時刻を確かめる。設定は各期限を 2^31−1 ms 以下に限る（`ConfigError`）。単体で 30 日の保持期限が即座に満了しないことを確認 |
+| 診断の code・op の集合 | `src/shared/diagnostics.ts` に秘匿購入の固定 code（SAFE_REASONS の追加分・終端理由・attest/record の code）と op `private_probe`/`private_rpc` を登録（既存の抽出テストが要求） |
+| x402 受信の `eventId` | credential のオブジェクトを 2 度読まない（`payloadOf` の写しから `nonce` を取る。hot path は `JSON.stringify` 1 回・要求本文の parse 無し、既存の cid の試験が要求） |
+

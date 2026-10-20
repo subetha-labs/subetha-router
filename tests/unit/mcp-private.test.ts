@@ -124,4 +124,3 @@ describe("outputSchema（SDK が structuredContent を検証する。形が合�
     }
   });
 });
-

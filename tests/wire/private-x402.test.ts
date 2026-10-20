@@ -21,7 +21,7 @@ import { DEFAULT_DYNAMIC_LIMITS } from "../../src/config.js";
 import type { StopPoint } from "../../src/core/private.js";
 import { TOOL_NAMES } from "../../src/mcp/tools.js";
 import { sha256File, type LaunchHooksForTest } from "../../src/private/verifier.js";
-import { runPrivatePayer } from "../../tools/private-payer.js";
+import { recoverPrivatePayer, runPrivatePayer } from "../../tools/private-payer.js";
 import { createX402Payer } from "../../tools/x402-payer.js";
 import { startVerifyingFacilitator, type VerifyingFacilitator } from "../fixtures/dynamic/verifying-facilitator.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
@@ -686,7 +686,7 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     }
   }, LONG);
 
-  test("tools/private-payer.ts（受入で owner が使う Payer 側の道具）が同じ fixture で quote 止まり → 承認つきで delivered まで通り、証跡は 5 ゲート別・bearer 無し", async () => {
+  test("tools/private-payer.ts（受入で owner が使う Payer 側の道具）: quote（再開点）→ 同じ out で承認 → delivered。別 out・改変・引数違いの承認は拒否。引き渡し後の失敗でも受信決済は証跡に残り、--recover で読み直せる", async () => {
     const world = newWorld();
     await startRouter(world);
     const outDir = path.join(world.dir, "payer-tool");
@@ -694,27 +694,65 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     const canary = `canary-tool-${randomBytes(8).toString("hex")}`;
     writeFileSync(bodyFile, JSON.stringify({ schema: "lab.select.v1", model: "lab-echo", prompt: canary }), { mode: 0o600 });
     const base = { routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, profileId: PROFILE_ID, labDir: lab.labDir, srsPath: lab.srs, method: "POST" as const, host: HOST, path: POST_PATH, bodyFile, outbound: { protocol: "x402" as const, network: NETWORK, asset: USDC, payTo: PROVIDER_PAY_TO, maxAmount: PRICE }, trust: "lab-fixture-ca" as const, connect: `127.0.0.1:${provider.port}`, payerPrivateKey: generatePrivateKey(), log: () => {} };
-    // 承認なし: quote で止まる（支払いも署名も無い）。
-    const quoted = await runPrivatePayer({ ...base, outDir: path.join(outDir, "q"), approve: false });
+    // 1 回目（承認なし）: quote で止まり、承認対象と再開点を書く。支払いも署名も無い（facilitator の settle は増えない。計数は fixture 全体で累積）。
+    const settleBefore = facilitator.calls.settle;
+    const d = path.join(outDir, "d");
+    const quoted = await runPrivatePayer({ ...base, outDir: d, approve: false });
     expect(quoted).toMatchObject({ ok: true, stage: "quoted" });
+    if (!quoted.ok || quoted.stage !== "quoted") return;
     expect(provider.seen.paid).toHaveLength(0);
-    expect(readFileSync(path.join(outDir, "q", "quote.json"), "utf8")).not.toContain("ownerKey");
-    // mozilla（実 Provider）では支払い範囲の記録が無いと走らない。
+    expect(facilitator.calls.settle).toBe(settleBefore);
+    const quoteText = readFileSync(path.join(d, "quote.json"), "utf8");
+    expect(quoteText).not.toContain("ownerKey");
+    expect(statSync(path.join(d, "checkpoint.json")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path.join(d, "checkpoint.json"), "utf8")).toContain(quoted.quote.ownerKey);
+    // 再 quote の拒否（同じ out）、別 out での承認の拒否、引数違いの拒否、改変の拒否、mozilla で範囲の記録が無い拒否。
+    expect(await runPrivatePayer({ ...base, outDir: d, approve: false })).toMatchObject({ ok: false, stage: "review" });
+    expect(await runPrivatePayer({ ...base, outDir: path.join(outDir, "fresh"), approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    expect(await runPrivatePayer({ ...base, outDir: d, approve: true, outbound: { ...base.outbound, maxAmount: "20000" } })).toMatchObject({ ok: false, stage: "approve" });
+    writeFileSync(path.join(d, "quote.json"), quoteText.replace(/"total": "\d+"/, '"total": "1"'));
+    expect(await runPrivatePayer({ ...base, outDir: d, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    writeFileSync(path.join(d, "quote.json"), quoteText);
     expect(await runPrivatePayer({ ...base, trust: "mozilla", connect: undefined as never, outDir: path.join(outDir, "m"), approve: true })).toMatchObject({ ok: false, stage: "prerequisites" });
-    // 承認あり: 最後まで。
-    const run = await runPrivatePayer({ ...base, outDir: path.join(outDir, "d"), approve: true });
+    expect(provider.seen.paid).toHaveLength(0);
+    expect(facilitator.calls.settle).toBe(settleBefore);
+    // 2 回目（同じ out に承認）: 読んだ quote そのものを購入し、最後まで。
+    const run = await runPrivatePayer({ ...base, outDir: d, approve: true });
     expect(run.ok, JSON.stringify(run)).toBe(true);
     if (!run.ok || run.stage !== "delivered") return;
-    expect(run.evidence).toMatchObject({ synthetic: true, gates: { inbound_settlement: { settled: true }, outbound_settlement: { issued: true, receipt: true }, private_delivery: { status: "delivered_private", recordRepeatable: true, proof: { delivery: true, requestBinding: true } }, payer_receipt: { ok: true, verifiedBundleBeforeDecrypt: true }, finality: { checked: false } } });
+    expect(run.paymentId).toBe(quoted.quote.paymentId);
+    expect(run.evidence).toMatchObject({ synthetic: true, stage: "delivered", gates: { inbound_settlement: { settled: true }, outbound_settlement: { issued: true, receipt: true }, private_delivery: { status: "delivered_private", recordRepeatable: true, proof: { delivery: true, requestBinding: true } }, payer_receipt: { ok: true, verifiedBundleBeforeDecrypt: true }, finality: { checked: false } } });
     expect(run.evidence.gates.inbound_settlement.txRef).toMatch(/^0x[0-9a-f]{64}$/i);
     expect(run.evidence.gates.outbound_settlement.txRef).toMatch(/^0x[0-9a-f]{64}$/i);
     expect(run.plaintext.toString("utf8")).toBe(provider.respond({ method: "POST", path: POST_PATH, body: readFileSync(bodyFile, "utf8") }));
-    const evidenceText = readFileSync(path.join(outDir, "d", "evidence.json"), "utf8");
-    const headerValue = (JSON.parse(readFileSync(path.join(outDir, "d", "payment_header.json"), "utf8")) as { value: string }).value;
+    const evidenceText = readFileSync(path.join(d, "evidence.json"), "utf8");
+    const headerValue = (JSON.parse(readFileSync(path.join(d, "payment_header.json"), "utf8")) as { value: string }).value;
     expect(evidenceText).not.toContain(headerValue);
     expect(evidenceText).not.toContain(canary);
-    expect(statSync(path.join(outDir, "d", "payment_header.json")).mode & 0o777).toBe(0o600);
+    expect(evidenceText).not.toContain(quoted.quote.ownerKey);
+    expect(statSync(path.join(d, "payment_header.json")).mode & 0o777).toBe(0o600);
+    // 引き渡し済みの再承認は拒否（二重の支払いを作らない）。--recover は読むだけ。
+    expect(await runPrivatePayer({ ...base, outDir: d, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    const recovered = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: d, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
+    expect(recovered).toMatchObject({ ok: true, paymentId: run.paymentId, recordAvailable: true, decrypted: true, evidence: { gates: { inbound_settlement: { settled: true }, private_delivery: { status: "delivered_private" }, payer_receipt: { ok: true } } } });
     expectCanaries(world, { public: evidenceText }, [canary], [headerValue]);
+    // 引き渡しの後で失敗（executor が Provider に届かない）: 受信決済と発行は証跡に残り、stage は session。別プロセスからの --recover は checkpoint の ownerKey で status を読める。
+    const f = path.join(outDir, "f");
+    const quotedF = await runPrivatePayer({ ...base, outDir: f, approve: false });
+    expect(quotedF).toMatchObject({ ok: true, stage: "quoted" });
+    const failed = await runPrivatePayer({ ...base, outDir: f, approve: true, connect: "127.0.0.1:9", sessionTimeoutSecs: 30 });
+    expect(failed).toMatchObject({ ok: false, stage: "session", evidence: { stage: "session", gates: { inbound_settlement: { settled: true }, outbound_settlement: { issued: true, receipt: false } } } });
+    if (failed.ok) return;
+    // Router 側は、Verifier の子がセッション失敗で終われば終端の unknown、まだなら awaiting_session（どちらも「払ったかもしれない」側の扱い）。
+    expect(["awaiting_session", "unknown"]).toContain(failed.evidence.routerStatus?.status);
+    expect(failed.evidence.gates.inbound_settlement.txRef).toMatch(/^0x[0-9a-f]{64}$/i);
+    expect(failed.reason).toContain("do not re-pay");
+    const recoveredF = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: f, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
+    expect(recoveredF).toMatchObject({ ok: true, recordAvailable: false, decrypted: false, evidence: { gates: { inbound_settlement: { settled: true }, outbound_settlement: { issued: true } } } });
+    if (!recoveredF.ok) return;
+    expect(["awaiting_session", "unknown"]).toContain(recoveredF.status?.["status"]);
+    expect(recoveredF.evidence.gates.inbound_settlement.txRef).toBe(failed.evidence.gates.inbound_settlement.txRef);
+    expect(await runPrivatePayer({ ...base, outDir: f, approve: true })).toMatchObject({ ok: false, stage: "approve" });
   }, LONG);
 
   test("否定ケース（セッション無し）: port≠443、payTo 不一致、record/attest 未完成、所有者違い、サイズ超過、別の offer の credential、注文のすり替え → TLS 前に拒否 → セッション無しの期限で unknown", async () => {

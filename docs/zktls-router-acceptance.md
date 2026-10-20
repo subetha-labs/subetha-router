@@ -93,6 +93,8 @@ npx tsx tools/remote-router-process.ts
 1 回の購入 = 封筒 → quote → **承認** → 受信 credential（EIP-3009、Payer の鍵）→ purchase（引き渡し）→ `payer-finalize-order` → `executor-session`（実 MPC-TLS、Verifier は Router が起動した loopback）→ `executor-prove` → attest → record（2 回取得して同一）→ `payer-decrypt`。
 
 まず `--approve` なしで quote だけ取り、`<out>/quote.json`（承認対象: 両レグの額・資産・網・受取先、target の host/path/method、本文の長さと commitment、Payer 鍵、各期限、開示）を読む。
+ツールは同じ `<out>` に再開点 `checkpoint.json`（0600。quote 文書・ownerKey・requestId・注文）を書く。**承認は同じ `--out` に `--approve` を足して再実行する**: ツールは keygen も quote もやり直さず、
+読んだ quote そのものを購入する。`quote.json` が書き換えられていた・quote の期限（`approval.deadlineMs`）が過ぎた・引数が違う・別の `--out` のときは拒む（新しい `--out` で quote からやり直す）。
 
 ```sh
 # C（x402 POST）。本文は Payer が決める（≤ 512 B の JSON object、`lab.select.v1`）。Router には渡らない。
@@ -103,12 +105,14 @@ SUBETHA_PAYER_PRIVATE_KEY=0x… PRIVATE_PAYER_TOKEN=<token> npx tsx tools/privat
   --outbound-protocol x402 --outbound-network eip155:84532 --outbound-asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
   --outbound-pay-to 0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1 --outbound-max-amount 10000 --inbound-max-total 11000 \
   --trust mozilla --scope-file runtime/private-live/scope.json --out runtime/private-live/c1
-# 読んで納得したら同じコマンドに --approve を足す（ここで初めて受信 credential を作り、Router が決済する）。
+# 読んで納得したら同じコマンド（同じ --out）に --approve を足す（ここで初めて受信 credential を作り、Router が決済する）。
+# 応答を失った・途中で止まったときは、同じ --out に --recover（status と record を読み直し、手元に bundle があれば復号。何も払わない）。
 ```
 
 F は `--profile priv-f-tempo-post --host provider-mpp-post.subethalabs.com --outbound-protocol mpp --outbound-network eip155:42431 --outbound-asset 0x20c0000000000000000000000000000000000000`。A/B は `--method GET --path /v1/eth/snapshot`（`--body-file` なし）と各 host。
 
-出力（`<out>/`、dir 0700、ファイル 0600）: `quote.json`（承認対象）、`intent.json`、`payment_header.json`（**bearer**）、`order_final.json`（**bearer**）、`release.json`、`record.json`、`bundle.json`、`keys/`（Payer 鍵・salt・`decrypt.bin`・`decrypt_result.json`）、`executor/`、`evidence.json`。bearer と鍵のファイルは受入が終わったら消す。`evidence.json` には bearer・本文・鍵・復号結果の本文は入らない。
+出力（`<out>/`、dir 0700、ファイル 0600）: `quote.json`（承認対象）、`checkpoint.json`（再開点。**ownerKey を含む**）、`intent.json`、`payment_header.json`（**bearer**）、`order_final.json`（**bearer**）、`release.json`、`record.json`、`bundle.json`、`keys/`（Payer 鍵・salt・`decrypt-*.bin`・`decrypt-*_result.json`）、`executor/`、`evidence.json`（`--recover` は `evidence-recover.json`）。bearer・ownerKey・鍵のファイルは受入が終わったら消す。`evidence.json` には bearer・本文・鍵・復号結果の本文は入らない。
+証跡はゲートが分かった時点で書く: 引き渡しの直後に受信決済の tx（status から）と「送信 credential 発行済み」、attest の後に秘匿配送、復号の後に Payer 受領。引き渡しの後で失敗しても分かっている分は残り、`stage` に止まった段が入る。purchase の応答を失った・`unknown` のときは両決済に `uncertain: true`（払ったかもしれない）。
 
 ## 5. 受入テスト（`tests/acceptance/private-live.test.ts`）
 
@@ -121,7 +125,7 @@ F は `--profile priv-f-tempo-post --host provider-mpp-post.subethalabs.com --ou
 | `PRIVATE_LIVE_ROUTER_URL`, `PRIVATE_LIVE_PRINCIPAL`, `PRIVATE_LIVE_TOKEN`, `PRIVATE_LIVE_PROFILE` | 実合成の Router と allowlist のプロファイル |
 | `PRIVATE_LIVE_SCOPE_FILE` | §2 の記録（必須。欠けていれば何も払わない） |
 | `SUBETHA_PAYER_PRIVATE_KEY` | Payer の鍵（env だけ） |
-| `PRIVATE_LIVE_APPROVE=1` | 承認。無ければ quote で止まる（支払い無し） |
+| `PRIVATE_LIVE_APPROVE=1` | 承認。テストは quote（1 回目）→ 同じ証跡ディレクトリの再開点を承認（2 回目）の順に走る。無ければ quote で止まる（支払い無し） |
 | `PRIVATE_LIVE_EVIDENCE_DIR`, `PRIVATE_LIVE_INBOUND_MAX_TOTAL`, `PRIVATE_LIVE_BODY` | 任意 |
 
 ```sh
@@ -144,7 +148,7 @@ npx vitest run tests/acceptance/private-live.test.ts
 
 ## 7. 失敗したときの扱い
 
-- `purchase` が `unknown`（例: `private_issuance_unknown`・`private_session_timeout`・`private_verifier_unavailable`）: **払ったかもしれない**。同じ quote で再提出しても再発行はされない。journal と両チェーンを読む。record があれば `payer-decrypt`。
+- `purchase` が `unknown`（例: `private_issuance_unknown`・`private_session_timeout`・`private_verifier_unavailable`）、または応答を失った: **払ったかもしれない**（証跡の両決済は `uncertain`）。同じ quote で再提出しても再発行はされない。`--recover` で status を読み、journal と両チェーンを読む。record があれば `--recover` が `payer-decrypt` まで行う。
 - `attest` が `unknown/private_attest_invalid`: 検証が通らなかった（bundle・record・領収のどれかが合わない）。record は保持期限まで取得でき、Payer は手元で検証・復号できる。
 - Router の再起動後は attest できない（取得専用。設計 §3.6）。record を取得して手元で復号する。
 - Tempo pull の credential 期限切れ（`validBefore`）: Provider が 402 を返し、record の状態行が `non_200` → attest は通らない。送信レグは動いていない可能性が高いが、**unknown として扱う**（Provider 側の claim の有無はチェーンで読む）。

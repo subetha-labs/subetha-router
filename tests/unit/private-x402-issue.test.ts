@@ -145,7 +145,10 @@ describe("checkReceipt（Verifier の record に現れた PAYMENT-RESPONSE）", 
     const tx = `0x${"7a".repeat(32)}`;
     const header = (receipt: Record<string, unknown>): string => encodePaymentResponseHeader(receipt as never);
     expect(r.checkReceipt(header({ success: true, network: FIXTURE_NETWORK, transaction: tx, payer: evm.address }), offer, issued)).toEqual({ ok: true, txRef: tx, receiptRef: header({ success: true, network: FIXTURE_NETWORK, transaction: tx, payer: evm.address }) });
-    expect(r.checkReceipt(header({ success: true, network: FIXTURE_NETWORK, transaction: tx }), offer, issued)).toMatchObject({ ok: true, txRef: tx });
+    // payer の欄が無い・null・別のアドレスはどれも不一致（秘匿購入は署名者の名乗りを要求する。FR-Z08）。
+    expect(r.checkReceipt(header({ success: true, network: FIXTURE_NETWORK, transaction: tx }), offer, issued)).toEqual({ ok: false, reason: "destination_receipt_payer_mismatch" });
+    expect(r.checkReceipt(header({ success: true, network: FIXTURE_NETWORK, transaction: tx, payer: null }), offer, issued)).toEqual({ ok: false, reason: "destination_receipt_payer_mismatch" });
+    expect(r.checkReceipt(header({ success: true, network: FIXTURE_NETWORK, transaction: tx, payer: evm.address.toUpperCase().replace("0X", "0x") }), offer, issued)).toMatchObject({ ok: true, txRef: tx });
     expect(r.checkReceipt(header({ success: false, network: FIXTURE_NETWORK, transaction: tx, payer: evm.address }), offer, issued)).toEqual({ ok: false, reason: "destination_receipt_unverified" });
     expect(r.checkReceipt(header({ success: true, network: "eip155:1", transaction: tx, payer: evm.address }), offer, issued)).toEqual({ ok: false, reason: "destination_receipt_unverified" });
     expect(r.checkReceipt(header({ success: true, network: FIXTURE_NETWORK, transaction: "0x12", payer: evm.address }), offer, issued)).toEqual({ ok: false, reason: "destination_receipt_unverified" });

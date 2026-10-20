@@ -33,6 +33,8 @@ import { intentFromCreated, privateBindingOf, type IntentStore } from "./store.j
 const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
 const PROBE_BODY = "{}";
 const PROBE_BODY_SHA256 = createHash("sha256").update(PROBE_BODY, "utf8").digest("hex");
+/** Node の setTimeout の上限（2^31−1 ms ≈ 24.8 日）。 */
+const MAX_TIMER_MS = 2_147_483_647;
 const INTENT_FILE = "intent.json";
 const RELEASE_FILE = "release.json";
 const ORDER_FINAL_FILE = "order_final.json";
@@ -244,18 +246,27 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   const stop = async (point: StopPoint, paymentId: string): Promise<void> => {
     await options.hooksForTest?.stop?.(point, paymentId);
   };
-  function schedule(ms: number, run: () => void): void {
+  /**
+   * 絶対時刻 `untilMs` に `run` を 1 回。Node の timer は 2^31−1 ms が上限なので、それより先の期限は刻んで待ち、発火のたびに絶対時刻を確かめる
+   * （長い保持期限が即座に満了したことにならない）。
+   */
+  function scheduleAt(untilMs: number, run: () => void): void {
     if (closing) return;
+    const delay = Math.min(Math.max(0, untilMs - now()), MAX_TIMER_MS);
     const timer = setTimeout(() => {
       timers.delete(timer);
       if (closing) return;
+      if (now() < untilMs) {
+        scheduleAt(untilMs, run);
+        return;
+      }
       try {
         run();
       } catch {
         // タイマの中の例外は固定の note だけ（journal・応答には出さない）。
         note?.("private: timer callback failed");
       }
-    }, Math.max(0, ms));
+    }, delay);
     timer.unref();
     timers.add(timer);
   }
@@ -623,7 +634,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   /* ------------------------------------------------------------------ session と record（§3.3） */
 
   function superviseSession(paymentId: string, child: Child, sessionBy: number): void {
-    schedule(sessionBy - now(), () => {
+    scheduleAt(sessionBy, () => {
       void child.kill();
     });
     void track(
@@ -759,7 +770,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   }
 
   function scheduleAttestTimeout(paymentId: string, attestBy: number): void {
-    schedule(attestBy - now(), () => {
+    scheduleAt(attestBy, () => {
       void track(
         withPayment(paymentId, async () => {
           if (closing) return;
@@ -778,7 +789,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   }
 
   function scheduleRetention(paymentId: string, until: number): void {
-    schedule(until - now(), () => {
+    scheduleAt(until, () => {
       void track(
         withPayment(paymentId, async () => {
           if (closing) return;

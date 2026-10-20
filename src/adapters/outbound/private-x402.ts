@@ -12,6 +12,8 @@ import type { GuardedTransport } from "../../net/guarded-fetch.js";
 import type { DestinationOffer, EvmSigningCapability, UpstreamTarget } from "../../ports/outbound.js";
 import type { IssueCredentialArgs, IssueOutcome, PrivateDiscovery, PrivateOutboundRail, ReceiptCheck } from "../../ports/private-outbound.js";
 import { EVM_RECEIPT_FORM } from "../../shared/x402-receipt.js";
+import { decodePaymentResponseHeader } from "@x402/core/http";
+
 import { checkDynamicX402Offer, createX402ChallengeReader, receiptOf, signX402PaymentOnly, X402_DYNAMIC_UNPAID_TIMEOUT_MS, type DynamicChallenge } from "./x402-dynamic.js";
 
 export interface PrivateX402Options {
@@ -110,6 +112,17 @@ export function createPrivateX402Rail(capability: EvmSigningCapability, options:
       const receipt = receiptOf(response, offer, receiptForm);
       if (receipt.kind !== "settled") {
         return { ok: false, reason: receipt.kind === "payer_mismatch" ? "destination_receipt_payer_mismatch" : "destination_receipt_unverified" };
+      }
+      // 秘匿購入（FR-Z08・設計 §6.1）: 領収は**必ず**この Router の署名者を payer として名乗ること（動的経路は payer の欄が無くても通すが、ここでは要求する）。
+      let decoded: unknown;
+      try {
+        decoded = decodePaymentResponseHeader(headerValue);
+      } catch {
+        return { ok: false, reason: "destination_receipt_unverified" };
+      }
+      const payer = typeof decoded === "object" && decoded !== null ? (decoded as Record<string, unknown>)["payer"] : undefined;
+      if (typeof payer !== "string" || payer.toLowerCase() !== capability.signer.address.toLowerCase()) {
+        return { ok: false, reason: "destination_receipt_payer_mismatch" };
       }
       return { ok: true, txRef: receipt.transaction, receiptRef: receipt.header };
     },
