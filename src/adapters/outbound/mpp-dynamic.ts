@@ -247,10 +247,18 @@ export function checkDynamicMppChallenge(
       asset: currency,
       amount,
       payTo: recipient,
-      // 条件の全文。`id`・`expires`・`digest` は発行ごとに変わるので入れない（設計 §3.2）。
-      extra: { realm, terms: stableJson({ realm, method, intent, request, meta }) },
+      // 条件の全文。`id`・`expires`・`digest` は発行ごとに変わるので入れない（設計 §3.2）。`opaque` の中身（meta）も、mppx 0.13 が 402 ごとに新しくする
+      // `_mppx_nonce` は条件ではないので除く（scope などの条件は残す。送り返す `opaque` は再照合で選んだ**新しい** challenge のものをそのまま使う）。
+      extra: { realm, terms: stableJson({ realm, method, intent, request, meta: comparableMetaOf(meta) }) },
     },
   };
+}
+
+/** 比較する `opaque` の中身: 402 ごとに変わる nonce（`_mppx_nonce`）を除いた残り。`null`（opaque 無し）はそのまま。 */
+export function comparableMetaOf(meta: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (meta === null) return null;
+  const { _mppx_nonce: _nonce, ...rest } = meta;
+  return rest;
 }
 
 /** 署名・送信の境界で止めた。 */

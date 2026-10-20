@@ -604,3 +604,14 @@ wire の証跡は `lab-fixture-ca` の **synthetic**。実 Provider（C/F/A/B）
 ### 14.5 Codex 最終レビュー 5 回目（2026-10-20、**APPROVE**）
 nit 1 件（耐久書き込みの文言: rename の前後で「前の再開点が残る／latch つきの再開点が残る」を区別）を反映。実 Provider C/F/A/B の受入・両チェーンの読み取り・finality は owner のゲートのまま（未実行）。
 
+### 14.6 受入の実行記録（2026-10-20/21 UTC、owner の testnet 包括承認のもと作者が実行。実合成 `tools/remote-router-process.ts` + `tools/private-payer.ts`）
+| Provider | 結果 | 受信 tx（Base Sepolia） | 送信 tx | 平文 | 証跡 |
+|---|---|---|---|---|---|
+| C（x402 POST `/select`） | **delivered_private**、5 ゲート成立 | `0x2feed4c9…5a68`（11000 USDC、21 conf） | `0x7c0a4a81…97de`（10000 USDC → 0x9014…、20 conf） | `select-post-c` / `lab.select.v1`、`received_sha256` = 承認本文 | `.claude_workflow/local/zktls-live-C-20261021.json` |
+| A（x402 GET `/v1/eth/snapshot`） | **delivered_private**、5 ゲート成立 | `0xf08deae2…ba36` | `0xf72ed059…3593` | `market-data-a` 400 B | `zktls-live-A-20261021.json` |
+| B（Tempo pull GET） | **delivered_private**、5 ゲート成立 | `0xea9b641e…3071` | Tempo `0xd482e92b…3b25`（10000 pathUSD + fee 29、59 conf） | `market-data-b` 704 B | `zktls-live-B-20261021.json` |
+| F（Tempo pull POST） | **未成立**（Provider 側） | 3 件決済（各 11000 USDC） | 無し（pathUSD 不変） | — | `zktls-live-F-20261021-diagnosis.json` |
+
+F の経緯: (1) 1 回目は purchase の再照合で `offer_changed`（資金移動なし）。原因は Tempo の offer の比較条件に `opaque` の `_mppx_nonce`（mppx 0.13 が 402 ごとに更新）が含まれていたこと → `comparableMetaOf` で除外（§14.5 の後の修正、単体テスト追加）。(2) 修正後は引き渡しまで進むが executor が「status line not 200」で失敗。(3) 診断（`--stop-after-handover` で発行直後の credential を直接送信）で Provider F が **HTTP 500 `internal-payment-error`** を 0.3 秒で返すことを確認。Router の credential は形式・expiring nonce・validBefore（+25 s）・memo とも正常で、同じ Tempo pull credential は Provider B で成立した。Provider F（owner デプロイの Worker）側の確認（`wrangler tail`、`TEMPO_RPC_URL`、Durable Object）が要る。
+Router 側の budget の注意: 動的予算は 1 件の両レグを同じバケットで合算する（USDC 21000/件、Tempo は送金 + fee cap 210000/件）。受入の設定は `runtime/private-live/router.config.json`（git 管理外）。
+

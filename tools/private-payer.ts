@@ -64,6 +64,8 @@ export interface PrivatePayerOptions {
   readonly sessionTimeoutSecs?: number;
   readonly now?: () => number;
   readonly log?: (line: string) => void;
+  /** **診断専用**: 引き渡しで止める（executor を走らせない。Router 側はその購入を期限で `unknown` にする）。Provider の応答を直接観察するときだけ。 */
+  readonly stopAfterHandover?: boolean;
   /** **試験専用**: 耐久書き込みの故障注入（段ごと）と、latch の後で止める（割り込みの再現）。 */
   readonly hooksForTest?: DurableHooksForTest & { readonly afterLatch?: () => void };
 }
@@ -171,10 +173,20 @@ function writeDurable(file: string, bytes: Buffer | string, hooks?: DurableHooks
     closeSync(dir);
   }
 }
-function runBinary(bin: string, srs: string, args: readonly string[], timeoutMs: number): Promise<{ code: number | null; stderr: string }> {
+/**
+ * lab バイナリを別プロセスで。stdout/stderr は `<logDir>/lab-<stage>.log`（0600）に残す（原因の調査用。lab のログは固定文だが bearer を含み得る前提で outDir と同じ扱い）。
+ */
+function runBinary(bin: string, srs: string, args: readonly string[], timeoutMs: number, logFile?: string): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(bin, [...args], { env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", DELIVERY_SRS_DAT: srs, RUST_LOG: "warn" }, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, _stdout, stderr) => {
+    execFile(bin, [...args], { env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", DELIVERY_SRS_DAT: srs, RUST_LOG: "info" }, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       const code = error === null ? 0 : typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null;
+      if (logFile !== undefined) {
+        try {
+          writePrivate(logFile, `# exit ${String(code)}\n# stdout\n${String(stdout)}\n# stderr\n${String(stderr)}\n`);
+        } catch {
+          // ログが書けなくても結果は返す。
+        }
+      }
       resolve({ code, stderr: String(stderr) });
     });
   });
@@ -336,7 +348,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     } else {
       keygenArgs.push("--method", "GET");
     }
-    const keygen = await runBinary(bin, srs, keygenArgs, 60_000);
+    const keygen = await runBinary(bin, srs, keygenArgs, 60_000, path.join(options.outDir, "lab-keygen.log"));
     if (keygen.code !== 0) return fail("keygen", "payer-keygen failed (see lab binary stderr; not recorded)");
     const order = JSON.parse(readFileSync(path.join(keys, "order.json"), "utf8")) as unknown;
     const intentBytes = envelopeBytesOf(order, options.outbound, inbound);
@@ -427,13 +439,14 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   writePrivate(headerFile, JSON.stringify(handover.headerFile));
   writePrivate(releaseFile, Buffer.from(handover.releaseB64, "base64"));
   log(`private-payer: handover verifier=${handover.verifier.address} sessionBy=${new Date(handover.deadlines.sessionBy).toISOString()}`);
+  if (options.stopAfterHandover === true) return fail("handover", "stopped after handover (--stop-after-handover, diagnostics only); the Router will time this purchase out as unknown");
   const failAfterHandover = async (stage: string, reason: string): Promise<PrivatePayerRun> => {
     await fillFromStatus(client, paymentId, quote.ownerKey, evidence);
     return fail(stage, `${reason} (the inbound leg is settled and the credential was released: the outbound outcome is unknown until the Router's deadlines; do not re-pay; use --recover to read status/record)`);
   };
 
   // 5. finalize → session → prove（Payer の executor。Router は本文を見ない）。
-  const finalize = await runBinary(bin, srs, ["payer-finalize-order", "--intent", intentFile, "--payment-header-file", headerFile, "--out", orderFinal], 60_000);
+  const finalize = await runBinary(bin, srs, ["payer-finalize-order", "--intent", intentFile, "--payment-header-file", headerFile, "--out", orderFinal], 60_000, path.join(options.outDir, "lab-finalize.log"));
   if (finalize.code !== 0) return failAfterHandover("finalize", "payer-finalize-order failed");
   const requestPrivate = path.join(exec, "private_inbox", "request_private.json");
   if (options.method === "POST") copyFileSync(path.join(keys, "request_private.json"), requestPrivate);
@@ -441,7 +454,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const sessionArgs = ["executor-session", "--executor-dir", exec, "--order", orderFinal, "--verifier-addr", handover.verifier.address, "--host", options.host, "--port", "443", "--path", options.path, "--trust", options.trust, "--timeout-secs", String(timeoutSecs)];
   if (options.method === "POST") sessionArgs.push("--request-private", requestPrivate);
   if (options.connect !== undefined) sessionArgs.push("--connect", options.connect);
-  const session = await runBinary(bin, srs, sessionArgs, (timeoutSecs + 60) * 1000);
+  const session = await runBinary(bin, srs, sessionArgs, (timeoutSecs + 60) * 1000, path.join(options.outDir, "lab-session.log"));
   if (session.code !== 0) return failAfterHandover("session", "executor-session failed");
   const until = handover.deadlines.sessionBy + 60_000;
   for (;;) {
@@ -456,7 +469,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   persistEvidence();
   const proveArgs = ["executor-prove", "--executor-dir", exec, "--order", orderFinal];
   if (options.method === "POST") proveArgs.push("--request-private", requestPrivate);
-  const prove = await runBinary(bin, srs, proveArgs, 900_000);
+  const prove = await runBinary(bin, srs, proveArgs, 900_000, path.join(options.outDir, "lab-prove.log"));
   if (prove.code !== 0) return failAfterHandover("prove", "executor-prove failed");
   const bundle = readFileSync(path.join(exec, "bundle.json"));
   writePrivate(path.join(options.outDir, "bundle.json"), bundle);
@@ -500,7 +513,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
 }
 
 async function decryptLocally(bin: string, srs: string, options: Pick<PrivatePayerOptions, "host" | "path">, keys: string, orderFinal: string, recordFile: string, bundleFile: string, intentFile: string, releaseFile: string, resultName = `decrypt-${randomBytes(3).toString("hex")}`): Promise<{ gate: PrivatePayerEvidence["gates"]["payer_receipt"]; plaintextFile: string }> {
-  const run = await runBinary(bin, srs, ["payer-decrypt", "--payer-dir", keys, "--order", orderFinal, "--record", recordFile, "--bundle", bundleFile, "--expect-host", options.host, "--expect-port", "443", "--expect-path", options.path, "--intent", intentFile, "--release", releaseFile, "--result-name", resultName], 600_000);
+  const run = await runBinary(bin, srs, ["payer-decrypt", "--payer-dir", keys, "--order", orderFinal, "--record", recordFile, "--bundle", bundleFile, "--expect-host", options.host, "--expect-port", "443", "--expect-path", options.path, "--intent", intentFile, "--release", releaseFile, "--result-name", resultName], 600_000, path.join(path.dirname(keys), `lab-${resultName}.log`));
   const resultFile = path.join(keys, `${resultName}_result.json`);
   const result = existsSync(resultFile) ? (JSON.parse(readFileSync(resultFile, "utf8")) as Record<string, unknown>) : undefined;
   return {
@@ -656,6 +669,7 @@ async function main(): Promise<void> {
     outDir,
     payerPrivateKey: key,
     approve: process.argv.includes("--approve"),
+    ...(process.argv.includes("--stop-after-handover") ? { stopAfterHandover: true } : {}),
     ...(argOf("scope-file") === undefined ? {} : { scopeFile: argOf("scope-file")! }),
   });
   if (run.ok && run.stage === "quoted") {

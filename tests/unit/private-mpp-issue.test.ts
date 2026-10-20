@@ -12,7 +12,7 @@ import { Abis } from "viem/tempo";
 import { tempoModerato } from "viem/tempo/chains";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
-import { approvedTransferOf, checkDynamicMppChallenge, checkRawTempoTransfer, createGuardedTempoAccount, TempoSigningRefusedError } from "../../src/adapters/outbound/mpp-dynamic.js";
+import { approvedTransferOf, checkDynamicMppChallenge, checkRawTempoTransfer, comparableMetaOf, createGuardedTempoAccount, TempoSigningRefusedError } from "../../src/adapters/outbound/mpp-dynamic.js";
 import { attributionMemoOf, createPrivateMppRail, expectedTransferDataOf, PRIVATE_RPC_READ_METHODS, privateReadOnlyRequestOf } from "../../src/adapters/outbound/private-mpp.js";
 import type { DynamicProfile } from "../../src/config.js";
 import { createGuardedTransport, type GuardedTransport } from "../../src/net/guarded-fetch.js";
@@ -54,7 +54,7 @@ afterEach(async () => {
 });
 
 /** 実 `mppx/server` の challenge（pull だけ・scope 付き）。 */
-async function challengeHeaderOf(rpcUrl: string, options: { modes?: readonly string[]; feePayer?: boolean; scope?: string; amount?: string } = {}): Promise<string> {
+async function challengeHeaderOf(rpcUrl: string, options: { modes?: readonly string[]; feePayer?: boolean; scope?: string; amount?: string; meta?: Record<string, unknown> } = {}): Promise<string> {
   const client = createClient({ chain: { ...tempoModerato, id: MPP_FIXTURE_CHAIN_ID } as never, transport: viemHttp(rpcUrl, { retryCount: 0 }) });
   const server = Mppx.create({
     secretKey: "fixture-secret-0123456789abcdef0123456789abcdef",
@@ -71,7 +71,7 @@ async function challengeHeaderOf(rpcUrl: string, options: { modes?: readonly str
     ],
   }) as unknown as { challenge: { tempo: { charge(parameters: Record<string, unknown>): Promise<Record<string, unknown>> } } };
   const scope = options.scope ?? `POST ${URL_POST}`;
-  const challenge = await server.challenge.tempo.charge({ amount: options.amount ?? "1000", chainId: MPP_FIXTURE_CHAIN_ID, expires: new Date(Date.now() + 600_000).toISOString(), scope, meta: { _mppx_scope: scope } });
+  const challenge = await server.challenge.tempo.charge({ amount: options.amount ?? "1000", chainId: MPP_FIXTURE_CHAIN_ID, expires: new Date(Date.now() + 600_000).toISOString(), scope, meta: { _mppx_scope: scope, ...options.meta } });
   return Challenge.serialize(challenge as never);
 }
 
@@ -165,6 +165,31 @@ describe("discover（pull を提供する challenge だけ。FR-Z16・§6.2）",
     const [parsed] = Challenge.deserializeList(await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], scope: `GET ${URL_POST}` }));
     expect(checkDynamicMppChallenge(parsed, PROFILE, [], URL_POST, Date.now())).toEqual({ ok: false, reason: "pull_only" });
     expect(checkDynamicMppChallenge(parsed, PROFILE, [], URL_POST, Date.now(), { mode: "pull", method: "GET" }).ok).toBe(true);
+  });
+});
+
+describe("再照合の比較条件（offer の `extra.terms`）: 402 ごとに変わる id・expires・`_mppx_nonce` は条件ではない", () => {
+  test("nonce と id・expires だけが違う 2 つの challenge は同じ offer。scope が違えば候補外（受入 live-F-20261021 の `offer_changed` の再現と修正）", async () => {
+    const h = await harness();
+    const [a] = Challenge.deserializeList(await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], meta: { _mppx_nonce: `0x${"a1".repeat(32)}` } }));
+    const [b] = Challenge.deserializeList(await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], meta: { _mppx_nonce: `0x${"b2".repeat(32)}` } }));
+    expect((a as unknown as { id: string }).id).not.toBe((b as unknown as { id: string }).id);
+    expect((a as unknown as { opaque: string }).opaque).not.toBe((b as unknown as { opaque: string }).opaque);
+    const ca = checkDynamicMppChallenge(a, PROFILE, [], URL_POST, Date.now(), { mode: "pull", method: "POST" });
+    const cb = checkDynamicMppChallenge(b, PROFILE, [], URL_POST, Date.now(), { mode: "pull", method: "POST" });
+    expect(ca.ok && cb.ok, JSON.stringify([ca, cb])).toBe(true);
+    if (!ca.ok || !cb.ok) return;
+    expect(JSON.stringify(ca.offer)).toBe(JSON.stringify(cb.offer));
+    expect(JSON.stringify(ca.offer)).not.toContain("_mppx_nonce");
+    expect(JSON.stringify(ca.offer)).toContain("_mppx_scope");
+    // 発行時は承認した offer と一致する**新しい** challenge（新しい id・opaque）が選ばれる（discover → issueCredential の経路）。
+    h.challenge = await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], meta: { _mppx_nonce: `0x${"c3".repeat(32)}` } });
+    const found = await h.rail.discover(PROFILE_ID, { url: URL_POST, method: "POST", body: "{}" });
+    expect(found.offers.map((o) => JSON.stringify(o))).toEqual([JSON.stringify(ca.offer)]);
+    const [other] = Challenge.deserializeList(await challengeHeaderOf(h.rpc.plainUrl, { modes: ["pull"], scope: "POST https://provider.test/other", meta: { _mppx_nonce: `0x${"d4".repeat(32)}` } }));
+    expect(checkDynamicMppChallenge(other, PROFILE, [], URL_POST, Date.now(), { mode: "pull", method: "POST" })).toEqual({ ok: false, reason: "scope" });
+    expect(comparableMetaOf(null)).toBeNull();
+    expect(comparableMetaOf({ _mppx_scope: "x", _mppx_nonce: "0x1", other: 1 })).toEqual({ _mppx_scope: "x", other: 1 });
   });
 });
 

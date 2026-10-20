@@ -158,3 +158,7 @@ PRIVATE_LIVE_AC=1 PRIVATE_LIVE_MODE=approve PRIVATE_LIVE_PROVIDER=C PRIVATE_LIVE
 - `attest` が `unknown/private_attest_invalid`: 検証が通らなかった（bundle・record・領収のどれかが合わない）。record は保持期限まで取得でき、Payer は手元で検証・復号できる。
 - Router の再起動後は attest できない（取得専用。設計 §3.6）。record を取得して手元で復号する。
 - Tempo pull の credential 期限切れ（`validBefore`）: Provider が 402 を返し、record の状態行が `non_200` → attest は通らない。送信レグは動いていない可能性が高いが、**unknown として扱う**（Provider 側の claim の有無はチェーンで読む）。
+
+## 8. 実行記録（2026-10-20/21）
+C・A・B は 5 ゲート成立（設計 §14.6）。F は Provider F が有料要求に HTTP 500（mppx `internal-payment-error`）を返し未成立（受信決済は 3 件済み、送信は無し）。owner 側で Provider F の Worker ログと RPC を確認してから再実行する。Tempo の 402 は probe ごとに `_mppx_nonce` が変わるため、Router 側の offer 比較から除外した（修正済み）。
+
