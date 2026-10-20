@@ -74,7 +74,11 @@ export interface Child {
 export type ServeOutcome = { readonly ok: true; readonly child: Child; readonly address: string } | { readonly ok: false; readonly reason: "launch_failed" | "not_ready" | "expired" };
 export type VerifyOutcome =
   | { readonly ok: true; readonly result: unknown; readonly exitCode: number | null }
-  | { readonly ok: false; readonly reason: "launch_failed" | "timeout" | "result_unreadable" | "result_too_large"; readonly exitCode?: number | null };
+  | { readonly ok: false; readonly reason: "launch_failed" | "timeout" | "result_unreadable" | "result_too_large" | "exit_nonzero"; readonly exitCode?: number | null };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export type InventoryOutcome = { readonly ok: true; readonly terminated: number } | { readonly ok: false; readonly reason: "enumeration_failed" | "cancel_failed" | "unverifiable_pid" | "termination_unconfirmed" };
 
@@ -167,22 +171,38 @@ async function commandLineOf(pid: number): Promise<string | undefined> {
   });
 }
 
-/** 子の stdout/stderr を上限までファイルへ（0600）。超過分は捨てる。 */
-function boundedSink(file: string, maxBytes: number): (chunk: Buffer) => void {
-  const fd = openSync(file, "w", 0o600);
+/** 子の stdout/stderr を上限までファイルへ（0600）。超過分は捨てる。`close` は何度呼んでもよい（fd を漏らさない）。 */
+function boundedSink(file: string, maxBytes: number): { write(chunk: Buffer): void; close(): void } {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, "w", 0o600);
+  } catch {
+    fd = undefined;
+  }
   let written = 0;
-  let closed = false;
-  return (chunk: Buffer): void => {
-    if (closed) return;
-    const room = maxBytes - written;
-    if (room <= 0) {
+  const close = (): void => {
+    if (fd === undefined) return;
+    try {
       closeSync(fd);
-      closed = true;
-      return;
+    } catch {
+      // 既に閉じている。
     }
-    const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
-    writeSync(fd, slice);
-    written += slice.length;
+    fd = undefined;
+  };
+  return {
+    write(chunk: Buffer): void {
+      if (fd === undefined) return;
+      const room = maxBytes - written;
+      if (room <= 0) return;
+      const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
+      try {
+        writeSync(fd, slice);
+        written += slice.length;
+      } catch {
+        close();
+      }
+    },
+    close,
   };
 }
 
@@ -219,20 +239,27 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
     try {
       proc = spawn("/bin/sh", ["-c", wrapperOf(options.launchHooksForTest), options.deliveryBin, ...args], { stdio: ["ignore", "pipe", "pipe"], env: envOf(dir, kind), cwd: dir });
     } catch {
+      stdout.close();
+      stderr.close();
       return undefined;
     }
-    if (proc.pid === undefined) return undefined;
-    proc.stdout?.on("data", (chunk: Buffer) => stdout(chunk));
-    proc.stderr?.on("data", (chunk: Buffer) => stderr(chunk));
+    if (proc.pid === undefined) {
+      stdout.close();
+      stderr.close();
+      return undefined;
+    }
+    proc.stdout?.on("data", (chunk: Buffer) => stdout.write(chunk));
+    proc.stderr?.on("data", (chunk: Buffer) => stderr.write(chunk));
+    proc.stdout?.once("close", () => stdout.close());
+    proc.stderr?.once("close", () => stderr.close());
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       proc.once("exit", (code, signal) => resolve({ code, signal }));
       proc.once("error", () => resolve({ code: null, signal: null }));
     });
     let done = false;
-    void exited.then(() => {
-      done = true;
-      children.delete(child);
-      // 終了の後に pid ファイルと起動門を片付ける（棚卸しの対象から外す）。
+    /** 準備の握手（pid の確認）が済んだか。済む前に子が終わっても、pid ファイルは握手が読むまで残す（終了と準備の観測の競合を避ける）。 */
+    let handshakeDone = false;
+    const deleteOwnership = (): void => {
       for (const file of [path.join(dir, PID_FILE[kind]), path.join(dir, `${PID_FILE[kind]}.tmp`), gate]) {
         try {
           unlinkSync(file);
@@ -240,13 +267,28 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
           // 無ければよい。
         }
       }
+    };
+    void exited.then(() => {
+      done = true;
+      children.delete(child);
+      stdout.close();
+      stderr.close();
+      // 終了の後に pid ファイルと起動門を片付ける（棚卸しの対象から外す）。握手の前なら握手の側が片付ける。
+      if (handshakeDone) deleteOwnership();
     });
-    const child: Child = {
+    const child: Child & { markHandshake(): void } = {
       pid: proc.pid,
       kind,
       exited,
+      markHandshake(): void {
+        handshakeDone = true;
+        if (done) deleteOwnership();
+      },
       async kill(graceMs = DEFAULT_GRACE_MS): Promise<void> {
-        if (done) return;
+        if (done) {
+          deleteOwnership();
+          return;
+        }
         try {
           proc.kill("SIGTERM");
         } catch {
@@ -261,24 +303,48 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
           }
           await exited;
         }
+        deleteOwnership();
       },
     };
     children.add(child);
     return child;
   }
 
-  /** pid ファイルの内容が spawn の pid と一致するまで待つ（期限の内側）。 */
-  async function waitPid(dir: string, kind: LaunchKind, pid: number, byMs: number): Promise<boolean> {
+  /** pid ファイルの内容が spawn の pid と一致するまで待つ（期限の内側）。子が先に終わっていても、公開済みの pid は読める（握手まで残す）。 */
+  async function waitPid(dir: string, kind: LaunchKind, child: Child & { markHandshake(): void }, byMs: number): Promise<boolean> {
     const file = path.join(dir, PID_FILE[kind]);
-    while (now() < byMs) {
+    let exitedFlag = false;
+    void child.exited.then(() => {
+      exitedFlag = true;
+    });
+    for (;;) {
       try {
-        if (readFileSync(file, "utf8").trim() === String(pid)) return true;
+        if (readFileSync(file, "utf8").trim() === String(child.pid)) {
+          child.markHandshake();
+          return true;
+        }
       } catch {
         // まだ。
       }
+      if (exitedFlag) {
+        // 終了の後に 1 度だけ読み直す（公開と終了の間で読み漏らさない）。
+        try {
+          if (readFileSync(file, "utf8").trim() === String(child.pid)) {
+            child.markHandshake();
+            return true;
+          }
+        } catch {
+          // 公開されなかった。
+        }
+        child.markHandshake();
+        return false;
+      }
+      if (!(now() < byMs)) {
+        child.markHandshake();
+        return false;
+      }
       await sleep(POLL_MS);
     }
-    return false;
   }
 
   return {
@@ -304,7 +370,7 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
         "--release", args.releasePath,
       ]);
       if (child === undefined) return { ok: false, reason: "launch_failed" };
-      if (!(await waitPid(args.dir, "serve", child.pid, args.readyByMs))) {
+      if (!(await waitPid(args.dir, "serve", child as Child & { markHandshake(): void }, args.readyByMs))) {
         await child.kill();
         return { ok: false, reason: "not_ready" };
       }
@@ -348,7 +414,7 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
         ...(args.requireExternalGate ? ["--require-external-gate"] : []),
       ]);
       if (child === undefined) return { ok: false, reason: "launch_failed" };
-      if (!(await waitPid(args.dir, "verify", child.pid, startedAt + Math.min(args.timeoutMs, 5_000)))) {
+      if (!(await waitPid(args.dir, "verify", child as Child & { markHandshake(): void }, startedAt + Math.min(args.timeoutMs, 5_000)))) {
         await child.kill();
         return { ok: false, reason: "launch_failed" };
       }
@@ -364,6 +430,10 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
         parsed = JSON.parse(read.bytes.toString("utf8"));
       } catch {
         return { ok: false, reason: "result_unreadable", exitCode: finished.code };
+      }
+      // 成功は「結果が ok かつ終了コード 0」のときだけ（`ok:true` を書いて非 0 で終わるものは信じない）。
+      if (isRecord(parsed) && parsed["ok"] === true && (finished.code !== 0 || finished.signal !== null)) {
+        return { ok: false, reason: "exit_nonzero", exitCode: finished.code };
       }
       return { ok: true, result: parsed, exitCode: finished.code };
     },

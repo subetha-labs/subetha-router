@@ -64,7 +64,8 @@ function boundRecord() {
   const intentBytes = readFileSync(kv.get("intent"));
   const releaseBytes = readFileSync(kv.get("release"));
   const release = JSON.parse(releaseBytes.toString("utf8"));
-  const h = order.request.payment_header;
+  const h = order?.request?.payment_header;
+  if (!h || typeof h.name !== "string" || typeof h.value !== "string") return { fake: true, note: "order has no payment header; not a bound record" };
   const isGet = order.request.framing === "phase5-get-public-v1";
   const prefix = isGet
     ? `GET ${order.target.path} HTTP/1.1\r\nHost: ${order.target.host}\r\nConnection: close\r\n${h.name}: ${h.value}\r\n\r\n`

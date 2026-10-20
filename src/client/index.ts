@@ -21,8 +21,16 @@ import type {
   RouteListing,
   RouterClient,
   RouterClientOptions,
+  PrivateAttestResult,
+  PrivatePurchaseResult,
+  PrivateQuoteResult,
+  PrivateQuoteView,
+  PrivateRecordResult,
+  PrivateRouterClient,
 } from "./types.js";
 
+export { privateBindingOf, privateQuoteViewOf } from "./private.js";
+import { privateBindingOf, privateQuoteViewOf } from "./private.js";
 export type {
   ApprovalDecision,
   ExecuteInput,
@@ -232,7 +240,7 @@ export const DEFAULT_DYNAMIC_EXECUTE_TIMEOUT_MS = DEFAULT_EXECUTE_TIMEOUT_MS;
 /** 動的 quote（`quoteUrl`）の期限の既定。Router 側の最悪（上流の読取 5 秒＋見積り 6 秒＋1 回 3 秒 = 14 秒）に余裕を足したもの。 */
 export const DEFAULT_DYNAMIC_QUOTE_TIMEOUT_MS = 30_000;
 
-export function createRouterClient(options: RouterClientOptions): RouterClient {
+export function createRouterClient(options: RouterClientOptions): RouterClient & PrivateRouterClient {
   const base = new URL(options.baseUrl);
   if (base.protocol !== "http:" && base.protocol !== "https:") {
     throw new Error("router client baseUrl must use http(s)");
@@ -260,6 +268,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
    * 汎用の仕組みは作らず、束縛比較に必要な最小限だけを持つ。
    */
   const issued = new Map<string, { binding: string; requestId: string }>();
+  /** 秘匿 quote の束縛スナップショット（全欄。`privateBindingOf`）。 */
+  const privateIssued = new Map<string, { binding: string; requestId: string }>();
 
   async function call(
     path: string,
@@ -553,6 +563,143 @@ export function createRouterClient(options: RouterClientOptions): RouterClient {
         paymentId,
         ...reasonOf(result.body),
       };
+    },
+
+    async privateQuote(input): Promise<PrivateQuoteResult> {
+      let result: Awaited<ReturnType<typeof call>>;
+      try {
+        result = await call("/v1/private/quotes", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ profileId: input.profileId, requestId: input.requestId, intentB64: input.intentB64 }), timeoutMs: quoteTimeoutMs });
+      } catch {
+        return { ok: false, error: "transport_failed", status: 0 };
+      }
+      if (result.status !== 200) {
+        return { ok: false, error: errorCodeOf(result.body, `http_${result.status}`), status: result.status, ...reasonOf(result.body), ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) };
+      }
+      const quote = privateQuoteViewOf(result.body);
+      if (quote === undefined) {
+        return { ok: false, error: "quote_malformed", status: result.status };
+      }
+      // 束縛のスナップショット（全欄。`ownerKey` を含む）。
+      privateIssued.set(quote.quoteId, { binding: privateBindingOf(quote), requestId: input.requestId });
+      return { ok: true, quote };
+    },
+
+    async privatePurchase(input): Promise<PrivatePurchaseResult> {
+      const bound = frozenClone({ quote: input.quote, approval: input.approval, credential: input.credential, requestId: input.requestId });
+      const { quote, approval, credential, requestId } = bound;
+      if (approval.approved !== true) {
+        return { outcome: "not_approved", reason: approval.reason ?? "approval_required", paymentId: quote.paymentId };
+      }
+      if (approval.quoteId !== quote.quoteId || quote.approval.boundTo !== quote.quoteId) {
+        return { outcome: "approval_mismatch", reason: "approval_bound_to_other_quote", paymentId: quote.paymentId };
+      }
+      // 購入口は秘匿購入の口そのもの（`POST <base>/v1/private/purchases`）。
+      let quoted: URL | undefined;
+      try {
+        quoted = new URL(quote.resource.url);
+      } catch {
+        quoted = undefined;
+      }
+      if (quoted === undefined || quoted.pathname !== "/v1/private/purchases" || quoted.search !== "" || quoted.hash !== "" || quote.resource.method !== "POST") {
+        return { outcome: "resource_mismatch", reason: "resource_not_approved_private", paymentId: quote.paymentId };
+      }
+      const snapshot = privateIssued.get(quote.quoteId);
+      if (snapshot === undefined) {
+        if (options.allowUnissuedQuotes !== true) {
+          return { outcome: "resource_mismatch", reason: "quote_not_issued_by_client", paymentId: quote.paymentId };
+        }
+      } else {
+        if (privateBindingOf(quote) !== snapshot.binding) {
+          return { outcome: "resource_mismatch", reason: "quote_binding_changed", paymentId: quote.paymentId };
+        }
+        if (requestId !== snapshot.requestId) {
+          return { outcome: "resource_mismatch", reason: "request_id_changed", paymentId: quote.paymentId };
+        }
+      }
+      if (credential === "") {
+        return { outcome: "rejected", error: "credential_required", status: 0 };
+      }
+      let result: Awaited<ReturnType<typeof call>>;
+      try {
+        result = await call("/v1/private/purchases", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ quoteId: quote.quoteId, requestId, approval: approval.quoteId, credential, ownerKey: quote.ownerKey }),
+          timeoutMs: executeTimeoutMs,
+        });
+      } catch {
+        return { outcome: "unknown", paymentId: quote.paymentId, reason: "transport_uncertain" };
+      }
+      const paymentId = quote.paymentId;
+      const body = isRecord(result.body) ? result.body : undefined;
+      const bodyId = body === undefined ? undefined : requireString(body, "paymentId");
+      if (result.status === 200) {
+        if (body === undefined || bodyId !== paymentId || body["status"] !== "awaiting_session") {
+          return { outcome: "unknown", paymentId, reason: bodyId === undefined ? "payment_id_missing" : "payment_id_mismatch" };
+        }
+        const verifier = body["verifier"];
+        const releasedHeader = body["releasedHeader"];
+        const headerFile = body["headerFile"];
+        const deadlines = body["deadlines"];
+        if (
+          !isRecord(verifier) || typeof verifier["address"] !== "string" ||
+          !isRecord(releasedHeader) || typeof releasedHeader["name"] !== "string" || typeof releasedHeader["value"] !== "string" ||
+          !isRecord(headerFile) || typeof headerFile["order_id"] !== "string" || typeof headerFile["intent_sha256"] !== "string" || typeof headerFile["name"] !== "string" || typeof headerFile["value"] !== "string" ||
+          typeof body["releaseB64"] !== "string" || !isRecord(deadlines) || typeof deadlines["credentialExpiresAt"] !== "number" || typeof deadlines["sessionBy"] !== "number"
+        ) {
+          return { outcome: "unknown", paymentId, reason: "response_unreadable" };
+        }
+        return {
+          outcome: "awaiting_session",
+          handover: {
+            paymentId,
+            verifier: { address: verifier["address"] },
+            releasedHeader: { name: releasedHeader["name"], value: releasedHeader["value"] },
+            headerFile: { order_id: headerFile["order_id"], intent_sha256: headerFile["intent_sha256"], name: headerFile["name"], value: headerFile["value"] },
+            releaseB64: body["releaseB64"],
+            deadlines: { credentialExpiresAt: deadlines["credentialExpiresAt"], sessionBy: deadlines["sessionBy"] },
+          },
+        };
+      }
+      const serverStatus = body?.["status"];
+      if (serverStatus === "unknown" || serverStatus === "paid_data_unavailable") {
+        if (bodyId !== paymentId) return { outcome: "unknown", paymentId, reason: bodyId === undefined ? "payment_id_missing" : "payment_id_mismatch" };
+        if (serverStatus === "unknown") return { outcome: "unknown", paymentId, reason: errorCodeOf(result.body, "destination_pay_unknown") };
+        const terminalReason = body === undefined ? undefined : requireString(body, "terminalReason");
+        return { outcome: "paid_data_unavailable", paymentId, ...(terminalReason === undefined ? {} : { terminalReason }) };
+      }
+      if (body === undefined) return { outcome: "unknown", paymentId, reason: "response_unreadable" };
+      if (result.status === 402) return { outcome: "payment_required", error: errorCodeOf(result.body, "payment_required"), paymentId };
+      if (result.status >= 500) return { outcome: "unknown", paymentId, reason: errorCodeOf(result.body, "response_unreadable") };
+      return { outcome: "rejected", error: errorCodeOf(result.body, `http_${result.status}`), status: result.status, paymentId, ...reasonOf(result.body) };
+    },
+
+    async privateAttest(input): Promise<PrivateAttestResult> {
+      let result: Awaited<ReturnType<typeof call>>;
+      try {
+        result = await call(`/v1/private/purchases/${encodeURIComponent(input.paymentId)}/attest`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundleB64: input.bundleB64, ownerKey: input.ownerKey }), timeoutMs: executeTimeoutMs });
+      } catch {
+        return { ok: false, error: "transport_failed", status: 0 };
+      }
+      if (result.status !== 200 || !isRecord(result.body) || result.body["paymentId"] !== input.paymentId || typeof result.body["status"] !== "string") {
+        return { ok: false, error: errorCodeOf(result.body, `http_${result.status}`), status: result.status };
+      }
+      const terminalReason = requireString(result.body, "terminalReason");
+      return { ok: true, paymentId: input.paymentId, status: result.body["status"], ...(terminalReason === undefined ? {} : { terminalReason }), ...(isRecord(result.body["private"]) ? { private: result.body["private"] } : {}) };
+    },
+
+    async privateRecord(input): Promise<PrivateRecordResult> {
+      let result: Awaited<ReturnType<typeof call>>;
+      try {
+        result = await call(`/v1/private/purchases/${encodeURIComponent(input.paymentId)}/record`, { method: "GET", headers: { "x-router-owner-key": input.ownerKey } });
+      } catch {
+        return { ok: false, error: "transport_failed", status: 0 };
+      }
+      const body = isRecord(result.body) ? result.body : undefined;
+      if (result.status !== 200 || body === undefined || body["paymentId"] !== input.paymentId || typeof body["recordB64"] !== "string" || typeof body["releaseB64"] !== "string" || typeof body["recordAvailableUntil"] !== "number") {
+        return { ok: false, error: errorCodeOf(result.body, `http_${result.status}`), status: result.status };
+      }
+      return { ok: true, paymentId: input.paymentId, recordB64: body["recordB64"], releaseB64: body["releaseB64"], recordAvailableUntil: body["recordAvailableUntil"] };
     },
 
     async status(paymentId: string, ownerKey?: string) {

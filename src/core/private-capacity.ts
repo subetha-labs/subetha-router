@@ -75,7 +75,8 @@ export class PrivateCapacity {
   #committedBytes = 0;
   readonly #leases = new Map<string, { bytes: number; session: boolean }>();
   #runningVerifications = 0;
-  readonly #queue: Array<() => void> = [];
+  readonly #queue: Array<{ readonly start: () => void; readonly cancel: (error: Error) => void }> = [];
+  #closing = false;
 
   constructor(limits: CapacityLimits, workDir: string) {
     this.#limits = limits;
@@ -104,7 +105,7 @@ export class PrivateCapacity {
 
   /** 不等式を全部満たすときだけ、ディレクトリを作って予約する（同期）。 */
   reserve(paymentId: string): CapacityLease | undefined {
-    if (!this.#opened) return undefined;
+    if (!this.#opened || this.#closing) return undefined;
     const allowance = this.#limits.purchaseAllowance;
     if (this.#activeSessions + 1 > this.#limits.maxConcurrentSessions) return undefined;
     if (this.#committedPurchases + 1 > this.#limits.maxRetainedPurchases) return undefined;
@@ -202,19 +203,30 @@ export class PrivateCapacity {
           const next = this.#queue.shift();
           if (next !== undefined) {
             this.#runningVerifications += 1;
-            next();
+            next.start();
           }
         },
       };
     };
+    if (this.#closing) return undefined;
     if (this.#runningVerifications < this.#limits.maxConcurrentVerifications) {
       this.#runningVerifications += 1;
       return Promise.resolve(slot());
     }
     if (this.#queue.length >= this.#limits.maxQueuedVerifications) return undefined;
-    return new Promise<VerificationSlot>((resolve) => {
-      this.#queue.push(() => resolve(slot()));
+    return new Promise<VerificationSlot>((resolve, reject) => {
+      this.#queue.push({ start: () => resolve(slot()), cancel: reject });
     });
+  }
+
+  /** drain（設計 §3.7 `close`）: 待ち行列のジョブを取り消し、以後の受理を止める。実行中のジョブは呼び出し側が子を止めて待つ。 */
+  closeQueue(): void {
+    this.#closing = true;
+    for (const waiter of this.#queue.splice(0)) waiter.cancel(new Error("private capacity is closing"));
+  }
+
+  get closing(): boolean {
+    return this.#closing;
   }
 }
 

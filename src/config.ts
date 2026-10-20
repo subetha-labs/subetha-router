@@ -7,6 +7,8 @@
  * 下の検証でも使う。既存の import 先（`src/config.ts`）は変わらない。
  * ────────────────────────────────────────────────────────────────────────────── */
 export * from "./shared/networks.js";
+import path from "node:path";
+
 import {
   assetKeyOf,
   evmChainIdOf,
@@ -971,11 +973,114 @@ function parseRouterConfigUnchecked(raw: unknown): RouterConfig {
   if (entries.length === 0) {
     throw new ConfigError("router.routes must not be empty");
   }
+  const dynamic = raw["dynamic"] === undefined ? undefined : parseDynamic(raw["dynamic"], routes);
   return {
     approvalTtlMs: requireNumber(raw, "approvalTtlMs", "router"),
     routes: Object.fromEntries(entries.map(([routeId, route]) => [routeId, parseRoute(route, routeId)])),
     budget: parseBudget(requireRecord(raw, "budget", "router")),
-    ...(raw["dynamic"] === undefined ? {} : { dynamic: parseDynamic(raw["dynamic"], routes) }),
+    ...(dynamic === undefined ? {} : { dynamic }),
+    ...(raw["private"] === undefined ? {} : { private: parsePrivate(raw["private"], dynamic) }),
+  };
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** 秘匿購入の受信レグは本 v1 では x402 の Base Sepolia USDC だけ（要件 FR-Z13、Z1〜Z3）。 */
+export const PRIVATE_INBOUND_NETWORK = "eip155:84532";
+export const PRIVATE_INBOUND_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+
+function requirePositiveInt(source: Record<string, unknown>, key: string, at: string, fallback: number | undefined): number {
+  const value = source[key] ?? fallback;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ConfigError(`${at}.${key} must be a positive integer`);
+  }
+  return value;
+}
+
+/**
+ * `router.private`（`docs/zktls-router-design.md` §9、要件 FR-Z12・FR-Z13・FR-Z28）。既定値は `DEFAULT_PRIVATE_CONFIG`。
+ * `profiles` は動的プロファイルに存在し、**受信**が x402 の Base Sepolia USDC、**送信**が x402（EVM、`tokenDomain` あり）か mpp（Tempo = EVM の family、`feeAsset`・`maxFee` あり）
+ * であること。`verifierListen` は `127.0.0.1:0` だけ。trust は設定に無い（`mozilla` 固定）。
+ */
+function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): PrivateConfig {
+  const at = "private";
+  if (!isRecord(raw)) {
+    throw new ConfigError(`${at} must be an object`);
+  }
+  if (Object.hasOwn(raw, "trust")) {
+    throw new ConfigError(`${at}.trust is not a field (trust is fixed to mozilla; the test trust is injected only by test capabilities)`);
+  }
+  if (dynamic === undefined) {
+    throw new ConfigError(`${at} requires router.dynamic (private profiles are dynamic profiles)`);
+  }
+  const deliveryBin = requireString(raw, "deliveryBin", at);
+  const srsPath = requireString(raw, "srsPath", at);
+  const deliveryBinSha256 = requireString(raw, "deliveryBinSha256", at);
+  const srsSha256 = requireString(raw, "srsSha256", at);
+  if (!SHA256_HEX.test(deliveryBinSha256) || !SHA256_HEX.test(srsSha256)) {
+    throw new ConfigError(`${at}.deliveryBinSha256 and ${at}.srsSha256 must be lowercase sha256 hex`);
+  }
+  if (!path.isAbsolute(deliveryBin) || !path.isAbsolute(srsPath)) {
+    throw new ConfigError(`${at}.deliveryBin and ${at}.srsPath must be absolute paths`);
+  }
+  const profiles = raw["profiles"];
+  if (!Array.isArray(profiles) || profiles.length === 0 || profiles.some((id) => typeof id !== "string" || id === "")) {
+    throw new ConfigError(`${at}.profiles must be a non-empty array of dynamic profile ids`);
+  }
+  if (new Set(profiles).size !== profiles.length) {
+    throw new ConfigError(`${at}.profiles must not repeat a profile id`);
+  }
+  for (const profileId of profiles as string[]) {
+    const profile = dynamic.profiles[profileId];
+    if (profile === undefined) {
+      throw new ConfigError(`${at}.profiles: ${profileId} is not a dynamic profile`);
+    }
+    if (profile.sourceRail !== "x402" || profile.source.network !== PRIVATE_INBOUND_NETWORK || profile.source.asset.toLowerCase() !== PRIVATE_INBOUND_ASSET.toLowerCase()) {
+      throw new ConfigError(`${at}.profiles: ${profileId} must receive x402 on ${PRIVATE_INBOUND_NETWORK} (USDC) in this version`);
+    }
+    if (profile.rail === "x402") {
+      if (networkFamilyOf(profile.destination.network) !== "evm" || profile.destination.tokenDomain === undefined) {
+        throw new ConfigError(`${at}.profiles: ${profileId} must pay x402 on an EVM network with a tokenDomain`);
+      }
+    } else if (networkFamilyOf(profile.destination.network) !== "evm" || profile.destination.feeAsset === undefined || profile.destination.maxFee === undefined) {
+      throw new ConfigError(`${at}.profiles: ${profileId} must pay MPP on Tempo (EVM family) with feeAsset and maxFee (pull)`);
+    }
+  }
+  const verifierListen = (raw["verifierListen"] ?? DEFAULT_PRIVATE_CONFIG.verifierListen) as unknown;
+  if (verifierListen !== "127.0.0.1:0") {
+    throw new ConfigError(`${at}.verifierListen must be "127.0.0.1:0" (loopback only)`);
+  }
+  const workDir = raw["workDir"] === undefined ? DEFAULT_PRIVATE_CONFIG.workDir : raw["workDir"];
+  if (typeof workDir !== "string" || workDir === "") {
+    throw new ConfigError(`${at}.workDir must be a non-empty string`);
+  }
+  const lifetimes = raw["minCredentialLifetimeMs"] === undefined ? {} : raw["minCredentialLifetimeMs"];
+  if (!isRecord(lifetimes)) {
+    throw new ConfigError(`${at}.minCredentialLifetimeMs must be an object`);
+  }
+  const defaults = DEFAULT_PRIVATE_CONFIG;
+  return {
+    deliveryBin,
+    deliveryBinSha256,
+    srsPath,
+    srsSha256,
+    profiles: [...(profiles as string[])],
+    verifierListen: "127.0.0.1:0",
+    sessionTimeoutMs: requirePositiveInt(raw, "sessionTimeoutMs", at, defaults.sessionTimeoutMs),
+    attestTimeoutMs: requirePositiveInt(raw, "attestTimeoutMs", at, defaults.attestTimeoutMs),
+    verifyTimeoutMs: requirePositiveInt(raw, "verifyTimeoutMs", at, defaults.verifyTimeoutMs),
+    minCredentialLifetimeMs: { x402: requirePositiveInt(lifetimes, "x402", `${at}.minCredentialLifetimeMs`, defaults.minCredentialLifetimeMs.x402), mpp: requirePositiveInt(lifetimes, "mpp", `${at}.minCredentialLifetimeMs`, defaults.minCredentialLifetimeMs.mpp) },
+    minSessionRemainingMs: requirePositiveInt(raw, "minSessionRemainingMs", at, defaults.minSessionRemainingMs),
+    workDir,
+    retentionMs: requirePositiveInt(raw, "retentionMs", at, defaults.retentionMs),
+    maxConcurrentSessions: requirePositiveInt(raw, "maxConcurrentSessions", at, defaults.maxConcurrentSessions),
+    maxConcurrentVerifications: requirePositiveInt(raw, "maxConcurrentVerifications", at, defaults.maxConcurrentVerifications),
+    maxQueuedVerifications: requirePositiveInt(raw, "maxQueuedVerifications", at, defaults.maxQueuedVerifications),
+    maxIntentBytes: requirePositiveInt(raw, "maxIntentBytes", at, defaults.maxIntentBytes),
+    maxBundleBytes: requirePositiveInt(raw, "maxBundleBytes", at, defaults.maxBundleBytes),
+    maxRecordBytes: requirePositiveInt(raw, "maxRecordBytes", at, defaults.maxRecordBytes),
+    maxChildOutputBytes: requirePositiveInt(raw, "maxChildOutputBytes", at, defaults.maxChildOutputBytes),
+    maxRetainedBytes: requirePositiveInt(raw, "maxRetainedBytes", at, defaults.maxRetainedBytes),
+    maxRetainedPurchases: requirePositiveInt(raw, "maxRetainedPurchases", at, defaults.maxRetainedPurchases),
   };
 }
 

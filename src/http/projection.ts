@@ -4,7 +4,7 @@
  */
 
 import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig, usesGasIndexedFee } from "../config.js";
-import type { Projection, QuoteDocument } from "../core/orchestrator.js";
+import type { PrivateQuoteDocument, Projection, QuoteDocument } from "../core/orchestrator.js";
 import type { InboundOffer } from "../ports/inbound.js";
 import { networkFamilyOf } from "../shared/networks.js";
 
@@ -183,6 +183,43 @@ export function dynamicQuoteBody(quote: QuoteDocument, profile: DynamicProfile, 
     },
     pricing: { ...pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
     disclosures: dynamicDisclosuresOf(fundsMoveOnCredential, usesGasIndexedFee(profile)),
+    approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
+    ownerKey: quote.ownerKey,
+  };
+}
+
+/**
+ * 秘匿 quote の文書（`docs/zktls-router-design.md` §2・§2.1・§8.1）。動的の文書を継承せず**明示的に**組む: `resource` は秘匿購入の口（`POST <base>/v1/private/purchases`）、
+ * `upstream` 欄は無い（探りの要求は承認対象ではない）。`ownerKey` はこの応答にしか載らない。
+ */
+export function privateQuoteBody(quote: PrivateQuoteDocument, profile: DynamicProfile, canonicalBaseUrl: string): unknown {
+  return {
+    quoteId: quote.quoteId,
+    paymentId: quote.paymentId,
+    routeId: quote.routeId,
+    resource: { url: `${canonicalBaseUrl}/v1/private/purchases`, method: "POST" },
+    source: {
+      rail: profile.sourceRail,
+      amount: quote.source.amount,
+      asset: quote.source.asset,
+      decimals: profile.source.decimals,
+      network: quote.source.network,
+      payTo: quote.source.offer.payTo,
+      expiresAt: quote.source.offer.extra.expiresAt,
+      offer: quote.source.offer,
+    },
+    destination: {
+      rail: profile.rail,
+      quoted: quote.destination.quoted,
+      asset: quote.destination.asset,
+      decimals: profile.destination.decimals,
+      network: quote.destination.network,
+      payTo: quote.destination.payTo,
+      quoteFingerprint: quote.destination.quoteFingerprint,
+    },
+    pricing: { ...quote.pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
+    disclosures: { ...dynamicDisclosuresOf(false, usesGasIndexedFee(profile)), privatePurchase: true, routerSeesRequestBody: false, routerSeesResponseBody: false },
+    private: quote.private,
     approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
     ownerKey: quote.ownerKey,
   };

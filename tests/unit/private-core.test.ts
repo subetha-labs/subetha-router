@@ -11,7 +11,9 @@ import { DEFAULT_DYNAMIC_LIMITS, DEFAULT_PRIVATE_CONFIG, type DynamicProfile, ty
 import { createRouterCore, type PrivateQuoteOutcome, type RouterCore } from "../../src/core/orchestrator.js";
 import { stableJson } from "../../src/core/intent.js";
 import type { StopPoint } from "../../src/core/private.js";
-import { createVerifierRunner, sha256File } from "../../src/private/verifier.js";
+import { createVerifierRunner, sha256File, type VerifierRunner } from "../../src/private/verifier.js";
+import { open as openFile } from "node:fs/promises";
+import { vi } from "vitest";
 import type { CreateOfferRequest, InboundOffer, InboundRail, PaymentCredential, PreflightResult, SettleResult } from "../../src/ports/inbound.js";
 import type { DestinationOffer, OutboundRail, PayResult, UpstreamTarget } from "../../src/ports/outbound.js";
 import type { IssueCredentialArgs, IssueOutcome, PrivateOutboundRail, ReceiptCheck } from "../../src/ports/private-outbound.js";
@@ -165,19 +167,29 @@ function control(value: Record<string, unknown>): void {
   writeFileSync(path.join(privateDir, "fake-control.json"), JSON.stringify({ receiptHeader: { name: "PAYMENT-RESPONSE", value: RECEIPT_VALUE }, delayMs: 150, ...value }));
 }
 
-async function boot(cfg: RouterConfig = config(), extra: { stop?: (point: StopPoint, paymentId: string) => Promise<void>; trust?: "mozilla" | "lab-fixture-ca" } = {}): Promise<RouterCore> {
-  const runner = createVerifierRunner({ deliveryBin: FAKE, srsPath: cfg.private!.srsPath, trust: extra.trust ?? "lab-fixture-ca", maxChildOutputBytes: cfg.private!.maxChildOutputBytes });
+async function boot(cfg: RouterConfig = config(), extra: { stop?: (point: StopPoint, paymentId: string) => Promise<void>; trust?: "mozilla" | "lab-fixture-ca"; now?: () => number; runner?: (base: VerifierRunner) => VerifierRunner } = {}): Promise<RouterCore> {
+  const base = createVerifierRunner({ deliveryBin: FAKE, srsPath: cfg.private!.srsPath, trust: extra.trust ?? "lab-fixture-ca", maxChildOutputBytes: cfg.private!.maxChildOutputBytes });
+  const runner = extra.runner === undefined ? base : extra.runner(base);
   const core = await createRouterCore({
     journalPath,
     config: cfg,
     inbound,
     outbound,
     nextPaymentId: () => `pay-${(ids += 1)}`,
+    ...(extra.now === undefined ? {} : { now: extra.now }),
     dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") },
     private: { rails: { [PROFILE_ID]: rail }, runner, trust: extra.trust ?? "lab-fixture-ca", workDir: privateDir, ...(extra.stop === undefined ? {} : { hooksForTest: { stop: extra.stop } }) },
   });
   opened.push(core);
   return core;
+}
+
+/** canary の行列（設計 §11、タスク文書）: Router が触れる成果物のうち、面ごとに許されない値が無いこと。 */
+function scanArtifacts(core: RouterCore, paymentId: string, ownerKey: string): { journal: string; projection: string; files: Record<string, string> } {
+  const files: Record<string, string> = {};
+  const dir = path.join(privateDir, paymentId);
+  if (existsSync(dir)) for (const name of readdirSync(dir)) files[name] = readFileSync(path.join(dir, name), "latin1");
+  return { journal: readFileSync(journalPath, "utf8"), projection: JSON.stringify(core.status(paymentId, "alice", ownerKey)), files };
 }
 
 async function quote(core: RouterCore, requestId = "r1", b64 = envelopeFor().b64): Promise<Extract<PrivateQuoteOutcome, { ok: true }>> {
@@ -406,13 +418,219 @@ describe("purchase → session → attest → record（全経路）", () => {
     const core = await boot();
     const q = await quote(core, "r1");
     await purchase(core, q);
-    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "unknown");
+    // `unknown` の行と `private_recorded {late}` の行は 2 行: 両方が揃うのを待つ。
+    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "unknown" && core.status(q.paymentId, "alice", q.ownerKey)?.private?.artifacts.record === "available");
     const status = core.status(q.paymentId, "alice", q.ownerKey)!;
     expect(status).toMatchObject({ terminalReason: "private_session_timeout", private: { artifacts: { record: "available", late: true } } });
     expect(status.private?.deadlines.attestBy).toBeUndefined();
     expect(core.privateRecord(q.paymentId, "alice", q.ownerKey).ok).toBe(true);
     expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(envelopeFor().order))).toEqual({ ok: false, code: "attest_closed" });
     expect(readdirSync(path.join(privateDir, q.paymentId))).toEqual(["record.json"]);
+  });
+});
+
+describe("attest の受付（同時提出・待ち行列・期限）", () => {
+  test("検証中: 同じ digest は合流（検証 1 回）、別の digest は即 attest_in_progress。待ち行列の受理は期限内なら attestBy を越えても検証する。タイマは受理済みを壊さない", async () => {
+    control({});
+    let releaseVerify: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseVerify = resolve;
+    });
+    let stops = 0;
+    const core = await boot(config({ maxConcurrentVerifications: 1, maxQueuedVerifications: 1, attestTimeoutMs: 1_500 }), {
+      stop: async (point) => {
+        if (point === "afterAttestAdmission") {
+          stops += 1;
+          if (stops === 1) await blocked;
+        }
+      },
+    });
+    const envA = envelopeFor();
+    const envB = envelopeFor("0".repeat(32) + "a".repeat(32));
+    const qA = await quote(core, "r1", envA.b64);
+    const qB = await quote(core, "r2", envB.b64);
+    await purchase(core, qA, "r1");
+    await purchase(core, qB, "r2");
+    await waitFor(() => core.status(qA.paymentId, "alice", qA.ownerKey)?.status === "attesting" && core.status(qB.paymentId, "alice", qB.ownerKey)?.status === "attesting");
+    // A: 1 件目の検証は hook で止まる。
+    const first = core.privateAttest(qA.paymentId, "alice", qA.ownerKey, bundleFor(envA.order));
+    await waitFor(() => stops === 1);
+    const same = core.privateAttest(qA.paymentId, "alice", qA.ownerKey, bundleFor(envA.order));
+    const different = await core.privateAttest(qA.paymentId, "alice", qA.ownerKey, bundleFor(envA.order, { payload_len: 197 }));
+    expect(different).toEqual({ ok: false, code: "attest_in_progress" });
+    // B: 枠（実行 1）が塞がっているので待ち行列へ。期限（1.5 s）を越えても受理済みなので検証される。
+    const queued = core.privateAttest(qB.paymentId, "alice", qB.ownerKey, bundleFor(envB.order));
+    const overflow = await core.privateAttest(qB.paymentId, "alice", qB.ownerKey, bundleFor(envB.order, { payload_len: 197 }));
+    expect(overflow).toEqual({ ok: false, code: "attest_in_progress" });
+    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    // attestBy を過ぎたが、A は検証中・B は受理済み: タイマは unknown を書かない。
+    expect(core.status(qA.paymentId, "alice", qA.ownerKey)?.status).toBe("attesting");
+    expect(core.status(qB.paymentId, "alice", qB.ownerKey)?.status).toBe("attesting");
+    releaseVerify!();
+    expect(await first).toEqual({ ok: true, status: "delivered_private" });
+    expect(await same).toEqual({ ok: true, status: "delivered_private" });
+    expect(await queued).toEqual({ ok: true, status: "delivered_private" });
+    expect(stops).toBe(2);
+    // 期限切れの 3 件目の購入: 受理されない。
+    const envC = envelopeFor("0".repeat(32) + "c".repeat(32));
+    const qC = await quote(core, "r3", envC.b64);
+    await purchase(core, qC, "r3");
+    await waitFor(() => core.status(qC.paymentId, "alice", qC.ownerKey)?.status === "attesting");
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    expect(core.status(qC.paymentId, "alice", qC.ownerKey)).toMatchObject({ status: "unknown", terminalReason: "private_attest_timeout" });
+    expect(await core.privateAttest(qC.paymentId, "alice", qC.ownerKey, bundleFor(envC.order))).toEqual({ ok: false, code: "attest_closed" });
+    expect(readdirSync(path.join(privateDir, qC.paymentId))).toEqual(["record.json"]);
+  }, 20_000);
+
+  test("検証の枠が無ければ private_capacity（状態不変）。drain 中の受理は private_unavailable で、待ち行列は取り消される", async () => {
+    control({});
+    let releaseVerify: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseVerify = resolve;
+    });
+    const core = await boot(config({ maxConcurrentVerifications: 1, maxQueuedVerifications: 0 }), { stop: async (point) => (point === "afterAttestAdmission" ? blocked : undefined) });
+    const envA = envelopeFor();
+    const envB = envelopeFor("0".repeat(32) + "a".repeat(32));
+    const qA = await quote(core, "r1", envA.b64);
+    const qB = await quote(core, "r2", envB.b64);
+    await purchase(core, qA, "r1");
+    await purchase(core, qB, "r2");
+    await waitFor(() => core.status(qA.paymentId, "alice", qA.ownerKey)?.status === "attesting" && core.status(qB.paymentId, "alice", qB.ownerKey)?.status === "attesting");
+    const first = core.privateAttest(qA.paymentId, "alice", qA.ownerKey, bundleFor(envA.order));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await core.privateAttest(qB.paymentId, "alice", qB.ownerKey, bundleFor(envB.order))).toEqual({ ok: false, code: "private_capacity" });
+    expect(core.status(qB.paymentId, "alice", qB.ownerKey)?.status).toBe("attesting");
+    // drain: 実行中の検証は永続化せずに終わる（record は残り、再起動で unknown）。
+    const closing = core.close();
+    opened.pop();
+    releaseVerify!();
+    expect(await first).toEqual({ ok: false, code: "private_unavailable" });
+    await closing;
+    expect(events().filter((event) => event === "private_attested" || event === "unknown")).toEqual([]);
+    const reopened = await boot();
+    expect(reopened.status(qA.paymentId, "alice", qA.ownerKey)).toMatchObject({ status: "unknown", terminalReason: "interrupted_after_release", private: { artifacts: { record: "available" } } });
+  }, 20_000);
+});
+
+describe("期限の検査 3 回（§3.2 8・9）", () => {
+  test("起動前・addr 取得後・応答直前で sessionBy を越えていれば unknown/private_session_timeout（credential は返さない）", async () => {
+    control({ mode: "hang" });
+    for (const point of ["afterRelease", "afterSpawn", "afterHandoverJournal"] as const) {
+      inbound = new SyntheticInbound();
+      rail = new FakePrivateRail();
+      let clock = Date.now();
+      const core = await boot(config({ sessionTimeoutMs: 10_000, minSessionRemainingMs: 1_000 }), {
+        now: () => clock,
+        stop: async (p) => {
+          if (p === point) clock += 60_000; // 期限を越える
+        },
+      });
+      const q = await quote(core, "r1");
+      const result = await purchase(core, q);
+      expect(result, point).toMatchObject({ status: "unknown", terminalReason: "private_session_timeout" });
+      expect(result.handover, point).toBeUndefined();
+      expect(existsSync(path.join(privateDir, q.paymentId)), point).toBe(false);
+      await core.close();
+      opened.pop();
+      rmSync(journalPath, { force: true });
+      rmSync(path.join(workDir, "dynamic-quotes"), { recursive: true, force: true });
+      ids = 0;
+    }
+  }, 30_000);
+});
+
+describe("record の保持・取得・壊れた record", () => {
+  test("保持期限で削除され 410、再起動で延びない。壊れた record は返さない", async () => {
+    control({});
+    const core = await boot(config({ retentionMs: 2_000 }));
+    const env = envelopeFor();
+    const q = await quote(core, "r1", env.b64);
+    await purchase(core, q);
+    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "attesting");
+    expect(await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order))).toEqual({ ok: true, status: "delivered_private" });
+    const until = core.status(q.paymentId, "alice", q.ownerKey)!.private!.artifacts.recordAvailableUntil!;
+    // 壊れた record は配らない。
+    const recordFile = path.join(privateDir, q.paymentId, "record.json");
+    const original = readFileSync(recordFile);
+    writeFileSync(recordFile, Buffer.concat([original, Buffer.from(" ")]));
+    expect(core.privateRecord(q.paymentId, "alice", q.ownerKey)).toEqual({ ok: false, code: "record_corrupt" });
+    writeFileSync(recordFile, original);
+    expect(core.privateRecord(q.paymentId, "alice", q.ownerKey).ok).toBe(true);
+    // 再起動しても保持期限は record の完成時刻から（延びない）。
+    await core.close();
+    opened.pop();
+    const reopened = await boot(config({ retentionMs: 2_000 }));
+    expect(reopened.status(q.paymentId, "alice", q.ownerKey)!.private!.artifacts.recordAvailableUntil).toBe(until);
+    await waitFor(() => reopened.status(q.paymentId, "alice", q.ownerKey)?.private?.artifacts.record === "expired", 6_000);
+    expect(reopened.privateRecord(q.paymentId, "alice", q.ownerKey)).toEqual({ ok: false, code: "record_expired" });
+    expect(existsSync(path.join(privateDir, q.paymentId))).toBe(false);
+    expect(events()).toContain("private_record_expired");
+  }, 15_000);
+});
+
+describe("棚卸しの失敗・journal の失敗（fail closed）", () => {
+  test("前世代の子を確認できなければ秘匿購入は閉じたまま（quote は private_unavailable、容量は取れない）", async () => {
+    const core = await boot(config(), { runner: (base) => ({ ...base, inventory: async () => ({ ok: false, reason: "unverifiable_pid" }) }) });
+    expect(await core.privateQuote({ principalId: "alice", requestId: "r1", profileId: PROFILE_ID, intentB64: envelopeFor().b64 })).toEqual({ ok: false, code: "private_unavailable" });
+  });
+  test("予約の後の journal の失敗: 固定の unknown を返し、以後の秘匿購入を止め、作業ディレクトリ（証拠）を消さない", async () => {
+    control({});
+    const core = await boot();
+    const q = await quote(core, "r1");
+    const probe = await openFile(path.join(workDir, "fsync-probe"), "a");
+    const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+    await probe.close();
+    // 予約（private_issuance_reserved）の行の fsync を失敗させる → journal は以後の追記を拒む（毒された writer）。
+    let failed = false;
+    const spy = vi.spyOn(proto, "sync").mockImplementation(async function (this: { sync: () => Promise<void> }) {
+      if (!failed && existsSync(journalPath) && readFileSync(journalPath, "utf8").includes('"private_issuance_reserved"')) {
+        failed = true;
+        throw new Error("fsync failed");
+      }
+    });
+    try {
+      const result = await purchase(core, q);
+      expect(result).toMatchObject({ status: "unknown", terminalReason: "private_issuance_unknown" });
+      expect(result.handover).toBeUndefined();
+      expect(failed).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    // 作業ディレクトリ（証拠）は消えていない。
+    expect(existsSync(path.join(privateDir, q.paymentId))).toBe(true);
+    // 以後は閉じる。証拠は残る。
+    expect(await core.privateQuote({ principalId: "alice", requestId: "r2", profileId: PROFILE_ID, intentB64: envelopeFor("0".repeat(32) + "a".repeat(32)).b64 })).toEqual({ ok: false, code: "private_unavailable" });
+    expect(rail.issueCalls).toBe(0);
+  });
+});
+
+describe("canary の行列", () => {
+  test("bearer は最終注文・record・引き渡しの応答にだけ、封筒は journal と Verifier の入力にだけ、射影には無い", async () => {
+    control({});
+    const core = await boot();
+    const env = envelopeFor();
+    const q = await quote(core, "r1", env.b64);
+    const result = await purchase(core, q);
+    expect(JSON.stringify(result.handover)).toContain(HEADER_VALUE);
+    await waitFor(() => core.status(q.paymentId, "alice", q.ownerKey)?.status === "attesting");
+    let scan = scanArtifacts(core, q.paymentId, q.ownerKey);
+    expect(scan.journal).not.toContain(HEADER_VALUE);
+    expect(scan.projection).not.toContain(HEADER_VALUE);
+    expect(scan.projection).not.toContain(env.b64.slice(0, 24));
+    expect(Object.keys(scan.files).sort()).toEqual(["fake-args.verifier-serve.json", "intent.json", "order_final.json", "record.json", "release.json", "serve.stderr.log", "serve.stdout.log", "verifier.addr"]);
+    for (const [name, text] of Object.entries(scan.files)) {
+      if (name === "order_final.json" || name === "record.json") expect(text, name).toContain(HEADER_VALUE);
+      else expect(text, name).not.toContain(HEADER_VALUE);
+    }
+    expect(scan.files["intent.json"]).toBe(env.bytes.toString("latin1"));
+    expect(scan.journal).toContain(env.b64); // created の private 欄（権威の保管）
+    await core.privateAttest(q.paymentId, "alice", q.ownerKey, bundleFor(env.order));
+    scan = scanArtifacts(core, q.paymentId, q.ownerKey);
+    expect(Object.keys(scan.files)).toEqual(["record.json"]);
+    expect(scan.journal).not.toContain(HEADER_VALUE);
+    expect(scan.projection).not.toContain(HEADER_VALUE);
+    // 要約は固定の値だけ（Provider の文字列を写さない）。
+    expect(core.status(q.paymentId, "alice", q.ownerKey)!.private!.verifier).toEqual({ trust: "lab-fixture-ca", externalGate: false, serverName: "test-server.io", target: { host: "test-server.io", port: 443, path: "/select" }, requestLine: "POST /select HTTP/1.1", lenSent: expect.any(Number), bodyLen: 196, statusLine: "HTTP/1.1 200 OK", credLen: 39 });
   });
 });
 
@@ -431,9 +649,12 @@ describe("再起動（§3.6）", () => {
     await waitFor(() => existsSync(path.join(privateDir, q.paymentId, "record.json")));
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(core.status(q.paymentId, "alice", q.ownerKey)?.status).toBe("awaiting_session");
-    await core.close();
+    // 「クラッシュ」= drain: 止まっていた継続は closing を見て永続化せずに終わる（record は残る）。
+    const closingCore = core.close();
     opened.pop();
     release!();
+    await closingCore;
+    expect(events()).not.toContain("private_recorded");
     const reopened = await boot();
     const status = reopened.status(q.paymentId, "alice", q.ownerKey)!;
     expect(status).toMatchObject({ status: "unknown", terminalReason: "interrupted_after_release", private: { artifacts: { record: "available" } } });
@@ -454,10 +675,14 @@ describe("再起動（§3.6）", () => {
     const q = await quote(core, "r1");
     const pending = purchase(core, q);
     await waitFor(() => events().includes("private_released"));
-    await core.close();
+    const closingCore = core.close();
     opened.pop();
     release!();
-    await pending.catch(() => {});
+    const outcome = await pending;
+    await closingCore;
+    // drain 中の継続は子を起動せず、耐久でない固定の unknown を返す（journal は private_released のまま）。
+    expect(outcome).toMatchObject({ status: "unknown", terminalReason: "private_unavailable" });
+    expect(events().at(-1)).toBe("private_released");
     const reopened = await boot();
     expect(reopened.status(q.paymentId, "alice", q.ownerKey)).toMatchObject({ status: "unknown", terminalReason: "interrupted_before_handover" });
     expect(existsSync(path.join(privateDir, q.paymentId))).toBe(false);

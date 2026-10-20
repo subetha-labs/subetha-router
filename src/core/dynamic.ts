@@ -792,8 +792,9 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     const eventId = isRecord(settled) ? settled["eventId"] : undefined;
     if (outcome === "settled" && typeof txRef === "string" && txRef !== "") {
       try {
-        // 支払いイベントの識別子（受信 adapter が返したときだけ。秘匿購入の二重一意性 FR-Z06 (b) の材料）。
-        await store.append(paymentId, "source_settled", { txRef, ...(typeof eventId === "string" && eventId !== "" ? { eventId } : {}) });
+        // 支払いイベントの識別子は**秘匿購入だけ**に写す（FR-Z06 (b) の材料。通常の動的購入の journal の形は不変）。
+        const isPrivateIntent = options.private !== undefined && options.private.isPrivate(intent);
+        await store.append(paymentId, "source_settled", { txRef, ...(isPrivateIntent && typeof eventId === "string" && eventId !== "" ? { eventId } : {}) });
       } catch {
         // 静的と同じ（`orchestrator.ts` の settle）: 記録できなければ `unknown` を返し、別の行を書かず、送信を始めない。
         note?.(`source_settled could not be journaled (paymentId=${paymentId}); answering unknown`);

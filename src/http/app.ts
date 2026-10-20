@@ -8,10 +8,11 @@ import { once } from "node:events";
 
 import { canonicalPathOf, resolveProfile, resolveRoute, type RouterConfig } from "../config.js";
 import type { PurchaseOutcome, RouterCore } from "../core/orchestrator.js";
+import { MAX_ATTEST_BODY_BYTES_OF } from "./private-limits.js";
 import type { InboundOffer, PaymentCredential } from "../ports/inbound.js";
 import type { DrainGate } from "../shared/drain.js";
 import { authenticate, singleHeader } from "./auth.js";
-import { dynamicQuoteBody, paymentRequiredBody, projectionBody, quoteBody, routeListBody } from "./projection.js";
+import { dynamicQuoteBody, paymentRequiredBody, privateQuoteBody, projectionBody, quoteBody, routeListBody } from "./projection.js";
 
 export interface AppOptions {
   readonly core: RouterCore;
@@ -62,12 +63,12 @@ function sendError(
   sendJson(response, status, { error, ...extra }, status === 429 && error === "rate_limited" ? { "retry-after": String(RATE_LIMIT_RETRY_AFTER_SECONDS), ...headers } : headers);
 }
 
-async function readBody(request: http.IncomingMessage): Promise<string | undefined> {
+async function readBody(request: http.IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<string | undefined> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       return undefined;
     }
     chunks.push(chunk as Buffer);
@@ -121,6 +122,7 @@ const REJECTED_STATUS: Readonly<Record<string, number>> = {
   payment_id_collision: 409,
   quote_unreadable: 409,
   dynamic_unavailable: 503,
+  private_disabled: 404,
 };
 
 /** 受信 settle 前に終わった失敗（課金は起きていない）。 */
@@ -138,6 +140,45 @@ const AWAITING_STATUS: Readonly<Record<string, number>> = {
   rate_limited: 429,
   operator_funds_unavailable: 503,
   source_verify_unavailable: 503,
+  // 秘匿（`docs/zktls-router-design.md` §3.7）。
+  private_capacity: 429,
+};
+
+/** 秘匿 quote の失敗コード → HTTP（動的の表に足す。設計 §8.1）。 */
+const PRIVATE_QUOTE_STATUS: Readonly<Record<string, number>> = {
+  private_disabled: 404,
+  private_unavailable: 503,
+  unknown_route: 404,
+  invalid_intent: 400,
+  intent_too_large: 413,
+  intent_mismatch: 409,
+  invalid_upstream_url: 400,
+  request_id_conflict: 409,
+  rate_limited: 429,
+  dynamic_capacity: 429,
+  dynamic_unavailable: 503,
+  source_terms_mismatch: 502,
+  quote_failed: 502,
+};
+
+/** attest・record の固定コード → HTTP。 */
+const PRIVATE_ATTEST_STATUS: Readonly<Record<string, number>> = {
+  not_found: 404,
+  invalid_bundle: 400,
+  bundle_too_large: 413,
+  attest_closed: 409,
+  attest_not_ready: 409,
+  attest_in_progress: 409,
+  attest_expired: 409,
+  attest_foreign: 409,
+  private_capacity: 429,
+  private_unavailable: 503,
+};
+const PRIVATE_RECORD_STATUS: Readonly<Record<string, number>> = {
+  not_found: 404,
+  record_not_available: 409,
+  record_expired: 410,
+  record_corrupt: 500,
 };
 
 /** 動的 quote の失敗コード → HTTP。 */
@@ -174,6 +215,13 @@ function statusForOutcome(outcome: PurchaseOutcome): number {
       return 500;
     case "paid":
       return 409;
+    // 秘匿購入: 引き渡しの応答は 200（`handover` 付き）、進行中の再提出は 409。
+    case "awaiting_session":
+      return outcome.handover === undefined ? 409 : 200;
+    case "attesting":
+      return 409;
+    case "delivered_private":
+      return 200;
     case "awaiting_payment":
       return AWAITING_STATUS[outcome.code ?? ""] ?? 402;
     case "rejected":
@@ -278,6 +326,12 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       return;
     }
 
+    // 秘匿購入（`docs/zktls-router-design.md` §2）: POST /v1/private/quotes, POST /v1/private/purchases, POST /v1/private/purchases/{id}/attest, GET /v1/private/purchases/{id}/record
+    if (segments.length >= 2 && segments[0] === "v1" && segments[1] === "private") {
+      await handlePrivate(request, response, principalId, segments.slice(2));
+      return;
+    }
+
     // R4: GET /v1/purchases/{paymentId}
     if (segments.length === 3 && segments[0] === "v1" && segments[1] === "purchases") {
       if (request.method !== "GET") {
@@ -347,6 +401,170 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       return;
     }
     sendJson(response, 200, quoteBody(outcome, route, options.canonicalBaseUrl));
+  }
+
+  /** 秘匿購入の 4 経路。既存の経路の挙動は変えない。 */
+  async function handlePrivate(request: http.IncomingMessage, response: http.ServerResponse, principalId: string, rest: readonly string[]): Promise<void> {
+    const maxBundle = MAX_ATTEST_BODY_BYTES_OF(options.config.private?.maxBundleBytes ?? 262_144);
+    // POST /v1/private/quotes
+    if (rest.length === 1 && rest[0] === "quotes") {
+      if (request.method !== "POST") {
+        sendError(response, 405, "method_not_allowed", {}, { allow: "POST" });
+        return;
+      }
+      const body = await readJsonObject(request, response, MAX_BODY_BYTES);
+      if (body === undefined) return;
+      const profileId = body["profileId"];
+      const requestId = body["requestId"];
+      const intentB64 = body["intentB64"];
+      if (typeof profileId !== "string" || profileId === "") {
+        sendError(response, 400, "profile_id_required");
+        return;
+      }
+      if (typeof requestId !== "string" || requestId === "") {
+        sendError(response, 400, "request_id_required");
+        return;
+      }
+      if (typeof intentB64 !== "string" || intentB64 === "") {
+        sendError(response, 400, "intent_required");
+        return;
+      }
+      const profile = options.config.private !== undefined && options.config.dynamic?.enabled === true && options.config.private.profiles.includes(profileId) ? resolveProfile(options.config, profileId) : undefined;
+      if (profile === undefined) {
+        sendError(response, 404, options.config.private === undefined ? "private_disabled" : "unknown_route");
+        return;
+      }
+      const outcome = await options.core.privateQuote({ principalId, requestId, profileId, intentB64, source: sourceOf(request, principalId) });
+      if (!outcome.ok) {
+        sendError(response, PRIVATE_QUOTE_STATUS[outcome.code] ?? 502, outcome.code, outcome.reason === undefined ? {} : { reason: outcome.reason });
+        return;
+      }
+      sendJson(response, 200, privateQuoteBody(outcome, profile, options.canonicalBaseUrl));
+      return;
+    }
+    // POST /v1/private/purchases
+    if (rest.length === 1 && rest[0] === "purchases") {
+      if (request.method !== "POST") {
+        sendError(response, 405, "method_not_allowed", {}, { allow: "POST" });
+        return;
+      }
+      if (options.config.private === undefined) {
+        sendError(response, 404, "private_disabled");
+        return;
+      }
+      const body = await readJsonObject(request, response, MAX_BODY_BYTES);
+      if (body === undefined) return;
+      const quoteId = body["quoteId"];
+      const requestId = body["requestId"];
+      const approval = body["approval"];
+      const rawCredential = body["credential"];
+      const ownerKey = body["ownerKey"];
+      if (typeof quoteId !== "string" || quoteId === "") {
+        sendError(response, 400, "quote_id_required");
+        return;
+      }
+      if (typeof requestId !== "string" || requestId === "") {
+        sendError(response, 400, "request_id_required");
+        return;
+      }
+      if (typeof rawCredential !== "string" || rawCredential === "") {
+        sendError(response, 400, "credential_required");
+        return;
+      }
+      const credential = decodeCredential(rawCredential);
+      if (credential === undefined) {
+        sendError(response, 400, "invalid_payment_header");
+        return;
+      }
+      const outcome = await options.core.purchase({
+        principalId,
+        requestId,
+        quoteId,
+        ...(typeof approval === "string" ? { approval } : {}),
+        credential,
+        ...(typeof ownerKey === "string" ? { ownerKey } : {}),
+        source: sourceOf(request, principalId),
+      });
+      if (outcome.status === "awaiting_session" && outcome.handover !== undefined) {
+        // 引き渡し（credential の値を含む。認証済みの応答にだけ載せる）。
+        sendJson(response, 200, { paymentId: outcome.paymentId, status: "awaiting_session", ...outcome.handover });
+        return;
+      }
+      const status = statusForOutcome(outcome);
+      sendError(response, status, outcome.code ?? outcome.terminalReason ?? outcome.status, {
+        status: outcome.status,
+        ...(outcome.paymentId === undefined ? {} : { paymentId: outcome.paymentId }),
+        ...(outcome.terminalReason === undefined ? {} : { terminalReason: outcome.terminalReason }),
+      });
+      return;
+    }
+    // POST /v1/private/purchases/{id}/attest
+    if (rest.length === 3 && rest[0] === "purchases" && rest[2] === "attest") {
+      if (request.method !== "POST") {
+        sendError(response, 405, "method_not_allowed", {}, { allow: "POST" });
+        return;
+      }
+      if (options.config.private === undefined) {
+        sendError(response, 404, "private_disabled");
+        return;
+      }
+      const body = await readJsonObject(request, response, maxBundle);
+      if (body === undefined) return;
+      const bundleB64 = body["bundleB64"];
+      const ownerKey = body["ownerKey"];
+      if (typeof bundleB64 !== "string" || bundleB64 === "") {
+        sendError(response, 400, "bundle_required");
+        return;
+      }
+      const outcome = await options.core.privateAttest(rest[1] ?? "", principalId, typeof ownerKey === "string" ? ownerKey : undefined, bundleB64);
+      if (!outcome.ok) {
+        sendError(response, PRIVATE_ATTEST_STATUS[outcome.code] ?? 500, outcome.code);
+        return;
+      }
+      const projection = options.core.status(rest[1] ?? "", principalId, typeof ownerKey === "string" ? ownerKey : undefined);
+      sendJson(response, 200, { paymentId: rest[1], status: outcome.status, ...(outcome.terminalReason === undefined ? {} : { terminalReason: outcome.terminalReason }), ...(projection?.private === undefined ? {} : { private: projection.private }) });
+      return;
+    }
+    // GET /v1/private/purchases/{id}/record
+    if (rest.length === 3 && rest[0] === "purchases" && rest[2] === "record") {
+      if (request.method !== "GET") {
+        sendError(response, 405, "method_not_allowed", {}, { allow: "GET" });
+        return;
+      }
+      if (options.config.private === undefined) {
+        sendError(response, 404, "private_disabled");
+        return;
+      }
+      const outcome = options.core.privateRecord(rest[1] ?? "", principalId, singleHeader(request.headers, "x-router-owner-key"));
+      if (!outcome.ok) {
+        sendError(response, PRIVATE_RECORD_STATUS[outcome.code] ?? 500, outcome.code);
+        return;
+      }
+      sendJson(response, 200, { paymentId: rest[1], recordB64: outcome.recordB64, releaseB64: outcome.releaseB64, recordAvailableUntil: outcome.recordAvailableUntil });
+      return;
+    }
+    sendError(response, 404, "not_found");
+  }
+
+  /** JSON object の本文を読む（上限つき）。失敗は応答を書いて `undefined`。 */
+  async function readJsonObject(request: http.IncomingMessage, response: http.ServerResponse, maxBytes: number): Promise<Record<string, unknown> | undefined> {
+    const raw = await readBody(request, maxBytes);
+    if (raw === undefined) {
+      sendError(response, 413, "body_too_large");
+      return undefined;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw === "" ? "null" : raw);
+    } catch {
+      sendError(response, 400, "invalid_json");
+      return undefined;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      sendError(response, 400, "invalid_request");
+      return undefined;
+    }
+    return parsed as Record<string, unknown>;
   }
 
   /** 送信元の識別（門の鍵）。MCP 層が必ず上書きするヘッダ。無ければ principal。 */

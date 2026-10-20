@@ -2,7 +2,7 @@
  * Verifier ランナー（設計 §4、T-Z4a）: 起動手順（起動門 → wrapper は pid 公開 → 門の確認 → exec）、serve は新しい addr を待ち verify は待たない、
  * 監督（kill と exit の待ち、timeout）、出力の上限と 0600、棚卸し（門の取り消し・pid の同一性・確認できない pid）。偽バイナリ（`fake-delivery.mjs`）で実プロセスを起動する。
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -69,7 +69,8 @@ describe("serve", () => {
     expect(readFileSync(path.join(p.dir, PID_FILE.serve), "utf8").trim()).toBe(String(served.child.pid));
     expect(existsSync(path.join(p.dir, GATE_FILE.serve))).toBe(true);
     const exit = await served.child.exited;
-    expect(exit.code).toBe(0);
+    const stderr = existsSync(path.join(p.dir, "serve.stderr.log")) ? readFileSync(path.join(p.dir, "serve.stderr.log"), "utf8") : "(no stderr log)";
+    expect(exit.code, `fake exited ${String(exit.code)}/${String(exit.signal)}: ${stderr}`).toBe(0);
     const args = JSON.parse(readFileSync(path.join(p.dir, "fake-args.verifier-serve.json"), "utf8")) as { kv: Record<string, string>; env: Record<string, string>; pid: number };
     expect(args.pid).toBe(served.child.pid);
     expect(args.kv).toMatchObject({ "verifier-dir": p.dir, order: p.order, listen: "127.0.0.1:0", "expect-host": "test-server.io", "expect-port": "443", "expect-path": "/select", trust: "lab-fixture-ca", "timeout-secs": "5", intent: p.intent, release: p.release });
@@ -111,6 +112,26 @@ describe("serve", () => {
     expect(exit.signal === "SIGTERM" || exit.signal === "SIGKILL" || exit.code !== null).toBe(true);
     expect(statSync(path.join(p.dir, "serve.stderr.log")).size).toBeLessThanOrEqual(1024);
   });
+});
+
+describe("fd を漏らさない", () => {
+  test("起動を繰り返しても開いている fd の数は増えない", async () => {
+    const work = workDir();
+    const r = runner();
+    const countFds = (): number => readdirSync("/dev/fd").length;
+    const warm = async (): Promise<void> => {
+      const p = purchaseDir(work, `pay-warm-${Math.random().toString(16).slice(2)}`);
+      control(p.dir, { mode: "record", delayMs: 20 });
+      const served = await r.serve({ dir: p.dir, orderPath: p.order, intentPath: p.intent, releasePath: p.release, host: "test-server.io", path: "/select", timeoutSecs: 5, readyByMs: Date.now() + 5_000 });
+      if (served.ok) await served.child.exited;
+    };
+    await warm();
+    await warm();
+    const before = countFds();
+    for (let i = 0; i < 6; i += 1) await warm();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(countFds()).toBeLessThanOrEqual(before + 1);
+  }, 20_000);
 });
 
 describe("verify", () => {

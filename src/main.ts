@@ -21,6 +21,11 @@ import { resolveSvmInboundPolicy } from "./adapters/inbound/x402-svm-startup.js"
 import { ConsumedSignaturesHolder, createMppSolanaInbound, type MppSolanaInbound, type MppSolanaInboundOptions } from "./adapters/inbound/mpp-solana.js";
 import { createMppOutbound } from "./adapters/outbound/mpp.js";
 import { assertDynamicMppCapability } from "./adapters/outbound/mpp-dynamic.js";
+import { createPrivateMppRail } from "./adapters/outbound/private-mpp.js";
+import { createPrivateX402Rail } from "./adapters/outbound/private-x402.js";
+import type { PrivateOutboundRail } from "./ports/private-outbound.js";
+import type { PrivateHooksForTest } from "./core/private.js";
+import { createVerifierRunner, sha256File, type LaunchHooksForTest, type VerifierRunner } from "./private/verifier.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
 import { createX402SvmOutbound, type X402SvmOutboundOptions } from "./adapters/outbound/x402-svm.js";
 import { createMppSolanaOutbound } from "./adapters/outbound/mpp-solana.js";
@@ -146,6 +151,15 @@ export interface RouterCapabilities {
    * `flush`・`close` があれば drain・停止の終わりに短い上限つきで呼ぶ（best effort）。
    */
   readonly diagnostics?: ClosableDiagnosticsSink;
+  /**
+   * **試験専用。** 秘匿購入の Verifier の trust を lab の fixture CA に差し替える（`docs/zktls-router-design.md` §9、要件 FR-Z24）。本番の入口は渡さない。
+   * 渡されたときの証跡は synthetic（公開 PKI の受入の代わりにならない）。
+   */
+  readonly privateTrustForTest?: "lab-fixture-ca";
+  /** **試験専用。** 秘匿購入の停止点（設計 §11）。 */
+  readonly privateHooksForTest?: PrivateHooksForTest;
+  /** **試験専用。** wrapper の 3 段の境界（設計 §11）。 */
+  readonly launchHooksForTest?: LaunchHooksForTest;
 }
 
 /** 停止の前に書き出しを待てる sink（ファイルの sink）。`close` は reject しない契約。 */
@@ -614,9 +628,19 @@ export function transportFor(allowLoopback: boolean, report: (event: TransportEv
   return createGuardedTransport({ ...hooks, allowLoopback, report });
 }
 
+/** 秘匿購入の配線（`docs/zktls-router-design.md` §9）。`createRouterCore` の `private` にそのまま渡す。 */
+export interface PrivateWiring {
+  readonly rails: Readonly<Record<string, PrivateOutboundRail>>;
+  readonly runner: VerifierRunner;
+  readonly trust: "mozilla" | "lab-fixture-ca";
+  readonly hooksForTest?: PrivateHooksForTest;
+}
+
 export interface ComposedRails {
   readonly inbound: InboundRail;
   readonly outbound: OutboundRail;
+  /** 秘匿購入（設定 `router.private` があるときだけ）。 */
+  readonly private?: PrivateWiring;
   readonly balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>;
   readonly dynamic?: DynamicWiring;
   readonly startup?: () => Promise<void>;
@@ -642,6 +666,9 @@ export function composeRails(
     if (config.router.dynamic !== undefined) {
       // 合成レールには動的経路が無い（上流の URL を受け取ると例外になる）。設定があっても組まない。
       throw new ConfigError("dynamic upstream URLs are not available with the synthetic rails");
+    }
+    if (config.router.private !== undefined) {
+      throw new ConfigError("private purchases are not available with the synthetic rails");
     }
     return {
       inbound: createSubethaInbound({ facilitatorUrl: config.synthetic.facilitatorUrl, transport: transportFor(true, report) }),
@@ -1193,9 +1220,68 @@ export function composeRails(
           },
         };
 
+  /**
+   * 秘匿購入（`docs/zktls-router-design.md` §9）: allowlist のプロファイルごとに私的 rail（x402 は EVM 署名能力 + 動的 transport、mpp は Tempo 能力 + 動的 transport。
+   * どちらも loopback 不可・DNS 期限つき）。Verifier ランナーはバイナリと SRS の sha256 を起動時に照合する（不一致なら起動しない）。trust は `mozilla` 固定で、
+   * `privateTrustForTest` を渡した起動だけ fixture CA（証跡は synthetic）。
+   */
+  const privateConfig = config.router.private;
+  let privateWiring: PrivateWiring | undefined;
+  if (privateConfig !== undefined) {
+    if (dynamicTransport === undefined) {
+      throw new ConfigError("private purchases require router.dynamic (the private rails use the dynamic transport)");
+    }
+    let actualBin: string;
+    let actualSrs: string;
+    try {
+      actualBin = sha256File(privateConfig.deliveryBin);
+      actualSrs = sha256File(privateConfig.srsPath);
+    } catch {
+      throw new ConfigError("private.deliveryBin or private.srsPath could not be read");
+    }
+    if (actualBin !== privateConfig.deliveryBinSha256) {
+      throw new ConfigError("private.deliveryBin does not match private.deliveryBinSha256");
+    }
+    if (actualSrs !== privateConfig.srsSha256) {
+      throw new ConfigError("private.srsPath does not match private.srsSha256");
+    }
+    const trust = capabilities.privateTrustForTest ?? "mozilla";
+    const privateRails: Record<string, PrivateOutboundRail> = {};
+    for (const profileId of privateConfig.profiles) {
+      const profile = profiles[profileId];
+      if (profile === undefined) {
+        throw new ConfigError(`private.profiles: ${profileId} is not a dynamic profile`);
+      }
+      const own = { [profileId]: profile };
+      if (profile.rail === "x402") {
+        const capability = evmByNetwork.get(profile.destination.network);
+        if (capability === undefined) {
+          throw new SignerNotAuthorizedError();
+        }
+        privateRails[profileId] = createPrivateX402Rail(capability, { profiles: own, transport: dynamicTransport, denyHosts, operatorAddresses });
+      } else {
+        const capability = capabilities.mppTempo;
+        if (capability === undefined) {
+          throw new SignerNotAuthorizedError();
+        }
+        privateRails[profileId] = createPrivateMppRail(capability, { profiles: own, transport: dynamicTransport, denyHosts, operatorAddresses });
+      }
+    }
+    const runner = createVerifierRunner({
+      deliveryBin: privateConfig.deliveryBin,
+      srsPath: privateConfig.srsPath,
+      trust,
+      maxChildOutputBytes: privateConfig.maxChildOutputBytes,
+      note,
+      ...(capabilities.launchHooksForTest === undefined ? {} : { launchHooksForTest: capabilities.launchHooksForTest }),
+    });
+    privateWiring = { rails: privateRails, runner, trust, ...(capabilities.privateHooksForTest === undefined ? {} : { hooksForTest: capabilities.privateHooksForTest }) };
+  }
+
   // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。
   startupChecks.push(...svmStartups);
   return {
+    ...(privateWiring === undefined ? {} : { private: privateWiring }),
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
     inbound: inboundByRoute(config.router.routes, inboundRails, profiles),
     outbound: railByRoute(config.router.routes, rails, profiles),
@@ -1317,6 +1403,8 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     // journal の消費済み署名を MPP Solana 受信に見せる（`docs/mpp-solana-design.md` §2.3）。load の直後、core が公開される前。
     onStoreLoaded: rails.bindConsumed,
     ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
+    // 秘匿購入（設定があるときだけ）。作業ディレクトリは設定の `workDir`（journal と同じく相対なら cwd 基準）。
+    ...(rails.private === undefined ? {} : { private: rails.private }),
   });
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。

@@ -179,6 +179,55 @@ export type StatusResult =
    */
   | { readonly found: false; readonly status: number; readonly reason: string };
 
+/**
+ * 秘匿 quote の文書（`docs/zktls-router-design.md` §2・§8.2）。動的の `QuoteView` とは別の形で読む: `resource` は秘匿購入の口（`POST <base>/v1/private/purchases`）、
+ * `upstream` は無く、承認対象の全欄が `private` に入る。`privateBindingOf` はこの全欄（`ownerKey` を含む）のスナップショット。
+ */
+export interface PrivateQuoteView {
+  readonly quoteId: string;
+  readonly paymentId: string;
+  readonly routeId: string;
+  readonly resource: ResourceRef;
+  readonly source: Readonly<Record<string, unknown>> & { readonly offer: unknown };
+  readonly destination: Readonly<Record<string, unknown>>;
+  readonly pricing: Readonly<Record<string, unknown>>;
+  readonly disclosures: Readonly<Record<string, unknown>>;
+  readonly private: Readonly<Record<string, unknown>> & { readonly intentSha256: string; readonly orderId: string; readonly payerPk: unknown; readonly target: unknown; readonly method: string; readonly framing: string; readonly body: unknown; readonly outbound: unknown; readonly inbound: unknown; readonly policy: unknown; readonly limits: unknown; readonly disclosures: unknown };
+  readonly approval: { readonly required: boolean; readonly boundTo: string; readonly deadlineMs: number };
+  /** 持ち主の証明。purchase・attest・record・status で Router に返す。**表示・保存の対象ではない。** */
+  readonly ownerKey: string;
+}
+
+export type PrivateQuoteResult = { readonly ok: true; readonly quote: PrivateQuoteView } | { readonly ok: false; readonly error: string; readonly status: number; readonly reason?: string; readonly retryAfterMs?: number };
+
+/** 秘匿購入の引き渡し（`POST /v1/private/purchases` の 200）。`releasedHeader.value` は bearer（Payer の executor にだけ渡す）。 */
+export interface PrivateHandoverView {
+  readonly paymentId: string;
+  readonly verifier: { readonly address: string };
+  readonly releasedHeader: { readonly name: string; readonly value: string };
+  readonly headerFile: { readonly order_id: string; readonly intent_sha256: string; readonly name: string; readonly value: string };
+  readonly releaseB64: string;
+  readonly deadlines: { readonly credentialExpiresAt: number; readonly sessionBy: number };
+}
+
+export type PrivatePurchaseResult =
+  | { readonly outcome: "awaiting_session"; readonly handover: PrivateHandoverView }
+  | { readonly outcome: "unknown"; readonly paymentId: string; readonly reason: string }
+  | { readonly outcome: "paid_data_unavailable"; readonly paymentId: string; readonly terminalReason?: string }
+  | { readonly outcome: "payment_required"; readonly error: string; readonly paymentId?: string }
+  | { readonly outcome: "rejected"; readonly error: string; readonly status: number; readonly paymentId?: string; readonly reason?: string }
+  | { readonly outcome: "not_approved"; readonly reason: string; readonly paymentId?: string }
+  | { readonly outcome: "approval_mismatch"; readonly reason: string; readonly paymentId?: string }
+  | { readonly outcome: "resource_mismatch"; readonly reason: string; readonly paymentId?: string };
+
+export type PrivateAttestResult =
+  | { readonly ok: true; readonly paymentId: string; readonly status: string; readonly terminalReason?: string; readonly private?: Readonly<Record<string, unknown>> }
+  | { readonly ok: false; readonly error: string; readonly status: number };
+
+export type PrivateRecordResult =
+  | { readonly ok: true; readonly paymentId: string; readonly recordB64: string; readonly releaseB64: string; readonly recordAvailableUntil: number }
+  | { readonly ok: false; readonly error: string; readonly status: number };
+
 export interface RouterClient {
   /** `dynamic` は Router に動的プロファイルの設定があるときだけ（`enabled` と一覧）。 */
   listRoutes(): Promise<{ readonly ok: boolean; readonly routes: readonly RouteListing[]; readonly dynamic?: Readonly<Record<string, unknown>> }>;
@@ -189,4 +238,12 @@ export interface RouterClient {
   execute(input: ExecuteInput): Promise<ExecutionResult>;
   /** 動的購入は持ち主の証明（`ownerKey`）が無いと読めない。 */
   status(paymentId: string, ownerKey?: string): Promise<StatusResult>;
+}
+
+/** 秘匿購入の操作（`docs/zktls-router-design.md` §8.2）。既存の `RouterClient` の契約は変えず、`createRouterClient` はこれも実装する。 */
+export interface PrivateRouterClient {
+  privateQuote(input: { readonly profileId: string; readonly requestId: string; readonly intentB64: string }): Promise<PrivateQuoteResult>;
+  privatePurchase(input: { readonly quote: PrivateQuoteView; readonly requestId: string; readonly approval: ApprovalDecision; readonly credential: string }): Promise<PrivatePurchaseResult>;
+  privateAttest(input: { readonly paymentId: string; readonly ownerKey: string; readonly bundleB64: string }): Promise<PrivateAttestResult>;
+  privateRecord(input: { readonly paymentId: string; readonly ownerKey: string }): Promise<PrivateRecordResult>;
 }

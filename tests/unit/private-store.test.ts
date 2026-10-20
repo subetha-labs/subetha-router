@@ -5,7 +5,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { open as openFile } from "node:fs/promises";
 
 import { openJournal, type Journal } from "../../src/core/journal.js";
 import { IntentStore, intentFromCreated, privateBindingOf, privateFieldsOf } from "../../src/core/store.js";
@@ -218,26 +219,23 @@ describe("reservePrivateIssuance（二重一意性 FR-Z06）", () => {
     expect(await store.reservePrivateIssuance("pay-3", INTENT_B_SHA, "x402|eip155:84532|0xtx-1|0xa")).toBe("collision");
     expect(await store.reservePrivateIssuance("pay-3", INTENT_B_SHA, "x402|eip155:84532|0xtx-3|0xc")).toBe("reserved");
   });
-  test("(d) journal の append の失敗は unavailable: 集合に入らず、呼び出し側が自動で再試行しない前提の値を返す", async () => {
-    const journal = await openJournal({ journalPath });
-    opened.push(journal);
-    const store = await IntentStore.load(journal);
+  test("(d) journal の fsync の失敗は unavailable: 集合に入らず、journal は以後の追記を拒む（自動再試行は無い）", async () => {
+    const { store } = await load();
     await settled(store, "pay-1", "0xq1", "0xa");
-    // store の中の journal の append を 1 回だけ失敗させる（fsync の失敗の再現）。
-    const original = journal.append.bind(journal);
-    let fail = true;
-    (journal as { append: Journal["append"] }).append = async (entry) => {
-      if (fail && entry.event === "private_issuance_reserved") {
-        fail = false;
-        throw new Error("fsync failed");
-      }
-      return original(entry);
-    };
-    expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "x402|eip155:84532|0xtx-1|0xa")).toBe("unavailable");
+    const probe = await openFile(path.join(workDir, "fsync-probe"), "a");
+    const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+    await probe.close();
+    const spy = vi.spyOn(proto, "sync").mockRejectedValueOnce(new Error("fsync failed"));
+    try {
+      expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "x402|eip155:84532|0xtx-1|0xa")).toBe("unavailable");
+    } finally {
+      spy.mockRestore();
+    }
     expect(store.hasIssuedIntent(INTENT_SHA)).toBe(false);
     expect(store.hasConsumedInbound("x402|eip155:84532|0xtx-1|0xa")).toBe(false);
     expect(store.byPaymentId("pay-1")?.status).toBe("source_settled");
-    expect((await events()).filter((event) => event === "private_issuance_reserved")).toHaveLength(0);
+    // 毒された writer: 以後の追記も拒む（店の側で黙って再試行しない）。
+    await expect(store.append("pay-1", "unknown", { outcome: "unknown", reason: "x" })).rejects.toThrow();
   });
   test("予約は再起動をまたいで残り、形の壊れた予約の行は起動を止める", async () => {
     {

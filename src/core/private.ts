@@ -17,8 +17,8 @@ import { dynamicAuthoritativeTermsOf, privateAuthoritativeTermsOf, resolveProfil
 import { parseUpstreamUrl } from "../net/upstream-url.js";
 import type { InboundRail } from "../ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, UpstreamTarget } from "../ports/outbound.js";
-import type { IssuedCredential, PrivateOutboundRail } from "../ports/private-outbound.js";
-import { checkAttest, checkBundleBinding, maxPaymentValueOf, MAX_SENT_BYTES, parseBundlePublic, parseVerifierRecord, parseVerifyResult, recordCompletedAtMsOf, requestLengthBoundOf, validatePaymentHeader, type VerifierRecord } from "../private/attest.js";
+import type { IssuedCredential, PrivateDiscovery, PrivateOutboundRail } from "../ports/private-outbound.js";
+import { checkAttest, checkBundleBinding, maxPaymentValueOf, MAX_SENT_BYTES, parseBundlePublic, parseRecvHeaders, parseVerifierRecord, parseVerifyResult, recordCompletedAtMsOf, requestLengthBoundOf, validatePaymentHeader, type VerifierRecord } from "../private/attest.js";
 import { finalOrderBytesOf, headerFileOf, parseIntent, type IntentOrder, type ParsedIntent } from "../private/intent.js";
 import { releaseBytesOf } from "../private/release.js";
 import { readBounded, type Child, type VerifierRunner } from "../private/verifier.js";
@@ -181,7 +181,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   const config = options.config.private;
   if (config === undefined) throw new Error("private core requires config.router.private");
   const privateConfig: PrivateConfig = config;
-  const workDir = options.workDir ?? privateConfig.workDir;
+  // 作業ディレクトリは絶対パスに正規化する（子の cwd は購入ディレクトリ: 相対のままだと子の側で別の場所を指す）。
+  const workDir = path.resolve(options.workDir ?? privateConfig.workDir);
   const capacity = new PrivateCapacity(
     {
       maxConcurrentSessions: privateConfig.maxConcurrentSessions,
@@ -194,6 +195,29 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     workDir,
   );
   let unavailable = false;
+  /** drain（`close`）が始まった。以後、新しい起動・受理・タイマは無く、進行中の継続は永続化せずに終わる（購入は再起動時の規則で終端になる）。 */
+  let closing = false;
+  /** 進行中の継続（送信レグ・セッションの終わり・検証ジョブ）。`close` は子を止めた後にこれを待ってから掃除する。 */
+  const inflight = new Set<Promise<unknown>>();
+  function track<T>(work: Promise<T>): Promise<T> {
+    const settled = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    inflight.add(settled);
+    void settled.then(() => inflight.delete(settled));
+    return work;
+  }
+  /**
+   * journal への追記が失敗した（fsync の失敗など。journal は以後の追記を拒む）。固定の `unknown` の応答は返すが**耐久だとは言わない**。以後の秘匿購入の実行は止め
+   * （`unavailable`）、証拠（作業ディレクトリ）は消さずに残す。再起動の再構成が引き継ぐ。
+   */
+  let persistenceFailed = false;
+  function persistenceLost(): void {
+    persistenceFailed = true;
+    unavailable = true;
+    note?.("private: journal append failed; private purchases are closed until restart (artifacts preserved)");
+  }
   /** 購入ごとの直列化（session の終わり・attest・期限のタイマ）。 */
   const locks = new Map<string, Promise<void>>();
   function withPayment<T>(paymentId: string, run: () => Promise<T>): Promise<T> {
@@ -219,9 +243,16 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     await options.hooksForTest?.stop?.(point, paymentId);
   };
   function schedule(ms: number, run: () => void): void {
+    if (closing) return;
     const timer = setTimeout(() => {
       timers.delete(timer);
-      run();
+      if (closing) return;
+      try {
+        run();
+      } catch {
+        // タイマの中の例外は固定の note だけ（journal・応答には出さない）。
+        note?.("private: timer callback failed");
+      }
     }, Math.max(0, ms));
     timer.unref();
     timers.add(timer);
@@ -414,7 +445,11 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
 
   /* ------------------------------------------------------------------ 送信レグ（§3.2） */
 
-  async function deliver(paymentId: string, _diag: PurchaseDiagnostics, lease: CapacityLease | undefined): Promise<DynamicPurchaseOutcome> {
+  function deliver(paymentId: string, diag: PurchaseDiagnostics, lease: CapacityLease | undefined): Promise<DynamicPurchaseOutcome> {
+    return track(deliverInner(paymentId, diag, lease));
+  }
+
+  async function deliverInner(paymentId: string, _diag: PurchaseDiagnostics, lease: CapacityLease | undefined): Promise<DynamicPurchaseOutcome> {
     const intent = store.byPaymentId(paymentId);
     const priv = intent?.private;
     const profile = intent === undefined ? undefined : resolveProfile(options.config, intent.routeId);
@@ -429,28 +464,42 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
     }
     leases.set(paymentId, lease);
+    const capacityLease: CapacityLease = lease;
     const undelivered = async (reason: string): Promise<DynamicPurchaseOutcome> => {
       releaseLease();
       await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason });
       return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
     };
+    /**
+     * 予約の後の失敗はすべて `unknown`（FR-Z09）。journal に書けなければ、固定の応答は返すが耐久だとは言わず、以後の実行を止めて証拠を残す（掃除しない）。
+     */
     const unknown = async (reason: string): Promise<DynamicPurchaseOutcome> => {
-      await unknownReason(paymentId, reason);
-      lease.sessionEnded();
-      lease.attestSettled();
+      try {
+        await unknownReason(paymentId, reason);
+      } catch {
+        persistenceLost();
+        return { paymentId, status: "unknown", terminalReason: reason };
+      }
+      capacityLease.sessionEnded();
+      if (!capacityLease.attestSettled()) note?.("private: cleanup failed after unknown; the reservation stays charged");
       leases.delete(paymentId);
       return { paymentId, status: "unknown", terminalReason: reason };
     };
+    if (closing || unavailable) {
+      // drain・停止中: 発行を始めない（予約の前なので未発行。再提出は再起動後の規則で）。
+      return undelivered("private_unavailable");
+    }
     // 1. 再照合（FR-Z18 の 2 回目）。
     const target = probeTargetOf(priv);
-    let discovered;
+    let discovered: PrivateDiscovery | undefined;
     try {
       discovered = await rail.discover(profile.profileId, target);
     } catch {
       return undelivered("offer_unavailable");
     }
+    const found: PrivateDiscovery = discovered;
     const approvedJson = stableJson(intent.destination.selectedOffer);
-    if (!discovered.offers.some((offer) => stableJson(offer) === approvedJson)) return undelivered("offer_changed");
+    if (!found.offers.some((offer) => stableJson(offer) === approvedJson)) return undelivered("offer_changed");
     if (now() >= intent.approvalDeadlineMs) return undelivered("approval_expired");
     // 2. 受信支払いの識別子。
     const txRef = intent.source.txRef;
@@ -462,11 +511,13 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     const reserved = await store.reservePrivateIssuance(paymentId, priv.intentSha256, inboundIdentity);
     if (reserved === "collision") return unknown("private_issuance_duplicate");
     if (reserved !== "reserved") return unknown("private_issuance_unknown");
+    const settledTxRef: string = txRef;
+    const afterReservation = async (): Promise<DynamicPurchaseOutcome> => {
     await stop("afterReserve", paymentId);
     // 4. 発行（送らない）。
     let issued: IssuedCredential;
     try {
-      const outcome = await rail.issueCredential({ profileId: profile.profileId, offer: intent.destination.selectedOffer, target, challenge: discovered.challenge, deadlineMs: intent.approvalDeadlineMs, ...(intent.dynamic?.pricing.maxFee === undefined ? {} : { maxFee: intent.dynamic.pricing.maxFee }) });
+      const outcome = await rail.issueCredential({ profileId: profile.profileId, offer: intent.destination.selectedOffer, target, challenge: found.challenge, deadlineMs: intent.approvalDeadlineMs, ...(intent.dynamic?.pricing.maxFee === undefined ? {} : { maxFee: intent.dynamic.pricing.maxFee }) });
       if (!outcome.ok) return unknown(outcome.reason === "destination_deadline" ? "approval_expired" : "private_issue_failed");
       issued = outcome.issued;
     } catch {
@@ -481,16 +532,21 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     // 6. 寿命。
     if (issued.expiresAtMs - now() < priv.policy.minCredentialLifetimeMs) return unknown("private_credential_lifetime");
     // 7. release（sessionBy はここで永続化）。
-    const releaseBytes = releaseBytesOf({ intentSha256: priv.intentSha256, orderId: priv.orderId, headerName: header.name, headerValue: header.value, inboundTx: txRef });
+    const releaseBytes = releaseBytesOf({ intentSha256: priv.intentSha256, orderId: priv.orderId, headerName: header.name, headerValue: header.value, inboundTx: settledTxRef });
     const sessionBy = now() + priv.policy.sessionTimeoutMs;
     try {
       await store.append(paymentId, "private_released", { headerName: header.name, headerSha256: sha256Hex(header.value), expiresAtMs: issued.expiresAtMs, ...(issued.expectedRef === undefined ? {} : { expectedRef: issued.expectedRef }), releaseB64: releaseBytes.toString("base64"), sessionBy });
     } catch {
-      return unknown("private_release_unknown");
+      persistenceLost();
+      return { paymentId, status: "unknown", terminalReason: "private_release_unknown" };
     }
     await stop("afterRelease", paymentId);
+    if (closing) {
+      // drain 中: 子を起動しない。journal は `private_released` のまま → 再起動で `interrupted_before_handover`。
+      return { paymentId, status: "unknown", terminalReason: "private_unavailable" };
+    }
     // 8. Verifier 起動。
-    const dir = lease.dir;
+    const dir = capacityLease.dir;
     const orderBytes = finalOrderBytesOf(order, header);
     try {
       writeFileSync(path.join(dir, INTENT_FILE), Buffer.from(priv.intentB64, "base64"), { mode: 0o600 });
@@ -527,7 +583,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     } catch {
       await served.child.kill();
       children.delete(paymentId);
-      return unknown("private_handover_unknown");
+      persistenceLost();
+      return { paymentId, status: "unknown", terminalReason: "private_handover_unknown" };
     }
     await stop("afterHandoverJournal", paymentId);
     if (now() >= sessionBy) {
@@ -548,6 +605,13 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       deadlines: { credentialExpiresAt: issued.expiresAtMs, sessionBy },
     });
     return { paymentId, status: "awaiting_session" };
+    };
+    try {
+      return await afterReservation();
+    } catch {
+      // 予期しない例外（ファイル・プロセス）も固定の unknown に写す。
+      return unknown("private_unavailable");
+    }
   }
 
   /* ------------------------------------------------------------------ session と record（§3.3） */
@@ -556,67 +620,88 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     schedule(sessionBy - now(), () => {
       void child.kill();
     });
-    void child.exited.then(() =>
-      withPayment(paymentId, async () => {
-        children.delete(paymentId);
-        const intent = store.byPaymentId(paymentId);
-        const lease = leases.get(paymentId);
-        if (intent === undefined || intent.private === undefined || lease === undefined) return;
-        if (intent.status !== "private_awaiting_session") return;
-        const priv = intent.private;
-        const dir = lease.dir;
-        const recordFile = path.join(dir, RECORD_FILE);
-        const read = readBounded(recordFile, priv.limits.maxRecordBytes);
-        const record = read.ok ? parseRecordBytes(read.bytes) : undefined;
-        const bound = record !== undefined && recordIsBound(record, priv);
-        if (!bound) {
-          await unknownReason(paymentId, "private_session_timeout");
-          lease.sessionEnded();
-          lease.attestSettled();
-          leases.delete(paymentId);
-          return;
-        }
-        const completedAtMs = recordCompletedAtMsOf(record!);
-        const qualified = record!.tls_accept_unix_ms <= sessionBy && completedAtMs <= sessionBy;
-        try {
-          fsyncFileAndDir(recordFile);
-        } catch {
-          await unknownReason(paymentId, "private_record_unknown");
-          lease.sessionEnded();
-          return;
-        }
-        await stop("afterRecordPublish", paymentId);
-        const recordPatch = {
-          recordSha256: sha256Hex(read.ok ? read.bytes : Buffer.alloc(0)),
-          recordBytes: read.ok ? read.bytes.length : 0,
-          recordCompletedAtMs: completedAtMs,
-          summary: summaryOf(record!),
-          recordAvailableUntil: completedAtMs + priv.policy.retentionMs,
-        };
-        if (!qualified) {
-          await unknownReason(paymentId, "private_session_timeout");
+    void track(
+      child.exited.then(() =>
+        withPayment(paymentId, async () => {
           try {
-            await store.append(paymentId, "private_recorded", { ...recordPatch, late: true });
+            await onSessionExit(paymentId, sessionBy);
           } catch {
-            // record は残る。再起動の再構成が回収する。
+            note?.("private: session completion handling failed");
           }
-          lease.sessionEnded();
-          lease.attestSettled();
-          scheduleRetention(paymentId, recordPatch.recordAvailableUntil);
-          return;
-        }
-        try {
-          await store.append(paymentId, "private_recorded", { ...recordPatch, attestBy: completedAtMs + priv.policy.attestTimeoutMs });
-        } catch {
-          await unknownReason(paymentId, "private_record_unknown").catch(() => {});
-          lease.sessionEnded();
-          return;
-        }
-        lease.sessionEnded();
-        scheduleAttestTimeout(paymentId, completedAtMs + priv.policy.attestTimeoutMs);
-        scheduleRetention(paymentId, recordPatch.recordAvailableUntil);
-      }),
+        }),
+      ),
     );
+  }
+
+  async function onSessionExit(paymentId: string, sessionBy: number): Promise<void> {
+    children.delete(paymentId);
+    if (closing) return; // drain: 永続化しない（再起動の再構成が record を回収する）。
+    const intent = store.byPaymentId(paymentId);
+    const lease = leases.get(paymentId);
+    if (intent === undefined || intent.private === undefined || lease === undefined) return;
+    if (intent.status !== "private_awaiting_session") return;
+    const priv = intent.private;
+    const dir = lease.dir;
+    const recordFile = path.join(dir, RECORD_FILE);
+    const read = readBounded(recordFile, priv.limits.maxRecordBytes);
+    const record = read.ok ? parseRecordBytes(read.bytes) : undefined;
+    const bound = record !== undefined && recordIsBound(record, intent);
+    if (!bound) {
+      // 完成していない・この購入に束縛されていない record は保持しない（ディレクトリごと消し、量と件数を返す）。
+      try {
+        await unknownReason(paymentId, "private_session_timeout");
+      } catch {
+        persistenceLost();
+        return;
+      }
+      lease.retire();
+      leases.delete(paymentId);
+      return;
+    }
+    const completedAtMs = recordCompletedAtMsOf(record!);
+    const qualified = record!.tls_accept_unix_ms <= sessionBy && completedAtMs <= sessionBy;
+    try {
+      fsyncFileAndDir(recordFile);
+    } catch {
+      try {
+        await unknownReason(paymentId, "private_record_unknown");
+      } catch {
+        persistenceLost();
+      }
+      lease.sessionEnded();
+      return;
+    }
+    await stop("afterRecordPublish", paymentId);
+    if (closing) return;
+    const recordPatch = {
+      recordSha256: sha256Hex(read.ok ? read.bytes : Buffer.alloc(0)),
+      recordBytes: read.ok ? read.bytes.length : 0,
+      recordCompletedAtMs: completedAtMs,
+      summary: summaryOf(record!, priv),
+      recordAvailableUntil: completedAtMs + priv.policy.retentionMs,
+    };
+    if (!qualified) {
+      try {
+        await unknownReason(paymentId, "private_session_timeout");
+        await store.append(paymentId, "private_recorded", { ...recordPatch, late: true });
+      } catch {
+        persistenceLost();
+        return;
+      }
+      lease.sessionEnded();
+      if (!lease.attestSettled()) note?.("private: cleanup failed after late record; the reservation stays charged");
+      scheduleRetention(paymentId, recordPatch.recordAvailableUntil);
+      return;
+    }
+    try {
+      await store.append(paymentId, "private_recorded", { ...recordPatch, attestBy: completedAtMs + priv.policy.attestTimeoutMs });
+    } catch {
+      persistenceLost();
+      return;
+    }
+    lease.sessionEnded();
+    scheduleAttestTimeout(paymentId, completedAtMs + priv.policy.attestTimeoutMs);
+    scheduleRetention(paymentId, recordPatch.recordAvailableUntil);
   }
 
   function parseRecordBytes(bytes: Buffer): VerifierRecord | undefined {
@@ -628,9 +713,10 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   }
 
   /** 完成の認定（§3.3）: この購入の注文・intent・release・発行ヘッダ・受信 tx に束縛された record。 */
-  function recordIsBound(record: VerifierRecord, priv: IntentPrivate): boolean {
-    const issuance = priv.issuance;
-    if (issuance === undefined) return false;
+  function recordIsBound(record: VerifierRecord, intent: Intent): boolean {
+    const priv = intent.private;
+    const issuance = priv?.issuance;
+    if (priv === undefined || issuance === undefined) return false;
     const binding = record.intent_binding;
     return (
       record.order_id === priv.orderId &&
@@ -640,43 +726,70 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       binding !== undefined &&
       binding.intent_sha256 === priv.intentSha256 &&
       binding.release_sha256 === sha256Hex(Buffer.from(issuance.releaseB64, "base64")) &&
-      binding.header_sha256 === issuance.headerSha256
+      binding.header_sha256 === issuance.headerSha256 &&
+      typeof intent.source.txRef === "string" &&
+      binding.inbound_tx === intent.source.txRef
     );
   }
 
-  function summaryOf(record: VerifierRecord): Record<string, unknown> {
-    const requestLine = record.request.revealed_prefix.slice(0, Math.max(0, record.request.revealed_prefix.indexOf("\r\n")));
-    const statusLine = record.revealed_recv_headers.slice(0, Math.max(0, record.revealed_recv_headers.indexOf("\r\n")));
-    return { trust: record.trust, externalGate: record.external_gate, serverName: record.server_name, target: record.target, requestLine, lenSent: record.len_sent, bodyLen: record.body_len, statusLine, credLen: record.request.cred_len };
+  /**
+   * journal・射影に写す要約（§3.3）。**検証済み・正規化した固定の値だけ**: 要求行は承認した注文から組み、応答の状態行は `HTTP/1.1 200 OK` か `non_200` の 2 値、
+   * trust・server_name は期待値と一致すればその値、違えば固定語。Provider が書ける文字列（理由句など）は写さない（canary の境界）。
+   */
+  function summaryOf(record: VerifierRecord, priv: IntentPrivate): Record<string, unknown> {
+    const expectedTrust = options.trust === "mozilla" ? "mozilla-webpki-roots" : "lab-fixture-ca";
+    const recv = parseRecvHeaders(record.revealed_recv_headers);
+    return {
+      trust: record.trust === expectedTrust ? record.trust : "unexpected",
+      externalGate: record.external_gate === true,
+      serverName: record.server_name === priv.target.host ? priv.target.host : "mismatch",
+      target: { host: priv.target.host, port: 443, path: priv.target.path },
+      requestLine: `${priv.method} ${priv.target.path} HTTP/1.1`,
+      lenSent: Number.isSafeInteger(record.len_sent) ? record.len_sent : 0,
+      bodyLen: Number.isSafeInteger(record.body_len) ? record.body_len : 0,
+      statusLine: recv?.statusLine === "HTTP/1.1 200 OK" ? "HTTP/1.1 200 OK" : "non_200",
+      credLen: Number.isSafeInteger(record.request.cred_len) ? record.request.cred_len : 0,
+    };
   }
 
   function scheduleAttestTimeout(paymentId: string, attestBy: number): void {
     schedule(attestBy - now(), () => {
-      void withPayment(paymentId, async () => {
-        const intent = store.byPaymentId(paymentId);
-        if (intent === undefined || intent.status !== "private_recorded" || pendingAttest.has(paymentId)) return;
-        await unknownReason(paymentId, "private_attest_timeout");
-        leases.get(paymentId)?.attestSettled();
-      });
+      void track(
+        withPayment(paymentId, async () => {
+          if (closing) return;
+          const intent = store.byPaymentId(paymentId);
+          if (intent === undefined || intent.status !== "private_recorded" || pendingAttest.has(paymentId)) return;
+          try {
+            await unknownReason(paymentId, "private_attest_timeout");
+          } catch {
+            persistenceLost();
+            return;
+          }
+          if (leases.get(paymentId)?.attestSettled() === false) note?.("private: cleanup failed after attest timeout; the reservation stays charged");
+        }),
+      );
     });
   }
 
   function scheduleRetention(paymentId: string, until: number): void {
     schedule(until - now(), () => {
-      void withPayment(paymentId, async () => {
-        const intent = store.byPaymentId(paymentId);
-        if (intent?.private?.record === undefined || intent.private.record.expired === true) return;
-        leases.get(paymentId)?.retire();
-        leases.delete(paymentId);
-        await store.append(paymentId, "private_record_expired", {}).catch(() => {});
-      });
+      void track(
+        withPayment(paymentId, async () => {
+          if (closing) return;
+          const intent = store.byPaymentId(paymentId);
+          if (intent?.private?.record === undefined || intent.private.record.expired === true) return;
+          leases.get(paymentId)?.retire();
+          leases.delete(paymentId);
+          await store.append(paymentId, "private_record_expired", {}).catch(() => persistenceLost());
+        }),
+      );
     });
   }
 
   /* ------------------------------------------------------------------ attest（§3.4） */
 
   async function attest(paymentId: string, principalId: string, ownerKey: string | undefined, bundleB64: string): Promise<AttestOutcome> {
-    if (unavailable) return { ok: false, code: "private_unavailable" };
+    if (unavailable || closing) return { ok: false, code: "private_unavailable" };
     const intent = store.byPaymentId(paymentId);
     if (intent === undefined || intent.private === undefined || intent.dynamic === undefined || intent.principalId !== principalId || !ownerKeyMatches(ownerKey, intent.dynamic.ownerKeyHash)) {
       return { ok: false, code: "not_found" };
@@ -700,7 +813,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     const bundle = parseBundlePublic(parsedBundle);
     if (bundle === undefined) return { ok: false, code: "invalid_bundle" };
     const bundleSha256 = sha256Hex(bytes);
-    return withPayment(paymentId, async () => {
+    // 受付（§3.4 3〜6）だけを購入の lock の中で行い、検証そのものは lock の外で待つ（別の提出が `attest_in_progress`／合流をすぐに受けられるように）。
+    const admitted = await withPayment(paymentId, async (): Promise<AttestOutcome | { readonly job: Promise<AttestOutcome> }> => {
       const current = store.byPaymentId(paymentId)!;
       const cur = current.private!;
       // 3. 重複: 耐久結果、または進行中のジョブへの合流。
@@ -709,7 +823,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       }
       const pending = pendingAttest.get(paymentId);
       if (pending !== undefined) {
-        if (pending.bundleSha256 === bundleSha256) return pending.done;
+        if (pending.bundleSha256 === bundleSha256) return { job: pending.done };
         return { ok: false, code: "attest_in_progress" };
       }
       // 4. 拒否（状態不変）。
@@ -720,7 +834,12 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       const lease = leases.get(paymentId);
       if (record === undefined || record.attestBy === undefined || lease === undefined) return { ok: false, code: "attest_closed" };
       if (now() >= record.attestBy) {
-        await unknownReason(paymentId, "private_attest_timeout");
+        try {
+          await unknownReason(paymentId, "private_attest_timeout");
+        } catch {
+          persistenceLost();
+          return { ok: false, code: "private_unavailable" };
+        }
         lease.attestSettled();
         return { ok: false, code: "attest_expired" };
       }
@@ -732,16 +851,37 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       // 6. 受理: 検証ジョブの枠。pending digest を記録。
       const slot = capacity.enqueueVerification();
       if (slot === undefined) return { ok: false, code: "private_capacity" };
-      const done = runVerification(paymentId, cur, lease, verifierRecord, bundle, bytes, bundleSha256, slot);
+      const done = track(runVerification(paymentId, cur, lease, verifierRecord, bundle, bytes, bundleSha256, slot));
       pendingAttest.set(paymentId, { bundleSha256, done });
-      return done;
+      return { job: done };
     });
+    return "job" in admitted ? admitted.job : admitted;
   }
 
   async function runVerification(paymentId: string, priv: IntentPrivate, lease: CapacityLease, record: VerifierRecord, bundle: NonNullable<ReturnType<typeof parseBundlePublic>>, bundleBytes: Buffer, bundleSha256: string, slotPromise: Promise<{ release(): void }>): Promise<AttestOutcome> {
-    const slot = await slotPromise;
+    let slot: { release(): void };
     try {
+      slot = await slotPromise;
+    } catch {
+      // 待ち行列が drain で取り消された。状態は変えない。
+      pendingAttest.delete(paymentId);
+      return { ok: false, code: "private_unavailable" };
+    }
+    try {
+      return await runVerificationInner(paymentId, priv, lease, record, bundle, bundleBytes, bundleSha256);
+    } catch {
+      // 予期しない例外（ファイル・プロセス）: 状態を変えずに閉じる（再提出は同じ受付手順を通る）。
+      return { ok: false, code: "private_unavailable" };
+    } finally {
+      slot.release();
+      pendingAttest.delete(paymentId);
+    }
+  }
+
+  async function runVerificationInner(paymentId: string, priv: IntentPrivate, lease: CapacityLease, record: VerifierRecord, bundle: NonNullable<ReturnType<typeof parseBundlePublic>>, bundleBytes: Buffer, bundleSha256: string): Promise<AttestOutcome> {
+    {
       await stop("afterAttestAdmission", paymentId);
+      if (closing) return { ok: false, code: "private_unavailable" };
       const dir = lease.dir;
       let reason: string | undefined;
       let receipt: { txRef?: string; receiptRef: string } | undefined;
@@ -762,8 +902,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
           timeoutMs: privateConfig.verifyTimeoutMs,
           requireExternalGate: options.trust === "mozilla",
         });
-        if (!verified.ok) {
-          reason = verified.reason === "timeout" ? "private_verify_timeout" : "private_attest_invalid";
+        if (!verified.ok || verified.exitCode !== 0) {
+          reason = verified.ok === false && verified.reason === "timeout" ? "private_verify_timeout" : "private_attest_invalid";
         } else {
           const result = parseVerifyResult(verified.result);
           const headerValue = headerValueOf(dir);
@@ -799,20 +939,28 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
         }
       }
       await stop("beforeResultPersist", paymentId);
-      let outcome: AttestOutcome;
-      if (reason === undefined && receipt !== undefined) {
-        await store.append(paymentId, "private_attested", { bundleSha256, ...(receipt.txRef === undefined ? {} : { txRef: receipt.txRef }), receiptRef: receipt.receiptRef, recordSha256: priv.record?.sha256 ?? "", proof: { delivery: true, requestBinding: priv.method === "POST" } });
-        outcome = { ok: true, status: "delivered_private" };
-      } else {
-        const terminalReason = reason ?? "private_attest_invalid";
-        await unknownReason(paymentId, terminalReason, { attest: { bundleSha256 } });
-        outcome = { ok: true, status: "unknown", terminalReason };
-      }
-      lease.attestSettled();
-      return outcome;
-    } finally {
-      slot.release();
-      pendingAttest.delete(paymentId);
+      // 結果の永続化は購入の lock の中で（期限のタイマと直列化）。drain 中は永続化しない（record は残り、再起動で終端）。
+      return withPayment(paymentId, async (): Promise<AttestOutcome> => {
+        if (closing) return { ok: false, code: "private_unavailable" };
+        const current = store.byPaymentId(paymentId);
+        if (current === undefined || current.status !== "private_recorded") return { ok: false, code: "attest_closed" };
+        let outcome: AttestOutcome;
+        try {
+          if (reason === undefined && receipt !== undefined) {
+            await store.append(paymentId, "private_attested", { bundleSha256, ...(receipt.txRef === undefined ? {} : { txRef: receipt.txRef }), receiptRef: receipt.receiptRef, recordSha256: priv.record?.sha256 ?? "", proof: { delivery: true, requestBinding: priv.method === "POST" } });
+            outcome = { ok: true, status: "delivered_private" };
+          } else {
+            const terminalReason = reason ?? "private_attest_invalid";
+            await unknownReason(paymentId, terminalReason, { attest: { bundleSha256 } });
+            outcome = { ok: true, status: "unknown", terminalReason };
+          }
+        } catch {
+          persistenceLost();
+          return { ok: false, code: "private_unavailable" };
+        }
+        if (!lease.attestSettled()) note?.("private: cleanup failed after attest; the reservation stays charged");
+        return outcome;
+      });
     }
   }
 
@@ -847,6 +995,16 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   /* ------------------------------------------------------------------ 再構成（§3.6） */
 
   async function start(): Promise<void> {
+    try {
+      await reconcile();
+    } catch {
+      unavailable = true;
+      note?.("private: reconciliation failed; private purchases stay closed (artifacts preserved)");
+    }
+  }
+
+  /** 再構成（§3.6）。どこかで失敗したら例外 → 受付を閉じたまま（容量を開かない。保持成果物を計上できないまま開かない）。 */
+  async function reconcile(): Promise<void> {
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
     const inventory = await runner.inventory(workDir);
     await stop("duringRecoveryInventory", "-");
@@ -869,12 +1027,12 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       if (priv.record !== undefined) {
         if (priv.record.expired === true || !read.ok || sha256Hex(read.bytes) !== priv.record.sha256) {
           rmSync(dir, { recursive: true, force: true });
-          if (priv.record.expired !== true) await store.append(intent.paymentId, "private_record_expired", { reason: "record_mismatch" }).catch(() => {});
+          if (priv.record.expired !== true) await store.append(intent.paymentId, "private_record_expired", { reason: "record_mismatch" });
           continue;
         }
         if (now() >= priv.record.recordAvailableUntil) {
           rmSync(dir, { recursive: true, force: true });
-          await store.append(intent.paymentId, "private_record_expired", {}).catch(() => {});
+          await store.append(intent.paymentId, "private_record_expired", {});
           continue;
         }
         deleteNonRecord(dir);
@@ -884,33 +1042,28 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
         scheduleRetention(intent.paymentId, priv.record.recordAvailableUntil);
         continue;
       }
-      // 発行済みで record の記録が無い: 完成していれば回収（取得専用）。
+      // 発行済みで record の記録が無い: 完成していれば回収（取得専用）。失敗（fsync・journal・掃除）は例外 → 受付を閉じたまま（計上できない成果物のまま開かない）。
       const record = read.ok ? parseRecordBytes(read.bytes) : undefined;
-      if (priv.issuance !== undefined && record !== undefined && recordIsBound(record, priv)) {
+      if (priv.issuance !== undefined && record !== undefined && recordIsBound(record, intent)) {
         const completedAtMs = recordCompletedAtMsOf(record);
         const until = completedAtMs + priv.policy.retentionMs;
         if (now() < until) {
-          try {
-            fsyncFileAndDir(recordFile);
-            await store.append(intent.paymentId, "private_recorded", {
-              recordSha256: sha256Hex(read.ok ? read.bytes : Buffer.alloc(0)),
-              recordBytes: read.ok ? read.bytes.length : 0,
-              recordCompletedAtMs: completedAtMs,
-              summary: summaryOf(record),
-              recordAvailableUntil: until,
-              recoveredAtRestart: true,
-              late: !(record.tls_accept_unix_ms <= priv.issuance.sessionBy && completedAtMs <= priv.issuance.sessionBy),
-            });
-            deleteNonRecord(dir);
-            retainedPurchases += 1;
-            retainedBytes += read.ok ? read.bytes.length : 0;
-            leases.set(intent.paymentId, capacity.adoptRetained(intent.paymentId, read.ok ? read.bytes.length : 0));
-            scheduleRetention(intent.paymentId, until);
-            continue;
-          } catch {
-            // 書けなければ次の再起動へ（ファイルは残す）。
-            continue;
-          }
+          fsyncFileAndDir(recordFile);
+          await store.append(intent.paymentId, "private_recorded", {
+            recordSha256: sha256Hex(read.ok ? read.bytes : Buffer.alloc(0)),
+            recordBytes: read.ok ? read.bytes.length : 0,
+            recordCompletedAtMs: completedAtMs,
+            summary: summaryOf(record, priv),
+            recordAvailableUntil: until,
+            recoveredAtRestart: true,
+            late: !(record.tls_accept_unix_ms <= priv.issuance.sessionBy && completedAtMs <= priv.issuance.sessionBy),
+          });
+          deleteNonRecord(dir);
+          retainedPurchases += 1;
+          retainedBytes += read.ok ? read.bytes.length : 0;
+          leases.set(intent.paymentId, capacity.adoptRetained(intent.paymentId, read.ok ? read.bytes.length : 0));
+          scheduleRetention(intent.paymentId, until);
+          continue;
         }
       }
       rmSync(dir, { recursive: true, force: true });
@@ -931,8 +1084,13 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   }
 
   async function close(): Promise<void> {
+    closing = true;
+    capacity.closeQueue();
     for (const timer of timers) clearTimeout(timer);
     timers.clear();
+    // 子を止めてから、進行中の継続（送信レグ・セッションの終わり・検証）が終わるのを待つ。永続化はしない（再起動の規則で終端）。
+    await runner.closeAll();
+    await Promise.allSettled([...inflight]);
     await runner.closeAll();
     // 進行中の作業成果物を消す（購入は再起動時の規則で終端になる）。完成した record（journal に届く前のものを含む）は残し、再構成が回収する。
     for (const [, lease] of leases) {
@@ -948,7 +1106,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   return {
     start,
     get unavailable(): boolean {
-      return unavailable;
+      return unavailable || persistenceFailed;
     },
     quote,
     dynamicDeps: {
@@ -964,7 +1122,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
           ...(rail?.estimateFee === undefined ? {} : { estimateFee: (profileId: string, offer: DestinationOffer, target: UpstreamTarget) => rail.estimateFee!(profileId, offer, target) }),
         };
       },
-      reserveCapacity: (intent) => (unavailable ? undefined : capacity.reserve(intent.paymentId)),
+      reserveCapacity: (intent) => (unavailable || closing ? undefined : capacity.reserve(intent.paymentId)),
       deliver,
       routeFingerprintOf,
     },
