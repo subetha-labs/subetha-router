@@ -64,6 +64,13 @@ export interface PrivatePayerOptions {
   readonly sessionTimeoutSecs?: number;
   readonly now?: () => number;
   readonly log?: (line: string) => void;
+  /** **試験専用**: 耐久書き込みの故障注入（段ごと）と、latch の後で止める（割り込みの再現）。 */
+  readonly hooksForTest?: DurableHooksForTest & { readonly afterLatch?: () => void };
+}
+
+/** **試験専用**: `writeDurable` の各段で失敗させる。`true` を返した段で例外になる。 */
+export interface DurableHooksForTest {
+  readonly durableFail?: (stage: "write" | "fsync" | "rename" | "dirfsync", file: string) => boolean;
 }
 
 export interface PrivatePayerEvidence {
@@ -124,16 +131,29 @@ function writePrivate(file: string, bytes: Buffer | string): void {
   writeFileSync(file, bytes, { mode: 0o600 });
 }
 /** 耐久の書き込み（再開点・証跡）: 一時ファイル（0600）に書いて fsync → rename → 親ディレクトリを fsync。失敗したら前のファイルが残る。 */
-function writeDurable(file: string, bytes: Buffer | string): void {
+function writeDurable(file: string, bytes: Buffer | string, hooks?: DurableHooksForTest): void {
   const tmp = `${file}.tmp`;
+  const fail = (stage: "write" | "fsync" | "rename" | "dirfsync"): void => {
+    if (hooks?.durableFail?.(stage, file) === true) throw new Error(`durable write failed at ${stage}`);
+  };
   const fd = openSync(tmp, "w", 0o600);
   try {
+    fail("write");
     writeFileSync(fd, bytes);
+    fail("fsync");
     fsyncSync(fd);
-  } finally {
+  } catch (error) {
     closeSync(fd);
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 残骸は残さない（残っても次回が上書きする）。
+    }
+    throw error;
   }
+  closeSync(fd);
   try {
+    fail("rename");
     renameSync(tmp, file);
   } catch (error) {
     try {
@@ -145,6 +165,7 @@ function writeDurable(file: string, bytes: Buffer | string): void {
   }
   const dir = openSync(path.dirname(file), "r");
   try {
+    fail("dirfsync");
     fsyncSync(dir);
   } finally {
     closeSync(dir);
@@ -256,8 +277,8 @@ function readCheckpoint(outDir: string): Checkpoint | undefined {
   const parsed = JSON.parse(readFileSync(file, "utf8")) as Checkpoint;
   return parsed.version === CHECKPOINT_VERSION ? parsed : undefined;
 }
-function writeCheckpoint(outDir: string, checkpoint: Checkpoint): void {
-  writeDurable(path.join(outDir, CHECKPOINT_FILE), `${JSON.stringify(checkpoint, null, 2)}\n`);
+function writeCheckpoint(outDir: string, checkpoint: Checkpoint, hooks?: DurableHooksForTest): void {
+  writeDurable(path.join(outDir, CHECKPOINT_FILE), `${JSON.stringify(checkpoint, null, 2)}\n`, hooks);
 }
 function argsOf(options: PrivatePayerOptions, inbound: NonNullable<PrivatePayerOptions["inbound"]>): Checkpoint["args"] {
   return { routerBaseUrl: options.routerBaseUrl, principalId: options.principalId, profileId: options.profileId, method: options.method, host: options.host, path: options.path, outbound: options.outbound, inbound, trust: options.trust };
@@ -355,11 +376,16 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const requestId = checkpoint.requestId;
   mkdirSync(path.join(exec, "private_inbox"), { recursive: true, mode: 0o700 });
 
-  // 3. 署名・提出の前に耐久の latch（応答を失っても、以後の承認は拒み --recover に回す）。
+  // 3. 署名・提出の前に耐久の latch（応答を失っても、以後の承認は拒み --recover に回す）。latch が耐久に書けなければ署名しない（前の再開点はそのまま残る）。
   checkpoint.progress = { ...checkpoint.progress, paymentId: quote.paymentId, purchaseAttempted: true };
-  writeCheckpoint(options.outDir, checkpoint);
+  try {
+    writeCheckpoint(options.outDir, checkpoint, options.hooksForTest);
+  } catch {
+    return fail("approve", "the purchase-attempt latch could not be written durably; nothing was signed or submitted (retry when the disk is writable)");
+  }
   evidence.stage = "purchase";
   persistEvidence();
+  options.hooksForTest?.afterLatch?.();
   // 受信 credential（自分の鍵。EIP-3009。資金はこの後の Router の settle で動く）。
   const offer = quote.source.offer as { network: string; extra: Record<string, unknown> } & Record<string, unknown>;
   const chainId = Number(String(offer.network).replace(/^eip155:/, ""));

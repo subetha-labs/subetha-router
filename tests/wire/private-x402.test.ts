@@ -782,11 +782,8 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     expect(["awaiting_session", "unknown"]).toContain(recoveredF.status?.["status"]);
     expect(recoveredF.evidence.gates.inbound_settlement.txRef).toBe(failed.evidence.gates.inbound_settlement.txRef);
     expect(await runPrivatePayer({ ...base, outDir: f, approve: true })).toMatchObject({ ok: false, stage: "approve" });
-    // 回復は 1 つの evidence.json に単調に併合: Router に届かない回復（別ポート）でも確立した受信 tx は消えず、失敗は recovery-log.json に残る。
-    const unreachable = await recoverPrivatePayer({ routerBaseUrl: "http://127.0.0.1:9", principalId: ALICE.id, token: ALICE.token, outDir: f, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
-    expect(unreachable).toMatchObject({ ok: false });
-    const evidenceF = JSON.parse(readFileSync(path.join(f, "evidence.json"), "utf8")) as { gates: { inbound_settlement: { settled: boolean; txRef?: string } } };
-    expect(evidenceF.gates.inbound_settlement).toMatchObject({ settled: true, txRef: failed.evidence.gates.inbound_settlement.txRef });
+    // 別の Router URL は再開点と違うので拒否（identity の検査。証跡は触らない）。
+    expect(await recoverPrivatePayer({ routerBaseUrl: "http://127.0.0.1:9", principalId: ALICE.id, token: ALICE.token, outDir: f, labDir: lab.labDir, srsPath: lab.srs, log: () => {} })).toMatchObject({ ok: false });
     expect(existsSync(path.join(f, "evidence-recover.json"))).toBe(false);
     // 成功した復号の後、bundle を壊して再び回復しても payer_receipt は ok のまま（失敗は recovery-log.json へ）。
     const bundleFileD = path.join(d, "bundle.json");
@@ -802,6 +799,52 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
       expect(() => JSON.parse(readFileSync(path.join(dir, "checkpoint.json"), "utf8"))).not.toThrow();
       expect(() => JSON.parse(readFileSync(path.join(dir, "evidence.json"), "utf8"))).not.toThrow();
     }
+    // 耐久書き込みの故障注入: latch が fsync/rename/ディレクトリ fsync のどこで失敗しても、署名も購入要求も起きず、前の再開点（latch 無し）がそのまま読める。
+    for (const stage of ["write", "fsync", "rename", "dirfsync"] as const) {
+      const h = path.join(outDir, `h-${stage}`);
+      expect(await runPrivatePayer({ ...base, outDir: h, approve: false })).toMatchObject({ ok: true, stage: "quoted" });
+      const before = readFileSync(path.join(h, "checkpoint.json"), "utf8");
+      const verifyBefore = facilitator.calls.verify;
+      const probesBefore = provider.seen.probes.length;
+      const refused = await runPrivatePayer({ ...base, outDir: h, approve: true, hooksForTest: { durableFail: (s, file) => s === stage && path.basename(file) === "checkpoint.json" } });
+      expect(refused, stage).toMatchObject({ ok: false, stage: "approve" });
+      expect(facilitator.calls.verify, stage).toBe(verifyBefore);
+      expect(provider.seen.probes.length, stage).toBe(probesBefore);
+      expect(existsSync(path.join(h, "checkpoint.json.tmp")), stage).toBe(false);
+      const after = readFileSync(path.join(h, "checkpoint.json"), "utf8");
+      if (stage === "dirfsync") {
+        // rename の後の失敗: 新しい再開点（latch つき）が既に置かれている。保守的に、以後の承認は拒否（--recover へ）。署名は起きていない。
+        expect((JSON.parse(after) as { progress: { purchaseAttempted?: boolean } }).progress.purchaseAttempted, stage).toBe(true);
+        expect(await runPrivatePayer({ ...base, outDir: h, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+        expect(facilitator.calls.verify, stage).toBe(verifyBefore);
+      } else {
+        // rename の前の失敗: 前の再開点が無傷。故障が無ければ同じ再開点から承認できる。
+        expect(after, stage).toBe(before);
+        if (stage === "rename") {
+          const ok = await runPrivatePayer({ ...base, outDir: h, approve: true });
+          expect(ok.ok, JSON.stringify(ok)).toBe(true);
+        }
+      }
+    }
+    // latch の直後の割り込み（プロセスが止まった）: 新しい起動は署名も提出もせず拒否し、--recover に回す。
+    const i = path.join(outDir, "i-interrupt");
+    expect(await runPrivatePayer({ ...base, outDir: i, approve: false })).toMatchObject({ ok: true, stage: "quoted" });
+    const verifyBeforeI = facilitator.calls.verify;
+    await expect(runPrivatePayer({ ...base, outDir: i, approve: true, hooksForTest: { afterLatch: () => { throw new Error("interrupted after the latch"); } } })).rejects.toThrow(/interrupted/);
+    expect((JSON.parse(readFileSync(path.join(i, "checkpoint.json"), "utf8")) as { progress: { purchaseAttempted?: boolean } }).progress.purchaseAttempted).toBe(true);
+    expect(await runPrivatePayer({ ...base, outDir: i, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    expect(facilitator.calls.verify).toBe(verifyBeforeI);
+    // Router が止まっている間の --recover（再開点と同じ URL）: 通常の経路で返り、確立したゲートは残り、status/record の失敗は recovery-log.json に残る。
+    const beforeDown = JSON.parse(readFileSync(path.join(f, "evidence.json"), "utf8")) as { gates: { inbound_settlement: { settled: boolean; txRef?: string } } };
+    const routerUrl = world.router!.baseUrl;
+    await stopRouter(world);
+    const down = await recoverPrivatePayer({ routerBaseUrl: routerUrl, principalId: ALICE.id, token: ALICE.token, outDir: f, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
+    expect(down).toMatchObject({ ok: true, recordAvailable: false, decrypted: false, evidence: { gates: { inbound_settlement: { settled: true, txRef: beforeDown.gates.inbound_settlement.txRef }, outbound_settlement: { issued: true } } } });
+    if (down.ok) expect(down.status).toBeUndefined();
+    const logF = JSON.parse(readFileSync(path.join(f, "recovery-log.json"), "utf8")) as { stage: string }[];
+    expect(logF.map((e) => e.stage)).toEqual(expect.arrayContaining(["status", "record"]));
+    expect((JSON.parse(readFileSync(path.join(f, "evidence.json"), "utf8")) as typeof beforeDown).gates.inbound_settlement).toEqual(beforeDown.gates.inbound_settlement);
+    expect(existsSync(path.join(f, "evidence-recover.json"))).toBe(false);
   }, LONG);
 
   test("否定ケース（セッション無し）: port≠443、payTo 不一致、record/attest 未完成、所有者違い、サイズ超過、別の offer の credential、注文のすり替え → TLS 前に拒否 → セッション無しの期限で unknown", async () => {
