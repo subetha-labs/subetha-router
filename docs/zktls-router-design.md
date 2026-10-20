@@ -593,11 +593,14 @@ wire の証跡は `lab-fixture-ca` の **synthetic**。実 Provider（C/F/A/B）
 | 指摘 | 対応 |
 |---|---|
 | 1 回復の証跡が別ファイルで、次の回復や再復号の失敗で確立した事実が後退する | 証跡は `evidence.json` **1 つ**に単調に併合（`--recover` も同じ）。復号の結果は `ok: true` を失敗で上書きしない（`mergePayerReceipt`）。status・record が読めない・再復号の失敗は `recovery-log.json` に追記。wire で「Router を止めた状態の回復（再開点と同じ URL）が通常の経路で返り、確立した受信 tx が残り、status/record の失敗が `recovery-log.json` に残る」「bundle を壊した再回復でも `payer_receipt.ok` が残る」「別 URL は identity の検査で拒否」を試験 |
-| 2 latch の書き込みが耐久・原子的でない | 再開点・証跡・記録は `writeDurable`（一時ファイル 0600 → fsync → rename → 親ディレクトリの fsync。失敗したら前の内容が残る）。wire で、故障注入（write / fsync / rename / 親ディレクトリの fsync の各段）で latch が書けないとき署名も購入要求も起きず前の再開点が無傷であること、latch 直後の割り込みの後の新しい起動が署名せず拒否すること、残骸（`.tmp`）が無く常に読める JSON であることを確認（試験専用の `hooksForTest`） |
+| 2 latch の書き込みが耐久・原子的でない | 再開点・証跡・記録は `writeDurable`（一時ファイル 0600 → fsync → rename → 親ディレクトリの fsync。rename の前の失敗なら前の内容が残り、rename の後の失敗なら latch つきの新しい再開点が置かれたまま → 以後の承認は拒否し `--recover` へ）。wire で、故障注入（write / fsync / rename / 親ディレクトリの fsync の各段）で latch が書けないとき署名も購入要求も起きないこと（rename の前の失敗では前の再開点が無傷、rename の後の失敗では latch つきの再開点が残り以後の承認は拒否）、latch 直後の割り込みの後の新しい起動が署名せず拒否すること、残骸（`.tmp`）が無く常に読める JSON であることを確認（試験専用の `hooksForTest`） |
 
 ### 14.4 Codex 最終レビュー 4 回目（2026-10-20、APPROVE WITH CHANGES）の指摘と対応
 | 指摘 | 対応 |
 |---|---|
 | 1 「Router に届かない回復」の試験が identity の拒否で早期に返っていた | Router を止めて再開点と同じ URL で回復し、通常の経路で返ること・確立したゲートの保持・`recovery-log.json` の status/record の記録を assert（§14.3 の記述も修正）|
 | 2 耐久書き込みの試験が成功経路だけ | `hooksForTest.durableFail`（write/fsync/rename/dirfsync）と `afterLatch`（割り込み）の故障注入を追加し、latch が書けなければ署名・提出が起きず前の再開点が無傷、割り込み後の新しい起動は拒否、を assert |
+
+### 14.5 Codex 最終レビュー 5 回目（2026-10-20、**APPROVE**）
+nit 1 件（耐久書き込みの文言: rename の前後で「前の再開点が残る／latch つきの再開点が残る」を区別）を反映。実 Provider C/F/A/B の受入・両チェーンの読み取り・finality は owner のゲートのまま（未実行）。
 

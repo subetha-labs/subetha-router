@@ -130,7 +130,7 @@ function sha256Hex(bytes: Buffer | string): string {
 function writePrivate(file: string, bytes: Buffer | string): void {
   writeFileSync(file, bytes, { mode: 0o600 });
 }
-/** 耐久の書き込み（再開点・証跡）: 一時ファイル（0600）に書いて fsync → rename → 親ディレクトリを fsync。失敗したら前のファイルが残る。 */
+/** 耐久の書き込み（再開点・証跡）: 一時ファイル（0600）に書いて fsync → rename → 親ディレクトリを fsync。rename の前に失敗すれば前のファイルが残り、rename の後（ディレクトリの fsync）で失敗すれば新しい内容が置かれたまま（呼び出し側は保守的に扱う）。 */
 function writeDurable(file: string, bytes: Buffer | string, hooks?: DurableHooksForTest): void {
   const tmp = `${file}.tmp`;
   const fail = (stage: "write" | "fsync" | "rename" | "dirfsync"): void => {
@@ -381,7 +381,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   try {
     writeCheckpoint(options.outDir, checkpoint, options.hooksForTest);
   } catch {
-    return fail("approve", "the purchase-attempt latch could not be written durably; nothing was signed or submitted (retry when the disk is writable)");
+    return fail("approve", "the purchase-attempt latch could not be written durably; nothing was signed or submitted (if the latched checkpoint was installed before the failure, later --approve is refused: use --recover; otherwise retry when the disk is writable)");
   }
   evidence.stage = "purchase";
   persistEvidence();
