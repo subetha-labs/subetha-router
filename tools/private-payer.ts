@@ -10,8 +10,10 @@
  * - `--trust mozilla`（実 Provider）では **支払い範囲の記録**（`--scope-file`、AGENTS.md）が無いと走らない。`lab-fixture-ca` の証跡は synthetic。
  * - 鍵は env `SUBETHA_PAYER_PRIVATE_KEY` だけから読み、出力・証跡・例外に出さない。bearer は 0600 のファイル（`payment_header.json`・`order_final.json`）にだけ。
  * - 証跡 `evidence.json` は **5 つのゲートを別々に**、分かった時点で記録する（受信決済は引き渡し直後の status から。失敗しても分かっている分は残し、不明は `uncertain`）。
- *   既にある証跡は**単調に**しか更新しない（分かったことを消さない）。承認が拒否された起動は証跡を触らず `refusals.json` に追記する。
- * - 署名・提出の**前**に再開点へ `purchaseAttempted` を書く（耐久の latch）。以後の `--approve` は拒み、`--recover` に回す（応答を失っても二度署名しない）。
+ *   既にある証跡は**単調に**しか更新しない（分かったことを消さない。`--recover` も同じ `evidence.json` に併合する）。承認が拒否された起動は証跡を触らず `refusals.json` に、
+ *   回復・再復号の失敗は `recovery-log.json` に追記する。
+ * - 署名・提出の**前**に再開点へ `purchaseAttempted` を書く（耐久の latch: 一時ファイルに書いて fsync → rename → ディレクトリを fsync。途中で止まっても前の再開点が残る）。
+ *   以後の `--approve` は拒み、`--recover` に回す（応答を失っても二度署名しない）。
  *
  * usage: SUBETHA_PAYER_PRIVATE_KEY=0x… PRIVATE_PAYER_TOKEN=… npx tsx tools/private-payer.ts --router http://127.0.0.1:<port> --principal <id> --profile <profileId> \
  *          --method POST --host provider-x402-post.subethalabs.com --path /select --body-file body.json \
@@ -20,7 +22,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -121,6 +123,33 @@ function sha256Hex(bytes: Buffer | string): string {
 function writePrivate(file: string, bytes: Buffer | string): void {
   writeFileSync(file, bytes, { mode: 0o600 });
 }
+/** 耐久の書き込み（再開点・証跡）: 一時ファイル（0600）に書いて fsync → rename → 親ディレクトリを fsync。失敗したら前のファイルが残る。 */
+function writeDurable(file: string, bytes: Buffer | string): void {
+  const tmp = `${file}.tmp`;
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmp, file);
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 残っても次回の書き込みが上書きする。
+    }
+    throw error;
+  }
+  const dir = openSync(path.dirname(file), "r");
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync(dir);
+  }
+}
 function runBinary(bin: string, srs: string, args: readonly string[], timeoutMs: number): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve) => {
     execFile(bin, [...args], { env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", DELIVERY_SRS_DAT: srs, RUST_LOG: "warn" }, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, _stdout, stderr) => {
@@ -173,9 +202,17 @@ function loadEvidence(outDir: string, fresh: PrivatePayerEvidence): PrivatePayer
     return fresh;
   }
 }
-/** 承認が拒否された起動の記録（証跡とは別。証跡を上書きしない）。 */
-function recordRefusal(outDir: string, stage: string, reason: string): void {
-  const file = path.join(outDir, "refusals.json");
+/** 復号の結果を単調に併合する: 既に `ok: true` なら失敗で上書きしない（失敗は `recovery-log.json` へ）。 */
+function mergePayerReceipt(evidence: PrivatePayerEvidence, result: PrivatePayerEvidence["gates"]["payer_receipt"], outDir: string): void {
+  if (evidence.gates.payer_receipt.ok && !result.ok) {
+    recordLog(outDir, "recovery-log.json", "decrypt", `repeat decryption failed (${result.failedStage ?? "unknown"}); established receipt kept`);
+    return;
+  }
+  evidence.gates.payer_receipt = result;
+}
+/** 追記の記録（拒否・回復の失敗）。証跡を上書きしない。 */
+function recordLog(outDir: string, name: string, stage: string, reason: string): void {
+  const file = path.join(outDir, name);
   let entries: unknown[] = [];
   try {
     if (existsSync(file)) entries = JSON.parse(readFileSync(file, "utf8")) as unknown[];
@@ -183,7 +220,11 @@ function recordRefusal(outDir: string, stage: string, reason: string): void {
     entries = [];
   }
   entries.push({ at: new Date().toISOString(), stage, reason });
-  writePrivate(file, `${JSON.stringify(entries, null, 2)}\n`);
+  writeDurable(file, `${JSON.stringify(entries, null, 2)}\n`);
+}
+/** 承認が拒否された起動の記録（証跡とは別。証跡を上書きしない）。 */
+function recordRefusal(outDir: string, stage: string, reason: string): void {
+  recordLog(outDir, "refusals.json", stage, reason);
 }
 
 /** Router の status（読み取り専用）から分かるゲートを証跡に写す。失敗しても投げない。 */
@@ -196,8 +237,14 @@ async function fillFromStatus(client: RouterClient & PrivateRouterClient, paymen
     if (projection.source?.txRef !== undefined) {
       evidence.gates.inbound_settlement = { settled: true, txRef: projection.source.txRef, ...(projection.source.eventId === undefined ? {} : { eventId: projection.source.eventId }) };
     }
-    if (projection.private?.outbound?.issued === true) evidence.gates.outbound_settlement.issued = true;
-    if (projection.destination?.txRef !== undefined) evidence.gates.outbound_settlement = { ...evidence.gates.outbound_settlement, issued: true, txRef: projection.destination.txRef, receipt: true };
+    if (projection.private?.outbound?.issued === true) {
+      const { uncertain: _u, ...rest } = evidence.gates.outbound_settlement;
+      evidence.gates.outbound_settlement = { ...rest, issued: true };
+    }
+    if (projection.destination?.txRef !== undefined) {
+      const { uncertain: _u, ...rest } = evidence.gates.outbound_settlement;
+      evidence.gates.outbound_settlement = { ...rest, issued: true, txRef: projection.destination.txRef, receipt: true };
+    }
   } catch {
     // 読めない: 証跡はそのまま（分からないものは分からないまま）。
   }
@@ -210,7 +257,7 @@ function readCheckpoint(outDir: string): Checkpoint | undefined {
   return parsed.version === CHECKPOINT_VERSION ? parsed : undefined;
 }
 function writeCheckpoint(outDir: string, checkpoint: Checkpoint): void {
-  writePrivate(path.join(outDir, CHECKPOINT_FILE), `${JSON.stringify(checkpoint, null, 2)}\n`);
+  writeDurable(path.join(outDir, CHECKPOINT_FILE), `${JSON.stringify(checkpoint, null, 2)}\n`);
 }
 function argsOf(options: PrivatePayerOptions, inbound: NonNullable<PrivatePayerOptions["inbound"]>): Checkpoint["args"] {
   return { routerBaseUrl: options.routerBaseUrl, principalId: options.principalId, profileId: options.profileId, method: options.method, host: options.host, path: options.path, outbound: options.outbound, inbound, trust: options.trust };
@@ -225,7 +272,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const inbound = options.inbound ?? { network: PRIVATE_INBOUND_NETWORK, asset: PRIVATE_INBOUND_ASSET, maxTotal: String(BigInt(options.outbound.maxAmount) + 1000n) };
   mkdirSync(options.outDir, { recursive: true, mode: 0o700 });
   const evidence = loadEvidence(options.outDir, newEvidence(options));
-  const persistEvidence = (): void => writePrivate(path.join(options.outDir, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
+  const persistEvidence = (): void => writeDurable(path.join(options.outDir, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
   /** 購入に触れる前の拒否（前提・再開点の検査）は証跡を上書きしない。 */
   const REFUSAL_STAGES = new Set(["prerequisites", "review", "approve", "keygen", "quote"]);
   const fail = (stage: string, reason: string): PrivatePayerRun => {
@@ -415,7 +462,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
 
   // 7. Payer の復号（手元で bundle を検証してから）。
   const decrypted = await decryptLocally(bin, srs, options, keys, orderFinal, recordFile, path.join(options.outDir, "bundle.json"), intentFile, releaseFile);
-  evidence.gates.payer_receipt = decrypted.gate;
+  mergePayerReceipt(evidence, decrypted.gate, options.outDir);
   evidence.stage = "decrypt";
   persistEvidence();
   if (!decrypted.gate.ok) return fail("decrypt", "payer-decrypt did not succeed");
@@ -482,7 +529,12 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
   }
   const projection = status.found ? (status.projection as unknown as Record<string, unknown>) : undefined;
   if (projection !== undefined && evidence.gates.inbound_settlement.txRef !== undefined) delete (evidence.gates.inbound_settlement as { uncertain?: true }).uncertain;
-  const record = await client.privateRecord({ paymentId, ownerKey: checkpoint.quote.ownerKey });
+  let record: Awaited<ReturnType<typeof client.privateRecord>>;
+  try {
+    record = await client.privateRecord({ paymentId, ownerKey: checkpoint.quote.ownerKey });
+  } catch {
+    record = { ok: false, error: "transport_failed", status: 0 };
+  }
   let decrypted = false;
   if (record.ok) {
     const recordBytes = Buffer.from(record.recordB64, "base64");
@@ -496,17 +548,21 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
     const srs = options.srsPath ?? defaultSrsPath();
     if (existsSync(bundleFile) && existsSync(orderFinal) && existsSync(bin) && existsSync(srs)) {
       const result = await decryptLocally(bin, srs, { host: checkpoint.args.host, path: checkpoint.args.path }, path.join(options.outDir, "keys"), orderFinal, recordFile, bundleFile, path.join(options.outDir, "intent.json"), path.join(options.outDir, "release.json"));
-      evidence.gates.payer_receipt = result.gate;
+      mergePayerReceipt(evidence, result.gate, options.outDir);
       decrypted = result.gate.ok;
     }
+  } else {
+    recordLog(options.outDir, "recovery-log.json", "record", `record not available (${record.error}); established gates kept`);
   }
+  if (!status.found) recordLog(options.outDir, "recovery-log.json", "status", `status not readable (${status.reason}); established gates kept`);
   if (projection !== undefined) {
     const priv = projection["private"] as Record<string, unknown> | undefined;
     if (typeof projection["status"] === "string") evidence.gates.private_delivery.status = projection["status"];
     if (typeof projection["terminalReason"] === "string") evidence.gates.private_delivery.terminalReason = projection["terminalReason"];
     if (priv !== undefined && priv["proof"] !== undefined) evidence.gates.private_delivery.proof = priv["proof"];
   }
-  writePrivate(path.join(options.outDir, "evidence-recover.json"), `${JSON.stringify(evidence, null, 2)}\n`);
+  // 証跡は 1 つ（`evidence.json`）に単調に併合する（回復で分かったことも、次の回復で消えない）。
+  writeDurable(path.join(options.outDir, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
   return { ok: true, paymentId, status: projection, recordAvailable: record.ok, decrypted, evidence };
 }
 

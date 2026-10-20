@@ -782,6 +782,26 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     expect(["awaiting_session", "unknown"]).toContain(recoveredF.status?.["status"]);
     expect(recoveredF.evidence.gates.inbound_settlement.txRef).toBe(failed.evidence.gates.inbound_settlement.txRef);
     expect(await runPrivatePayer({ ...base, outDir: f, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    // 回復は 1 つの evidence.json に単調に併合: Router に届かない回復（別ポート）でも確立した受信 tx は消えず、失敗は recovery-log.json に残る。
+    const unreachable = await recoverPrivatePayer({ routerBaseUrl: "http://127.0.0.1:9", principalId: ALICE.id, token: ALICE.token, outDir: f, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
+    expect(unreachable).toMatchObject({ ok: false });
+    const evidenceF = JSON.parse(readFileSync(path.join(f, "evidence.json"), "utf8")) as { gates: { inbound_settlement: { settled: boolean; txRef?: string } } };
+    expect(evidenceF.gates.inbound_settlement).toMatchObject({ settled: true, txRef: failed.evidence.gates.inbound_settlement.txRef });
+    expect(existsSync(path.join(f, "evidence-recover.json"))).toBe(false);
+    // 成功した復号の後、bundle を壊して再び回復しても payer_receipt は ok のまま（失敗は recovery-log.json へ）。
+    const bundleFileD = path.join(d, "bundle.json");
+    const goodBundle = readFileSync(bundleFileD);
+    writeFileSync(bundleFileD, tamperedProof(goodBundle));
+    const repeat = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: d, labDir: lab.labDir, srsPath: lab.srs, log: () => {} });
+    expect(repeat).toMatchObject({ ok: true, decrypted: false, evidence: { gates: { payer_receipt: { ok: true }, private_delivery: { status: "delivered_private" } } } });
+    expect(JSON.parse(readFileSync(path.join(d, "recovery-log.json"), "utf8"))).toEqual([expect.objectContaining({ stage: "decrypt" })]);
+    writeFileSync(bundleFileD, goodBundle);
+    // 再開点・証跡は一時ファイル経由の原子的な書き込み（残骸が無く、常に読める JSON）。
+    for (const dir of [d, f]) {
+      expect(existsSync(path.join(dir, "checkpoint.json.tmp"))).toBe(false);
+      expect(() => JSON.parse(readFileSync(path.join(dir, "checkpoint.json"), "utf8"))).not.toThrow();
+      expect(() => JSON.parse(readFileSync(path.join(dir, "evidence.json"), "utf8"))).not.toThrow();
+    }
   }, LONG);
 
   test("否定ケース（セッション無し）: port≠443、payTo 不一致、record/attest 未完成、所有者違い、サイズ超過、別の offer の credential、注文のすり替え → TLS 前に拒否 → セッション無しの期限で unknown", async () => {

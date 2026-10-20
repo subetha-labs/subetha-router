@@ -111,7 +111,7 @@ SUBETHA_PAYER_PRIVATE_KEY=0x… PRIVATE_PAYER_TOKEN=<token> npx tsx tools/privat
 
 F は `--profile priv-f-tempo-post --host provider-mpp-post.subethalabs.com --outbound-protocol mpp --outbound-network eip155:42431 --outbound-asset 0x20c0000000000000000000000000000000000000`。A/B は `--method GET --path /v1/eth/snapshot`（`--body-file` なし）と各 host。
 
-出力（`<out>/`、dir 0700、ファイル 0600）: `quote.json`（承認対象）、`checkpoint.json`（再開点。**ownerKey を含む**）、`intent.json`、`payment_header.json`（**bearer**）、`order_final.json`（**bearer**）、`release.json`、`record.json`、`bundle.json`、`keys/`（Payer 鍵・salt・`decrypt-*.bin`・`decrypt-*_result.json`）、`executor/`、`evidence.json`（`--recover` は `evidence-recover.json`）。bearer・ownerKey・鍵のファイルは受入が終わったら消す。`evidence.json` には bearer・本文・鍵・復号結果の本文は入らない。
+出力（`<out>/`、dir 0700、ファイル 0600）: `quote.json`（承認対象）、`checkpoint.json`（再開点。**ownerKey を含む**）、`intent.json`、`payment_header.json`（**bearer**）、`order_final.json`（**bearer**）、`release.json`、`record.json`、`bundle.json`、`keys/`（Payer 鍵・salt・`decrypt-*.bin`・`decrypt-*_result.json`）、`executor/`、`evidence.json`（`--recover` も同じファイルに単調に併合する。承認の拒否は `refusals.json`、回復・再復号の失敗は `recovery-log.json`）。再開点と証跡は一時ファイル → fsync → rename で書く（途中で止まっても前の内容が残る）。bearer・ownerKey・鍵のファイルは受入が終わったら消す。`evidence.json` には bearer・本文・鍵・復号結果の本文は入らない。
 証跡はゲートが分かった時点で書く: 引き渡しの直後に受信決済の tx（status から）と「送信 credential 発行済み」、attest の後に秘匿配送、復号の後に Payer 受領。引き渡しの後で失敗しても分かっている分は残り、`stage` に止まった段が入る。purchase の応答を失った・`unknown` のときは両決済に `uncertain: true`（払ったかもしれない）。
 
 ## 5. 受入テスト（`tests/acceptance/private-live.test.ts`）
