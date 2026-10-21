@@ -76,3 +76,10 @@ worktree `subetha-router/zktls-router-20261020`（branch `task/zktls-router`）�
 | T-Z9 | 文書 済。Codex 最終レビュー 1 回目（REJECT、4 件）→ 対応（§14.1）→ 2 回目（REJECT、3 件）→ 対応（§14.2）→ 3 回目（REJECT、should 2 件）→ 対応（§14.3）→ 4 回目（APPROVE WITH CHANGES、試験の補強 2 件）→ 対応（§14.4）→ 5 回目 **APPROVE**（nit 1 件反映、§14.5） | `docs/zktls-router-design.md` §14〜§14.4、`.claude_workflow/local/zktls-impl-review{3,4,5,6}.md` |
 
 wire で見つかった実合成の不具合 3 件（受信 rail の解決、verify の check 文字列、MCP の出力 schema）は設計 §14 に記録した。
+
+## 増分（2026-10-22）: 第三者 Provider への最小経路（`docs/zktls-router-thirdparty.md` v1.1、Codex 設計レビュー APPROVE WITH CHANGES → 反映）
+| タスク | 状態 | 証跡 |
+|---|---|---|
+| T-3P1 事前互換検査の道具 | 済 | `tools/private-provider-precheck.ts`、`tests/wire/private-provider-precheck.test.ts`（lab 不要）、実 Provider への未払い probe の記録 `.claude_workflow/local/zktls-3p-probe-20261022.json`（git 管理外） |
+| T-3P2 入力経路と受入の雛形 | 済 | `tools/private-payer.ts --provider-file`、`tests/unit/private-payer-provider-file.test.ts`、`tests/wire/private-x402.test.ts`（第三者の入力経路、lab）、`tests/acceptance/private-live.test.ts` Provider `X` |
+| T-3P3 文書・状態・レビュー | 済（実送金は owner のゲート。未実施） | 設計 §14.7、受入 §9、`.claude_workflow/state.json`、Codex 実装レビュー `.claude_workflow/local/zktls-3p-impl-review*.md` |

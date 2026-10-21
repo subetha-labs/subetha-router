@@ -1,6 +1,6 @@
 # 秘匿購入（zkTLS）の受入手順（TR-3、owner 実行）
 
-**版**: v1.0（2026-10-20）。対象: `docs/zktls-router-requirements.md` v3.3 の TR-3、`docs/zktls-router-design.md` v5.1 §11、`docs/zktls-router-tasks.md` v1.1 の T-Z8。
+**版**: v1.1（2026-10-22、§9 を追加）。対象: `docs/zktls-router-requirements.md` v3.3 の TR-3、`docs/zktls-router-design.md` v5.1 §11、`docs/zktls-router-tasks.md` v1.1 の T-Z8。
 
 本書は、Router の**実合成**（`src/main.ts`、`ROUTER_ADAPTER_MODE=real`）で、lab の testnet Provider に対して秘匿購入（Router が要求本文・応答本文を見ないまま、指定の Provider に指定の内容が実行されたことを検証して配送する）を**実送金つきで**確かめる手順である。実行は **owner**（AGENTS.md: ローカル開発の権限では支払い・署名・放送を行わない）。ここで言う「ローカルで実装が完了した」と「owner が受入を実行して成立した」は別のことで、報告でも区別する。
 
@@ -162,3 +162,15 @@ PRIVATE_LIVE_AC=1 PRIVATE_LIVE_MODE=approve PRIVATE_LIVE_PROVIDER=C PRIVATE_LIVE
 ## 8. 実行記録（2026-10-20/21）
 C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）。F は最初の 2 回が Provider F の一時的な HTTP 500（mppx `internal-payment-error`、公開 Tempo RPC のレート制限が濃厚）で未成立となり、3 回目で成立。Tempo の 402 は probe ごとに `_mppx_nonce` が変わるため、Router 側の offer 比較から除外した（修正済み）。
 
+
+## 9. 第三者 Provider（公開 GET）の受入（`docs/zktls-router-thirdparty.md`、2026-10-22）
+
+対象は **x402 v2 の公開 GET** だけ（秘匿 POST は lab の Provider 契約 C/F に限る）。自社 Provider での成立は第三者対応の証明ではないので、次の順で**別の承認**を得てから払う。
+
+1. **事前互換検査**（払わない・署名しない。未払いの GET を 1 回）: `npx tsx tools/private-provider-precheck.ts --url https://<host><path> --max-amount <atomic> --out runtime/private-live/<run>/`。
+   通ると `provider.json`（封筒の値: host・path・payTo・額）と観測（TLS 1.2 の suite、402 の framing、ヘッダの大きさ）が書かれる。**通っても B3（有料応答が `HTTP/1.1 200 OK`・`Content-Length`・≤ 704 B）と B4（領収の `payer`）は払うまで分からない**（`notVerified`）。`--ca`/`--connect` は試験専用で、その `provider.json` は synthetic（`--trust mozilla` の Payer は拒む）。
+2. **支払い範囲の記録**（§2 と同じ形）に Provider の URL・`payTo`・額・`maxPurchases`、受信と送信の合計上限（例: 2 件なら受信 4,000・送信 2,000 atomic）を書く。
+3. Router の設定に受信 x402 Base Sepolia USDC → 送信 x402 Base Sepolia USDC のプロファイル（`maxUpstreamAmount` = 事前検査の額、fee flat 1,000）と `private.profiles` の追加、予算 bucket を同じ上限で。
+4. `tools/private-payer.ts --provider-file runtime/private-live/<run>/provider.json`（`--method/--host/--path/--outbound-*` と**排他**。転記しない）で quote → `quote.json` を読む（`private.target`・`private.outbound.payTo`・額が `provider.json` と一致すること）→ 同じ `--out` に `--approve`。受入テストなら `PRIVATE_LIVE_PROVIDER=X PRIVATE_LIVE_PROVIDER_FILE=<provider.json>`（§5 の `quote` → `approve` と同じ）。
+5. 証跡（§6）に `providerFileSha256`（封筒の値の出所）が入る。ゲート 4 は第三者では **bundle 検証 → 1..=704 B → sha256 一致** だけ（応答の内容の契約は検証しない）。
+6. **失敗したときの損失**: 有料応答が 704 B を超える・chunked・領収が無い（B3/B4）と、executor か attest が失敗する。**受信レグ（2,000 atomic）は決済済み**、送信レグ（1,000 atomic）は Provider が決済済みのこともある `unknown`。自動の返金は無い。framing で落ちた場合は record も bundle も残らない（復号の救済も無い）。再試行は owner が証跡と両チェーンを読んでから、新しい quote と新しい承認で。

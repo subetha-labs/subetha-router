@@ -27,6 +27,8 @@ import { startVerifyingFacilitator, type VerifyingFacilitator } from "../fixture
 import { startListening, type Listening } from "../fixtures/loopback.js";
 import { labPaths, readJson, runDelivery } from "../fixtures/private/lab.js";
 import { startZktlsProvider, type ZktlsProvider } from "../fixtures/private/zktls-provider.js";
+import { precheckProvider } from "../../tools/private-provider-precheck.js";
+import { withProviderFile } from "../../tools/private-payer.js";
 import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
 
 const lab = labPaths();
@@ -599,6 +601,53 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     // 既存の経路は不変: 動的の購入口は秘匿 quote を知らない。
     expect((await http(world, "GET", `/v1/routes/${PROFILE_ID}/resource`, undefined, { "x-router-quote-id": String(quote["quoteId"]), ...ownerHeaders(ownerKey) })).status).toBe(402);
   }, LONG);
+
+  test("第三者 Provider の入力経路（docs/zktls-router-thirdparty.md §4.2）: 事前互換検査（fixture CA・loopback の差し替え = synthetic）→ provider.json → --provider-file で quote → approve → delivered。provider.json を変えた承認は拒否", async () => {
+    const world = newWorld();
+    await startRouter(world);
+    const preDir = path.join(world.dir, "precheck");
+    // 事前検査: Provider fixture（lab の fixture CA、test-server.io）に未払いの GET を 1 回。
+    const pre = await precheckProvider({ url: `https://${HOST}${GET_PATH}`, maxAmount: PRICE, outDir: preDir, ca: readFileSync(lab.rootCa, "utf8"), connect: `127.0.0.1:${provider.port}` });
+    expect(pre.ok, JSON.stringify(pre)).toBe(true);
+    if (!pre.ok) return;
+    expect(pre.provider).toMatchObject({ method: "GET", host: HOST, path: GET_PATH, outbound: { protocol: "x402", network: NETWORK, asset: USDC, payTo: PROVIDER_PAY_TO, maxAmount: PRICE }, observed: { synthetic: true, trust: "test-ca", framing402: "content-length" } });
+    expect(provider.seen.probes.at(-1)).toMatchObject({ method: "GET", path: GET_PATH });
+    const providerFile = pre.file!;
+    const fileSha = createHash("sha256").update(readFileSync(providerFile)).digest("hex");
+    // Payer: 値は provider.json から（手入力しない）。lab-fixture-ca なので synthetic でも通る。
+    const common = { routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, profileId: PROFILE_ID, labDir: lab.labDir, srsPath: lab.srs, trust: "lab-fixture-ca" as const, connect: `127.0.0.1:${provider.port}`, payerPrivateKey: generatePrivateKey(), log: () => {} };
+    const out = path.join(world.dir, "payer-3p");
+    const quoted = await runPrivatePayer({ ...withProviderFile(providerFile, common)!, outDir: out, approve: false });
+    expect(quoted).toMatchObject({ ok: true, stage: "quoted" });
+    expect((JSON.parse(readFileSync(path.join(out, "checkpoint.json"), "utf8")) as { args: Record<string, unknown> }).args).toMatchObject({ method: "GET", host: HOST, path: GET_PATH, providerFileSha256: fileSha });
+    // provider.json を書き換えた承認（値は同じでも別のバイト列）→ 拒否。署名も purchase も起きない。
+    const settleBefore = facilitator.calls.settle;
+    writeFileSync(providerFile, JSON.stringify(JSON.parse(readFileSync(providerFile, "utf8")), null, 1));
+    expect(await runPrivatePayer({ ...withProviderFile(providerFile, common)!, outDir: out, approve: true })).toMatchObject({ ok: false, stage: "approve" });
+    expect(facilitator.calls.settle).toBe(settleBefore);
+    writeFileSync(providerFile, JSON.stringify(JSON.parse(readFileSync(providerFile, "utf8")), null, 2) + "\n");
+    expect(createHash("sha256").update(readFileSync(providerFile)).digest("hex")).toBe(fileSha);
+    const delivered = await runPrivatePayer({ ...withProviderFile(providerFile, common)!, outDir: out, approve: true });
+    // 診断には平文を含めない（失敗時の出力に canary を出さない）。
+    expect(delivered, JSON.stringify({ ok: delivered.ok, stage: delivered.stage, ...(delivered.ok ? {} : { reason: delivered.reason }), gates: delivered.evidence.gates })).toMatchObject({ ok: true, stage: "delivered" });
+    if (!delivered.ok || delivered.stage !== "delivered") return;
+    expect(delivered.evidence.providerFileSha256).toBe(fileSha);
+    expect(delivered.evidence.gates.private_delivery).toMatchObject({ status: "delivered_private", proof: { delivery: true, requestBinding: false } });
+    expect(delivered.evidence.gates.payer_receipt).toMatchObject({ ok: true, verifiedBundleBeforeDecrypt: true });
+    expect(facilitator.calls.settle).toBe(settleBefore + 1);
+    const plaintext = delivered.plaintext.toString("utf8");
+    expect(plaintext).toBe(provider.respond({ method: "GET", path: GET_PATH, body: "" }));
+    const evidenceText = readFileSync(path.join(out, "evidence.json"), "utf8");
+    expect(evidenceText).not.toContain(plaintext);
+    expect(evidenceText).toContain(fileSha);
+    // 証跡を失った回復: 出所の記録は再開点の args から復元される。
+    unlinkSync(path.join(out, "evidence.json"));
+    const recovered = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: out, labDir: lab.labDir, srsPath: lab.srs });
+    expect(recovered.ok).toBe(true);
+    if (recovered.ok) expect(recovered.evidence.providerFileSha256).toBe(fileSha);
+    expect(readFileSync(path.join(out, "evidence.json"), "utf8")).toContain(fileSha);
+    await stopRouter(world);
+  }, 300_000);
 
   test("GET 全経路（公開 GET の秘匿配送）+ 同時二重 purchase + 完成した record への別注文 bundle（attest_foreign、状態不変）", async () => {
     const world = newWorld();

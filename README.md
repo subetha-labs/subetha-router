@@ -341,6 +341,7 @@ This file is the entry point. The working records live next to it:
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | Deploying the hosted Router (EC2 + Docker + TLS) |
 | [`CLAUDE.md`](CLAUDE.md) | The steps an agent follows to pay through this Router |
 | [`docs/zktls-router-requirements.md`](docs/zktls-router-requirements.md), [`docs/zktls-router-design.md`](docs/zktls-router-design.md), [`docs/zktls-router-tasks.md`](docs/zktls-router-tasks.md), [`docs/zktls-router-acceptance.md`](docs/zktls-router-acceptance.md) | Private purchases (zkTLS): requirements, design (+§14 implementation deltas), task record, owner-run acceptance procedure (Japanese) |
+| [`docs/zktls-router-thirdparty.md`](docs/zktls-router-thirdparty.md) | Private purchases against a third-party public-GET x402 Provider: compatibility conditions, unpaid pre-check tool (`tools/private-provider-precheck.ts`), `--provider-file` input path, owner gate (Japanese) |
 | [`docs/`](docs/) | Requirements and design per phase (Japanese) |
 
 ## Sources and license

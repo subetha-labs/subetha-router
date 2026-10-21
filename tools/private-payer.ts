@@ -19,6 +19,9 @@
  *          --method POST --host provider-x402-post.subethalabs.com --path /select --body-file body.json \
  *          --outbound-protocol x402 --outbound-network eip155:84532 --outbound-asset 0x036C… --outbound-pay-to 0x9014… --outbound-max-amount 10000 \
  *          --inbound-max-total 11000 --trust mozilla --scope-file runtime/private-live/<run>/scope.json --out runtime/private-live/<run> [--approve | --recover] [--connect 127.0.0.1:<port>]
+ *
+ * 第三者 Provider（公開 GET、`docs/zktls-router-thirdparty.md` §4.2）: `--provider-file <provider.json>`（`tools/private-provider-precheck.ts` の出力）が
+ * `--method/--host/--path/--outbound-*` の代わりになる（**排他**: 両方あれば拒否。転記しない）。ファイルの sha256 は証跡の `providerFileSha256` に入る。
  */
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -30,6 +33,7 @@ import { pathToFileURL } from "node:url";
 import { createRouterClient } from "../src/client/index.js";
 import type { PrivateHandoverView, PrivateQuoteView, RouterClient } from "../src/client/types.js";
 import type { PrivateRouterClient } from "../src/client/types.js";
+import { parseProviderFile } from "./private-provider-precheck.js";
 import { createX402Payer } from "./x402-payer.js";
 
 export const PRIVATE_INBOUND_NETWORK = "eip155:84532";
@@ -50,6 +54,10 @@ export interface PrivatePayerOptions {
   /** POST の承認済み本文（そのままのバイト列。Router には渡らない）。 */
   readonly bodyFile?: string;
   readonly outbound: { readonly protocol: "x402" | "mpp"; readonly network: string; readonly asset: string; readonly payTo: string; readonly maxAmount: string };
+  /** `withProviderFile` が入れる: 事前互換検査の `provider.json` の sha256（証跡と再開点の `args` に写す。値の出所の記録。承認・回復で違えば拒む）。 */
+  readonly providerFileSha256?: string;
+  /** `withProviderFile` が入れる: `provider.json` が試験の差し替え（`--ca`/`--connect`）で得た synthetic な観測なら true（`mozilla` では拒む）。 */
+  readonly providerSynthetic?: boolean;
   readonly inbound?: { readonly network: string; readonly asset: string; readonly maxTotal: string };
   readonly trust: "mozilla" | "lab-fixture-ca";
   /** 試験だけ: executor の TCP の行き先（loopback の fixture）。`mozilla` では使えない。 */
@@ -83,6 +91,8 @@ export interface PrivatePayerEvidence {
   readonly synthetic: boolean;
   readonly provider: { readonly method: string; readonly host: string; readonly path: string };
   scopeFileSha256?: string;
+  /** 第三者 Provider: 封筒の値の出所（`provider.json` の sha256）。 */
+  providerFileSha256?: string;
   intentSha256?: string;
   orderId?: string;
   paymentId?: string;
@@ -114,7 +124,7 @@ interface Checkpoint {
   readonly quoteFileSha256: string;
   readonly intentSha256: string;
   readonly orderId: string;
-  readonly args: { readonly routerBaseUrl: string; readonly principalId: string; readonly profileId: string; readonly method: string; readonly host: string; readonly path: string; readonly outbound: PrivatePayerOptions["outbound"]; readonly inbound: NonNullable<PrivatePayerOptions["inbound"]>; readonly trust: string };
+  readonly args: { readonly routerBaseUrl: string; readonly principalId: string; readonly profileId: string; readonly method: string; readonly host: string; readonly path: string; readonly outbound: PrivatePayerOptions["outbound"]; readonly inbound: NonNullable<PrivatePayerOptions["inbound"]>; readonly trust: string; readonly providerFileSha256?: string };
   /** 進んだ段（再開・回復の判断用）。 */
   progress?: { paymentId?: string; purchaseAttempted?: boolean; handedOver?: boolean; sessionDone?: boolean; attested?: boolean };
 }
@@ -206,6 +216,20 @@ export function envelopeBytesOf(order: unknown, outbound: PrivatePayerOptions["o
   return Buffer.from(JSON.stringify({ version: "phase5-intent-v1", order, outbound: { protocol: outbound.protocol, network: outbound.network, asset: outbound.asset, payTo: outbound.payTo, maxAmount: outbound.maxAmount }, inbound: { network: inbound.network, asset: inbound.asset, maxTotal: inbound.maxTotal } }), "utf8");
 }
 
+/** 第三者 Provider の値を事前互換検査の `provider.json` から**そのまま**取る（手入力の代わり。`docs/zktls-router-thirdparty.md` §4.2）。読めない・形が違えば `undefined`。 */
+export function withProviderFile<T extends object>(file: string, options: T): (T & Pick<PrivatePayerOptions, "method" | "host" | "path" | "outbound" | "providerFileSha256" | "providerSynthetic">) | undefined {
+  // 1 回だけ読み、**同じバイト列**を検査して sha256 を取る（読み直しの間の差し替えで値と digest が食い違わない）。
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(file);
+  } catch {
+    return undefined;
+  }
+  const provider = parseProviderFile(bytes);
+  if (provider === undefined) return undefined;
+  return { ...options, method: provider.method, host: provider.host, path: provider.path, outbound: { ...provider.outbound }, providerFileSha256: sha256Hex(bytes), providerSynthetic: provider.observed.synthetic };
+}
+
 function newEvidence(options: { readonly trust: "mozilla" | "lab-fixture-ca"; readonly method: string; readonly host: string; readonly path: string }): PrivatePayerEvidence {
   const runId = `${new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15)}-${randomBytes(3).toString("hex")}`;
   return {
@@ -293,7 +317,7 @@ function writeCheckpoint(outDir: string, checkpoint: Checkpoint, hooks?: Durable
   writeDurable(path.join(outDir, CHECKPOINT_FILE), `${JSON.stringify(checkpoint, null, 2)}\n`, hooks);
 }
 function argsOf(options: PrivatePayerOptions, inbound: NonNullable<PrivatePayerOptions["inbound"]>): Checkpoint["args"] {
-  return { routerBaseUrl: options.routerBaseUrl, principalId: options.principalId, profileId: options.profileId, method: options.method, host: options.host, path: options.path, outbound: options.outbound, inbound, trust: options.trust };
+  return { routerBaseUrl: options.routerBaseUrl, principalId: options.principalId, profileId: options.profileId, method: options.method, host: options.host, path: options.path, outbound: options.outbound, inbound, trust: options.trust, ...(options.providerFileSha256 === undefined ? {} : { providerFileSha256: options.providerFileSha256 }) };
 }
 
 export async function runPrivatePayer(options: PrivatePayerOptions): Promise<PrivatePayerRun> {
@@ -327,6 +351,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     evidence.scopeFileSha256 = sha256Hex(readFileSync(options.scopeFile));
   }
   if (!/^0x[0-9a-fA-F]{64}$/.test(options.payerPrivateKey)) return fail("prerequisites", "SUBETHA_PAYER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string");
+  if (options.trust === "mozilla" && options.providerSynthetic === true) return fail("prerequisites", "the provider file holds a synthetic pre-check (test CA / loopback override); re-run tools/private-provider-precheck.ts against the public host before a live purchase");
   // 承認は別の起動で再開するので、client が自分で発行した quote でなくても受け付ける（`allowUnissuedQuotes`: client は自分の控えとの照合を飛ばす。
   // 読んだ quote が買われることの保証は、この道具の再開点（0600 のローカルの権威。`quote.json` の sha256 で改変を検出）と Router 側の束縛の検査による）。
   const client = createRouterClient({ baseUrl: options.routerBaseUrl, principalId: options.principalId, token: options.token, allowUnissuedQuotes: true });
@@ -356,6 +381,8 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     evidence.orderId = orderId;
     writePrivate(intentFile, intentBytes);
     const requestId = options.requestId ?? `pp-${evidence.runId}`;
+    // 出所の記録（provider.json の sha256）は quote のときに証跡へ。承認では再開点の args と一致したときだけ（拒否の応答に別の digest を載せない）。
+    if (options.providerFileSha256 !== undefined) evidence.providerFileSha256 = options.providerFileSha256;
     const quoted = await client.privateQuote({ profileId: options.profileId, requestId, intentB64: intentBytes.toString("base64") });
     if (!quoted.ok) return fail("quote", `${quoted.error}${quoted.reason === undefined ? "" : ` (${quoted.reason})`}`);
     const quote = quoted.quote;
@@ -382,6 +409,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   if (checkpoint.progress?.purchaseAttempted === true) return fail("approve", "a purchase was already attempted for this quote (its outcome may be unknown); never re-sign — use --recover to read status/record");
   const quote = checkpoint.quote;
   if (now() >= quote.approval.deadlineMs) return fail("approve", "the reviewed quote has expired; quote again in a new --out and review it again");
+  if (checkpoint.args.providerFileSha256 !== undefined) evidence.providerFileSha256 = checkpoint.args.providerFileSha256;
   evidence.intentSha256 = checkpoint.intentSha256;
   evidence.orderId = checkpoint.orderId;
   evidence.paymentId = quote.paymentId;
@@ -551,6 +579,8 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
   evidence.paymentId = paymentId;
   evidence.intentSha256 = checkpoint.intentSha256;
   evidence.orderId = checkpoint.orderId;
+  // 出所の記録は再開点の args が権威（証跡が無い・失われた回復でも復元する）。
+  if (checkpoint.args.providerFileSha256 !== undefined) evidence.providerFileSha256 = checkpoint.args.providerFileSha256;
   evidence.stage = "recover";
   if (checkpoint.progress?.handedOver === true) {
     evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, settled: true };
@@ -635,15 +665,32 @@ async function main(): Promise<void> {
     process.stderr.write("SUBETHA_PAYER_PRIVATE_KEY is required (env only)\n");
     process.exit(2);
   }
-  const method = requireArg("method");
-  if (method !== "GET" && method !== "POST") {
-    process.stderr.write("--method must be GET or POST\n");
+  const providerFile = argOf("provider-file");
+  const manualArgs = ["method", "host", "path", "outbound-protocol", "outbound-network", "outbound-asset", "outbound-pay-to", "outbound-max-amount"];
+  if (providerFile !== undefined && manualArgs.some((name) => argOf(name) !== undefined)) {
+    process.stderr.write("--provider-file replaces --method/--host/--path/--outbound-* (give one or the other, not both)\n");
     process.exit(2);
   }
-  const protocol = requireArg("outbound-protocol");
-  if (protocol !== "x402" && protocol !== "mpp") {
-    process.stderr.write("--outbound-protocol must be x402 or mpp\n");
-    process.exit(2);
+  let target: Pick<PrivatePayerOptions, "method" | "host" | "path" | "outbound" | "providerFileSha256">;
+  if (providerFile !== undefined) {
+    const fromFile = withProviderFile(providerFile, {});
+    if (fromFile === undefined) {
+      process.stderr.write("--provider-file is not a readable provider.json from tools/private-provider-precheck.ts\n");
+      process.exit(2);
+    }
+    target = fromFile;
+  } else {
+    const method = requireArg("method");
+    if (method !== "GET" && method !== "POST") {
+      process.stderr.write("--method must be GET or POST\n");
+      process.exit(2);
+    }
+    const protocol = requireArg("outbound-protocol");
+    if (protocol !== "x402" && protocol !== "mpp") {
+      process.stderr.write("--outbound-protocol must be x402 or mpp\n");
+      process.exit(2);
+    }
+    target = { method, host: requireArg("host"), path: requireArg("path"), outbound: { protocol, network: requireArg("outbound-network"), asset: requireArg("outbound-asset"), payTo: requireArg("outbound-pay-to"), maxAmount: requireArg("outbound-max-amount") } };
   }
   const trust = argOf("trust") ?? "mozilla";
   if (trust !== "mozilla" && trust !== "lab-fixture-ca") {
@@ -658,11 +705,8 @@ async function main(): Promise<void> {
     token,
     profileId: requireArg("profile"),
     ...(argOf("lab-dir") === undefined ? {} : { labDir: argOf("lab-dir")! }),
-    method,
-    host: requireArg("host"),
-    path: requireArg("path"),
+    ...target,
     ...(argOf("body-file") === undefined ? {} : { bodyFile: argOf("body-file")! }),
-    outbound: { protocol, network: requireArg("outbound-network"), asset: requireArg("outbound-asset"), payTo: requireArg("outbound-pay-to"), maxAmount: requireArg("outbound-max-amount") },
     ...(inboundMaxTotal === undefined ? {} : { inbound: { network: PRIVATE_INBOUND_NETWORK, asset: PRIVATE_INBOUND_ASSET, maxTotal: inboundMaxTotal } }),
     trust,
     ...(argOf("connect") === undefined ? {} : { connect: argOf("connect")! }),

@@ -143,6 +143,22 @@ function pathIsCanonical(host: string, path: string): boolean {
   return url.pathname === path && url.search === "" && url.hash === "" && url.hostname === host && url.port === "";
 }
 
+/**
+ * target の host と path の規則（§5.1。FR-Z28）。`parseIntent` が使うのと同じ判定を、I/O の前に単独で当てたい道具（事前検査）にも公開する。
+ * host は小文字の DNS 名（IP リテラル不可）、path は `/` 始まりの VCHAR 列でクエリ・`#`・空白・制御文字を含まず ≤ 256 B、URL として自分自身に正規化される。
+ */
+export function checkTarget(host: unknown, path: unknown): { readonly ok: true; readonly host: string; readonly path: string } | { readonly ok: false; readonly reason: "target_host" | "target_path" } {
+  if (!checkHost(host)) return { ok: false, reason: "target_host" };
+  if (!checkPath(host, path)) return { ok: false, reason: "target_path" };
+  return { ok: true, host, path };
+}
+export function checkHost(host: unknown): host is string {
+  return typeof host === "string" && HOSTNAME.test(host);
+}
+export function checkPath(host: string, path: unknown): path is string {
+  return typeof path === "string" && path !== "" && Buffer.byteLength(path, "utf8") <= MAX_PATH_BYTES && PATH.test(path) && pathIsCanonical(host, path);
+}
+
 function checkOrder(raw: unknown): { readonly ok: true; readonly order: IntentOrder; readonly method: "GET" | "POST" } | { readonly ok: false; readonly reason: IntentRejection } {
   const no = (reason: IntentRejection) => ({ ok: false as const, reason });
   if (!isRecord(raw) || !hasExactlyKeys(raw, ["order_id", "payer_pk", "curve", "target", "request"])) return no("order_shape");
@@ -154,11 +170,11 @@ function checkOrder(raw: unknown): { readonly ok: true; readonly order: IntentOr
   const target = raw["target"];
   if (!isRecord(target) || !hasExactlyKeys(target, ["host", "port", "path"])) return no("target_host");
   const host = target["host"];
-  if (typeof host !== "string" || !HOSTNAME.test(host)) return no("target_host");
+  if (!checkHost(host)) return no("target_host");
   // FR-Z28: 試験でも 443 以外は拒否（loopback へは dial の差し替えで届かせる）。
   if (target["port"] !== 443) return no("target_port");
   const path = target["path"];
-  if (typeof path !== "string" || path === "" || Buffer.byteLength(path, "utf8") > MAX_PATH_BYTES || !PATH.test(path) || !pathIsCanonical(host, path)) return no("target_path");
+  if (!checkPath(host, path)) return no("target_path");
   const request = raw["request"];
   if (!isRecord(request)) return no("request_shape");
   if (Object.hasOwn(request, "payment_header")) return no("request_payment_header");

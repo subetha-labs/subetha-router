@@ -116,6 +116,9 @@ describe("parseIntent: order の各欄（Rust の骨格の規則と同じか、�
     expect(reasonOf((o) => { (o["target"] as Record<string, unknown>)["host"] = "localhost"; })).toBe("target_host");
     expect(reasonOf((o) => { (o["target"] as Record<string, unknown>)["port"] = 8443; })).toBe("target_port");
     expect(reasonOf((o) => { (o["target"] as Record<string, unknown>)["port"] = "443"; })).toBe("target_port");
+    // 拒否の優先順は host → port → path（`checkTarget` の切り出し後も不変）。
+    expect(reasonOf((o) => { const t = o["target"] as Record<string, unknown>; t["host"] = "127.0.0.1"; t["port"] = 8443; })).toBe("target_host");
+    expect(reasonOf((o) => { const t = o["target"] as Record<string, unknown>; t["port"] = 8443; t["path"] = "/a?b"; })).toBe("target_port");
     // 秘匿 POST の path は `/select` 固定（Provider 契約）。GET で path の規則を見る。
     const get = (patch: (target: Record<string, unknown>) => void): string | undefined => {
       const order = getOrder();

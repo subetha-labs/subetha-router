@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
 
-import { recoverPrivatePayer, runPrivatePayer, type PrivatePayerRecovery, type PrivatePayerRun } from "../../tools/private-payer.js";
+import { recoverPrivatePayer, runPrivatePayer, withProviderFile, type PrivatePayerRecovery, type PrivatePayerRun } from "../../tools/private-payer.js";
 
 const ENABLED = process.env["PRIVATE_LIVE_AC"] === "1";
 
@@ -26,6 +26,11 @@ export const LIVE_PROVIDERS = {
   B: { method: "GET", host: "provider-mpp.subethalabs.com", path: "/v1/eth/snapshot", outbound: { protocol: "mpp", network: "eip155:42431", asset: "0x20c0000000000000000000000000000000000000", payTo: "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1", maxAmount: "10000" }, result: { providerId: "market-data-b" } },
 } as const;
 export type LiveProvider = keyof typeof LIVE_PROVIDERS;
+/**
+ * 第三者 Provider（公開 GET、`docs/zktls-router-thirdparty.md` §4.2）: `PRIVATE_LIVE_PROVIDER=X` + `PRIVATE_LIVE_PROVIDER_FILE`（`tools/private-provider-precheck.ts` の `provider.json`）。
+ * 値はファイルから**そのまま**（転記しない）。平文の契約は知らない（JSON とも限らない）ので、ゲート 4 は「手元の bundle 検証 → 1..=704 B → sha256 が復号結果と一致」（配送の事実であって内容の検証ではない）。
+ */
+const THIRD_PARTY = "X";
 
 function env(name: string): string {
   const value = process.env[name];
@@ -34,8 +39,9 @@ function env(name: string): string {
 }
 
 describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・testnet）", () => {
-  const providerKey = (process.env["PRIVATE_LIVE_PROVIDER"] ?? "C") as LiveProvider;
-  const provider = LIVE_PROVIDERS[providerKey];
+  const providerKey = (process.env["PRIVATE_LIVE_PROVIDER"] ?? "C") as LiveProvider | typeof THIRD_PARTY;
+  const thirdParty = providerKey === THIRD_PARTY;
+  const provider = thirdParty ? undefined : LIVE_PROVIDERS[providerKey as LiveProvider];
   /** 1 回の起動で 1 つの操作だけ: quote（承認対象と再開点を書いて止まる）→ owner が読む → approve（**同じ** PRIVATE_LIVE_EVIDENCE_DIR の再開点を買う）→ 必要なら recover。 */
   const mode = (process.env["PRIVATE_LIVE_MODE"] ?? "quote") as "quote" | "approve" | "recover";
   let run: PrivatePayerRun | undefined;
@@ -44,7 +50,7 @@ describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・te
   let checkpoint: { quote: { paymentId: string; quoteId: string }; intentSha256: string; quoteFileSha256: string } | undefined;
 
   beforeAll(async () => {
-    if (provider === undefined) throw new Error("PRIVATE_LIVE_PROVIDER must be one of C, F, A, B");
+    if (provider === undefined && !thirdParty) throw new Error("PRIVATE_LIVE_PROVIDER must be one of C, F, A, B, or X (third party, PRIVATE_LIVE_PROVIDER_FILE)");
     if (mode !== "quote" && mode !== "approve" && mode !== "recover") throw new Error("PRIVATE_LIVE_MODE must be quote, approve or recover");
     // 支払い範囲の記録（AGENTS.md）: 実行前に存在し、内容の sha256 を証跡に残す。無ければ何も払わない。
     const scopeFile = env("PRIVATE_LIVE_SCOPE_FILE");
@@ -60,25 +66,29 @@ describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・te
       expect(existsSync(path.join(evidenceDir, "checkpoint.json")), "PRIVATE_LIVE_EVIDENCE_DIR must hold the reviewed quote's checkpoint.json").toBe(true);
     }
     writeFileSync(path.join(evidenceDir, "scope.sha256"), `${createHash("sha256").update(readFileSync(scopeFile)).digest("hex")}\n`, { mode: 0o600 });
-    const bodyFile = provider.method === "POST" ? path.join(evidenceDir, "approved_body.json") : undefined;
+    const bodyFile = provider?.method === "POST" ? path.join(evidenceDir, "approved_body.json") : undefined;
     // 本文は quote のときにだけ作る（承認で作り直さない: 承認対象の commitment と同じ本文を送る）。
     if (bodyFile !== undefined && mode === "quote") writeFileSync(bodyFile, process.env["PRIVATE_LIVE_BODY"] ?? JSON.stringify({ schema: "lab.select.v1", model: "lab-echo", prompt: `acceptance-${providerKey}-${Date.now()}` }), { mode: 0o600 });
-    const base = {
+    const common = {
       routerBaseUrl: env("PRIVATE_LIVE_ROUTER_URL"),
       principalId: env("PRIVATE_LIVE_PRINCIPAL"),
       token: env("PRIVATE_LIVE_TOKEN"),
       profileId: env("PRIVATE_LIVE_PROFILE"),
-      method: provider.method,
-      host: provider.host,
-      path: provider.path,
       ...(bodyFile === undefined ? {} : { bodyFile }),
-      outbound: provider.outbound,
       ...(process.env["PRIVATE_LIVE_INBOUND_MAX_TOTAL"] === undefined ? {} : { inbound: { network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", maxTotal: process.env["PRIVATE_LIVE_INBOUND_MAX_TOTAL"] } }),
       trust: "mozilla" as const,
       outDir: evidenceDir,
       payerPrivateKey: env("SUBETHA_PAYER_PRIVATE_KEY"),
       scopeFile,
     };
+    let base: Omit<Parameters<typeof runPrivatePayer>[0], "approve">;
+    if (provider !== undefined) {
+      base = { ...common, method: provider.method, host: provider.host, path: provider.path, outbound: provider.outbound };
+    } else {
+      const fromFile = withProviderFile(env("PRIVATE_LIVE_PROVIDER_FILE"), common);
+      if (fromFile === undefined) throw new Error("PRIVATE_LIVE_PROVIDER_FILE is not a readable provider.json from tools/private-provider-precheck.ts");
+      base = fromFile;
+    }
     if (mode === "recover") {
       recovery = await recoverPrivatePayer({ routerBaseUrl: base.routerBaseUrl, principalId: base.principalId, token: base.token, outDir: evidenceDir });
     } else {
@@ -115,16 +125,23 @@ describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・te
     });
     test("ゲート 3: 秘匿配送（Router の attest = delivered_private、proof の delivery と POST の requestBinding、record は繰り返し取得で同一）", () => {
       expect(run?.evidence.gates.private_delivery.status).toBe("delivered_private");
-      expect(run?.evidence.gates.private_delivery.proof).toMatchObject({ delivery: true, requestBinding: provider.method === "POST", onChainFinality: "not_checked" });
+      expect(run?.evidence.gates.private_delivery.proof).toMatchObject({ delivery: true, requestBinding: provider?.method === "POST", onChainFinality: "not_checked" });
       expect(run?.evidence.gates.private_delivery.recordRepeatable).toBe(true);
     });
-    test("ゲート 4: Payer 受領（手元で bundle を検証してから復号。平文は Provider の応答契約に合う）", () => {
+    test("ゲート 4: Payer 受領（手元で bundle を検証してから復号。自社 Provider は応答契約に合う。第三者は 1..=704 B と sha256 一致 = 配送の事実だけで内容の検証ではない）", () => {
       expect(run?.evidence.gates.payer_receipt).toMatchObject({ ok: true, verifiedBundleBeforeDecrypt: true });
       if (run === undefined || !run.ok || run.stage !== "delivered") throw new Error(`run did not deliver: ${JSON.stringify(run)}`);
       expect(createHash("sha256").update(run.plaintext).digest("hex")).toBe(run.evidence.gates.payer_receipt.decryptedSha256);
-      const body = JSON.parse(run.plaintext.toString("utf8")) as Record<string, unknown>;
-      expect(body["providerId"]).toBe(provider.result.providerId);
-      if ("schema" in provider.result) expect(body["schema"]).toBe(provider.result.schema);
+      expect(run.plaintext.length).toBeGreaterThanOrEqual(1);
+      expect(run.plaintext.length).toBeLessThanOrEqual(704);
+      if (provider !== undefined) {
+        const body = JSON.parse(run.plaintext.toString("utf8")) as Record<string, unknown>;
+        expect(body["providerId"]).toBe(provider.result.providerId);
+        if ("schema" in provider.result) expect(body["schema"]).toBe(provider.result.schema);
+      } else {
+        // 第三者: 平文の契約は知らない（JSON とも限らない）。出所の記録（provider.json の sha256）が証跡にあることだけ確かめる。
+        expect(run.evidence.providerFileSha256).toMatch(/^[0-9a-f]{64}$/);
+      }
     });
     test("ゲート 5: finality は本 v1 では未確認（別のゲートとして明記。両チェーンの読み取りは owner が別途行う）", () => {
       expect(run?.evidence.gates.finality).toEqual({ checked: false, note: expect.stringContaining("not checked") });
@@ -134,7 +151,7 @@ describe.skipIf(!ENABLED)("秘匿購入の受入（owner 実行・実送金・te
       expect(text).not.toContain(env("SUBETHA_PAYER_PRIVATE_KEY"));
       expect(text).not.toContain("\"value\"");
       expect(text).not.toContain("ownerKey");
-      if (provider.method === "POST") expect(text).not.toContain("lab-echo");
+      if (provider?.method === "POST") expect(text).not.toContain("lab-echo");
     });
   });
 
