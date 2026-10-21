@@ -174,3 +174,5 @@ C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）�
 4. `tools/private-payer.ts --provider-file runtime/private-live/<run>/provider.json`（`--method/--host/--path/--outbound-*` と**排他**。転記しない）で quote → `quote.json` を読む（`private.target`・`private.outbound.payTo`・額が `provider.json` と一致すること）→ 同じ `--out` に `--approve`。受入テストなら `PRIVATE_LIVE_PROVIDER=X PRIVATE_LIVE_PROVIDER_FILE=<provider.json>`（§5 の `quote` → `approve` と同じ）。
 5. 証跡（§6）に `providerFileSha256`（封筒の値の出所）が入る。ゲート 4 は第三者では **bundle 検証 → 1..=704 B → sha256 一致** だけ（応答の内容の契約は検証しない）。
 6. **失敗したときの損失**: 有料応答が 704 B を超える・chunked・領収が無い（B3/B4）と、executor か attest が失敗する。**受信レグ（2,000 atomic）は決済済み**、送信レグ（1,000 atomic）は Provider が決済済みのこともある `unknown`。自動の返金は無い。framing で落ちた場合は record も bundle も残らない（復号の救済も無い）。再試行は owner が証跡と両チェーンを読んでから、新しい quote と新しい承認で。
+
+**第三者 Provider X の実行記録（2026-10-22）**: §9 の手順で `GET https://tollbooth-hello-testnet.sjwilliams8.workers.dev/hello`（1,000 atomic）を 1 回。`delivered_private`、5 ゲート成立（受信 tx `0x74cc1d6f…266f`、送信 tx `0xafc13f15…5045`、平文 326 B、両チェーン読取 300 conf 超）。詳細は設計 §14.7。

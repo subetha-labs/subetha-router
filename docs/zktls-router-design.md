@@ -619,4 +619,12 @@ Router 側の budget の注意: 動的予算は 1 件の両レグを同じバケ
 ### 14.7 第三者 Provider への最小経路（増分 v1.1、2026-10-22。`docs/zktls-router-thirdparty.md`）
 照合: HEAD `f14b5e2` で private 群の単体 76 件・wire run12（lab 実バイナリ、synthetic）10 件 pass を再現。Router コアは**変更なし**（第三者の公開 GET は既存の規則と設定で足りる。`src/private/intent.ts` は host/path の規則を `checkTarget` として export しただけで挙動不変）。
 増分: `tools/private-provider-precheck.ts`（未払いの事前互換検査。lab の TLS 1.2 の 2 suite・固定骨格・`resource.url`・`checkDynamicX402Offer`・期限つき名前解決と `classifyAddress`、出力は封筒の値と観測だけ、synthetic の印）、`tools/private-payer.ts --provider-file`（手入力と排他、sha256 を証跡と再開点に、synthetic は `mozilla` で拒否）、`tests/acceptance/private-live.test.ts` の Provider `X`（内容に依存しないゲート 4）、試験 `tests/wire/private-provider-precheck.test.ts`（lab 不要）・`tests/unit/private-payer-provider-file.test.ts`（lab・Router 不要）・`tests/wire/private-x402.test.ts` の 1 ケース（lab）。
-候補: CDP discovery の Base Sepolia 1,565 件から 56 ホストを未払いで probe、38 が未払い条件を通過。選定 `GET https://tollbooth-hello-testnet.sjwilliams8.workers.dev/hello`（1,000 atomic。事前検査 OK、2026-10-22）。**第三者 Provider への実送金は未実施**（owner の別承認が要る。thirdparty §6）。
+候補: CDP discovery の Base Sepolia 1,565 件から 56 ホストを未払いで probe、38 が未払い条件を通過。選定 `GET https://tollbooth-hello-testnet.sjwilliams8.workers.dev/hello`（1,000 atomic。事前検査 OK、2026-10-22）。
+
+**受入の実行記録（2026-10-22 JST = 2026-10-21 19:33Z、owner が thirdparty §6 のゲートを承認した後、作者が実行。1 回目で成立）**
+
+| Provider | 結果 | 受信 tx（Base Sepolia） | 送信 tx | 平文 | 証跡 |
+|---|---|---|---|---|---|
+| X（第三者、x402 v2 GET `/hello`、Cloudflare Workers） | **delivered_private**、5 ゲート成立 | `0x74cc1d6f…266f`（2000 USDC atomic `0xfCea…0bF1` → `0xcD8e…47F5`、x402.org facilitator、332 conf） | `0xafc13f15…5045`（1000 USDC atomic `0x8763…2b19` → `0xb3e7…bF5B`、Provider 側の facilitator `0x59b7…e704`、322 conf） | 326 B の JSON（`{data:{message}, meta:{…}}`。内容は Router が検証しない） | `.claude_workflow/local/zktls-live-X-20261022.json`、`runtime/private-live/x1/`（git 管理外） |
+
+B3/B4 は実測で成立: 有料応答は `HTTP/1.1 200 OK`、`Content-Length: 326`、identity、`PAYMENT-RESPONSE` 1 つ（`payer` = Router の送信鍵）。record の trust は `mozilla-webpki-roots` + external_gate。canary: journal・diagnostics・router.log・証跡に bearer・ownerKey・平文は無く、作業ディレクトリは record.json だけ。使った資金: 受信 2,000 + 送信 1,000 atomic（承認の上限 6,000 のうち 3,000。2 件目は実行していない）。
