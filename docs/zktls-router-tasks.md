@@ -84,3 +84,4 @@ wire で見つかった実合成の不具合 3 件（受信 rail の解決、ver
 | T-3P2 入力経路と受入の雛形 | 済 | `tools/private-payer.ts --provider-file`、`tests/unit/private-payer-provider-file.test.ts`、`tests/wire/private-x402.test.ts`（第三者の入力経路、lab）、`tests/acceptance/private-live.test.ts` Provider `X` |
 | T-3P3 文書・状態・レビュー | 済 | 設計 §14.7、受入 §9、`.claude_workflow/state.json`、Codex 実装レビュー `.claude_workflow/local/zktls-3p-impl-review{1,2}.md`（APPROVE WITH CHANGES → 反映） |
 | 第三者 Provider X の実送金 | **済（2026-10-22、owner 承認後、1 回で delivered_private、5 ゲート）** | `.claude_workflow/local/zktls-live-X-20261022.json`、設計 §14.7、thirdparty §9 |
+| 控え候補 3 件 + tollbooth 2 件目 | 済: fx・shelf・tollbooth(2) delivered_private、joke は B3（938 B）で不成立 | `.claude_workflow/local/zktls-live-X-batch-20261022.json`、設計 §14.7、thirdparty §9.1 |

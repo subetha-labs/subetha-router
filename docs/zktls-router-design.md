@@ -627,4 +627,15 @@ Router 側の budget の注意: 動的予算は 1 件の両レグを同じバケ
 |---|---|---|---|---|---|
 | X（第三者、x402 v2 GET `/hello`、Cloudflare Workers） | **delivered_private**、5 ゲート成立 | `0x74cc1d6f…266f`（2000 USDC atomic `0xfCea…0bF1` → `0xcD8e…47F5`、x402.org facilitator、332 conf） | `0xafc13f15…5045`（1000 USDC atomic `0x8763…2b19` → `0xb3e7…bF5B`、Provider 側の facilitator `0x59b7…e704`、322 conf） | 326 B の JSON（`{data:{message}, meta:{…}}`。内容は Router が検証しない） | `.claude_workflow/local/zktls-live-X-20261022.json`、`runtime/private-live/x1/`（git 管理外） |
 
-B3/B4 は実測で成立: 有料応答は `HTTP/1.1 200 OK`、`Content-Length: 326`、identity、`PAYMENT-RESPONSE` 1 つ（`payer` = Router の送信鍵）。record の trust は `mozilla-webpki-roots` + external_gate。canary: journal・diagnostics・router.log・証跡に bearer・ownerKey・平文は無く、作業ディレクトリは record.json だけ。使った資金: 受信 2,000 + 送信 1,000 atomic（承認の上限 6,000 のうち 3,000。2 件目は実行していない）。
+B3/B4 は実測で成立: 有料応答は `HTTP/1.1 200 OK`、`Content-Length: 326`、identity、`PAYMENT-RESPONSE` 1 つ（`payer` = Router の送信鍵）。record の trust は `mozilla-webpki-roots` + external_gate。canary: journal・diagnostics・router.log・証跡に bearer・ownerKey・平文は無く、作業ディレクトリは record.json だけ。使った資金: 受信 2,000 + 送信 1,000 atomic。
+
+**続き（同日、owner の常時承認「テストネットでの送金なので毎回許可をもらわなくて大丈夫」のもと、順に実行。`.claude_workflow/local/zktls-live-X-batch-20261022.json`）**
+
+| Provider | 結果 | 受信 tx | 送信 tx | 平文 |
+|---|---|---|---|---|
+| genesisblock `GET /api/joke` | **不成立（B3）**: 有料応答が 938 B > 704 B。両レグは決済済み（受信 `0x2c90c481…` 2,000、送信 `0xd0bf6997…` 1,000 は Provider 側 facilitator が実行）、Router は `unknown/private_session_timeout`、record 無し、返金無し。再試行しない | `0x2c90c481…1e492` | `0xd0bf6997…f1c7` | 無し |
+| shelf `GET /v1/sepolia/block-height/q1`（Railway） | **delivered_private**（2 回目。1 回目は x402.org facilitator の settle が `invalid_exact_evm_transaction_failed` → `unknown/source_rejected`、チェーン上は無送金） | `0xd241baf2…46a7`（580 conf） | `0xc86e6381…ab7c`（570 conf） | 91 B JSON |
+| wallet-services `GET /fx-rate`（Workers） | **delivered_private** | `0x2e4b42d9…27cd` | `0x24c178ed…b8b8` | 214 B JSON |
+| tollbooth `GET /hello` 2 回目 | **delivered_private**（3 回目の試み。1 回目は quote の `rate_limited`、2 回目は facilitator settle の同じ失敗、無送金） | `0xce851024…3c2b`（359 conf） | `0x93e591e0…097b`（351 conf） | 326 B JSON |
+
+資金: 受信 4 × 2,000 = 8,000、送信 4 × 1,000 = 4,000 atomic（記録した上限どおり）。無送金で終わった 3 試行はチェーン読取（Transfer ログ・残高）で確認。学び: (1) B3（応答 ≤ 704 B）が実際の選別で、事前検査では見えない; (2) 受信 facilitator の settle 失敗は一時的で資金は動かず、Router は `unknown/source_rejected`、再実行は新しい quote と、試行を数える `maxPurchases` を持つ journal が要る（x2 → x3）; (3) Router の quote は同一 principal から 1 分 3 件で `rate_limited`。canary は x2・x3 とも clean。

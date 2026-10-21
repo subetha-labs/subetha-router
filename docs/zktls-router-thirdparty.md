@@ -130,3 +130,6 @@ worktree `subetha-router/zktls-router-20261020`（branch `task/zktls-router`、H
 ## 9. 実行記録（2026-10-22）
 owner が §6 を承認（「承認します」）。事前検査（公開 host、synthetic でない）→ `runtime/private-live/x1/scope.json`（上限: 受信 4,000・送信 2,000、`maxPurchases` 2）→ 専用の Router 設定（`priv-3p-x402-get`、専用 journal、USDC bucket 3,000/6,000）→ quote（承認対象を §6 と照合: 受信 2,000 → `0xcD8e…47F5`、送信 1,000 → `0xb3e7…bF5B`、`GET /hello`）→ `--approve`。
 結果: **1 回目で `delivered_private`、5 ゲート成立**（受信 tx `0x74cc1d6f…266f`、送信 tx `0xafc13f15…5045`、record `HTTP/1.1 200 OK` + `Content-Length: 326` + `PAYMENT-RESPONSE`、平文 326 B の JSON、両チェーン読取 322/332 conf）。B3/B4 は実測で成立。使用額は受信 2,000 + 送信 1,000 atomic（2 件目は未実行）。証跡 `.claude_workflow/local/zktls-live-X-20261022.json`、設計 §14.7。
+
+### 9.1 続き（同日）: 控え候補 3 件 + tollbooth 2 件目
+順に joke → shelf → fx → tollbooth(2)。結果: **fx・shelf・tollbooth(2) は `delivered_private`（5 ゲート）**、joke は有料応答 938 B（> 704 B、B3）で不成立（両レグ決済済み、record 無し、返金無し）。shelf と tollbooth(2) は 1 回目が x402.org facilitator の settle 失敗（`invalid_exact_evm_transaction_failed` → `unknown/source_rejected`、チェーン上は無送金）で、専用 journal（x3、`maxPurchases` 2）で新しい quote から再実行して成立。資金は受信 8,000・送信 4,000 atomic（上限どおり）。詳細は設計 §14.7、`.claude_workflow/local/zktls-live-X-batch-20261022.json`。

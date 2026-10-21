@@ -176,3 +176,5 @@ C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）�
 6. **失敗したときの損失**: 有料応答が 704 B を超える・chunked・領収が無い（B3/B4）と、executor か attest が失敗する。**受信レグ（2,000 atomic）は決済済み**、送信レグ（1,000 atomic）は Provider が決済済みのこともある `unknown`。自動の返金は無い。framing で落ちた場合は record も bundle も残らない（復号の救済も無い）。再試行は owner が証跡と両チェーンを読んでから、新しい quote と新しい承認で。
 
 **第三者 Provider X の実行記録（2026-10-22）**: §9 の手順で `GET https://tollbooth-hello-testnet.sjwilliams8.workers.dev/hello`（1,000 atomic）を 1 回。`delivered_private`、5 ゲート成立（受信 tx `0x74cc1d6f…266f`、送信 tx `0xafc13f15…5045`、平文 326 B、両チェーン読取 300 conf 超）。詳細は設計 §14.7。
+
+**同日の続き**: 控え候補 3 件 + tollbooth 2 件目。fx（214 B）・shelf（91 B）・tollbooth(2)（326 B）は `delivered_private`、joke は有料応答 938 B で B3 不成立（両レグ決済済み・返金無し）。facilitator の settle 失敗 2 回は無送金で、新しい quote で再実行。設計 §14.7。
