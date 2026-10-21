@@ -160,5 +160,5 @@ PRIVATE_LIVE_AC=1 PRIVATE_LIVE_MODE=approve PRIVATE_LIVE_PROVIDER=C PRIVATE_LIVE
 - Tempo pull の credential 期限切れ（`validBefore`）: Provider が 402 を返し、record の状態行が `non_200` → attest は通らない。送信レグは動いていない可能性が高いが、**unknown として扱う**（Provider 側の claim の有無はチェーンで読む）。
 
 ## 8. 実行記録（2026-10-20/21）
-C・A・B は 5 ゲート成立（設計 §14.6）。F は Provider F が有料要求に HTTP 500（mppx `internal-payment-error`）を返し未成立（受信決済は 3 件済み、送信は無し）。owner 側で Provider F の Worker ログと RPC を確認してから再実行する。Tempo の 402 は probe ごとに `_mppx_nonce` が変わるため、Router 側の offer 比較から除外した（修正済み）。
+C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）。F は最初の 2 回が Provider F の一時的な HTTP 500（mppx `internal-payment-error`、公開 Tempo RPC のレート制限が濃厚）で未成立となり、3 回目で成立。Tempo の 402 は probe ごとに `_mppx_nonce` が変わるため、Router 側の offer 比較から除外した（修正済み）。
 
