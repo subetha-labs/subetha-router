@@ -179,7 +179,7 @@ owner の指示（2026-10-22「実 transport（公開到達可能な V2 facilita
 | journal | `source_settled {txRef 0x50a0…c197, eventId 11155111:0x50a0…c197:253}` → `private_issuance_reserved {inboundIdentity subetha|eip155:11155111|0x50a0…c197|11155111:0x50a0…c197:253}` → released → handed_over → recorded → attested。V2 の `/admin/payments/<nonce>`: accepted、receipt mined、logs [{logIndex 253, value 2000}]、eventId 同値 |
 | 送信 | tx `0x69560c152e9e255c8d38566509ecd2aa8defcb195555f94b50361b76fbf0b8c1`（Base Sepolia）。`--recover --chain` block 48673239: outbound **settled**、inbound `skipped: protocol` |
 | 配送 | `delivered_private`、proof `{delivery: true, requestBinding: false}`、record 2 回同一（`04565f2d…359a`）、payer 側で復号 326 B（`e7095be3…7c84`） |
-| 5 つのゲート | 受信決済（facilitator accepted + Sepolia receipt）、送信決済（chain settled）、秘匿配送、payer 受領、finality（Router・道具は未確認。V2 の settled は後で追記） |
+| 5 つのゲート | 受信決済（facilitator accepted + Sepolia receipt）、送信決済（chain settled）、秘匿配送、payer 受領、finality（Router・道具は未確認。**V2 側の報告**: 08:21:21Z settled、receipt.level final（block 11968251、canonical hash 一致）、eventId 同値、coin spendable / intake finalized / release authorized、`/admin/pending` finalized 3 / failed 0、afterRelease なし。V2 側の記録 `t22d-joint-router-real-transport.md`） |
 | 資金 | 受信 2000 atomic zUSDC V2（A → merchant D の POS）、送信 1000 atomic USDC。2 run の合計: 受信 4000 zUSDC V2、送信 2000 USDC |
 
 記録: `.claude_workflow/local/zktls-live-v2b-20261022.json`、`runtime/private-live/v2b/t1/`（ignored。bearer・ownerKey は受入の後に消す）。

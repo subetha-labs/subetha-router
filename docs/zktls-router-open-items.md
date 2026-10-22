@@ -106,4 +106,5 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 ## B-12 結合 2 件目（2026-10-22）: 実 transport で成立
 - owner の指示で実合成の Router（試験能力なし）× 公開到達可能な V2 facilitator（run の間だけ ngrok の https トンネル）。paymentId `56c85a2c…`、burn `0x50a0…c197`（logIndex 253）、送信 `0x6956…b8c1`、delivered_private。記録は `docs/zktls-router-v2-inbound.md` §12。コード変更なし。
 - zETH は owner の判断で対象外（利用想定なし）。
-- 残り: V2 の settled 報告の追記、lab の §A（704 B）、push。
+- V2 側 settled 08:21:21Z（receipt final、pending 0 / finalized 3 / failed 0）。両側で close。
+- 残り: lab の §A（704 B）、push。
