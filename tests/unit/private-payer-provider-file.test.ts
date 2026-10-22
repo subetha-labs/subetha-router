@@ -65,6 +65,12 @@ describe("--provider-file: 入力の境界（lab 不要）", () => {
       ["observed", providerDoc({ observed: {} })],
     ];
     for (const [name, doc] of bad) expect(withProviderFile(writeDoc(`bad-${name}.json`, doc), {}), name).toBeUndefined();
+    // warnings（不適合の兆候）はそのまま写す。形が違えば読めない。
+    expect(withProviderFile(writeDoc("warn.json", providerDoc({ warnings: ["402 chunked"] })), {})).toMatchObject({ providerWarnings: ["402 chunked"] });
+    expect(withProviderFile(writeDoc("warn-empty.json", providerDoc({ warnings: [] })), {})).not.toHaveProperty("providerWarnings");
+    for (const [name, warnings] of [["string", "x"], ["null", null], ["number-element", [1]], ["null-element", ["ok", null]]] as const) {
+      expect(withProviderFile(writeDoc(`warn-bad-${name}.json`, providerDoc({ warnings })), {}), name).toBeUndefined();
+    }
     writeFileSync(path.join(tmp, "not-json.json"), "{");
     expect(withProviderFile(path.join(tmp, "not-json.json"), {})).toBeUndefined();
     expect(withProviderFile(path.join(tmp, "missing.json"), {})).toBeUndefined();
@@ -112,6 +118,14 @@ describe("--provider-file: 入力の境界（lab 不要）", () => {
     const lab2 = await runPrivatePayer({ ...synthetic!, trust: "lab-fixture-ca", scopeFile: undefined as never, connect: "127.0.0.1:9", outDir: path.join(tmp, "syn-out-2") });
     expect(lab2.ok).toBe(false);
     if (!lab2.ok) expect(lab2.stage).toBe("keygen");
+    // 事前検査の warnings は keygen・quote の前にログに出て、止めない（偽の lab なので次の段 keygen で止まる = warning は拒否ではない）。
+    const lines: string[] = [];
+    const warned = withProviderFile(writeDoc("syn-warn.json", providerDoc({ warnings: ["402 chunked"] }, { synthetic: true, trust: "test-ca" })), { ...BASE, ...lab, trust: "lab-fixture-ca" as const, connect: "127.0.0.1:9", outDir: path.join(tmp, "syn-out-3"), approve: false, log: (line: string) => lines.push(line) })!;
+    const warnedRun = await runPrivatePayer(warned);
+    expect(warnedRun.ok).toBe(false);
+    if (!warnedRun.ok) expect(warnedRun.stage).toBe("keygen");
+    expect(lines.filter((l) => l.includes("provider warning: 402 chunked"))).toHaveLength(1);
+    expect(lines.findIndex((l) => l.includes("provider warning"))).toBeLessThan(lines.findIndex((l) => l.includes("keygen")));
   });
 
   test("承認時に provider.json が変わっている（sha256 が再開点の args と違う）→ approve で拒み、署名も購入要求も起きず、証跡の出所は quote のまま", async () => {

@@ -14,7 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { encodePaymentRequiredHeader } from "@x402/core/http";
 
 import { generateTestTls, type TlsMaterial } from "../fixtures/tls/generate.js";
-import { MAX_RECV_BYTES, NOT_VERIFIED, precheckProvider, readProviderFile, resolveVetted, type PrecheckResult } from "../../tools/private-provider-precheck.js";
+import { FRAMING_WARNING, MAX_RECV_BYTES, NOT_VERIFIED, parseProviderFile, precheckProvider, readProviderFile, resolveVetted, type PrecheckResult } from "../../tools/private-provider-precheck.js";
 
 const HOST = "provider.test";
 const PATH = "/paid";
@@ -89,9 +89,15 @@ describe("第三者 Provider の事前互換検査（未払い・TLS 1.2 fixture
   });
 
   const run = (overrides: Partial<Parameters<typeof precheckProvider>[0]> = {}): Promise<PrecheckResult> => precheckProvider({ url: URL_OK, ca: TLS.ca, connect: `127.0.0.1:${port}`, timeoutMs: 5000, ...overrides });
-  const send402 = (response: import("node:http").ServerResponse, header: string, options: { chunked?: boolean } = {}): void => {
+  const send402 = (response: import("node:http").ServerResponse, header: string, options: { chunked?: boolean; contentEncoding?: string } = {}): void => {
     const body = JSON.stringify({ x402Version: 2, error: BODY_MARKER });
     response.shouldKeepAlive = false;
+    if (options.contentEncoding !== undefined) {
+      // Content-Length 1 つでも非 identity の Content-Encoding は framing "other"（本文はそのまま: 検査は 402 のヘッダだけを見る）。
+      response.writeHead(402, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)), "content-encoding": options.contentEncoding, "payment-required": header, connection: "close" });
+      response.end(body);
+      return;
+    }
     if (options.chunked === true) {
       response.writeHead(402, { "content-type": "application/json", "payment-required": header, connection: "close" });
       response.write(body);
@@ -260,11 +266,32 @@ describe("第三者 Provider の事前互換検査（未払い・TLS 1.2 fixture
     expect(requests).toBe(0);
   });
 
-  test("観測: 402 が chunked でも通過し、framing402 = chunked を記録する（B3 は払うまで分からない）", async () => {
+  test("観測: 402 が chunked でも通過し、framing402 = chunked と warnings（不適合の兆候、固定文）を記録する（B3 は払うまで分からない）。Content-Length の 402 には warnings が無い", async () => {
     handler = (_request, response) => send402(response, paymentRequired([offer()]), { chunked: true });
     const result = await run();
     expect(result.ok, JSON.stringify(result)).toBe(true);
-    if (result.ok) expect(result.provider.observed.framing402).toBe("chunked");
+    if (result.ok) {
+      expect(result.provider.observed.framing402).toBe("chunked");
+      expect(result.provider.warnings).toEqual([FRAMING_WARNING]);
+      expect(result.checks.find((c) => c.name.startsWith("observation: 402 framing"))?.detail).toContain("incompatibility sign");
+      // 書き出した形（provider.json と同じ JSON）を読み戻しても warnings は残る。
+      expect(parseProviderFile(Buffer.from(JSON.stringify(result.provider)))?.warnings).toEqual([FRAMING_WARNING]);
+    }
+    // Content-Length 1 つ + 非 identity の Content-Encoding = "other" も同じ warning。
+    handler = (_request, response) => send402(response, paymentRequired([offer()]), { contentEncoding: "gzip" });
+    const other = await run();
+    expect(other.ok, JSON.stringify(other)).toBe(true);
+    if (other.ok) {
+      expect(other.provider.observed.framing402).toBe("other");
+      expect(other.provider.warnings).toEqual([FRAMING_WARNING]);
+    }
+    handler = (_request, response) => send402(response, paymentRequired([offer()]));
+    const plain = await run();
+    expect(plain.ok).toBe(true);
+    if (plain.ok) {
+      expect("warnings" in plain.provider).toBe(false);
+      expect(plain.checks.find((c) => c.name.startsWith("observation: 402 framing"))?.detail).toBe("content-length");
+    }
   });
 
   test("負: 受信が 16 KiB を超える 402 → recv_too_large（lab の受信予算）。閉じずに送り続ける応答でも、上限で切って timeout を待たない", async () => {

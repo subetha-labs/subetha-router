@@ -71,6 +71,8 @@ export interface PrivatePayerOptions {
   readonly providerFileSha256?: string;
   /** `withProviderFile` が入れる: `provider.json` が試験の差し替え（`--ca`/`--connect`）で得た synthetic な観測なら true（`mozilla` では拒む）。 */
   readonly providerSynthetic?: boolean;
+  /** `withProviderFile` が入れる: 事前検査の `warnings`（不適合の兆候。固定文）。quote のときにログに出す。合否は変えない。 */
+  readonly providerWarnings?: readonly string[];
   /** 受信（既定は Base Sepolia USDC、x402）。SubEtha V2 burn-sale は `{ network: "eip155:11155111", asset: <zUSDC>, maxTotal }`。 */
   readonly inbound?: { readonly network: string; readonly asset: string; readonly maxTotal: string };
   readonly trust: "mozilla" | "lab-fixture-ca";
@@ -315,7 +317,7 @@ export function payFirstOf(quote: PrivateQuoteView): { payTo: string; amount: st
 }
 
 /** 第三者 Provider の値を事前互換検査の `provider.json` から**そのまま**取る（手入力の代わり。`docs/zktls-router-thirdparty.md` §4.2）。読めない・形が違えば `undefined`。 */
-export function withProviderFile<T extends object>(file: string, options: T): (T & Pick<PrivatePayerOptions, "method" | "host" | "path" | "outbound" | "providerFileSha256" | "providerSynthetic">) | undefined {
+export function withProviderFile<T extends object>(file: string, options: T): (T & Pick<PrivatePayerOptions, "method" | "host" | "path" | "outbound" | "providerFileSha256" | "providerSynthetic" | "providerWarnings">) | undefined {
   // 1 回だけ読み、**同じバイト列**を検査して sha256 を取る（読み直しの間の差し替えで値と digest が食い違わない）。
   let bytes: Buffer;
   try {
@@ -325,7 +327,7 @@ export function withProviderFile<T extends object>(file: string, options: T): (T
   }
   const provider = parseProviderFile(bytes);
   if (provider === undefined) return undefined;
-  return { ...options, method: provider.method, host: provider.host, path: provider.path, outbound: { ...provider.outbound }, providerFileSha256: sha256Hex(bytes), providerSynthetic: provider.observed.synthetic };
+  return { ...options, method: provider.method, host: provider.host, path: provider.path, outbound: { ...provider.outbound }, providerFileSha256: sha256Hex(bytes), providerSynthetic: provider.observed.synthetic, ...(provider.warnings === undefined || provider.warnings.length === 0 ? {} : { providerWarnings: [...provider.warnings] }) };
 }
 
 function newEvidence(options: { readonly trust: "mozilla" | "lab-fixture-ca"; readonly method: string; readonly host: string; readonly path: string }): PrivatePayerEvidence {
@@ -468,6 +470,8 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   if (!options.approve) {
     // 1. keygen（Payer の鍵・salt・注文の骨格。本文は Payer の手元にだけ）→ 封筒 → quote → checkpoint。何も払わない。
     if (existsSync(path.join(options.outDir, CHECKPOINT_FILE))) return fail("review", "this --out already holds a reviewed quote; use --approve to continue it or a new --out to quote again");
+    // 事前検査の不適合の兆候（例: 402 が chunked / 非 identity の encoding）は keygen・quote の前に人に見せる。止めはしない（合否は払うまで分からない。open-items §A-4）。
+    for (const warning of options.providerWarnings ?? []) log(`private-payer: provider warning: ${warning}`);
     mkdirSync(path.join(exec, "private_inbox"), { recursive: true, mode: 0o700 });
     const orderId = `${"0".repeat(32)}${randomBytes(16).toString("hex")}`;
     const keygenArgs = ["payer-keygen", "--payer-dir", keys, "--order-id", orderId, "--host", options.host, "--port", "443", "--path", options.path];

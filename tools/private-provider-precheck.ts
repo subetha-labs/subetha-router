@@ -8,7 +8,9 @@
  *   R2 Router の offer 規則（`checkDynamicX402Offer` をそのまま）を通る Base Sepolia USDC の offer が 1 つある
  *   R4 host/path の規則（`checkTarget` = `parseIntent` と同じ）と `parseUpstreamUrl`（I/O の前）
  * 払うまで分からないもの（`notVerified` として出力に書く）: 有料応答が `HTTP/1.1 200 OK` + `Content-Length` 1 つ + 本文 ≤ 704 B であること（B3）、
- * 領収 `PAYMENT-RESPONSE` に `payer` があること（B4）。402 の framing は**観測**として記録するだけで合否にしない。
+ * 領収 `PAYMENT-RESPONSE` に `payer` があること（B4）。402 の framing は**観測**として記録するだけで合否にしない。ただし 402 が `Content-Length` でなければ
+ * `warnings` に不適合の兆候として書く（lab は `Transfer-Encoding` を設計として受け付けない: `docs/zktls-router-open-items.md` §A-4。有料応答も chunked なら
+ * 両レグ決済の後に B3 で落ち、返金は無い）。
  *
  * 接続先の安全（Router の動的 transport と同じ方針）: 名前解決は期限つき（`dns.lookup`、全アドレス）、解決した**すべて**のアドレスを `classifyAddress`
  * （loopback・自アドレス・特殊用途を拒否）に通し、通った先頭のアドレスへ接続する（SNI と証明書の検査は host 名のまま）。`--connect` は試験専用の loopback の差し替え
@@ -96,6 +98,8 @@ export interface ProviderFile {
     readonly skeletonBytes: number;
   };
   readonly notVerified: readonly string[];
+  /** 不適合の兆候（固定文。合否ではない）。無ければ欄ごと無い。 */
+  readonly warnings?: readonly string[];
   readonly checkedAt: string;
 }
 
@@ -135,6 +139,9 @@ export const NOT_VERIFIED = [
   "B3: the paid 200 response must be exactly 'HTTP/1.1 200 OK' with one Content-Length, no Transfer-Encoding/Content-Encoding and a body of 1..=704 bytes; this cannot be checked without paying",
   "B4: the paid response must carry exactly one PAYMENT-RESPONSE with success, a bytes32 transaction, the network and payer = the Router's outbound signer; this cannot be checked without paying",
 ] as const;
+
+/** 402 が `Content-Length` 1 つで返らなかったときの固定文（lab の回答 §A-4: chunked は設計として受け付けない）。 */
+export const FRAMING_WARNING = "402 was not framed with a single Content-Length and identity encoding (chunked, or Content-Encoding/other): the lab's delivery binary accepts only content-length-identity-single-response and refuses Transfer-Encoding and non-identity Content-Encoding by design (open-items §A-4), so the paid response is likely to fail B3 after both legs are paid, with no refund; prefer a provider whose 402 carries a single Content-Length with identity encoding";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -324,7 +331,8 @@ export async function precheckProvider(options: PrecheckOptions): Promise<Preche
   if (status !== 402) return no("not_402", String(status));
   checks.push({ name: "R1 unpaid GET answers 402", ok: true });
   const framing402 = framingOf(recv.headers);
-  checks.push({ name: "observation: 402 framing (not a pass/fail; the paid response's framing is B3)", ok: true, detail: framing402 });
+  checks.push({ name: "observation: 402 framing (not a pass/fail; the paid response's framing is B3)", ok: true, detail: framing402 === "content-length" ? framing402 : `${framing402} (incompatibility sign: the lab accepts only content-length-identity framing, open-items §A-4; see provider.warnings)` });
+  const warnings = framing402 === "content-length" ? [] : [FRAMING_WARNING];
   const prHeaders = recv.headers.filter((h) => h.name === "payment-required");
   if (prHeaders.length !== 1 || prHeaders[0]!.value === "") return no("no_payment_required_header");
   let raw: unknown;
@@ -378,6 +386,7 @@ export async function precheckProvider(options: PrecheckOptions): Promise<Preche
       skeletonBytes,
     },
     notVerified: [...NOT_VERIFIED],
+    ...(warnings.length === 0 ? {} : { warnings }),
     checkedAt: new Date(options.now?.() ?? Date.now()).toISOString(),
   };
   if (options.outDir === undefined) return { ok: true, provider, checks };
@@ -437,6 +446,8 @@ export function parseProviderFile(bytes: Buffer): ProviderFile | undefined {
   if (parsed["url"] !== `https://${target.host}${target.path}`) return undefined;
   const observed = parsed["observed"];
   if (!isRecord(observed) || typeof observed["synthetic"] !== "boolean") return undefined;
+  const warnings = parsed["warnings"];
+  if (warnings !== undefined && (!Array.isArray(warnings) || !warnings.every((w) => typeof w === "string"))) return undefined;
   return parsed as unknown as ProviderFile;
 }
 

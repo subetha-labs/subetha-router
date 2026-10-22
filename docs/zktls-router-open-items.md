@@ -27,7 +27,7 @@
 - **A-2 chunked**: **受け付けない（設計）**。`tls.rs` の `validate_response_framing`: `Content-Length` ちょうど 1 つ、`Transfer-Encoding` があれば拒否、`Content-Encoding` は identity のみ。chunked はチャンク枠の解釈で「committed 範囲 = Content-Length 本文」の対応が崩れるため予定なし。**事前検査で「402 が chunked」を不適合の兆候として扱う運用は妥当**（Provider 側で `Content-Length` を明示すれば回避可能）。
 - **A-3**: TLS 1.2 の 2 suite は TLSNotary 上流の制約。lab 側でも障害なし。
 - 補足: 938 B の件は払うまで長さが分からない構造で、Provider が 402 に応答サイズの上限ヒントを載せる以外に事前判定の手段はない（Provider C/F は ≤704 B 固定で設計）。裏付け: `phase3/noir/src/main.nr`、`phase3/runner/src/{types,tls}.rs`、`phase3/REPORT.ja.md`、`phase5/results/*/logs/*executor-prove.stdout.log`。
-- **Router 側の整理**: 現状は変更なし。上限を広げるなら lab の案 (a)（サイズ別回路）+ Router 側 1 増分（record/attest の variant 欄、`limits.maxResponseBytes` の開示、事前検査の説明文、`deliveryBinSha256` 更新）。着手は owner の判断。事前検査は「402 が chunked」を不適合の兆候として扱う（既存の `tools/private-provider-precheck.ts` の `framing402` 観測で判定可能）。
+- **Router 側の整理**: 現状は変更なし。上限を広げるなら lab の案 (a)（サイズ別回路）+ Router 側 1 増分（record/attest の variant 欄、`limits.maxResponseBytes` の開示、事前検査の説明文、`deliveryBinSha256` 更新）。着手は owner の判断。事前検査は「402 が chunked」を不適合の兆候として扱う: **対応済み（2026-10-22）** `tools/private-provider-precheck.ts` は `framing402 !== "content-length"`（chunked、または非 identity の `Content-Encoding` 等の other）のとき `provider.warnings: [FRAMING_WARNING]`（`provider.json` と stdout の `provider` 欄）に固定文を書き、stdout の `checks` の framing 観測に「incompatibility sign」の要約を添え、`tools/private-payer.ts --provider-file` は keygen・quote の前にその文をログに出す（合否は変えない。払うまで分からない）。Codex（gpt-6-astra）APPROVE WITH CHANGES → 反映（`other` = 非 identity encoding の試験と文言、壊れた `warnings` の拒否、ログの試験）。
 
 ## B. zERC20 V2 決済側（別 worktree、別担当）との接続境界（案。確定ではない）
 
