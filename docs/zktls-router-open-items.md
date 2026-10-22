@@ -87,3 +87,8 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 ## B-8 owner の判断（2026-10-22）
 - **(2) 発行時点: accepted**（V1 と同じ。受信 facilitator の `/settle` が receipt mined で成功を返した時点で Router は送信 credential を発行する）。「以前の SubEtha v1 の実装のように accepted で発行の想定でいます。」 発行後の取消（reorg / screening-rejected）は既存どおり送信レグ `unknown`・返金無しとして記録する。settled 待ちの状態新設は行わない。
 - (8) token: 未決。Router の増分は受信の network・資産を設定値として扱い、どちらでも載る形で作る（zETH を選ぶ場合は 1:1 の前提が崩れるので、固定換算の設定が別に要る）。
+
+## B-9 V2 担当の追記（2026-10-22）: payer の burn の代替
+- V2 の burn-sale は EIP-3009 ではなく「公開 z token を payTo（注文別 burn address）へ `transfer` するだけ」。結合（B-3 の 3）の payer 操作は subetha-v2 側の harness `packages/zerc20-v2-adapter/scripts/live-slice.mjs` の `pos-pay A <payTo> <amount>`（A の ETH を zETH に wrap → transfer → tx hash を出力。T22 の live で使用）で代替できる。zUSDC 版は `mint-usdc` + deposit 済み残高からの transfer を足せば同様。
+- 手順案: Router が quote（`/challenge` 相当）で得た payTo を V2 側に渡す → V2 側が `pos-pay` で支払い、tx hash を返す → Router 側（payer 道具）が credential `{challengeNonce, burnTxHash}` を組んで purchase（Router が `/verify` → `/settle`）。`task/subetha-hosted-inbound` の merge を待たずに結合できる。
+- Router 側の対応: `tools/private-payer.ts` に「受信 credential を外部で得た burn tx hash から組む」入力（`--burn-tx-hash`。subetha 受信の quote だけ）を足せば足りる（鍵も署名も Router 側に無い。承認対象の burn address・額を V2 側に渡すのは人手）。**owner の判断材料**。
