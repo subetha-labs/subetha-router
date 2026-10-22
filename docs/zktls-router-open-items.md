@@ -92,3 +92,8 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 - V2 の burn-sale は EIP-3009 ではなく「公開 z token を payTo（注文別 burn address）へ `transfer` するだけ」。結合（B-3 の 3）の payer 操作は subetha-v2 側の harness `packages/zerc20-v2-adapter/scripts/live-slice.mjs` の `pos-pay A <payTo> <amount>`（A の ETH を zETH に wrap → transfer → tx hash を出力。T22 の live で使用）で代替できる。zUSDC 版は `mint-usdc` + deposit 済み残高からの transfer を足せば同様。
 - 手順案: Router が quote（`/challenge` 相当）で得た payTo を V2 側に渡す → V2 側が `pos-pay` で支払い、tx hash を返す → Router 側（payer 道具）が credential `{challengeNonce, burnTxHash}` を組んで purchase（Router が `/verify` → `/settle`）。`task/subetha-hosted-inbound` の merge を待たずに結合できる。
 - Router 側の対応: `tools/private-payer.ts` に「受信 credential を外部で得た burn tx hash から組む」入力（`--burn-tx-hash`。subetha 受信の quote だけ）を足せば足りる（鍵も署名も Router 側に無い。承認対象の burn address・額を V2 側に渡すのは人手）。**owner の判断材料**。
+
+## B-10 V2 担当の確認（2026-10-22）: Router v1.3 が依存する契約と結合の前提
+- Router v1.3 が依存する 4 点（`/challenge` の `extra.settlementKind`、`/settle` の `transaction` = burnTxHash、`extra.eventId` の chainId/txHash 整合、同じ nonce → 同じ eventId と 1 tx → 1 challenge）は **V2 facilitator の現実装で満たされている**（台帳 `txOwners`/`evidence`）。V2 側は `subetha-v2/docs/ZERC20-V2-ROUTER-BOUNDARY.md` §5b に同じ文言で記録。
+- transport: V2 の `runV2Daemon` は listen host を引数に取るので、**V2 facilitator を loopback 以外のホスト名で公開するのは設定で可能**（`run-v2-local.mjs` は今 127.0.0.1 固定。結合時に host 指定の env を足す。`/admin/*` は token 必須のまま）。
+- owner への判断事項は双方同じ 4 点: (1) 発行時点 accepted の本人確認（Router 経由の判断を V2 側が確定扱いにするため）、(2) token、(3) payer の支払い道具、(4) transport（Router 子 = synthetic transport か、非 loopback 公開か）。
