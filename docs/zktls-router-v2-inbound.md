@@ -159,7 +159,7 @@ V2 の zUSDC は V1 と別 deployment（§4）。`SUBETHA_ZERC20_ASSETS`（`src/
 | journal | `source_settled {txRef 0x8ec7…a831, eventId 11155111:0x8ec7…a831:151}` → `private_issuance_reserved {inboundIdentity subetha|eip155:11155111|0x8ec7…a831|11155111:0x8ec7…a831:151}` → `private_released` → `private_handed_over` → `private_recorded` → `private_attested`。V2 の `/admin/payments/<nonce>`（07:5x）: accepted、receipt mined、logs [{logIndex 151, value 2000}]、eventId 同値 |
 | 送信 | tx `0x12be50769833af321911c588104b66c52cf0ec479442b12e85ebeeee20d3cf17`（Base Sepolia、Router 署名者 `0x8763…2b19` → Provider）。`--recover --chain` block 48666184: outbound **settled**（AuthorizationUsed → Transfer）、inbound `skipped: protocol`（設計どおり） |
 | 配送 | `delivered_private`、proof `{delivery: true, requestBinding: false, onChainFinality: not_checked}`、record 2 回同一（sha256 `187436f3…ba2c`）、payer 側で bundle 検証後に復号 326 B（sha256 `e6a9ddbb…1b79`）。証跡 `gates.inbound_settlement = {settled, claimedTxRef = txRef = 0x8ec7…a831}` |
-| 5 つのゲート | 受信決済（facilitator accepted + Sepolia receipt）、送信決済（chain settled）、秘匿配送、payer 受領、finality（未確認。V2 の settled は約 13 分後に V2 側が報告） |
+| 5 つのゲート | 受信決済（facilitator accepted + Sepolia receipt）、送信決済（chain settled）、秘匿配送、payer 受領、finality（Router・道具は未確認。**V2 側の報告**: 07:57:47Z settled、receipt.level final（block 11968136、canonical hash 一致）、eventId 同値、coin spendable / intake finalized / release authorized、`/admin/pending` finalized 2 / failed 0、後発の reorg・screening-rejected なし。V2 側の記録 `t22c-joint-router-v2-inbound.md`） |
 | 資金 | 受信 2000 atomic zUSDC V2（V2 harness の A → merchant D の POS）、送信 1000 atomic USDC（Router 署名者）。scope 1 件、追加なし |
 
 記録: `.claude_workflow/local/zktls-live-v2a-20261022.json`（quote・journal・証跡・V2 の観測）、`runtime/private-live/v2a/t1/`（ignored。bearer・ownerKey は受入の後に消す）。

@@ -100,5 +100,5 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 
 ## B-11 結合 1 件目（2026-10-22）: 成立
 - owner の判断（4 点）→ Router v1.3.1（payer 道具 `--burn-tx-hash`）・v1.3.2（表の行 + `sameAsset`）→ Router 子（synthetic 受信 transport）で V2 facilitator（127.0.0.1:4133、zUSDC V2、merchant D）と結合。paymentId `060fd61f…`、burn `0x8ec7…a831`（logIndex 151）、送信 `0x12be…cf17`、delivered_private。記録は `docs/zktls-router-v2-inbound.md` §11。
-- V2 側は Router の `/settle` を accepted で観測、`/admin/payments/<nonce>` の eventId は Router の受信 identity と同値。settled（約 13 分）は V2 側が後で報告。
+- V2 側は Router の `/settle` を accepted で観測、`/admin/payments/<nonce>` の eventId は Router の受信 identity と同値。**settled 07:57:47Z**（支払いから約 13.5 分、receipt final、pending 0 / finalized 2 / failed 0）。両側で close。
 - 残り: 実 transport（公開到達可能な V2 facilitator）での再実行、zETH（価格規則）、lab の §A（704 B）、push。
