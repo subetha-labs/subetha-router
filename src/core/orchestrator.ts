@@ -277,7 +277,8 @@ function projectionOf(intent: Intent): Projection {
           dynamic: {
             profileId: intent.dynamic.profileId,
             pricing: intent.dynamic.pricing,
-            fundsMoveOnCredential: (intent.dynamic.profile as { sourceRail?: unknown })["sourceRail"] === "mpp",
+            // MPP と SubEtha（burn-sale。payer が burn を送ってから credential を作る）は credential の時点で資金が動く（v1.3 FR-V5）。
+            fundsMoveOnCredential: ["mpp", "subetha"].includes(String((intent.dynamic.profile as { sourceRail?: unknown })["sourceRail"])),
             promoted: intent.dynamic.reservation !== undefined,
           },
         }),
@@ -376,6 +377,7 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "destination_receipt_payer_mismatch",
   // 秘匿購入（`docs/zktls-router-design.md` §7.1。固定文字列で、credential・上流の値は含まない）。
   "private_capacity",
+  "private_only_profile",
   "private_disabled",
   "private_unavailable",
   "attest_foreign",

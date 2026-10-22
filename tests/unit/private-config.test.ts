@@ -75,6 +75,16 @@ describe("parse", () => {
     expect(() => parseRouterConfig(router(patch))).toThrow(message);
     expect(() => parseRouterConfig(router(patch))).toThrow(ConfigError);
   });
+  const ZUSDC = "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF";
+  const subethaProfile = (asset = ZUSDC) => ({ "priv-subetha": { profileId: "priv-subetha", sourceRail: "subetha", source: { network: "eip155:11155111", asset, decimals: 6, payTo: RECEIVER }, rail: "x402", destination: { scheme: "exact", network: "eip155:84532", asset: USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" } }, par: true, maxUpstreamAmount: "10000", fee: { flat: "1000", bps: 0, min: "1000" } } });
+  test("v1.3: subetha 受信（V2 burn-sale、Sepolia の zERC20）のプロファイルは private.profiles に挙げれば通る。別の資産・allowlist 外は起動しない", () => {
+    const parsed = parseRouterConfig(router({ profiles: ["priv-x402", "priv-subetha"] }, subethaProfile()));
+    expect(parsed.dynamic?.profiles["priv-subetha"]?.sourceRail).toBe("subetha");
+    expect(parsed.private?.profiles).toEqual(["priv-x402", "priv-subetha"]);
+    expect(() => parseRouterConfig(router({ profiles: ["priv-x402", "priv-subetha"] }, subethaProfile("0x0000000000000000000000000000000000005ce7")))).toThrow(/known zERC20 asset/);
+    expect(() => parseRouterConfig(router({ profiles: ["priv-x402"] }, subethaProfile()))).toThrow(/only allowed for profiles listed in private.profiles/);
+    expect(() => parseRouterConfig(router(null, subethaProfile()))).toThrow(/only allowed for profiles listed in private.profiles/);
+  });
   test("拒否: dynamic 無し、送信が SVM、Tempo で feeAsset 無し", () => {
     const withoutDynamic = router();
     delete withoutDynamic["dynamic"];

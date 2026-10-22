@@ -493,7 +493,8 @@ export function operatorAddressesOf(
   for (const route of Object.values(router.routes)) {
     if ((route.sourceRail === "x402" || route.sourceRail === "mpp") && route.source.payTo !== undefined) addresses.add(route.source.payTo);
   }
-  for (const profile of Object.values(profiles)) addresses.add(profile.source.payTo);
+  // `subetha` 受信のプロファイルの `source.payTo` は飾り（burn address は注文ごとに facilitator が決める）なので運用者の集合に入れない。
+  for (const profile of Object.values(profiles)) if (profile.sourceRail !== "subetha") addresses.add(profile.source.payTo);
   for (const capability of capabilities.evmByNetwork.values()) addresses.add(capability.signer.address);
   for (const capability of capabilities.svmByNetwork.values()) addresses.add(capability.address);
   if (capabilities.mppTempo !== undefined) addresses.add(capabilities.mppTempo.account.address);
@@ -568,7 +569,8 @@ function inboundByRoute(
   const byRoute = new Map<string, InboundRail>();
   const byBinding = new Map<string, InboundRail>();
   for (const profile of Object.values(profiles)) {
-    const rail = rails[`${profile.sourceRail}:${profile.profileId}`];
+    // `subetha` 受信（V2 burn-sale。秘匿購入だけ）は facilitator が 1 つなので route と同じ `subetha` の rail を使う。
+    const rail = rails[profile.sourceRail === "subetha" ? "subetha" : `${profile.sourceRail}:${profile.profileId}`];
     if (rail === undefined) {
       throw new ConfigError(`dynamic.profiles.${profile.profileId}.sourceRail has no configured inbound rail`);
     }

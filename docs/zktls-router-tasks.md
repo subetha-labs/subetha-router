@@ -88,3 +88,4 @@ wire で見つかった実合成の不具合 3 件（受信 rail の解決、ver
 | T-3P4 回復時のチェーン読取（`--recover --chain`） | 済（Codex 設計 ×3・実装 ×2 の指摘を反映、v1.2.3） | `tools/private-payer.ts`、`tests/unit/private-payer-chain.test.ts`（lab・Router・ネットワーク不要、24 件）、`tests/wire/private-x402.test.ts`（lab）、実機読取（joke の両レグ settled）`.claude_workflow/local/zktls-live-X-batch-20261022.json` |
 | T-3P5 運用の注記 | 済 | 受入 §10、thirdparty §10.2 |
 | 他担当への確認事項 | 文書のみ | `docs/zktls-router-open-items.md`（lab: 704 B の根拠と拡張、V2: 受信境界の表と最小の共同検証） |
+| v1.3 受信 SubEtha V2（burn-sale） | 実装・ローカル検証 済（`docs/zktls-router-v2-inbound.md` 設計 v2、Codex 設計 1 回 REJECT → 実装レビュー 2 回（REJECT → APPROVE WITH CHANGES、残りの網羅を反映）） | `tests/wire/private-x402.test.ts`（lab: 受信 V2 → 発行 → MPC-TLS → attest → 復号、二重 burn・eventId 無し・通常 quote の拒否）、`tests/unit/{private-config,dynamic-core,private-core}.test.ts`、`tests/wire/subetha-inbound.test.ts`（fixture の V2 モード）。結合（live の burn-sale）は owner の判断待ち（token、payer の burn 道具、transport の前提） |

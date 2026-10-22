@@ -29,7 +29,7 @@ export function dynamicListingOf(config: RouterConfig): Record<string, unknown> 
       fee: { ...profile.fee },
       // gas-indexed の手数料は Tempo 宛の MPP だけ（Solana 宛の MPP は cap を持たない。`docs/mpp-solana-design.md` §1.4）。
       ...(usesGasIndexedFee(profile) ? { feePolicy: { kind: "gas-indexed", feeMargin: profile.destination.feeMargin, maxFeeCeiling: profile.destination.maxFee } } : {}),
-      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp", usesGasIndexedFee(profile)),
+      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp" || profile.sourceRail === "subetha", usesGasIndexedFee(profile)),
     })),
   };
 }
@@ -218,7 +218,8 @@ export function privateQuoteBody(quote: PrivateQuoteDocument, profile: DynamicPr
       quoteFingerprint: quote.destination.quoteFingerprint,
     },
     pricing: { ...quote.pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
-    disclosures: { ...dynamicDisclosuresOf(false, usesGasIndexedFee(profile)), privatePurchase: true, routerSeesRequestBody: false, routerSeesResponseBody: false },
+    // 受信で資金が動く時点: x402 は purchase（Router の settle）、SubEtha（burn-sale）は credential を作る前の burn（v1.3 FR-V5）。
+    disclosures: { ...dynamicDisclosuresOf(profile.sourceRail === "subetha", usesGasIndexedFee(profile)), privatePurchase: true, routerSeesRequestBody: false, routerSeesResponseBody: false },
     private: quote.private,
     approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
     ownerKey: quote.ownerKey,

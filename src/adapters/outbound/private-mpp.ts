@@ -162,7 +162,7 @@ export function createPrivateMppRail(capability: MppTempoCapability, options: Pr
     return profile;
   }
   function operatorAddressesOf(profile: DynamicProfile): string[] {
-    return [capability.account.address, profile.source.payTo, ...(options.operatorAddresses ?? [])];
+    return [capability.account.address, ...(profile.sourceRail === "subetha" ? [] : [profile.source.payTo]), ...(options.operatorAddresses ?? [])];
   }
   // 見積りは既存の動的経路のもの（読取だけ・同じ guard）。push 専用の `pay` はここからは呼ばない。
   const estimator = createMppDynamicPath({ ...capability, mode: "push" }, { profiles: Object.fromEntries(profiles), transport, denyHosts, now, ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }) });

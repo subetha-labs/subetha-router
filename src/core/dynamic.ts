@@ -114,7 +114,7 @@ export interface DynamicQuoteFields {
   readonly dynamic: {
     readonly profileId: string;
     readonly pricing: DynamicPricing;
-    readonly sourceRail: "x402" | "mpp";
+    readonly sourceRail: "x402" | "mpp" | "subetha";
     readonly rail: "x402" | "mpp";
     /** 受信レールで credential を作った時点で資金が動く（MPP）。 */
     readonly fundsMoveOnCredential: boolean;
@@ -280,7 +280,8 @@ function fieldsOf(intent: Intent, ownerKey: string): DynamicQuoteFields {
       pricing: dynamic.pricing,
       sourceRail: profile.sourceRail,
       rail: profile.rail,
-      fundsMoveOnCredential: profile.sourceRail === "mpp",
+      // MPP と SubEtha（burn-sale: payer が burn を送ってから credential を作る）は credential の時点で資金が動く。
+      fundsMoveOnCredential: profile.sourceRail === "mpp" || profile.sourceRail === "subetha",
     },
     ownerKey,
   };
@@ -363,6 +364,10 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     const profile = resolveProfile(config, request.profileId);
     if (profile === undefined) {
       return { ok: false, code: "unknown_route" };
+    }
+    // `subetha` 受信（V2 burn-sale）のプロファイルは秘匿購入の口にだけ開く（`docs/zktls-router-v2-inbound.md` SR-V1）。I/O の前に拒む。
+    if (profile.sourceRail === "subetha") {
+      return { ok: false, code: "private_only_profile" };
     }
     const parsed = parseUpstreamUrl(request.url, { denyHosts: dynamic.denyHosts });
     if (!parsed.ok) {
@@ -543,6 +548,10 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     const isPrivate = intent.private !== undefined;
     if (isPrivate && options.private === undefined) {
       return { paymentId: intent.paymentId, status: "rejected", code: "private_disabled" };
+    }
+    // 防御: 秘匿の記録でない購入が `subetha` 受信のプロファイルを指していれば、I/O の前に拒む（SR-V1。quote の口で既に拒んでいる）。
+    if (!isPrivate && resolveProfile(config, intent.routeId)?.sourceRail === "subetha") {
+      return { paymentId: intent.paymentId, status: "rejected", code: "private_only_profile" };
     }
     if (request.routeId !== undefined && request.routeId !== intent.routeId) {
       return { paymentId: intent.paymentId, status: "rejected", code: "route_mismatch" };

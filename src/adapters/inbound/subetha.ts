@@ -63,6 +63,24 @@ function requireInteger(source: Record<string, unknown>, key: string): number {
 
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+/** V2 facilitator の `/settle` 応答 `extra.eventId`（`<chainId>:<txHash>:<logIndex>`。`docs/zktls-router-v2-inbound.md` FR-V3）。 */
+const EVENT_ID_PATTERN = /^([1-9][0-9]{0,15}):(0x[0-9a-fA-F]{64}):(0|[1-9][0-9]{0,9})$/;
+
+/**
+ * `/settle` の成功応答から支払いイベントの識別子を読む（秘匿購入の二重一意性 FR-Z06 (b) の材料）。
+ * chainId 部が offer の network、txHash 部が応答の `transaction` と一致するときだけ返す。形が違う・無ければ `undefined`（静的 route の挙動は不変: `settled` に `eventId` が無いだけ）。
+ */
+export function settleEventIdOf(json: Record<string, unknown>, network: string, transaction: string): string | undefined {
+  const extra = json["extra"];
+  if (!isRecord(extra)) return undefined;
+  const eventId = extra["eventId"];
+  if (typeof eventId !== "string") return undefined;
+  const match = EVENT_ID_PATTERN.exec(eventId);
+  if (match === null) return undefined;
+  if (`eip155:${match[1]}` !== network) return undefined;
+  if (match[2]!.toLowerCase() !== transaction.toLowerCase()) return undefined;
+  return `${match[1]}:${match[2]!.toLowerCase()}:${match[3]}`;
+}
 
 /**
  * settle の `errorReason` のうち、**「課金されていない」ことを意味しない**もの。
@@ -208,6 +226,9 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
       }
       const pair = requireHelperPair(json);
       const fee = requireFee(json);
+      // V2 facilitator は `extra.settlementKind`（例 `zerc20-v2-burn-sale`）を返す。あれば写す（秘匿購入の quote が V2 であることを確かめる材料。V1 は無い）。
+      const extraIn = json["extra"];
+      const settlementKind = isRecord(extraIn) && typeof extraIn["settlementKind"] === "string" && /^[a-z0-9-]{1,40}$/.test(extraIn["settlementKind"]) ? extraIn["settlementKind"] : undefined;
       return {
         scheme: SUBETHA_SCHEME,
         network: `eip155:${chainId}`,
@@ -231,6 +252,7 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
           fundsMoveOnCredential: true,
           ...(pair === undefined ? {} : { helper: pair.helper, deadline: pair.deadline }),
           ...(fee === undefined ? {} : { fee }),
+          ...(settlementKind === undefined ? {} : { settlementKind }),
         },
       };
     },
@@ -305,7 +327,17 @@ export function createSubethaInbound(options: SubethaInboundOptions): InboundRai
       }
       const transaction = json["transaction"];
       if (json["success"] === true && typeof transaction === "string" && transaction !== "") {
-        return { outcome: "settled", txRef: transaction };
+        // tx hash は小文字に正準化する（同じ tx の大小文字違いで受信 identity が別になれば二重発行の検出を抜けるため。`docs/zktls-router-v2-inbound.md` FR-V3）。
+        // hex でない値（合成 fixture の `synthetic-src-*`）はそのまま。
+        const txRef = NONCE_PATTERN.test(transaction) ? transaction.toLowerCase() : transaction;
+        // payer が申告した burn（`payload.burnTxHash`）: 形が違えば `unknown`、facilitator の `transaction` と別の tx なら `unknown`（別の tx の決済をこの credential の
+        // 決済と確定しない）。申告が無い（legacy の permit 経路）なら `settled` だが **支払いイベントの識別子は出さない**（秘匿購入は credential と tx の束縛を要求する）。
+        const claimed = credential.payload["burnTxHash"];
+        if (claimed !== undefined && (typeof claimed !== "string" || !NONCE_PATTERN.test(claimed) || claimed.toLowerCase() !== txRef)) {
+          return { outcome: "unknown", reason: "source_settle_unknown" };
+        }
+        const eventId = claimed === undefined ? undefined : settleEventIdOf(json, offer.network, txRef);
+        return { outcome: "settled", txRef, ...(eventId === undefined ? {} : { eventId }) };
       }
       /**
        * **`success:false` は一律 `rejected` ではない。** 未課金を意味しない応答を

@@ -68,7 +68,7 @@ export interface PrivateQuoteRequest {
 export interface PrivateQuoteFields {
   readonly private: Record<string, unknown>;
   readonly pricing: DynamicPricing;
-  readonly sourceRail: "x402" | "mpp";
+  readonly sourceRail: "x402" | "mpp" | "subetha";
   readonly rail: "x402" | "mpp";
   readonly ownerKey: string;
 }
@@ -302,7 +302,7 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     return { ok: true, cap: { maxFee, estimate: { gas: estimate.gas, maxFeePerGas: estimate.maxFeePerGas, bound: estimate.bound, atMs: now() } } };
   }
 
-  function privateFieldsOf(intent: ParsedIntent, profile: DynamicProfile, pricing: DynamicPricing, offer: DestinationOffer): Record<string, unknown> {
+  function privateFieldsOf(intent: ParsedIntent, profile: DynamicProfile, pricing: DynamicPricing, offer: DestinationOffer, inboundPayTo: string): Record<string, unknown> {
     const order = intent.order;
     return {
       intentSha256: intent.sha256,
@@ -321,7 +321,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
         amount: offer.amount,
         fundsMoveAt: profile.rail === "x402" ? "provider_paid_request" : "provider_broadcast",
       },
-      inbound: { rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, payTo: profile.source.payTo, total: pricing.total, fee: pricing.fee, fundsMoveAt: "router_purchase_settle_before_issuance" },
+      // 受信で資金が動く時点（FR-Z14、v1.3 FR-V5）: x402 は Router の purchase（facilitator の settle）、SubEtha（burn-sale）は Payer が credential を作る前の burn。
+      inbound: { rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, payTo: inboundPayTo, total: pricing.total, fee: pricing.fee, fundsMoveAt: profile.sourceRail === "subetha" ? "payer_burn_before_credential" : "router_purchase_settle_before_issuance" },
       policy: { minCredentialLifetimeMs: privateConfig.minCredentialLifetimeMs[profile.rail], sessionTimeoutMs: privateConfig.sessionTimeoutMs, attestTimeoutMs: privateConfig.attestTimeoutMs, retentionMs: privateConfig.retentionMs },
       limits: {
         maxSentBytes: MAX_SENT_BYTES,
@@ -404,6 +405,14 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       if (sourceOffer.amount !== pricing.total || sourceOffer.asset !== profile.source.asset || sourceOffer.network !== profile.source.network || sourceOffer.extra.routeBinding !== binding) {
         return { ok: false, code: "source_terms_mismatch" };
       }
+      // `subetha` 受信は V2 の burn-sale の challenge だけ（V1 の facilitator は `eventId` を返さないので発行できない。`docs/zktls-router-v2-inbound.md` FR-V2）。
+      if (profile.sourceRail === "subetha" && sourceOffer.extra["settlementKind"] !== "zerc20-v2-burn-sale") {
+        return { ok: false, code: "source_terms_mismatch", reason: "settlement_kind" };
+      }
+      // 注文ごとの burn address が、同じ network・資産の Provider の受取先と同じなら拒む（v1.3 設計レビュー 6）。
+      if (sourceOffer.network === selected.network && sourceOffer.asset.toLowerCase() === selected.asset.toLowerCase() && sourceOffer.payTo.toLowerCase() === selected.payTo.toLowerCase()) {
+        return { ok: false, code: "quote_failed", reason: "pay_to_conflict" };
+      }
       const issuedAtMs = now();
       const approvalDeadlineMs = Math.min(issuedAtMs + options.config.approvalTtlMs, sourceOffer.extra.expiresAt * 1000);
       const paymentId = options.nextPaymentId();
@@ -444,7 +453,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       if (written === undefined) return { ok: false, code: "dynamic_unavailable" };
       const restored = intentFromCreated(written.paymentId, new Date(now()).toISOString(), written.record as Record<string, unknown>, { requireReservation: false });
       if (restored.private === undefined || restored.privateInvalid === true || restored.dynamic === undefined) return { ok: false, code: "dynamic_unavailable" };
-      return { ok: true, intent: restored, fields: { private: privateFieldsOf(intent, profile, pricing, selected), pricing, sourceRail: profile.sourceRail, rail: profile.rail, ownerKey } };
+      // 承認対象の受信の受取先: x402 は Router の受取先、subetha（burn-sale）は quote ごとの burn address（= 受信 offer の payTo）。
+      return { ok: true, intent: restored, fields: { private: privateFieldsOf(intent, profile, pricing, selected, sourceOffer.payTo), pricing, sourceRail: profile.sourceRail, rail: profile.rail, ownerKey } };
     });
   }
 
@@ -518,7 +528,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     const txRef = intent.source.txRef;
     const eventId = intent.source.eventId;
     if (typeof txRef !== "string" || txRef === "") return undelivered("private_inbound_identity_missing");
-    if (profile.sourceRail === "x402" && (typeof eventId !== "string" || eventId === "")) return undelivered("private_inbound_identity_missing");
+    // x402 と subetha（burn-sale）は支払いイベントの識別子が無ければ発行しない（FR-Z06 (b)、v1.3 FR-V4）。
+    if ((profile.sourceRail === "x402" || profile.sourceRail === "subetha") && (typeof eventId !== "string" || eventId === "")) return undelivered("private_inbound_identity_missing");
     const inboundIdentity = `${profile.sourceRail}|${intent.source.network}|${txRef}|${eventId ?? ""}`;
     // 3. 発行予約（FR-Z06）。以後の失敗はすべて unknown。
     const reserved = await store.reservePrivateIssuance(paymentId, priv.intentSha256, inboundIdentity);

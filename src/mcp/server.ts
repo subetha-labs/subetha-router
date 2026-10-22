@@ -424,7 +424,9 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "Quote a PRIVATE purchase: the Router issues the outbound payment header and runs a Verifier, but never sees your request body or the Provider's response. " +
         "`intentB64` is the exact bytes of the Payer's phase5-intent-v1 envelope (built locally with `delivery payer-keygen`; the body stays with you). " +
         "**This tool starts no payment.** The returned `subject.private` shows both legs, the target host/path/method, the body commitment and length, the payer key, intentSha256, " +
-        "the deadline policies and that nothing is refunded. The quote document carries an `ownerKey`: pass the whole document to " +
+        "the deadline policies and that nothing is refunded. `subject.private.inbound.fundsMoveAt` says when the inbound funds move: for x402 at the Router's purchase (settle), " +
+        "for a SubEtha (zERC20 burn-sale) inbound at the payer's burn BEFORE the credential exists (`payer_burn_before_credential`, `fundsMoveOnCredential: true`): get approval before the burn, and the recipient is a per-quote burn address. " +
+        "The quote document carries an `ownerKey`: pass the whole document to " +
         `${TOOL_NAMES.privatePurchase}, and its \`ownerKey\` to ${TOOL_NAMES.privateAttest} / ${TOOL_NAMES.privateRecord} / ${TOOL_NAMES.status}.`,
       inputSchema: {
         profileId: z.string().min(1).describe("A dynamic profile id listed in the Router's private allowlist"),

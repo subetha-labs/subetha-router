@@ -83,10 +83,14 @@ class SyntheticInbound implements InboundRail {
   verifyCalls = 0;
   settleCalls = 0;
   eventId: string | undefined = "0xnonce-auth";
+  /** v1.3 の試験用: offer の受取先と `extra` の追加欄（subetha の `settlementKind` など）、settle が返す txRef の固定値（同じ burn tx の再利用の試験）。 */
+  payTo = "0xrouter";
+  extra: Record<string, unknown> = {};
+  txRef: string | undefined;
   #issued = 0;
   async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
     this.#issued += 1;
-    return { scheme: "exact", network: request.network, asset: request.asset, amount: request.amount, payTo: "0xrouter", maxTimeoutSeconds: 120, extra: { challengeNonce: `0xnonce${this.#issued}`, expiresAt: Math.floor(Date.now() / 1000) + 600, routeBinding: request.routeBinding, name: "USDC", version: "2" } };
+    return { scheme: "exact", network: request.network, asset: request.asset, amount: request.amount, payTo: this.payTo, maxTimeoutSeconds: 120, extra: { challengeNonce: `0xnonce${this.#issued}`, expiresAt: Math.floor(Date.now() / 1000) + 600, routeBinding: request.routeBinding, name: "USDC", version: "2", ...this.extra } };
   }
   preflight(offer: InboundOffer, credential: PaymentCredential): PreflightResult {
     if (credential.payload.challengeNonce !== offer.extra.challengeNonce) return { ok: false, reason: "nonce_mismatch" };
@@ -99,7 +103,7 @@ class SyntheticInbound implements InboundRail {
   }
   async settle(): Promise<SettleResult> {
     this.settleCalls += 1;
-    return { outcome: "settled", txRef: `0xsrc${this.settleCalls}`, ...(this.eventId === undefined ? {} : { eventId: this.eventId }) };
+    return { outcome: "settled", txRef: this.txRef ?? `0xsrc${this.settleCalls}`, ...(this.eventId === undefined ? {} : { eventId: this.eventId }) };
   }
   credentialFor(offer: InboundOffer): PaymentCredential {
     return { x402Version: 2, accepted: offer, payload: { challengeNonce: offer.extra.challengeNonce, authorization: { nonce: this.eventId ?? "0x00" } } };
@@ -224,6 +228,104 @@ function bundleFor(order: Record<string, unknown>, patch: Record<string, unknown
   };
   return Buffer.from(JSON.stringify(bundle), "utf8").toString("base64");
 }
+
+describe("v1.3: subetha 受信（V2 burn-sale）の秘匿購入（`docs/zktls-router-v2-inbound.md`）", () => {
+  const SUBETHA_ID = "priv-subetha";
+  const ZUSDC = "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF";
+  const SEPOLIA = "eip155:11155111";
+  function subethaConfig(destinationOnSepolia = false): RouterConfig {
+    const cfg = JSON.parse(JSON.stringify(config())) as RouterConfig;
+    const profile: DynamicProfile = { ...PROFILE, profileId: SUBETHA_ID, sourceRail: "subetha", source: { network: SEPOLIA, asset: ZUSDC, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, ...(destinationOnSepolia ? { destination: { ...PROFILE.destination, network: SEPOLIA, asset: ZUSDC } } : {}) };
+    (cfg.dynamic!.profiles as Record<string, DynamicProfile>)[SUBETHA_ID] = profile;
+    (cfg.private!.profiles as string[]).push(SUBETHA_ID);
+    // 受信資産（Sepolia zUSDC）の予算 bucket。
+    (cfg.dynamic!.budget.buckets as { network: string; asset: string; maxTotal: string; maxPerPurchase: string }[]).push({ network: SEPOLIA, asset: ZUSDC, maxTotal: "100000000", maxPerPurchase: "200000" });
+    return cfg;
+  }
+  let orderSeq = 0;
+  /** 呼ぶたびに別の intent（order_id を変える）: 受信 identity の二重一意性を intent の一意性と混同しない。 */
+  function subethaEnvelope(): string {
+    orderSeq += 1;
+    const doc = JSON.parse(envelopeFor(`${"0".repeat(48)}${orderSeq.toString(16).padStart(16, "0")}`).bytes.toString("utf8")) as { inbound: Record<string, unknown> };
+    doc.inbound = { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" };
+    return Buffer.from(JSON.stringify(doc)).toString("base64");
+  }
+  async function bootSubetha(destinationOnSepolia = false): Promise<RouterCore> {
+    const cfg = subethaConfig(destinationOnSepolia);
+    const base = createVerifierRunner({ deliveryBin: FAKE, srsPath: cfg.private!.srsPath, trust: "lab-fixture-ca", maxChildOutputBytes: cfg.private!.maxChildOutputBytes });
+    const core = await createRouterCore({ journalPath, config: cfg, inbound, outbound, nextPaymentId: () => `pay-${(ids += 1)}`, dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") }, private: { rails: { [PROFILE_ID]: rail, [SUBETHA_ID]: rail }, runner: base, trust: "lab-fixture-ca", workDir: privateDir } });
+    opened.push(core);
+    return core;
+  }
+  test("quote: challenge が V2（settlementKind）でなければ source_terms_mismatch。V2 なら承認対象の受信は burn address と payer_burn_before_credential、射影は fundsMoveOnCredential", async () => {
+    const core = await bootSubetha();
+    inbound.payTo = "0x000000000000000000000000000000000000b0a7";
+    const notV2 = await core.privateQuote({ principalId: "alice", requestId: "r1", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    expect(notV2, JSON.stringify(notV2)).toEqual({ ok: false, code: "source_terms_mismatch", reason: "settlement_kind" });
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    const q = await core.privateQuote({ principalId: "alice", requestId: "r2", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!q.ok) throw new Error(`quote failed: ${q.code} ${q.reason ?? ""}`);
+    expect(q.private).toMatchObject({ inbound: { rail: "subetha", network: SEPOLIA, asset: ZUSDC, payTo: "0x000000000000000000000000000000000000b0a7", total: "11000", fundsMoveAt: "payer_burn_before_credential" }, outbound: { rail: "x402", payTo: PAY_TO } });
+    expect(core.status(q.paymentId, "alice", q.ownerKey)?.dynamic).toMatchObject({ fundsMoveOnCredential: true });
+    // 通常の動的 quote は I/O の前に拒む（SR-V1）。
+    expect(await core.quote({ principalId: "alice", requestId: "r3", routeId: SUBETHA_ID, upstream: { url: "https://test-server.io/select" }, source: "alice" })).toMatchObject({ ok: false, code: "private_only_profile" });
+  });
+  test("quote: 注文ごとの burn address が同じ network・資産の Provider の受取先と同じなら pay_to_conflict", async () => {
+    // 送信も Sepolia zUSDC（同じ network・資産）のプロファイルで、Provider の受取先 = 注文の burn address にする。
+    const core = await bootSubetha(true);
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    rail.offers = [{ ...OFFER, network: SEPOLIA, asset: ZUSDC, payTo: "0x000000000000000000000000000000000000b0a7" }];
+    inbound.payTo = "0x000000000000000000000000000000000000B0A7";
+    const doc = JSON.parse(Buffer.from(subethaEnvelope(), "base64").toString("utf8")) as { outbound: Record<string, unknown> };
+    doc.outbound = { ...doc.outbound, network: SEPOLIA, asset: ZUSDC, payTo: "0x000000000000000000000000000000000000b0a7" };
+    const conflict = await core.privateQuote({ principalId: "alice", requestId: "r1", profileId: SUBETHA_ID, intentB64: Buffer.from(JSON.stringify(doc)).toString("base64") });
+    expect(conflict, JSON.stringify(conflict)).toEqual({ ok: false, code: "quote_failed", reason: "pay_to_conflict" });
+  });
+  test("purchase: settle が eventId を返さなければ発行しない（paid_undelivered/private_inbound_identity_missing）。返せば identity は subetha|<network>|<tx>|<eventId> で発行", async () => {
+    const core = await bootSubetha();
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    inbound.eventId = undefined;
+    const q1 = await core.privateQuote({ principalId: "alice", requestId: "r1", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!q1.ok) throw new Error(`${q1.code} ${q1.reason ?? ""}`);
+    const p1 = await core.purchase({ principalId: "alice", requestId: "r1", quoteId: q1.quoteId, approval: q1.quoteId, credential: inbound.credentialFor(q1.source.offer), ownerKey: q1.ownerKey });
+    expect(p1, JSON.stringify(p1)).toMatchObject({ status: "paid_data_unavailable", terminalReason: "private_inbound_identity_missing" });
+    expect(rail.issueCalls).toBe(0);
+    inbound.eventId = "11155111:0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef:121";
+    const q2 = await core.privateQuote({ principalId: "alice", requestId: "r2", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!q2.ok) throw new Error(q2.code);
+    control({});
+    const p2 = await core.purchase({ principalId: "alice", requestId: "r2", quoteId: q2.quoteId, approval: q2.quoteId, credential: inbound.credentialFor(q2.source.offer), ownerKey: q2.ownerKey });
+    expect(p2).toMatchObject({ status: "awaiting_session" });
+    expect(rail.issueCalls).toBe(1);
+    const reserved = readFileSync(journalPath, "utf8").split("\n").map((l) => (l === "" ? undefined : (JSON.parse(l) as { event?: string; patch?: Record<string, unknown> }))).find((e) => e?.event === "private_issuance_reserved");
+    expect(reserved?.patch?.["inboundIdentity"]).toBe(`subetha|${SEPOLIA}|0xsrc2|${inbound.eventId}`);
+    // 再起動後、別の intent が同じ burn tx（同じ txRef・同じ eventId）で来ても発行しない（受信 identity の二重一意性は journal から復元される）。
+    inbound.txRef = "0xsrc2";
+    await core.close();
+    opened.splice(opened.indexOf(core), 1);
+    const reopened = await bootSubetha();
+    const q3 = await reopened.privateQuote({ principalId: "alice", requestId: "r3", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!q3.ok) throw new Error(`${q3.code} ${q3.reason ?? ""}`);
+    const p3 = await reopened.purchase({ principalId: "alice", requestId: "r3", quoteId: q3.quoteId, approval: q3.quoteId, credential: inbound.credentialFor(q3.source.offer), ownerKey: q3.ownerKey });
+    expect(p3, JSON.stringify(p3)).toMatchObject({ status: "unknown", terminalReason: "private_issuance_duplicate" });
+    expect(rail.issueCalls).toBe(1);
+    // 再起動後も、元の購入の開示（受信は credential の時点で資金が動く）は射影に残る。
+    expect(reopened.status(q2.paymentId, "alice", q2.ownerKey)?.dynamic).toMatchObject({ fundsMoveOnCredential: true });
+    // 同時: 同じ burn tx を申告する 2 つの intent を同時に purchase → 発行は合計 1 回のまま、もう片方は duplicate。
+    const q4 = await reopened.privateQuote({ principalId: "alice", requestId: "r4", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    const q5 = await reopened.privateQuote({ principalId: "alice", requestId: "r5", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!q4.ok || !q5.ok) throw new Error("quote failed");
+    inbound.txRef = "0xsrc9";
+    inbound.eventId = "11155111:0x9999999999999999999999999999999999999999999999999999999999999999:7";
+    const [p4, p5] = await Promise.all([
+      reopened.purchase({ principalId: "alice", requestId: "r4", quoteId: q4.quoteId, approval: q4.quoteId, credential: inbound.credentialFor(q4.source.offer), ownerKey: q4.ownerKey }),
+      reopened.purchase({ principalId: "alice", requestId: "r5", quoteId: q5.quoteId, approval: q5.quoteId, credential: inbound.credentialFor(q5.source.offer), ownerKey: q5.ownerKey }),
+    ]);
+    const outcomes = [p4, p5].map((p) => ("terminalReason" in p ? p.terminalReason : p.status)).sort();
+    expect(outcomes, JSON.stringify([p4, p5])).toEqual(["awaiting_session", "private_issuance_duplicate"]);
+    expect(rail.issueCalls).toBe(2);
+  });
+});
 
 describe("quote（§3.1）", () => {
   test("封筒を検査し、探りは `{}` の POST、承認対象に方針と上限、記録に封筒と方針の写し。ownerKey はこの応答にしか無い", async () => {

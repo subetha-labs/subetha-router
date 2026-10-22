@@ -64,7 +64,8 @@ export function createPrivateX402Rail(capability: EvmSigningCapability, options:
     return profile;
   }
   function operatorAddressesOf(profile: DynamicProfile): string[] {
-    return [capability.signer.address, profile.source.payTo, ...(options.operatorAddresses ?? [])];
+    // `subetha` 受信のプロファイルの `source.payTo` は飾り（burn address は注文ごと）なので運用者の集合に入れない（v1.3 設計レビュー 6）。
+    return [capability.signer.address, ...(profile.sourceRail === "subetha" ? [] : [profile.source.payTo]), ...(options.operatorAddresses ?? [])];
   }
   const reader = createX402ChallengeReader({ transport, denyHosts: options.denyHosts ?? [], unpaidTimeoutMs: options.unpaidTimeoutMs ?? X402_DYNAMIC_UNPAID_TIMEOUT_MS });
   const receiptForm = EVM_RECEIPT_FORM(capability.signer.address);

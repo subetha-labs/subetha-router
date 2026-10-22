@@ -37,6 +37,18 @@ const challengeMode = arg("challenge", "ok");
 const settleNetwork = arg("settle-network", "");
 /** settle の応答をこの時間だけ遅らせる（タスク R-0: Router の子の drain が進行中の購入を待つことの試験）。 */
 const settleDelayMs = Number(arg("settle-delay-ms", "0"));
+/**
+ * V2（burn-sale）の形（`docs/zktls-router-v2-inbound.md`）: `--v2 on` で challenge の `extra.{settlementKind, policy}`、注文ごとの burn address（nonce から導く）、
+ * settle は credential の `payload.burnTxHash`（64 hex）が無ければ `rejected`、あれば `transaction = burnTxHash` と `extra.{phase, settlementKind, policy, deliveryKey, receiptLevel, txRef, eventId, logIndex}`。
+ * `--v2-event`: `ok`（既定。同じ nonce には同じ logIndex）| `none` | `bad-chain` | `bad-tx` | `changed`（呼ぶたびに logIndex が変わる）。`--v2-tx mismatch`: `transaction` を burnTxHash と別の hash にする。
+ */
+const v2 = arg("v2", "off") === "on";
+const v2Event = arg("v2-event", "ok");
+/** `--v2-tx same|mismatch|upper`（`upper`: `transaction` を大文字 hex で返す = 同じ tx の別表記）。 */
+const v2Tx = arg("v2-tx", "same");
+/** `--v2-claim strict|lenient`（`lenient`: credential に burnTxHash が無くても成功応答を返す = adapter 側の境界の試験用。tx は固定）。 */
+const v2Claim = arg("v2-claim", "strict");
+const v2LogIndex = new Map<string, number>();
 
 /** `helper`/`deadline`（両方あるか両方ないか）と、その型違反を作る。 */
 function challengeExtras(): Record<string, unknown> {
@@ -114,13 +126,15 @@ const server = http.createServer((request, response) => {
       const expiresAt = Math.floor(Date.now() / 1000) + 300;
       issued.set(challengeNonce, { amount, expiresAt });
       send(response, 200, {
-        payTo,
+        // V2: 注文ごとの burn address（Sale.id）。nonce から決定的に導く。
+        payTo: v2 ? `0x${challengeNonce.slice(2, 42)}` : payTo,
         amount,
         token,
         chainId,
         challengeNonce,
         expiresAt,
         ...challengeExtras(),
+        ...(v2 ? { extra: { settlementKind: "zerc20-v2-burn-sale", policy: "receipt" } } : {}),
       });
       return;
     }
@@ -203,6 +217,41 @@ const server = http.createServer((request, response) => {
           transaction: `synthetic-src-${settleCalls}`,
           network,
           extra: { phase: "pending" },
+        });
+        return;
+      }
+      if (v2) {
+        const payload = (body["paymentPayload"] ?? {}) as Record<string, unknown>;
+        const inner = (payload["payload"] ?? {}) as Record<string, unknown>;
+        const nonce = typeof inner["challengeNonce"] === "string" ? inner["challengeNonce"] : "";
+        const burnTxHash = typeof inner["burnTxHash"] === "string" ? inner["burnTxHash"] : "";
+        const claimOk = /^0x[0-9a-fA-F]{64}$/.test(burnTxHash);
+        if ((!claimOk && v2Claim !== "lenient") || !issued.has(nonce)) {
+          send(response, 400, { success: false, errorReason: "burn tx missing", transaction: "", network });
+          return;
+        }
+        const base = claimOk ? burnTxHash.toLowerCase() : `0x${"11".repeat(32)}`;
+        const transaction = v2Tx === "mismatch" ? `0x${"ef".repeat(32)}` : v2Tx === "upper" ? base.toUpperCase().replace(/^0X/, "0x") : base;
+        let logIndex = v2LogIndex.get(nonce);
+        if (logIndex === undefined || v2Event === "changed") {
+          logIndex = (logIndex ?? 120) + (v2Event === "changed" ? 1 : 1);
+          v2LogIndex.set(nonce, logIndex);
+        }
+        const eventChain = v2Event === "bad-chain" ? chainId + 1 : chainId;
+        const eventTx = v2Event === "bad-tx" ? `0x${"cd".repeat(32)}` : transaction.toLowerCase();
+        send(response, 200, {
+          success: true,
+          transaction,
+          network,
+          extra: {
+            phase: "accepted",
+            settlementKind: "zerc20-v2-burn-sale",
+            policy: "receipt",
+            deliveryKey: nonce,
+            receiptLevel: "mined",
+            txRef: transaction,
+            ...(v2Event === "none" ? {} : { eventId: `${eventChain}:${eventTx}:${logIndex}`, logIndex }),
+          },
         });
         return;
       }

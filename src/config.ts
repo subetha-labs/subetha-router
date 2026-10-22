@@ -25,6 +25,7 @@ import {
   type NetworkFamily,
   type OutboundRailName,
   type X402FacilitatorKind,
+  SUBETHA_ZERC20_ASSETS,
 } from "./shared/networks.js";
 
 interface TermsToValidate {
@@ -151,7 +152,8 @@ export interface DynamicProfile {
   /** `routeId` と同じ文字種・同じ名前空間（route と重複したら起動しない）。 */
   readonly profileId: string;
   /** 受信レール。SubEtha 受信は対象外。 */
-  readonly sourceRail: "x402" | "mpp";
+  /** 受信レール。`subetha`（SubEtha V2 burn-sale。`docs/zktls-router-v2-inbound.md`）は秘匿購入のプロファイルにだけ許す（`private.profiles` に含まれること）。 */
+  readonly sourceRail: "x402" | "mpp" | "subetha";
   /** 受信条件。**額は持たない**（上流額＋手数料で quote ごとに決まる）。 */
   readonly source: {
     readonly network: string;
@@ -705,8 +707,8 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     throw new ConfigError(`${at}: profileId collides with a routeId`);
   }
   const sourceRail = value["sourceRail"];
-  if (sourceRail !== "x402" && sourceRail !== "mpp") {
-    throw new ConfigError(`${at}.sourceRail must be "x402" or "mpp"`);
+  if (sourceRail !== "x402" && sourceRail !== "mpp" && sourceRail !== "subetha") {
+    throw new ConfigError(`${at}.sourceRail must be "x402", "mpp" or "subetha"`);
   }
   const rail = value["rail"];
   if (rail !== "x402" && rail !== "mpp") {
@@ -950,7 +952,12 @@ export function validateRouterConfigAgainstTable(router: RouterConfig, networks:
   }
   for (const profile of Object.values(router.dynamic?.profiles ?? {})) {
     const at = `dynamic.profiles.${profile.profileId}`;
-    validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals, payTo: profile.source.payTo }, networks);
+    if (profile.sourceRail === "subetha") {
+      // SubEtha V2（burn-sale）受信は zERC20 の表（`SUBETHA_ZERC20_ASSETS`）が権威（受信の表の `inbound` は x402/mpp の列挙。静的 route の subetha と同じ扱い）。
+      const known = SUBETHA_ZERC20_ASSETS.find((entry) => entry.network === profile.source.network && entry.token.toLowerCase() === profile.source.asset.toLowerCase());
+      if (known === undefined) throw new ConfigError(`${at}.source: subetha inbound requires a known zERC20 asset`);
+      if (profile.source.decimals !== known.decimals) throw new ConfigError(`${at}.source.decimals does not match the zERC20 table`);
+    } else validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals, payTo: profile.source.payTo }, networks);
     validateTermsAgainstTable(`${at}.destination`, {
       direction: "outbound",
       rail: profile.rail,
@@ -974,6 +981,15 @@ function parseRouterConfigUnchecked(raw: unknown): RouterConfig {
     throw new ConfigError("router.routes must not be empty");
   }
   const dynamic = raw["dynamic"] === undefined ? undefined : parseDynamic(raw["dynamic"], routes);
+  // `sourceRail: subetha` の動的プロファイルは秘匿購入の allowlist にだけ開く（通常の動的購入には載せない。v1.3 SR-V1）。
+  if (dynamic !== undefined) {
+    const privateProfiles = isRecord(raw["private"]) && Array.isArray(raw["private"]["profiles"]) ? (raw["private"]["profiles"] as unknown[]) : [];
+    for (const profile of Object.values(dynamic.profiles)) {
+      if (profile.sourceRail === "subetha" && !privateProfiles.includes(profile.profileId)) {
+        throw new ConfigError(`dynamic.profiles.${profile.profileId}: sourceRail "subetha" is only allowed for profiles listed in private.profiles`);
+      }
+    }
+  }
   return {
     approvalTtlMs: requireNumber(raw, "approvalTtlMs", "router"),
     routes: Object.fromEntries(entries.map(([routeId, route]) => [routeId, parseRoute(route, routeId)])),
@@ -1036,8 +1052,11 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
     if (profile === undefined) {
       throw new ConfigError(`${at}.profiles: ${profileId} is not a dynamic profile`);
     }
-    if (profile.sourceRail !== "x402" || profile.source.network !== PRIVATE_INBOUND_NETWORK || profile.source.asset.toLowerCase() !== PRIVATE_INBOUND_ASSET.toLowerCase()) {
-      throw new ConfigError(`${at}.profiles: ${profileId} must receive x402 on ${PRIVATE_INBOUND_NETWORK} (USDC) in this version`);
+    // 受信は x402 の Base Sepolia USDC か、SubEtha V2 burn-sale（Sepolia の zERC20 の表）だけ（FR-Z13、v1.3 FR-V2）。
+    const x402Inbound = profile.sourceRail === "x402" && profile.source.network === PRIVATE_INBOUND_NETWORK && profile.source.asset.toLowerCase() === PRIVATE_INBOUND_ASSET.toLowerCase();
+    const subethaInbound = profile.sourceRail === "subetha" && SUBETHA_ZERC20_ASSETS.some((entry) => entry.network === profile.source.network && entry.token.toLowerCase() === profile.source.asset.toLowerCase());
+    if (!x402Inbound && !subethaInbound) {
+      throw new ConfigError(`${at}.profiles: ${profileId} must receive x402 on ${PRIVATE_INBOUND_NETWORK} (USDC) or subetha on a known zERC20 asset in this version`);
     }
     if (profile.rail === "x402") {
       if (networkFamilyOf(profile.destination.network) !== "evm" || profile.destination.tokenDomain === undefined) {

@@ -185,6 +185,7 @@ const PRIVATE_RECORD_STATUS: Readonly<Record<string, number>> = {
 const DYNAMIC_QUOTE_STATUS: Readonly<Record<string, number>> = {
   dynamic_disabled: 404,
   unknown_route: 404,
+  private_only_profile: 404,
   invalid_upstream_url: 400,
   invalid_upstream_body: 400,
   request_id_conflict: 409,

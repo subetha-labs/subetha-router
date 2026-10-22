@@ -262,6 +262,7 @@ const ROUTER_CODES = [
   "private_capacity",
   "private_credential_lifetime",
   "private_disabled",
+  "private_only_profile",
   "private_handover_unknown",
   "private_header_invalid",
   "private_inbound_identity_missing",

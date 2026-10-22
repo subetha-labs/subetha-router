@@ -45,6 +45,11 @@ const HOST = "test-server.io";
 const POST_PATH = "/select";
 const GET_PATH = "/v1/paid-snapshot";
 const FACILITATOR_HOST = "facilitator.other.test";
+/** v1.3: SubEtha V2（burn-sale）受信の fixture facilitator（`tests/fixtures/facilitator-server.ts --v2 on`）。plain HTTP、dial で loopback へ。 */
+const SUBETHA_HOST = "subetha.other.test";
+const SUBETHA_PROFILE_ID = "priv-subetha";
+const ZUSDC = "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF";
+const SEPOLIA = "eip155:11155111";
 const PRICE = "10000";
 const ALICE = { id: "alice", token: "tok-alice" };
 const BOB = { id: "bob", token: "tok-bob" };
@@ -53,14 +58,19 @@ const LONG = 1_800_000;
 
 let TLS: TlsMaterial;
 let facilitator: VerifyingFacilitator;
+let subethaFacilitator: Listening;
+let subethaFacilitatorNoEvent: Listening;
 let provider: ZktlsProvider;
 
 interface WorldOptions {
+  /** v1.3: この world の subetha facilitator（既定は V2 の正常な fixture）。 */
+  readonly subethaPort?: number;
   readonly sessionTimeoutMs?: number;
   readonly attestTimeoutMs?: number;
   readonly verifyTimeoutMs?: number;
 }
 interface World {
+  readonly subethaPort: number;
   readonly dir: string;
   readonly privateDir: string;
   readonly control: string;
@@ -155,8 +165,19 @@ function configDocument(world: World, options: WorldOptions): unknown {
             maxUpstreamAmount: "100000",
             fee: { flat: "1000", bps: 0, min: "1000" },
           },
+          // v1.3: 受信 SubEtha V2（burn-sale、Sepolia zUSDC）→ 送信 x402 Base Sepolia USDC。秘匿購入だけ（private.profiles）。
+          [SUBETHA_PROFILE_ID]: {
+            profileId: SUBETHA_PROFILE_ID,
+            sourceRail: "subetha",
+            source: { network: SEPOLIA, asset: ZUSDC, decimals: 6, payTo: OPERATOR_PAY_TO },
+            rail: "x402",
+            destination: { scheme: "exact", network: NETWORK, asset: USDC, decimals: 6, tokenDomain: { name: "USDC", version: "2" } },
+            par: true,
+            maxUpstreamAmount: "100000",
+            fee: { flat: "1000", bps: 0, min: "1000" },
+          },
         },
-        budget: { maxPurchases: 50, buckets: [{ network: NETWORK, asset: USDC, maxTotal: "100000000", maxPerPurchase: "200000" }] },
+        budget: { maxPurchases: 50, buckets: [{ network: NETWORK, asset: USDC, maxTotal: "100000000", maxPerPurchase: "200000" }, { network: SEPOLIA, asset: ZUSDC, maxTotal: "100000000", maxPerPurchase: "200000" }] },
         limits: { ...DEFAULT_DYNAMIC_LIMITS, quotesPerMinuteGlobal: 1000, quotesPerMinutePerSource: 1000, purchasesPerMinuteGlobal: 1000, purchasesPerMinutePerSource: 1000, perHostPerMinute: 1000, perAddressPerMinute: 1000 },
         denyHosts: [],
       },
@@ -165,7 +186,7 @@ function configDocument(world: World, options: WorldOptions): unknown {
         deliveryBinSha256: lab.available ? sha256File(lab.bin) : "0".repeat(64),
         srsPath: lab.srs,
         srsSha256: lab.available ? sha256File(lab.srs) : "0".repeat(64),
-        profiles: [PROFILE_ID],
+        profiles: [PROFILE_ID, SUBETHA_PROFILE_ID],
         workDir: world.privateDir,
         sessionTimeoutMs: options.sessionTimeoutMs ?? 600_000,
         attestTimeoutMs,
@@ -180,7 +201,7 @@ function configDocument(world: World, options: WorldOptions): unknown {
 function newWorld(options: WorldOptions = {}): World {
   mkdirSync(runtimeRoot, { recursive: true });
   const dir = mkdtempSync(path.join(runtimeRoot, "private-x402-"));
-  const world: World = { dir, privateDir: path.join(dir, "private"), control: path.join(dir, "control"), journalPath: path.join(dir, "journal.ndjson"), configPath: path.join(dir, "router.config.json"), ledgerDir: path.join(dir, "dynamic-quotes"), diagnosticsPath: path.join(dir, "diagnostics.ndjson"), router: undefined, outputs: [], operatorAddress: undefined };
+  const world: World = { dir, privateDir: path.join(dir, "private"), control: path.join(dir, "control"), journalPath: path.join(dir, "journal.ndjson"), configPath: path.join(dir, "router.config.json"), ledgerDir: path.join(dir, "dynamic-quotes"), diagnosticsPath: path.join(dir, "diagnostics.ndjson"), router: undefined, outputs: [], operatorAddress: undefined, subethaPort: options.subethaPort ?? subethaFacilitator.port };
   mkdirSync(world.control, { recursive: true });
   writeFileSync(world.configPath, JSON.stringify(configDocument(world, options)));
   worlds.push(world);
@@ -192,14 +213,14 @@ interface StartOptions {
   readonly launch?: LaunchHooksForTest;
 }
 function routerArgs(world: World): string[] {
-  return ["--control", world.control, "--dial", `${HOST}=${provider.port},${FACILITATOR_HOST}=${facilitator.port}`, "--ca", lab.rootCa, "--ca", path.join(TLS.dir, "ca.pem"), "--diagnostics", world.diagnosticsPath];
+  return ["--control", world.control, "--dial", `${HOST}=${provider.port},${FACILITATOR_HOST}=${facilitator.port},${SUBETHA_HOST}=${world.subethaPort}`, "--ca", lab.rootCa, "--ca", path.join(TLS.dir, "ca.pem"), "--diagnostics", world.diagnosticsPath];
 }
 function routerEnv(world: World): Record<string, string> {
   return {
     ROUTER_CONFIG_PATH: world.configPath,
     ROUTER_PRINCIPAL_TOKENS: `${ALICE.id}:${ALICE.token},${BOB.id}:${BOB.token}`,
     ROUTER_ADAPTER_MODE: "real",
-    ROUTER_SUBETHA_FACILITATOR_URL: "https://subetha.other.test",
+    ROUTER_SUBETHA_FACILITATOR_URL: `http://${SUBETHA_HOST}`,
     ROUTER_X402_INBOUND_FACILITATOR_URL: `https://${FACILITATOR_HOST}`,
     ROUTER_CANONICAL_BASE_URL: "https://router.test",
     ROUTER_JOURNAL_PATH: world.journalPath,
@@ -493,11 +514,15 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
   beforeAll(async () => {
     TLS = generateTestTls();
     facilitator = await startVerifyingFacilitator({ tls: TLS });
+    subethaFacilitator = await startListening("tests/fixtures/facilitator-server.ts", ["--port", "0", "--token", ZUSDC, "--pay-to", OPERATOR_PAY_TO, "--chain-id", "11155111", "--v2", "on"]);
+    subethaFacilitatorNoEvent = await startListening("tests/fixtures/facilitator-server.ts", ["--port", "0", "--token", ZUSDC, "--pay-to", OPERATOR_PAY_TO, "--chain-id", "11155111", "--v2", "on", "--v2-event", "none"]);
     provider = await startZktlsProvider({ certPath: lab.serverCert, keyPath: lab.serverKey, host: HOST, network: NETWORK, asset: USDC, payTo: PROVIDER_PAY_TO, amount: PRICE, tokenDomain: { name: "USDC", version: "2" } });
   }, 120_000);
   afterAll(async () => {
     await provider?.close();
     await facilitator?.close();
+    await subethaFacilitator?.stop();
+    await subethaFacilitatorNoEvent?.stop();
     TLS?.cleanup();
   });
   afterEach(async () => {
@@ -674,6 +699,76 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     }
     await stopRouter(world);
   }, 300_000);
+
+  test("v1.3 受信 SubEtha V2（burn-sale）: 承認対象は注文ごとの burn address と payer_burn_before_credential、credential は {challengeNonce, burnTxHash}、settle の eventId が発行予約の identity、GET の全経路が成立。eventId 無しは未発行、通常の動的 quote は private_only_profile", async () => {
+    const world = newWorld();
+    await startRouter(world);
+    const dirs = payerDirs(world, "subetha");
+    const kg = await keygen(dirs, "GET");
+    const envDoc = JSON.parse(envelopeOf(kg.order).bytes.toString("utf8")) as { inbound: Record<string, unknown> };
+    envDoc.inbound = { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" };
+    const envBytes = Buffer.from(JSON.stringify(envDoc), "utf8");
+    const env = { bytes: envBytes, b64: envBytes.toString("base64"), sha: createHash("sha256").update(envBytes).digest("hex") };
+    // 通常の動的 quote はこのプロファイルを使えない（I/O 無しで拒否）。
+    const ordinary = await http(world, "POST", "/v1/quotes", { routeId: SUBETHA_PROFILE_ID, requestId: "r-ord", upstream: { url: `https://${HOST}${GET_PATH}` } });
+    expect(ordinary.status, ordinary.text).toBe(404);
+    expect(ordinary.body["error"]).toBe("private_only_profile");
+    const quoted = await http(world, "POST", "/v1/private/quotes", { profileId: SUBETHA_PROFILE_ID, requestId: "r-sub", intentB64: env.b64 });
+    expect(quoted.status, quoted.text).toBe(200);
+    const offer = (quoted.body["source"] as { offer: Record<string, unknown> }).offer;
+    expect(offer).toMatchObject({ scheme: "subetha-zerc20", network: SEPOLIA, asset: ZUSDC, amount: "11000", extra: { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true } });
+    expect(String(offer["payTo"])).not.toBe(OPERATOR_PAY_TO);
+    expect(quoted.body["private"]).toMatchObject({ inbound: { rail: "subetha", network: SEPOLIA, asset: ZUSDC, payTo: offer["payTo"], total: "11000", fundsMoveAt: "payer_burn_before_credential" }, outbound: { rail: "x402", payTo: PROVIDER_PAY_TO } });
+    expect(quoted.body["disclosures"]).toMatchObject({ fundsMoveOnCredential: true });
+    const ownerKey = quoted.body["ownerKey"];
+    // Payer の credential: 承認した offer そのもの + {challengeNonce, burnTxHash}（burn は fixture では模擬: 64 hex）。
+    const burnTxHash = `0x${randomBytes(32).toString("hex")}`;
+    const credential = Buffer.from(JSON.stringify({ x402Version: 2, accepted: offer, payload: { challengeNonce: offer["extra"] && (offer["extra"] as Record<string, unknown>)["challengeNonce"], burnTxHash } })).toString("base64");
+    const purchase = await http(world, "POST", "/v1/private/purchases", { quoteId: quoted.body["quoteId"], requestId: "r-sub", approval: quoted.body["quoteId"], credential, ownerKey });
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    const settledLine = readFileSync(world.journalPath, "utf8").split("\n").map((l) => (l === "" ? undefined : (JSON.parse(l) as { event?: string; paymentId?: string; patch?: Record<string, unknown> }))).find((e) => e?.event === "source_settled" && e.paymentId === handover.paymentId);
+    expect(settledLine?.patch).toEqual({ txRef: burnTxHash.toLowerCase(), eventId: `11155111:${burnTxHash.toLowerCase()}:121` });
+    const reserved = readFileSync(world.journalPath, "utf8").split("\n").map((l) => (l === "" ? undefined : (JSON.parse(l) as { event?: string; paymentId?: string; patch?: Record<string, unknown> }))).find((e) => e?.event === "private_issuance_reserved" && e.paymentId === handover.paymentId);
+    expect(reserved?.patch?.["inboundIdentity"]).toBe(`subetha|${SEPOLIA}|${burnTxHash.toLowerCase()}|11155111:${burnTxHash.toLowerCase()}:121`);
+    const { files, bundle } = await completeSession(world, dirs, kg, handover, env.bytes, ownerKey);
+    const attested = await http(world, "POST", `/v1/private/purchases/${handover.paymentId}/attest`, { bundleB64: bundle.toString("base64"), ownerKey });
+    expect(attested.body, attested.text).toMatchObject({ status: "delivered_private", private: { proof: { delivery: true, requestBinding: false } } });
+    const record = await http(world, "GET", `/v1/private/purchases/${handover.paymentId}/record`, undefined, ownerHeaders(ownerKey));
+    const decrypted = await decrypt(dirs, kg, files, String(record.body["recordB64"]), bundle);
+    expect(decrypted.result).toMatchObject({ ok: true, verified_bundle_before_decrypt: true });
+    expect(decrypted.plaintext?.toString("utf8")).toBe(provider.respond({ method: "GET", path: GET_PATH, body: "" }));
+    const status = await statusOf(world, handover.paymentId, ownerKey);
+    expect(status.body).toMatchObject({ status: "delivered_private", dynamic: { fundsMoveOnCredential: true } });
+    expectCanaries(world, { public: `${quoted.text}\n${attested.text}\n${status.text}`, authenticated: `${purchase.text}\n${record.text}` }, [...executorSecrets(dirs, kg, bundle), decrypted.plaintext!.toString("latin1")], [handover.releasedHeader.value], env.b64);
+    // 同じ burn tx を別の intent の credential に載せても、二重一意性（受信 identity）で発行しない。
+    const kg2 = await keygen(payerDirs(world, "subetha-dup"), "GET");
+    const envDoc2 = JSON.parse(envelopeOf(kg2.order).bytes.toString("utf8")) as { inbound: Record<string, unknown> };
+    envDoc2.inbound = { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" };
+    const quoted2 = await http(world, "POST", "/v1/private/quotes", { profileId: SUBETHA_PROFILE_ID, requestId: "r-sub2", intentB64: Buffer.from(JSON.stringify(envDoc2)).toString("base64") });
+    const offer2 = (quoted2.body["source"] as { offer: Record<string, unknown> }).offer;
+    // 別の intent が同じ burn を**大文字 hex** で申告しても、adapter の正準化で同じ受信 identity になる（表記で二重発行を抜けない）。
+    const credential2 = Buffer.from(JSON.stringify({ x402Version: 2, accepted: offer2, payload: { challengeNonce: (offer2["extra"] as Record<string, unknown>)["challengeNonce"], burnTxHash: `0x${burnTxHash.slice(2).toUpperCase()}` } })).toString("base64");
+    const purchase2 = await http(world, "POST", "/v1/private/purchases", { quoteId: quoted2.body["quoteId"], requestId: "r-sub2", approval: quoted2.body["quoteId"], credential: credential2, ownerKey: quoted2.body["ownerKey"] });
+    expect(purchase2.body, purchase2.text).toMatchObject({ status: "unknown", terminalReason: "private_issuance_duplicate" });
+    expect(purchase2.text).not.toContain("releasedHeader");
+    await stopRouter(world);
+    // eventId を返さない facilitator: 受信は settle するが発行しない（paid_undelivered / private_inbound_identity_missing）。
+    const world2 = newWorld({ subethaPort: subethaFacilitatorNoEvent.port });
+    await startRouter(world2);
+    const kg3 = await keygen(payerDirs(world2, "subetha-noevent"), "GET");
+    const envDoc3 = JSON.parse(envelopeOf(kg3.order).bytes.toString("utf8")) as { inbound: Record<string, unknown> };
+    envDoc3.inbound = { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" };
+    const quoted3 = await http(world2, "POST", "/v1/private/quotes", { profileId: SUBETHA_PROFILE_ID, requestId: "r-sub3", intentB64: Buffer.from(JSON.stringify(envDoc3)).toString("base64") });
+    expect(quoted3.status, quoted3.text).toBe(200);
+    const offer3 = (quoted3.body["source"] as { offer: Record<string, unknown> }).offer;
+    const credential3 = Buffer.from(JSON.stringify({ x402Version: 2, accepted: offer3, payload: { challengeNonce: (offer3["extra"] as Record<string, unknown>)["challengeNonce"], burnTxHash: `0x${randomBytes(32).toString("hex")}` } })).toString("base64");
+    const purchase3 = await http(world2, "POST", "/v1/private/purchases", { quoteId: quoted3.body["quoteId"], requestId: "r-sub3", approval: quoted3.body["quoteId"], credential: credential3, ownerKey: quoted3.body["ownerKey"] });
+    expect(purchase3.body, purchase3.text).toMatchObject({ status: "paid_data_unavailable", terminalReason: "private_inbound_identity_missing" });
+    expect(purchase3.text).not.toContain("releasedHeader");
+    expect(existsSync(path.join(world2.privateDir, String(purchase3.body["paymentId"])))).toBe(false);
+    await stopRouter(world2);
+  }, LONG);
 
   test("GET 全経路（公開 GET の秘匿配送）+ 同時二重 purchase + 完成した record への別注文 bundle（attest_foreign、状態不変）", async () => {
     const world = newWorld();
