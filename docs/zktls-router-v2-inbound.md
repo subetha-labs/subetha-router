@@ -61,6 +61,7 @@ V2 担当との合意: burn-sale（注文別 burn address）経路、routeBindin
 - （**履歴**。下の owner の判断で zUSDC に確定。ただし V2 の zUSDC は表に無い: 次の箇条）token: owner 未決。**zUSDC**なら本増分の設定で載る（V2 側で burn-sale の live を先に 1 件）。**zETH は本増分では載らない**（`SUBETHA_ZERC20_ASSETS` に無い。Router の `par: true` と `priceOf` の 1:1 換算は zETH の額を表せない）: 資産表と価格規則の別の増分が要る。
 - 支払い範囲の記録・両レグの確認・合計の上限は受入 §9 と同じ。
 - **owner の判断（2026-10-22、「その形で進めて良い」）**: 発行時点は accepted（V2 担当は owner 本人から直接確認済み）、token は **zUSDC**、payer の burn は **(a) V2 harness `pos-pay-token` + 本 worktree の `--burn-tx-hash`**（§9）、transport は **(a) 試験基盤の Router 子（synthetic transport）** で最初の 1 件（Router の実合成は loopback に加えて private range（10/8・172.16/12・192.168/16）と自ホストのアドレスも拒むので、同一マシンでの「非 loopback 公開」は公開到達可能なトンネルが要る。実 transport は後の増分）。
+- 結合の Router 子: `tools/private-v2-joint-router-process.ts`（製品コードではない）。`tools/remote-router-process.ts` と同じ実能力（送信の鍵・診断）に **`fixtureFacilitators: true` だけ**を足し、SubEtha 受信の transport が loopback の V2 facilitator に届く。送信 x402 と zkTLS 配送は公開 DNS・公開 PKI のまま。runtime は `runtime/private-live/v2a/`（config、start script、scope、ignored）。
 - **V2 の zUSDC は V1 と別 deployment**（V2 担当の live 2026-10-22: `/challenge` の `token` = `0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f`、V1 の表の行は `0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF`）。`SUBETHA_ZERC20_ASSETS` に無い token は設定の検査で起動時に拒まれる（FR-V2）ので、結合の前に **その行を表に足す増分**（decimals・上限は V1 と同じ 6 / 20,000 atomic。V2 担当の確認待ち）が要る。
 
 ## 5. 未解決
