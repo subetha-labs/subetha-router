@@ -178,3 +178,10 @@ C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）�
 **第三者 Provider X の実行記録（2026-10-22）**: §9 の手順で `GET https://tollbooth-hello-testnet.sjwilliams8.workers.dev/hello`（1,000 atomic）を 1 回。`delivered_private`、5 ゲート成立（受信 tx `0x74cc1d6f…266f`、送信 tx `0xafc13f15…5045`、平文 326 B、両チェーン読取 300 conf 超）。詳細は設計 §14.7。
 
 **同日の続き**: 控え候補 3 件 + tollbooth 2 件目。fx（214 B）・shelf（91 B）・tollbooth(2)（326 B）は `delivered_private`、joke は有料応答 938 B で B3 不成立（両レグ決済済み・返金無し）。facilitator の settle 失敗 2 回は無送金で、新しい quote で再実行。設計 §14.7。
+
+## 10. 回復時のチェーン読取と運用の注記（thirdparty §10、2026-10-22）
+
+- `--recover --chain [--rpc-url …] [--payer-address 0x…]`: 読取だけ（何も払わない・署名しない・鍵は要らない）。EIP-3009 `authorizationState` を最新 block の hash で固定して読み、`true` なら `AuthorizationUsed` の直後の `Transfer(authorizer → payTo, 額)` を receipt で確かめたときだけ `settled`（`chainTxRef`）。`false` + 期限後 + Router が終端（`unknown`/`paid_data_unavailable`/`delivered`/`delivered_private`）なら `unused_expired`（その block 時点の観測。finality ではない。ゲート ⑤ は未確認のまま）。それ以外は不確実（回復のたびに今回の読取だけが決める）。遡れるのは最新から 1,000,000 block（公開 RPC の制約）。`--payer-address`（古い再開点用）の観測は診断だけでゲートを変えない。コンソールには結論と block だけ、証跡ファイルに nonce・tx hash。
+- `dynamic.budget.maxPurchases` は**昇格した購入**（settle に進んだもの。後で `unknown` になった分を含む）を数える。再実行は新しい quote で、昇格数の上限に余裕のある journal で（§14.7 の x2 → x3）。
+- quote は同一 principal から 1 分に 3 件まで（4 件目で `rate_limited`。設定で変わる）。quote の間隔は 20 秒以上。
+- 新しい quote や journal は承認ではない。再実行にも §9 の承認（scope の記録、両レグの確認、合計の上限）が要る。

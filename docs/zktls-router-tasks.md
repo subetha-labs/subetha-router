@@ -85,3 +85,6 @@ wire で見つかった実合成の不具合 3 件（受信 rail の解決、ver
 | T-3P3 文書・状態・レビュー | 済 | 設計 §14.7、受入 §9、`.claude_workflow/state.json`、Codex 実装レビュー `.claude_workflow/local/zktls-3p-impl-review{1,2}.md`（APPROVE WITH CHANGES → 反映） |
 | 第三者 Provider X の実送金 | **済（2026-10-22、owner 承認後、1 回で delivered_private、5 ゲート）** | `.claude_workflow/local/zktls-live-X-20261022.json`、設計 §14.7、thirdparty §9 |
 | 控え候補 3 件 + tollbooth 2 件目 | 済: fx・shelf・tollbooth(2) delivered_private、joke は B3（938 B）で不成立 | `.claude_workflow/local/zktls-live-X-batch-20261022.json`、設計 §14.7、thirdparty §9.1 |
+| T-3P4 回復時のチェーン読取（`--recover --chain`） | 済（Codex 設計 ×3・実装 ×2 の指摘を反映、v1.2.3） | `tools/private-payer.ts`、`tests/unit/private-payer-chain.test.ts`（lab・Router・ネットワーク不要、24 件）、`tests/wire/private-x402.test.ts`（lab）、実機読取（joke の両レグ settled）`.claude_workflow/local/zktls-live-X-batch-20261022.json` |
+| T-3P5 運用の注記 | 済 | 受入 §10、thirdparty §10.2 |
+| 他担当への確認事項 | 文書のみ | `docs/zktls-router-open-items.md`（lab: 704 B の根拠と拡張、V2: 受信境界の表と最小の共同検証） |

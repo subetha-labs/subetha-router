@@ -646,6 +646,32 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     expect(recovered.ok).toBe(true);
     if (recovered.ok) expect(recovered.evidence.providerFileSha256).toBe(fileSha);
     expect(readFileSync(path.join(out, "evidence.json"), "utf8")).toContain(fileSha);
+    // --recover --chain（thirdparty §10.1）: 偽の ChainReader が「使用 + 直後の Transfer」を返す → chain: settled。txRef は status 由来のまま（chainTxRef は付かない）。
+    const checkpointDoc = JSON.parse(readFileSync(path.join(out, "checkpoint.json"), "utf8")) as { progress: { payerAddress?: string }; quote: { source: { offer: { amount: string; payTo: string; extra: { challengeNonce: string } } } } };
+    expect(checkpointDoc.progress.payerAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    const inboundNonce = checkpointDoc.quote.source.offer.extra.challengeNonce;
+    const topicAddr = (a: string): string => `0x${a.slice(2).toLowerCase().padStart(64, "0")}`;
+    const fakeTx = `0x${"44".repeat(32)}`;
+    const head = { number: 1000, hash: `0x${"ab".repeat(32)}`, timestamp: Math.floor(Date.now() / 1000) };
+    const reader = {
+      chainId: async () => 84532,
+      latestBlock: async () => head,
+      blockByNumber: async () => head,
+      authorizationState: async () => true,
+      findAuthorization: async () => [{ kind: "used" as const, txHash: fakeTx, block: 900, blockHash: `0x${"cd".repeat(32)}` }],
+      receiptLogsOf: async () => ({ blockHash: `0x${"cd".repeat(32)}`, logs: [
+        { address: USDC, topics: ["0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5", topicAddr(checkpointDoc.progress.payerAddress!), inboundNonce], data: "0x" },
+        { address: USDC, topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", topicAddr(checkpointDoc.progress.payerAddress!), topicAddr(checkpointDoc.quote.source.offer.payTo)], data: `0x${BigInt(checkpointDoc.quote.source.offer.amount).toString(16).padStart(64, "0")}` },
+      ] }),
+    };
+    const chained = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: out, labDir: lab.labDir, srsPath: lab.srs, chain: { readerForTest: reader } });
+    expect(chained.ok).toBe(true);
+    if (chained.ok) {
+      expect(chained.evidence.chain?.inbound).toMatchObject({ verdict: "settled", authorizerSource: "checkpoint", txRef: fakeTx });
+      expect(chained.evidence.gates.inbound_settlement).toMatchObject({ settled: true, chain: "settled", txRef: delivered.evidence.gates.inbound_settlement.txRef });
+      expect(chained.evidence.gates.inbound_settlement.chainTxRef).toBeUndefined();
+      expect(chained.evidence.gates.private_delivery.status).toBe("delivered_private");
+    }
     await stopRouter(world);
   }, 300_000);
 

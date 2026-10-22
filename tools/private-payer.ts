@@ -7,6 +7,8 @@
  * 2. 同じ `--out` に `--approve`: checkpoint を**再開**する（keygen も quote もやり直さない）。`quote.json` が書き換えられていた・quote の期限が過ぎた・引数が違うときは拒む。
  *    受信 credential（EIP-3009、自分の鍵）→ purchase（引き渡し）→ `payer-finalize-order` → `executor-session`（実 MPC-TLS）→ `executor-prove` → attest → record（2 回・同一）→ `payer-decrypt`。
  * - `--recover`: checkpoint の ownerKey で status と record を読み直し、手元に bundle があれば復号する（応答を失ったとき・別プロセスから）。
+ *   `--recover --chain [--rpc-url …] [--payer-address 0x…]`: さらに EIP-3009 `authorizationState` を 1 つの block で読み、両レグの「決済済み / 未使用で期限切れ / 未使用で期限前」を証跡に写す
+ *   （`docs/zktls-router-thirdparty.md` §10.1。読取だけ。鍵は要らない。再実行はしない）。
  * - `--trust mozilla`（実 Provider）では **支払い範囲の記録**（`--scope-file`、AGENTS.md）が無いと走らない。`lab-fixture-ca` の証跡は synthetic。
  * - 鍵は env `SUBETHA_PAYER_PRIVATE_KEY` だけから読み、出力・証跡・例外に出さない。bearer は 0600 のファイル（`payment_header.json`・`order_final.json`）にだけ。
  * - 証跡 `evidence.json` は **5 つのゲートを別々に**、分かった時点で記録する（受信決済は引き渡し直後の status から。失敗しても分かっている分は残し、不明は `uncertain`）。
@@ -29,6 +31,8 @@ import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, re
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+import { encodeFunctionData, parseAbi } from "viem";
 
 import { createRouterClient } from "../src/client/index.js";
 import type { PrivateHandoverView, PrivateQuoteView, RouterClient } from "../src/client/types.js";
@@ -93,6 +97,8 @@ export interface PrivatePayerEvidence {
   scopeFileSha256?: string;
   /** 第三者 Provider: 封筒の値の出所（`provider.json` の sha256）。 */
   providerFileSha256?: string;
+  /** `--recover --chain`（thirdparty §10.1）: 1 つの block で読んだ EIP-3009 `authorizationState` の事実だけ（推定しない）。 */
+  chain?: ChainEvidence;
   intentSha256?: string;
   orderId?: string;
   paymentId?: string;
@@ -102,12 +108,67 @@ export interface PrivatePayerEvidence {
   routerStatus?: { status?: string; terminalReason?: string };
   /** 5 つのゲート（別々）。`uncertain: true` は「分からない」（払ったかもしれない）。 */
   readonly gates: {
-    inbound_settlement: { settled: boolean; txRef?: string; eventId?: string; uncertain?: true };
-    outbound_settlement: { issued: boolean; txRef?: string; receipt: boolean; uncertain?: true };
+    inbound_settlement: { settled: boolean; txRef?: string; eventId?: string; uncertain?: true; chain?: ChainLegVerdict; chainTxRef?: string };
+    outbound_settlement: { issued: boolean; txRef?: string; receipt: boolean; uncertain?: true; chain?: ChainLegVerdict; chainTxRef?: string };
     private_delivery: { status?: string; terminalReason?: string; proof?: unknown; recordSha256?: string; recordRepeatable?: boolean };
     payer_receipt: { ok: boolean; verifiedBundleBeforeDecrypt?: boolean; decryptedSha256?: string; payloadLen?: number; failedStage?: string };
     finality: { checked: false; note: string };
   };
+}
+
+/**
+ * チェーン読取の結論（レグごと。thirdparty §10.1）。`settled` = `AuthorizationUsed(authorizer, nonce)` の tx に期待どおりの `Transfer(authorizer → payTo, amount)` がある（決済の証明）。
+ * `canceled` = `AuthorizationCanceled` が見つかった。`used_unlocated` = `authorizationState` は true（使用または取消）だがログを特定できない（不確実のまま）。
+ * `unused` = その block 時点で未使用（期限前。まだ使われ得る）。`unused_expired` = その block 時点で未使用かつ `validBefore` を過ぎた（finality の確認ではない）。
+ */
+export type ChainLegVerdict = "settled" | "canceled" | "used_unlocated" | "unused" | "unused_expired";
+export interface ChainLegEvidence {
+  readonly authorizer: string;
+  /** 受信: 再開点に署名の前に書いたアドレス（`checkpoint`）か、古い再開点で operator が与えた未検証のもの（`operator_unverified`）。送信: 手元の header の `from`（`header`）。 */
+  readonly authorizerSource: "checkpoint" | "operator_unverified" | "header";
+  readonly nonce: string;
+  readonly state: "unused" | "used_or_canceled";
+  readonly verdict: ChainLegVerdict;
+  readonly validBefore: number;
+  readonly expired: boolean;
+  readonly txRef?: string;
+  readonly txBlock?: number;
+}
+export interface ChainEvidence {
+  readonly readAt: string;
+  readonly rpcHost: string;
+  readonly chainId: number;
+  readonly block: { readonly number: number; readonly hash: string; readonly time: number };
+  inbound?: ChainLegEvidence;
+  outbound?: ChainLegEvidence;
+  /** 読まなかった理由（固定語）。 */
+  skipped?: { inbound?: string; outbound?: string };
+}
+/** RPC の読取の抽象（試験では差し替える。外部ネットワーク無しで判定を試す）。 */
+export interface ChainReader {
+  chainId(): Promise<number>;
+  latestBlock(): Promise<{ number: number; hash: string; timestamp: number }>;
+  /** 読取の後に同じ番号の block を読み直して hash を照合する（reorg の検出）。 */
+  blockByNumber(block: number): Promise<{ number: number; hash: string; timestamp: number }>;
+  /** `authorizationState(authorizer, nonce)` を **block hash で固定して**（EIP-1898）読む。 */
+  authorizationState(asset: string, authorizer: string, nonce: string, blockHash: string): Promise<boolean>;
+  /** `AuthorizationUsed` / `AuthorizationCanceled` の (authorizer, nonce) のログ（資産 contract 発）を [fromBlock, toBlock] で探す。 */
+  findAuthorization(asset: string, authorizer: string, nonce: string, fromBlock: number, toBlock: number): Promise<readonly { kind: "used" | "canceled"; txHash: string; block: number; blockHash: string }[]>;
+  /** その tx の receipt（成功したものだけ）のログ列を**順序どおり**（contract のアドレス・topics・data）。失敗した tx や無い tx は `undefined`。 */
+  receiptLogsOf(txHash: string): Promise<{ blockHash: string; logs: readonly { address: string; topics: readonly string[]; data: string }[] } | undefined>;
+}
+/** 1 レグの読取の入力（quote と手元の header から組む。推定しない）。 */
+export interface ChainLegInput {
+  readonly authorizer: string;
+  readonly authorizerSource: ChainLegEvidence["authorizerSource"];
+  readonly nonce: string;
+  readonly validBefore: number;
+  readonly network: string;
+  readonly asset: string;
+  readonly payTo: string;
+  readonly amount: bigint;
+  /** 探索の下限の目安（quote の作成時刻、ms）。 */
+  readonly notBeforeMs: number;
 }
 
 export type PrivatePayerRun =
@@ -126,7 +187,7 @@ interface Checkpoint {
   readonly orderId: string;
   readonly args: { readonly routerBaseUrl: string; readonly principalId: string; readonly profileId: string; readonly method: string; readonly host: string; readonly path: string; readonly outbound: PrivatePayerOptions["outbound"]; readonly inbound: NonNullable<PrivatePayerOptions["inbound"]>; readonly trust: string; readonly providerFileSha256?: string };
   /** 進んだ段（再開・回復の判断用）。 */
-  progress?: { paymentId?: string; purchaseAttempted?: boolean; handedOver?: boolean; sessionDone?: boolean; attested?: boolean };
+  progress?: { paymentId?: string; purchaseAttempted?: boolean; handedOver?: boolean; sessionDone?: boolean; attested?: boolean; payerAddress?: string };
 }
 
 export function defaultLabDir(): string {
@@ -285,18 +346,20 @@ function recordRefusal(outDir: string, stage: string, reason: string): void {
 }
 
 /** Router の status（読み取り専用）から分かるゲートを証跡に写す。失敗しても投げない。 */
-async function fillFromStatus(client: RouterClient & PrivateRouterClient, paymentId: string, ownerKey: string, evidence: PrivatePayerEvidence): Promise<void> {
+async function fillFromStatus(client: Pick<RouterClient & PrivateRouterClient, "status">, paymentId: string, ownerKey: string, evidence: PrivatePayerEvidence): Promise<void> {
   try {
     const status = await client.status(paymentId, ownerKey);
     if (!status.found) return;
     const projection = status.projection as unknown as { status?: string; terminalReason?: string; source?: { txRef?: string; eventId?: string }; destination?: { txRef?: string }; private?: { outbound?: { issued?: boolean } } };
     evidence.routerStatus = { ...(projection.status === undefined ? {} : { status: projection.status }), ...(projection.terminalReason === undefined ? {} : { terminalReason: projection.terminalReason }) };
     if (projection.source?.txRef !== undefined) {
-      evidence.gates.inbound_settlement = { settled: true, txRef: projection.source.txRef, ...(projection.source.eventId === undefined ? {} : { eventId: projection.source.eventId }) };
+      // 既存の欄（chain の結論など）を保って併合する。
+      const { uncertain: _u, ...rest } = evidence.gates.inbound_settlement;
+      evidence.gates.inbound_settlement = { ...rest, settled: true, txRef: projection.source.txRef, ...(projection.source.eventId === undefined ? {} : { eventId: projection.source.eventId }) };
     }
     if (projection.private?.outbound?.issued === true) {
-      const { uncertain: _u, ...rest } = evidence.gates.outbound_settlement;
-      evidence.gates.outbound_settlement = { ...rest, issued: true };
+      // 発行済みは決済の確立ではない: `uncertain` は外さない（外すのは領収の txRef か chain の settled だけ）。
+      evidence.gates.outbound_settlement = { ...evidence.gates.outbound_settlement, issued: true };
     }
     if (projection.destination?.txRef !== undefined) {
       const { uncertain: _u, ...rest } = evidence.gates.outbound_settlement;
@@ -429,7 +492,11 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   // 受信 credential（自分の鍵。EIP-3009。資金はこの後の Router の settle で動く）。
   const offer = quote.source.offer as { network: string; extra: Record<string, unknown> } & Record<string, unknown>;
   const chainId = Number(String(offer.network).replace(/^eip155:/, ""));
-  const credential = await createX402Payer(options.payerPrivateKey).credentialFor(offer as never, chainId);
+  const payer = createX402Payer(options.payerPrivateKey);
+  // 回復時のチェーン読取（§10.1）のために **アドレスだけ** を再開点に残す（鍵は残さない）。
+  checkpoint.progress = { ...checkpoint.progress, payerAddress: payer.address };
+  writeCheckpoint(options.outDir, checkpoint);
+  const credential = await payer.credentialFor(offer as never, chainId);
 
   // 4. purchase → 引き渡し。応答を失ったら「払ったかもしれない」。
   let purchased: Awaited<ReturnType<typeof client.privatePurchase>>;
@@ -562,7 +629,318 @@ export interface PrivatePayerRecoverOptions {
   readonly labDir?: string;
   readonly srsPath?: string;
   readonly log?: (line: string) => void;
+  /** `--chain`: 読取専用のチェーン照合（thirdparty §10.1）。`rpcUrl` の既定は `SUBETHA_BASE_SEPOLIA_RPC_URL` か公開 RPC。`payerAddress` は古い再開点（`progress.payerAddress` 無し）のため。 */
+  readonly chain?: { readonly rpcUrl?: string; readonly payerAddress?: string; readonly readerForTest?: ChainReader };
+  /** **試験専用**: Router の client と手元の復号の差し替え（Router も lab も無しで回復の論理を試す）。 */
+  readonly clientForTest?: Pick<RouterClient & PrivateRouterClient, "status" | "privateRecord">;
+  readonly decryptForTest?: () => Promise<{ gate: PrivatePayerEvidence["gates"]["payer_receipt"]; plaintextFile: string }>;
 }
+export const DEFAULT_BASE_SEPOLIA_RPC_URL = "https://sepolia.base.org";
+export const BASE_SEPOLIA_CHAIN_ID = 84532;
+const AUTHORIZATION_STATE_ABI = parseAbi(["function authorizationState(address authorizer, bytes32 nonce) view returns (bool)"]);
+const TOPIC_AUTHORIZATION_USED = "0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5";
+const TOPIC_AUTHORIZATION_CANCELED = "0x1cdd46ff242716cdaa72d159d339a485b3438398348d68f09d7c8c0a59353d81";
+const TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const BYTES32 = /^0x[0-9a-fA-F]{64}$/;
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+/** 公開 RPC の `eth_getLogs` の 1 回の上限（Base Sepolia の公開 RPC は 200 block）。 */
+const LOG_CHUNK_BLOCKS = 200;
+/** 探索区間の余裕（block）。区間の両端は block の timestamp の二分探索で決める（block 時間を仮定しない: Base Sepolia は約 0.2 s/block）。 */
+const SEARCH_MARGIN_BLOCKS = 200;
+/** 二分探索の上限（header の読取回数）と、遡る block 数の上限（公開 RPC は古い block を返さないことがある。これより古い決済は `used_unlocated` になる = 限界として文書化）。 */
+const MAX_BISECT_STEPS = 48;
+const MAX_LOOKBACK_BLOCKS = 1_000_000;
+
+function topicAddress(address: string): string {
+  return `0x${address.slice(2).toLowerCase().padStart(64, "0")}`;
+}
+
+/** 公開 RPC の読取（JSON-RPC。失敗は例外 = 呼び出し側が recovery-log に固定文を書く。URL は出力しない）。 */
+export function rpcChainReader(rpcUrl: string): ChainReader {
+  async function call(method: string, params: unknown[]): Promise<unknown> {
+    const response = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error("rpc_http");
+    const body = (await response.json()) as { result?: unknown; error?: unknown };
+    if (body.error !== undefined || body.result === undefined) throw new Error("rpc_error");
+    return body.result;
+  }
+  const hex = (n: number): string => `0x${n.toString(16)}`;
+  return {
+    chainId: async () => Number(BigInt(String(await call("eth_chainId", [])))),
+    latestBlock: async () => {
+      const block = (await call("eth_getBlockByNumber", ["latest", false])) as { number?: string; hash?: string; timestamp?: string };
+      if (typeof block.number !== "string" || typeof block.hash !== "string" || typeof block.timestamp !== "string") throw new Error("rpc_shape");
+      return { number: Number(BigInt(block.number)), hash: block.hash, timestamp: Number(BigInt(block.timestamp)) };
+    },
+    blockByNumber: async (block) => {
+      const b = (await call("eth_getBlockByNumber", [hex(block), false])) as { number?: string; hash?: string; timestamp?: string } | null;
+      if (b === null || typeof b.number !== "string" || typeof b.hash !== "string" || typeof b.timestamp !== "string") throw new Error("rpc_shape");
+      return { number: Number(BigInt(b.number)), hash: b.hash, timestamp: Number(BigInt(b.timestamp)) };
+    },
+    authorizationState: async (asset, authorizer, nonce, blockHash) => {
+      const data = encodeFunctionData({ abi: AUTHORIZATION_STATE_ABI, functionName: "authorizationState", args: [authorizer as `0x${string}`, nonce as `0x${string}`] });
+      // EIP-1898: block を hash で固定する。
+      const result = await call("eth_call", [{ to: asset, data }, { blockHash }]);
+      if (typeof result !== "string" || !BYTES32.test(result)) throw new Error("rpc_shape");
+      const value = BigInt(result);
+      // 正準な bool（0 / 1）だけを受ける。他の値は形違い（証跡を変えない）。
+      if (value !== 0n && value !== 1n) throw new Error("rpc_shape");
+      return value === 1n;
+    },
+    findAuthorization: async (asset, authorizer, nonce, fromBlock, toBlock) => {
+      const found: { kind: "used" | "canceled"; txHash: string; block: number; blockHash: string }[] = [];
+      for (let from = fromBlock; from <= toBlock; from += LOG_CHUNK_BLOCKS) {
+        const to = Math.min(toBlock, from + LOG_CHUNK_BLOCKS - 1);
+        for (const [kind, topic] of [["used", TOPIC_AUTHORIZATION_USED], ["canceled", TOPIC_AUTHORIZATION_CANCELED]] as const) {
+          const logs = (await call("eth_getLogs", [{ fromBlock: hex(from), toBlock: hex(to), address: asset, topics: [topic, topicAddress(authorizer), nonce] }])) as { transactionHash?: string; blockNumber?: string; blockHash?: string; topics?: string[] }[];
+          for (const log of logs) {
+            if (typeof log.transactionHash !== "string" || typeof log.blockNumber !== "string" || typeof log.blockHash !== "string") throw new Error("rpc_shape");
+            found.push({ kind, txHash: log.transactionHash, block: Number(BigInt(log.blockNumber)), blockHash: log.blockHash });
+          }
+        }
+      }
+      return found;
+    },
+    receiptLogsOf: async (txHash) => {
+      const receipt = (await call("eth_getTransactionReceipt", [txHash])) as { status?: string; blockHash?: string; logs?: { address?: string; topics?: string[]; data?: string }[] } | null;
+      if (receipt === null) return undefined;
+      if (typeof receipt !== "object" || !Array.isArray(receipt.logs) || typeof receipt.blockHash !== "string") throw new Error("rpc_shape");
+      if (receipt.status !== "0x1") return undefined;
+      const logs = receipt.logs.map((log) => {
+        if (typeof log.address !== "string" || !Array.isArray(log.topics) || typeof log.data !== "string") throw new Error("rpc_shape");
+        return { address: log.address, topics: log.topics, data: log.data };
+      });
+      return { blockHash: receipt.blockHash, logs };
+    },
+  };
+}
+
+/** 1 レグの読取（§10.1 3〜5）。例外は呼び出し側へ。 */
+/**
+ * receipt のログ列（資産 contract 発だけ）で、(authorizer, nonce) の `AuthorizationUsed` の**直後**が `Transfer(authorizer → payTo, amount)` か（Circle の EIP-3009 は
+ * `AuthorizationUsed` を出した直後に transfer を実行する。同じ receipt にあるだけでは束縛にならない）。
+ */
+export function settlementBoundInReceipt(logs: readonly { address: string; topics: readonly string[]; data: string }[], leg: Pick<ChainLegInput, "asset" | "authorizer" | "nonce" | "payTo" | "amount">): boolean {
+  const own = logs.filter((log) => log.address.toLowerCase() === leg.asset.toLowerCase());
+  for (let index = 0; index < own.length - 1; index += 1) {
+    const used = own[index]!;
+    if (used.topics[0] !== TOPIC_AUTHORIZATION_USED || used.topics.length !== 3 || used.topics[1]!.toLowerCase() !== topicAddress(leg.authorizer) || used.topics[2]!.toLowerCase() !== leg.nonce.toLowerCase()) continue;
+    const next = own[index + 1]!;
+    if (next.topics[0] !== TOPIC_TRANSFER || next.topics.length !== 3) continue;
+    const from = `0x${next.topics[1]!.slice(-40)}`;
+    const to = `0x${next.topics[2]!.slice(-40)}`;
+    let value: bigint;
+    try {
+      value = BigInt(next.data);
+    } catch {
+      continue;
+    }
+    if (from.toLowerCase() === leg.authorizer.toLowerCase() && to.toLowerCase() === leg.payTo.toLowerCase() && value === leg.amount) return true;
+  }
+  return false;
+}
+
+/** timestamp が `atOrAfter` 以上になる最初の block 番号（head 以下。二分探索。block 時間を仮定しない）。 */
+async function firstBlockAtOrAfter(reader: ChainReader, head: { number: number; timestamp: number }, atOrAfter: number): Promise<number> {
+  if (head.timestamp < atOrAfter) return head.number;
+  let low = Math.max(0, head.number - MAX_LOOKBACK_BLOCKS);
+  let high = head.number;
+  if (low > 0) {
+    // 遡る上限より古い時刻なら、上限の block から探す（それより前は探さない）。
+    const oldest = await reader.blockByNumber(low);
+    if (oldest.timestamp >= atOrAfter) return low;
+  }
+  for (let step = 0; step < MAX_BISECT_STEPS && low < high; step += 1) {
+    const mid = Math.floor((low + high) / 2);
+    const block = await reader.blockByNumber(mid);
+    if (block.timestamp >= atOrAfter) high = mid;
+    else low = mid + 1;
+  }
+  return low;
+}
+
+async function readLeg(reader: ChainReader, leg: ChainLegInput, head: { number: number; hash: string; timestamp: number }): Promise<ChainLegEvidence> {
+  const used = await reader.authorizationState(leg.asset, leg.authorizer, leg.nonce, head.hash);
+  const expired = head.timestamp > leg.validBefore;
+  const base = { authorizer: leg.authorizer, authorizerSource: leg.authorizerSource, nonce: leg.nonce, validBefore: leg.validBefore, expired };
+  if (!used) return { ...base, state: "unused", verdict: expired ? "unused_expired" : "unused" };
+  // true は「使用または取消」: ログで決済を確かめる。区間は timestamp の二分探索で [quote の作成時刻, validBefore] に対応する block を求め、前後に余裕。
+  const fromBlock = Math.max(0, (await firstBlockAtOrAfter(reader, head, Math.floor(leg.notBeforeMs / 1000))) - SEARCH_MARGIN_BLOCKS);
+  const toBlock = Math.min(head.number, Math.max(fromBlock, (await firstBlockAtOrAfter(reader, head, leg.validBefore + 1)) + SEARCH_MARGIN_BLOCKS));
+  const found = await reader.findAuthorization(leg.asset, leg.authorizer, leg.nonce, fromBlock, toBlock);
+  if (found.some((entry) => entry.kind === "canceled") && !found.some((entry) => entry.kind === "used")) return { ...base, state: "used_or_canceled", verdict: "canceled" };
+  for (const entry of found.filter((entry) => entry.kind === "used")) {
+    const receipt = await reader.receiptLogsOf(entry.txHash);
+    if (receipt === undefined) continue;
+    // receipt とログの block hash が一致しなければ観測が不整合（reorg）: この tx は使わない。
+    if (receipt.blockHash.toLowerCase() !== entry.blockHash.toLowerCase()) throw new ChainInconsistentError();
+    if (settlementBoundInReceipt(receipt.logs, leg)) return { ...base, state: "used_or_canceled", verdict: "settled", txRef: entry.txHash, txBlock: entry.block };
+  }
+  return { ...base, state: "used_or_canceled", verdict: "used_unlocated" };
+}
+
+class ChainInconsistentError extends Error {}
+
+/** 読取（§10.1 1〜5）。失敗は固定語の `error`（証跡は呼び出し側で不変）。 */
+export async function readChain(reader: ChainReader, rpcHost: string, legs: { readonly inbound?: ChainLegInput; readonly outbound?: ChainLegInput; readonly skipped?: { inbound?: string; outbound?: string } }): Promise<{ ok: true; chain: ChainEvidence } | { ok: false; error: string }> {
+  let chainId: number;
+  let head: { number: number; hash: string; timestamp: number };
+  try {
+    chainId = await reader.chainId();
+    head = await reader.latestBlock();
+  } catch {
+    return { ok: false, error: "chain_unreadable" };
+  }
+  if (chainId !== BASE_SEPOLIA_CHAIN_ID) return { ok: false, error: "chain_mismatch" };
+  const chain: ChainEvidence = { readAt: new Date().toISOString(), rpcHost, chainId, block: { number: head.number, hash: head.hash, time: head.timestamp }, ...(legs.skipped === undefined ? {} : { skipped: { ...legs.skipped } }) };
+  for (const [name, leg] of [["inbound", legs.inbound], ["outbound", legs.outbound]] as const) {
+    if (leg === undefined) continue;
+    if (leg.network !== `eip155:${BASE_SEPOLIA_CHAIN_ID}`) {
+      chain.skipped = { ...chain.skipped, [name]: "network" };
+      continue;
+    }
+    try {
+      chain[name] = await readLeg(reader, leg, head);
+    } catch (error) {
+      return { ok: false, error: error instanceof ChainInconsistentError ? "chain_inconsistent" : `${name}_unreadable` };
+    }
+  }
+  // 読取の後に同じ番号の block を読み直す: hash が違えば reorg（結果を捨てる）。
+  try {
+    const again = await reader.blockByNumber(head.number);
+    if (again.hash.toLowerCase() !== head.hash.toLowerCase()) return { ok: false, error: "chain_reorg_detected" };
+  } catch {
+    return { ok: false, error: "chain_unreadable" };
+  }
+  return { ok: true, chain };
+}
+
+/**
+ * 証跡への写し（§10.1。**単調**: 確立した事実は下げない。純関数ではないが I/O は無い）。戻り値は recovery-log に書く固定語の列。
+ * `routerTerminal` = Router の公開状態が終端（unknown / paid_data_unavailable / delivered / delivered_private）。
+ */
+export function mergeChainEvidence(evidence: PrivatePayerEvidence, chain: ChainEvidence, routerTerminal: boolean, attempted = true): string[] {
+  const notes: string[] = [];
+  // 前回の chain 読取の tx 参照はゲートの `chainTxRef` に写してあるものだけが残る（`evidence.chain` は今回の読取で上書き）。
+  evidence.chain = chain;
+  const inbound = chain.inbound;
+  if (inbound !== undefined) {
+    const leg = evidence.gates.inbound_settlement;
+    const established = leg.settled;
+    if (established && inbound.state === "unused") notes.push("contradiction: inbound settled (established) but authorizationState unused at the read block; evidence kept");
+    if (inbound.authorizerSource === "operator_unverified") {
+      // 未検証のアドレスの観測は診断だけ（ゲートの settled / uncertain を変えない）。
+      evidence.gates.inbound_settlement = { ...leg, chain: inbound.verdict };
+      notes.push("inbound chain read used an operator-supplied, unverified payer address: diagnostic only");
+    } else if (established) {
+      // 確立した事実は下げない（txRef の有無によらず）。一致する観測（settled）は参照を足し、不確実の印は外す。
+      if (inbound.verdict === "settled") {
+        const { uncertain: _u, ...rest } = leg;
+        evidence.gates.inbound_settlement = { ...rest, chain: "settled", ...(rest.txRef === undefined && rest.chainTxRef === undefined ? { chainTxRef: inbound.txRef! } : {}) };
+      }
+    } else if (inbound.verdict === "settled") {
+      const { uncertain: _u, ...rest } = leg;
+      evidence.gates.inbound_settlement = { ...rest, settled: true, chain: "settled", ...(rest.txRef === undefined ? { chainTxRef: inbound.txRef! } : {}) };
+    } else if (inbound.verdict === "unused_expired" && routerTerminal) {
+      const { uncertain: _u, ...rest } = leg;
+      evidence.gates.inbound_settlement = { ...rest, settled: false, chain: "unused_expired" };
+    } else {
+      // 未解決（期限前・取消・特定不能・Router が終端でない）: 提出済みなら不確実の印を**戻す**（過去の「未使用」の観測で今の結果を確定させない）。
+      evidence.gates.inbound_settlement = { ...leg, ...(attempted ? { uncertain: true as const } : {}), chain: inbound.verdict };
+    }
+  }
+  const outbound = chain.outbound;
+  if (outbound !== undefined) {
+    const leg = evidence.gates.outbound_settlement;
+    const established = leg.txRef !== undefined || leg.chainTxRef !== undefined;
+    if (established && outbound.state === "unused") notes.push("contradiction: outbound settlement established (txRef/chainTxRef) but authorizationState unused at the read block; evidence kept");
+    if (established) {
+      if (outbound.verdict === "settled") {
+        const { uncertain: _u, ...rest } = leg;
+        evidence.gates.outbound_settlement = { ...rest, chain: "settled" };
+      }
+    } else if (outbound.verdict === "settled") {
+      const { uncertain: _u, ...rest } = leg;
+      evidence.gates.outbound_settlement = { ...rest, issued: true, chain: "settled", chainTxRef: outbound.txRef! };
+    } else if (outbound.verdict === "unused_expired" && routerTerminal) {
+      const { uncertain: _u, ...rest } = leg;
+      evidence.gates.outbound_settlement = { ...rest, chain: "unused_expired" };
+    } else {
+      evidence.gates.outbound_settlement = { ...leg, ...(attempted ? { uncertain: true as const } : {}), chain: outbound.verdict };
+    }
+  }
+  return notes;
+}
+
+/** quote と手元の header から読取の入力を組む（§10.1。推定しない。形が違えば `skipped` に固定語）。 */
+export function chainLegInputsOf(checkpoint: Checkpoint, outDir: string, payerAddressOverride: string | undefined): { ok: true; inbound?: ChainLegInput; outbound?: ChainLegInput; skipped?: { inbound?: string; outbound?: string } } | { ok: false; reason: string } {
+  const quote = checkpoint.quote as unknown as { source?: { offer?: Record<string, unknown>; payTo?: unknown; amount?: unknown }; destination?: { network?: unknown; asset?: unknown; payTo?: unknown; quoted?: unknown } };
+  const offer = quote.source?.offer;
+  const skipped: { inbound?: string; outbound?: string } = {};
+  const result: { ok: true; inbound?: ChainLegInput; outbound?: ChainLegInput; skipped?: typeof skipped } = { ok: true };
+  const notBeforeMs = Date.parse(checkpoint.createdAt);
+  // 受信。
+  const recorded = checkpoint.progress?.payerAddress;
+  if (recorded !== undefined && payerAddressOverride !== undefined && recorded.toLowerCase() !== payerAddressOverride.toLowerCase()) return { ok: false, reason: "payer_address_conflict" };
+  const authorizer = recorded ?? payerAddressOverride;
+  const extra = offer?.["extra"] as Record<string, unknown> | undefined;
+  const nonce = extra?.["challengeNonce"];
+  const expiresAt = extra?.["expiresAt"];
+  if (authorizer === undefined || !EVM_ADDRESS_RE.test(authorizer)) skipped.inbound = "payer_address_unknown";
+  else if (offer === undefined || typeof offer["network"] !== "string" || typeof offer["asset"] !== "string" || typeof offer["payTo"] !== "string" || typeof offer["amount"] !== "string" || !/^[0-9]+$/.test(offer["amount"]) || typeof nonce !== "string" || !BYTES32.test(nonce) || typeof expiresAt !== "number") skipped.inbound = "offer_shape";
+  else if (offer["scheme"] !== "exact") skipped.inbound = "protocol";
+  else if (offer["network"] !== PRIVATE_INBOUND_NETWORK) skipped.inbound = "network";
+  else if (offer["asset"].toLowerCase() !== PRIVATE_INBOUND_ASSET.toLowerCase()) skipped.inbound = "asset";
+  else result.inbound = { authorizer, authorizerSource: recorded !== undefined ? "checkpoint" : "operator_unverified", nonce, validBefore: expiresAt, network: offer["network"], asset: offer["asset"], payTo: offer["payTo"], amount: BigInt(offer["amount"]), notBeforeMs };
+  // 送信（header がある = 発行済み）。
+  const headerFile = path.join(outDir, "payment_header.json");
+  if (existsSync(headerFile)) {
+    try {
+      const header = JSON.parse(readFileSync(headerFile, "utf8")) as { value?: unknown };
+      const decoded = typeof header.value === "string" ? (JSON.parse(Buffer.from(header.value, "base64").toString("utf8")) as { payload?: { authorization?: Record<string, unknown> } }) : undefined;
+      const auth = decoded?.payload?.authorization ?? {};
+      const from = auth["from"];
+      const outNonce = auth["nonce"];
+      const validBefore = auth["validBefore"];
+      const to = auth["to"];
+      const value = auth["value"];
+      const destination = quote.destination;
+      if (typeof from !== "string" || !EVM_ADDRESS_RE.test(from) || typeof outNonce !== "string" || !BYTES32.test(outNonce) || (typeof validBefore !== "string" && typeof validBefore !== "number") || typeof to !== "string" || (typeof value !== "string" && typeof value !== "number")) {
+        skipped.outbound = "header_shape";
+      } else if (destination === undefined || typeof destination.network !== "string" || typeof destination.asset !== "string" || typeof destination.payTo !== "string" || typeof destination.quoted !== "string" || !/^[0-9]+$/.test(destination.quoted)) {
+        skipped.outbound = "quote_shape";
+      } else if (destination.network !== PRIVATE_INBOUND_NETWORK) {
+        skipped.outbound = "network";
+      } else if (destination.asset.toLowerCase() !== PRIVATE_INBOUND_ASSET.toLowerCase()) {
+        skipped.outbound = "asset";
+      } else if (to.toLowerCase() !== destination.payTo.toLowerCase() || BigInt(value) !== BigInt(destination.quoted)) {
+        skipped.outbound = "header_mismatch";
+      } else {
+        result.outbound = { authorizer: from, authorizerSource: "header", nonce: outNonce, validBefore: Number(validBefore), network: destination.network, asset: destination.asset, payTo: destination.payTo, amount: BigInt(destination.quoted), notBeforeMs };
+      }
+    } catch {
+      skipped.outbound = "header_shape";
+    }
+  }
+  if (Object.keys(skipped).length > 0) result.skipped = skipped;
+  return result;
+}
+
+/** `--recover` の stdout 向けの射影: chain は要約だけ、各レグの tx 参照（`txRef`・`chainTxRef`）と `eventId`（authorization nonce を含み得る）は出さない。証跡ファイルにはすべてある。 */
+export function consoleProjectionOf(evidence: PrivatePayerEvidence): Record<string, unknown> {
+  const strip = <T extends Record<string, unknown>>(leg: T): Omit<T, "txRef" | "chainTxRef" | "eventId"> => {
+    const { txRef: _t, chainTxRef: _c, eventId: _e, ...rest } = leg as T & { txRef?: unknown; chainTxRef?: unknown; eventId?: unknown };
+    return rest;
+  };
+  return { ...evidence, chain: chainSummaryOf(evidence.chain), gates: { ...evidence.gates, inbound_settlement: strip(evidence.gates.inbound_settlement), outbound_settlement: strip(evidence.gates.outbound_settlement) } };
+}
+
+/** コンソール向けの要約（nonce・authorizer・tx hash・RPC は出さない。§10.1 出力の方針）。 */
+export function chainSummaryOf(chain: ChainEvidence | undefined): { block: number; inbound?: ChainLegVerdict; outbound?: ChainLegVerdict; skipped?: ChainEvidence["skipped"] } | undefined {
+  if (chain === undefined) return undefined;
+  return { block: chain.block.number, ...(chain.inbound === undefined ? {} : { inbound: chain.inbound.verdict }), ...(chain.outbound === undefined ? {} : { outbound: chain.outbound.verdict }), ...(chain.skipped === undefined ? {} : { skipped: chain.skipped }) };
+}
+
 export type PrivatePayerRecovery =
   | { readonly ok: true; readonly paymentId: string; readonly status: Record<string, unknown> | undefined; readonly recordAvailable: boolean; readonly decrypted: boolean; readonly evidence: PrivatePayerEvidence }
   | { readonly ok: false; readonly reason: string };
@@ -572,7 +950,8 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
   const checkpoint = readCheckpoint(options.outDir);
   if (checkpoint === undefined) return { ok: false, reason: "no checkpoint in --out" };
   if (checkpoint.args.routerBaseUrl !== options.routerBaseUrl || checkpoint.args.principalId !== options.principalId) return { ok: false, reason: "the checkpoint belongs to another Router/principal" };
-  const client = createRouterClient({ baseUrl: options.routerBaseUrl, principalId: options.principalId, token: options.token, allowUnissuedQuotes: true });
+  const client = options.clientForTest ?? createRouterClient({ baseUrl: options.routerBaseUrl, principalId: options.principalId, token: options.token, allowUnissuedQuotes: true });
+  const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   const paymentId = checkpoint.progress?.paymentId ?? checkpoint.quote.paymentId;
   // 既にある証跡を引き継ぐ（分かったことを消さない）。提出したが結果が分からない購入は、status が読めるまで両決済を uncertain とする。
   const evidence = loadEvidence(options.outDir, newEvidence({ trust: checkpoint.args.trust as "mozilla" | "lab-fixture-ca", method: checkpoint.args.method, host: checkpoint.args.host, path: checkpoint.args.path }));
@@ -585,9 +964,14 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
   if (checkpoint.progress?.handedOver === true) {
     evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, settled: true };
     evidence.gates.outbound_settlement.issued = true;
-  } else if (checkpoint.progress?.purchaseAttempted === true && !evidence.gates.inbound_settlement.settled) {
-    evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, uncertain: true };
-    evidence.gates.outbound_settlement = { ...evidence.gates.outbound_settlement, uncertain: true };
+  }
+  if (checkpoint.progress?.purchaseAttempted === true) {
+    // 提出済みで確立していないレグは、レグごとに独立して不確実にする（引き渡し済みでも送信の決済は確立していない）。過去の chain 読取の
+    // 「未使用で期限切れ」は履歴（`chain` 欄）として残るが、今の結果は今回の読取（--chain）だけが決める。
+    const inbound = evidence.gates.inbound_settlement;
+    if (!inbound.settled && inbound.txRef === undefined && inbound.chainTxRef === undefined) evidence.gates.inbound_settlement = { ...inbound, uncertain: true };
+    const outbound = evidence.gates.outbound_settlement;
+    if (outbound.txRef === undefined && outbound.chainTxRef === undefined) evidence.gates.outbound_settlement = { ...outbound, uncertain: true };
   }
   await fillFromStatus(client, paymentId, checkpoint.quote.ownerKey, evidence);
   let status: Awaited<ReturnType<typeof client.status>>;
@@ -615,8 +999,8 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
     const labDir = options.labDir ?? defaultLabDir();
     const bin = path.join(labDir, "phase5/runner/target/release/delivery");
     const srs = options.srsPath ?? defaultSrsPath();
-    if (existsSync(bundleFile) && existsSync(orderFinal) && existsSync(bin) && existsSync(srs)) {
-      const result = await decryptLocally(bin, srs, { host: checkpoint.args.host, path: checkpoint.args.path }, path.join(options.outDir, "keys"), orderFinal, recordFile, bundleFile, path.join(options.outDir, "intent.json"), path.join(options.outDir, "release.json"));
+    if (options.decryptForTest !== undefined || (existsSync(bundleFile) && existsSync(orderFinal) && existsSync(bin) && existsSync(srs))) {
+      const result = options.decryptForTest !== undefined ? await options.decryptForTest() : await decryptLocally(bin, srs, { host: checkpoint.args.host, path: checkpoint.args.path }, path.join(options.outDir, "keys"), orderFinal, recordFile, bundleFile, path.join(options.outDir, "intent.json"), path.join(options.outDir, "release.json"));
       mergePayerReceipt(evidence, result.gate, options.outDir);
       decrypted = result.gate.ok;
     }
@@ -629,6 +1013,23 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
     if (typeof projection["status"] === "string") evidence.gates.private_delivery.status = projection["status"];
     if (typeof projection["terminalReason"] === "string") evidence.gates.private_delivery.terminalReason = projection["terminalReason"];
     if (priv !== undefined && priv["proof"] !== undefined) evidence.gates.private_delivery.proof = priv["proof"];
+  }
+  // --chain: 読取専用のチェーン照合（§10.1）。Router の公開状態が終端（unknown / paid_data_unavailable / delivered / delivered_private）のときだけ「未使用で期限切れ」が不確実を外せる。
+  if (options.chain !== undefined) {
+    const routerStatus = typeof projection?.["status"] === "string" ? (projection["status"] as string) : undefined;
+    // Router の公開状態（`src/core/intent.ts` PublicStatus）のうち終端: unknown / paid_data_unavailable / delivered / delivered_private。`awaiting_payment` は進行中とも終端（source_failed）とも読めるので終端にしない。
+    const routerTerminal = routerStatus !== undefined && ["unknown", "paid_data_unavailable", "delivered_private", "delivered"].includes(routerStatus);
+    const inputs = chainLegInputsOf(checkpoint, options.outDir, options.chain.payerAddress);
+    if (!inputs.ok) return { ok: false, reason: inputs.reason };
+    const rpcUrl = options.chain.rpcUrl ?? process.env["SUBETHA_BASE_SEPOLIA_RPC_URL"] ?? DEFAULT_BASE_SEPOLIA_RPC_URL;
+    const reader = options.chain.readerForTest ?? rpcChainReader(rpcUrl);
+    const read = await readChain(reader, options.chain.readerForTest !== undefined ? "test" : new URL(rpcUrl).host, inputs);
+    if (!read.ok) {
+      recordLog(options.outDir, "recovery-log.json", "chain", `chain check not applied (${read.error}); evidence unchanged`);
+    } else {
+      for (const note of mergeChainEvidence(evidence, read.chain, routerTerminal, checkpoint.progress?.purchaseAttempted === true)) recordLog(options.outDir, "recovery-log.json", "chain", note);
+      log(`private-payer: chain ${JSON.stringify(chainSummaryOf(read.chain))}`);
+    }
   }
   // 証跡は 1 つ（`evidence.json`）に単調に併合する（回復で分かったことも、次の回復で消えない）。
   writeDurable(path.join(options.outDir, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
@@ -655,8 +1056,11 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   if (process.argv.includes("--recover")) {
-    const recovered = await recoverPrivatePayer({ routerBaseUrl: requireArg("router"), principalId: requireArg("principal"), token, outDir: requireArg("out"), ...(argOf("lab-dir") === undefined ? {} : { labDir: argOf("lab-dir")! }) });
-    process.stdout.write(`${JSON.stringify(recovered.ok ? { ok: true, paymentId: recovered.paymentId, status: recovered.status?.["status"], terminalReason: recovered.status?.["terminalReason"], recordAvailable: recovered.recordAvailable, decrypted: recovered.decrypted, evidence: recovered.evidence } : recovered)}\n`);
+    const chain = process.argv.includes("--chain") ? { ...(argOf("rpc-url") === undefined ? {} : { rpcUrl: argOf("rpc-url")! }), ...(argOf("payer-address") === undefined ? {} : { payerAddress: argOf("payer-address")! }) } : undefined;
+    const recovered = await recoverPrivatePayer({ routerBaseUrl: requireArg("router"), principalId: requireArg("principal"), token, outDir: requireArg("out"), ...(argOf("lab-dir") === undefined ? {} : { labDir: argOf("lab-dir")! }), ...(chain === undefined ? {} : { chain }) });
+    // コンソールには chain の要約（verdict と block）だけ。nonce・authorizer・tx hash は証跡ファイルに。
+    const printable = recovered.ok ? consoleProjectionOf(recovered.evidence) : undefined;
+    process.stdout.write(`${JSON.stringify(recovered.ok ? { ok: true, paymentId: recovered.paymentId, status: recovered.status?.["status"], terminalReason: recovered.status?.["terminalReason"], recordAvailable: recovered.recordAvailable, decrypted: recovered.decrypted, evidence: printable } : recovered)}\n`);
     if (!recovered.ok) process.exit(1);
     return;
   }

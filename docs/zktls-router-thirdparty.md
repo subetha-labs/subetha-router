@@ -133,3 +133,80 @@ owner が §6 を承認（「承認します」）。事前検査（公開 host�
 
 ### 9.1 続き（同日）: 控え候補 3 件 + tollbooth 2 件目
 順に joke → shelf → fx → tollbooth(2)。結果: **fx・shelf・tollbooth(2) は `delivered_private`（5 ゲート）**、joke は有料応答 938 B（> 704 B、B3）で不成立（両レグ決済済み、record 無し、返金無し）。shelf と tollbooth(2) は 1 回目が x402.org facilitator の settle 失敗（`invalid_exact_evm_transaction_failed` → `unknown/source_rejected`、チェーン上は無送金）で、専用 journal（x3、`maxPurchases` 2）で新しい quote から再実行して成立。資金は受信 8,000・送信 4,000 atomic（上限どおり）。詳細は設計 §14.7、`.claude_workflow/local/zktls-live-X-batch-20261022.json`。
+
+## 10. 増分 v1.2（2026-10-22）: 回復時のチェーン読取と運用の注記（§9.1 の実測から。Codex レビュー REJECT ×3 → 本版 v1.2.3、§10.4〜§10.6）
+
+**動機**: §9.1 で `unknown/source_rejected`（受信 facilitator の settle 失敗）と `unknown/private_session_timeout`（joke、B3）が起きたとき、資金の行方は手作業のチェーン読取（Transfer ログ・残高）で確かめた。これを `tools/private-payer.ts --recover` に**読取専用**で組み込み、再実行の判断を記録付きにする。Router コアは変えない。
+
+### 10.1 `--recover --chain`（Payer の道具。何も払わない・署名しない・鍵は要らない）
+**読むもの**（すべて同じ RPC、同じ時点）:
+1. `eth_chainId` が `84532`（Base Sepolia）であること。違えば chain 読取をしない（`chain_mismatch`）。
+2. 最新 block の**番号・hash・時刻**（`eth_getBlockByNumber latest`）。状態の読取は **hash で固定**（EIP-1898 の `{blockHash}`）し、すべての読取の後に同じ番号の block を読み直して hash が同じことを確かめる。違えば（reorg）**結果を捨てて**証跡を変えない（`chain_reorg_detected`）。最新 block の観測は不可逆ではない。
+3. レグごとに、**先に protocol と資産を検査**する: 受信は offer の `scheme === "exact"`・network `eip155:84532`・asset = Base Sepolia USDC（`0x036C…CF7e`）、送信は quote の `destination` が同じ network・同じ USDC（本増分の私的 x402 送信はこれだけ）。違えばそのレグは読まない（`protocol`/`asset`/`network`）。通れば EIP-3009 `authorizationState(authorizer, nonce)` を**その block（hash）で**。
+   - 受信: authorizer = Payer のアドレス、nonce = quote の `source.offer.extra.challengeNonce`、資産 = `source.offer.asset`、network = `source.offer.network`（`eip155:84532` でなければそのレグは読まない）。`validBefore` の上限 = `source.offer.extra.expiresAt`（Payer の署名は `≤ expiresAt`。保守的）。
+   - 送信: 手元の `payment_header.json`（0600、bearer）を読んで `payload.authorization.{from, nonce, validBefore, to, value}` を取る（値は出力しない）。network = `destination.network`（`eip155:84532` でなければ読まない）、資産 = `destination.asset`。
+4. **`true` は「使用または取消」であって決済の証明ではない**（Circle の EIP-3009 は transfer と cancel で同じ状態を立てる）。`true` のときは `AuthorizationUsed(authorizer, nonce)`（両方 indexed、**資産の contract 発**）のログを `eth_getLogs`（公開 RPC は 1 回 200 block まで。区間は quote の作成時刻と `validBefore` に対応する block を **timestamp の二分探索**で求め（block 時間を仮定しない: Base Sepolia は約 0.2 s/block で、2 s の仮定では区間が 10 倍短く実機で見つからなかった）、前後 200 block の余裕、上限は最新 block。遡るのは最新から 1,000,000 block まで（公開 RPC は古い block を返さないことがある）: それより古い決済は `used_unlocated` になる = **限界**）で探し、その tx の receipt（`status 0x1`、receipt の `blockHash` がログの `blockHash` と一致）で、**同じ contract のログ列の中で、その `AuthorizationUsed` の直後のログ**が `Transfer(authorizer → 期待の payTo, 期待の額)` であるときだけ `settled`（Circle の実装は `AuthorizationUsed` を出した直後に transfer を実行する。同じ receipt にあるだけでは束縛にならない: バッチ tx は複数の authorization と Transfer を含み得る）。`AuthorizationCanceled` が見つかれば `canceled`。どちらでもなければ `used_unlocated`（不確実のまま）。これは「観測した決済」であって finality ではない。
+   - 期待の payTo/額: 受信は `source.payTo`/`source.amount`、送信は header の `to`/`value`（= quote の `destination.payTo`/`quoted` と一致していること。違えば `header_mismatch` で読まない）。
+5. `false` は「**その block 時点で未使用**」。`expired` = `blockTime > validBefore`。未使用でも期限前なら、まだ使われ得る。
+
+**authorizer の出所**（受信）: 承認時、latch の後・**署名の前**に `checkpoint.progress.payerAddress`（鍵から導いた**アドレスだけ**）を書く。`--payer-address` は再開点に無いときだけ使え、証跡に `authorizerSource: "operator_unverified"` と印を付け（再開点にあって引数と違えば拒む）、**その観測は診断だけ**: ゲートの `settled`/`uncertain` を変えない（間違ったアドレスの `false` で「未払い」にしない）。送信の authorizer は header の `from`（= Router の送信鍵。quote には無いので header が権威）。
+
+**証跡**（`evidence.chain`。読取の事実だけ。推定しない）:
+`{readAt, rpcHost, chainId, block: {number, hash, time}, inbound?: {authorizer, authorizerSource, nonce, state: "unused"|"used_or_canceled", verdict: "settled"|"canceled"|"used_unlocated"|"unused"|"unused_expired", validBefore, expired, txRef?, txBlock?}, outbound?: {…同じ}, skipped?: {inbound?, outbound?}}`。
+**ゲートへの写し（単調。確立した事実は下げない）**:
+- `settled`（直後の Transfer まで確認、authorizer が `checkpoint`/`header` 由来）→ `gates.<leg>.settled = true`（受信）/ `issued = true`（送信）、`txRef` が無ければ chain の tx hash を `chainTxRef` に（status 由来の `txRef` とは別の欄。`txRef` は Router の射影が権威）、`uncertain` を外す、`chain: "settled"`。
+- `unused` + `expired` + Router の公開状態が**終端**（`unknown`/`paid_data_unavailable`/`delivered`/`delivered_private`）+ そのレグに確立した事実が無い + authorizer が `checkpoint`/`header` 由来 → `chain: "unused_expired"`、`uncertain` を外す（「この block 時点で、この authorizer・nonce は未使用で期限切れ」。**finality の確認ではない**。ゲート ⑤ は `checked: false` のまま）。Router の状態が読めない・終端でないときは不確実のまま。再実行は**新しい承認と新しい quote**で（道具は再実行しない）。
+- `operator_unverified` の観測は `chain` 欄に結論を書くだけ（ゲートは変えない）。
+- それ以外（`unused` だが期限前、`used_unlocated`、`canceled`、Router が終端でない・読めない）→ 提出済みなら `uncertain` を**付ける**（以前の読取で外れていても戻す: 過去の「未使用」の観測で今の結果を確定させない）、`chain` に結論。`--chain` 無しの回復も、提出済みで確立していないレグは**レグごとに独立して** `uncertain` に戻す（引き渡し済みで受信が確立していても、送信の決済が確立していなければ送信は不確実。`issued` だけでは外さない。`chain` 欄の履歴は残る）。
+- 確立したレグ（引き渡し由来の `settled: true` や `chainTxRef`）に一致する `settled` の観測が来たら、`uncertain` を外し、tx 参照が無ければ `chainTxRef` を足す（次の読取で `evidence.chain` が上書きされても参照が残る）。
+- Router の終端 = 公開状態 `unknown` / `paid_data_unavailable` / `delivered` / `delivered_private`（`awaiting_payment` は進行中とも終端とも読めるので終端にしない）。
+- `authorizationState` の戻り値は正準な 0/1 だけを受ける（他は形違い = 証跡不変）。
+- 既に確立した事実（`settled: true` は `txRef` の有無によらず。引き渡し由来・chain 由来とも）は変えない。矛盾する観測（確立した `settled: true` に対し `unused`）は証跡を変えず `recovery-log.json` に `contradiction` として追記。`fillFromStatus` はレグの既存の欄（`chain`・`chainTxRef` 等）を保ったまま併合し、`--chain` 無しの回復でも chain の欄は残る。`receipt`（Provider の領収の有無）と配送のゲートは変えない（`receipt: false` は「領収が確立していない」であって配送が無かった証明ではない）。
+- 読めない（RPC 失敗・形違い・chain 違い）→ `recovery-log.json` に固定文を追記し証跡は不変。
+
+**出力の方針**: 証跡ファイルには nonce（quote の公開値）と tx hash を書く。コンソール（`--recover` の stdout）は `consoleProjectionOf`: chain は各レグの `verdict` と block 番号だけ、ゲートの `txRef`・`chainTxRef`・`eventId`（nonce を含み得る）も出さない（nonce・authorizer・bearer・署名・RPC の URL も出さない）。失敗のログは固定文のみ。
+
+### 10.2 運用の注記（手順書）
+- `dynamic.budget.maxPurchases` は**昇格した購入**（verify を通って settle に進んだもの。その後 `unknown` になった分を含む）を数える。昇格前の失敗（verify 不可・期限）は数えない。再実行は新しい quote で、かつ昇格数の上限に余裕のある journal で（§9.1 の x2 → x3）。受入の設定では `maxPurchases` = 予定の昇格数。
+- quote は同一 principal から 1 分の固定窓で 3 件まで（既定。**4 件目**が `rate_limited`。global・同時実行の上限も別にある）。受入では quote の間隔を 20 秒以上あける。
+- B3（有料応答 ≤ 704 B・`Content-Length`）は事前検査で見えない。候補は「静的で小さい応答」を公開情報から選び、最初の 1 件を払って確かめる（損失上限は設定額に依存。本増分の額なら 3,000 atomic/件）。
+- 新しい quote や新しい journal は、それ自体では購入の承認ではない。再実行にも受入 §9 の承認（scope の記録、両レグの確認、合計の上限）が要る。
+
+### 10.3 タスク
+| # | 変更 | 受入 |
+|---|---|---|
+| T-3P4 | `tools/private-payer.ts`: 承認時に `progress.payerAddress`（latch の後・署名の前）、`mergeChainEvidence`（証跡の単調な写し。I/O 無し）と `readChain`（`ChainReader` 抽象: `chainId`/`latestBlock`/`blockByNumber`/`authorizationState(blockHash)`/`findAuthorization`/`receiptLogsOf`）、`chainLegInputsOf`（protocol/資産/network の検査と header の照合）、`recoverPrivatePayer({chain?, clientForTest?, decryptForTest?})`、CLI `--recover --chain [--payer-address 0x…] [--rpc-url …]`、`fillFromStatus` の併合 | 新規 `tests/unit/private-payer-chain.test.ts`（**lab・Router・ネットワーク不要**: `ChainReader`・Router client・復号を差し替え）: 受信 settled（直後の Transfer 一致）; 同じ receipt にあっても直後でない Transfer（バッチ）→ used_unlocated; 別 contract のログは無視; Transfer の payTo/額が違う → used_unlocated; `true` + 取消 → canceled のまま uncertain; `true` + ログ無し → used_unlocated; 未使用 + 期限後 + 終端 → unused_expired で uncertain 解除; 未使用 + 期限後 + Router 非終端・読めない → uncertain; 未使用 + 期限前; 期限ちょうど（`blockTime == validBefore` は未期限）; chainId 違い・reorg（読み直した hash が違う）・receipt の blockHash 不一致 → 証跡不変 + recovery-log; 受信の scheme/資産違い・送信の network/資産違い → そのレグを読まない; header の形違い・`to`/`value` 不一致 → 読まない; 古い再開点 + `--payer-address` → `operator_unverified` は **ゲートを変えない**（unused_expired でも uncertain のまま、settled でも gate は不変）; 再開点と引数の不一致 → 拒否; 確立した settled（txRef 無し = 引き渡し由来、chain 由来の chainTxRef）は矛盾する観測でも不変 + recovery-log; `--chain` 無しの 2 回目の回復で chain 欄・chainTxRef が残る; stdout に nonce・authorizer・tx hash・bearer が無い。既存 wire（lab）に 1 ケース: 配送成立後の `--recover --chain` が偽 `ChainReader` で `settled` を書き、`txRef` は status 由来のまま |
+| T-3P5 | 手順書 §7・§9 に 10.2、thirdparty 本節 | 文書のみ |
+
+### 10.4 v1.2 → v1.2.1（Codex 設計レビュー 2 回目、REJECT）
+| 指摘 | 対応 |
+|---|---|
+| 1 `authorizationState` の true は取消でも立つ | 10.1 4: `AuthorizationUsed` ログ + 同一 tx の期待どおりの `Transfer` でだけ `settled`。取消は `canceled`、見つからなければ `used_unlocated`（不確実のまま） |
+| 2 アドレス・チェーンの束縛 | 10.1: `eth_chainId` の照合、レグごとの network/asset、`payerAddress` は署名の前に再開点へ、引数の上書きは再開点と矛盾すれば拒否・無ければ `operator_unverified` の印 |
+| 3 期限 ≠ finality | `final` → `expired`、block hash を記録、ゲート ⑤ は未確認のまま、非終端・読めないときは不確実のまま、`expiresAt` を上限に使う根拠を明記 |
+| 4 単調性 | `txRef` の有無によらず確立した事実を保つ、矛盾は recovery-log、`fillFromStatus` は併合 |
+| 5 試験の分離 | 純関数 `mergeChainEvidence` と `ChainReader` 抽象、Router client と復号の差し替え、挙げられた各ケース |
+| 6 領収と配送の区別・出力の方針 | `receipt` と配送のゲートは変えない、コンソールは verdict と block だけ、失敗ログは固定文 |
+| 7 運用の文言 | 昇格数を数える、4 件目で rate_limited、損失上限は設定額に依存、新 quote/journal は承認ではない |
+
+### 10.5 v1.2.1 → v1.2.2（Codex 設計レビュー 3 回目、REJECT）
+| 指摘 | 対応 |
+|---|---|
+| 1 同じ receipt にあるだけでは束縛にならない | 10.1 4: 資産 contract のログ列で `AuthorizationUsed` の**直後**の `Transfer` だけを束縛（Circle の実装順）。receipt の `status`・`blockHash` の一致。観測した決済 ≠ finality |
+| 2 `operator_unverified` が不確実を解除し得る | 10.1: `operator_unverified` は診断だけ（ゲートを変えない）。レグごとに protocol（`exact`）・資産（Base Sepolia USDC）・network を先に検査 |
+| 3 hash と番号の不整合 | 10.1 2: 状態は `blockHash` で読み（EIP-1898）、読取後に同じ番号の block を読み直して hash を照合、違えば捨てる |
+| 4 単調性の受入 | 10.3: `txRef` 無しの確立（引き渡し由来・chain 由来）が繰り返しの回復で残ることを試験 |
+| 5 試験の追加 | 10.3: 未検証アドレスは解除しない、別 contract・バッチの receipt、hash の変化・receipt の不整合、期限後の Router 不可読、確立の保持 |
+| 実機（§9.1 の joke）で `used_unlocated` | 区間の見積もりが block 時間 2 s の仮定で 10 倍短かった → timestamp の二分探索に変更（§10.1 4） |
+
+### 10.6 v1.2.2 → v1.2.3（Codex 実装レビュー 3 回目、REJECT 4 件）と実機確認
+| 指摘 | 対応 |
+|---|---|
+| 1 後の曖昧な観測が不確実を戻さない | `mergeChainEvidence`: 未解決の結論（期限前・取消・特定不能・非終端）は提出済みなら `uncertain` を付け直す。`--chain` 無しの回復も確立していないレグは不確実に戻す（履歴は `chain` 欄）。順次回復の試験 |
+| 2 stdout に tx hash・nonce（eventId）が残る | `consoleProjectionOf` でゲートの `txRef`/`chainTxRef`/`eventId` を落とす。完全な直列化の試験 |
+| 3 確立した受信に参照を足さない | 引き渡し由来の `settled` に一致する観測は `chainTxRef` を足し `uncertain` を外す。次の読取で上書きされても残る試験 |
+| 4 bool の復号が緩い | 正準な 0/1 以外は `rpc_shape`。偽の fetch で `rpcChainReader`（eth_call の blockHash、200 block の分割、receipt）を試験 |
+| 終端の一覧 | `unknown`/`paid_data_unavailable`/`delivered`/`delivered_private`（`rejected` は公開状態に無い、`awaiting_payment` は終端にしない） |
+| 実機（joke） | 2 s/block の仮定で `used_unlocated` → 二分探索 + 遡り上限 1,000,000 block。公開 RPC（sepolia.base.org）で両レグ `settled`: 受信 `0x2c90c481…`（block 48448541）、送信 `0xd0bf6997…`（block 48448567）。受信は `--payer-address`（古い再開点）なので診断だけ、送信は header 由来で `chainTxRef` に |
+| 再レビュー 4 回目（REJECT 1 件）: 送信の不確実が受信の状態に依存 | 回復の初期化をレグごとに独立（引き渡し済みでも送信は確立していなければ不確実）、`fillFromStatus` の `issued` では不確実を外さない、順次回復の試験（引き渡し済み + 送信未解決、Router 不可読・発行だけの status） |
+| 再レビュー 5 回目: **APPROVE WITH CHANGES**（Low 1 件: `mergeChainEvidence` のコメントの終端一覧） | 反映 |
