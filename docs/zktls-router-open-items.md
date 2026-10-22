@@ -70,3 +70,16 @@ Router の受信 rail は `src/ports/inbound.ts` の `InboundRail` で、秘匿�
 | (8) token | Router の動的プロファイルは受信資産と送信資産を **1:1（`par: true`）** とみなす。zUSDC → USDC なら成り立つが、**zETH → USDC は換算規則が無い**（Router に FX は無い）。Router の提案: 最初の結合は zUSDC（par が成り立つ。relayer fee 2.6 USDC/回は payer の testnet コスト）、zETH は「プロファイルごとの固定換算」を設定に足す別の増分。**owner** |
 
 Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.ts` を秘匿購入の受信に使えるようにする増分（`DynamicProfile.sourceRail` に `subetha` を許す、`private.profiles` の受信検査を V2 の network/資産に広げる、`settle` の応答から `eventId` を取る、`afterRelease` の固定語）と、V2 facilitator を模した fixture（`V2PaymentStatus` の形）での wire。要件・設計を短く書いて Codex レビューの後に実装する。
+
+## B-7 V2 担当の 2 回目の返答（2026-10-22）と、Router の受信 fixture が合わせる形
+- **`/settle` 応答への `eventId` 追加は V2 側で実装・テスト済み**（subetha-v2 worktree、未コミット = owner の commit 判断待ち）。V2 backend のときだけ `extra` に `{phase: "accepted", settlementKind: "zerc20-v2-burn-sale", policy: "receipt", deliveryKey: <challengeNonce>, receiptLevel: "mined"|"final", txRef: <burnTxHash>, eventId: "<chainId>:<txHash>:<logIndex>", logIndex}`。同じ nonce の再送でも同じ `eventId`。V1 応答は不変。
+- T22 live（Sepolia testnet-v2、zETH `0x7E72…eAf0`、2026-10-21 21:34–21:48Z）の応答の形:
+  - `POST /challenge {amount}` → `{payTo（= 注文別 burn address）, amount, token, chainId: 11155111, challengeNonce, expiresAt, extra: {settlementKind, policy}}`
+  - `POST /verify`（x402 の body。`paymentPayload.payload = {challengeNonce, burnTxHash}`、`paymentRequirements = {scheme: "subetha-zerc20", network: "eip155:11155111", asset, payTo, amount, extra: {challengeNonce}}`）→ `{isValid, payer}`（payer = on-chain の transfer の from）
+  - `POST /settle` → `{success: true, transaction: <burnTxHash>, network, extra: {...上}}`。pending は `"pending_burn"`、expired/uncertain は rejected 系。
+  - `GET /admin/payments/<nonce>`（admin 認証）→ `V2PaymentStatus`（`packages/facilitator/src/backend.ts` L182–205）: `{state, receipt: {level, tx: {txHash, blockNumber, blockHash, logs: [{logIndex, value}], payer}}, eligible, coins: [{ref, state}], root, intake, release: {policy, state, deliveryKey, authorizedAt}}`。
+  - `/supported` は V1 と同形（`scheme subetha-zerc20`、`network eip155:11155111`）。
+- 要確認の受け止め: (1)(3)(5)(6)(7) は Router 案で異議なし、(4) は実装済み。(2) 発行時点と (8) token は owner 判断へ（V2 facilitator も policy `receipt` + 運用者の二重明示 + afterRelease の事後計上なので (a) accepted で結合可能。zUSDC を選ぶなら V2 側で先に burn-sale の live を 1 件通す: faucet mint + deposit 15 分 + relayer fee 2.6 USDC は payer 負担）。
+- V2 側の境界文書: `subetha-v2/docs/ZERC20-V2-ROUTER-BOUNDARY.md`。
+
+**Router 側の次の増分（owner の 2 判断の後に着手）**: 既存 `src/adapters/inbound/subetha.ts` を秘匿購入の受信に使う。(i) `DynamicProfile.sourceRail` に `subetha` を許し受信 rail の選択を配線、(ii) `private.profiles` の受信検査を `subetha` + `eip155:11155111` + 設定の z token に広げる、(iii) `settle` 応答の `extra.eventId`（形 `<chainId>:<txHash>:<logIndex>` を検査）を `SettleResult.eventId` に写す（無ければ秘匿購入は fail closed）、(iv) `extra.phase`/`receiptLevel` を journal の固定語に、(v) V2 facilitator を模した fixture（上の形）で wire（HTTP/MCP の秘匿購入全経路、`pending_burn`・rejected・eventId 欠落の否定）。(b) settled 待ちの状態新設と zETH の固定換算は別の増分。
