@@ -19,6 +19,16 @@
 ### A-3 TLS 1.2 の 2 suite
 - 56 ホストの未払い probe はすべて `ECDHE-{ECDSA,RSA}-AES128-GCM-SHA256` で handshake できた。現時点で障害にはなっていない（参考情報）。
 
+### A-4 lab 担当の回答（2026-10-22、session `private-payment-binding-20261017-6f`、HEAD 206da19。コードと証跡からの事実。バイナリは owner の指示が無い限り変えない）
+- **A-1-1 704 B の根拠**: 回路（`phase3/noir/src/main.nr`、phase5 も同じ）は固定長: 私的入力 `payload[704]`・`blinder[16]`、公開入力 `ciphertext[720]`（720 = 704 + 16、AES-128-CBC/PKCS#7 で 16 の倍数のとき末尾に 1 ブロック）。`PREIMAGE_LEN=720` は commitment（TLSNotary の SHA-256 平文 commitment と同形）。`NUM_PUBLIC_INPUTS=774`。**704 は「1 応答を 1 回路に収める実用上の上限」で、プロトコル上の必然ではない**（要求側は body 512 / cred 64 の別回路）。現状コスト（M 系 Mac）: 証明 ≈1.2–1.4 s、検証 5–10 ms、proof 40,772 B、bundle 84–123 KB、SRS 134 MB（2^21）。コストは本文長に依存しない。
+- **2 KiB / 4 KiB に広げた見込み**: 制約は SHA-256（64 B/ブロック）と AES-CBC（16 B/ブロック）でほぼ線形。704→2048 で約 3 倍、→4096 で約 6 倍。SRS は 2^22（≈268 MB）か 2^23（≈537 MB）が要る可能性が高く、証明時間 4–8 s の目安、メモリ増。検証は ms 級のまま。公開入力の ciphertext が 2064 / 4112 に増え、bundle は +25–50 KB → 150–180 KB 程度（Router の `maxBundleBytes` 256 KiB に収まる）。record（64 KiB）は本文を含まず不変。`MAX_RECV_DATA` 16 KiB は TLSNotary の受信 transcript 上限で、4 KiB 案でも余裕。
+- **A-1-2 可変長**: 案 (a) **サイズ別回路**（704/2048/4096 を同梱し、注文の framing か公開の `payload_len` 上限で選ぶ）が容易で**推奨**。公開入力の形は同じで VK が回路ごとに変わる（Verifier は回路から VK を導出し `verifier_vk_sha256` を書く）ので、Router は record/attest に「どの variant か」を 1 欄足せば `checkAttest` の照合はそのまま。案 (b) 704 B チャンク×N の連鎖証明は、TLSNotary の複数範囲 commitment か回路内分割が要り、公開入力が ×N、復号側も N 本対応で、(a) より侵襲的。
+- **A-1-3 sha256 の更新**: `phase5/runner` を再ビルド → `delivery` の sha256 を `deliveryBinSha256` に。SRS は 2^21 に収まる限り同じ（超えれば新しい SRS と `srsSha256`）。VK の配布は不要（実行時に導出）。`privateAuthoritativeTermsOf` に両 sha が入っているので、切り替え時は既存 quote が `quote_changed` で止まる（並存なしと整合）。`limits.maxResponseBytes` の開示は variant に合わせる。
+- **A-2 chunked**: **受け付けない（設計）**。`tls.rs` の `validate_response_framing`: `Content-Length` ちょうど 1 つ、`Transfer-Encoding` があれば拒否、`Content-Encoding` は identity のみ。chunked はチャンク枠の解釈で「committed 範囲 = Content-Length 本文」の対応が崩れるため予定なし。**事前検査で「402 が chunked」を不適合の兆候として扱う運用は妥当**（Provider 側で `Content-Length` を明示すれば回避可能）。
+- **A-3**: TLS 1.2 の 2 suite は TLSNotary 上流の制約。lab 側でも障害なし。
+- 補足: 938 B の件は払うまで長さが分からない構造で、Provider が 402 に応答サイズの上限ヒントを載せる以外に事前判定の手段はない（Provider C/F は ≤704 B 固定で設計）。裏付け: `phase3/noir/src/main.nr`、`phase3/runner/src/{types,tls}.rs`、`phase3/REPORT.ja.md`、`phase5/results/*/logs/*executor-prove.stdout.log`。
+- **Router 側の整理**: 現状は変更なし。上限を広げるなら lab の案 (a)（サイズ別回路）+ Router 側 1 増分（record/attest の variant 欄、`limits.maxResponseBytes` の開示、事前検査の説明文、`deliveryBinSha256` 更新）。着手は owner の判断。事前検査は「402 が chunked」を不適合の兆候として扱う（既存の `tools/private-provider-precheck.ts` の `framing402` 観測で判定可能）。
+
 ## B. zERC20 V2 決済側（別 worktree、別担当）との接続境界（案。確定ではない）
 
 ### B-1 Router の受信レグが要るもの（現在の x402 受信の契約から）
