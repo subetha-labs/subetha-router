@@ -102,3 +102,8 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 - owner の判断（4 点）→ Router v1.3.1（payer 道具 `--burn-tx-hash`）・v1.3.2（表の行 + `sameAsset`）→ Router 子（synthetic 受信 transport）で V2 facilitator（127.0.0.1:4133、zUSDC V2、merchant D）と結合。paymentId `060fd61f…`、burn `0x8ec7…a831`（logIndex 151）、送信 `0x12be…cf17`、delivered_private。記録は `docs/zktls-router-v2-inbound.md` §11。
 - V2 側は Router の `/settle` を accepted で観測、`/admin/payments/<nonce>` の eventId は Router の受信 identity と同値。**settled 07:57:47Z**（支払いから約 13.5 分、receipt final、pending 0 / finalized 2 / failed 0）。両側で close。
 - 残り: 実 transport（公開到達可能な V2 facilitator）での再実行、zETH（価格規則）、lab の §A（704 B）、push。
+
+## B-12 結合 2 件目（2026-10-22）: 実 transport で成立
+- owner の指示で実合成の Router（試験能力なし）× 公開到達可能な V2 facilitator（run の間だけ ngrok の https トンネル）。paymentId `56c85a2c…`、burn `0x50a0…c197`（logIndex 253）、送信 `0x6956…b8c1`、delivered_private。記録は `docs/zktls-router-v2-inbound.md` §12。コード変更なし。
+- zETH は owner の判断で対象外（利用想定なし）。
+- 残り: V2 の settled 報告の追記、lab の §A（704 B）、push。

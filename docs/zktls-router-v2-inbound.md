@@ -164,3 +164,23 @@ V2 の zUSDC は V1 と別 deployment（§4）。`SUBETHA_ZERC20_ASSETS`（`src/
 
 記録: `.claude_workflow/local/zktls-live-v2a-20261022.json`（quote・journal・証跡・V2 の観測）、`runtime/private-live/v2a/t1/`（ignored。bearer・ownerKey は受入の後に消す）。
 発見: (1) Router の承認期限（既定 600 s）は人手の受け渡しには短い → この run は 1,200 s（challenge の 1800 s 内）。(2) `payFirst` の受け渡しは 1 往復で足り、burn → settle まで 25 秒。(3) すべて設計 v2 の契約どおりで、Router・adapter・core に変更は不要だった。
+
+## 12. 結合の記録（2026-10-22、2 件目）: **実 transport** — 実合成の Router × 公開到達可能な V2 facilitator、delivered_private
+owner の指示（2026-10-22「実 transport（公開到達可能な V2 facilitator）での再実行を進めていきましょう」。zETH は対象外）。Router は `tools/remote-router-process.ts`（**試験能力なし**。`fixtureFacilitators` も transport hooks も無い実合成）。V2 facilitator（同一マシンの 127.0.0.1:4133）は run の間だけ **ngrok の https トンネル**で公開し、Router は `ROUTER_SUBETHA_FACILITATOR_URL=https://<ngrok host>` を公開 DNS / 公開 PKI で引いて `/challenge → /verify → /settle` を叩いた（dynamic の拒否ホストにそのホストが入る: `src/main.ts` の denyHosts）。§11 の「受信 transport synthetic」の但し書きはこの run には付かない。
+
+| 項目 | 値 |
+|---|---|
+| Router | `runtime/private-live/v2b/`（port 8502、journal 専用、approvalTtlMs 1,200,000、予算・profile は §11 と同じ、scope は 1 件） |
+| 公開経路 | `ngrok http 127.0.0.1:4133` → `https://bendwise-phenotypic-rebbecca.ngrok-free.dev`（08:04Z 開始、08:12Z 停止）。healthz 200、`/admin/*` はトンネル越しでも token 無しは 401（V2 側の確認）。V2 側は公開向けのガード（open challenge ≤ 50、/challenge 10/分/IP、120/分）を有効化 |
+| 発見 1 | 最初の試行は 502: V2 facilitator が 1 件目の後に停止していた（`ngrok http 4133` は `localhost` を `::1` に解決し、facilitator は 127.0.0.1 bind。`ngrok http 127.0.0.1:4133` に直してから V2 側が再起動、既存 ledger から復元 finalized 2 / pending 0） |
+| quote | paymentId `56c85a2c-92a4-44b2-b4d9-f427084594d6`、challengeNonce `0x91b13331…c8d9`（08:06:21Z、expiresAt 08:36:21Z、承認期限 08:26:21Z）、burn address `0x0d359c3329fb5bf92c950062f61b93fa7b1ed7a1`、total 2000 atomic zUSDC V2、送信 1000 USDC → tollbooth |
+| burn（V2 harness） | approve `0xdae7455b…7299`、wrap `0x69ad2a64…8514`、transfer **`0x50a0d4904b40b11381b50bb31ca12c60531f1c1e9dc1a2df7f77cffb1504c197`**（08:07:39Z、Sepolia block 11968251、`Transfer → 0x0d35…d7a1, 2000` logIndex 253。受入側が publicnode の RPC で receipt を確認） |
+| 承認 → settle | 08:08:06Z `--approve --burn-tx-hash`（鍵無し）→ トンネル越しの `/verify` → `/settle` accepted 08:08:07Z（V2 側の観測と一致） |
+| journal | `source_settled {txRef 0x50a0…c197, eventId 11155111:0x50a0…c197:253}` → `private_issuance_reserved {inboundIdentity subetha|eip155:11155111|0x50a0…c197|11155111:0x50a0…c197:253}` → released → handed_over → recorded → attested。V2 の `/admin/payments/<nonce>`: accepted、receipt mined、logs [{logIndex 253, value 2000}]、eventId 同値 |
+| 送信 | tx `0x69560c152e9e255c8d38566509ecd2aa8defcb195555f94b50361b76fbf0b8c1`（Base Sepolia）。`--recover --chain` block 48673239: outbound **settled**、inbound `skipped: protocol` |
+| 配送 | `delivered_private`、proof `{delivery: true, requestBinding: false}`、record 2 回同一（`04565f2d…359a`）、payer 側で復号 326 B（`e7095be3…7c84`） |
+| 5 つのゲート | 受信決済（facilitator accepted + Sepolia receipt）、送信決済（chain settled）、秘匿配送、payer 受領、finality（Router・道具は未確認。V2 の settled は後で追記） |
+| 資金 | 受信 2000 atomic zUSDC V2（A → merchant D の POS）、送信 1000 atomic USDC。2 run の合計: 受信 4000 zUSDC V2、送信 2000 USDC |
+
+記録: `.claude_workflow/local/zktls-live-v2b-20261022.json`、`runtime/private-live/v2b/t1/`（ignored。bearer・ownerKey は受入の後に消す）。
+結論: Router・adapter・core・payer 道具は §11 から**無変更**で、実 transport でも同じ経路が成立した。公開到達性だけが差分（トンネル）。残る未確認は chain finality（Router は読まない。V2 の settled 報告と Sepolia / Base Sepolia の後続確認は別）。
