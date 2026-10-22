@@ -328,8 +328,10 @@ and the following remain behind separate gates, **not done**.
 - **Private purchases (zkTLS)** -- the Router issues the outbound credential without seeing the request or response body and
   verifies, through the lab's TLSNotary/UltraHonk `delivery` binary, that the approved request reached the approved Provider
   (`docs/zktls-router-design.md`). Wired end to end against the real binary with a fixture CA (`tests/wire/private-x402.test.ts`,
-  synthetic evidence). **Live acceptance against the lab's testnet Providers is an owner gate and has not been run**
-  (`docs/zktls-router-acceptance.md`); the hosted Router does not enable it.
+  synthetic evidence). Live acceptance was run by the owner on a local Router (`docs/zktls-router-acceptance.md`): the lab's
+  testnet Providers (2026-10-21), third-party public-GET x402 Providers after an unpaid pre-check (`docs/zktls-router-thirdparty.md`,
+  2026-10-22) and, with the SubEtha V2 burn-sale as the inbound rail, two joint runs with the V2 facilitator (`docs/zktls-router-v2-inbound.md`
+  §11 synthetic inbound transport, §12 real composition over a public tunnel, 2026-10-22). **The hosted Router does not enable it.**
 
 ## Where the detail went
 
@@ -342,6 +344,8 @@ This file is the entry point. The working records live next to it:
 | [`CLAUDE.md`](CLAUDE.md) | The steps an agent follows to pay through this Router |
 | [`docs/zktls-router-requirements.md`](docs/zktls-router-requirements.md), [`docs/zktls-router-design.md`](docs/zktls-router-design.md), [`docs/zktls-router-tasks.md`](docs/zktls-router-tasks.md), [`docs/zktls-router-acceptance.md`](docs/zktls-router-acceptance.md) | Private purchases (zkTLS): requirements, design (+§14 implementation deltas), task record, owner-run acceptance procedure (Japanese) |
 | [`docs/zktls-router-thirdparty.md`](docs/zktls-router-thirdparty.md) | Private purchases against a third-party public-GET x402 Provider: compatibility conditions, unpaid pre-check tool (`tools/private-provider-precheck.ts`), `--provider-file` input path, owner gate (Japanese) |
+| [`docs/zktls-router-v2-inbound.md`](docs/zktls-router-v2-inbound.md) | Private purchases paid over the SubEtha V2 burn-sale inbound (`sourceRail: subetha`, settle `eventId` as the issuance identity, payer tool `--burn-tx-hash`, V2 zUSDC table row, joint live records §11/§12) (Japanese) |
+| [`docs/zktls-router-open-items.md`](docs/zktls-router-open-items.md) | Open items with the zkTLS lab (704 B payload cap, framing; lab's answers §A-4) and the V2 facilitator boundary (§B, agreements and joint-run outcomes) (Japanese) |
 | [`docs/`](docs/) | Requirements and design per phase (Japanese) |
 
 ## Sources and license
