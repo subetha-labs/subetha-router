@@ -302,6 +302,12 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
     return { ok: true, cap: { maxFee, estimate: { gas: estimate.gas, maxFeePerGas: estimate.maxFeePerGas, bound: estimate.bound, atMs: now() } } };
   }
 
+/** 受信資産の同一性: EVM の 0x アドレス同士は大小文字を区別しない。それ以外（SVM の mint など）は完全一致。 */
+function sameAsset(a: string, b: string): boolean {
+  if (/^0x[0-9a-fA-F]{40}$/.test(a) && /^0x[0-9a-fA-F]{40}$/.test(b)) return a.toLowerCase() === b.toLowerCase();
+  return a === b;
+}
+
   function privateFieldsOf(intent: ParsedIntent, profile: DynamicProfile, pricing: DynamicPricing, offer: DestinationOffer, inboundPayTo: string): Record<string, unknown> {
     const order = intent.order;
     return {
@@ -402,7 +408,8 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
       const ownerKey = randomBytes(32).toString("base64url");
       const binding = privateBindingOf(profile.profileId, intent.method, intent.url, intent.sha256);
       const sourceOffer = await inbound.createOffer({ routeId: profile.profileId, amount: pricing.total, asset: profile.source.asset, network: profile.source.network, routeBinding: binding, nowMs: now() });
-      if (sourceOffer.amount !== pricing.total || sourceOffer.asset !== profile.source.asset || sourceOffer.network !== profile.source.network || sourceOffer.extra.routeBinding !== binding) {
+      // 資産は EVM の 0x アドレスなら大小文字を区別しない（設定は checksum、facilitator の challenge は別の綴りで返り得る。v1.3.2 レビュー 2）。offer 自体はそのまま credential の束縛に使う。
+      if (sourceOffer.amount !== pricing.total || !sameAsset(sourceOffer.asset, profile.source.asset) || sourceOffer.network !== profile.source.network || sourceOffer.extra.routeBinding !== binding) {
         return { ok: false, code: "source_terms_mismatch" };
       }
       // `subetha` 受信は V2 の burn-sale の challenge だけ（V1 の facilitator は `eventId` を返さないので発行できない。`docs/zktls-router-v2-inbound.md` FR-V2）。

@@ -87,10 +87,12 @@ class SyntheticInbound implements InboundRail {
   payTo = "0xrouter";
   extra: Record<string, unknown> = {};
   txRef: string | undefined;
+  /** v1.3.2 の試験用: offer の `asset` を要求と別の綴り・別の token で返す。 */
+  assetOverride: string | undefined;
   #issued = 0;
   async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
     this.#issued += 1;
-    return { scheme: "exact", network: request.network, asset: request.asset, amount: request.amount, payTo: this.payTo, maxTimeoutSeconds: 120, extra: { challengeNonce: `0xnonce${this.#issued}`, expiresAt: Math.floor(Date.now() / 1000) + 600, routeBinding: request.routeBinding, name: "USDC", version: "2", ...this.extra } };
+    return { scheme: "exact", network: request.network, asset: this.assetOverride ?? request.asset, amount: request.amount, payTo: this.payTo, maxTimeoutSeconds: 120, extra: { challengeNonce: `0xnonce${this.#issued}`, expiresAt: Math.floor(Date.now() / 1000) + 600, routeBinding: request.routeBinding, name: "USDC", version: "2", ...this.extra } };
   }
   preflight(offer: InboundOffer, credential: PaymentCredential): PreflightResult {
     if (credential.payload.challengeNonce !== offer.extra.challengeNonce) return { ok: false, reason: "nonce_mismatch" };
@@ -269,6 +271,17 @@ describe("v1.3: subetha 受信（V2 burn-sale）の秘匿購入（`docs/zktls-ro
     expect(core.status(q.paymentId, "alice", q.ownerKey)?.dynamic).toMatchObject({ fundsMoveOnCredential: true });
     // 通常の動的 quote は I/O の前に拒む（SR-V1）。
     expect(await core.quote({ principalId: "alice", requestId: "r3", routeId: SUBETHA_ID, upstream: { url: "https://test-server.io/select" }, source: "alice" })).toMatchObject({ ok: false, code: "private_only_profile" });
+  });
+  test("quote: challenge の token の綴り（小文字）が設定（checksum）と違っても同じ資産なら通り、承認対象の資産は challenge の綴り。別の token は source_terms_mismatch", async () => {
+    const core = await bootSubetha();
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    inbound.assetOverride = ZUSDC.toLowerCase();
+    const lower = await core.privateQuote({ principalId: "alice", requestId: "r-lower", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!lower.ok) throw new Error(`quote failed: ${lower.code} ${lower.reason ?? ""}`);
+    expect((lower.source.offer as { asset: string }).asset).toBe(ZUSDC.toLowerCase());
+    inbound.assetOverride = "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f";
+    expect(await core.privateQuote({ principalId: "alice", requestId: "r-other", profileId: SUBETHA_ID, intentB64: subethaEnvelope() })).toEqual({ ok: false, code: "source_terms_mismatch" });
+    inbound.assetOverride = undefined;
   });
   test("quote: 注文ごとの burn address が同じ network・資産の Provider の受取先と同じなら pay_to_conflict", async () => {
     // 送信も Sepolia zUSDC（同じ network・資産）のプロファイルで、Provider の受取先 = 注文の burn address にする。

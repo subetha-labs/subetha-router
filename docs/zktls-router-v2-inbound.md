@@ -119,3 +119,27 @@ Router には何も足さない。`tools/private-payer.ts` だけ。
 | 4 Medium: 応答喪失・unknown で受信 gate を置き換え、`claimedTxRef` が消える | `markBothUncertain`（既存の欄を保つ）。単体: 応答喪失（閉じた port）で `{settled:false, uncertain:true, claimedTxRef}` |
 | 5 Low: §4 に判断前の箇条が残る | 履歴と明記。受入 §11 に表の前提 |
 | 再レビュー（REJECT、残り 1）: 引数違い・quote.json 改変の拒否が burn 付きでも「quote し直せ」を含む | burn 付きは「quote し直せ」を外し照合だけ。単体: 引数違い・改変・削除の 3 件（再開点・証跡のバイト列不変、`quote again` 無し）、burn 無しは従来の文 |
+
+## 10. 増分 v1.3.2（2026-10-22）: zERC20 表に V2 testnet-v2 の zUSDC の行
+V2 の zUSDC は V1 と別 deployment（§4）。`SUBETHA_ZERC20_ASSETS`（`src/shared/networks.ts`）に 1 行足す。表の消費者は `parsePrivate`（FR-V2）と `validateRouterConfigAgainstTable`（network + token で引く。network だけ・先頭行の仮定は無い）、および payer package の vendored copy（`packages/payer/src/vendor/networks.ts`、`npm run vendor` で同期）。**`maxAmount` はこの増分では参照されない metadata**（`npm run sign` は `SIGN_MAX_AMOUNT` と `KNOWN_NETWORKS` を使い、`subetha-zerc20` を扱わない。hosted の静的 route は `INBOUND_ZUSDC` = V1 に固定のまま）。
+あわせて `src/core/private.ts` の quote で challenge の token と設定の資産を **EVM アドレスは大小文字を区別せず**比べる（設定は checksum、facilitator は別の綴りで返り得る。offer 自体の綴りは credential の束縛にそのまま使う）。
+
+| 欄 | 値（V2 担当の確認 2026-10-22） |
+|---|---|
+| network | `eip155:11155111`（Sepolia） |
+| token（zUSDC V2、tokenId 2） | `0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f` |
+| decimals | 6（SDK `Chain.tokens()` と ERC20 `decimals()`。USDC と同じ atomic） |
+| maxAmount | 20,000 atomic（V1 の行と同じ。**未参照の metadata**: 上限の実効は予算 bucket の `maxPerPurchase`） |
+| 参考（表に入れない） | underlying test USDC `0xD9D3a44745a5d04197024a20fD5BeD9b8B56C60D`（faucet = `mint(address,uint256)`、public）、wrap は z token の `wrap(uint256, address)`、Verifier `0x48F50a80114781d517C2EB869020FBd38C606AaA`、network.json `https://testnet-v2.zerc20.io/network.json`。V2 zETH `0x7E72…eAf0`（18 桁）は**入れない**（§4: 価格規則の別増分） |
+
+固定性: testnet-v2 の address は 2026-10-18〜22 で不変（V2 facilitator は起動時に network.json の verifier を pin し、違えば起動拒否）。zERC20 側の再デプロイは裁量なので、変わったら V2 facilitator の起動拒否で検出し、この表の行を更新して追従する（運用）。
+
+試験: `tests/unit/subetha-hosted-config.test.ts` T1（表は 2 行、各行凍結）、`tests/unit/private-config.test.ts`（V2 token のプロファイルは通る、decimals 18 は表の検査で拒む）、`tests/unit/private-core.test.ts`（challenge の小文字 token は通る・別 token は `source_terms_mismatch`）、`packages/payer` の vendor 一致。既存の V1 の行・静的 route の設定生成は不変（同ファイルの他の試験）。
+
+### 10.1 レビュー（Codex `gpt-6-astra`、2026-10-22、APPROVE WITH CHANGES → 反映）
+| 指摘 | 対応 |
+|---|---|
+| 1 Medium: payer package の vendored `networks.ts` が古く、一致の試験が落ちる | `npm run vendor` で同期 |
+| 2 Medium: 設定が小文字だと quote の完全一致で `source_terms_mismatch`（既存の挙動、V2 で顕在） | `sameAsset`（EVM アドレスは大小文字を区別しない）。private-core に両綴りと別 token |
+| 3 Low: sign が表の `maxAmount` を読むかのような記述 | 未参照の metadata と明記 |
+

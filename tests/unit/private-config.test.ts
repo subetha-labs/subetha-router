@@ -6,7 +6,8 @@ import path from "node:path";
 import { generatePrivateKey } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, type RuntimeConfig } from "../../src/config.js";
+import { ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, validateRouterConfigAgainstTable, type RuntimeConfig } from "../../src/config.js";
+import { KNOWN_NETWORKS } from "../../src/shared/networks.js";
 import { composeRails, profileIdOfBinding, type RouterCapabilities } from "../../src/main.js";
 import { privateBindingOf } from "../../src/core/store.js";
 import { sha256File } from "../../src/private/verifier.js";
@@ -82,6 +83,13 @@ describe("parse", () => {
     expect(parsed.dynamic?.profiles["priv-subetha"]?.sourceRail).toBe("subetha");
     expect(parsed.private?.profiles).toEqual(["priv-x402", "priv-subetha"]);
     expect(() => parseRouterConfig(router({ profiles: ["priv-x402", "priv-subetha"] }, subethaProfile("0x0000000000000000000000000000000000005ce7")))).toThrow(/known zERC20 asset/);
+    // V2 testnet-v2 の zUSDC（別 deployment、`docs/zktls-router-v2-inbound.md` §10）も表にあるので通る。decimals 違いは拒む。
+    const v2 = parseRouterConfig(router({ profiles: ["priv-x402", "priv-subetha"] }, subethaProfile("0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f")));
+    expect(v2.dynamic?.profiles["priv-subetha"]?.source.asset).toBe("0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f");
+    const v2Profile = subethaProfile("0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f")["priv-subetha"] as { source: Record<string, unknown> };
+    // decimals の照合は表の検査（validateRouterConfigAgainstTable）で起動時に拒む。
+    expect(() => validateRouterConfigAgainstTable(parseRouterConfig(router({ profiles: ["priv-x402", "priv-subetha"] }, { "priv-subetha": { ...v2Profile, source: { ...v2Profile.source, decimals: 18 } } })), KNOWN_NETWORKS)).toThrow(/decimals does not match the zERC20 table/);
+    expect(() => validateRouterConfigAgainstTable(v2, KNOWN_NETWORKS)).not.toThrow();
     expect(() => parseRouterConfig(router({ profiles: ["priv-x402"] }, subethaProfile()))).toThrow(/only allowed for profiles listed in private.profiles/);
     expect(() => parseRouterConfig(router(null, subethaProfile()))).toThrow(/only allowed for profiles listed in private.profiles/);
   });
