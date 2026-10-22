@@ -83,3 +83,7 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 - V2 側の境界文書: `subetha-v2/docs/ZERC20-V2-ROUTER-BOUNDARY.md`。
 
 **Router 側の次の増分（owner の 2 判断の後に着手）**: 既存 `src/adapters/inbound/subetha.ts` を秘匿購入の受信に使う。(i) `DynamicProfile.sourceRail` に `subetha` を許し受信 rail の選択を配線、(ii) `private.profiles` の受信検査を `subetha` + `eip155:11155111` + 設定の z token に広げる、(iii) `settle` 応答の `extra.eventId`（形 `<chainId>:<txHash>:<logIndex>` を検査）を `SettleResult.eventId` に写す（無ければ秘匿購入は fail closed）、(iv) `extra.phase`/`receiptLevel` を journal の固定語に、(v) V2 facilitator を模した fixture（上の形）で wire（HTTP/MCP の秘匿購入全経路、`pending_burn`・rejected・eventId 欠落の否定）。(b) settled 待ちの状態新設と zETH の固定換算は別の増分。
+
+## B-8 owner の判断（2026-10-22）
+- **(2) 発行時点: accepted**（V1 と同じ。受信 facilitator の `/settle` が receipt mined で成功を返した時点で Router は送信 credential を発行する）。「以前の SubEtha v1 の実装のように accepted で発行の想定でいます。」 発行後の取消（reorg / screening-rejected）は既存どおり送信レグ `unknown`・返金無しとして記録する。settled 待ちの状態新設は行わない。
+- (8) token: 未決。Router の増分は受信の network・資産を設定値として扱い、どちらでも載る形で作る（zETH を選ぶ場合は 1:1 の前提が崩れるので、固定換算の設定が別に要る）。
