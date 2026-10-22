@@ -144,3 +144,23 @@ V2 の zUSDC は V1 と別 deployment（§4）。`SUBETHA_ZERC20_ASSETS`（`src/
 | 2 Medium: 設定が小文字だと quote の完全一致で `source_terms_mismatch`（既存の挙動、V2 で顕在） | `sameAsset`（EVM アドレスは大小文字を区別しない）。private-core に両綴りと別 token |
 | 3 Low: sign が表の `maxAmount` を読むかのような記述 | 未参照の metadata と明記 |
 
+
+## 11. 結合の記録（2026-10-22、B-3 の 3、1 件目）: SubEtha V2 burn-sale → 第三者 Provider、delivered_private
+**transport は synthetic**（受信: `tools/private-v2-joint-router-process.ts` = 実合成 + `fixtureFacilitators: true`、V2 facilitator は同一マシンの `127.0.0.1:4133`。送信 x402 と zkTLS 配送は公開 DNS/PKI、trust mozilla）。実 transport の証跡ではない。owner の判断 §4。
+
+| 項目 | 値 |
+|---|---|
+| Router 子 | `runtime/private-live/v2a/`（port 8501、journal 専用、approvalTtlMs 1,200,000、予算 USDC 2000/4000・zUSDC V2 2000/4000、maxPurchases 2、scope は 1 件） |
+| V2 facilitator | V2 担当（session `subetha-v2-0c`）が起動: port 4133、token zUSDC V2、merchant = 使い捨て鍵 D、challenge TTL 1800 s、発行時点 accepted |
+| Provider | tollbooth `https://tollbooth-hello-testnet.sjwilliams8.workers.dev/hello`（x402 GET、1000 atomic USDC、`runtime/private-live/x3/tollbooth2/provider.json`、事前検査 mozilla） |
+| quote | paymentId `060fd61f-d43e-4293-acae-abf23c7cc3cf`、challengeNonce `0x1ab14e56…c735`（challenge 07:43:08Z、expiresAt 08:13:08Z、Router の承認期限 08:03:08Z）、受信 `payTo` = 注文別 burn address `0x491fd6db76d122f922b33a24027725c2fafa800d`、total 2000 atomic zUSDC V2（upstream 1000 + fee 1000）、`fundsMoveAt: payer_burn_before_credential`、送信 1000 USDC → `0xb3e7…bF5B` |
+| payer の burn（V2 harness `pos-pay-token A <payTo> zUSDC 0.002`） | approve `0x237bef34…1b56`、wrap `0xcadc5942…191c`、transfer **`0x8ec73746400c56d29f6ca27e87d1f39f913eb8c241cf47df687cee1ec4bfa831`**（07:44:14Z mined、Sepolia block 11968136、`Transfer(A → 0x491f…800d, 2000)` logIndex 151。受入側が publicnode の RPC で receipt を読んで確認） |
+| 承認 | 07:44:38Z `--approve --burn-tx-hash 0x8ec7…a831`（鍵無し） → purchase: `/verify` → `/settle` accepted 07:44:39Z（V2 側の観測と一致） |
+| journal | `source_settled {txRef 0x8ec7…a831, eventId 11155111:0x8ec7…a831:151}` → `private_issuance_reserved {inboundIdentity subetha|eip155:11155111|0x8ec7…a831|11155111:0x8ec7…a831:151}` → `private_released` → `private_handed_over` → `private_recorded` → `private_attested`。V2 の `/admin/payments/<nonce>`（07:5x）: accepted、receipt mined、logs [{logIndex 151, value 2000}]、eventId 同値 |
+| 送信 | tx `0x12be50769833af321911c588104b66c52cf0ec479442b12e85ebeeee20d3cf17`（Base Sepolia、Router 署名者 `0x8763…2b19` → Provider）。`--recover --chain` block 48666184: outbound **settled**（AuthorizationUsed → Transfer）、inbound `skipped: protocol`（設計どおり） |
+| 配送 | `delivered_private`、proof `{delivery: true, requestBinding: false, onChainFinality: not_checked}`、record 2 回同一（sha256 `187436f3…ba2c`）、payer 側で bundle 検証後に復号 326 B（sha256 `e6a9ddbb…1b79`）。証跡 `gates.inbound_settlement = {settled, claimedTxRef = txRef = 0x8ec7…a831}` |
+| 5 つのゲート | 受信決済（facilitator accepted + Sepolia receipt）、送信決済（chain settled）、秘匿配送、payer 受領、finality（未確認。V2 の settled は約 13 分後に V2 側が報告） |
+| 資金 | 受信 2000 atomic zUSDC V2（V2 harness の A → merchant D の POS）、送信 1000 atomic USDC（Router 署名者）。scope 1 件、追加なし |
+
+記録: `.claude_workflow/local/zktls-live-v2a-20261022.json`（quote・journal・証跡・V2 の観測）、`runtime/private-live/v2a/t1/`（ignored。bearer・ownerKey は受入の後に消す）。
+発見: (1) Router の承認期限（既定 600 s）は人手の受け渡しには短い → この run は 1,200 s（challenge の 1800 s 内）。(2) `payFirst` の受け渡しは 1 往復で足り、burn → settle まで 25 秒。(3) すべて設計 v2 の契約どおりで、Router・adapter・core に変更は不要だった。

@@ -206,3 +206,5 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
 ```
 
 受信レールの取り違えは latch の前で拒む（x402 の quote に `--burn-tx-hash`、subetha の quote に無し）。`--burn-tx-hash` は再開点と `evidence.json`（`claimedTxRef`）に小文字で残り、facilitator が確定した `txRef` と並ぶ。**burn は Router の拒否で戻らない**（quote の期限切れ・facilitator の rejected・容量拒否: `awaiting_payment` は未払いの証明ではない）。
+
+実行記録（2026-10-22）: 結合 1 件目 `060fd61f…` delivered_private（受信 burn `0x8ec7…a831` eventId `…:151`、送信 `0x12be…cf17` chain settled、transport synthetic）。詳細は `docs/zktls-router-v2-inbound.md` §11。

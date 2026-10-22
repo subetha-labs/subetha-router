@@ -97,3 +97,8 @@ Router 側の次の着手（B-3 の 2、V2 の賛成あり）: 既存 `subetha.t
 - Router v1.3 が依存する 4 点（`/challenge` の `extra.settlementKind`、`/settle` の `transaction` = burnTxHash、`extra.eventId` の chainId/txHash 整合、同じ nonce → 同じ eventId と 1 tx → 1 challenge）は **V2 facilitator の現実装で満たされている**（台帳 `txOwners`/`evidence`）。V2 側は `subetha-v2/docs/ZERC20-V2-ROUTER-BOUNDARY.md` §5b に同じ文言で記録。
 - transport: V2 の `runV2Daemon` は listen host を引数に取るので、**V2 facilitator を loopback 以外のホスト名で公開するのは設定で可能**（`run-v2-local.mjs` は今 127.0.0.1 固定。結合時に host 指定の env を足す。`/admin/*` は token 必須のまま）。
 - owner への判断事項は双方同じ 4 点: (1) 発行時点 accepted の本人確認（Router 経由の判断を V2 側が確定扱いにするため）、(2) token、(3) payer の支払い道具、(4) transport（Router 子 = synthetic transport か、非 loopback 公開か）。
+
+## B-11 結合 1 件目（2026-10-22）: 成立
+- owner の判断（4 点）→ Router v1.3.1（payer 道具 `--burn-tx-hash`）・v1.3.2（表の行 + `sameAsset`）→ Router 子（synthetic 受信 transport）で V2 facilitator（127.0.0.1:4133、zUSDC V2、merchant D）と結合。paymentId `060fd61f…`、burn `0x8ec7…a831`（logIndex 151）、送信 `0x12be…cf17`、delivered_private。記録は `docs/zktls-router-v2-inbound.md` §11。
+- V2 側は Router の `/settle` を accepted で観測、`/admin/payments/<nonce>` の eventId は Router の受信 identity と同値。settled（約 13 分）は V2 側が後で報告。
+- 残り: 実 transport（公開到達可能な V2 facilitator）での再実行、zETH（価格規則）、lab の §A（704 B）、push。
