@@ -21,7 +21,7 @@ import { DEFAULT_DYNAMIC_LIMITS } from "../../src/config.js";
 import type { StopPoint } from "../../src/core/private.js";
 import { TOOL_NAMES } from "../../src/mcp/tools.js";
 import { sha256File, type LaunchHooksForTest } from "../../src/private/verifier.js";
-import { recoverPrivatePayer, runPrivatePayer } from "../../tools/private-payer.js";
+import { payFirstOf, recoverPrivatePayer, runPrivatePayer } from "../../tools/private-payer.js";
 import { createX402Payer } from "../../tools/x402-payer.js";
 import { startVerifyingFacilitator, type VerifyingFacilitator } from "../fixtures/dynamic/verifying-facilitator.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
@@ -769,6 +769,56 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     expect(existsSync(path.join(world2.privateDir, String(purchase3.body["paymentId"])))).toBe(false);
     await stopRouter(world2);
   }, LONG);
+
+  test("v1.3 payer 道具 --burn-tx-hash（docs/zktls-router-v2-inbound.md §4）: subetha 受信の quote は鍵無し、payFirst に注文別 burn address、burn 無しの承認は latch の前で拒否、--burn-tx-hash で delivered。証跡の受信 txRef は facilitator の確定値（eventId は journal）、--recover --chain は受信を protocol で読まず送信だけ読む", async () => {
+    const world = newWorld();
+    await startRouter(world);
+    const common = { routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, profileId: SUBETHA_PROFILE_ID, labDir: lab.labDir, srsPath: lab.srs, method: "GET" as const, host: HOST, path: GET_PATH, outbound: { protocol: "x402" as const, network: NETWORK, asset: USDC, payTo: PROVIDER_PAY_TO, maxAmount: PRICE }, inbound: { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" }, trust: "lab-fixture-ca" as const, connect: `127.0.0.1:${provider.port}`, log: () => {} };
+    const out = path.join(world.dir, "payer-burn");
+    const quoted = await runPrivatePayer({ ...common, outDir: out, approve: false });
+    expect(quoted, JSON.stringify(quoted)).toMatchObject({ ok: true, stage: "quoted" });
+    if (!quoted.ok || quoted.stage !== "quoted") return;
+    const payFirst = payFirstOf(quoted.quote);
+    const offer = quoted.quote.source.offer as Record<string, unknown>;
+    expect(payFirst).toEqual({ payTo: offer["payTo"], amount: "11000", network: SEPOLIA, asset: ZUSDC });
+    expect(String(payFirst!.payTo)).not.toBe(OPERATOR_PAY_TO);
+    const settledLines = (): number => readFileSync(world.journalPath, "utf8").split("\n").filter((l) => l !== "" && (JSON.parse(l) as { event?: string }).event === "source_settled").length;
+    const before = settledLines();
+    // burn 無しの承認: latch の前で拒否（purchase も settle も起きない）。
+    const missing = await runPrivatePayer({ ...common, outDir: out, approve: true });
+    expect(missing).toMatchObject({ ok: false, stage: "approve" });
+    expect((JSON.parse(readFileSync(path.join(out, "checkpoint.json"), "utf8")) as { progress: Record<string, unknown> }).progress["purchaseAttempted"]).toBeUndefined();
+    expect(settledLines()).toBe(before);
+    // 人が burn address に払った（fixture では模擬: 64 hex、大文字混じりで渡す → credential と再開点は小文字）。
+    const burnTxHash = `0x${randomBytes(32).toString("hex").toUpperCase()}`;
+    const delivered = await runPrivatePayer({ ...common, outDir: out, approve: true, burnTxHash });
+    expect(delivered, JSON.stringify({ ok: delivered.ok, stage: delivered.stage, ...(delivered.ok ? {} : { reason: delivered.reason }), gates: delivered.evidence.gates })).toMatchObject({ ok: true, stage: "delivered" });
+    if (!delivered.ok || delivered.stage !== "delivered") return;
+    expect(settledLines()).toBe(before + 1);
+    // status の射影は eventId を出さない（journal にだけ）。証跡の受信 txRef は facilitator の確定値（小文字）= 申告した burn。
+    expect(delivered.evidence.gates.inbound_settlement).toMatchObject({ settled: true, claimedTxRef: burnTxHash.toLowerCase(), txRef: burnTxHash.toLowerCase() });
+    const settledLine = readFileSync(world.journalPath, "utf8").split("\n").map((l) => (l === "" ? undefined : (JSON.parse(l) as { event?: string; paymentId?: string; patch?: Record<string, unknown> }))).find((e) => e?.event === "source_settled" && e.paymentId === delivered.paymentId);
+    expect(settledLine?.patch).toEqual({ txRef: burnTxHash.toLowerCase(), eventId: `11155111:${burnTxHash.toLowerCase()}:121` });
+    expect(delivered.evidence.gates.private_delivery).toMatchObject({ status: "delivered_private", proof: { delivery: true, requestBinding: false } });
+    expect(delivered.evidence.gates.payer_receipt).toMatchObject({ ok: true, verifiedBundleBeforeDecrypt: true });
+    expect(delivered.plaintext.toString("utf8")).toBe(provider.respond({ method: "GET", path: GET_PATH, body: "" }));
+    const checkpointDoc = JSON.parse(readFileSync(path.join(out, "checkpoint.json"), "utf8")) as { progress: Record<string, unknown> };
+    expect(checkpointDoc.progress).toMatchObject({ burnTxHash: burnTxHash.toLowerCase(), handedOver: true });
+    expect(checkpointDoc.progress["payerAddress"]).toBeUndefined();
+    // --recover --chain: 受信は protocol で読まない。送信（x402 Base Sepolia）は手元の header から読む（偽の reader: 未使用）。
+    const head = { number: 1000, hash: `0x${"ab".repeat(32)}`, timestamp: Math.floor(Date.now() / 1000) };
+    const reader = { chainId: async () => 84532, latestBlock: async () => head, blockByNumber: async () => head, authorizationState: async () => false, findAuthorization: async () => [], receiptLogsOf: async () => undefined };
+    const chained = await recoverPrivatePayer({ routerBaseUrl: world.router!.baseUrl, principalId: ALICE.id, token: ALICE.token, outDir: out, labDir: lab.labDir, srsPath: lab.srs, chain: { readerForTest: reader } });
+    expect(chained.ok).toBe(true);
+    if (chained.ok) {
+      expect(chained.evidence.chain?.skipped).toEqual({ inbound: "protocol" });
+      expect(chained.evidence.chain?.inbound).toBeUndefined();
+      expect(chained.evidence.chain?.outbound).toMatchObject({ verdict: "unused", authorizerSource: "header" });
+      expect(chained.evidence.gates.inbound_settlement).toMatchObject({ settled: true, claimedTxRef: burnTxHash.toLowerCase(), txRef: burnTxHash.toLowerCase() });
+      expect(chained.evidence.gates.private_delivery.status).toBe("delivered_private");
+    }
+    await stopRouter(world);
+  }, 300_000);
 
   test("GET 全経路（公開 GET の秘匿配送）+ 同時二重 purchase + 完成した record への別注文 bundle（attest_foreign、状態不変）", async () => {
     const world = newWorld();

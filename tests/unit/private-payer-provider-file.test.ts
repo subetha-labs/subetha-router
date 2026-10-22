@@ -129,7 +129,7 @@ describe("--provider-file: 入力の境界（lab 不要）", () => {
       createdAt: new Date().toISOString(),
       requestId: "r1",
       // offer は受信 credential を**手元で**署名できる形（Router には届かない: 127.0.0.1:9 は閉じている）。
-      quote: { paymentId: "p1", quoteId: "q1", ownerKey: "k", approval: { deadlineMs: Date.now() + 600_000 }, source: { offer: { network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo: "0xcD8eCC44D54d1E7a35b6625f681267ABa4ad47F5", amount: "2000", extra: { name: "USDC", version: "2", expiresAt: String(Math.floor(Date.now() / 1000) + 600), challengeNonce: `0x${"ab".repeat(32)}` } } }, pricing: {} },
+      quote: { paymentId: "p1", quoteId: "q1", ownerKey: "k", approval: { deadlineMs: Date.now() + 600_000 }, source: { offer: { scheme: "exact", network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", payTo: "0xcD8eCC44D54d1E7a35b6625f681267ABa4ad47F5", amount: "2000", extra: { name: "USDC", version: "2", expiresAt: String(Math.floor(Date.now() / 1000) + 600), challengeNonce: `0x${"ab".repeat(32)}` } } }, pricing: {} },
       quoteFileSha256: createHash("sha256").update(quoteText).digest("hex"),
       intentSha256: "a".repeat(64),
       orderId: "0".repeat(64),

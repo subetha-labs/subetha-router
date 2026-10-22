@@ -185,3 +185,24 @@ C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）�
 - `dynamic.budget.maxPurchases` は**昇格した購入**（settle に進んだもの。後で `unknown` になった分を含む）を数える。再実行は新しい quote で、昇格数の上限に余裕のある journal で（§14.7 の x2 → x3）。
 - quote は同一 principal から 1 分に 3 件まで（4 件目で `rate_limited`。設定で変わる）。quote の間隔は 20 秒以上。
 - 新しい quote や journal は承認ではない。再実行にも §9 の承認（scope の記録、両レグの確認、合計の上限）が要る。
+
+## 11. 受信 SubEtha V2（burn-sale）の payer 手順（`docs/zktls-router-v2-inbound.md` §9、2026-10-22）
+受信が subetha のプロファイル（`sourceRail: "subetha"`、`private.profiles` に列挙）では、受信の credential は署名ではなく **人が先に払った burn の tx hash**。鍵は要らない。
+**前提**: プロファイルの `source.asset` は `SUBETHA_ZERC20_ASSETS`（`src/shared/networks.ts`）にある token でなければ Router が起動時に拒む。V2 の zUSDC（`0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f`）は 2026-10-22 時点で表に無い（V1 の `0x132C…` だけ）: 結合の前に表の行を足す増分が要る（設計 §4）。
+
+```sh
+# 1. quote（鍵無し）。stdout の payFirst（注文別 burn address と atomic の額）を V2 側の支払い道具に渡す。
+PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
+  --router http://127.0.0.1:<port> --principal owner --profile <priv-subetha-…> \
+  --method GET --host <provider host> --path <path> \
+  --outbound-protocol x402 --outbound-network eip155:84532 --outbound-asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  --outbound-pay-to <provider payTo> --outbound-max-amount 10000 \
+  --inbound-network eip155:11155111 --inbound-asset <V2 zUSDC> --inbound-max-total 11000 \
+  --trust mozilla --scope-file runtime/private-live/scope.json --out runtime/private-live/<run>
+# 2. quote.json を読む（private.inbound.payTo = burn address、total、fundsMoveAt = payer_burn_before_credential、両レグの額）。承認してから払う。
+# 3. V2 側: pos-pay-token A <payTo> zUSDC <total を 6 桁の decimal に>（例 11000 → 0.011）。transfer の tx hash を受け取る。
+# 4. 同じ --out に --approve --burn-tx-hash <tx hash>（challenge の期限内。鍵無し）。
+# 応答を失った・途中で止まった: 同じ --out に --recover（--chain は送信レグだけ読む。受信の burn は V2 の台帳と Sepolia の receipt で確かめる）。
+```
+
+受信レールの取り違えは latch の前で拒む（x402 の quote に `--burn-tx-hash`、subetha の quote に無し）。`--burn-tx-hash` は再開点と `evidence.json`（`claimedTxRef`）に小文字で残り、facilitator が確定した `txRef` と並ぶ。**burn は Router の拒否で戻らない**（quote の期限切れ・facilitator の rejected・容量拒否: `awaiting_payment` は未払いの証明ではない）。

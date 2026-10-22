@@ -56,10 +56,12 @@ V2 担当との合意: burn-sale（注文別 burn address）経路、routeBindin
 | T-V3 | 文書: 本書の実装記録、`docs/zktls-router-acceptance.md` に「受信 V2（burn-sale）」の節、`open-items` §B-9、Codex レビュー、commit | `npm test` の private 群、`npm run types`、golden |
 
 ## 4. 結合（B-3 の 3。本増分の後、owner と V2 担当と段取り）
-- V2 facilitator をローカル起動（`run-v2-local.mjs`、port 4132、merchant は使い捨て鍵）。**前提**: Router の実合成（`src/main.ts`）は subetha 受信の transport で loopback を拒む（`capabilities.fixtureFacilitators` は試験専用の能力で、hosted の origin 固定の allowlist ではない）。同一ホストでの結合は (a) 試験基盤の Router 子（`tests/fixtures/private/router-private-process.ts` と同じ能力注入。transport は試験の差し替え = **synthetic transport**、Router の build と facilitator は実物）で行うか、(b) V2 facilitator を loopback 以外のホスト名・アドレス（別ホストやトンネル）で公開して実合成で行う。(a) の結果は「transport が synthetic」と明記する。**owner の判断**。
-- Payer 側の burn: 本 worktree に道具が無い（FR-V7）。選択肢: (a) V2 側の harness `pos-pay`（open-items §B-9）で transfer し tx hash を受け取る → `tools/private-payer.ts` に `--burn-tx-hash`（subetha 受信の quote だけ。credential を `{challengeNonce, burnTxHash}` で組む）を足す、(b) `task/subetha-hosted-inbound` の `tools/subetha-payer.ts` を merge。**owner の判断**。
-- token: owner 未決。**zUSDC**なら本増分の設定で載る（V2 側で burn-sale の live を先に 1 件）。**zETH は本増分では載らない**（`SUBETHA_ZERC20_ASSETS` に無い。Router の `par: true` と `priceOf` の 1:1 換算は zETH の額を表せない）: 資産表と価格規則の別の増分が要る。
+- （**履歴**。下の owner の判断で (a) に確定）V2 facilitator をローカル起動（`run-v2-local.mjs`、port 4132、merchant は使い捨て鍵）。**前提**: Router の実合成（`src/main.ts`）は subetha 受信の transport で loopback を拒む（`capabilities.fixtureFacilitators` は試験専用の能力で、hosted の origin 固定の allowlist ではない）。同一ホストでの結合は (a) 試験基盤の Router 子（`tests/fixtures/private/router-private-process.ts` と同じ能力注入。transport は試験の差し替え = **synthetic transport**、Router の build と facilitator は実物）で行うか、(b) V2 facilitator を loopback 以外のホスト名・アドレス（別ホストやトンネル）で公開して実合成で行う。(a) の結果は「transport が synthetic」と明記する。**owner の判断**。
+- （**履歴**。下の owner の判断で (a) に確定、§9 で実装済み）Payer 側の burn: 本 worktree に道具が無い（FR-V7）。選択肢: (a) V2 側の harness `pos-pay`（open-items §B-9）で transfer し tx hash を受け取る → `tools/private-payer.ts` に `--burn-tx-hash`（subetha 受信の quote だけ。credential を `{challengeNonce, burnTxHash}` で組む）を足す、(b) `task/subetha-hosted-inbound` の `tools/subetha-payer.ts` を merge。**owner の判断**。
+- （**履歴**。下の owner の判断で zUSDC に確定。ただし V2 の zUSDC は表に無い: 次の箇条）token: owner 未決。**zUSDC**なら本増分の設定で載る（V2 側で burn-sale の live を先に 1 件）。**zETH は本増分では載らない**（`SUBETHA_ZERC20_ASSETS` に無い。Router の `par: true` と `priceOf` の 1:1 換算は zETH の額を表せない）: 資産表と価格規則の別の増分が要る。
 - 支払い範囲の記録・両レグの確認・合計の上限は受入 §9 と同じ。
+- **owner の判断（2026-10-22、「その形で進めて良い」）**: 発行時点は accepted（V2 担当は owner 本人から直接確認済み）、token は **zUSDC**、payer の burn は **(a) V2 harness `pos-pay-token` + 本 worktree の `--burn-tx-hash`**（§9）、transport は **(a) 試験基盤の Router 子（synthetic transport）** で最初の 1 件（Router の実合成は loopback に加えて private range（10/8・172.16/12・192.168/16）と自ホストのアドレスも拒むので、同一マシンでの「非 loopback 公開」は公開到達可能なトンネルが要る。実 transport は後の増分）。
+- **V2 の zUSDC は V1 と別 deployment**（V2 担当の live 2026-10-22: `/challenge` の `token` = `0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f`、V1 の表の行は `0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF`）。`SUBETHA_ZERC20_ASSETS` に無い token は設定の検査で起動時に拒まれる（FR-V2）ので、結合の前に **その行を表に足す増分**（decimals・上限は V1 と同じ 6 / 20,000 atomic。V2 担当の確認待ち）が要る。
 
 ## 5. 未解決
 - receive code 宛 private send の注文 binding（zERC20 回答待ち）。
@@ -89,3 +91,31 @@ V2 担当との合意: burn-sale（注文別 burn address）経路、routeBindin
 | 3 試験の不足 | 通常の記録が subetha プロファイルを指す purchase の防御（dynamic-core、接続 0）、再起動後の同じ burn tx の別 intent（private-core）、`changed` logIndex の信頼の境界（adapter）、上の 1・2 |
 | 4 文書の矛盾・過剰 | 冒頭の取消の文、FR-V3 の実装どおりの契約、§7 の限定（client の列挙は無し、作者の実行結果、synthetic の証跡） |
 | レビュー 3 回目（APPROVE WITH CHANGES、残り = 試験の網羅）: 別 intent の大文字 hex 申告、同時の二重、再起動後の開示 | wire の 2 つ目の intent は同じ burn を大文字で申告（同じ identity で `private_issuance_duplicate`）、private-core に同時 purchase（発行は 1 回、片方は duplicate）と再起動後の `fundsMoveOnCredential` の保持。intent は呼ぶたびに別（order_id）にして受信 identity の一意性と区別 |
+
+## 9. 増分 v1.3.1（2026-10-22）: payer 道具 `--burn-tx-hash`（FR-V7 の (a)）
+Router には何も足さない。`tools/private-payer.ts` だけ。
+
+- **FR-P1 受信の指定**: `--inbound-network <net> --inbound-asset <token> --inbound-max-total <atomic>`（3 つ組。既定は Base Sepolia USDC、x402）。封筒の `inbound` に写す（Router 側は FR-Z 系の intent 検査でプロファイルと照合）。
+- **FR-P2 鍵の要否**: x402 受信（既定）は従来どおり `SUBETHA_PAYER_PRIVATE_KEY` 必須。subetha 受信（`--inbound-network/--inbound-asset` が Base Sepolia USDC 以外）は鍵を要求しない（credential に署名は無い）。
+- **FR-P3 quote の出力**: 受信が `private.inbound.fundsMoveAt = payer_burn_before_credential` なら、stdout の `quoted` に `payFirst = { payTo（注文別 burn address）, amount（atomic）, network, asset }` を出す（人がこれを V2 側の支払い道具に渡す）。`quote.json` は従来どおり承認対象の全体。
+- **FR-P4 承認**: 同じ `--out` に `--approve --burn-tx-hash 0x<64 hex>`。**latch の前**に、再開点の quote の `source.offer.scheme` を権威として: subetha（`subetha-zerc20`）で `--burn-tx-hash` が無い → 拒否（払う先を案内）、x402（`exact`）に `--burn-tx-hash` → 拒否、x402 で鍵無し → 拒否。いずれも何も書かない（refusals.json だけ）。
+- **FR-P5 credential**: subetha は `{x402Version: 2, accepted: <offer そのもの>, payload: {challengeNonce: offer.extra.challengeNonce, burnTxHash: <小文字>}}` の base64（adapter の preflight と同じ形）。再開点 `progress.burnTxHash`（小文字）と証跡 `gates.inbound_settlement.claimedTxRef` に残す（`payerAddress` は書かない）。コンソールの射影は `claimedTxRef` も出さない。
+- **FR-P6 回復**: `--recover` は再開点の `burnTxHash` を `claimedTxRef` に写す。`--recover --chain` は subetha の受信を `skipped.inbound = protocol` で読まない（EIP-3009 ではない。burn の確認は V2 側の台帳と Sepolia の receipt）。送信（x402 Base Sepolia）は従来どおり header から読む。
+- **FR-P7 変えないもの**: x402 受信の経路（鍵・EIP-3009・`payerAddress`・chain 読取）、latch の意味（応答を失ったら `--recover`、二度と送らない）、証跡の単調併合。
+
+| 試験 | 内容 |
+|---|---|
+| `tests/unit/private-payer-burn-sale.test.ts`（lab 不要） | credential の形・`payFirstOf`、前提の段の 3 拒否（x402 鍵無し・x402 に burn・壊れた hash）と subetha の鍵無し通過、承認の段の 3 拒否（latch 無し）、subetha の latch → `burnTxHash`/`claimedTxRef`、`chainLegInputsOf` の `protocol`、CLI の exit 2 × 4 と subetha の鍵無し通過 |
+| `tests/wire/private-x402.test.ts`「v1.3 payer 道具 --burn-tx-hash」（lab） | V2 fixture で quote（鍵無し、`payFirst`）→ burn 無しの承認拒否（settle 0）→ 大文字混じりの hash で delivered（journal の `source_settled` は小文字 txRef と eventId、証跡の `claimedTxRef` = `txRef`）→ `--recover --chain` で受信 `protocol`・送信 header |
+
+結合（§4）の手順: Router 子を起動 → `private-payer.ts`（`--inbound-network eip155:11155111 --inbound-asset <V2 zUSDC> --inbound-max-total 11000`、鍵無し）で quote → `payFirst` を V2 担当へ → V2 側 `pos-pay-token A <payTo> zUSDC <amount decimal>` → transfer の tx hash を受け取る → `--approve --burn-tx-hash <hash>`（challenge の TTL 1800 s 内）→ delivered。結果は「transport synthetic」と明記し、受信の burn は V2 の台帳（`/admin/payments` は V2 側が読む）と Sepolia の receipt で、送信は `--recover --chain` で確かめる。
+
+### 9.1 レビュー（Codex `gpt-6-astra`、2026-10-22、REJECT → 反映）
+| 指摘 | 対応 |
+|---|---|
+| 1 High: `subetha-zerc20` 以外は全部 x402 として署名に進む。`offer.extra` 無しで例外 | scheme の allowlist（`exact` / `subetha-zerc20`。ほかは latch の前に拒否）、offer/extra/network の形を安全に検査。単体: 知らない scheme、extra 無し → 再開点不変・header 無し |
+| 2 High: burn を渡した承認の期限切れが「新しい --out で quote し直せ」と言う（払い直しの誘導） | burn 付きの拒否（期限切れ・引数違い・quote.json 改変・形違い）は「transfer は戻らない。照合してから」。単体: 期限切れ（burn 付き / 無し）と引数違い |
+| 3 Medium: CLI の stdout が `run.evidence` をそのまま出す（`claimedTxRef`・`txRef`） | 承認の結果も `consoleProjectionOf` で出す。単体: 実際の stdout に hash が無く、evidence.json にある |
+| 4 Medium: 応答喪失・unknown で受信 gate を置き換え、`claimedTxRef` が消える | `markBothUncertain`（既存の欄を保つ）。単体: 応答喪失（閉じた port）で `{settled:false, uncertain:true, claimedTxRef}` |
+| 5 Low: §4 に判断前の箇条が残る | 履歴と明記。受入 §11 に表の前提 |
+| 再レビュー（REJECT、残り 1）: 引数違い・quote.json 改変の拒否が burn 付きでも「quote し直せ」を含む | burn 付きは「quote し直せ」を外し照合だけ。単体: 引数違い・改変・削除の 3 件（再開点・証跡のバイト列不変、`quote again` 無し）、burn 無しは従来の文 |

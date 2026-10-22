@@ -22,6 +22,10 @@
  *          --outbound-protocol x402 --outbound-network eip155:84532 --outbound-asset 0x036C… --outbound-pay-to 0x9014… --outbound-max-amount 10000 \
  *          --inbound-max-total 11000 --trust mozilla --scope-file runtime/private-live/<run>/scope.json --out runtime/private-live/<run> [--approve | --recover] [--connect 127.0.0.1:<port>]
  *
+ * SubEtha V2 burn-sale の受信（`docs/zktls-router-v2-inbound.md` §4）: `--inbound-network eip155:11155111 --inbound-asset <zUSDC>` で quote すると、承認対象の
+ *   `private.inbound.payTo` は注文別の burn address。人が別の道具（V2 harness）でその address に `total` を transfer してから、同じ --out で
+ *   `--approve --burn-tx-hash 0x…` を実行する。credential は `{challengeNonce, burnTxHash}`（鍵も署名も要らない。資金は burn で既に動いている）。
+ *   x402 受信（既定）に `--burn-tx-hash` を渡すと拒む。subetha 受信に `--burn-tx-hash` が無ければ拒む（latch の前なので何も起きない）。
  * 第三者 Provider（公開 GET、`docs/zktls-router-thirdparty.md` §4.2）: `--provider-file <provider.json>`（`tools/private-provider-precheck.ts` の出力）が
  * `--method/--host/--path/--outbound-*` の代わりになる（**排他**: 両方あれば拒否。転記しない）。ファイルの sha256 は証跡の `providerFileSha256` に入る。
  */
@@ -42,6 +46,11 @@ import { createX402Payer } from "./x402-payer.js";
 
 export const PRIVATE_INBOUND_NETWORK = "eip155:84532";
 export const PRIVATE_INBOUND_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+/** SubEtha V2 burn-sale の受信（`src/adapters/inbound/subetha.ts`）の offer scheme。credential は `{challengeNonce, burnTxHash}`。 */
+const SUBETHA_SCHEME = "subetha-zerc20";
+/** x402（EIP-3009）の受信 offer の scheme。この 2 つ以外の scheme の再開点は承認しない（署名にも latch にも進まない）。 */
+const X402_SCHEME = "exact";
+const TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 const CHECKPOINT_FILE = "checkpoint.json";
 const CHECKPOINT_VERSION = "private-payer-checkpoint-v1";
 
@@ -62,12 +71,16 @@ export interface PrivatePayerOptions {
   readonly providerFileSha256?: string;
   /** `withProviderFile` が入れる: `provider.json` が試験の差し替え（`--ca`/`--connect`）で得た synthetic な観測なら true（`mozilla` では拒む）。 */
   readonly providerSynthetic?: boolean;
+  /** 受信（既定は Base Sepolia USDC、x402）。SubEtha V2 burn-sale は `{ network: "eip155:11155111", asset: <zUSDC>, maxTotal }`。 */
   readonly inbound?: { readonly network: string; readonly asset: string; readonly maxTotal: string };
   readonly trust: "mozilla" | "lab-fixture-ca";
   /** 試験だけ: executor の TCP の行き先（loopback の fixture）。`mozilla` では使えない。 */
   readonly connect?: string;
   readonly outDir: string;
-  readonly payerPrivateKey: string;
+  /** x402 受信（EIP-3009）の署名鍵。subetha 受信では要らない（credential は burn の tx hash）。x402 受信で無ければ承認の前に拒む。 */
+  readonly payerPrivateKey?: string;
+  /** subetha 受信の承認だけ: 人が注文別 burn address へ払った transfer の tx hash（0x + 64 hex）。credential に載せる。x402 受信では拒む。 */
+  readonly burnTxHash?: string;
   /** false: quote で止まる（checkpoint を書く）。true: 同じ `outDir` の checkpoint を再開して最後まで。 */
   readonly approve: boolean;
   /** 実 Provider（`mozilla`）で必須: 支払い範囲の記録（JSON）。sha256 を証跡に書く。 */
@@ -108,7 +121,7 @@ export interface PrivatePayerEvidence {
   routerStatus?: { status?: string; terminalReason?: string };
   /** 5 つのゲート（別々）。`uncertain: true` は「分からない」（払ったかもしれない）。 */
   readonly gates: {
-    inbound_settlement: { settled: boolean; txRef?: string; eventId?: string; uncertain?: true; chain?: ChainLegVerdict; chainTxRef?: string };
+    inbound_settlement: { settled: boolean; txRef?: string; eventId?: string; uncertain?: true; chain?: ChainLegVerdict; chainTxRef?: string; /** subetha 受信: credential に載せた burn の tx hash（小文字。facilitator が確定した `txRef` とは別の欄）。 */ claimedTxRef?: string };
     outbound_settlement: { issued: boolean; txRef?: string; receipt: boolean; uncertain?: true; chain?: ChainLegVerdict; chainTxRef?: string };
     private_delivery: { status?: string; terminalReason?: string; proof?: unknown; recordSha256?: string; recordRepeatable?: boolean };
     payer_receipt: { ok: boolean; verifiedBundleBeforeDecrypt?: boolean; decryptedSha256?: string; payloadLen?: number; failedStage?: string };
@@ -187,7 +200,7 @@ interface Checkpoint {
   readonly orderId: string;
   readonly args: { readonly routerBaseUrl: string; readonly principalId: string; readonly profileId: string; readonly method: string; readonly host: string; readonly path: string; readonly outbound: PrivatePayerOptions["outbound"]; readonly inbound: NonNullable<PrivatePayerOptions["inbound"]>; readonly trust: string; readonly providerFileSha256?: string };
   /** 進んだ段（再開・回復の判断用）。 */
-  progress?: { paymentId?: string; purchaseAttempted?: boolean; handedOver?: boolean; sessionDone?: boolean; attested?: boolean; payerAddress?: string };
+  progress?: { paymentId?: string; purchaseAttempted?: boolean; handedOver?: boolean; sessionDone?: boolean; attested?: boolean; payerAddress?: string; /** subetha 受信: credential に載せた burn の tx hash（小文字）。 */ burnTxHash?: string };
 }
 
 export function defaultLabDir(): string {
@@ -275,6 +288,30 @@ function stableJson(value: unknown): string {
 /** 封筒（設計 §5.1）: compact JSON。`order` は lab の `payer-keygen` が書いた注文そのもの。 */
 export function envelopeBytesOf(order: unknown, outbound: PrivatePayerOptions["outbound"], inbound: NonNullable<PrivatePayerOptions["inbound"]>): Buffer {
   return Buffer.from(JSON.stringify({ version: "phase5-intent-v1", order, outbound: { protocol: outbound.protocol, network: outbound.network, asset: outbound.asset, payTo: outbound.payTo, maxAmount: outbound.maxAmount }, inbound: { network: inbound.network, asset: inbound.asset, maxTotal: inbound.maxTotal } }), "utf8");
+}
+
+/** 提出したが結果が分からない: 両決済を不確実にする。既にある欄（申告した burn の `claimedTxRef` など）は消さない。 */
+function markBothUncertain(evidence: PrivatePayerEvidence): void {
+  evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, settled: false, uncertain: true };
+  evidence.gates.outbound_settlement = { ...evidence.gates.outbound_settlement, issued: false, receipt: false, uncertain: true };
+}
+
+/** subetha burn-sale の受信 credential（`src/adapters/inbound/subetha.ts` の preflight と同じ形: `accepted` は offer の完全一致、`payload.challengeNonce` は offer の nonce）。base64。 */
+export function subethaCredentialOf(offer: Record<string, unknown>, burnTxHash: string): string {
+  const extra = offer["extra"] as Record<string, unknown>;
+  return Buffer.from(JSON.stringify({ x402Version: 2, accepted: offer, payload: { challengeNonce: extra["challengeNonce"], burnTxHash } }), "utf8").toString("base64");
+}
+
+/** quote の受信が「credential の前に人が払う」（subetha burn-sale）なら、払う先と額（承認対象 `private.inbound` の写し）。x402 受信では `undefined`。 */
+export function payFirstOf(quote: PrivateQuoteView): { payTo: string; amount: string; network: string; asset: string } | undefined {
+  const inbound = (quote as unknown as { private?: { inbound?: Record<string, unknown> } }).private?.inbound;
+  if (inbound === undefined || inbound["fundsMoveAt"] !== "payer_burn_before_credential") return undefined;
+  const payTo = inbound["payTo"];
+  const amount = inbound["total"];
+  const network = inbound["network"];
+  const asset = inbound["asset"];
+  if (typeof payTo !== "string" || typeof amount !== "string" || typeof network !== "string" || typeof asset !== "string") return undefined;
+  return { payTo, amount, network, asset };
 }
 
 /** 第三者 Provider の値を事前互換検査の `provider.json` から**そのまま**取る（手入力の代わり。`docs/zktls-router-thirdparty.md` §4.2）。読めない・形が違えば `undefined`。 */
@@ -413,7 +450,11 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     if (options.scopeFile === undefined || !existsSync(options.scopeFile)) return fail("prerequisites", "a payment scope record (--scope-file) is required before any live payment (AGENTS.md)");
     evidence.scopeFileSha256 = sha256Hex(readFileSync(options.scopeFile));
   }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(options.payerPrivateKey)) return fail("prerequisites", "SUBETHA_PAYER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string");
+  const inboundIsSubetha = inbound.network !== PRIVATE_INBOUND_NETWORK || inbound.asset.toLowerCase() !== PRIVATE_INBOUND_ASSET.toLowerCase();
+  if (options.payerPrivateKey !== undefined && !/^0x[0-9a-fA-F]{64}$/.test(options.payerPrivateKey)) return fail("prerequisites", "SUBETHA_PAYER_PRIVATE_KEY must be a 0x-prefixed 32-byte hex string");
+  if (!inboundIsSubetha && options.payerPrivateKey === undefined) return fail("prerequisites", "SUBETHA_PAYER_PRIVATE_KEY is required for an x402 inbound (env only)");
+  if (!inboundIsSubetha && options.burnTxHash !== undefined) return fail("prerequisites", "--burn-tx-hash applies only to a SubEtha burn-sale inbound (--inbound-network/--inbound-asset)");
+  if (options.burnTxHash !== undefined && !TX_HASH_RE.test(options.burnTxHash)) return fail("prerequisites", "--burn-tx-hash must be a 0x-prefixed 32-byte transaction hash");
   if (options.trust === "mozilla" && options.providerSynthetic === true) return fail("prerequisites", "the provider file holds a synthetic pre-check (test CA / loopback override); re-run tools/private-provider-precheck.ts against the public host before a live purchase");
   // 承認は別の起動で再開するので、client が自分で発行した quote でなくても受け付ける（`allowUnissuedQuotes`: client は自分の控えとの照合を飛ばす。
   // 読んだ quote が買われることの保証は、この道具の再開点（0600 のローカルの権威。`quote.json` の sha256 で改変を検出）と Router 側の束縛の検査による）。
@@ -458,7 +499,8 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     writeCheckpoint(options.outDir, checkpoint);
     evidence.stage = "quoted";
     persistEvidence();
-    log(`private-payer: quoted paymentId=${quote.paymentId} intentSha256=${evidence.intentSha256} total=${String((quote.pricing as Record<string, unknown>)["total"])} (review ${quoteFile}, then re-run with --approve)`);
+    const payFirst = payFirstOf(quote);
+    log(`private-payer: quoted paymentId=${quote.paymentId} intentSha256=${evidence.intentSha256} total=${String((quote.pricing as Record<string, unknown>)["total"])}${payFirst === undefined ? "" : ` payFirst=${payFirst.amount} ${payFirst.asset}@${payFirst.network} to ${payFirst.payTo} (burn-sale: transfer first, then --approve --burn-tx-hash)`} (review ${quoteFile}, then re-run with --approve)`);
     return { ok: true, stage: "quoted", quote, evidence };
   }
 
@@ -466,12 +508,25 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const found = readCheckpoint(options.outDir);
   if (found === undefined) return fail("approve", "no reviewed quote in --out (run once without --approve, review quote.json, then re-run with --approve in the same --out)");
   checkpoint = found;
-  if (stableJson(checkpoint.args) !== stableJson(argsOf(options, inbound))) return fail("approve", "the arguments differ from the reviewed quote (router/principal/profile/method/host/path/outbound/inbound/trust); quote again in a new --out");
-  if (!existsSync(quoteFile) || sha256Hex(readFileSync(quoteFile)) !== checkpoint.quoteFileSha256) return fail("approve", "quote.json was modified or removed after the review; quote again in a new --out");
+  // burn の tx hash が渡された承認の拒否は「新しい --out で quote し直せ」と言わない: その transfer は拒否で戻らない。先に照合（quote の burn address・V2 の台帳・Sepolia の receipt）。
+  const burnNote = options.burnTxHash === undefined ? "" : "; a burn tx hash was supplied: this refusal does not reverse that transfer and the old order's burn address cannot be reused — reconcile it against the reviewed quote's burn address (quote.json private.inbound.payTo, V2 ledger, Sepolia receipt) with the operator before any new payment, and never pay again on this refusal alone";
+  const requote = options.burnTxHash === undefined ? "; quote again in a new --out" : "";
+  if (stableJson(checkpoint.args) !== stableJson(argsOf(options, inbound))) return fail("approve", `the arguments differ from the reviewed quote (router/principal/profile/method/host/path/outbound/inbound/trust)${requote}${burnNote}`);
+  if (!existsSync(quoteFile) || sha256Hex(readFileSync(quoteFile)) !== checkpoint.quoteFileSha256) return fail("approve", `quote.json was modified or removed after the review${requote}${burnNote}`);
   if (checkpoint.progress?.handedOver === true) return fail("approve", "this purchase was already handed over; use --recover to read its status/record");
   if (checkpoint.progress?.purchaseAttempted === true) return fail("approve", "a purchase was already attempted for this quote (its outcome may be unknown); never re-sign — use --recover to read status/record");
   const quote = checkpoint.quote;
-  if (now() >= quote.approval.deadlineMs) return fail("approve", "the reviewed quote has expired; quote again in a new --out and review it again");
+  if (now() >= quote.approval.deadlineMs) return fail("approve", `the reviewed quote has expired${options.burnTxHash === undefined ? "; quote again in a new --out and review it again" : burnNote}`);
+  // 受信レールと入力の整合（latch の前。ここで拒んでも何も起きていない）。再開点の offer の scheme が権威: subetha-zerc20 と exact（x402）だけ。ほかは署名にも latch にも進まない。
+  const offer = (isRecord(quote.source) && isRecord(quote.source["offer"]) ? quote.source["offer"] : undefined) as ({ scheme?: unknown; network?: unknown; extra?: unknown } & Record<string, unknown>) | undefined;
+  const offerExtra = offer !== undefined && isRecord(offer.extra) ? offer.extra : undefined;
+  if (offer === undefined || offerExtra === undefined || typeof offer.network !== "string") return fail("approve", `the reviewed quote's offer is malformed (no offer, extra or network); nothing was signed or submitted${burnNote}`);
+  const offerIsSubetha = offer.scheme === SUBETHA_SCHEME;
+  if (!offerIsSubetha && offer.scheme !== X402_SCHEME) return fail("approve", `the reviewed quote's inbound scheme is not supported by this tool (expected ${X402_SCHEME} or ${SUBETHA_SCHEME}); nothing was signed or submitted${burnNote}`);
+  if (offerIsSubetha && options.burnTxHash === undefined) return fail("approve", "this quote's inbound is a SubEtha burn-sale: transfer the quoted amount to the per-quote burn address (quote.json private.inbound.payTo) first, then re-run with --approve --burn-tx-hash 0x…");
+  if (offerIsSubetha && typeof offerExtra["challengeNonce"] !== "string") return fail("approve", `the reviewed quote's offer has no challengeNonce; nothing was signed or submitted${burnNote}`);
+  if (!offerIsSubetha && options.burnTxHash !== undefined) return fail("approve", "--burn-tx-hash applies only to a SubEtha burn-sale inbound; this quote's inbound is x402 (nothing was signed or submitted)");
+  if (!offerIsSubetha && options.payerPrivateKey === undefined) return fail("approve", "SUBETHA_PAYER_PRIVATE_KEY is required for an x402 inbound (env only)");
   if (checkpoint.args.providerFileSha256 !== undefined) evidence.providerFileSha256 = checkpoint.args.providerFileSha256;
   evidence.intentSha256 = checkpoint.intentSha256;
   evidence.orderId = checkpoint.orderId;
@@ -489,31 +544,36 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   evidence.stage = "purchase";
   persistEvidence();
   options.hooksForTest?.afterLatch?.();
-  // 受信 credential（自分の鍵。EIP-3009。資金はこの後の Router の settle で動く）。
-  const offer = quote.source.offer as { network: string; extra: Record<string, unknown> } & Record<string, unknown>;
-  const chainId = Number(String(offer.network).replace(/^eip155:/, ""));
-  const payer = createX402Payer(options.payerPrivateKey);
-  // 回復時のチェーン読取（§10.1）のために **アドレスだけ** を再開点に残す（鍵は残さない）。
-  checkpoint.progress = { ...checkpoint.progress, payerAddress: payer.address };
-  writeCheckpoint(options.outDir, checkpoint);
-  const credential = await payer.credentialFor(offer as never, chainId);
+  let credential: string;
+  if (offerIsSubetha) {
+    // 受信 credential（subetha burn-sale）: 承認した offer そのもの + {challengeNonce, burnTxHash}。資金は人の burn で既に動いている（Router の settle は facilitator の確認）。
+    const burnTxHash = options.burnTxHash!.toLowerCase();
+    checkpoint.progress = { ...checkpoint.progress, burnTxHash };
+    writeCheckpoint(options.outDir, checkpoint);
+    evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, claimedTxRef: burnTxHash };
+    credential = subethaCredentialOf(offer as Record<string, unknown>, burnTxHash);
+  } else {
+    // 受信 credential（自分の鍵。EIP-3009。資金はこの後の Router の settle で動く）。
+    const chainId = Number(String(offer.network).replace(/^eip155:/, ""));
+    const payer = createX402Payer(options.payerPrivateKey!);
+    // 回復時のチェーン読取（§10.1）のために **アドレスだけ** を再開点に残す（鍵は残さない）。
+    checkpoint.progress = { ...checkpoint.progress, payerAddress: payer.address };
+    writeCheckpoint(options.outDir, checkpoint);
+    credential = await payer.credentialFor(offer as never, chainId);
+  }
 
   // 4. purchase → 引き渡し。応答を失ったら「払ったかもしれない」。
   let purchased: Awaited<ReturnType<typeof client.privatePurchase>>;
   try {
     purchased = await client.privatePurchase({ quote, requestId, approval: { approved: true, quoteId: quote.quoteId }, credential });
   } catch {
-    evidence.gates.inbound_settlement = { settled: false, uncertain: true };
-    evidence.gates.outbound_settlement = { issued: false, receipt: false, uncertain: true };
+    markBothUncertain(evidence);
     await fillFromStatus(client, quote.paymentId, quote.ownerKey, evidence);
     return fail("purchase", "the purchase response was lost (transport); the Router may have settled the inbound leg — read status with --recover, do not re-pay");
   }
   if (purchased.outcome !== "awaiting_session") {
     const detail = "reason" in purchased ? purchased.reason : "error" in purchased ? purchased.error : purchased.outcome;
-    if (purchased.outcome === "unknown") {
-      evidence.gates.inbound_settlement = { settled: false, uncertain: true };
-      evidence.gates.outbound_settlement = { issued: false, receipt: false, uncertain: true };
-    }
+    if (purchased.outcome === "unknown") markBothUncertain(evidence);
     await fillFromStatus(client, quote.paymentId, quote.ownerKey, evidence);
     // unknown は「払ったかもしれない」。再試行しない。
     return fail("purchase", `${purchased.outcome}: ${String(detail)}`);
@@ -886,7 +946,8 @@ export function chainLegInputsOf(checkpoint: Checkpoint, outDir: string, payerAd
   const extra = offer?.["extra"] as Record<string, unknown> | undefined;
   const nonce = extra?.["challengeNonce"];
   const expiresAt = extra?.["expiresAt"];
-  if (authorizer === undefined || !EVM_ADDRESS_RE.test(authorizer)) skipped.inbound = "payer_address_unknown";
+  if (offer !== undefined && offer["scheme"] !== "exact") skipped.inbound = "protocol";
+  else if (authorizer === undefined || !EVM_ADDRESS_RE.test(authorizer)) skipped.inbound = "payer_address_unknown";
   else if (offer === undefined || typeof offer["network"] !== "string" || typeof offer["asset"] !== "string" || typeof offer["payTo"] !== "string" || typeof offer["amount"] !== "string" || !/^[0-9]+$/.test(offer["amount"]) || typeof nonce !== "string" || !BYTES32.test(nonce) || typeof expiresAt !== "number") skipped.inbound = "offer_shape";
   else if (offer["scheme"] !== "exact") skipped.inbound = "protocol";
   else if (offer["network"] !== PRIVATE_INBOUND_NETWORK) skipped.inbound = "network";
@@ -928,8 +989,8 @@ export function chainLegInputsOf(checkpoint: Checkpoint, outDir: string, payerAd
 
 /** `--recover` の stdout 向けの射影: chain は要約だけ、各レグの tx 参照（`txRef`・`chainTxRef`）と `eventId`（authorization nonce を含み得る）は出さない。証跡ファイルにはすべてある。 */
 export function consoleProjectionOf(evidence: PrivatePayerEvidence): Record<string, unknown> {
-  const strip = <T extends Record<string, unknown>>(leg: T): Omit<T, "txRef" | "chainTxRef" | "eventId"> => {
-    const { txRef: _t, chainTxRef: _c, eventId: _e, ...rest } = leg as T & { txRef?: unknown; chainTxRef?: unknown; eventId?: unknown };
+  const strip = <T extends Record<string, unknown>>(leg: T): Omit<T, "txRef" | "chainTxRef" | "eventId" | "claimedTxRef"> => {
+    const { txRef: _t, chainTxRef: _c, eventId: _e, claimedTxRef: _b, ...rest } = leg as T & { txRef?: unknown; chainTxRef?: unknown; eventId?: unknown; claimedTxRef?: unknown };
     return rest;
   };
   return { ...evidence, chain: chainSummaryOf(evidence.chain), gates: { ...evidence.gates, inbound_settlement: strip(evidence.gates.inbound_settlement), outbound_settlement: strip(evidence.gates.outbound_settlement) } };
@@ -961,6 +1022,7 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
   // 出所の記録は再開点の args が権威（証跡が無い・失われた回復でも復元する）。
   if (checkpoint.args.providerFileSha256 !== undefined) evidence.providerFileSha256 = checkpoint.args.providerFileSha256;
   evidence.stage = "recover";
+  if (checkpoint.progress?.burnTxHash !== undefined) evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, claimedTxRef: checkpoint.progress.burnTxHash };
   if (checkpoint.progress?.handedOver === true) {
     evidence.gates.inbound_settlement = { ...evidence.gates.inbound_settlement, settled: true };
     evidence.gates.outbound_settlement.issued = true;
@@ -1064,9 +1126,21 @@ async function main(): Promise<void> {
     if (!recovered.ok) process.exit(1);
     return;
   }
+  const inboundNetwork = argOf("inbound-network");
+  const inboundAsset = argOf("inbound-asset");
+  if ((inboundNetwork === undefined) !== (inboundAsset === undefined)) {
+    process.stderr.write("--inbound-network and --inbound-asset go together\n");
+    process.exit(2);
+  }
+  const inboundIsDefault = inboundNetwork === undefined || (inboundNetwork === PRIVATE_INBOUND_NETWORK && inboundAsset!.toLowerCase() === PRIVATE_INBOUND_ASSET.toLowerCase());
   const key = process.env["SUBETHA_PAYER_PRIVATE_KEY"];
-  if (key === undefined || key === "") {
-    process.stderr.write("SUBETHA_PAYER_PRIVATE_KEY is required (env only)\n");
+  if (inboundIsDefault && (key === undefined || key === "")) {
+    process.stderr.write("SUBETHA_PAYER_PRIVATE_KEY is required for an x402 inbound (env only)\n");
+    process.exit(2);
+  }
+  const burnTxHash = argOf("burn-tx-hash");
+  if (burnTxHash !== undefined && !process.argv.includes("--approve")) {
+    process.stderr.write("--burn-tx-hash goes with --approve (quote first, pay the burn address, then approve)\n");
     process.exit(2);
   }
   const providerFile = argOf("provider-file");
@@ -1102,6 +1176,10 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const inboundMaxTotal = argOf("inbound-max-total");
+  if (inboundNetwork !== undefined && inboundMaxTotal === undefined) {
+    process.stderr.write("--inbound-max-total is required with --inbound-network/--inbound-asset\n");
+    process.exit(2);
+  }
   const outDir = requireArg("out");
   const run = await runPrivatePayer({
     routerBaseUrl: requireArg("router"),
@@ -1111,20 +1189,23 @@ async function main(): Promise<void> {
     ...(argOf("lab-dir") === undefined ? {} : { labDir: argOf("lab-dir")! }),
     ...target,
     ...(argOf("body-file") === undefined ? {} : { bodyFile: argOf("body-file")! }),
-    ...(inboundMaxTotal === undefined ? {} : { inbound: { network: PRIVATE_INBOUND_NETWORK, asset: PRIVATE_INBOUND_ASSET, maxTotal: inboundMaxTotal } }),
+    ...(inboundMaxTotal === undefined ? {} : { inbound: { network: inboundNetwork ?? PRIVATE_INBOUND_NETWORK, asset: inboundAsset ?? PRIVATE_INBOUND_ASSET, maxTotal: inboundMaxTotal } }),
     trust,
     ...(argOf("connect") === undefined ? {} : { connect: argOf("connect")! }),
     outDir,
-    payerPrivateKey: key,
+    ...(key === undefined || key === "" ? {} : { payerPrivateKey: key }),
+    ...(burnTxHash === undefined ? {} : { burnTxHash }),
     approve: process.argv.includes("--approve"),
     ...(process.argv.includes("--stop-after-handover") ? { stopAfterHandover: true } : {}),
     ...(argOf("scope-file") === undefined ? {} : { scopeFile: argOf("scope-file")! }),
   });
   if (run.ok && run.stage === "quoted") {
-    process.stdout.write(`${JSON.stringify({ stage: "quoted", paymentId: run.quote.paymentId, approvalSubjectFile: path.join(outDir, "quote.json"), note: "no payment was made; review quote.json, then re-run the same command with --approve (same --out)" })}\n`);
+    const payFirst = payFirstOf(run.quote);
+    process.stdout.write(`${JSON.stringify({ stage: "quoted", paymentId: run.quote.paymentId, approvalSubjectFile: path.join(outDir, "quote.json"), ...(payFirst === undefined ? {} : { payFirst }), note: payFirst === undefined ? "no payment was made; review quote.json, then re-run the same command with --approve (same --out)" : "no payment was made; review quote.json; the inbound is a burn-sale: transfer exactly payFirst.amount of payFirst.asset to payFirst.payTo before the quote deadline, then re-run the same command with --approve --burn-tx-hash <that tx hash> (same --out)" })}\n`);
     return;
   }
-  process.stdout.write(`${JSON.stringify(run.ok ? { stage: run.stage, paymentId: run.paymentId, evidence: run.evidence } : { stage: run.stage, reason: run.reason, evidence: run.evidence })}\n`);
+  // コンソールには tx 参照を出さない射影（`--recover` と同じ方針）。全部は evidence.json に。
+  process.stdout.write(`${JSON.stringify(run.ok ? { stage: run.stage, paymentId: run.paymentId, evidence: consoleProjectionOf(run.evidence) } : { stage: run.stage, reason: run.reason, evidence: consoleProjectionOf(run.evidence) })}\n`);
   if (!run.ok) process.exit(1);
 }
 
