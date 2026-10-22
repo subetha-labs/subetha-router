@@ -330,6 +330,8 @@ describe("動的 quote", () => {
     ["URL が https でない", () => baseConfig(), { routeId: PROFILE_ID, url: "http://provider.test/" }, "invalid_upstream_url"],
     ["URL に userinfo", () => baseConfig(), { routeId: PROFILE_ID, url: "https://u:p@provider.test/" }, "invalid_upstream_url"],
     ["拒否ホスト", () => baseConfig({ denyHosts: ["provider.test"] }), { routeId: PROFILE_ID, url: URL_A }, "invalid_upstream_url"],
+    // v1.3 SR-V1: subetha 受信（V2 burn-sale）のプロファイルは秘匿購入の口だけ。通常の動的 quote は I/O の前に拒む。
+    ["subetha 受信のプロファイル（秘匿購入専用）", () => baseConfig({ profile: { ...PROFILE, sourceRail: "subetha", source: { network: "eip155:11155111", asset: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF", decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" } } }), { routeId: PROFILE_ID, url: URL_A }, "private_only_profile"],
   ])("接続 0 で拒否: %s", async (_name, config, request, code) => {
     const core = await boot(config());
     const outcome = await core.quote({ principalId: "alice", requestId: "r1", ...request, upstream: { url: request.url }, source: "alice" });
@@ -338,6 +340,22 @@ describe("動的 quote", () => {
     expect(inbound.createOfferCalls).toBe(0);
     expect(await journalLines()).toEqual([]);
     expect(await ledgerText()).toBe("");
+  });
+
+  test("v1.3 SR-V1 (iii): 通常の動的購入の記録が、設定変更で subetha 受信になったプロファイルを指しても、purchase は I/O の前に private_only_profile で拒む", async () => {
+    const core = await boot(baseConfig());
+    const quote = await quoteOk(core);
+    // quote 自体は上流の 402 を 1 回読む。以後（purchase）で接続が増えないことを見る。
+    const before = connections();
+    const verifyBefore = inbound.verifyCalls;
+    await core.close();
+    opened.splice(opened.indexOf(core), 1);
+    const core2 = await boot(baseConfig({ profile: { ...PROFILE, sourceRail: "subetha", source: { network: "eip155:11155111", asset: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF", decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" } } }));
+    const result = await core2.purchase(purchaseArgs(quote, { ownerKey: quote.ownerKey }));
+    expect(result).toEqual({ paymentId: quote.paymentId, status: "rejected", code: "private_only_profile" });
+    expect(inbound.verifyCalls).toBe(verifyBefore);
+    expect(inbound.settleCalls).toBe(0);
+    expect(connections()).toEqual(before);
   });
 
   test("選択: adapter が返した順の先頭。上限超の額・形の違う額は飛ばす。通るものが無ければ no_matching_offer", async () => {

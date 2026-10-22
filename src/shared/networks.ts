@@ -177,7 +177,11 @@ export const EVM_TESTNET_NETWORKS: ReadonlySet<string> = Object.freeze(new Set([
  * zUSDC は x402 では受けない。`npm run sign` は鍵に触れる前にこの表で network・token・額の上限を確かめる（上限は `SIGN_MAX_AMOUNT` と同じ 20,000 = 0.02 zUSDC）。
  */
 export const SUBETHA_ZERC20_ASSETS: readonly { readonly network: string; readonly token: string; readonly decimals: number; readonly maxAmount: bigint }[] = Object.freeze([
+  // zERC20 V1（Sepolia、permit/burn 経路。`docs/subetha-hosted-inbound-design.md` §6.1）。
   Object.freeze({ network: "eip155:11155111", token: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF", decimals: 6, maxAmount: 20_000n }),
+  // zERC20 V2 "testnet-v2"（Sepolia、burn-sale 受信。`docs/zktls-router-v2-inbound.md` §10）: 別 deployment の zUSDC（tokenId 2、6 桁、underlying = test USDC
+  // `0xD9D3a44745a5d04197024a20fD5BeD9b8B56C60D`）。V2 担当の確認 2026-10-22（network.json: https://testnet-v2.zerc20.io/network.json）。上限は V1 と同じ。
+  Object.freeze({ network: "eip155:11155111", token: "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f", decimals: 6, maxAmount: 20_000n }),
 ]);
 
 /** 遅いチェーン（block ~12 秒）。期限の表（設計 §3.6）の右の列。 */

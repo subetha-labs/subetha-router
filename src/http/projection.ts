@@ -4,7 +4,7 @@
  */
 
 import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig, usesGasIndexedFee } from "../config.js";
-import type { Projection, QuoteDocument } from "../core/orchestrator.js";
+import type { PrivateQuoteDocument, Projection, QuoteDocument } from "../core/orchestrator.js";
 import type { InboundOffer } from "../ports/inbound.js";
 import { networkFamilyOf } from "../shared/networks.js";
 
@@ -29,7 +29,7 @@ export function dynamicListingOf(config: RouterConfig): Record<string, unknown> 
       fee: { ...profile.fee },
       // gas-indexed の手数料は Tempo 宛の MPP だけ（Solana 宛の MPP は cap を持たない。`docs/mpp-solana-design.md` §1.4）。
       ...(usesGasIndexedFee(profile) ? { feePolicy: { kind: "gas-indexed", feeMargin: profile.destination.feeMargin, maxFeeCeiling: profile.destination.maxFee } } : {}),
-      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp", usesGasIndexedFee(profile)),
+      disclosures: dynamicDisclosuresOf(profile.sourceRail === "mpp" || profile.sourceRail === "subetha", usesGasIndexedFee(profile)),
     })),
   };
 }
@@ -189,6 +189,44 @@ export function dynamicQuoteBody(quote: QuoteDocument, profile: DynamicProfile, 
 }
 
 /**
+ * 秘匿 quote の文書（`docs/zktls-router-design.md` §2・§2.1・§8.1）。動的の文書を継承せず**明示的に**組む: `resource` は秘匿購入の口（`POST <base>/v1/private/purchases`）、
+ * `upstream` 欄は無い（探りの要求は承認対象ではない）。`ownerKey` はこの応答にしか載らない。
+ */
+export function privateQuoteBody(quote: PrivateQuoteDocument, profile: DynamicProfile, canonicalBaseUrl: string): unknown {
+  return {
+    quoteId: quote.quoteId,
+    paymentId: quote.paymentId,
+    routeId: quote.routeId,
+    resource: { url: `${canonicalBaseUrl}/v1/private/purchases`, method: "POST" },
+    source: {
+      rail: profile.sourceRail,
+      amount: quote.source.amount,
+      asset: quote.source.asset,
+      decimals: profile.source.decimals,
+      network: quote.source.network,
+      payTo: quote.source.offer.payTo,
+      expiresAt: quote.source.offer.extra.expiresAt,
+      offer: quote.source.offer,
+    },
+    destination: {
+      rail: profile.rail,
+      quoted: quote.destination.quoted,
+      asset: quote.destination.asset,
+      decimals: profile.destination.decimals,
+      network: quote.destination.network,
+      payTo: quote.destination.payTo,
+      quoteFingerprint: quote.destination.quoteFingerprint,
+    },
+    pricing: { ...quote.pricing, sourceDecimals: profile.source.decimals, destinationDecimals: profile.destination.decimals },
+    // 受信で資金が動く時点: x402 は purchase（Router の settle）、SubEtha（burn-sale）は credential を作る前の burn（v1.3 FR-V5）。
+    disclosures: { ...dynamicDisclosuresOf(profile.sourceRail === "subetha", usesGasIndexedFee(profile)), privatePurchase: true, routerSeesRequestBody: false, routerSeesResponseBody: false },
+    private: quote.private,
+    approval: { required: true, boundTo: quote.approval.boundTo, deadlineMs: quote.approval.deadlineMs },
+    ownerKey: quote.ownerKey,
+  };
+}
+
+/**
  * R3 の 402。既存 quote があればその発行 offer をそのまま再提示し、無ければ
  * 「R2 で quote を取得せよ」という指示（`quoteUrl` と `routeId` のみ）を返す。
  * どちらも新しい quote・intent・孤児レコードを作らない。
@@ -254,5 +292,7 @@ export function projectionBody(projection: Projection): unknown {
             awaitingPaymentDoesNotMeanUnpaid: projection.dynamic.fundsMoveOnCredential && projection.status === "awaiting_payment",
           },
         }),
+    // 秘匿購入だけ（`docs/zktls-router-design.md` §7.3）。値・record 本体・封筒は core の射影に無い。
+    ...(projection.private === undefined ? {} : { private: projection.private }),
   };
 }

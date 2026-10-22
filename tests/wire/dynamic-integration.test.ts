@@ -585,6 +585,9 @@ test("受信が成立した後に送信が上流に拒否されたら、終端�
   expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "paid_data_unavailable", terminalReason: "destination_rejected" });
   expect(outboundCalls(fixtures).x402Payments).toBe(1);
   expect(journalEvents(router)).toEqual(["created", "source_pending", "source_settled", "destination_pending", "dest_failed"]);
+  // 通常（非秘匿）の動的購入の `source_settled` の行は従来どおり（秘匿購入だけが `eventId` を持つ。`docs/zktls-router-design.md` §7.1）。
+  const settledRow = readFileSync(router.journalPath, "utf8").split("\n").filter((line) => line.includes('"source_settled"')).map((line) => JSON.parse(line) as { patch: Record<string, unknown> })[0]!;
+  expect(settledRow.patch).not.toHaveProperty("eventId");
   // 再提出しても再試行しない。再起動後も同じ。
   fixtures.x402.state.pay = () => paidOk(router.payerAddress.x402, { price: 1 });
   expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "paid_data_unavailable" });

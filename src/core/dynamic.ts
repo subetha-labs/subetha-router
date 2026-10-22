@@ -25,6 +25,8 @@ import { capCoversFee, IntentCollisionError, intentFromCreated, type IntentStore
 import { classifyTransportError } from "../net/guarded-fetch.js";
 import type { DiagnosticsSink } from "../shared/diagnostics.js";
 import { withPurchaseDiagnostics, type PurchaseDiagnostics } from "./purchase-diagnostics.js";
+import type { CapacityLease } from "./private-capacity.js";
+import type { OutboundRead, PrivateCore } from "./private.js";
 
 const AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,29})$/;
 const MAX_AMOUNT_DIGITS = 30;
@@ -112,7 +114,7 @@ export interface DynamicQuoteFields {
   readonly dynamic: {
     readonly profileId: string;
     readonly pricing: DynamicPricing;
-    readonly sourceRail: "x402" | "mpp";
+    readonly sourceRail: "x402" | "mpp" | "subetha";
     readonly rail: "x402" | "mpp";
     /** 受信レールで credential を作った時点で資金が動く（MPP）。 */
     readonly fundsMoveOnCredential: boolean;
@@ -148,6 +150,11 @@ export interface DynamicCoreOptions {
   readonly deliver: (paymentId: string, diag?: PurchaseDiagnostics) => Promise<DynamicPurchaseOutcome>;
   /** 診断の記録（`docs/rejection-reasons-design.md` §4.1、タスク R-2）。省略時は何もしない。 */
   readonly diagnostics?: DiagnosticsSink;
+  /**
+   * 秘匿購入（`docs/zktls-router-design.md` §3.2）: `private` 欄を持つ intent だけ、上流の読み取りを私的 rail の探りに、受信成立後の継続を私的な送信レグに切り替える。
+   * 容量の予約は preflight の直後（受信 verify の前）。`private` 欄の無い intent の挙動は 1 行も変わらない。
+   */
+  readonly private?: PrivateCore["dynamicDeps"];
 }
 
 export interface DynamicPurchaseOutcome {
@@ -273,7 +280,8 @@ function fieldsOf(intent: Intent, ownerKey: string): DynamicQuoteFields {
       pricing: dynamic.pricing,
       sourceRail: profile.sourceRail,
       rail: profile.rail,
-      fundsMoveOnCredential: profile.sourceRail === "mpp",
+      // MPP と SubEtha（burn-sale: payer が burn を送ってから credential を作る）は credential の時点で資金が動く。
+      fundsMoveOnCredential: profile.sourceRail === "mpp" || profile.sourceRail === "subetha",
     },
     ownerKey,
   };
@@ -304,13 +312,18 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     }
   }
 
-  /** 上流を読む。**呼び出し側が宛先ホストの枠を持っていること。** */
-  async function readOffers(profileId: string, target: UpstreamTarget): Promise<{ readonly ok: true; readonly offers: readonly DestinationOffer[] } | { readonly ok: false; readonly code: string }> {
+  /** 上流を読む。**呼び出し側が宛先ホストの枠を持っていること。** 秘匿購入は私的 rail の探り（`read`）。 */
+  async function readOffers(profileId: string, target: UpstreamTarget, read: OutboundRead = outbound): Promise<{ readonly ok: true; readonly offers: readonly DestinationOffer[] } | { readonly ok: false; readonly code: string }> {
     try {
-      return { ok: true, offers: await outbound.readChallenge(profileId, target) };
+      return { ok: true, offers: await read.readChallenge(profileId, target) };
     } catch (error) {
       return { ok: false, code: error instanceof UpstreamMethodUnsupportedError ? "method_not_supported" : "offer_unavailable" };
     }
+  }
+
+  /** この intent の上流の読み取り口（秘匿購入なら私的 rail の探り）。 */
+  function readerFor(intent: Intent): OutboundRead {
+    return options.private !== undefined && options.private.isPrivate(intent) ? options.private.outboundFor(intent) : outbound;
   }
 
   /**
@@ -320,13 +333,14 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     profile: DynamicProfile,
     offer: DestinationOffer,
     target: UpstreamTarget,
+    read: OutboundRead = outbound,
   ): Promise<{ ok: true; cap: NonNullable<Parameters<typeof priceOf>[2]>; estimate: FeeEstimate } | { ok: false; reason: string }> {
-    if (typeof outbound.estimateFee !== "function" || profile.destination.maxFee === undefined) {
+    if (typeof read.estimateFee !== "function" || profile.destination.maxFee === undefined) {
       return { ok: false, reason: "fee_estimate_unavailable" };
     }
     let estimate: FeeEstimate;
     try {
-      estimate = await outbound.estimateFee(profile.profileId, offer, target);
+      estimate = await read.estimateFee(profile.profileId, offer, target);
     } catch {
       return { ok: false, reason: "fee_estimate_unavailable" };
     }
@@ -350,6 +364,10 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     const profile = resolveProfile(config, request.profileId);
     if (profile === undefined) {
       return { ok: false, code: "unknown_route" };
+    }
+    // `subetha` 受信（V2 burn-sale）のプロファイルは秘匿購入の口にだけ開く（`docs/zktls-router-v2-inbound.md` SR-V1）。I/O の前に拒む。
+    if (profile.sourceRail === "subetha") {
+      return { ok: false, code: "private_only_profile" };
     }
     const parsed = parseUpstreamUrl(request.url, { denyHosts: dynamic.denyHosts });
     if (!parsed.ok) {
@@ -523,8 +541,17 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     if (intent.dynamic === undefined || intent.principalId !== request.principalId || !ownerKeyMatches(request.ownerKey, intent.dynamic.ownerKeyHash)) {
       return missing();
     }
-    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true) {
+    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true || intent.privateInvalid === true) {
       return { paymentId: intent.paymentId, status: "rejected", code: "quote_unreadable" };
+    }
+    // 秘匿購入の記録は、秘匿購入の依存が無ければ実行しない（設計 §3.0）。
+    const isPrivate = intent.private !== undefined;
+    if (isPrivate && options.private === undefined) {
+      return { paymentId: intent.paymentId, status: "rejected", code: "private_disabled" };
+    }
+    // 防御: 秘匿の記録でない購入が `subetha` 受信のプロファイルを指していれば、I/O の前に拒む（SR-V1。quote の口で既に拒んでいる）。
+    if (!isPrivate && resolveProfile(config, intent.routeId)?.sourceRail === "subetha") {
+      return { paymentId: intent.paymentId, status: "rejected", code: "private_only_profile" };
     }
     if (request.routeId !== undefined && request.routeId !== intent.routeId) {
       return { paymentId: intent.paymentId, status: "rejected", code: "route_mismatch" };
@@ -541,7 +568,9 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     // 設定変更・無効化の検出（指紋には `enabled` も入る）。
     const dynamic = config.dynamic;
     const profile = resolveProfile(config, intent.routeId);
-    if (dynamic === undefined || profile === undefined || intent.routeFingerprint !== fingerprintOf(dynamicAuthoritativeTermsOf(dynamic, profile))) {
+    // 秘匿購入は動的の権威に加え秘匿の権威（allowlist・方針・上限・バイナリの指紋）も照合する（設計 §3.1 7）。
+    const expectedFingerprint = dynamic === undefined || profile === undefined ? undefined : isPrivate ? options.private!.routeFingerprintOf(profile) : fingerprintOf(dynamicAuthoritativeTermsOf(dynamic, profile));
+    if (dynamic === undefined || profile === undefined || intent.routeFingerprint !== expectedFingerprint) {
       note?.(`dynamic profile mismatch (profileId=${intent.routeId})`);
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "quote_changed" };
     }
@@ -593,31 +622,62 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       }
     }
 
-    // 3. 残高の事前確認 → 上流の読み直しと照合 → 受信 verify（何も書かない）
-    if (options.balanceOf !== undefined) {
-      const enough = await fundsAvailable(profile, intent);
-      if (!enough) {
-        return awaiting("operator_funds_unavailable");
+    // 2'. 秘匿購入の容量（FR-Z27。受信 verify の前・settle の前）。取れなければ何も書かず止める。settle に至らずに終わる出口では必ず返す。
+    let capacity: CapacityLease | undefined;
+    const isPrivate = options.private !== undefined && options.private.isPrivate(intent);
+    if (isPrivate) {
+      capacity = options.private!.reserveCapacity(intent);
+      if (capacity === undefined) {
+        return awaiting("private_capacity");
       }
     }
-    // 宛先ホストの枠は、ここから送信の終わりまで持つ（settle 後の読み直し・送信もこの枠の中。設計 §7.3）。
-    const host = gate.admitHost(parsed.host);
-    if (!host.ok) {
-      precheck("rate_limited");
-      return { paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: host.reason };
+    let transferred = false;
+    try {
+      // 3. 残高の事前確認 → 上流の読み直しと照合 → 受信 verify（何も書かない）
+      if (options.balanceOf !== undefined) {
+        const enough = await fundsAvailable(profile, intent);
+        if (!enough) {
+          return awaiting("operator_funds_unavailable");
+        }
+      }
+      // 宛先ホストの枠は、ここから送信の終わりまで持つ（settle 後の読み直し・送信もこの枠の中。設計 §7.3）。
+      const host = gate.admitHost(parsed.host);
+      if (!host.ok) {
+        precheck("rate_limited");
+        return { paymentId, status: "awaiting_payment", code: "rate_limited", terminalReason: host.reason };
+      }
+      return await withLease(host.lease, () =>
+        purchaseWithHost(intent, profile, credential, isPromoted, upstreamTargetOf(intent.upstream!), diag, precheck, {
+          lease: capacity,
+          transfer: () => {
+            transferred = true;
+          },
+        }),
+      );
+    } finally {
+      if (capacity !== undefined && !transferred) capacity.release();
     }
-    return withLease(host.lease, () => purchaseWithHost(intent, profile, credential, isPromoted, upstreamTargetOf(intent.upstream!), diag, precheck));
   }
 
-  async function purchaseWithHost(intent: Intent, profile: DynamicProfile, credential: PaymentCredential, isPromoted: boolean, target: UpstreamTarget, diag: PurchaseDiagnostics, precheck: (code: string) => void): Promise<DynamicPurchaseOutcome> {
+  async function purchaseWithHost(
+    intent: Intent,
+    profile: DynamicProfile,
+    credential: PaymentCredential,
+    isPromoted: boolean,
+    target: UpstreamTarget,
+    diag: PurchaseDiagnostics,
+    precheck: (code: string) => void,
+    privateLease: { readonly lease: CapacityLease | undefined; readonly transfer: () => void } = { lease: undefined, transfer: () => {} },
+  ): Promise<DynamicPurchaseOutcome> {
+    const reader = readerFor(intent);
     const paymentId = intent.paymentId;
     const awaiting = (code: string): DynamicPurchaseOutcome => {
       precheck(code);
       return { paymentId, status: "awaiting_payment", code };
     };
     const plainAwaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
-    // 読み直しは記録の要求（URL・方法・本文）そのもので行う（FR-P2）。
-    const read = await readOffers(profile.profileId, target);
+    // 読み直しは記録の要求（URL・方法・本文）そのもので行う（FR-P2）。秘匿購入は探りの要求（本文 `{}`）。
+    const read = await readOffers(profile.profileId, target, reader);
     if (!read.ok) {
       return awaiting("offer_unavailable");
     }
@@ -640,7 +700,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       // 再見積り（§1.4）: 今の bound が記録の cap を超えていれば verify に進まない。cap は上げない。記録にも書かない。
       // Solana 宛の MPP は cap を持たないので見積もらない（`docs/mpp-solana-design.md` §1.4 (b)。上の `capCoversFee` の検査は残す）。
       if (usesGasIndexedFee(profile)) {
-        const current = await estimateFor(profile, intent.destination.selectedOffer, target);
+        const current = await estimateFor(profile, intent.destination.selectedOffer, target, reader);
         if (!current.ok) {
           return awaiting("fee_estimate_unavailable");
         }
@@ -738,9 +798,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       diag.note(() => ({ stage: "source_settle", outcome, promoted: true, ...(code === undefined ? {} : { code }), ...(settleElapsedMs === undefined ? {} : { elapsedMs: settleElapsedMs }) }));
     const outcome = isRecord(settled) ? settled["outcome"] : undefined;
     const txRef = isRecord(settled) ? settled["txRef"] : undefined;
+    const eventId = isRecord(settled) ? settled["eventId"] : undefined;
     if (outcome === "settled" && typeof txRef === "string" && txRef !== "") {
       try {
-        await store.append(paymentId, "source_settled", { txRef });
+        // 支払いイベントの識別子は**秘匿購入だけ**に写す（FR-Z06 (b) の材料。通常の動的購入の journal の形は不変）。
+        const isPrivateIntent = options.private !== undefined && options.private.isPrivate(intent);
+        await store.append(paymentId, "source_settled", { txRef, ...(isPrivateIntent && typeof eventId === "string" && eventId !== "" ? { eventId } : {}) });
       } catch {
         // 静的と同じ（`orchestrator.ts` の settle）: 記録できなければ `unknown` を返し、別の行を書かず、送信を始めない。
         note?.(`source_settled could not be journaled (paymentId=${paymentId}); answering unknown`);
@@ -749,6 +812,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       }
       settleNote("settled");
       // 昇格の後の送信（読み直し・支払い・遅れて届く callback を含む）は `promoted:true` の scope の中（購入の scope は昇格の前の値を持ち得る）。
+      if (options.private !== undefined && options.private.isPrivate(intent)) {
+        // 秘匿購入: 容量の lease の所有は送信レグへ移る（設計 §3.2）。
+        privateLease.transfer();
+        const privateDeps = options.private;
+        return diag.stage({ promoted: true }, () => privateDeps.deliver(paymentId, diag, privateLease.lease));
+      }
       return diag.stage({ promoted: true }, () => options.deliver(paymentId, diag));
     }
     /**

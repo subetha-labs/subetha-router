@@ -69,6 +69,9 @@ export type DiagTransportCode = (typeof DIAG_TRANSPORT_CODES)[number];
 
 /** transport の operation の閉じた集合（`src/`・`tools/` の literal）。集合の外は `other` に読み替える。 */
 export const DIAG_OPS = [
+  // 秘匿購入の探り（未払いの 402 の読み取り）と Tempo の読取 RPC（`src/adapters/outbound/private-*.ts`）
+  "private_probe",
+  "private_rpc",
   "facilitator_verify",
   "facilitator_settle",
   "facilitator_challenge",
@@ -239,6 +242,44 @@ const ROUTER_CODES = [
   // challenge の読み直しの既定・facilitator の期限（§4.3・§5.3）
   "challenge_invalid",
   "deadline",
+  // 秘匿購入（`docs/zktls-router-design.md` §7・§8。SAFE_REASONS の追加分、core/private.ts の code・終端理由）
+  "attest_closed",
+  "attest_expired",
+  "attest_foreign",
+  "attest_in_progress",
+  "attest_not_ready",
+  "bundle_too_large",
+  "intent_mismatch",
+  "intent_too_large",
+  "interrupted_after_release",
+  "interrupted_before_handover",
+  "interrupted_before_release",
+  "invalid_bundle",
+  "invalid_intent",
+  "not_found",
+  "private_attest_invalid",
+  "private_attest_timeout",
+  "private_capacity",
+  "private_credential_lifetime",
+  "private_disabled",
+  "private_only_profile",
+  "private_handover_unknown",
+  "private_header_invalid",
+  "private_inbound_identity_missing",
+  "private_issuance_duplicate",
+  "private_issuance_unknown",
+  "private_issue_failed",
+  "private_receipt_mismatch",
+  "private_record_unknown",
+  "private_release_unknown",
+  "private_session_timeout",
+  "private_unavailable",
+  "private_verifier_unavailable",
+  "private_verify_timeout",
+  "record_corrupt",
+  "record_expired",
+  "record_mismatch",
+  "record_not_available",
 ] as const;
 
 /** `code` に許す値: Router の固定の code ∪ 自前の facilitator の code（理由の表の `self_facilitator` 節）∪ 署名の道具の段 ∪ `unrecognized`。 */

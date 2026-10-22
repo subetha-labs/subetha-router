@@ -492,60 +492,21 @@ export class DynamicChallengeError extends Error {
   }
 }
 
-interface DynamicChallenge {
+export interface DynamicChallenge {
   readonly accepts: readonly unknown[];
   /** SDK に渡す `resource`（`url` と、文字列の説明だけ）。 */
   readonly resource: { url: string; description?: string; mimeType?: string };
 }
 
-export interface X402DynamicPath {
-  readChallenge(profileId: string, target: UpstreamTarget): Promise<readonly DestinationOffer[]>;
-  pay(request: PayRequest & { readonly target: UpstreamTarget }): Promise<PayResult>;
-}
-
-/** 未払いの読取・有料要求の期限の既定。drain の上限の試験（タスク R-0）が読む。 */
-export const X402_DYNAMIC_UNPAID_TIMEOUT_MS = 5_000;
-export const X402_DYNAMIC_PAID_TIMEOUT_MS = 30_000;
-
-export function createX402DynamicPath(capability: EvmSigningCapability, options: X402DynamicOptions): X402DynamicPath {
-  const transport = options.transport;
-  if (transport.allowLoopback) {
-    throw new Error("the dynamic x402 path must not use a transport that allows loopback");
-  }
-  if (!transport.boundsDns) {
-    // 名前解決に期限が無いと、未払い 5 秒・有料 30 秒の期限が効かない（止まった解決を待ち続ける）。
-    throw new Error("the dynamic x402 path requires a transport with a DNS deadline");
-  }
-  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? X402_DYNAMIC_UNPAID_TIMEOUT_MS;
-  const paidTimeoutMs = options.paidTimeoutMs ?? X402_DYNAMIC_PAID_TIMEOUT_MS;
-  const now = options.now ?? Date.now;
-  const denyHosts = options.denyHosts ?? [];
-  const diagnostics = options.diagnostics;
-
-  const profiles = new Map<string, DynamicProfile>();
-  for (const [profileId, profile] of Object.entries(options.profiles)) {
-    if (profile.rail !== "x402") continue;
-    if (profile.destination.scheme !== "exact" || profile.destination.tokenDomain === undefined) {
-      throw new Error(`dynamic profile ${profileId} is not an x402 exact profile with a tokenDomain`);
-    }
-    evmChainIdOf(profile.destination.network);
-    profiles.set(profileId, profile);
-  }
-
-  function profileFor(profileId: string): DynamicProfile {
-    const profile = profiles.get(profileId);
-    if (profile === undefined) {
-      throw new Error("no dynamic x402 profile for route");
-    }
-    return profile;
-  }
-
-  /** 運用者自身のアドレス（署名者と、受信の受取先、注入された運用者の集合。送信の設計 §2.3）。 */
-  function operatorAddressesOf(profile: DynamicProfile): string[] {
-    return [capability.signer.address, profile.source.payTo, ...(options.operatorAddresses ?? [])];
-  }
-  const receiptForm = EVM_RECEIPT_FORM(capability.signer.address);
-
+/**
+ * 未払いの 402 の読取（`getChallenge`）と要求の init（`requestInitOf`）。動的 `pay`/`readChallenge` と、秘匿購入の探り（`docs/zktls-router-design.md` §6.1）が
+ * **同じ関数**を使う（切り出しだけで挙動は不変）。
+ */
+export function createX402ChallengeReader(deps: { readonly transport: GuardedTransport; readonly denyHosts: readonly string[]; readonly unpaidTimeoutMs: number }): {
+  requestInitOf(target: UpstreamTarget, headers: Record<string, string>, timeoutMs: number): RequestInit;
+  getChallenge(target: UpstreamTarget, ctx: { routeId: string; operation: string }): Promise<DynamicChallenge>;
+} {
+  const { transport, denyHosts, unpaidTimeoutMs } = deps;
   /** 上流への要求の init（方法・本文・content-type）。POST の本文は target の文字列そのもの（記録が権威。FR-P2）。 */
   function requestInitOf(target: UpstreamTarget, headers: Record<string, string>, timeoutMs: number): RequestInit {
     if (target.method === "POST") {
@@ -609,6 +570,130 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
       },
     };
   }
+  return { requestInitOf, getChallenge };
+}
+
+export type X402SignOnlyResult =
+  | { readonly ok: true; readonly payload: PaymentPayloadLike; readonly headers: Record<string, string>; readonly validBefore: bigint }
+  | { readonly ok: false; readonly reason: "destination_deadline" | "destination_not_signed" | "destination_offer_changed" | "destination_payload_mismatch"; readonly payload?: PaymentPayloadLike };
+
+export interface PaymentPayloadLike {
+  readonly x402Version: number;
+  readonly accepted?: unknown;
+  readonly payload: { readonly authorization: { readonly validBefore: string | bigint | number } } & Record<string, unknown>;
+}
+
+/**
+ * 署名だけ（送らない）。`pay` の署名部分の切り出しで、動的 `pay` と秘匿購入の `issueCredential`（`docs/zktls-router-design.md` §6.1）が**同じ関数**を使う:
+ * 組み直しの署名器、SDK の client（選ばれた offer の完全一致・支出制御・`onBeforePaymentCreation` の arm）、`createPaymentPayload`、署名 1 回・`accepted` 一致・v2 の確認、
+ * `encodePaymentSignatureHeader`。transport には触れない（`fetch` 0 回）。
+ */
+export async function signX402PaymentOnly(args: {
+  readonly capability: EvmSigningCapability;
+  readonly profile: DynamicProfile;
+  readonly approved: DestinationOffer;
+  readonly challenge: DynamicChallenge;
+  readonly now: () => number;
+  readonly deadlineMs: number;
+}): Promise<X402SignOnlyResult> {
+  const { capability, profile, approved, challenge, now } = args;
+  const approvedJson = stableJson(approved);
+  // 一致の定義（設計 §3.2）: 保存した offer の全体が、今の accepts のどれかと一致すること。
+  const current = challenge.accepts.find((entry) => stableJson(entry) === approvedJson);
+  if (current === undefined) {
+    return { ok: false, reason: "destination_offer_changed" };
+  }
+  // SDK には写しを渡す（SDK が書き換えても、照合に使う値は変わらない）。
+  const selected = JSON.parse(JSON.stringify(current)) as PaymentRequired["accepts"][number];
+
+  const guard = createRebuildingSigner({ signer: capability.signer, destination: profile.destination, offer: approved, now, deadlineMs: args.deadlineMs });
+  const client = new x402Client((_version, requirements) => {
+    if (requirements.length !== 1 || stableJson(requirements[0]) !== approvedJson) {
+      throw new SigningRefusedError("destination_selected_offer_mismatch");
+    }
+    return requirements[0]!;
+  });
+  client.setSpendControls({
+    maxAmountPerPayment: false,
+    allowedAssets: [{ network: approved.network as Network, asset: approved.asset, maxAmountPerPayment: approved.amount }],
+  });
+  client.register(capability.network as Network, new ExactEvmScheme(guard.signer));
+  client.onBeforePaymentCreation(async (context) => {
+    if (stableJson(context.selectedRequirements) !== approvedJson || context.paymentRequired.x402Version !== 2) {
+      return { abort: true, reason: "destination_selected_offer_mismatch" };
+    }
+    guard.arm();
+    return undefined;
+  });
+  const httpClient = new x402HTTPClient(client);
+
+  let payload;
+  try {
+    // 上流のトップレベルの欄（`extensions`・`error` など）は SDK に渡さない。渡すのは確かめた 3 つだけ。
+    payload = await httpClient.createPaymentPayload({ x402Version: 2, resource: challenge.resource, accepts: [selected] } as PaymentRequired);
+  } catch (error) {
+    // payload 生成の失敗は送信前。署名の境界で止めた場合もここに来る。期限の拒否は理由をそのまま出す。
+    return { ok: false, reason: isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed" };
+  }
+  const like = payload as unknown as PaymentPayloadLike;
+  if (guard.signatures() !== 1 || stableJson((payload as { accepted?: unknown }).accepted) !== approvedJson || payload.x402Version !== 2) {
+    return { ok: false, reason: "destination_payload_mismatch", payload: like };
+  }
+  const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
+  const validBefore = like.payload.authorization.validBefore;
+  return { ok: true, payload: like, headers: paymentHeaders, validBefore: BigInt(validBefore) };
+}
+
+export interface X402DynamicPath {
+  readChallenge(profileId: string, target: UpstreamTarget): Promise<readonly DestinationOffer[]>;
+  pay(request: PayRequest & { readonly target: UpstreamTarget }): Promise<PayResult>;
+}
+
+/** 未払いの読取・有料要求の期限の既定。drain の上限の試験（タスク R-0）が読む。 */
+export const X402_DYNAMIC_UNPAID_TIMEOUT_MS = 5_000;
+export const X402_DYNAMIC_PAID_TIMEOUT_MS = 30_000;
+
+export function createX402DynamicPath(capability: EvmSigningCapability, options: X402DynamicOptions): X402DynamicPath {
+  const transport = options.transport;
+  if (transport.allowLoopback) {
+    throw new Error("the dynamic x402 path must not use a transport that allows loopback");
+  }
+  if (!transport.boundsDns) {
+    // 名前解決に期限が無いと、未払い 5 秒・有料 30 秒の期限が効かない（止まった解決を待ち続ける）。
+    throw new Error("the dynamic x402 path requires a transport with a DNS deadline");
+  }
+  const unpaidTimeoutMs = options.unpaidTimeoutMs ?? X402_DYNAMIC_UNPAID_TIMEOUT_MS;
+  const paidTimeoutMs = options.paidTimeoutMs ?? X402_DYNAMIC_PAID_TIMEOUT_MS;
+  const now = options.now ?? Date.now;
+  const denyHosts = options.denyHosts ?? [];
+  const diagnostics = options.diagnostics;
+
+  const profiles = new Map<string, DynamicProfile>();
+  for (const [profileId, profile] of Object.entries(options.profiles)) {
+    if (profile.rail !== "x402") continue;
+    if (profile.destination.scheme !== "exact" || profile.destination.tokenDomain === undefined) {
+      throw new Error(`dynamic profile ${profileId} is not an x402 exact profile with a tokenDomain`);
+    }
+    evmChainIdOf(profile.destination.network);
+    profiles.set(profileId, profile);
+  }
+
+  function profileFor(profileId: string): DynamicProfile {
+    const profile = profiles.get(profileId);
+    if (profile === undefined) {
+      throw new Error("no dynamic x402 profile for route");
+    }
+    return profile;
+  }
+
+  /** 運用者自身のアドレス（署名者と、受信の受取先、注入された運用者の集合。送信の設計 §2.3）。 */
+  function operatorAddressesOf(profile: DynamicProfile): string[] {
+    return [capability.signer.address, profile.source.payTo, ...(options.operatorAddresses ?? [])];
+  }
+  const receiptForm = EVM_RECEIPT_FORM(capability.signer.address);
+
+  // 未払いの読取と要求の init は秘匿購入の探りと共有（切り出しだけで挙動は不変）。
+  const { requestInitOf, getChallenge } = createX402ChallengeReader({ transport, denyHosts, unpaidTimeoutMs });
 
   return {
     /** 検査を通った offer だけを、**上流の順のまま**返す（先頭が §2.3 の「最初の 1 件」）。 */
@@ -649,55 +734,26 @@ export function createX402DynamicPath(capability: EvmSigningCapability, options:
         recordChallengeFailure(diagnostics, error, error instanceof DynamicChallengeError ? error.reason : undefined, challengeStartedAt);
         return { outcome: "not_sent", reason: "destination_challenge_unreadable" };
       }
-      // 一致の定義（設計 §3.2）: 保存した offer の全体が、今の accepts のどれかと一致すること。
-      const current = challenge.accepts.find((entry) => stableJson(entry) === approvedJson);
-      if (current === undefined) {
-        return { outcome: "not_sent", reason: "destination_offer_changed" };
-      }
-      // SDK には写しを渡す（SDK が書き換えても、照合に使う値は変わらない）。
-      const selected = JSON.parse(JSON.stringify(current)) as PaymentRequired["accepts"][number];
-
-      const guard = createRebuildingSigner({ signer: capability.signer, destination: profile.destination, offer: approved, now, deadlineMs: request.deadlineMs });
-      const client = new x402Client((_version, requirements) => {
-        if (requirements.length !== 1 || stableJson(requirements[0]) !== approvedJson) {
-          throw new SigningRefusedError("destination_selected_offer_mismatch");
+      // 署名だけ（送らない）。秘匿購入の `issueCredential` と同じ関数（切り出しだけで挙動は不変）。
+      const signed = await signX402PaymentOnly({ capability, profile, approved, challenge, now, deadlineMs: request.deadlineMs });
+      if (!signed.ok) {
+        if (signed.reason === "destination_offer_changed") {
+          return { outcome: "not_sent", reason: "destination_offer_changed" };
         }
-        return requirements[0]!;
-      });
-      client.setSpendControls({
-        maxAmountPerPayment: false,
-        allowedAssets: [{ network: approved.network as Network, asset: approved.asset, maxAmountPerPayment: approved.amount }],
-      });
-      client.register(capability.network as Network, new ExactEvmScheme(guard.signer));
-      client.onBeforePaymentCreation(async (context) => {
-        if (stableJson(context.selectedRequirements) !== approvedJson || context.paymentRequired.x402Version !== 2) {
-          return { abort: true, reason: "destination_selected_offer_mismatch" };
+        if (signed.reason === "destination_payload_mismatch") {
+          // `cid` の入力は署名した authorization の値の参照だけ（hash は後回しの処理で。記録は送出の後、§12.3）。
+          recordSignNotSent(diagnostics, "destination_payload_mismatch", outboundDiagnosticsEnabled(diagnostics) && signed.payload !== undefined ? evmCidInputOf(signed.payload as never, approved) : undefined);
+          return { outcome: "not_sent", reason: "destination_payload_mismatch" };
         }
-        guard.arm();
-        return undefined;
-      });
-      const httpClient = new x402HTTPClient(client);
-
-      let payload;
-      try {
-        // 上流のトップレベルの欄（`extensions`・`error` など）は SDK に渡さない。渡すのは確かめた 3 つだけ。
-        payload = await httpClient.createPaymentPayload({ x402Version: 2, resource: challenge.resource, accepts: [selected] } as PaymentRequired);
-      } catch (error) {
-        // payload 生成の失敗は送信前。署名の境界で止めた場合もここに来る。期限の拒否は理由をそのまま出す。
-        const reason = isSigningRefusal(error, "destination_deadline") ? "destination_deadline" : "destination_not_signed";
-        recordSignNotSent(diagnostics, reason);
-        return { outcome: "not_sent", reason };
+        recordSignNotSent(diagnostics, signed.reason);
+        return { outcome: "not_sent", reason: signed.reason };
       }
-      // `cid` の入力は署名した authorization の値の参照だけ（hash は後回しの処理で。記録は送出の後、§12.3）。
-      const cid = outboundDiagnosticsEnabled(diagnostics) ? evmCidInputOf(payload, approved) : undefined;
-      if (guard.signatures() !== 1 || stableJson((payload as { accepted?: unknown }).accepted) !== approvedJson || payload.x402Version !== 2) {
-        recordSignNotSent(diagnostics, "destination_payload_mismatch", cid);
-        return { outcome: "not_sent", reason: "destination_payload_mismatch" };
-      }
+      const payload = signed.payload;
+      const cid = outboundDiagnosticsEnabled(diagnostics) ? evmCidInputOf(payload as never, approved) : undefined;
 
       const payCtx = { routeId: request.routeId, operation: "pay" };
       // 要求を先に組み（ヘッダの符号化）、**送出の委譲の直前**に承認の期限（FR-36）。署名だけでは資金は動かない。
-      const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
+      const paymentHeaders = signed.headers;
       if (!(now() < request.deadlineMs)) {
         recordSignNotSent(diagnostics, "destination_deadline", cid);
         return { outcome: "not_sent", reason: "destination_deadline" };

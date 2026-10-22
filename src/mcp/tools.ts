@@ -14,7 +14,7 @@
  *   固定エラーを返す（推測で署名しない）。
  */
 
-import type { QuoteView, RouterClient } from "../client/types.js";
+import type { PrivateQuoteView, PrivateRouterClient, QuoteView, RouterClient } from "../client/types.js";
 
 /** 合成レールかどうか。実レールでは credential を組まない。 */
 export type AdapterMode = "synthetic" | "real";
@@ -54,7 +54,7 @@ export interface InboundPayer {
 }
 
 export interface ToolDeps {
-  readonly client: RouterClient;
+  readonly client: RouterClient & Partial<PrivateRouterClient>;
   readonly mode: AdapterMode;
   readonly evidence: Evidence;
   /**
@@ -71,6 +71,11 @@ export const TOOL_NAMES = {
   quoteUrl: "subetha_router_quote_url",
   purchase: "subetha_router_purchase",
   status: "subetha_router_status",
+  // 秘匿購入（`docs/zktls-router-design.md` §8.3）。既存 5 ツールは不変。
+  privateQuote: "subetha_router_private_quote",
+  privatePurchase: "subetha_router_private_purchase",
+  privateAttest: "subetha_router_private_attest",
+  privateRecord: "subetha_router_private_record",
 } as const;
 
 /** 応答に必ず添える。合成であることを隠さない。 */
@@ -319,15 +324,111 @@ export interface ToolHandlers {
     quote?: unknown;
   }): Promise<Record<string, unknown>>;
   status(input: { paymentId: string; ownerKey?: string | undefined }): Promise<Record<string, unknown>>;
+  /** 秘匿購入（設計 §8.3）。 */
+  privateQuote(input: { profileId: string; requestId: string; intentB64: string }): Promise<Record<string, unknown>>;
+  privatePurchase(input: { quoteId: string; requestId: string; approval?: string | undefined; credential?: string | undefined; quote?: unknown }): Promise<Record<string, unknown>>;
+  privateAttest(input: { paymentId: string; ownerKey: string; bundleB64: string }): Promise<Record<string, unknown>>;
+  privateRecord(input: { paymentId: string; ownerKey: string }): Promise<Record<string, unknown>>;
   /** テスト用: 発行済み quote の数（プロセス内保持の確認）。 */
   issuedCount(): number;
+}
+
+/**
+ * 秘匿 quote の承認対象（設計 §2.1・§8.3）: 両レグの額・資産・ネットワーク・受取先、host・path・メソッド、本文の commitment と長さ、Payer 鍵、`intentSha256`、
+ * 方針（長さ）、上限、資金が動く時点（レグ別）、返金無し・unknown の可能性。credential の値は quote には無い。
+ */
+function privateApprovalSubject(quote: PrivateQuoteView): Record<string, unknown> {
+  return {
+    quoteId: quote.quoteId,
+    paymentId: quote.paymentId,
+    routeId: quote.routeId,
+    resource: quote.resource,
+    source: quote.source,
+    destination: quote.destination,
+    pricing: quote.pricing,
+    disclosures: quote.disclosures,
+    private: quote.private,
+    approval: quote.approval,
+    fundsMoveOnCredential: false,
+    privatePurchase: true,
+  };
+}
+
+function privateNextStep(quote: PrivateQuoteView): string {
+  const priv = quote.private as Record<string, unknown>;
+  const target = priv["target"] as Record<string, unknown> | undefined;
+  return [
+    "This is a PRIVATE purchase: the Router never sees the request body or the response body. It only issues the outbound payment header and runs the Verifier.",
+    `Show the human both legs (inbound total ${String((quote.pricing as Record<string, unknown>)["total"])} base units; outbound ${String((priv["outbound"] as Record<string, unknown> | undefined)?.["amount"])} to ${String((priv["outbound"] as Record<string, unknown> | undefined)?.["payTo"])}), ` +
+      `the target https://${String(target?.["host"])}${String(target?.["path"])} (${String(priv["method"])}), the body commitment and length, the payer key, intentSha256 ${String(priv["intentSha256"])}, ` +
+      "the deadline policies (session, attest, record retention) and that nothing is refunded; outcome `unknown` is possible after the inbound payment settled.",
+    "Inbound funds move when the Router settles at purchase (before the outbound credential is issued); outbound funds move when the Provider receives the paid request (x402) or broadcasts the pull transfer (Tempo).",
+    `If the human approves, build the inbound credential with your own key (npm run sign -- '<quote>'), then call ${TOOL_NAMES.privatePurchase} with this quote document (it carries the owner key). ` +
+      "The response returns the Verifier address, the released header, the header file and the release bytes: run `payer-finalize-order` and `executor-session` immediately (before `deadlines.sessionBy`), " +
+      `then \`executor-prove\` and ${TOOL_NAMES.privateAttest} with the bundle; fetch the record with ${TOOL_NAMES.privateRecord} and decrypt locally with \`payer-decrypt\`.`,
+  ].join(" ");
 }
 
 export function createToolHandlers(deps: ToolDeps): ToolHandlers {
   /** `quoteId → QuoteView`。`execute()` が QuoteView 全体を要求するため保持する。 */
   const issued = new Map<string, QuoteView>();
+  const privateIssued = new Map<string, PrivateQuoteView>();
+  const privateUnavailable = (): Record<string, unknown> => withEvidence(deps, { ok: false, error: "private_disabled", detail: "This Router client has no private purchase operations." });
 
   return {
+    async privateQuote(input): Promise<Record<string, unknown>> {
+      if (deps.client.privateQuote === undefined) return privateUnavailable();
+      const result = await deps.client.privateQuote(input);
+      if (!result.ok) return withEvidence(deps, quoteFailureOf(result));
+      privateIssued.set(result.quote.quoteId, result.quote);
+      return withEvidence(deps, { ok: true, approvalRequired: true, quote: result.quote, nextStep: privateNextStep(result.quote), subject: privateApprovalSubject(result.quote) });
+    },
+
+    async privatePurchase(input): Promise<Record<string, unknown>> {
+      if (deps.client.privatePurchase === undefined) return privateUnavailable();
+      const quote = (input.quote as PrivateQuoteView | undefined) ?? privateIssued.get(input.quoteId);
+      if (quote === undefined) {
+        return withEvidence(deps, { ok: false, error: "quote_required", detail: `Call ${TOOL_NAMES.privateQuote} first and pass the quote it returns as the \`quote\` argument.` });
+      }
+      if (input.credential === undefined || input.credential === "") {
+        // 秘匿購入の受信 credential は呼び出し側が自分の鍵で作る（合成の代替は無い: 受信は実 x402）。
+        return withEvidence(deps, { ok: false, error: "credential_required", detail: "Build the inbound credential with your own key (npm run sign) and pass it as `credential`. No payment was started." });
+      }
+      const result = await deps.client.privatePurchase({ quote, requestId: input.requestId, approval: { approved: true, quoteId: input.approval ?? "" }, credential: input.credential });
+      if (result.outcome === "awaiting_session") {
+        // 引き渡し: Payer のファイル契約（`releasedHeader`・`headerFile`・`releaseB64`）をそのまま返す（bearer を含む。表示・保存の対象ではなく executor に渡す）。
+        return withEvidence(deps, {
+          ok: true,
+          outcome: "awaiting_session",
+          paymentId: result.handover.paymentId,
+          handover: result.handover,
+          nextStep:
+            `Run now (before ${new Date(result.handover.deadlines.sessionBy).toISOString()}): write handover.headerFile to a file and call \`delivery payer-finalize-order --intent <intent> --payment-header-file <file> --out <order>\`, ` +
+            `then \`delivery executor-session --verifier-addr ${result.handover.verifier.address} --order <order> ...\`, then \`executor-prove\`, then ${TOOL_NAMES.privateAttest} with the bundle (base64). ` +
+            "The released header is a bearer: give it only to the executor; do not log or store it.",
+        });
+      }
+      return withEvidence(deps, { ok: false, ...result });
+    },
+
+    async privateAttest(input): Promise<Record<string, unknown>> {
+      if (deps.client.privateAttest === undefined) return privateUnavailable();
+      const result = await deps.client.privateAttest(input);
+      if (!result.ok) return withEvidence(deps, { ok: false, error: result.error, httpStatus: result.status });
+      return withEvidence(deps, {
+        ...result,
+        ok: result.status === "delivered_private",
+        proof: result.status === "delivered_private" ? { verifiedDelivery: true, requestBinding: "see private.proof", upstreamReceipt: "claimed", onChainFinality: "not_checked" } : { verifiedDelivery: false, onChainFinality: "not_checked" },
+        nextStep: result.status === "delivered_private" ? `Fetch the record with ${TOOL_NAMES.privateRecord} and decrypt locally with payer-decrypt (the Router never sees the plaintext).` : "Attestation did not succeed: the outbound leg is unknown (the credential may have been used). Do not retry on your own; the record (if any) is still retrievable for your own decryption.",
+      });
+    },
+
+    async privateRecord(input): Promise<Record<string, unknown>> {
+      if (deps.client.privateRecord === undefined) return privateUnavailable();
+      const result = await deps.client.privateRecord(input);
+      if (!result.ok) return withEvidence(deps, { ok: false, error: result.error, httpStatus: result.status });
+      return withEvidence(deps, { ...result, ok: true, note: "The record contains the released payment header (bearer) in its revealed prefix: pass it to payer-decrypt and do not log it." });
+    },
     async listRoutes(): Promise<Record<string, unknown>> {
       const result = await deps.client.listRoutes();
       // 動的プロファイルの一覧は落とさず返す（設計 §1.1）。無ければ欄ごと無い。

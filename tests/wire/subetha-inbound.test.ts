@@ -70,6 +70,72 @@ async function callCounts(fixture: Listening): Promise<{ verifyCalls: number; se
   return (await response.json()) as { verifyCalls: number; settleCalls: number };
 }
 
+describe("subetha inbound: V2 burn-sale の形（`docs/zktls-router-v2-inbound.md` FR-V3。fixture の --v2 on）", () => {
+  const BURN = `0x${"ab".repeat(32)}`;
+  const withBurn = (offer: InboundOffer, burnTxHash: string | undefined): PaymentCredential => ({ x402Version: 2, accepted: structuredClone(offer), payload: { challengeNonce: offer.extra.challengeNonce, ...(burnTxHash === undefined ? {} : { burnTxHash }) } });
+  async function v2(args: readonly string[] = []): Promise<{ inbound: ReturnType<typeof createSubethaInbound>; offer: InboundOffer }> {
+    const fixture = await startFacilitator(["--v2", "on", ...args]);
+    const inbound = createSubethaInbound({ facilitatorUrl: fixture.baseUrl, transport: createGuardedTransport({ allowLoopback: true, report: () => {} }) });
+    const offer = await inbound.createOffer({ routeId: "priv-subetha", amount: "2000", asset: TOKEN, network: NETWORK, routeBinding: ROUTE_BINDING, nowMs: Date.now() });
+    return { inbound, offer };
+  }
+  it("challenge: extra.settlementKind が写り、payTo は注文ごとの burn address。settle: transaction = burnTxHash、eventId = <chainId>:<tx>:<logIndex>（再 settle でも同じ）", async () => {
+    const { inbound, offer } = await v2();
+    expect(offer.extra["settlementKind"]).toBe("zerc20-v2-burn-sale");
+    expect(offer.payTo).not.toBe(PAY_TO);
+    expect(offer.payTo).toMatch(/^0x[0-9a-f]{40}$/);
+    expect(offer.extra.fundsMoveOnCredential).toBe(true);
+    const credential = withBurn(offer, BURN);
+    expect(inbound.preflight(offer, credential, Date.now())).toEqual({ ok: true });
+    expect(await inbound.verify(offer, credential)).toEqual({ isValid: true });
+    const first = await inbound.settle(offer, credential);
+    expect(first).toEqual({ outcome: "settled", txRef: BURN, eventId: `${CHAIN_ID}:${BURN}:121` });
+    expect(await inbound.settle(offer, credential)).toEqual(first);
+  });
+  it("eventId が無い・chainId が違う・tx が違う → settled だが eventId 無し（秘匿購入は発行しない側で止まる）", async () => {
+    for (const [mode, _why] of [["none", "absent"], ["bad-chain", "chain"], ["bad-tx", "tx"]] as const) {
+      const { inbound, offer } = await v2(["--v2-event", mode]);
+      const settled = await inbound.settle(offer, withBurn(offer, BURN));
+      expect(settled, mode).toEqual({ outcome: "settled", txRef: BURN });
+    }
+  });
+  it("transaction が申告の burnTxHash と違う → unknown（別の tx の決済をこの credential の決済と確定しない）。burnTxHash 無し → fixture は 400 = rejected", async () => {
+    const { inbound, offer } = await v2(["--v2-tx", "mismatch"]);
+    expect(await inbound.settle(offer, withBurn(offer, BURN))).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    const plain = await v2();
+    expect(await plain.inbound.settle(plain.offer, withBurn(plain.offer, undefined))).toEqual({ outcome: "rejected", reason: "source_rejected" });
+    const malformed = await v2();
+    expect(await malformed.inbound.settle(malformed.offer, withBurn(malformed.offer, "0xnot-a-hash"))).toEqual({ outcome: "rejected", reason: "source_rejected" });
+  });
+  it("tx hash は小文字に正準化（大文字の transaction でも txRef・eventId は同じ値 = 受信 identity が表記で割れない）", async () => {
+    const { inbound, offer } = await v2(["--v2-tx", "upper"]);
+    expect(await inbound.settle(offer, withBurn(offer, BURN.toUpperCase().replace(/^0X/, "0x")))).toEqual({ outcome: "settled", txRef: BURN, eventId: `${CHAIN_ID}:${BURN}:121` });
+  });
+  it("申告の burnTxHash が無い（legacy の permit 経路）: settled だが eventId を出さない（秘匿購入は未発行で止まる）。空文字・非文字列・形違いの申告は unknown", async () => {
+    const { inbound, offer } = await v2(["--v2-claim", "lenient"]);
+    expect(await inbound.settle(offer, withBurn(offer, undefined))).toEqual({ outcome: "settled", txRef: `0x${"11".repeat(32)}` });
+    expect(await inbound.settle(offer, withBurn(offer, ""))).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(await inbound.settle(offer, { ...withBurn(offer, undefined), payload: { challengeNonce: offer.extra.challengeNonce, burnTxHash: 42 } })).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+    expect(await inbound.settle(offer, withBurn(offer, "0xnot-a-hash"))).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
+  });
+  it("信頼の境界: facilitator が同じ tx に別の logIndex を返せば eventId は別になる（Router は検出しない。V2 台帳の契約 = 同じ nonce は同じ logIndex、1 tx は 1 challenge）", async () => {
+    const { inbound, offer } = await v2(["--v2-event", "changed"]);
+    const a = await inbound.settle(offer, withBurn(offer, BURN));
+    const b = await inbound.settle(offer, withBurn(offer, BURN));
+    expect(a).toMatchObject({ outcome: "settled", txRef: BURN });
+    expect(b).toMatchObject({ outcome: "settled", txRef: BURN });
+    expect((a as { eventId?: string }).eventId).not.toBe((b as { eventId?: string }).eventId);
+  });
+  it("V1 の形（--v2 無し）は不変: settlementKind 無し、synthetic の transaction、eventId 無し", async () => {
+    const fixture = await startFacilitator();
+    const inbound = createSubethaInbound({ facilitatorUrl: fixture.baseUrl, transport: createGuardedTransport({ allowLoopback: true, report: () => {} }) });
+    const offer = await inbound.createOffer({ routeId: "r", amount: "1", asset: TOKEN, network: NETWORK, routeBinding: ROUTE_BINDING, nowMs: Date.now() });
+    expect(offer.extra).not.toHaveProperty("settlementKind");
+    expect(offer.payTo).toBe(PAY_TO);
+    expect(await inbound.settle(offer, withBurn(offer, undefined))).toEqual({ outcome: "settled", txRef: "synthetic-src-1" });
+  });
+});
+
 describe("subetha inbound over real local HTTP", () => {
   it("発行 offer は challenge の実値と route 束縛を持つ", async () => {
     const fixture = await startFacilitator();

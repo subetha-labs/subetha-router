@@ -73,8 +73,12 @@ function denyHostsOf(document: Record<string, unknown>): readonly string[] {
 }
 
 describe("T1: zUSDC の表と定数", () => {
-  test("表 SUBETHA_ZERC20_ASSETS は Sepolia の zUSDC 1 行（6 桁、sign の上限 20,000）。凍結", () => {
-    expect(SUBETHA_ZERC20_ASSETS).toEqual([{ network: "eip155:11155111", token: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF", decimals: 6, maxAmount: 20_000n }]);
+  test("表 SUBETHA_ZERC20_ASSETS は Sepolia の zUSDC 2 行（V1 と V2 testnet-v2。6 桁、sign の上限 20,000）。凍結", () => {
+    expect(SUBETHA_ZERC20_ASSETS).toEqual([
+      { network: "eip155:11155111", token: "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF", decimals: 6, maxAmount: 20_000n },
+      { network: "eip155:11155111", token: "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f", decimals: 6, maxAmount: 20_000n },
+    ]);
+    for (const entry of SUBETHA_ZERC20_ASSETS) expect(Object.isFrozen(entry)).toBe(true);
     expect(Object.isFrozen(SUBETHA_ZERC20_ASSETS)).toBe(true);
   });
 

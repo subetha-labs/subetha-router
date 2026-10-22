@@ -17,14 +17,24 @@ export type InternalStatus =
   | "paid_undelivered"
   | "unknown"
   | "source_failed"
-  | "dest_failed";
+  | "dest_failed"
+  /** 秘匿購入（`docs/zktls-router-design.md` §7.1）: 発行予約 → release → Payer へ引き渡し → record → attest 成立。 */
+  | "private_issuance_reserved"
+  | "private_released"
+  | "private_awaiting_session"
+  | "private_recorded"
+  | "delivered_private";
 
 export type PublicStatus =
   | "awaiting_payment"
   | "paid"
   | "delivered"
   | "paid_data_unavailable"
-  | "unknown";
+  | "unknown"
+  /** 秘匿購入だけ。`awaiting_session` = credential を Payer に渡し MPC-TLS セッションを待つ、`attesting` = record があり bundle を待つ。 */
+  | "awaiting_session"
+  | "attesting"
+  | "delivered_private";
 
 /** 送信レグがどう終わったか（公開射影に常に含める）。 */
 export type DestinationOutcome = "none" | "not_sent" | "rejected" | "failed" | "unknown" | "paid";
@@ -40,6 +50,11 @@ const PUBLIC_STATUS: Readonly<Record<InternalStatus, PublicStatus>> = {
   paid_undelivered: "paid_data_unavailable",
   dest_failed: "paid_data_unavailable",
   unknown: "unknown",
+  private_issuance_reserved: "paid",
+  private_released: "paid",
+  private_awaiting_session: "awaiting_session",
+  private_recorded: "attesting",
+  delivered_private: "delivered_private",
 };
 
 /** 再起動で変化しない確定済み終了状態。 */
@@ -49,6 +64,7 @@ const TERMINAL: ReadonlySet<InternalStatus> = new Set<InternalStatus>([
   "unknown",
   "source_failed",
   "dest_failed",
+  "delivered_private",
 ]);
 
 /**
@@ -61,6 +77,11 @@ const INTERRUPTED: ReadonlySet<InternalStatus> = new Set<InternalStatus>([
   "source_settled",
   "destination_pending",
   "destination_submitted",
+  // 秘匿購入（設計 §7.1 の「再起動」列）: 発行予約の後はすべて `unknown`（credential は再発行しない。要件 FR-Z25）。
+  "private_issuance_reserved",
+  "private_released",
+  "private_awaiting_session",
+  "private_recorded",
 ]);
 
 export function toPublicStatus(status: InternalStatus): PublicStatus {
@@ -81,6 +102,8 @@ export interface IntentSource {
   readonly network: string;
   readonly offer: InboundOffer;
   readonly txRef?: string;
+  /** 受信 settle の支払いイベントの識別子（x402 受信: authorization の nonce。秘匿購入の二重一意性 FR-Z06 (b) の材料）。 */
+  readonly eventId?: string;
   readonly outcome?: string;
 }
 
@@ -93,6 +116,8 @@ export interface IntentDestination {
   readonly outcome: DestinationOutcome;
   readonly txRef?: string;
   readonly receiptRef?: string;
+  /** 秘匿購入: Provider の領収ヘッダの sha256（原本は認証済みの record にだけ。§3.4）。 */
+  readonly receiptSha256?: string;
 }
 
 export interface IntentResult {
@@ -131,6 +156,47 @@ export interface IntentDynamic {
   readonly reservation?: { readonly legs: readonly { readonly network: string; readonly asset: string; readonly amount: string }[] };
 }
 
+/** 秘匿購入の記録（`docs/zktls-router-design.md` §7.2）。`created` 行の `private` 欄と、以後の private_* 行から組む。 */
+export interface IntentPrivate {
+  readonly intentSha256: string;
+  /** Payer が送った封筒の正確なバイト列（base64）。配布・Verifier の入力に使う。射影には出さない。 */
+  readonly intentB64: string;
+  readonly orderId: string;
+  readonly payerPk: { readonly x: string; readonly y: string };
+  readonly target: { readonly host: string; readonly port: 443; readonly path: string };
+  readonly method: "GET" | "POST";
+  readonly framing: string;
+  readonly bodyLen: number;
+  readonly bodyCommitmentHex: string;
+  readonly executorHeader: string;
+  readonly maxExecutorValueLen: number;
+  readonly outbound: { readonly protocol: "x402" | "mpp"; readonly network: string; readonly asset: string; readonly payTo: string; readonly maxAmount: string };
+  readonly inbound: { readonly network: string; readonly asset: string; readonly maxTotal: string };
+  /** 承認した方針の写し（期限はここから導く。設定の変更は指紋で検出する）。 */
+  readonly policy: { readonly minCredentialLifetimeMs: number; readonly sessionTimeoutMs: number; readonly attestTimeoutMs: number; readonly retentionMs: number };
+  readonly limits: { readonly maxIntentBytes: number; readonly maxBundleBytes: number; readonly maxRecordBytes: number };
+  /** `private_issuance_reserved` 行。 */
+  readonly reservation?: { readonly intentSha256: string; readonly inboundIdentity: string };
+  /** `private_released` 行（credential の値は無い）。 */
+  readonly issuance?: { readonly headerName: string; readonly headerSha256: string; readonly expiresAtMs: number; readonly expectedRef?: string; readonly releaseB64: string; readonly sessionBy: number };
+  /** `private_handed_over` 行。 */
+  readonly handover?: { readonly handedOverAtMs: number; readonly verifierAddress: string };
+  /** `private_recorded` 行（record 本体は無い）。 */
+  readonly record?: {
+    readonly sha256: string;
+    readonly bytes: number;
+    readonly completedAtMs: number;
+    readonly summary: Readonly<Record<string, unknown>>;
+    readonly attestBy?: number;
+    readonly recordAvailableUntil: number;
+    readonly recoveredAtRestart?: boolean;
+    readonly late?: boolean;
+    readonly expired?: boolean;
+  };
+  /** attest の耐久結果（`private_attested` または `attest` 付きの `unknown` 行）。 */
+  readonly attest?: { readonly bundleSha256: string; readonly result: "delivered_private" | "unknown"; readonly reason?: string };
+}
+
 export interface Intent {
   readonly paymentId: string;
   readonly quoteId: string;
@@ -161,6 +227,10 @@ export interface Intent {
    * （状態の照会・予算の集計は通る）が、**purchase は実行しない**（`docs/dynamic-gas-fee-design.md` §3.2）。
    */
   readonly dynamicCapInvalid?: boolean;
+  /** 秘匿購入の記録。無ければ通常の購入。 */
+  readonly private?: IntentPrivate;
+  /** `private` 欄があるのに読めない形だった。**この intent は実行しない**（状態の照会はできる）。 */
+  readonly privateInvalid?: boolean;
   /** 承認の絶対期限（ミリ秒）。発行 offer の失効時刻で上限を切る。 */
   readonly approvalDeadlineMs: number;
   readonly result?: IntentResult;

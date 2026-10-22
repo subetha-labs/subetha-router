@@ -7,6 +7,8 @@
  * 下の検証でも使う。既存の import 先（`src/config.ts`）は変わらない。
  * ────────────────────────────────────────────────────────────────────────────── */
 export * from "./shared/networks.js";
+import path from "node:path";
+
 import {
   assetKeyOf,
   evmChainIdOf,
@@ -23,6 +25,7 @@ import {
   type NetworkFamily,
   type OutboundRailName,
   type X402FacilitatorKind,
+  SUBETHA_ZERC20_ASSETS,
 } from "./shared/networks.js";
 
 interface TermsToValidate {
@@ -149,7 +152,8 @@ export interface DynamicProfile {
   /** `routeId` と同じ文字種・同じ名前空間（route と重複したら起動しない）。 */
   readonly profileId: string;
   /** 受信レール。SubEtha 受信は対象外。 */
-  readonly sourceRail: "x402" | "mpp";
+  /** 受信レール。`subetha`（SubEtha V2 burn-sale。`docs/zktls-router-v2-inbound.md`）は秘匿購入のプロファイルにだけ許す（`private.profiles` に含まれること）。 */
+  readonly sourceRail: "x402" | "mpp" | "subetha";
   /** 受信条件。**額は持たない**（上流額＋手数料で quote ごとに決まる）。 */
   readonly source: {
     readonly network: string;
@@ -238,12 +242,81 @@ export interface DynamicConfig {
   readonly denyHosts: readonly string[];
 }
 
+/**
+ * 秘匿購入（`docs/zktls-router-design.md` §9、要件 FR-Z12・FR-Z13・FR-Z24）。**省略時は機能そのものが無い**（口は 404 `private_disabled`）。
+ * trust は設定にない（`mozilla` 固定。試験 trust はテスト能力の注入だけ）。
+ */
+export interface PrivateConfig {
+  readonly deliveryBin: string;
+  readonly deliveryBinSha256: string;
+  readonly srsPath: string;
+  readonly srsSha256: string;
+  /** 秘匿購入を許す動的プロファイル ID の allowlist（受信 x402 Base Sepolia、送信 x402 EVM か MPP Tempo）。 */
+  readonly profiles: readonly string[];
+  /** `127.0.0.1:0` 固定（loopback 以外は起動しない）。 */
+  readonly verifierListen: string;
+  readonly sessionTimeoutMs: number;
+  readonly attestTimeoutMs: number;
+  readonly verifyTimeoutMs: number;
+  readonly minCredentialLifetimeMs: { readonly x402: number; readonly mpp: number };
+  readonly minSessionRemainingMs: number;
+  readonly workDir: string;
+  readonly retentionMs: number;
+  readonly maxConcurrentSessions: number;
+  readonly maxConcurrentVerifications: number;
+  readonly maxQueuedVerifications: number;
+  readonly maxIntentBytes: number;
+  readonly maxBundleBytes: number;
+  readonly maxRecordBytes: number;
+  readonly maxChildOutputBytes: number;
+  readonly maxRetainedBytes: number;
+  readonly maxRetainedPurchases: number;
+}
+
+export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
+  verifierListen: "127.0.0.1:0",
+  sessionTimeoutMs: 180_000,
+  attestTimeoutMs: 600_000,
+  verifyTimeoutMs: 60_000,
+  minCredentialLifetimeMs: Object.freeze({ x402: 40_000, mpp: 12_000 }),
+  minSessionRemainingMs: 5_000,
+  workDir: "runtime/private",
+  retentionMs: 3_600_000,
+  maxConcurrentSessions: 2,
+  maxConcurrentVerifications: 1,
+  maxQueuedVerifications: 4,
+  maxIntentBytes: 2048,
+  maxBundleBytes: 262_144,
+  maxRecordBytes: 65_536,
+  maxChildOutputBytes: 65_536,
+  maxRetainedBytes: 67_108_864,
+  maxRetainedPurchases: 256,
+});
+
+/**
+ * 秘匿購入の**承認の権威**（設計 §3.1 7）: allowlist・trust・バイナリと SRS の指紋・方針・上限。動的の権威（`dynamicAuthoritativeTermsOf`）と合成して
+ * `routeFingerprint` に入れる。変われば（profiles からの除外を含む）既存の quote は `quote_changed` で止まる。
+ */
+export function privateAuthoritativeTermsOf(config: PrivateConfig, profileId: string, rail: "x402" | "mpp", trust: "mozilla" | "lab-fixture-ca"): unknown {
+  return {
+    private: true,
+    allowlisted: config.profiles.includes(profileId),
+    trust,
+    deliveryBinSha256: config.deliveryBinSha256,
+    srsSha256: config.srsSha256,
+    policy: { minCredentialLifetimeMs: config.minCredentialLifetimeMs[rail], sessionTimeoutMs: config.sessionTimeoutMs, attestTimeoutMs: config.attestTimeoutMs, retentionMs: config.retentionMs },
+    limits: { maxIntentBytes: config.maxIntentBytes, maxBundleBytes: config.maxBundleBytes, maxRecordBytes: config.maxRecordBytes },
+  };
+}
+
 export interface RouterConfig {
   readonly routes: Readonly<Record<string, RouteConfig>>;
   readonly budget: BudgetLimits;
   readonly approvalTtlMs: number;
   /** 動的上流 URL。**省略時は機能そのものが無い。** */
   readonly dynamic?: DynamicConfig;
+  /** 秘匿購入。**省略時は機能そのものが無い。** */
+  readonly private?: PrivateConfig;
 }
 
 /**
@@ -634,8 +707,8 @@ function parseDynamicProfile(value: unknown, profileId: string, routes: Readonly
     throw new ConfigError(`${at}: profileId collides with a routeId`);
   }
   const sourceRail = value["sourceRail"];
-  if (sourceRail !== "x402" && sourceRail !== "mpp") {
-    throw new ConfigError(`${at}.sourceRail must be "x402" or "mpp"`);
+  if (sourceRail !== "x402" && sourceRail !== "mpp" && sourceRail !== "subetha") {
+    throw new ConfigError(`${at}.sourceRail must be "x402", "mpp" or "subetha"`);
   }
   const rail = value["rail"];
   if (rail !== "x402" && rail !== "mpp") {
@@ -879,7 +952,12 @@ export function validateRouterConfigAgainstTable(router: RouterConfig, networks:
   }
   for (const profile of Object.values(router.dynamic?.profiles ?? {})) {
     const at = `dynamic.profiles.${profile.profileId}`;
-    validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals, payTo: profile.source.payTo }, networks);
+    if (profile.sourceRail === "subetha") {
+      // SubEtha V2（burn-sale）受信は zERC20 の表（`SUBETHA_ZERC20_ASSETS`）が権威（受信の表の `inbound` は x402/mpp の列挙。静的 route の subetha と同じ扱い）。
+      const known = SUBETHA_ZERC20_ASSETS.find((entry) => entry.network === profile.source.network && entry.token.toLowerCase() === profile.source.asset.toLowerCase());
+      if (known === undefined) throw new ConfigError(`${at}.source: subetha inbound requires a known zERC20 asset`);
+      if (profile.source.decimals !== known.decimals) throw new ConfigError(`${at}.source.decimals does not match the zERC20 table`);
+    } else validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: profile.sourceRail, network: profile.source.network, asset: profile.source.asset, decimals: profile.source.decimals, payTo: profile.source.payTo }, networks);
     validateTermsAgainstTable(`${at}.destination`, {
       direction: "outbound",
       rail: profile.rail,
@@ -902,12 +980,140 @@ function parseRouterConfigUnchecked(raw: unknown): RouterConfig {
   if (entries.length === 0) {
     throw new ConfigError("router.routes must not be empty");
   }
+  const dynamic = raw["dynamic"] === undefined ? undefined : parseDynamic(raw["dynamic"], routes);
+  // `sourceRail: subetha` の動的プロファイルは秘匿購入の allowlist にだけ開く（通常の動的購入には載せない。v1.3 SR-V1）。
+  if (dynamic !== undefined) {
+    const privateProfiles = isRecord(raw["private"]) && Array.isArray(raw["private"]["profiles"]) ? (raw["private"]["profiles"] as unknown[]) : [];
+    for (const profile of Object.values(dynamic.profiles)) {
+      if (profile.sourceRail === "subetha" && !privateProfiles.includes(profile.profileId)) {
+        throw new ConfigError(`dynamic.profiles.${profile.profileId}: sourceRail "subetha" is only allowed for profiles listed in private.profiles`);
+      }
+    }
+  }
   return {
     approvalTtlMs: requireNumber(raw, "approvalTtlMs", "router"),
     routes: Object.fromEntries(entries.map(([routeId, route]) => [routeId, parseRoute(route, routeId)])),
     budget: parseBudget(requireRecord(raw, "budget", "router")),
-    ...(raw["dynamic"] === undefined ? {} : { dynamic: parseDynamic(raw["dynamic"], routes) }),
+    ...(dynamic === undefined ? {} : { dynamic }),
+    ...(raw["private"] === undefined ? {} : { private: parsePrivate(raw["private"], dynamic) }),
   };
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** 秘匿購入の受信レグは本 v1 では x402 の Base Sepolia USDC だけ（要件 FR-Z13、Z1〜Z3）。 */
+export const PRIVATE_INBOUND_NETWORK = "eip155:84532";
+/** Node の setTimeout の上限（2^31−1 ms）。秘匿購入の期限はこれ以下。 */
+export const MAX_TIMER_DURATION_MS = 2_147_483_647;
+export const PRIVATE_INBOUND_ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+
+function requirePositiveInt(source: Record<string, unknown>, key: string, at: string, fallback: number | undefined): number {
+  const value = source[key] ?? fallback;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ConfigError(`${at}.${key} must be a positive integer`);
+  }
+  return value;
+}
+
+/**
+ * `router.private`（`docs/zktls-router-design.md` §9、要件 FR-Z12・FR-Z13・FR-Z28）。既定値は `DEFAULT_PRIVATE_CONFIG`。
+ * `profiles` は動的プロファイルに存在し、**受信**が x402 の Base Sepolia USDC、**送信**が x402（EVM、`tokenDomain` あり）か mpp（Tempo = EVM の family、`feeAsset`・`maxFee` あり）
+ * であること。`verifierListen` は `127.0.0.1:0` だけ。trust は設定に無い（`mozilla` 固定）。
+ */
+function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): PrivateConfig {
+  const at = "private";
+  if (!isRecord(raw)) {
+    throw new ConfigError(`${at} must be an object`);
+  }
+  if (Object.hasOwn(raw, "trust")) {
+    throw new ConfigError(`${at}.trust is not a field (trust is fixed to mozilla; the test trust is injected only by test capabilities)`);
+  }
+  if (dynamic === undefined) {
+    throw new ConfigError(`${at} requires router.dynamic (private profiles are dynamic profiles)`);
+  }
+  const deliveryBin = requireString(raw, "deliveryBin", at);
+  const srsPath = requireString(raw, "srsPath", at);
+  const deliveryBinSha256 = requireString(raw, "deliveryBinSha256", at);
+  const srsSha256 = requireString(raw, "srsSha256", at);
+  if (!SHA256_HEX.test(deliveryBinSha256) || !SHA256_HEX.test(srsSha256)) {
+    throw new ConfigError(`${at}.deliveryBinSha256 and ${at}.srsSha256 must be lowercase sha256 hex`);
+  }
+  if (!path.isAbsolute(deliveryBin) || !path.isAbsolute(srsPath)) {
+    throw new ConfigError(`${at}.deliveryBin and ${at}.srsPath must be absolute paths`);
+  }
+  const profiles = raw["profiles"];
+  if (!Array.isArray(profiles) || profiles.length === 0 || profiles.some((id) => typeof id !== "string" || id === "")) {
+    throw new ConfigError(`${at}.profiles must be a non-empty array of dynamic profile ids`);
+  }
+  if (new Set(profiles).size !== profiles.length) {
+    throw new ConfigError(`${at}.profiles must not repeat a profile id`);
+  }
+  for (const profileId of profiles as string[]) {
+    const profile = dynamic.profiles[profileId];
+    if (profile === undefined) {
+      throw new ConfigError(`${at}.profiles: ${profileId} is not a dynamic profile`);
+    }
+    // 受信は x402 の Base Sepolia USDC か、SubEtha V2 burn-sale（Sepolia の zERC20 の表）だけ（FR-Z13、v1.3 FR-V2）。
+    const x402Inbound = profile.sourceRail === "x402" && profile.source.network === PRIVATE_INBOUND_NETWORK && profile.source.asset.toLowerCase() === PRIVATE_INBOUND_ASSET.toLowerCase();
+    const subethaInbound = profile.sourceRail === "subetha" && SUBETHA_ZERC20_ASSETS.some((entry) => entry.network === profile.source.network && entry.token.toLowerCase() === profile.source.asset.toLowerCase());
+    if (!x402Inbound && !subethaInbound) {
+      throw new ConfigError(`${at}.profiles: ${profileId} must receive x402 on ${PRIVATE_INBOUND_NETWORK} (USDC) or subetha on a known zERC20 asset in this version`);
+    }
+    if (profile.rail === "x402") {
+      if (networkFamilyOf(profile.destination.network) !== "evm" || profile.destination.tokenDomain === undefined) {
+        throw new ConfigError(`${at}.profiles: ${profileId} must pay x402 on an EVM network with a tokenDomain`);
+      }
+    } else if (networkFamilyOf(profile.destination.network) !== "evm" || profile.destination.feeAsset === undefined || profile.destination.maxFee === undefined) {
+      throw new ConfigError(`${at}.profiles: ${profileId} must pay MPP on Tempo (EVM family) with feeAsset and maxFee (pull)`);
+    }
+  }
+  const verifierListen = (raw["verifierListen"] ?? DEFAULT_PRIVATE_CONFIG.verifierListen) as unknown;
+  if (verifierListen !== "127.0.0.1:0") {
+    throw new ConfigError(`${at}.verifierListen must be "127.0.0.1:0" (loopback only)`);
+  }
+  const workDir = raw["workDir"] === undefined ? DEFAULT_PRIVATE_CONFIG.workDir : raw["workDir"];
+  if (typeof workDir !== "string" || workDir === "") {
+    throw new ConfigError(`${at}.workDir must be a non-empty string`);
+  }
+  const lifetimes = raw["minCredentialLifetimeMs"] === undefined ? {} : raw["minCredentialLifetimeMs"];
+  if (!isRecord(lifetimes)) {
+    throw new ConfigError(`${at}.minCredentialLifetimeMs must be an object`);
+  }
+  const defaults = DEFAULT_PRIVATE_CONFIG;
+  const parsed: PrivateConfig = {
+    deliveryBin,
+    deliveryBinSha256,
+    srsPath,
+    srsSha256,
+    profiles: [...(profiles as string[])],
+    verifierListen: "127.0.0.1:0",
+    sessionTimeoutMs: requirePositiveInt(raw, "sessionTimeoutMs", at, defaults.sessionTimeoutMs),
+    attestTimeoutMs: requirePositiveInt(raw, "attestTimeoutMs", at, defaults.attestTimeoutMs),
+    verifyTimeoutMs: requirePositiveInt(raw, "verifyTimeoutMs", at, defaults.verifyTimeoutMs),
+    minCredentialLifetimeMs: { x402: requirePositiveInt(lifetimes, "x402", `${at}.minCredentialLifetimeMs`, defaults.minCredentialLifetimeMs.x402), mpp: requirePositiveInt(lifetimes, "mpp", `${at}.minCredentialLifetimeMs`, defaults.minCredentialLifetimeMs.mpp) },
+    minSessionRemainingMs: requirePositiveInt(raw, "minSessionRemainingMs", at, defaults.minSessionRemainingMs),
+    workDir,
+    retentionMs: requirePositiveInt(raw, "retentionMs", at, defaults.retentionMs),
+    maxConcurrentSessions: requirePositiveInt(raw, "maxConcurrentSessions", at, defaults.maxConcurrentSessions),
+    maxConcurrentVerifications: requirePositiveInt(raw, "maxConcurrentVerifications", at, defaults.maxConcurrentVerifications),
+    maxQueuedVerifications: requirePositiveInt(raw, "maxQueuedVerifications", at, defaults.maxQueuedVerifications),
+    maxIntentBytes: requirePositiveInt(raw, "maxIntentBytes", at, defaults.maxIntentBytes),
+    maxBundleBytes: requirePositiveInt(raw, "maxBundleBytes", at, defaults.maxBundleBytes),
+    maxRecordBytes: requirePositiveInt(raw, "maxRecordBytes", at, defaults.maxRecordBytes),
+    maxChildOutputBytes: requirePositiveInt(raw, "maxChildOutputBytes", at, defaults.maxChildOutputBytes),
+    maxRetainedBytes: requirePositiveInt(raw, "maxRetainedBytes", at, defaults.maxRetainedBytes),
+    maxRetainedPurchases: requirePositiveInt(raw, "maxRetainedPurchases", at, defaults.maxRetainedPurchases),
+  };
+  // record は attest と検証が終わるまで取得できること（設計 §3.5）: 保持期限 ≥ attest の期限 + 検証の上限。
+  if (parsed.retentionMs < parsed.attestTimeoutMs + parsed.verifyTimeoutMs) {
+    throw new ConfigError(`${at}.retentionMs must be at least attestTimeoutMs + verifyTimeoutMs`);
+  }
+  // 期限は Node の timer の上限（2^31−1 ms ≈ 24.8 日）の内側（上限を越える値は即座の満了に化ける。core は刻んで待つが、設定でも閉じる）。
+  for (const [key, value] of [["sessionTimeoutMs", parsed.sessionTimeoutMs], ["attestTimeoutMs", parsed.attestTimeoutMs], ["verifyTimeoutMs", parsed.verifyTimeoutMs], ["retentionMs", parsed.retentionMs], ["minSessionRemainingMs", parsed.minSessionRemainingMs], ["minCredentialLifetimeMs.x402", parsed.minCredentialLifetimeMs.x402], ["minCredentialLifetimeMs.mpp", parsed.minCredentialLifetimeMs.mpp]] as const) {
+    if (value > MAX_TIMER_DURATION_MS) {
+      throw new ConfigError(`${at}.${key} must be at most ${String(MAX_TIMER_DURATION_MS)} ms`);
+    }
+  }
+  return parsed;
 }
 
 /** `id:token,id:token` 形式。token は解析するだけで、どこにも出力しない。 */
