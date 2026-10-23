@@ -89,10 +89,12 @@ class SyntheticInbound implements InboundRail {
   txRef: string | undefined;
   /** v1.3.2 の試験用: offer の `asset` を要求と別の綴り・別の token で返す。 */
   assetOverride: string | undefined;
+  /** v1.4 の試験用: challenge の有効期間（秒）。 */
+  expiresInS = 600;
   #issued = 0;
   async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
     this.#issued += 1;
-    return { scheme: "exact", network: request.network, asset: this.assetOverride ?? request.asset, amount: request.amount, payTo: this.payTo, maxTimeoutSeconds: 120, extra: { challengeNonce: `0xnonce${this.#issued}`, expiresAt: Math.floor(Date.now() / 1000) + 600, routeBinding: request.routeBinding, name: "USDC", version: "2", ...this.extra } };
+    return { scheme: "exact", network: request.network, asset: this.assetOverride ?? request.asset, amount: request.amount, payTo: this.payTo, maxTimeoutSeconds: 120, extra: { challengeNonce: `0xnonce${this.#issued}`, expiresAt: Math.floor(request.nowMs / 1000) + this.expiresInS, routeBinding: request.routeBinding, name: "USDC", version: "2", ...this.extra } };
   }
   preflight(offer: InboundOffer, credential: PaymentCredential): PreflightResult {
     if (credential.payload.challengeNonce !== offer.extra.challengeNonce) return { ok: false, reason: "nonce_mismatch" };
@@ -235,8 +237,8 @@ describe("v1.3: subetha 受信（V2 burn-sale）の秘匿購入（`docs/zktls-ro
   const SUBETHA_ID = "priv-subetha";
   const ZUSDC = "0x132CeD517327C2aC5073ACEb9eCF1e7783feCbcF";
   const SEPOLIA = "eip155:11155111";
-  function subethaConfig(destinationOnSepolia = false): RouterConfig {
-    const cfg = JSON.parse(JSON.stringify(config())) as RouterConfig;
+  function subethaConfig(destinationOnSepolia = false, privateOverrides: Partial<RouterConfig["private"] & {}> = {}, dynamicLimits: Partial<typeof DEFAULT_DYNAMIC_LIMITS> = {}): RouterConfig {
+    const cfg = JSON.parse(JSON.stringify(config(privateOverrides, dynamicLimits))) as RouterConfig;
     const profile: DynamicProfile = { ...PROFILE, profileId: SUBETHA_ID, sourceRail: "subetha", source: { network: SEPOLIA, asset: ZUSDC, decimals: 6, payTo: "0x00000000000000000000000000000000000000b0" }, ...(destinationOnSepolia ? { destination: { ...PROFILE.destination, network: SEPOLIA, asset: ZUSDC } } : {}) };
     (cfg.dynamic!.profiles as Record<string, DynamicProfile>)[SUBETHA_ID] = profile;
     (cfg.private!.profiles as string[]).push(SUBETHA_ID);
@@ -252,10 +254,10 @@ describe("v1.3: subetha 受信（V2 burn-sale）の秘匿購入（`docs/zktls-ro
     doc.inbound = { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" };
     return Buffer.from(JSON.stringify(doc)).toString("base64");
   }
-  async function bootSubetha(destinationOnSepolia = false): Promise<RouterCore> {
-    const cfg = subethaConfig(destinationOnSepolia);
+  async function bootSubetha(destinationOnSepolia = false, extra: { privateOverrides?: Partial<RouterConfig["private"] & {}>; dynamicLimits?: Partial<typeof DEFAULT_DYNAMIC_LIMITS>; now?: () => number } = {}): Promise<RouterCore> {
+    const cfg = subethaConfig(destinationOnSepolia, extra.privateOverrides, extra.dynamicLimits);
     const base = createVerifierRunner({ deliveryBin: FAKE, srsPath: cfg.private!.srsPath, trust: "lab-fixture-ca", maxChildOutputBytes: cfg.private!.maxChildOutputBytes });
-    const core = await createRouterCore({ journalPath, config: cfg, inbound, outbound, nextPaymentId: () => `pay-${(ids += 1)}`, dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") }, private: { rails: { [PROFILE_ID]: rail, [SUBETHA_ID]: rail }, runner: base, trust: "lab-fixture-ca", workDir: privateDir } });
+    const core = await createRouterCore({ journalPath, config: cfg, inbound, outbound, nextPaymentId: () => `pay-${(ids += 1)}`, ...(extra.now === undefined ? {} : { now: extra.now }), dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") }, private: { rails: { [PROFILE_ID]: rail, [SUBETHA_ID]: rail }, runner: base, trust: "lab-fixture-ca", workDir: privateDir } });
     opened.push(core);
     return core;
   }
@@ -282,6 +284,82 @@ describe("v1.3: subetha 受信（V2 burn-sale）の秘匿購入（`docs/zktls-ro
     inbound.assetOverride = "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f";
     expect(await core.privateQuote({ principalId: "alice", requestId: "r-other", profileId: SUBETHA_ID, intentB64: subethaEnvelope() })).toEqual({ ok: false, code: "source_terms_mismatch" });
     inbound.assetOverride = undefined;
+  });
+  test("v1.4 FR-H1: subetha の承認期限は burnSaleApprovalTtlMs（x402 は approvalTtlMs のまま）、challenge の expiresAt で上限。旧 10 分を過ぎた purchase が通る", async () => {
+    let clock = Date.now();
+    const core = await bootSubetha(false, { privateOverrides: { burnSaleApprovalTtlMs: 1_200_000, retentionMs: 3_600_000 }, now: () => clock });
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    inbound.expiresInS = 1_800;
+    const issuedAt = clock;
+    const q = await core.privateQuote({ principalId: "alice", requestId: "r-ttl", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!q.ok) throw new Error(`${q.code} ${q.reason ?? ""}`);
+    expect(q.approval.deadlineMs).toBe(issuedAt + 1_200_000);
+    // x402 の秘匿 quote は router.approvalTtlMs（120 s）のまま。
+    const x = await core.privateQuote({ principalId: "alice", requestId: "r-x402", profileId: PROFILE_ID, intentB64: envelopeFor().b64 });
+    if (!x.ok) throw new Error(`${x.code} ${x.reason ?? ""}`);
+    expect(x.approval.deadlineMs).toBe(issuedAt + 120_000);
+    // challenge が短ければ challenge の期限が上限。
+    inbound.expiresInS = 300;
+    const short = await core.privateQuote({ principalId: "alice", requestId: "r-short", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    if (!short.ok) throw new Error(short.code);
+    expect(short.approval.deadlineMs).toBe(Math.floor(issuedAt / 1000) * 1000 + 300_000);
+    // 旧 10 分（600 s）を過ぎてから purchase: 期限内なので発行まで進む。
+    clock = issuedAt + 660_000;
+    inbound.eventId = "11155111:0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef:7";
+    // 偽の rail の credential の期限は試験の時計から（実の rail は発行の時点の challenge から決める）。
+    rail.issue = () => ({ ok: true, issued: { name: "PAYMENT-SIGNATURE", value: HEADER_VALUE, expiresAtMs: clock + 120_000 } });
+    control({});
+    const p = await core.purchase({ principalId: "alice", requestId: "r-ttl", quoteId: q.quoteId, approval: q.quoteId, credential: inbound.credentialFor(q.source.offer), ownerKey: q.ownerKey });
+    expect(p, JSON.stringify(p)).toMatchObject({ status: "awaiting_session" });
+  });
+  test("v1.4 FR-H1: TTL を増減した再起動でも既存 quote の期限は不変で quote_changed にならない", async () => {
+    let clock = Date.now();
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    inbound.expiresInS = 1_800;
+    const first = await bootSubetha(false, { privateOverrides: { burnSaleApprovalTtlMs: 1_200_000, retentionMs: 3_600_000 }, now: () => clock });
+    const envelope = subethaEnvelope();
+    const q = await first.privateQuote({ principalId: "alice", requestId: "r-restart", profileId: SUBETHA_ID, intentB64: envelope });
+    if (!q.ok) throw new Error(q.code);
+    const deadline = q.approval.deadlineMs;
+    // 最後の再起動は短い TTL（300 s）: 期限が設定から取り直されるなら、400 s 後の purchase は approval_expired になる。
+    for (const ttl of [1_500_000, 300_000]) {
+      await opened.pop()!.close();
+      const again = await bootSubetha(false, { privateOverrides: { burnSaleApprovalTtlMs: ttl, retentionMs: 3_600_000 }, now: () => clock });
+      // 秘匿 quote の requestId は再利用できない（冪等ではない）: 再起動の後も conflict = ledger から読み戻された。
+      expect(await again.privateQuote({ principalId: "alice", requestId: "r-restart", profileId: SUBETHA_ID, intentB64: envelope })).toEqual({ ok: false, code: "request_id_conflict" });
+    }
+    clock += 400_000;
+    inbound.eventId = "11155111:0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef:8";
+    rail.issue = () => ({ ok: true, issued: { name: "PAYMENT-SIGNATURE", value: HEADER_VALUE, expiresAtMs: clock + 120_000 } });
+    control({});
+    const core = opened.at(-1)!;
+    const p = await core.purchase({ principalId: "alice", requestId: "r-restart", quoteId: q.quoteId, approval: q.quoteId, credential: inbound.credentialFor(q.source.offer), ownerKey: q.ownerKey });
+    expect(p, JSON.stringify(p)).toMatchObject({ status: "awaiting_session" });
+    expect(deadline).toBe(clock - 400_000 + 1_200_000);
+  });
+  test("v1.4 FR-H1: 1 日を超える challenge でも TTL = 1 日の quote は ledger に入り、期限前の再起動で読め、満了すると未処理の数から外れて受付が戻る", async () => {
+    let clock = Date.now();
+    const overrides = { privateOverrides: { burnSaleApprovalTtlMs: 86_400_000, retentionMs: 2 * 86_400_000, attestTimeoutMs: 20_000, verifyTimeoutMs: 5_000 }, dynamicLimits: { maxOutstandingQuotes: 1 }, now: () => clock };
+    inbound.extra = { settlementKind: "zerc20-v2-burn-sale", fundsMoveOnCredential: true };
+    inbound.expiresInS = 2 * 86_400;
+    const core = await bootSubetha(false, overrides);
+    const issuedAt = clock;
+    const envelope = subethaEnvelope();
+    const q = await core.privateQuote({ principalId: "alice", requestId: "r-day", profileId: SUBETHA_ID, intentB64: envelope });
+    if (!q.ok) throw new Error(`${q.code} ${q.reason ?? ""}`);
+    expect(q.approval.deadlineMs).toBe(issuedAt + 86_400_000);
+    // 未処理 1 件で上限: 次の quote は受付の余地が無い。
+    expect(await core.privateQuote({ principalId: "alice", requestId: "r-day-2", profileId: SUBETHA_ID, intentB64: subethaEnvelope() })).toMatchObject({ ok: false, code: "dynamic_capacity" });
+    // 期限前の再起動: ledger から読み戻せる（まだ上限）。
+    clock = issuedAt + 3_600_000;
+    await opened.pop()!.close();
+    const reopened = await bootSubetha(false, overrides);
+    expect(await reopened.privateQuote({ principalId: "alice", requestId: "r-day", profileId: SUBETHA_ID, intentB64: envelope })).toEqual({ ok: false, code: "request_id_conflict" });
+    expect(await reopened.privateQuote({ principalId: "alice", requestId: "r-day-3", profileId: SUBETHA_ID, intentB64: subethaEnvelope() })).toMatchObject({ ok: false, code: "dynamic_capacity" });
+    // 期限の後: 満了して未処理から外れ、受付が戻る。
+    clock = issuedAt + 86_400_000 + 1;
+    const after = await reopened.privateQuote({ principalId: "alice", requestId: "r-day-4", profileId: SUBETHA_ID, intentB64: subethaEnvelope() });
+    expect(after, JSON.stringify(after)).toMatchObject({ ok: true });
   });
   test("quote: 注文ごとの burn address が同じ network・資産の Provider の受取先と同じなら pay_to_conflict", async () => {
     // 送信も Sepolia zUSDC（同じ network・資産）のプロファイルで、Provider の受取先 = 注文の burn address にする。

@@ -10,6 +10,7 @@ import path from "node:path";
 import { afterAll, describe, expect, test } from "vitest";
 
 import { chainLegInputsOf, consoleProjectionOf, payFirstOf, runPrivatePayer, subethaCredentialOf, type PrivatePayerEvidence } from "../../tools/private-payer.js";
+import { fakeBurnReader } from "../fixtures/burn-reader.js";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const tmp = mkdtempSync(path.join(os.tmpdir(), "payer-burn-"));
@@ -58,7 +59,13 @@ describe("--burn-tx-hash: subetha burn-sale の受信（lab 不要）", () => {
     const decoded = JSON.parse(Buffer.from(subethaCredentialOf(offer, BURN.toLowerCase()), "base64").toString("utf8")) as Record<string, unknown>;
     expect(decoded).toEqual({ x402Version: 2, accepted: offer, payload: { challengeNonce: (offer["extra"] as Record<string, unknown>)["challengeNonce"], burnTxHash: BURN.toLowerCase() } });
     const subethaQuote = { private: { inbound: { rail: "subetha", network: "eip155:11155111", asset: ZUSDC, payTo: offer["payTo"], total: "2000", fundsMoveAt: "payer_burn_before_credential" } } };
-    expect(payFirstOf(subethaQuote as never)).toEqual({ payTo: offer["payTo"], amount: "2000", network: "eip155:11155111", asset: ZUSDC });
+    // payBy は承認期限 − 180 s（承認期限の無い quote は「払わない」）。
+    expect(payFirstOf(subethaQuote as never)).toMatchObject({ payTo: offer["payTo"], amount: "2000", network: "eip155:11155111", asset: ZUSDC, payBy: null });
+    const deadlineMs = Date.parse("2026-10-23T01:00:00.000Z");
+    expect(payFirstOf({ ...subethaQuote, approval: { deadlineMs } } as never, deadlineMs - 600_000)).toEqual({ payTo: offer["payTo"], amount: "2000", network: "eip155:11155111", asset: ZUSDC, payBy: "2026-10-23T00:57:00.000Z" });
+    const short = payFirstOf({ ...subethaQuote, approval: { deadlineMs } } as never, deadlineMs - 120_000);
+    expect(short).toMatchObject({ payBy: null });
+    expect(short?.note).toContain("do not pay");
     expect(payFirstOf({ private: { inbound: { rail: "x402", fundsMoveAt: "router_settle_after_credential", payTo: "0x1", total: "1", network: "n", asset: "a" } } } as never)).toBeUndefined();
     expect(payFirstOf({} as never)).toBeUndefined();
   });
@@ -169,18 +176,19 @@ describe("--burn-tx-hash: subetha burn-sale の受信（lab 不要）", () => {
     const out = path.join(tmp, "approve-latch");
     seedCheckpoint(out, subethaOffer(), SUBETHA_INBOUND, "priv-subetha");
     // 試験専用 `afterLatch` は latch の後・credential の前。burn の hash は latch の直後に書くので、ここで止めると latch だけが残る。
-    await expect(runPrivatePayer({ ...BASE, ...lab, inbound: SUBETHA_INBOUND, burnTxHash: BURN, outDir: out, approve: true, hooksForTest: { afterLatch: () => { throw new Error("stop-before-credential"); } } })).rejects.toThrow("stop-before-credential");
+    const reader = fakeBurnReader({ txHash: BURN, token: ZUSDC, payTo: String(subethaOffer()["payTo"]), amount: 2000n });
+    await expect(runPrivatePayer({ ...BASE, ...lab, inbound: SUBETHA_INBOUND, burnTxHash: BURN, burnReaderForTest: reader, outDir: out, approve: true, hooksForTest: { afterLatch: () => { throw new Error("stop-before-credential"); } } })).rejects.toThrow("stop-before-credential");
     expect(progressOf(out)).toMatchObject({ purchaseAttempted: true });
     expect(progressOf(out)["payerAddress"]).toBeUndefined();
     expect(existsSync(path.join(out, "payment_header.json"))).toBe(false);
-    const again = await runPrivatePayer({ ...BASE, ...lab, inbound: SUBETHA_INBOUND, burnTxHash: BURN, outDir: out, approve: true });
+    const again = await runPrivatePayer({ ...BASE, ...lab, inbound: SUBETHA_INBOUND, burnTxHash: BURN, burnReaderForTest: reader, outDir: out, approve: true });
     expect(again).toMatchObject({ ok: false, stage: "approve" });
     if (!again.ok) expect(again.reason).toContain("already attempted");
     // latch の後、credential まで組む（鍵無し）→ purchase の応答喪失（127.0.0.1:9 は閉じている。client は `unknown: transport_uncertain` にする）: 「払ったかもしれない」。
     // 両決済は uncertain、申告した burn（claimedTxRef）は消えない。
     const out2 = path.join(tmp, "approve-lost");
     seedCheckpoint(out2, subethaOffer(), SUBETHA_INBOUND, "priv-subetha");
-    const lost = await runPrivatePayer({ ...BASE, ...lab, inbound: SUBETHA_INBOUND, burnTxHash: BURN, outDir: out2, approve: true });
+    const lost = await runPrivatePayer({ ...BASE, ...lab, inbound: SUBETHA_INBOUND, burnTxHash: BURN, burnReaderForTest: reader, outDir: out2, approve: true });
     expect(lost).toMatchObject({ ok: false, stage: "purchase" });
     if (!lost.ok) expect(lost.reason).toContain("unknown");
     expect(progressOf(out2)).toMatchObject({ purchaseAttempted: true, burnTxHash: BURN.toLowerCase() });
@@ -237,11 +245,14 @@ describe("--burn-tx-hash: subetha burn-sale の受信（lab 不要）", () => {
     const lab = fakeLab();
     const seeded = path.join(tmp, "cli-seeded");
     seedCheckpoint(seeded, subethaOffer(), SUBETHA_INBOUND, "priv-subetha");
-    const approved = await cliFull([...common.slice(0, -1), seeded, ...subetha, "--lab-dir", lab.labDir, "--approve", "--burn-tx-hash", BURN], { SUBETHA_ZKTLS_SRS_DAT: lab.srsPath });
+    // 照合は操作者が明示して飛ばす（ネットワーク無し）。証跡に skipped_by_operator が残る。
+    const approved = await cliFull([...common.slice(0, -1), seeded, ...subetha, "--lab-dir", lab.labDir, "--approve", "--burn-tx-hash", BURN, "--burn-precheck", "off"], { SUBETHA_ZKTLS_SRS_DAT: lab.srsPath });
     expect(approved.status).toBe(1);
     expect(approved.stdout).toContain('"stage":"purchase"');
     expect(approved.stdout).not.toContain(BURN.toLowerCase());
     expect(approved.stdout).not.toContain(BURN);
     expect(readFileSync(path.join(seeded, "evidence.json"), "utf8")).toContain(BURN.toLowerCase());
+    expect(readFileSync(path.join(seeded, "evidence.json"), "utf8")).toContain("skipped_by_operator");
+    expect(approved.stdout).toContain('"burn":{"verdict":"skipped_by_operator"}');
   }, 120_000);
 });

@@ -6,7 +6,8 @@ import path from "node:path";
 import { generatePrivateKey } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, validateRouterConfigAgainstTable, type RuntimeConfig } from "../../src/config.js";
+import { BURN_SALE_APPROVAL_TTL_MAX_MS, ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, validateRouterConfigAgainstTable, type RuntimeConfig } from "../../src/config.js";
+import { MAX_QUOTE_LIFETIME_MS } from "../../src/core/quote-ledger.js";
 import { KNOWN_NETWORKS } from "../../src/shared/networks.js";
 import { composeRails, profileIdOfBinding, type RouterCapabilities } from "../../src/main.js";
 import { privateBindingOf } from "../../src/core/store.js";
@@ -92,6 +93,34 @@ describe("parse", () => {
     expect(() => validateRouterConfigAgainstTable(v2, KNOWN_NETWORKS)).not.toThrow();
     expect(() => parseRouterConfig(router({ profiles: ["priv-x402"] }, subethaProfile()))).toThrow(/only allowed for profiles listed in private.profiles/);
     expect(() => parseRouterConfig(router(null, subethaProfile()))).toThrow(/only allowed for profiles listed in private.profiles/);
+  });
+  test("v1.4 FR-H1: burnSaleApprovalTtlMs の検査の表（既定・上限・subetha の有無・retentionMs）", () => {
+    const withSub = (patch: Record<string, unknown>) => parseRouterConfig(router({ profiles: ["priv-x402", "priv-subetha"], ...patch }, subethaProfile())).private!;
+    const x402Only = (patch: Record<string, unknown>) => parseRouterConfig(router({ profiles: ["priv-x402"], ...patch })).private!;
+    // 省略: subetha 無しは既定（使われない）、ありは min(1,200,000, cap)。
+    expect(x402Only({}).burnSaleApprovalTtlMs).toBe(1_200_000);
+    expect(withSub({}).burnSaleApprovalTtlMs).toBe(1_200_000);
+    expect(withSub({ retentionMs: 900_000, attestTimeoutMs: 600_000, verifyTimeoutMs: 60_000 }).burnSaleApprovalTtlMs).toBe(900_000);
+    // 既存の x402 だけの設定は retentionMs が短くても起動する（欄を持たない）。
+    expect(x402Only({ retentionMs: 30_000, attestTimeoutMs: 20_000, verifyTimeoutMs: 5_000 }).retentionMs).toBe(30_000);
+    // subetha ありで cap < 60,000 は省略でも拒否。
+    expect(() => withSub({ retentionMs: 30_000, attestTimeoutMs: 20_000, verifyTimeoutMs: 5_000 })).toThrow(/retentionMs is too short for a burn-sale approval window/);
+    // 明示: 常に [60,000, 86,400,000] の整数。subetha ありは retentionMs 以下も。
+    for (const bad of [59_999, 86_400_001, 1.5, "1200000", -1]) {
+      expect(() => x402Only({ burnSaleApprovalTtlMs: bad }), String(bad)).toThrow(/burnSaleApprovalTtlMs must be an integer between 60000 and 86400000/);
+      expect(() => withSub({ burnSaleApprovalTtlMs: bad }), String(bad)).toThrow(/burnSaleApprovalTtlMs must be an integer between/);
+    }
+    expect(x402Only({ burnSaleApprovalTtlMs: 86_400_000 }).burnSaleApprovalTtlMs).toBe(86_400_000);
+    expect(() => withSub({ burnSaleApprovalTtlMs: 3_600_001 })).toThrow(/must be at most retentionMs \(3600000 ms\)/);
+    expect(withSub({ burnSaleApprovalTtlMs: 3_600_000 }).burnSaleApprovalTtlMs).toBe(3_600_000);
+    expect(withSub({ burnSaleApprovalTtlMs: 60_000 }).burnSaleApprovalTtlMs).toBe(60_000);
+    // retentionMs が 1 日を超えても上限は 1 日（quote ledger の上限）。
+    expect(withSub({ retentionMs: 2 * 86_400_000, burnSaleApprovalTtlMs: 86_400_000 }).burnSaleApprovalTtlMs).toBe(86_400_000);
+    expect(() => withSub({ retentionMs: 2 * 86_400_000, burnSaleApprovalTtlMs: 86_400_001 })).toThrow(/must be an integer between/);
+    expect(withSub({ retentionMs: 2 * 86_400_000 }).burnSaleApprovalTtlMs).toBe(1_200_000);
+  });
+  test("v1.4: 上限の定数は quote ledger の上限と同じ", () => {
+    expect(BURN_SALE_APPROVAL_TTL_MAX_MS).toBe(MAX_QUOTE_LIFETIME_MS);
   });
   test("拒否: dynamic 無し、送信が SVM、Tempo で feeAsset 無し", () => {
     const withoutDynamic = router();
