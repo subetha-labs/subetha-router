@@ -6,9 +6,10 @@
  * 資金は動かない。trust は `lab-fixture-ca` → ここで得る証跡は **synthetic**（公開 PKI の受入の代わりにならない）。lab が無ければ skip（= **未検証**。合格ではない）。
  * この Mac では MPC-TLS のセッション 1 本が 10 秒前後、証明の生成・検証も数秒。各テストの上限は余裕をもって長い。
  */
-import { spawn, execFileSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, execFile, execFileSync, type ChildProcessByStdio } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
+import { createServer } from "node:http";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
@@ -22,6 +23,7 @@ import type { StopPoint } from "../../src/core/private.js";
 import { TOOL_NAMES } from "../../src/mcp/tools.js";
 import { sha256File, type LaunchHooksForTest } from "../../src/private/verifier.js";
 import { payFirstOf, recoverPrivatePayer, runPrivatePayer } from "../../tools/private-payer.js";
+import { fakeBurnReader } from "../fixtures/burn-reader.js";
 import { createX402Payer } from "../../tools/x402-payer.js";
 import { startVerifyingFacilitator, type VerifyingFacilitator } from "../fixtures/dynamic/verifying-facilitator.js";
 import { startListening, type Listening } from "../fixtures/loopback.js";
@@ -68,6 +70,8 @@ interface WorldOptions {
   readonly sessionTimeoutMs?: number;
   readonly attestTimeoutMs?: number;
   readonly verifyTimeoutMs?: number;
+  /** v1.4: burn-sale の承認期限（`private.burnSaleApprovalTtlMs`）。 */
+  readonly burnSaleApprovalTtlMs?: number;
 }
 interface World {
   readonly subethaPort: number;
@@ -192,6 +196,7 @@ function configDocument(world: World, options: WorldOptions): unknown {
         attestTimeoutMs,
         verifyTimeoutMs,
         retentionMs: Math.max(3_600_000, attestTimeoutMs + verifyTimeoutMs),
+        ...(options.burnSaleApprovalTtlMs === undefined ? {} : { burnSaleApprovalTtlMs: options.burnSaleApprovalTtlMs }),
       },
     },
     x402: { upstreams: { [STATIC_ROUTE]: "https://static.provider.test/v1/small" } },
@@ -780,7 +785,8 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     if (!quoted.ok || quoted.stage !== "quoted") return;
     const payFirst = payFirstOf(quoted.quote);
     const offer = quoted.quote.source.offer as Record<string, unknown>;
-    expect(payFirst).toEqual({ payTo: offer["payTo"], amount: "11000", network: SEPOLIA, asset: ZUSDC });
+    expect(payFirst).toMatchObject({ payTo: offer["payTo"], amount: "11000", network: SEPOLIA, asset: ZUSDC });
+    expect(payFirst?.payBy).toBe(new Date(quoted.quote.approval.deadlineMs - 180_000).toISOString());
     expect(String(payFirst!.payTo)).not.toBe(OPERATOR_PAY_TO);
     const settledLines = (): number => readFileSync(world.journalPath, "utf8").split("\n").filter((l) => l !== "" && (JSON.parse(l) as { event?: string }).event === "source_settled").length;
     const before = settledLines();
@@ -791,7 +797,14 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     expect(settledLines()).toBe(before);
     // 人が burn address に払った（fixture では模擬: 64 hex、大文字混じりで渡す → credential と再開点は小文字）。
     const burnTxHash = `0x${randomBytes(32).toString("hex").toUpperCase()}`;
-    const delivered = await runPrivatePayer({ ...common, outDir: out, approve: true, burnTxHash });
+    // 承認前の burn の照合（FR-H3）: まず未 mine（not_found）→ approve の段で拒否・settle 0・latch 無し。次に transferred → delivered。
+    const notMined = fakeBurnReader({ txHash: burnTxHash, token: ZUSDC, payTo: String(offer["payTo"]), amount: 11000n, receipt: null });
+    const refused = await runPrivatePayer({ ...common, outDir: out, approve: true, burnTxHash, burnReaderForTest: notMined });
+    expect(refused).toMatchObject({ ok: false, stage: "approve" });
+    if (!refused.ok) expect(refused.reason).toContain("do NOT pay again");
+    expect(settledLines()).toBe(before);
+    expect((JSON.parse(readFileSync(path.join(out, "checkpoint.json"), "utf8")) as { progress: Record<string, unknown> }).progress["purchaseAttempted"]).toBeUndefined();
+    const delivered = await runPrivatePayer({ ...common, outDir: out, approve: true, burnTxHash, burnReaderForTest: fakeBurnReader({ txHash: burnTxHash, token: ZUSDC, payTo: String(offer["payTo"]), amount: 11000n }) });
     expect(delivered, JSON.stringify({ ok: delivered.ok, stage: delivered.stage, ...(delivered.ok ? {} : { reason: delivered.reason }), gates: delivered.evidence.gates })).toMatchObject({ ok: true, stage: "delivered" });
     if (!delivered.ok || delivered.stage !== "delivered") return;
     expect(settledLines()).toBe(before + 1);
@@ -819,6 +832,81 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
     }
     await stopRouter(world);
   }, 300_000);
+
+  test("v1.4 CLI の出力（docs/zktls-router-burn-sale-hardening.md FR-H2・H5）: quote（payBy あり / 期限が短く payBy null で「払わない」）と承認の成功（照合 → delivered）の stdout・stderr に burn の hash・blockHash・RPC の URL が無い（delivered の行の inboundTx= は既存の例外）", async () => {
+    const cli = (args: string[]): Promise<{ status: number; stdout: string; stderr: string }> =>
+      new Promise((resolve) => {
+        execFile(process.execPath, ["--import", "tsx", "tools/private-payer.ts", ...args], { cwd: repoRoot, encoding: "utf8", timeout: 280_000, env: { ...process.env, PRIVATE_PAYER_TOKEN: ALICE.token, SUBETHA_PAYER_PRIVATE_KEY: "", SUBETHA_ZKTLS_SRS_DAT: lab.srs, SUBETHA_SEPOLIA_RPC_URL: "" } }, (error, stdout, stderr) => {
+          resolve({ status: error === null ? 0 : ((error as { code?: number }).code ?? 1), stdout: String(stdout), stderr: String(stderr) });
+        });
+      });
+    const args = (world: World, out: string): string[] => ["--router", world.router!.baseUrl, "--principal", ALICE.id, "--profile", SUBETHA_PROFILE_ID, "--method", "GET", "--host", HOST, "--path", GET_PATH, "--outbound-protocol", "x402", "--outbound-network", NETWORK, "--outbound-asset", USDC, "--outbound-pay-to", PROVIDER_PAY_TO, "--outbound-max-amount", PRICE, "--inbound-network", SEPOLIA, "--inbound-asset", ZUSDC, "--inbound-max-total", "11000", "--trust", "lab-fixture-ca", "--connect", `127.0.0.1:${provider.port}`, "--lab-dir", lab.labDir, "--out", out];
+    const burnTxHash = `0x${randomBytes(32).toString("hex")}`;
+    const blockHash = `0x${"bb".repeat(32)}`;
+    const CANARY = "/rpc-canary-wire-51c2";
+    // 1. 既定の TTL: quote の stdout に payFirst.payBy、note は「payBy までに mine」。
+    const world = newWorld();
+    await startRouter(world);
+    const out = path.join(world.dir, "cli-burn");
+    const quoted = await cli(args(world, out));
+    expect(quoted.status, quoted.stderr).toBe(0);
+    const doc = JSON.parse(quoted.stdout.trim()) as { payFirst: { payTo: string; amount: string; asset: string; payBy: string | null }; note: string };
+    expect(doc.payFirst.payBy).not.toBeNull();
+    expect(doc.note).toContain("mined by payFirst.payBy");
+    // 2. 照合用の Sepolia RPC（loopback）: この quote の burn address・額・token の Transfer を返す。
+    const topic = (a: string): string => `0x${a.slice(2).toLowerCase().padStart(64, "0")}`;
+    const rpc = createServer((request, response) => {
+      let body = "";
+      request.on("data", (c: Buffer) => (body += c.toString()));
+      request.on("end", () => {
+        const { method, id } = JSON.parse(body) as { method: string; id: number };
+        const result = method === "eth_chainId" ? "0xaa36a7" : method === "eth_getTransactionReceipt"
+          ? { transactionHash: burnTxHash, status: "0x1", blockNumber: "0x10", blockHash, logs: [{ address: doc.payFirst.asset, topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", topic("0x000000000000000000000000000000000000a11c"), topic(doc.payFirst.payTo)], data: `0x${BigInt(doc.payFirst.amount).toString(16).padStart(64, "0")}`, logIndex: "0x97" }] }
+          : { number: "0x10", hash: blockHash };
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, "127.0.0.1", () => resolve()));
+    const rpcUrl = `http://127.0.0.1:${(rpc.address() as import("node:net").AddressInfo).port}`;
+    try {
+      const approved = await cli([...args(world, out), "--approve", "--burn-tx-hash", burnTxHash, "--sepolia-rpc-url", `${rpcUrl}${CANARY}`]);
+      // 既存の delivered の行は `inboundTx=<受信 tx>` を出す（既存の例外）: その値だけを伏せて行の残りも検査する。
+      const masked = approved.stderr.split(`inboundTx=${burnTxHash.toLowerCase()}`).join("inboundTx=<allowed>");
+      expect(approved.status, masked).toBe(0);
+      expect(approved.stderr).toContain(`inboundTx=${burnTxHash.toLowerCase()}`);
+      expect(approved.stdout).toContain('"stage":"delivered"');
+      expect(approved.stdout).toContain('"burn":{"verdict":"transferred","block":16}');
+      expect(approved.stderr).toContain('burn check {"verdict":"transferred","block":16}');
+      for (const [name, stream] of [["quote stdout", quoted.stdout], ["quote stderr", quoted.stderr], ["approve stdout", approved.stdout], ["approve stderr", masked]] as const) {
+        for (const secret of [burnTxHash, blockHash, CANARY, new URL(rpcUrl).host]) expect(stream, `${name}: ${secret}`).not.toContain(secret);
+      }
+      // 証跡ファイルには全部ある（観測の記録）。
+      const evidence = readFileSync(path.join(out, "evidence.json"), "utf8");
+      expect(evidence).toContain(burnTxHash);
+      expect(evidence).toContain('"logIndex": 151');
+    } finally {
+      await new Promise<void>((resolve) => rpc.close(() => resolve()));
+      await stopRouter(world);
+    }
+    // 3. 期限が短い（burnSaleApprovalTtlMs 60 s < 余裕 180 s）: payBy null、note は「DO NOT PAY」、払えという文は無い。
+    const shortWorld = newWorld({ burnSaleApprovalTtlMs: 60_000 });
+    await startRouter(shortWorld);
+    try {
+      const short = await cli(args(shortWorld, path.join(shortWorld.dir, "cli-short")));
+      expect(short.status, short.stderr).toBe(0);
+      const shortDoc = JSON.parse(short.stdout.trim()) as { payFirst: { payBy: string | null; note?: string }; note: string };
+      expect(shortDoc.payFirst.payBy).toBeNull();
+      expect(shortDoc.note).toContain("DO NOT PAY");
+      expect(shortDoc.note).not.toContain("transfer exactly");
+      expect(short.stderr).toContain("payBy=none (do not pay: window too short)");
+      for (const [name, stream] of [["short stdout", short.stdout], ["short stderr", short.stderr]] as const) {
+        for (const secret of [burnTxHash, blockHash, CANARY, new URL(rpcUrl).host]) expect(stream, `${name}: ${secret}`).not.toContain(secret);
+      }
+    } finally {
+      await stopRouter(shortWorld);
+    }
+  }, 600_000);
 
   test("GET 全経路（公開 GET の秘匿配送）+ 同時二重 purchase + 完成した record への別注文 bundle（attest_foreign、状態不変）", async () => {
     const world = newWorld();

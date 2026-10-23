@@ -83,6 +83,12 @@ export interface PrivatePayerOptions {
   readonly payerPrivateKey?: string;
   /** subetha 受信の承認だけ: 人が注文別 burn address へ払った transfer の tx hash（0x + 64 hex）。credential に載せる。x402 受信では拒む。 */
   readonly burnTxHash?: string;
+  /** subetha の承認の前の burn の照合（`docs/zktls-router-burn-sale-hardening.md` FR-H3）。既定 `on`。`off` は操作者の明示（証跡に `skipped_by_operator`）。 */
+  readonly burnPrecheck?: "on" | "off";
+  /** burn の照合の Sepolia RPC（FR-H6）。省略時は env `SUBETHA_SEPOLIA_RPC_URL`、無ければ公開 RPC。 */
+  readonly sepoliaRpcUrl?: string;
+  /** **試験専用**: burn の照合の RPC の差し替え。 */
+  readonly burnReaderForTest?: BurnReader;
   /** false: quote で止まる（checkpoint を書く）。true: 同じ `outDir` の checkpoint を再開して最後まで。 */
   readonly approve: boolean;
   /** 実 Provider（`mozilla`）で必須: 支払い範囲の記録（JSON）。sha256 を証跡に書く。 */
@@ -114,6 +120,8 @@ export interface PrivatePayerEvidence {
   providerFileSha256?: string;
   /** `--recover --chain`（thirdparty §10.1）: 1 つの block で読んだ EIP-3009 `authorizationState` の事実だけ（推定しない）。 */
   chain?: ChainEvidence;
+  /** subetha 受信の burn の receipt の観測（FR-H3・H4）。**決済のゲートとは別**（facilitator の受理・Router の settle の確立ではない。finality でもない）。 */
+  burn?: BurnEvidence;
   intentSha256?: string;
   orderId?: string;
   paymentId?: string;
@@ -305,7 +313,7 @@ export function subethaCredentialOf(offer: Record<string, unknown>, burnTxHash: 
 }
 
 /** quote の受信が「credential の前に人が払う」（subetha burn-sale）なら、払う先と額（承認対象 `private.inbound` の写し）。x402 受信では `undefined`。 */
-export function payFirstOf(quote: PrivateQuoteView): { payTo: string; amount: string; network: string; asset: string } | undefined {
+export function payFirstOf(quote: PrivateQuoteView, nowMs: number = Date.now()): { payTo: string; amount: string; network: string; asset: string; payBy: string | null; note?: string } | undefined {
   const inbound = (quote as unknown as { private?: { inbound?: Record<string, unknown> } }).private?.inbound;
   if (inbound === undefined || inbound["fundsMoveAt"] !== "payer_burn_before_credential") return undefined;
   const payTo = inbound["payTo"];
@@ -313,7 +321,22 @@ export function payFirstOf(quote: PrivateQuoteView): { payTo: string; amount: st
   const network = inbound["network"];
   const asset = inbound["asset"];
   if (typeof payTo !== "string" || typeof amount !== "string" || typeof network !== "string" || typeof asset !== "string") return undefined;
-  return { payTo, amount, network, asset };
+  // FR-H2: 払う期限 = 承認期限 − 余裕。quote の時点で過ぎていれば払わない（設定の期限が短すぎる）。
+  const deadlineMs = (quote as unknown as { approval?: { deadlineMs?: unknown } }).approval?.deadlineMs;
+  const payByMs = typeof deadlineMs === "number" ? deadlineMs - BURN_PAY_MARGIN_MS : undefined;
+  if (payByMs === undefined || payByMs <= nowMs) return { payTo, amount, network, asset, payBy: null, note: "do not pay: the approval window is too short to transfer and approve in time; quote again with a longer burnSaleApprovalTtlMs" };
+  return { payTo, amount, network, asset, payBy: new Date(payByMs).toISOString() };
+}
+
+/** quote の stdout（FR-H2）: burn-sale は payFirst と、payBy があれば「payBy までに mine」、無ければ「払わない」。 */
+export function quotedOutputOf(quote: PrivateQuoteView, approvalSubjectFile: string, nowMs: number = Date.now()): Record<string, unknown> {
+  const payFirst = payFirstOf(quote, nowMs);
+  const note = payFirst === undefined
+    ? "no payment was made; review quote.json, then re-run the same command with --approve (same --out)"
+    : payFirst.payBy === null
+      ? "no payment was made; DO NOT PAY this quote: the approval window is too short to transfer and approve in time; quote again with a longer burnSaleApprovalTtlMs in a new --out"
+      : `no payment was made; review quote.json; the inbound is a burn-sale: transfer exactly payFirst.amount of payFirst.asset to payFirst.payTo so that it is mined by payFirst.payBy (${payFirst.payBy}), then re-run the same command with --approve --burn-tx-hash <that tx hash> (same --out)`;
+  return { stage: "quoted", paymentId: quote.paymentId, approvalSubjectFile, ...(payFirst === undefined ? {} : { payFirst }), note };
 }
 
 /** 第三者 Provider の値を事前互換検査の `provider.json` から**そのまま**取る（手入力の代わり。`docs/zktls-router-thirdparty.md` §4.2）。読めない・形が違えば `undefined`。 */
@@ -504,7 +527,7 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     evidence.stage = "quoted";
     persistEvidence();
     const payFirst = payFirstOf(quote);
-    log(`private-payer: quoted paymentId=${quote.paymentId} intentSha256=${evidence.intentSha256} total=${String((quote.pricing as Record<string, unknown>)["total"])}${payFirst === undefined ? "" : ` payFirst=${payFirst.amount} ${payFirst.asset}@${payFirst.network} to ${payFirst.payTo} (burn-sale: transfer first, then --approve --burn-tx-hash)`} (review ${quoteFile}, then re-run with --approve)`);
+    log(`private-payer: quoted paymentId=${quote.paymentId} intentSha256=${evidence.intentSha256} total=${String((quote.pricing as Record<string, unknown>)["total"])}${payFirst === undefined ? "" : ` payFirst=${payFirst.amount} ${payFirst.asset}@${payFirst.network} to ${payFirst.payTo} payBy=${payFirst.payBy ?? "none (do not pay: window too short)"} (burn-sale: transfer first, then --approve --burn-tx-hash)`} (review ${quoteFile}, then re-run with --approve)`);
     return { ok: true, stage: "quoted", quote, evidence };
   }
 
@@ -537,6 +560,25 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   evidence.paymentId = quote.paymentId;
   const requestId = checkpoint.requestId;
   mkdirSync(path.join(exec, "private_inbox"), { recursive: true, mode: 0o700 });
+
+  // 2b. subetha: latch の前に burn の receipt を照合（FR-H3）。`transferred` 以外は拒否（何も起きていない）。照合の後に新しい now() で期限を確かめ直す。
+  if (offerIsSubetha) {
+    if (options.burnPrecheck === "off") {
+      evidence.burn = { verdict: "skipped_by_operator", txRef: options.burnTxHash!.toLowerCase(), readAt: new Date(now()).toISOString(), at: "approve" };
+    } else {
+      const rpcUrl = rpcUrlOf(options.sepoliaRpcUrl ?? process.env["SUBETHA_SEPOLIA_RPC_URL"] ?? DEFAULT_SEPOLIA_RPC_URL);
+      if (rpcUrl === undefined && options.burnReaderForTest === undefined) return fail("approve", burnRefusalOf({ verdict: "rpc_unavailable", readAt: new Date(now()).toISOString(), at: "approve" }).replace("could not be checked (rpc_unavailable)", "could not be checked (the Sepolia RPC URL is not a valid http(s) URL)"));
+      const reader = options.burnReaderForTest ?? rpcBurnReader(rpcUrl!.href);
+      const chainId = Number(String(offer.network).replace(/^eip155:/, ""));
+      const amount = typeof offer["amount"] === "string" && /^[0-9]+$/.test(offer["amount"]) ? BigInt(offer["amount"]) : undefined;
+      if (!Number.isSafeInteger(chainId) || amount === undefined || typeof offer["asset"] !== "string" || typeof offer["payTo"] !== "string") return fail("approve", `the reviewed quote's offer is malformed (network/asset/payTo/amount); nothing was signed or submitted${burnNote}`);
+      const burn = await readBurn(reader, options.burnReaderForTest !== undefined ? "test" : rpcUrl!.host, { chainId, asset: offer["asset"], payTo: offer["payTo"], amount, txHash: options.burnTxHash! }, "approve");
+      log(`private-payer: burn check ${JSON.stringify({ verdict: burn.verdict, ...(burn.reason === undefined ? {} : { reason: burn.reason }), ...(burn.block === undefined ? {} : { block: burn.block }) })}`);
+      if (burn.verdict !== "transferred") return fail("approve", burnRefusalOf(burn));
+      evidence.burn = burn;
+    }
+    if (now() >= quote.approval.deadlineMs) return fail("approve", `the reviewed quote expired during the burn check${burnNote}`);
+  }
 
   // 3. 署名・提出の前に耐久の latch（応答を失っても、以後の承認は拒み --recover に回す）。latch が耐久に書けなければ署名しない（前の再開点はそのまま残る）。
   checkpoint.progress = { ...checkpoint.progress, paymentId: quote.paymentId, purchaseAttempted: true };
@@ -694,11 +736,149 @@ export interface PrivatePayerRecoverOptions {
   readonly srsPath?: string;
   readonly log?: (line: string) => void;
   /** `--chain`: 読取専用のチェーン照合（thirdparty §10.1）。`rpcUrl` の既定は `SUBETHA_BASE_SEPOLIA_RPC_URL` か公開 RPC。`payerAddress` は古い再開点（`progress.payerAddress` 無し）のため。 */
-  readonly chain?: { readonly rpcUrl?: string; readonly payerAddress?: string; readonly readerForTest?: ChainReader };
+  readonly chain?: { readonly rpcUrl?: string; readonly payerAddress?: string; readonly readerForTest?: ChainReader; /** subetha の burn の読取（FR-H4）。 */ readonly sepoliaRpcUrl?: string; readonly burnReaderForTest?: BurnReader };
   /** **試験専用**: Router の client と手元の復号の差し替え（Router も lab も無しで回復の論理を試す）。 */
   readonly clientForTest?: Pick<RouterClient & PrivateRouterClient, "status" | "privateRecord">;
   readonly decryptForTest?: () => Promise<{ gate: PrivatePayerEvidence["gates"]["payer_receipt"]; plaintextFile: string }>;
 }
+/** burn の照合の既定 RPC（FR-H6。結合 2 件の照合で使ったもの）。 */
+export const DEFAULT_SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+/** `payFirst.payBy` = 承認期限 − これ（FR-H2: transfer の 3 tx と hash の受け渡し・approve の時間）。 */
+export const BURN_PAY_MARGIN_MS = 180_000;
+
+export type BurnVerdict = "transferred" | "not_found" | "reverted" | "mismatch" | "reorged" | "unreadable" | "wrong_chain" | "rpc_unavailable" | "skipped_by_operator";
+export interface BurnEvidence {
+  readonly verdict: BurnVerdict;
+  /** `mismatch` の理由（固定語）。 */
+  readonly reason?: "no_transfer_to_pay_to" | "amount_differs";
+  readonly txRef?: string;
+  readonly block?: number;
+  readonly blockHash?: string;
+  /** 選んだ log（宛先が payTo の最初の Transfer）の logIndex。 */
+  readonly logIndex?: number;
+  readonly readAt: string;
+  readonly rpcHost?: string;
+  readonly at: "approve" | "recover";
+}
+/** burn の照合の RPC（生の JSON を返す。形の検査は `readBurn` が持つ: fail closed）。 */
+export interface BurnReader {
+  chainId(): Promise<unknown>;
+  receipt(txHash: string): Promise<unknown>;
+  blockByNumber(block: number): Promise<unknown>;
+}
+export interface BurnExpect {
+  readonly chainId: number;
+  readonly asset: string;
+  readonly payTo: string;
+  readonly amount: bigint;
+  readonly txHash: string;
+}
+const HEX_QUANTITY = /^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$/;
+/** hex の数量を安全な整数に（範囲外・形違いは undefined = unreadable。精度を落として別の block を読まない）。 */
+function safeQuantity(value: unknown): number | undefined {
+  if (typeof value !== "string" || !HEX_QUANTITY.test(value)) return undefined;
+  const big = BigInt(value);
+  return big > BigInt(Number.MAX_SAFE_INTEGER) ? undefined : Number(big);
+}
+/** RPC の URL を http(s) として解析する（失敗は undefined。値はどこにも出さない）。 */
+export function rpcUrlOf(raw: string | undefined): URL | undefined {
+  if (raw === undefined) return undefined;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+const HEX_DATA = /^0x([0-9a-fA-F]{2})*$/;
+interface BurnLog { readonly address: string; readonly topics: readonly string[]; readonly data: string; readonly logIndex: number }
+
+/**
+ * FR-H3 の 5: V2 facilitator と同じ選び方。log の順に、資産の contract が出した Transfer（topics 3 つ・data 32 byte）のうち、`to` = payTo の**最初の 1 つ**を選び、
+ * その額が完全一致なら transferred。先を探さない・合計しない。
+ */
+export function selectBurnTransfer(logs: readonly BurnLog[], expect: Pick<BurnExpect, "asset" | "payTo" | "amount">): { readonly kind: "transferred"; readonly logIndex: number } | { readonly kind: "mismatch"; readonly reason: "no_transfer_to_pay_to" | "amount_differs" } {
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== expect.asset.toLowerCase()) continue;
+    if (log.topics.length !== 3 || log.topics[0]!.toLowerCase() !== TOPIC_TRANSFER || !BYTES32.test(log.data)) continue;
+    const to = `0x${log.topics[2]!.slice(-40)}`;
+    if (to.toLowerCase() !== expect.payTo.toLowerCase()) continue;
+    return BigInt(log.data) === expect.amount ? { kind: "transferred", logIndex: log.logIndex } : { kind: "mismatch", reason: "amount_differs" };
+  }
+  return { kind: "mismatch", reason: "no_transfer_to_pay_to" };
+}
+
+/** FR-H3 の 1〜6（形が違えば `unreadable`、例外は `rpc_unavailable`）。 */
+export async function readBurn(reader: BurnReader, rpcHost: string, expect: BurnExpect, at: BurnEvidence["at"]): Promise<BurnEvidence> {
+  const base = { readAt: new Date().toISOString(), rpcHost, at, txRef: expect.txHash.toLowerCase() } as const;
+  try {
+    const chainIdRaw = await reader.chainId();
+    if (typeof chainIdRaw !== "string" || !HEX_QUANTITY.test(chainIdRaw)) return { ...base, verdict: "unreadable" };
+    if (BigInt(chainIdRaw) !== BigInt(expect.chainId)) return { ...base, verdict: "wrong_chain" };
+    const receipt = await reader.receipt(expect.txHash);
+    if (receipt === null) return { ...base, verdict: "not_found" };
+    if (!isRecord(receipt)) return { ...base, verdict: "unreadable" };
+    const { transactionHash, status, blockNumber, blockHash, logs } = receipt;
+    if (typeof transactionHash !== "string" || transactionHash.toLowerCase() !== expect.txHash.toLowerCase()) return { ...base, verdict: "unreadable" };
+    if (status !== "0x1" && status !== "0x0") return { ...base, verdict: "unreadable" };
+    const number = safeQuantity(blockNumber);
+    if (number === undefined || typeof blockHash !== "string" || !BYTES32.test(blockHash) || !Array.isArray(logs)) return { ...base, verdict: "unreadable" };
+    const parsed: BurnLog[] = [];
+    for (const raw of logs) {
+      if (!isRecord(raw)) return { ...base, verdict: "unreadable" };
+      const { address, topics, data, logIndex } = raw;
+      const index = safeQuantity(logIndex);
+      if (typeof address !== "string" || !EVM_ADDRESS_RE.test(address) || !Array.isArray(topics) || !topics.every((t) => typeof t === "string" && BYTES32.test(t)) || typeof data !== "string" || !HEX_DATA.test(data) || index === undefined) {
+        return { ...base, verdict: "unreadable" };
+      }
+      parsed.push({ address, topics: topics as string[], data, logIndex: index });
+    }
+    const at2 = { ...base, block: number, blockHash: blockHash.toLowerCase() };
+    // 同じ番号の block を読み直して hash を照合（reorg）。`reverted` もこの後でだけ出す。
+    const block = await reader.blockByNumber(number);
+    if (!isRecord(block) || typeof block["hash"] !== "string" || !BYTES32.test(block["hash"])) return { ...base, verdict: "unreadable" };
+    if (block["hash"].toLowerCase() !== blockHash.toLowerCase()) return { ...base, verdict: "reorged" };
+    if (status === "0x0") return { ...at2, verdict: "reverted" };
+    const selected = selectBurnTransfer(parsed, expect);
+    return selected.kind === "transferred" ? { ...at2, verdict: "transferred", logIndex: selected.logIndex } : { ...at2, verdict: "mismatch", reason: selected.reason };
+  } catch {
+    return { ...base, verdict: "rpc_unavailable" };
+  }
+}
+
+/** 公開の JSON-RPC の burn の reader（20 s。`fetch`、操作者が選ぶ URL。既存の Base Sepolia の reader と同じ）。 */
+export function rpcBurnReader(rpcUrl: string, timeoutMs = 20_000): BurnReader {
+  async function call(method: string, params: unknown[]): Promise<unknown> {
+    const response = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) throw new Error("rpc_http");
+    const body = (await response.json()) as { result?: unknown; error?: unknown };
+    if (body.error !== undefined || !("result" in body)) throw new Error("rpc_error");
+    return body.result;
+  }
+  return {
+    chainId: () => call("eth_chainId", []),
+    receipt: (txHash) => call("eth_getTransactionReceipt", [txHash]),
+    blockByNumber: (block) => call("eth_getBlockByNumber", [`0x${block.toString(16)}`, false]),
+  };
+}
+
+/** burn の結論ごとの拒否文（FR-H3）。**すべて「払い直さない」を含み、その禁止は payBy と quote の期限の後も続く**。 */
+export function burnRefusalOf(burn: BurnEvidence): string {
+  const never = "do NOT pay again on this result alone (this holds after payBy and after the quote deadline too: the order's transfer may exist elsewhere or be mined later)";
+  switch (burn.verdict) {
+    case "not_found":
+      return `the burn transaction was not found on Sepolia (not mined yet, or a wrong hash); re-run the same command before payBy; ${never}`;
+    case "reverted":
+      return `the given transaction reverted, so THIS transaction sent nothing (it may be the approve/wrap step or an unrelated hash); reconcile the order's transfer attempts with the V2 operator or an explorer before deciding anything; this result does not authorize a replacement payment; ${never}`;
+    case "mismatch":
+      return burn.reason === "amount_differs"
+        ? `the first Transfer to this quote's burn address has a different amount (funds did reach the burn address); reconcile with the V2 operator; ${never}`
+        : `the transaction has no Transfer of this quote's token to this quote's burn address; reconcile it (wrong hash, wrong address or token) with the V2 operator or an explorer; ${never}`;
+    default:
+      return `the burn receipt could not be checked (${burn.verdict}); re-run, optionally with --sepolia-rpc-url, or skip the check explicitly with --burn-precheck off; ${never}`;
+  }
+}
+
 export const DEFAULT_BASE_SEPOLIA_RPC_URL = "https://sepolia.base.org";
 export const BASE_SEPOLIA_CHAIN_ID = 84532;
 const AUTHORIZATION_STATE_ABI = parseAbi(["function authorizationState(address authorizer, bytes32 nonce) view returns (bool)"]);
@@ -997,7 +1177,8 @@ export function consoleProjectionOf(evidence: PrivatePayerEvidence): Record<stri
     const { txRef: _t, chainTxRef: _c, eventId: _e, claimedTxRef: _b, ...rest } = leg as T & { txRef?: unknown; chainTxRef?: unknown; eventId?: unknown; claimedTxRef?: unknown };
     return rest;
   };
-  return { ...evidence, chain: chainSummaryOf(evidence.chain), gates: { ...evidence.gates, inbound_settlement: strip(evidence.gates.inbound_settlement), outbound_settlement: strip(evidence.gates.outbound_settlement) } };
+  const { burn, ...rest } = evidence;
+  return { ...rest, chain: chainSummaryOf(evidence.chain), ...(burn === undefined ? {} : { burn: { verdict: burn.verdict, ...(burn.block === undefined ? {} : { block: burn.block }) } }), gates: { ...evidence.gates, inbound_settlement: strip(evidence.gates.inbound_settlement), outbound_settlement: strip(evidence.gates.outbound_settlement) } };
 }
 
 /** コンソール向けの要約（nonce・authorizer・tx hash・RPC は出さない。§10.1 出力の方針）。 */
@@ -1097,6 +1278,27 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
       log(`private-payer: chain ${JSON.stringify(chainSummaryOf(read.chain))}`);
     }
   }
+  // --chain かつ subetha: burn の receipt の観測（FR-H4）。決済のゲートは変えない。前の観測は recovery-log に残し、最新で置き換える。
+  if (options.chain !== undefined) {
+    const offer = (checkpoint.quote as unknown as { source?: { offer?: Record<string, unknown> } }).source?.offer;
+    const burnTxHash = checkpoint.progress?.burnTxHash;
+    if (offer !== undefined && offer["scheme"] === SUBETHA_SCHEME && burnTxHash !== undefined) {
+      const rpcUrl = rpcUrlOf(options.chain.sepoliaRpcUrl ?? process.env["SUBETHA_SEPOLIA_RPC_URL"] ?? DEFAULT_SEPOLIA_RPC_URL);
+      const chainId = Number(String(offer["network"]).replace(/^eip155:/, ""));
+      const amount = typeof offer["amount"] === "string" && /^[0-9]+$/.test(offer["amount"]) ? BigInt(offer["amount"]) : undefined;
+      if (Number.isSafeInteger(chainId) && amount !== undefined && typeof offer["asset"] === "string" && typeof offer["payTo"] === "string") {
+        // URL が読めなければ読取の失敗として観測に残す（rpc_unavailable）。
+        const burn: BurnEvidence = rpcUrl === undefined && options.chain.burnReaderForTest === undefined
+          ? { verdict: "rpc_unavailable", txRef: burnTxHash.toLowerCase(), readAt: new Date().toISOString(), at: "recover" }
+          : await readBurn(options.chain.burnReaderForTest ?? rpcBurnReader(rpcUrl!.href), options.chain.burnReaderForTest !== undefined ? "test" : rpcUrl!.host, { chainId, asset: offer["asset"], payTo: offer["payTo"], amount, txHash: burnTxHash }, "recover");
+        if (evidence.burn !== undefined) recordLog(options.outDir, "recovery-log.json", "burn", `previous burn observation ${JSON.stringify({ verdict: evidence.burn.verdict, at: evidence.burn.at, readAt: evidence.burn.readAt, ...(evidence.burn.block === undefined ? {} : { block: evidence.burn.block }) })} replaced`);
+        evidence.burn = burn;
+        log(`private-payer: burn ${JSON.stringify({ verdict: burn.verdict, ...(burn.reason === undefined ? {} : { reason: burn.reason }), ...(burn.block === undefined ? {} : { block: burn.block }) })}`);
+      } else {
+        recordLog(options.outDir, "recovery-log.json", "burn", "burn check not applied (offer shape); evidence unchanged");
+      }
+    }
+  }
   // 証跡は 1 つ（`evidence.json`）に単調に併合する（回復で分かったことも、次の回復で消えない）。
   writeDurable(path.join(options.outDir, "evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
   return { ok: true, paymentId, status: projection, recordAvailable: record.ok, decrypted, evidence };
@@ -1122,7 +1324,11 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   if (process.argv.includes("--recover")) {
-    const chain = process.argv.includes("--chain") ? { ...(argOf("rpc-url") === undefined ? {} : { rpcUrl: argOf("rpc-url")! }), ...(argOf("payer-address") === undefined ? {} : { payerAddress: argOf("payer-address")! }) } : undefined;
+    if (argOf("sepolia-rpc-url") !== undefined && rpcUrlOf(argOf("sepolia-rpc-url")) === undefined) {
+      process.stderr.write("--sepolia-rpc-url must be an http(s) URL\n");
+      process.exit(2);
+    }
+    const chain = process.argv.includes("--chain") ? { ...(argOf("rpc-url") === undefined ? {} : { rpcUrl: argOf("rpc-url")! }), ...(argOf("payer-address") === undefined ? {} : { payerAddress: argOf("payer-address")! }), ...(argOf("sepolia-rpc-url") === undefined ? {} : { sepoliaRpcUrl: argOf("sepolia-rpc-url")! }) } : undefined;
     const recovered = await recoverPrivatePayer({ routerBaseUrl: requireArg("router"), principalId: requireArg("principal"), token, outDir: requireArg("out"), ...(argOf("lab-dir") === undefined ? {} : { labDir: argOf("lab-dir")! }), ...(chain === undefined ? {} : { chain }) });
     // コンソールには chain の要約（verdict と block）だけ。nonce・authorizer・tx hash は証跡ファイルに。
     const printable = recovered.ok ? consoleProjectionOf(recovered.evidence) : undefined;
@@ -1143,6 +1349,16 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const burnTxHash = argOf("burn-tx-hash");
+  const burnPrecheck = argOf("burn-precheck");
+  if (burnPrecheck !== undefined && burnPrecheck !== "on" && burnPrecheck !== "off") {
+    process.stderr.write("--burn-precheck must be on or off\n");
+    process.exit(2);
+  }
+  const sepoliaRpcUrl = argOf("sepolia-rpc-url");
+  if (sepoliaRpcUrl !== undefined && rpcUrlOf(sepoliaRpcUrl) === undefined) {
+    process.stderr.write("--sepolia-rpc-url must be an http(s) URL\n");
+    process.exit(2);
+  }
   if (burnTxHash !== undefined && !process.argv.includes("--approve")) {
     process.stderr.write("--burn-tx-hash goes with --approve (quote first, pay the burn address, then approve)\n");
     process.exit(2);
@@ -1199,13 +1415,14 @@ async function main(): Promise<void> {
     outDir,
     ...(key === undefined || key === "" ? {} : { payerPrivateKey: key }),
     ...(burnTxHash === undefined ? {} : { burnTxHash }),
+    ...(burnPrecheck === undefined ? {} : { burnPrecheck }),
+    ...(sepoliaRpcUrl === undefined ? {} : { sepoliaRpcUrl }),
     approve: process.argv.includes("--approve"),
     ...(process.argv.includes("--stop-after-handover") ? { stopAfterHandover: true } : {}),
     ...(argOf("scope-file") === undefined ? {} : { scopeFile: argOf("scope-file")! }),
   });
   if (run.ok && run.stage === "quoted") {
-    const payFirst = payFirstOf(run.quote);
-    process.stdout.write(`${JSON.stringify({ stage: "quoted", paymentId: run.quote.paymentId, approvalSubjectFile: path.join(outDir, "quote.json"), ...(payFirst === undefined ? {} : { payFirst }), note: payFirst === undefined ? "no payment was made; review quote.json, then re-run the same command with --approve (same --out)" : "no payment was made; review quote.json; the inbound is a burn-sale: transfer exactly payFirst.amount of payFirst.asset to payFirst.payTo before the quote deadline, then re-run the same command with --approve --burn-tx-hash <that tx hash> (same --out)" })}\n`);
+    process.stdout.write(`${JSON.stringify(quotedOutputOf(run.quote, path.join(outDir, "quote.json")))}\n`);
     return;
   }
   // コンソールには tx 参照を出さない射影（`--recover` と同じ方針）。全部は evidence.json に。

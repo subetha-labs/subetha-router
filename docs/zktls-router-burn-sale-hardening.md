@@ -85,3 +85,21 @@
 |---|---|
 | 1 Medium: FR-H1 の検査の条件が矛盾、省略時の既定が下限を割り得る | 検査の表に一本化（明示は常に [60,000, 1 日]、subetha があれば `cap` も、`cap < 60,000` は省略でも拒否）。境界ごとに試験 |
 | 2 Medium: quote の寿命の試験が足りない | 1 日を超える challenge、ledger への登録・期限前の再起動・満了で未処理数から外れ受付が戻る、を private-core に。latch の直前の期限の再確認は新しい `now()` で、`--burn-precheck off` でも行う |
+
+## 6. 実装の記録（2026-10-23。作者の実行結果）
+- `src/config.ts`: `PrivateConfig.burnSaleApprovalTtlMs`、`BURN_SALE_APPROVAL_TTL_{MIN,MAX}_MS`、`burnSaleApprovalTtlOf`（§2 の検査の表）。`src/core/private.ts`: 承認期限の TTL を受信レールで選ぶ（3 行）。
+- `tools/private-payer.ts`: `selectBurnTransfer`・`readBurn`・`rpcBurnReader`・`burnRefusalOf`、approve の 2b 段（照合 → 新しい `now()` で期限の再確認 → latch）、`payFirstOf` の `payBy`、recover の burn の観測、`consoleProjectionOf` の `burn` の要約、CLI `--burn-precheck on|off`・`--sepolia-rpc-url`（recover でも）。
+- 試験: `tests/unit/private-payer-burn-check.test.ts`（16: 選び方 3、readBurn 7、approve 3、実 JSON-RPC の loopback fixture と優先順位 1、recover と射影 3）、`tests/fixtures/burn-reader.ts`、`tests/unit/private-payer-burn-sale.test.ts`（payBy、既存の承認は偽の reader / `--burn-precheck off`）、`tests/unit/private-config.test.ts`（検査の表、上限の定数 = `MAX_QUOTE_LIFETIME_MS`）、`tests/unit/private-core.test.ts`（期限の選択と上限・旧 10 分超の purchase、TTL 増減の再起動、1 日超の challenge の寿命と受付）、`tests/wire/private-x402.test.ts`（`not_found` で承認拒否・settle 0 → `transferred` で delivered、`payBy`）。
+- 結果: 関連の単体・wire 169 件と lab wire 13 件が通過。`npx tsc` は既存の `packages/payer/test` の 2 件だけ。**sabotage**: core の TTL 選択を戻すと private-core の v1.4 の 3 件が落ちることを確認（戻した）。
+
+## 7. 実装レビュー 1 回目（Codex、APPROVE WITH CHANGES）への対応
+| 指摘 | 対応 |
+|---|---|
+| 1 Medium: `payBy: null` でも上位の note が「払え」と言う | `quotedOutputOf` に切り出し、`payBy: null` は「DO NOT PAY」、あれば「payBy までに mine」。単体で両方 |
+| 2 Medium: 壊れた RPC の URL が構造化された拒否・観測を通らない | `rpcUrlOf`（http(s) の解析）を approve・recover・CLI で共有。approve は拒否（`refusals.json`、払い直さない）、recover は `rpc_unavailable` の観測。options・env・recover・CLI を試験 |
+| 3 Medium: hex の数量が number で精度を落とす | `safeQuantity`（安全な整数の範囲外は `unreadable`）、chain id は BigInt で比較。block 番号・logIndex の範囲外を試験 |
+| 4 Medium: stdout/stderr の行列と失敗の経路の試験が足りない | CLI で approve の拒否・approve（照合 → purchase の応答喪失）・bypass・recover（Router 不在、`--rpc-url` も loopback）の 4 場面の stdout と stderr に burn の hash・blockHash・RPC の URL（path の canary と host）が無いこと、`result` の欄の無い応答・timeout は `rpc_unavailable`、CLI の値検査（exit 2）。**sabotage**: 射影が `burn` を丸ごと出すようにすると 2 件落ちることを確認（戻した） |
+
+結果: この増分が触る単体・wire・lab wire の 230 件のうち 229 件通過（1 件は lab が有るときの「lab 無し」の置き場の skip）。
+| 再レビュー（APPROVE WITH CHANGES、残り 1）: CLI の quote と承認の成功が stdout/stderr の行列に無い | lab wire に CLI の場合を追加: 実 Router と lab で CLI の quote（`payBy` あり・note「payBy までに mine」）→ loopback の Sepolia RPC で照合 → CLI の承認が delivered。両方の stdout と stderr（delivered の行の `inboundTx=<受信 tx>` の**値だけ**を既存の例外として伏せ、行の残りも検査）に burn の hash・blockHash・RPC の URL が無い。`burnSaleApprovalTtlMs` 60 s の Router で CLI の quote は `payBy: null`・note「DO NOT PAY」、その stdout と stderr も同じ検査 |
+| 3 回目（APPROVE WITH CHANGES、Medium 2）: 短い期限の場合の stream が未検査、delivered の行を丸ごと除外 | 短い期限の場合の stdout と stderr も検査、delivered の行は `inboundTx=` の値だけを伏せて残りを検査。機械的な修正なので再レビューはしない（`CLAUDE.md`: 小さな修正の繰り返しのレビューをしない） |
