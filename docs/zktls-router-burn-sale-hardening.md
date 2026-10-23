@@ -24,16 +24,16 @@
 - **FR-H2 払う期限の表示**: payer 道具の quote 出力の `payFirst` に `payBy`（ISO 8601、= 承認期限 − `BURN_PAY_MARGIN_MS` 180,000）。stdout と log の両方。quote の時点で `payBy` が過ぎていれば `payBy: null` と「払わない（期限が短すぎる）」注記。
 - **FR-H3 承認前の burn 照合**: `--approve --burn-tx-hash` は、既存の拒否（引数・quote.json・期限・scheme・burn 必須）の後、**latch の前**に Sepolia の receipt を読む。判定は **V2 facilitator と同じ選び方**:
   1. `eth_chainId` が offer の network の chain id と一致（違えば `wrong_chain`）
-  2. `eth_getTransactionReceipt`: `null` → `not_found`。形の検査（**fail closed**: どれかが違えば `unreadable`）: `transactionHash` が要求した hash と一致（大小文字無視）、`status` が `"0x1"` か `"0x0"`、`blockNumber` が hex 数、`blockHash` が 32 byte hex、`logs` が配列で各 log の `address`（20 byte hex）・`topics`（32 byte hex の配列）・`data`（hex）・`logIndex`（hex 数）
+  2. `eth_getTransactionReceipt`: `null` → `not_found`。receipt の形の検査（**fail closed**: どれかが違えば `unreadable`）: `transactionHash` が要求した hash と一致（大小文字無視）、`status` が `"0x1"` か `"0x0"`、`blockNumber` が安全な整数の hex、`blockHash` が 32 byte hex、`logs` が配列。**個々の log の形は 5 の decode が決め、崩れた log はその log だけ飛ばす**（v2.2。facilitator と同じ）。最初の一致の log の `logIndex` が読めなければ `unreadable`
   3. 同じ番号の block を読み直し、hash が一致（違えば `reorged`、`null`・形違いは `unreadable`）。`reverted` もこの検査の後にだけ出す
   4. `status = "0x0"` → `reverted`
-  5. log の順に、**address = offer の `asset`（大小文字無視）かつ topic0 = Transfer（`0xddf252ad…`）かつ topics の数が 3 かつ data が 32 byte** のもののうち、`to`（topics[2] の下位 20 byte）= offer の `payTo`（大小文字無視）の**最初の 1 つ**を選ぶ。無ければ `mismatch`（`no_transfer_to_pay_to`）。その `value`（BigInt）が offer の `amount`（BigInt）と**完全一致**なら `transferred`（その log の `logIndex` を記録）、違えば `mismatch`（`amount_differs`）。先の log を越えて額の一致を探さない・合計しない
+  5. **v2.2（2026-10-24 訂正）: V2 facilitator の `#evaluate`（`subetha-protocol` `packages/zerc20-v2-adapter/src/burn-sale-backend.ts`）と同じ判定**: この receipt の、**address = offer の `asset`（小文字にして比較）かつ facilitator と同じ ABI・同じ viem の `decodeEventLog` で Transfer として decode できる** log のうち（decode できない log・別の contract の log・形の崩れた log は**その log だけ**飛ばす）、`to` = offer の `payTo`（大小文字無視）の**すべて**の `value`（BigInt）を合計する。1 つも無ければ `mismatch`（`no_transfer_to_pay_to`）、合計 < `amount` なら `mismatch`（`insufficient`、合計を記録）、合計 ≥ `amount` なら `transferred`（`logIndex` は最初の一致の log = facilitator の eventId、合計を記録、超えていれば `overpaid` と警告。超過分は戻らない）。別の tx の合計はしない（facilitator も受けない）
   6. 例外・timeout・JSON-RPC error → `rpc_unavailable`
   - `from` と receipt の `to` は束縛しない（quote に権威ある payer の address が無い。receipt の `to` は呼んだ contract で helper のこともある）。
   - `transferred` 以外は approve の段で拒否（latch・credential・purchase は起きない。`refusals.json`）。**拒否文はすべて「この結果だけを根拠に払い直さない」を含み、その禁止は `payBy` と quote の期限の後も続く**（同じ注文の transfer が別にある・後で mine され得る）。結論ごとの案内:
     - `not_found`: 未 mine か hash の誤り。`payBy` までに同じコマンドを再実行。払い直さない
     - `reverted`: **この tx** は何も送っていない（approve/wrap の hash を渡した、別の tx 等もあり得る）。この注文に向けた transfer を V2 担当・explorer で**照合してから**判断する。この結果は払い直しの許可ではない
-    - `mismatch`: 選んだ log の宛先・額がこの quote と違う（`amount_differs` は正しい burn address に違う額が届いている）。照合してから。払い直さない
+    - `mismatch`: この tx にこの quote の token の burn address への Transfer が無い（`no_transfer_to_pay_to`）か、合計が足りない（`insufficient`: 合計を出す。合計が正なら**その分は burn address に届いている**、0 なら届いていない。別の tx の分は facilitator も合計しない）。照合してから。払い直さない
     - `reorged` / `unreadable` / `wrong_chain` / `rpc_unavailable`: 読めなかった。再実行（`--sepolia-rpc-url` で RPC を変えられる）。照合を飛ばすには `--burn-precheck off`（証跡に `skipped_by_operator`）。払い直さない
   - 照合は非同期なので、**latch の直前にもう一度承認期限を確かめる**（照合中に過ぎたら拒否。burn 付きの期限切れの文 = 払い直さない・照合）。
   - 通ったら証跡 `evidence.burn = { verdict: "transferred", txRef, block, blockHash, logIndex, readAt, rpcHost, at: "approve" }`。
@@ -53,7 +53,7 @@
 
 ## 4. 試験
 - 単体（lab 不要・ネットワーク不要）:
-  - `selectBurnTransfer`: 一致、先の log が別の宛先で後が一致（通る）、**先の log が同じ宛先で額違い・後が一致（`amount_differs`）**、別 token の log だけ（`no_transfer_to_pay_to`）、Transfer 以外の topic、topics の数違い・data 長違いは選ばない、大小文字、`logIndex` が選んだ log のもの。
+  - `selectBurnTransfer`（v2.2）: 一致、先の log が別の宛先で後が一致（通る）、1 tx 内の分割の合計（通る、logIndex は最初）、過払い（通る、overpaid）、合計不足（`insufficient`）、別の宛先・別 token は合計に入れない、別 token の log だけ（`no_transfer_to_pay_to`）、Transfer 以外の topic、topics の数違い・data 長違いは選ばない、大小文字、`logIndex` が選んだ log のもの。
   - `readBurn`: `not_found`、`reverted`（block の照合の後）、`reorged`、`wrong_chain`、`unreadable`（hash 不一致・status 形違い・blockHash 形違い・logs の形違い・block が null）、`rpc_unavailable`（例外・JSON-RPC error）。
   - approve: 結論ごとの拒否で latch 無し・再開点と証跡のバイト列不変・文に「払い直さない」・`reverted` の文が払い直しを許さない、`transferred` で latch → `evidence.burn`、`--burn-precheck off`、照合中に期限切れ → 拒否、RPC の優先順位。
   - `payFirst.payBy`（通常・期限が短すぎる）。
@@ -103,3 +103,12 @@
 結果: この増分が触る単体・wire・lab wire の 230 件のうち 229 件通過（1 件は lab が有るときの「lab 無し」の置き場の skip）。
 | 再レビュー（APPROVE WITH CHANGES、残り 1）: CLI の quote と承認の成功が stdout/stderr の行列に無い | lab wire に CLI の場合を追加: 実 Router と lab で CLI の quote（`payBy` あり・note「payBy までに mine」）→ loopback の Sepolia RPC で照合 → CLI の承認が delivered。両方の stdout と stderr（delivered の行の `inboundTx=<受信 tx>` の**値だけ**を既存の例外として伏せ、行の残りも検査）に burn の hash・blockHash・RPC の URL が無い。`burnSaleApprovalTtlMs` 60 s の Router で CLI の quote は `payBy: null`・note「DO NOT PAY」、その stdout と stderr も同じ検査 |
 | 3 回目（APPROVE WITH CHANGES、Medium 2）: 短い期限の場合の stream が未検査、delivered の行を丸ごと除外 | 短い期限の場合の stdout と stderr も検査、delivered の行は `inboundTx=` の値だけを伏せて残りを検査。機械的な修正なので再レビューはしない（`CLAUDE.md`: 小さな修正の繰り返しのレビューをしない） |
+
+## 8. 訂正 v2.2（2026-10-24、PR #200 の merge 前）: 照合の規則を facilitator に揃える
+V2 担当（session `subetha-v2-0c`）の指摘を受け、V2 facilitator の実装（`burn-sale-backend.ts` `#evaluate`、263–285 行）を直接読んで確認した: 宛先が burn address の Transfer を**すべて合計**し、**合計 ≥ 額**で受理する（eventId は最初の一致の log）。設計 v2 の FR-H3 の 5（「最初の 1 つ・額の完全一致」）は、作者が facilitator の挙動を**実装を読まずに**レビューに伝えた誤った前提に基づいていた（設計レビュー 1 回目の指摘 1 もその前提の上）。
+- 害: 照合が facilitator より厳しいと、facilitator が受理する burn（過払い、1 tx 内の分割）を**資金が動いた後に**拒み、拒否文は「払い直さない」なので、資金が burn address に残り配送されない。照合の目的（facilitator の判定を先に知る）に反する。
+- 対応: FR-H3 の 5 を facilitator と同じ判定に変更（上の 5）。過払いは拒まず `overpaid` と警告（超過分は戻らない）。試験を差し替え（分割の合計・過払い・合計不足・他の宛先と token を合計に入れない、承認の過払いは latch に進み警告）。
+- 依存: facilitator の判定が変われば照合も追従が要る（`burn-sale-backend.ts` を参照先として明記）。
+- 再レビュー（Codex、facilitator の実装を直接読ませた。APPROVE WITH CHANGES）: decode の厳しさの差（data の余り・余分な topic を facilitator は受ける）、形の崩れた無関係な log で receipt 全体を拒んでいた、0 の Transfer の文言。→ 同じ ABI と viem の `decodeEventLog` に変更、log ごとに飛ばす、`insufficient` の文に合計を出し 0 なら「届いていない」。
+- **facilitator に無い、意図して残す門**（照合が facilitator より厳しくなり得る点。どれも「読めた事実が食い違う・読めない」場合だけで、拒否文は「払い直さない」）: receipt の `transactionHash` が要求と一致、`status` が `0x1`/`0x0`、`blockNumber`・`blockHash` の形、同じ番号の block の hash の照合（reorg）、**最初の一致の Transfer の** `logIndex` が読めること（無関係な log の `logIndex` は見ない）、chain id。これらで止まったときは `--burn-precheck off` で照合を飛ばして承認できる（Router の `/verify` が最終の判定）。
+- 再レビュー 2 回目（APPROVE WITH CHANGES）: 余分な topic が文字列でない log を飛ばしていた（viem は必要な topic だけを decode する）、§2 と注釈に古い記述。→ topics・data の形は decode に任せる、`logIndex` は最初の一致の log でだけ要求、§2 の 2・mismatch の文と注釈を v2.2 に合わせた。

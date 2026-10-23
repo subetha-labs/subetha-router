@@ -36,7 +36,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { encodeFunctionData, parseAbi } from "viem";
+import { decodeEventLog, encodeFunctionData, parseAbi } from "viem";
 
 import { createRouterClient } from "../src/client/index.js";
 import type { PrivateHandoverView, PrivateQuoteView, RouterClient } from "../src/client/types.js";
@@ -573,7 +573,8 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
       const amount = typeof offer["amount"] === "string" && /^[0-9]+$/.test(offer["amount"]) ? BigInt(offer["amount"]) : undefined;
       if (!Number.isSafeInteger(chainId) || amount === undefined || typeof offer["asset"] !== "string" || typeof offer["payTo"] !== "string") return fail("approve", `the reviewed quote's offer is malformed (network/asset/payTo/amount); nothing was signed or submitted${burnNote}`);
       const burn = await readBurn(reader, options.burnReaderForTest !== undefined ? "test" : rpcUrl!.host, { chainId, asset: offer["asset"], payTo: offer["payTo"], amount, txHash: options.burnTxHash! }, "approve");
-      log(`private-payer: burn check ${JSON.stringify({ verdict: burn.verdict, ...(burn.reason === undefined ? {} : { reason: burn.reason }), ...(burn.block === undefined ? {} : { block: burn.block }) })}`);
+      log(`private-payer: burn check ${JSON.stringify({ verdict: burn.verdict, ...(burn.reason === undefined ? {} : { reason: burn.reason }), ...(burn.block === undefined ? {} : { block: burn.block }), ...(burn.overpaid === true ? { overpaid: true } : {}) })}`);
+      if (burn.overpaid === true) log("private-payer: burn warning: the transaction sent more than the quoted amount to the burn address; the facilitator accepts it, the excess is not returned");
       if (burn.verdict !== "transferred") return fail("approve", burnRefusalOf(burn));
       evidence.burn = burn;
     }
@@ -750,7 +751,11 @@ export type BurnVerdict = "transferred" | "not_found" | "reverted" | "mismatch" 
 export interface BurnEvidence {
   readonly verdict: BurnVerdict;
   /** `mismatch` の理由（固定語）。 */
-  readonly reason?: "no_transfer_to_pay_to" | "amount_differs";
+  readonly reason?: "no_transfer_to_pay_to" | "insufficient";
+  /** この tx で burn address に届いた額の合計（atomic、10 進）。 */
+  readonly total?: string;
+  /** 合計が quote の額を超えた（facilitator は受理する。超過分は戻らない）。 */
+  readonly overpaid?: true;
   readonly txRef?: string;
   readonly block?: number;
   readonly blockHash?: string;
@@ -791,21 +796,46 @@ export function rpcUrlOf(raw: string | undefined): URL | undefined {
   }
 }
 const HEX_DATA = /^0x([0-9a-fA-F]{2})*$/;
-interface BurnLog { readonly address: string; readonly topics: readonly string[]; readonly data: string; readonly logIndex: number }
+/** receipt の log（形は decode が決める。`logIndex` は読めなければ undefined: 最初の一致の log でだけ必要）。 */
+interface BurnLog { readonly address: string; readonly topics: readonly unknown[]; readonly data: unknown; readonly logIndex: number | undefined }
+const TRANSFER_EVENT_ABI = parseAbi(["event Transfer(address indexed from, address indexed to, uint256 value)"]);
 
 /**
- * FR-H3 の 5: V2 facilitator と同じ選び方。log の順に、資産の contract が出した Transfer（topics 3 つ・data 32 byte）のうち、`to` = payTo の**最初の 1 つ**を選び、
- * その額が完全一致なら transferred。先を探さない・合計しない。
+ * FR-H3 の 5: **V2 facilitator と同じ判定**（`subetha-protocol` `packages/zerc20-v2-adapter/src/burn-sale-backend.ts` `#evaluate`）。
+ * 資産の contract が出した log を、facilitator と同じ ABI・同じ viem の `decodeEventLog` で Transfer として decode し（できない log はその log だけ飛ばす）、
+ * `to` = payTo のものの額を**すべて**合計して、合計 ≥ quote の額なら transferred（logIndex は最初の一致の log = facilitator の eventId と同じ）。
+ * 過払い・1 tx 内の複数 log への分割は受理される。別の tx への分割は合計しない。
  */
-export function selectBurnTransfer(logs: readonly BurnLog[], expect: Pick<BurnExpect, "asset" | "payTo" | "amount">): { readonly kind: "transferred"; readonly logIndex: number } | { readonly kind: "mismatch"; readonly reason: "no_transfer_to_pay_to" | "amount_differs" } {
+export function selectBurnTransfer(logs: readonly BurnLog[], expect: Pick<BurnExpect, "asset" | "payTo" | "amount">): { readonly kind: "transferred"; readonly logIndex: number; readonly total: bigint; readonly overpaid: boolean } | { readonly kind: "mismatch"; readonly reason: "no_transfer_to_pay_to" | "insufficient"; readonly total?: bigint } | { readonly kind: "unreadable" } {
+  let first: number | undefined;
+  let matched = false;
+  let total = 0n;
+  const asset = expect.asset.toLowerCase();
+  const payTo = expect.payTo.toLowerCase();
   for (const log of logs) {
-    if (log.address.toLowerCase() !== expect.asset.toLowerCase()) continue;
-    if (log.topics.length !== 3 || log.topics[0]!.toLowerCase() !== TOPIC_TRANSFER || !BYTES32.test(log.data)) continue;
-    const to = `0x${log.topics[2]!.slice(-40)}`;
-    if (to.toLowerCase() !== expect.payTo.toLowerCase()) continue;
-    return BigInt(log.data) === expect.amount ? { kind: "transferred", logIndex: log.logIndex } : { kind: "mismatch", reason: "amount_differs" };
+    // facilitator と同じ順: 別の contract の log は decode の前に飛ばし、decode できない log は飛ばす（viem の decodeEventLog、同じ ABI）。
+    if (log.address.toLowerCase() !== asset) continue;
+    let to: string;
+    let value: bigint;
+    try {
+      const decoded = decodeEventLog({ abi: TRANSFER_EVENT_ABI, data: log.data as `0x${string}`, topics: log.topics as [`0x${string}`, ...`0x${string}`[]] });
+      to = decoded.args.to;
+      value = decoded.args.value;
+    } catch {
+      continue;
+    }
+    if (to.toLowerCase() !== payTo) continue;
+    // 最初の一致の log の logIndex は facilitator の eventId になる: 読めなければ受信 identity を作れない（作者の追加の門。§8）。
+    if (!matched) {
+      if (log.logIndex === undefined) return { kind: "unreadable" };
+      first = log.logIndex;
+      matched = true;
+    }
+    total += value;
   }
-  return { kind: "mismatch", reason: "no_transfer_to_pay_to" };
+  if (first === undefined) return { kind: "mismatch", reason: "no_transfer_to_pay_to" };
+  if (total < expect.amount) return { kind: "mismatch", reason: "insufficient", total };
+  return { kind: "transferred", logIndex: first, total, overpaid: total > expect.amount };
 }
 
 /** FR-H3 の 1〜6（形が違えば `unreadable`、例外は `rpc_unavailable`）。 */
@@ -823,15 +853,11 @@ export async function readBurn(reader: BurnReader, rpcHost: string, expect: Burn
     if (status !== "0x1" && status !== "0x0") return { ...base, verdict: "unreadable" };
     const number = safeQuantity(blockNumber);
     if (number === undefined || typeof blockHash !== "string" || !BYTES32.test(blockHash) || !Array.isArray(logs)) return { ...base, verdict: "unreadable" };
+    // log は 1 つずつ: 形の崩れた log は（facilitator と同じく）その log だけを飛ばす。topics と data の形は decode（viem）が決める。
     const parsed: BurnLog[] = [];
     for (const raw of logs) {
-      if (!isRecord(raw)) return { ...base, verdict: "unreadable" };
-      const { address, topics, data, logIndex } = raw;
-      const index = safeQuantity(logIndex);
-      if (typeof address !== "string" || !EVM_ADDRESS_RE.test(address) || !Array.isArray(topics) || !topics.every((t) => typeof t === "string" && BYTES32.test(t)) || typeof data !== "string" || !HEX_DATA.test(data) || index === undefined) {
-        return { ...base, verdict: "unreadable" };
-      }
-      parsed.push({ address, topics: topics as string[], data, logIndex: index });
+      if (!isRecord(raw) || typeof raw["address"] !== "string" || !Array.isArray(raw["topics"])) continue;
+      parsed.push({ address: raw["address"], topics: raw["topics"] as unknown[], data: raw["data"], logIndex: safeQuantity(raw["logIndex"]) });
     }
     const at2 = { ...base, block: number, blockHash: blockHash.toLowerCase() };
     // 同じ番号の block を読み直して hash を照合（reorg）。`reverted` もこの後でだけ出す。
@@ -840,7 +866,10 @@ export async function readBurn(reader: BurnReader, rpcHost: string, expect: Burn
     if (block["hash"].toLowerCase() !== blockHash.toLowerCase()) return { ...base, verdict: "reorged" };
     if (status === "0x0") return { ...at2, verdict: "reverted" };
     const selected = selectBurnTransfer(parsed, expect);
-    return selected.kind === "transferred" ? { ...at2, verdict: "transferred", logIndex: selected.logIndex } : { ...at2, verdict: "mismatch", reason: selected.reason };
+    if (selected.kind === "unreadable") return { ...base, verdict: "unreadable" };
+    return selected.kind === "transferred"
+      ? { ...at2, verdict: "transferred", logIndex: selected.logIndex, total: selected.total.toString(), ...(selected.overpaid ? { overpaid: true as const } : {}) }
+      : { ...at2, verdict: "mismatch", reason: selected.reason, ...(selected.total === undefined ? {} : { total: selected.total.toString() }) };
   } catch {
     return { ...base, verdict: "rpc_unavailable" };
   }
@@ -871,8 +900,8 @@ export function burnRefusalOf(burn: BurnEvidence): string {
     case "reverted":
       return `the given transaction reverted, so THIS transaction sent nothing (it may be the approve/wrap step or an unrelated hash); reconcile the order's transfer attempts with the V2 operator or an explorer before deciding anything; this result does not authorize a replacement payment; ${never}`;
     case "mismatch":
-      return burn.reason === "amount_differs"
-        ? `the first Transfer to this quote's burn address has a different amount (funds did reach the burn address); reconcile with the V2 operator; ${never}`
+      return burn.reason === "insufficient"
+        ? `the Transfers of this quote's token to its burn address in this transaction total ${burn.total ?? "?"}, less than the quoted amount${burn.total !== undefined && burn.total !== "0" ? " (those funds did reach the burn address)" : " (no funds reached the burn address in this transaction)"}; the facilitator does not add up payments from separate transactions; reconcile with the V2 operator; ${never}`
         : `the transaction has no Transfer of this quote's token to this quote's burn address; reconcile it (wrong hash, wrong address or token) with the V2 operator or an explorer; ${never}`;
     default:
       return `the burn receipt could not be checked (${burn.verdict}); re-run, optionally with --sepolia-rpc-url, or skip the check explicitly with --burn-precheck off; ${never}`;
@@ -1178,7 +1207,7 @@ export function consoleProjectionOf(evidence: PrivatePayerEvidence): Record<stri
     return rest;
   };
   const { burn, ...rest } = evidence;
-  return { ...rest, chain: chainSummaryOf(evidence.chain), ...(burn === undefined ? {} : { burn: { verdict: burn.verdict, ...(burn.block === undefined ? {} : { block: burn.block }) } }), gates: { ...evidence.gates, inbound_settlement: strip(evidence.gates.inbound_settlement), outbound_settlement: strip(evidence.gates.outbound_settlement) } };
+  return { ...rest, chain: chainSummaryOf(evidence.chain), ...(burn === undefined ? {} : { burn: { verdict: burn.verdict, ...(burn.block === undefined ? {} : { block: burn.block }), ...(burn.overpaid === true ? { overpaid: true } : {}) } }), gates: { ...evidence.gates, inbound_settlement: strip(evidence.gates.inbound_settlement), outbound_settlement: strip(evidence.gates.outbound_settlement) } };
 }
 
 /** コンソール向けの要約（nonce・authorizer・tx hash・RPC は出さない。§10.1 出力の方針）。 */
@@ -1293,7 +1322,7 @@ export async function recoverPrivatePayer(options: PrivatePayerRecoverOptions): 
           : await readBurn(options.chain.burnReaderForTest ?? rpcBurnReader(rpcUrl!.href), options.chain.burnReaderForTest !== undefined ? "test" : rpcUrl!.host, { chainId, asset: offer["asset"], payTo: offer["payTo"], amount, txHash: burnTxHash }, "recover");
         if (evidence.burn !== undefined) recordLog(options.outDir, "recovery-log.json", "burn", `previous burn observation ${JSON.stringify({ verdict: evidence.burn.verdict, at: evidence.burn.at, readAt: evidence.burn.readAt, ...(evidence.burn.block === undefined ? {} : { block: evidence.burn.block }) })} replaced`);
         evidence.burn = burn;
-        log(`private-payer: burn ${JSON.stringify({ verdict: burn.verdict, ...(burn.reason === undefined ? {} : { reason: burn.reason }), ...(burn.block === undefined ? {} : { block: burn.block }) })}`);
+        log(`private-payer: burn ${JSON.stringify({ verdict: burn.verdict, ...(burn.reason === undefined ? {} : { reason: burn.reason }), ...(burn.block === undefined ? {} : { block: burn.block }), ...(burn.overpaid === true ? { overpaid: true } : {}) })}`);
       } else {
         recordLog(options.outDir, "recovery-log.json", "burn", "burn check not applied (offer shape); evidence unchanged");
       }

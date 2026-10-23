@@ -57,23 +57,30 @@ function seed(out: string, options: { deadlineMs?: number; progress?: Record<str
 }
 const bytes = (out: string, name: string): string => readFileSync(path.join(out, name), "utf8");
 
-describe("FR-H3 の 5: selectBurnTransfer（V2 facilitator と同じ選び方）", () => {
+describe("FR-H3 の 5: selectBurnTransfer（V2 facilitator の #evaluate と同じ判定: 宛先が payTo の全 log の合計 ≥ 額）", () => {
   const log = (token: string, to: string, amount: bigint, index: number) => ({ ...(transferLog(token, to, amount, index) as { address: string; topics: string[]; data: string }), logIndex: index });
   test("一致・先の log が別の宛先で後が一致・大小文字・選んだ log の logIndex", () => {
-    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 2000n, 7)], EXPECT)).toEqual({ kind: "transferred", logIndex: 7 });
-    expect(selectBurnTransfer([log(ZUSDC, ELSEWHERE, 2000n, 3), log(ZUSDC, PAY_TO, 2000n, 9)], EXPECT)).toEqual({ kind: "transferred", logIndex: 9 });
-    expect(selectBurnTransfer([log(ZUSDC.toLowerCase(), PAY_TO.toUpperCase().replace("0X", "0x"), 2000n, 1)], EXPECT)).toEqual({ kind: "transferred", logIndex: 1 });
+    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 2000n, 7)], EXPECT)).toEqual({ kind: "transferred", logIndex: 7, total: 2000n, overpaid: false });
+    expect(selectBurnTransfer([log(ZUSDC, ELSEWHERE, 2000n, 3), log(ZUSDC, PAY_TO, 2000n, 9)], EXPECT)).toEqual({ kind: "transferred", logIndex: 9, total: 2000n, overpaid: false });
+    expect(selectBurnTransfer([log(ZUSDC.toLowerCase(), PAY_TO.toUpperCase().replace("0X", "0x"), 2000n, 1)], EXPECT)).toEqual({ kind: "transferred", logIndex: 1, total: 2000n, overpaid: false });
   });
-  test("先の log が同じ宛先で額違い → amount_differs（後に一致があっても探さない・合計しない）", () => {
-    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 1999n, 1), log(ZUSDC, PAY_TO, 2000n, 2)], EXPECT)).toEqual({ kind: "mismatch", reason: "amount_differs" });
-    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 1000n, 1), log(ZUSDC, PAY_TO, 1000n, 2)], EXPECT)).toEqual({ kind: "mismatch", reason: "amount_differs" });
+  test("1 tx 内の複数 log への分割は合計で通る（logIndex は最初の一致 = facilitator の eventId）、過払いも通り overpaid、合計が足りなければ insufficient。別の宛先・別 token の log は合計に入れない", () => {
+    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 1000n, 1), log(ZUSDC, PAY_TO, 1000n, 2)], EXPECT)).toEqual({ kind: "transferred", logIndex: 1, total: 2000n, overpaid: false });
+    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 1999n, 1), log(ZUSDC, PAY_TO, 2000n, 2)], EXPECT)).toEqual({ kind: "transferred", logIndex: 1, total: 3999n, overpaid: true });
+    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 2001n, 4)], EXPECT)).toEqual({ kind: "transferred", logIndex: 4, total: 2001n, overpaid: true });
+    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 1999n, 1)], EXPECT)).toEqual({ kind: "mismatch", reason: "insufficient", total: 1999n });
+    expect(selectBurnTransfer([log(ZUSDC, PAY_TO, 1000n, 1), log(ZUSDC, ELSEWHERE, 1000n, 2), log(OTHER_TOKEN, PAY_TO, 1000n, 3)], EXPECT)).toEqual({ kind: "mismatch", reason: "insufficient", total: 1000n });
   });
-  test("別 token・Transfer 以外の topic・topics の数違い・data 長違いは選ばない → no_transfer_to_pay_to", () => {
+  test("decode は facilitator と同じ（viem の decodeEventLog）: 別 token・Transfer 以外の topic・indexed の欠け・data 不足は飛ばす。data の後ろの余り・余分な topic は decode できる（facilitator も受ける）", () => {
     const good = log(ZUSDC, PAY_TO, 2000n, 4);
     expect(selectBurnTransfer([log(OTHER_TOKEN, PAY_TO, 2000n, 1)], EXPECT)).toEqual({ kind: "mismatch", reason: "no_transfer_to_pay_to" });
     expect(selectBurnTransfer([{ ...good, topics: [`0x${"11".repeat(32)}`, ...good.topics.slice(1)] }], EXPECT)).toEqual({ kind: "mismatch", reason: "no_transfer_to_pay_to" });
     expect(selectBurnTransfer([{ ...good, topics: good.topics.slice(0, 2) }], EXPECT)).toEqual({ kind: "mismatch", reason: "no_transfer_to_pay_to" });
-    expect(selectBurnTransfer([{ ...good, data: `${good.data}00` }], EXPECT)).toEqual({ kind: "mismatch", reason: "no_transfer_to_pay_to" });
+    expect(selectBurnTransfer([{ ...good, data: "0x00" }], EXPECT)).toEqual({ kind: "mismatch", reason: "no_transfer_to_pay_to" });
+    expect(selectBurnTransfer([{ ...good, data: `${good.data}00` }], EXPECT)).toEqual({ kind: "transferred", logIndex: 4, total: 2000n, overpaid: false });
+    expect(selectBurnTransfer([{ ...good, topics: [...good.topics, `0x${"22".repeat(32)}`] }], EXPECT)).toEqual({ kind: "transferred", logIndex: 4, total: 2000n, overpaid: false });
+    // 余りのある log が先、普通の log が後: 最初の一致の logIndex は先の log（facilitator の eventId と同じ）。
+    expect(selectBurnTransfer([{ ...good, data: `${good.data}00`, logIndex: 2 }, log(ZUSDC, PAY_TO, 1n, 3)], EXPECT)).toEqual({ kind: "transferred", logIndex: 2, total: 2001n, overpaid: true });
     expect(selectBurnTransfer([], EXPECT)).toEqual({ kind: "mismatch", reason: "no_transfer_to_pay_to" });
   });
 });
@@ -92,7 +99,10 @@ describe("FR-H3 の 1〜6: readBurn（fail closed）", () => {
     expect(await read({ ...base, status: "0x0" })).toMatchObject({ verdict: "reverted", block: 0xb69b88 });
   });
   test("mismatch（理由つき）", async () => {
-    expect(await read({ ...base, logs: [transferLog(ZUSDC, PAY_TO, 1500n, 2)] })).toMatchObject({ verdict: "mismatch", reason: "amount_differs" });
+    expect(await read({ ...base, logs: [transferLog(ZUSDC, PAY_TO, 1500n, 2)] })).toMatchObject({ verdict: "mismatch", reason: "insufficient", total: "1500" });
+    expect(await read({ ...base, logs: [transferLog(ZUSDC, PAY_TO, 1500n, 2), transferLog(ZUSDC, PAY_TO, 500n, 3)] })).toMatchObject({ verdict: "transferred", logIndex: 2, total: "2000" });
+    const over = await read({ ...base, logs: [transferLog(ZUSDC, PAY_TO, 2500n, 2)] });
+    expect(over).toMatchObject({ verdict: "transferred", total: "2500", overpaid: true });
     expect(await read({ ...base, logs: [transferLog(ZUSDC, ELSEWHERE, 2000n, 2)] })).toMatchObject({ verdict: "mismatch", reason: "no_transfer_to_pay_to" });
   });
   test("unreadable: hash 不一致・status 形違い・blockNumber/blockHash 形違い・logs の形違い・block が null・chainId 形違い。決して transferred/reverted にならない", async () => {
@@ -105,28 +115,41 @@ describe("FR-H3 の 1〜6: readBurn（fail closed）", () => {
       ["blockNumber", { ...base, receipt: { ...receipt, blockNumber: "12" } }],
       ["blockHash", { ...base, receipt: { ...receipt, blockHash: "0x12" } }],
       ["logs not array", { ...base, receipt: { ...receipt, logs: {} } }],
-      ["log address", { ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, PAY_TO, 2000n, 1), address: "0x1" }] } }],
-      ["log topic", { ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, PAY_TO, 2000n, 1), topics: [TOPIC_TRANSFER, "0x12"] }] } }],
-      ["log data", { ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, PAY_TO, 2000n, 1), data: "zz" }] } }],
-      ["log index", { ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, PAY_TO, 2000n, 1), logIndex: 1 }] } }],
+      ["log index of an asset log", { ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, PAY_TO, 2000n, 1), logIndex: 1 }] } }],
       ["receipt not object", { ...base, receipt: "0x1" }],
       ["chainId", { ...base, chainId: 11155111 }],
       ["blockNumber beyond safe integer", { ...base, receipt: { ...receipt, blockNumber: "0x20000000000001" } }],
       ["logIndex beyond safe integer", { ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, PAY_TO, 2000n, 1), logIndex: "0x20000000000001" }] } }],
     ];
     for (const [name, options] of cases) expect((await read(options)).verdict, name).toBe("unreadable");
+    // 形の崩れた**関係の無い** log は飛ばす（facilitator と同じ）: 正しい支払いと並んでいれば transferred。
+    const goodLog = transferLog(ZUSDC, PAY_TO, 2000n, 9);
+    for (const [name, junk] of [["bad address", { ...goodLog, address: "0x1" }], ["other token, bad topics", { ...transferLog(OTHER_TOKEN, PAY_TO, 1n, 2), topics: "x" }], ["asset, undecodable data", { ...goodLog, data: "zz", logIndex: "0x2" }], ["not an object", 7]] as const) {
+      expect(await read({ ...base, receipt: { ...receipt, logs: [junk, goodLog] } }), name).toMatchObject({ verdict: "transferred", logIndex: 9 });
+    }
+    // 余分な topic が文字列でなくても、必要な topic で decode できれば受ける（facilitator の viem と同じ）。
+    expect(await read({ ...base, receipt: { ...receipt, logs: [{ ...goodLog, topics: [...(goodLog["topics"] as string[]), null] }] } })).toMatchObject({ verdict: "transferred", logIndex: 9 });
+    // 無関係な（宛先の違う）資産の log の logIndex が読めなくても見ない。最初の一致の log の logIndex が読めなければ unreadable。
+    expect(await read({ ...base, receipt: { ...receipt, logs: [{ ...transferLog(ZUSDC, ELSEWHERE, 5n, 1), logIndex: "bad" }, goodLog] } })).toMatchObject({ verdict: "transferred", logIndex: 9 });
+    expect((await read({ ...base, receipt: { ...receipt, logs: [{ ...goodLog, logIndex: "bad" }] } })).verdict).toBe("unreadable");
+    // 0X 接頭辞・大文字の address も facilitator と同じく小文字にして比べる。
+    expect(await read({ ...base, receipt: { ...receipt, logs: [{ ...goodLog, address: `0X${ZUSDC.slice(2).toUpperCase()}` }] } })).toMatchObject({ verdict: "transferred" });
     const nullBlock = fakeBurnReader(base);
     expect((await readBurn({ ...nullBlock, blockByNumber: async () => null }, "test", EXPECT, "approve")).verdict).toBe("unreadable");
   });
   test("rpc_unavailable: 例外（chainId・receipt・block）", async () => {
     for (const where of ["chainId", "receipt", "block"] as const) expect((await read({ ...base, throws: where })).verdict, where).toBe("rpc_unavailable");
   });
-  test("拒否文: すべて「払い直さない」、reverted は払い直しを許さない、amount_differs は資金が届いたと言う", () => {
+  test("拒否文: すべて「払い直さない」、reverted は払い直しを許さない、insufficient は資金が届いたと言う", () => {
     const at = { readAt: "x", at: "approve" as const };
     for (const verdict of ["not_found", "reverted", "mismatch", "reorged", "unreadable", "wrong_chain", "rpc_unavailable"] as const) expect(burnRefusalOf({ ...at, verdict }), verdict).toContain("do NOT pay again");
     expect(burnRefusalOf({ ...at, verdict: "reverted" })).toContain("does not authorize a replacement payment");
     expect(burnRefusalOf({ ...at, verdict: "reverted" })).not.toMatch(/you may pay|pay a new transfer/);
-    expect(burnRefusalOf({ ...at, verdict: "mismatch", reason: "amount_differs" })).toContain("did reach the burn address");
+    expect(burnRefusalOf({ ...at, verdict: "mismatch", reason: "insufficient", total: "1500" })).toContain("total 1500");
+    expect(burnRefusalOf({ ...at, verdict: "mismatch", reason: "insufficient", total: "1500" })).toContain("did reach the burn address");
+    // 0 の Transfer: 資金は届いていない。
+    expect(burnRefusalOf({ ...at, verdict: "mismatch", reason: "insufficient", total: "0" })).toContain("no funds reached the burn address");
+    expect(burnRefusalOf({ ...at, verdict: "mismatch", reason: "insufficient", total: "0" })).not.toContain("did reach");
   });
 });
 
@@ -136,7 +159,8 @@ describe("FR-H3: 承認の段（latch の前）", () => {
     const verdicts: [string, Parameters<typeof fakeBurnReader>[0]][] = [
       ["not_found", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2000n, receipt: null }],
       ["reverted", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2000n, status: "0x0" }],
-      ["mismatch", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 1999n }],
+      ["mismatch (insufficient)", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 1999n }],
+      ["mismatch (no transfer to payTo)", { txHash: BURN, token: ZUSDC, payTo: ELSEWHERE, amount: 2000n }],
       ["reorged", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2000n, blockHash: `0x${"cc".repeat(32)}` }],
       ["unreadable", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2000n, receipt: { transactionHash: BURN } }],
       ["wrong_chain", { txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2000n, chainId: "0x1" }],
@@ -163,7 +187,14 @@ describe("FR-H3: 承認の段（latch の前）", () => {
     const reader = fakeBurnReader({ txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2000n });
     await expect(runPrivatePayer({ ...BASE, ...lab, burnTxHash: BURN, burnReaderForTest: reader, outDir: out, approve: true, log: () => {}, hooksForTest: { afterLatch: () => { throw new Error("stop"); } } })).rejects.toThrow("stop");
     const evidence = JSON.parse(bytes(out, "evidence.json")) as PrivatePayerEvidence;
-    expect(evidence.burn).toMatchObject({ verdict: "transferred", logIndex: 151, block: 0xb69b88, at: "approve" });
+    expect(evidence.burn).toMatchObject({ verdict: "transferred", logIndex: 151, block: 0xb69b88, at: "approve", total: "2000" });
+    // 過払い（facilitator は受理する）: 拒まずに latch へ進み、警告を出し、証跡に overpaid。
+    const over = path.join(tmp, "ok-over");
+    seed(over);
+    const lines: string[] = [];
+    await expect(runPrivatePayer({ ...BASE, ...lab, burnTxHash: BURN, burnReaderForTest: fakeBurnReader({ txHash: BURN, token: ZUSDC, payTo: PAY_TO, amount: 2600n }), outDir: over, approve: true, log: (l) => lines.push(l), hooksForTest: { afterLatch: () => { throw new Error("stop"); } } })).rejects.toThrow("stop");
+    expect((JSON.parse(bytes(over, "evidence.json")) as PrivatePayerEvidence).burn).toMatchObject({ verdict: "transferred", total: "2600", overpaid: true });
+    expect(lines.some((l) => l.includes("burn warning") && l.includes("excess is not returned"))).toBe(true);
     expect((JSON.parse(bytes(out, "checkpoint.json")) as { progress: Record<string, unknown> }).progress).toMatchObject({ purchaseAttempted: true });
     const off = path.join(tmp, "off");
     seed(off);

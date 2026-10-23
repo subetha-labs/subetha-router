@@ -203,7 +203,7 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
 # 2. quote.json を読む（private.inbound.payTo = burn address、total、fundsMoveAt = payer_burn_before_credential、両レグの額）。承認してから払う。
 # 3. V2 側: pos-pay-token A <payTo> zUSDC <total を 6 桁の decimal に>（例 11000 → 0.011）。transfer の tx hash を受け取る。
 # 4. 同じ --out に --approve --burn-tx-hash <tx hash>（payBy までに。鍵無し）。latch の前に Sepolia の receipt を読み、
-#    この quote の token・burn address・額の Transfer（宛先が burn address の最初の log）でなければ拒む（何も起きない）。RPC は
+#    この tx でこの quote の token が burn address に届いた合計が quote の額以上でなければ拒む（何も起きない。V2 facilitator と同じ判定。過払いは警告して進む）。RPC は
 #    --sepolia-rpc-url > SUBETHA_SEPOLIA_RPC_URL > 公開 RPC。照合を飛ばすのは --burn-precheck off（証跡に skipped_by_operator）。
 #    拒否の文はどれも「この結果だけで払い直さない」（reverted も払い直しの許可ではない。照合してから）。
 # 応答を失った・途中で止まった: 同じ --out に --recover --chain（送信レグの EIP-3009 の照合に加え、受信の burn の receipt を evidence.burn に観測として書く。
