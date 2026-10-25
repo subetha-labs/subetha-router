@@ -1,13 +1,13 @@
-# 秘匿購入の proxy 型 TLS（増分 v1.5）要件定義 v2.1
+# 秘匿購入の proxy 型 TLS（増分 v1.5）要件定義 v3.1
 
 対象: 本 worktree（`subetha-router/zktls-proxy-20261026`、branch `task/zktls-proxy`、基点 `origin/main` `b9e7710`）。
 要件フェーズの成果物であり、設計・実装は含まない。既存の秘匿購入の要件 `docs/zktls-router-requirements.md` v3.3（以下「基礎要件」）の上に足す増分で、
 基礎要件の FR-Z*・SR-Z*・TR-* は、本書が明示して置き換えるもの以外すべてそのまま効く。
-v1 は Codex の独立レビュー（`.claude_workflow/local/proxy-req-review1.md`、REJECT、blocking 1・should 3・minor 1）を受けて v2 に、v2 の再レビュー（`proxy-req-review2.md`、APPROVE WITH CHANGES、should 1）を受けて v2.1 に改めた（§10 に対応表）。
+v1 は Codex の独立レビュー（`.claude_workflow/local/proxy-req-review1.md`、REJECT、blocking 1・should 3・minor 1）を受けて v2 に、v2 の再レビュー（`proxy-req-review2.md`、APPROVE WITH CHANGES、should 1）を受けて v2.1 に改めた（§10 に対応表）。v3 は owner の判断（既定を proxy 型にする）で FR-X01・X00・X14・SR-X1・TR-X1・TR-X2・TR-X4 を改めた（§11）。v3 の再レビュー（`proxy-req-review3.md`、APPROVE WITH CHANGES、should 3）を v3.1 に反映した（§11）。
 
 owner の依頼（2026-10-26）: 「proxy 型を Router に組み込むための要件定義から進めていきましょう」。前提となった owner の判断（同日）:
 - 利用先の Provider を Router に隠す設計はしない（受信・送信の `payTo` で Provider は Router に分かるため）。既存の TLS・zkTLS の経路を続ける。
-- MPC 型と proxy 型の比較の結果、proxy 型で進める。MPC 型は残す。
+- MPC 型と proxy 型の比較の結果、proxy 型で進める。MPC 型は残す。**既定は proxy 型で、指定したプロファイルだけ MPC 型にする**。
 - proxy 型で残る 2 つのリスク（Provider から全利用者が Router の IP に見える、Router↔Provider の経路を信頼する）は、必要になった時点で対策する前提で受け入れる。
 
 ## 1. 背景と目的
@@ -46,7 +46,7 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 | # | 内容 | 本増分 |
 |---|---|---|
 | P1 | 基礎要件 Z1〜Z3 の経路（x402 受信・SubEtha V2 burn-sale 受信 → x402 送信 / MPP Tempo pull 送信、POST 秘匿本文・公開 GET）を proxy 型で通す | 対象 |
-| P2 | MPC 型をそのまま残し、プロファイルごとに型を選ぶ | 対象 |
+| P2 | 既定を proxy 型にし、MPC 型をプロファイルの指定で残す | 対象 |
 | P3 | proxy 型の attestation（Notary 署名。第三者への持ち運べる証明） | 対象外（上流の正式な支持が未確認。§8） |
 | P4 | Router が署名する受領証（Agent 間の委任などで第三者に見せる形） | 対象外（別の増分。§8） |
 | P5 | Router の送信元 IP の分散、Router↔Provider の経路の強化（配置・DNS の固め） | 対象外（owner が受け入れたリスク。§6 で開示と記録だけ行う） |
@@ -55,19 +55,28 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 ## 4. 機能要件
 
 ### 4.1 型の選択・承認・互換性
-- FR-X01 **型はプロファイルで決める**: 設定 `private.proxyProfiles`（`private.profiles` の部分集合。省略時は空）。ここに載ったプロファイルの秘匿 quote は proxy 型、
-  それ以外は MPC 型。Payer が quote で型を選ぶ入力は設けない。`private.proxyProfiles` に `private.profiles` に無い ID があれば `ConfigError`。
+- FR-X01 **既定は proxy 型、指定したプロファイルだけ MPC 型**（owner の判断 2026-10-26）: 設定 `private.mpcProfiles`（`private.profiles` の部分集合。省略時は空）。
+  ここに載ったプロファイルの秘匿 quote は MPC 型、`private.profiles` のそれ以外はすべて proxy 型。Payer が quote で型を選ぶ入力は設けない。
+  `private.mpcProfiles` に `private.profiles` に無い ID があれば `ConfigError`。
+  **既定の切り替えの影響（承知のうえでの判断）**: 本増分の後、`mpcProfiles` を持たない既存の秘匿購入の設定は、全プロファイルが proxy 型になる。lab の proxy 対応バイナリ
+  （LX-*）が入るまでは FR-X14 の門で起動しない。今の Verifier は loopback 専用で hosted には出ていないので、影響は手元の試験・受入の環境に限られる。
+  既定の型は、MPC 型より主張の前提が 1 つ多い（SR-X2）。この差は承認の前に開示する（FR-X02）。
 - FR-X00 **MPC 型の不変と、増えるのは proxy 型だけ**（互換性の規則）:
-  - MPC 型の quote 文書・quote の記録・承認の指紋（`privateAuthoritativeTermsOf` の値）・journal の行・射影・record の検査は、`proxyProfiles` の有無にかかわらず
-    **今と byte 単位で同じ**。MPC 型には型の欄を足さない（型の欄が無いことが MPC 型を意味するのは、**本増分より前から存在する形**についてだけ）。
+  - **`mpcProfiles` に載った**プロファイルの MPC 型の quote 文書・quote の記録・承認の指紋（`privateAuthoritativeTermsOf` の値）・journal の行・射影・record の検査は
+    **今と byte 単位で同じ**。MPC 型には型の欄を足さない（型の欄が無いことが MPC 型を意味するのは、**本増分より前から存在する形**と MPC 型の行についてだけ）。
+    `mpcProfiles` という設定の欄そのものは指紋に入れない（MPC 型の指紋を今と同じに保つため。型は proxy 型の指紋の `tlsMode` の有無で区別される）。
   - proxy 型の quote・記録・指紋・journal の行・射影だけが `tls: {mode: "proxy"}` などの欄を持つ（FR-X02・X03・X13）。
   - **欠落を MPC 型と読み替えない**: proxy 型として発行した quote の記録（指紋に proxy を含むもの）に対しては、journal の行・record・attest のどれかで型の欄が欠けていれば
     fail closed（quote なら `quote_changed`、record なら FR-X09）。逆に、MPC 型の quote に proxy 型の record（`tls_mode: "proxy"`）が来ても fail closed。
-  - 既存の journal（本増分より前の行）と保存済みの quote は今と同じ意味で読む（すべて MPC 型）。
-  - config golden（`proxyProfiles` を持たない設定）と、MPC 型の journal・射影の golden は**更新しない**。proxy 型の golden は新しく足す。
+  - 既存の journal（本増分より前の行）と保存済みの quote・進行中の購入は今と同じ意味で読む（すべて MPC 型）。本増分の後に `mpcProfiles` に載らないプロファイルの、
+    本増分より前に発行した quote は、指紋が変わるので既存の `quote_changed` で止まる（資金は動かない）。release 済みの進行中の購入は MPC 型のまま基礎要件の規則で終える。
+  - golden の扱い: 秘匿購入の設定を持たない config golden は**更新しない**。MPC 型の golden（quote・指紋・journal・射影）は、設定に `mpcProfiles` を 1 行足すだけで
+    **他は更新せずに**通ること。proxy 型の golden は新しく足す。設定の既定値の表（`DEFAULT_PRIVATE_CONFIG` 相当）の検査は弱めない（`mpcProfiles` の省略の正規化は
+    既定値の表とは別に扱ってよい）。この「1 行の追加だけ」を守るために既存の検査を緩めてはならない。
   - バイナリ（`deliveryBinSha256`）の更新は既存の規則（open-items §A-4 A-1-3）どおり指紋を変え、発行済みの quote を `quote_changed` で止める。これは型によらない既存の挙動。
-- FR-X14 **バイナリの能力の門**（資金が動く前に止める）: `proxyProfiles` が空でないとき、Router は起動時に `delivery` の能力の宣言（LX-6）を読み、`proxy` を含まなければ
-  `ConfigError`（実モードでは起動しない）。宣言を読めないバイナリ（今の lab のバイナリ）も同じ。`proxyProfiles` が空なら能力の門は読まない（MPC 型の起動は今と同じ）。
+- FR-X14 **バイナリの能力の門**（資金が動く前に止める）: proxy 型のプロファイルが 1 つでもある（= `private.profiles` が `mpcProfiles` に含まれないものを持つ）とき、
+  Router は起動時に `delivery` の能力の宣言（LX-6）を読み、`proxy` を含まなければ `ConfigError`（実モードでは起動しない）。宣言を読めないバイナリ（今の lab の
+  バイナリ）も同じ。全プロファイルが `mpcProfiles` に載っていれば能力の門は読まない（MPC 型だけの起動は今と同じ）。
 - FR-X02 **承認対象への開示**（proxy 型の quote だけ）: 秘匿 quote の `private` 欄（基礎要件 FR-Z14）に `tls: {mode: "proxy"}` を足し、`disclosures` に次を足す:
   `routerConnectsToProvider: true`（Router が Provider へ接続し、TLS の暗号文・長さ・時刻を中継する）、`providerSeesRouterAddress: true`
   （Provider から見える送信元は Router の IP で、Provider の IP 制限・遮断・レート制限は Router を使う全利用者に効く）、
@@ -133,7 +142,7 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
   "proxy_server_name_mismatch" | "proxy_limit"}` の固定語だけ。例外文字列・アドレス・暗号文を含めない）を書いてから非 0 で終了する。record と failure.json は排他（両方は書かない）。
 
 ## 6. 安全要件と主張の範囲
-- SR-X1 基礎要件の SR-Z1〜SR-Z5 をそのまま満たす。MPC 型の経路の挙動・journal・射影は変えない（`proxyProfiles` に載らないプロファイルは byte 単位で不変）。
+- SR-X1 基礎要件の SR-Z1〜SR-Z5 をそのまま満たす。MPC 型の経路の挙動・journal・射影は変えない（`mpcProfiles` に載ったプロファイルは byte 単位で不変。FR-X00）。
 - SR-X2 **主張の範囲の差**（承認対象と射影で開示する）: proxy 型の `delivered_private` は、基礎要件 §1 の主張に加えて「Router が接続した Router↔Provider の
   ネットワーク経路を信頼する」前提に立つ。Payer がこの経路上の攻撃者と組めば、Provider ではない相手の応答を証明できる余地がある（上流の proxy 型の安全モデル）。
   MPC 型にはこの前提は無い。この差を `disclosures.trustsRouterProviderPath` と射影の `private.tls.mode` で区別できるようにし、MPC 型と同じ主張として表示しない。
@@ -143,8 +152,15 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 
 ## 7. テスト要件
 - TR-X1 単体:
-  - 設定: `proxyProfiles` の部分集合の検査、能力の門（宣言に proxy が無い・読めない → `ConfigError`、`proxyProfiles` が空なら門を読まない）、`proxyProfiles` の無い設定で
-    config golden と MPC 型の quote・指紋・journal・射影の golden が**更新なしに**通ること。
+  - 設定: `mpcProfiles` の部分集合の検査、型の決まり方（載っていれば MPC 型、それ以外は proxy 型、`mpcProfiles` 省略で全部 proxy 型）、能力の門（proxy 型が 1 つでもあり
+    宣言に proxy が無い・読めない → `ConfigError`、全部 MPC 型なら門を読まない）。秘匿購入の設定を持たない config golden が更新なしに通ること、MPC 型の quote・指紋・
+    journal・射影の golden が `mpcProfiles` の 1 行の追加だけで通ること、`mpcProfiles` の欄が MPC 型の指紋に入らないこと。
+  - 移行（quote）: 本増分より前に発行した quote が、(a) `mpcProfiles` に載らないプロファイルでは `quote_changed`、(b) 載ったプロファイルで他の権威の入力
+    （`deliveryBinSha256`・`srsSha256`・trust・方針・上限）が変わらなければそのまま購入でき、(c) 載ったプロファイルでもバイナリの sha256 が変わっていれば `quote_changed`。
+    `quote_changed` の場合はどれも受信 verify・settle が 0 回。
+  - 移行（進行中の購入）: 本増分より前の journal（受信 settle の後・発行予約の前の購入、release 済みの購入、record のある購入）を、そのプロファイルが既定で proxy 型になる
+    設定で再起動して開くと、MPC 型として読み、基礎要件 FR-Z25 の帰結（`paid_undelivered`・`unknown` の各理由）と record の保持が今と同じであること。発行・Provider への接続・
+    能力の門による受付の停止以外の変化が無いこと（発行・接続は 0 回）。
   - quote: proxy 型の `tls`・`disclosures`・指紋の `tlsMode`。型の変更（proxy ↔ MPC）で `quote_changed`。proxy 型の quote の記録から型の欄を消すと fail closed。
   - 宛先（FR-X06）: deny list、DENY4/DENY6 の各種、Router 自身のアドレス、IPv4-mapped IPv6、回答のうち 1 つだけ禁止、回答 0 件、解決の期限切れ、同時数の上限。
     いずれも発行予約の行を書かず、送信 adapter の `issueCredential` が 0 回、結果は `paid_undelivered`（`private_proxy_dial_refused`）。
@@ -162,18 +178,18 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
   - セッション期限切れ: proxy 型のセッションを `sessionBy` まで完了させない（Payer が Verifier に接続しない場合と、TLS の途中で止まる場合の 2 つ）。どちらも
     `unknown`（`private_session_timeout`）、発行は 1 回、期限の後に Provider（fixture）への接続回数が増えず、MPC 型への切り替えが無いこと。
   - 保存と再起動: proxy 型の購入の射影の `tls.mode`・開示が再起動後も同じ。release 後の再起動で `unknown` のまま、発行・接続が増えない。
-  - MPC 型の既存 wire（`tests/wire/private-*.test.ts`）が変更なしに通ること。
+  - MPC 型の既存 wire（`tests/wire/private-*.test.ts`）が、設定に `mpcProfiles` を足す以外の変更なしに通ること。
   - lab の proxy 対応バイナリが無ければ skip（skip は合格ではない）。
 - TR-X3 受入（testnet、実 PKI = `mozilla`）: Provider C（Z1）を proxy 型で 1 件、Provider F（Z2）を proxy 型で 1 件。受信決済・送信決済・秘匿配送・Payer 受領・finality を
   別々のゲートとして記録する（基礎要件 TR-3 と同じ）。所要時間を MPC 型の既存の受入と並べて記録する（判断材料。合否条件ではない）。
   testnet の送金は owner の包括の承認（2026-10-22）の範囲で行い、実行の前に支払いの範囲（Provider・額・回数）を記録する。
-- TR-X4 `npm test` と config golden が不変に通ること。
+- TR-X4 `npm test` が通ること。既存の試験の変更は、秘匿購入の MPC 型の試験の設定に `mpcProfiles` を足すことだけに限る（それ以外の既存の試験・golden は不変）。
 
 ## 8. 非目標・未解決
 - proxy 型の attestation（Notary 署名）と、それを使った「紛争のときだけ第三者に開示する」流れ。上流の attestation の例は proxy 型を拒否しており、正式な支持が確認できていない。
 - Router が署名する受領証（Agent の委任などで、Router の検証結果を第三者に持ち運ぶ形）。受領証に入れる内容は Router に開示した部分に限られる。
 - Router の送信元 IP の分散と、Router↔Provider の経路の強化。
-- lab が proxy 型に対応しない・できない場合、本増分は TR-X1 の範囲で止まる（Router 側の実装は MPC 型の挙動を変えないので、入れても害は無い。入れるかは owner の判断）。
+- lab が proxy 型に対応しない・できない場合、本増分は TR-X1 の範囲で止まる。既定が proxy 型なので、lab の対応の前に本増分を入れると、`mpcProfiles` に全プロファイルを書き出さない設定は FR-X14 の門で**意図して起動しない**。lab の対応の前に入れるなら、全プロファイルを `mpcProfiles` に書き出す（MPC 型だけの起動は今と同じ）。入れる時期は owner の判断。
 
 ## 9. 用語
 - **MPC 型**: TLSNotary の MPC-TLS。Payer と Verifier が TLS の鍵を 2 者計算で扱い、Payer が Provider へ直接接続する（基礎要件の方式）。
@@ -189,3 +205,14 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 | should 4: proxy 固有の試験 | TR-X1・TR-X2（固定の維持、発行と接続の回数、fallback 無し、再起動後の型、V2 受信の proxy wire、子プロセス出力と作業ディレクトリの canary、proxy で走ったことの確認） |
 | 再レビュー should 4 の残件: proxy の期限切れ試験 | TR-X2 に 2 通りの期限切れ（接続しない・途中で止まる）と回数の条件を追加（v2.1） |
 | minor 5: 上限の由来 | FR-X04（4096 B は要求の組み立ての上限、704 B は応答本文、ヘッダは別）、FR-X07 |
+
+## 11. v2.1 → v3 の対応（owner の判断 2026-10-26: 既定を proxy 型にする）
+| 変更 | 内容 |
+|---|---|
+| 型の選び方 | `private.proxyProfiles`（opt-in）を `private.mpcProfiles`（opt-out）に替えた（FR-X01）。既定の切り替えの影響（既存の設定が proxy 型になる、lab の改修までは起動しない、主張の前提が 1 つ多い）を明記 |
+| 不変の範囲 | 「`proxyProfiles` の無い設定で byte 不変」を「`mpcProfiles` に載ったプロファイルで byte 不変」に改め、`mpcProfiles` の欄を MPC 型の指紋に入れないこと、移行時の quote の扱いを足した（FR-X00） |
+| 能力の門 | 「proxy 型のプロファイルが 1 つでもあれば読む」に改めた（FR-X14） |
+| 試験 | 型の決まり方・移行・golden の扱い（`mpcProfiles` の 1 行の追加だけ）を足した（TR-X1・TR-X2・TR-X4） |
+| v3 再レビュー should 1: 旧 quote が購入できる条件 | TR-X1 の移行（quote）を 3 通りに分けた（バイナリの sha256 が変われば MPC 型でも `quote_changed`） |
+| v3 再レビュー should 2: 「入れても害は無い」の残り | §8 を「lab の対応の前に入れるなら全プロファイルを `mpcProfiles` に書き出す。書き出さなければ意図して起動しない」に改めた |
+| v3 再レビュー should 3: 進行中の購入の移行 | TR-X1 に移行（進行中の購入）を足した（旧 journal を proxy 既定の設定で開いても MPC 型として読み、帰結・record の保持が同じ、発行・接続 0 回）。既定値の表の検査を弱めないことを FR-X00 に足した |
