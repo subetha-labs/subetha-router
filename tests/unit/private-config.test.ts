@@ -6,7 +6,8 @@ import path from "node:path";
 import { generatePrivateKey } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { BURN_SALE_APPROVAL_TTL_MAX_MS, ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, validateRouterConfigAgainstTable, type RuntimeConfig } from "../../src/config.js";
+import { BURN_SALE_APPROVAL_TTL_MAX_MS, ConfigError, DEFAULT_PRIVATE_CONFIG, loadRuntimeConfig, parseRouterConfig, privateAuthoritativeTermsOf, tlsModeOf, validateRouterConfigAgainstTable, type PrivateConfig, type RuntimeConfig } from "../../src/config.js";
+import { PROXY_RELAY_LIMITS } from "../../src/private/proxy.js";
 import { MAX_QUOTE_LIFETIME_MS } from "../../src/core/quote-ledger.js";
 import { KNOWN_NETWORKS } from "../../src/shared/networks.js";
 import { composeRails, profileIdOfBinding, type RouterCapabilities } from "../../src/main.js";
@@ -180,6 +181,34 @@ describe("合成（composeRails）", () => {
     const { mppTempo: _m, ...withoutTempo } = capabilities();
     expect(() => composeRails(runtime(router()), withoutTempo, quiet, quiet)).toThrow(/signer_not_authorized/);
   });
+  /** 増分 v1.5 T-X2: 能力の門（設計 §3）。合成は同期のまま、門は起動の検査の列に入る。 */
+  function activated(patch: Record<string, unknown> = {}): RuntimeConfig {
+    const rt = runtime(router(patch));
+    return { ...rt, router: { ...rt.router, private: { ...rt.router.private!, proxyActivatedForTest: true } } };
+  }
+  test("能力の門: proxy 型のプロファイルがあれば起動の検査で 1 回読み、proxy を宣言しなければ起動の検査が ConfigError で失敗する", async () => {
+    const calls: string[] = [];
+    const noProxy = composeRails(activated(), capabilities({ readCapabilitiesForTest: async (bin) => { calls.push(bin); return { tlsModes: ["mpc"] }; } }), quiet, quiet);
+    expect(calls).toEqual([]); // 合成の時点では読まない（同期の合成は変えない）。
+    await expect(noProxy.startup!()).rejects.toThrow(/does not support proxy mode; list every private profile in private.mpcProfiles/);
+    await expect(noProxy.startup!()).rejects.toThrow(ConfigError);
+    expect(calls).toEqual([FAKE, FAKE]);
+    const unreadable = composeRails(activated(), capabilities({ readCapabilitiesForTest: async () => undefined }), quiet, quiet);
+    await expect(unreadable.startup!()).rejects.toThrow(/does not support proxy mode/);
+    const ok = composeRails(activated(), capabilities({ readCapabilitiesForTest: async () => ({ tlsModes: ["mpc", "proxy"] }) }), quiet, quiet);
+    await expect(ok.startup!()).resolves.toBeUndefined();
+    // 本物の読み取り（偽の delivery は両方を宣言する）。
+    await expect(composeRails(activated(), capabilities(), quiet, quiet).startup!()).resolves.toBeUndefined();
+  });
+  test("能力の門: 全プロファイルが MPC 型（有効化の前、または mpcProfiles に全部）なら読まない", async () => {
+    const calls: string[] = [];
+    const counting = capabilities({ readCapabilitiesForTest: async (bin) => { calls.push(bin); return undefined; } });
+    for (const config of [runtime(router()), activated({ mpcProfiles: ["priv-x402", "priv-tempo"] })]) {
+      const rails = composeRails(config, counting, quiet, quiet);
+      if (rails.startup !== undefined) await rails.startup();
+    }
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("受信 offer の束縛 → プロファイル（`profileIdOfBinding`）", () => {
@@ -192,5 +221,79 @@ describe("受信 offer の束縛 → プロファイル（`profileIdOfBinding`�
     expect(profileIdOfBinding("private|p|POST|u")).toBeUndefined();
     expect(profileIdOfBinding("x402|r1|https://p.test/x")).toBeUndefined();
     expect(profileIdOfBinding("")).toBeUndefined();
+  });
+});
+
+/** 増分 v1.5（proxy 型）T-X1: `mpcProfiles`・`tlsModeOf`・指紋の proxy 欄（`docs/zktls-router-proxy-design.md` §2、要件 FR-X00・FR-X01・FR-X03）。 */
+describe("proxy 型の設定（T-X1）", () => {
+  /** 本増分の前の `privateAuthoritativeTermsOf` の形（MPC 型はこれと完全に同じであること）。 */
+  function legacyTerms(config: PrivateConfig, profileId: string, rail: "x402" | "mpp", trust: "mozilla" | "lab-fixture-ca"): unknown {
+    return {
+      private: true,
+      allowlisted: config.profiles.includes(profileId),
+      trust,
+      deliveryBinSha256: config.deliveryBinSha256,
+      srsSha256: config.srsSha256,
+      policy: { minCredentialLifetimeMs: config.minCredentialLifetimeMs[rail], sessionTimeoutMs: config.sessionTimeoutMs, attestTimeoutMs: config.attestTimeoutMs, retentionMs: config.retentionMs },
+      limits: { maxIntentBytes: config.maxIntentBytes, maxBundleBytes: config.maxBundleBytes, maxRecordBytes: config.maxRecordBytes },
+    };
+  }
+
+  test("mpcProfiles を省略すると解析結果に欄が無い（本増分の前と同じ）", () => {
+    const parsed = parseRouterConfig(router()).private!;
+    expect(Object.hasOwn(parsed, "mpcProfiles")).toBe(false);
+    expect(Object.hasOwn(parsed, "proxyActivatedForTest")).toBe(false);
+  });
+  test("mpcProfiles を書けば写す", () => {
+    expect(parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!.mpcProfiles).toEqual(["priv-x402"]);
+    expect(parseRouterConfig(router({ mpcProfiles: [] })).private!.mpcProfiles).toEqual([]);
+  });
+  test.each<[string, unknown]>([
+    ["配列でない", "priv-x402"],
+    ["profiles に無い", ["dyn-mpp-in"]],
+    ["重複", ["priv-x402", "priv-x402"]],
+    ["空文字", [""]],
+    ["文字列でない", [1]],
+  ])("拒否: mpcProfiles が%s", (_name, value) => {
+    expect(() => parseRouterConfig(router({ mpcProfiles: value }))).toThrow(/mpcProfiles must be a subset of private.profiles without repeats/);
+  });
+  test("proxyActivatedForTest は設定から作れない", () => {
+    expect(() => parseRouterConfig(router({ proxyActivatedForTest: true }))).toThrow(/proxyActivatedForTest is not a field/);
+  });
+  test("有効化の前: proxyActivatedForTest の無い設定は、mpcProfiles によらず常に MPC 型", () => {
+    for (const patch of [{}, { mpcProfiles: [] }, { mpcProfiles: ["priv-x402"] }]) {
+      const parsed = parseRouterConfig(router(patch)).private!;
+      expect(tlsModeOf(parsed, "priv-x402")).toBe("mpc");
+      expect(tlsModeOf(parsed, "priv-tempo")).toBe("mpc");
+    }
+  });
+  test("proxyActivatedForTest があれば、mpcProfiles に載るものが MPC 型、それ以外が proxy 型", () => {
+    const parsed: PrivateConfig = { ...parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!, proxyActivatedForTest: true };
+    expect(tlsModeOf(parsed, "priv-x402")).toBe("mpc");
+    expect(tlsModeOf(parsed, "priv-tempo")).toBe("proxy");
+    const all: PrivateConfig = { ...parseRouterConfig(router()).private!, proxyActivatedForTest: true };
+    expect(tlsModeOf(all, "priv-x402")).toBe("proxy");
+  });
+  test("MPC 型の指紋は本増分の前と完全に同じ（mpcProfiles の欄は入らない）", () => {
+    for (const patch of [{}, { mpcProfiles: ["priv-x402", "priv-tempo"] }]) {
+      const parsed = parseRouterConfig(router(patch)).private!;
+      for (const trust of ["mozilla", "lab-fixture-ca"] as const) {
+        expect(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", trust)).toStrictEqual(legacyTerms(parsed, "priv-x402", "x402", trust));
+        expect(privateAuthoritativeTermsOf(parsed, "priv-tempo", "mpp", trust)).toStrictEqual(legacyTerms(parsed, "priv-tempo", "mpp", trust));
+      }
+      expect(JSON.stringify(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", "mozilla"))).toBe(JSON.stringify(legacyTerms(parsed, "priv-x402", "x402", "mozilla")));
+    }
+    // 有効化した設定でも、mpcProfiles に載るプロファイルは今と同じ。
+    const activated: PrivateConfig = { ...parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!, proxyActivatedForTest: true };
+    expect(privateAuthoritativeTermsOf(activated, "priv-x402", "x402", "mozilla")).toStrictEqual(legacyTerms(activated, "priv-x402", "x402", "mozilla"));
+  });
+  test("proxy 型の指紋は末尾に tlsMode と proxyRelay を足し、型の変更は両方向で指紋を変える", () => {
+    const parsed = parseRouterConfig(router()).private!;
+    const proxy: PrivateConfig = { ...parsed, proxyActivatedForTest: true };
+    const terms = privateAuthoritativeTermsOf(proxy, "priv-x402", "x402", "mozilla");
+    expect(terms).toStrictEqual({ ...(legacyTerms(proxy, "priv-x402", "x402", "mozilla") as object), tlsMode: "proxy", proxyRelay: { maxSentBytes: PROXY_RELAY_LIMITS.maxSentBytes, maxRecvBytes: PROXY_RELAY_LIMITS.maxRecvBytes } });
+    expect(JSON.stringify(terms)).not.toBe(JSON.stringify(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", "mozilla")));
+    const backToMpc: PrivateConfig = { ...proxy, mpcProfiles: ["priv-x402"] };
+    expect(JSON.stringify(privateAuthoritativeTermsOf(backToMpc, "priv-x402", "x402", "mozilla"))).toBe(JSON.stringify(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", "mozilla")));
   });
 });

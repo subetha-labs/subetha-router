@@ -25,7 +25,7 @@ import { createPrivateMppRail } from "./adapters/outbound/private-mpp.js";
 import { createPrivateX402Rail } from "./adapters/outbound/private-x402.js";
 import type { PrivateOutboundRail } from "./ports/private-outbound.js";
 import type { PrivateHooksForTest } from "./core/private.js";
-import { createVerifierRunner, sha256File, type LaunchHooksForTest, type VerifierRunner } from "./private/verifier.js";
+import { createVerifierRunner, readCapabilities, sha256File, type LaunchHooksForTest, type VerifierRunner } from "./private/verifier.js";
 import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outbound/x402.js";
 import { createX402SvmOutbound, type X402SvmOutboundOptions } from "./adapters/outbound/x402-svm.js";
 import { createMppSolanaOutbound } from "./adapters/outbound/mpp-solana.js";
@@ -47,7 +47,7 @@ import {
   type RouteConfig,
   type RouterConfig,
   type RuntimeConfig,
-  usesGasIndexedFee, MPP_SOLANA_SCHEME, evmTestnetDeadlinesOf, EVM_TESTNET_NETWORKS } from "./config.js";
+  usesGasIndexedFee, MPP_SOLANA_SCHEME, evmTestnetDeadlinesOf, EVM_TESTNET_NETWORKS, tlsModeOf } from "./config.js";
 import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
@@ -160,6 +160,10 @@ export interface RouterCapabilities {
   readonly privateHooksForTest?: PrivateHooksForTest;
   /** **試験専用。** wrapper の 3 段の境界（設計 §11）。 */
   readonly launchHooksForTest?: LaunchHooksForTest;
+  /**
+   * **試験専用。** 秘匿購入の能力の門（`docs/zktls-router-proxy-design.md` §3）の読み取りを差し替える（呼ばれた回数を数える試験のため）。本番の入口は渡さない。
+   */
+  readonly readCapabilitiesForTest?: typeof readCapabilities;
 }
 
 /** 停止の前に書き出しを待てる sink（ファイルの sink）。`close` は reject しない契約。 */
@@ -1250,6 +1254,18 @@ export function composeRails(
     }
     if (actualSrs !== privateConfig.srsSha256) {
       throw new ConfigError("private.srsPath does not match private.srsSha256");
+    }
+    // 能力の門（要件 FR-X14、設計 §3）: proxy 型のプロファイルが 1 つでもあるときだけ、起動の検査で `delivery capabilities` を読む。
+    // 合成は同期のまま（既存の起動の検査の列に足す）。全プロファイルが MPC 型なら読まない（今と同じ起動）。
+    if (privateConfig.profiles.some((profileId) => tlsModeOf(privateConfig, profileId) === "proxy")) {
+      const read = capabilities.readCapabilitiesForTest ?? readCapabilities;
+      const deliveryBin = privateConfig.deliveryBin;
+      startupChecks.push(async () => {
+        const declared = await read(deliveryBin);
+        if (declared === undefined || !declared.tlsModes.includes("proxy")) {
+          throw new ConfigError("private.deliveryBin does not support proxy mode; list every private profile in private.mpcProfiles to run MPC only");
+        }
+      });
     }
     const trust = capabilities.privateTrustForTest ?? "mozilla";
     const privateRails: Record<string, PrivateOutboundRail> = {};

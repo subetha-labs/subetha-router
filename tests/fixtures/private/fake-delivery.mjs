@@ -9,6 +9,11 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 const [sub, ...rest] = process.argv.slice(2);
+// 能力の宣言（`docs/zktls-router-proxy-design.md` §3、要件 LX-6）。作業ディレクトリを取らない。偽物は両方の型を宣言する。
+if (sub === "capabilities") {
+  process.stdout.write('{"tls_modes":["mpc","proxy"]}');
+  process.exit(0);
+}
 const kv = new Map();
 const flags = [];
 for (let i = 0; i < rest.length; i += 1) {

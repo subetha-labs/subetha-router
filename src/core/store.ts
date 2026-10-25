@@ -16,6 +16,7 @@ import {
   type IntentPrivate,
   type IntentUpstream,
   type InternalStatus,
+  type ProxyReservation,
 } from "./intent.js";
 import type { Journal } from "./journal.js";
 import { parseIntent } from "../private/intent.js";
@@ -231,6 +232,9 @@ export function privateFieldsOf(patch: Patch): { readonly private?: IntentPrivat
   }
   const policy = raw["policy"];
   const limits = raw["limits"];
+  // TLS の型（増分 v1.5）: 欄が無ければ MPC 型、`"proxy"` なら proxy 型、それ以外は形違い（この intent は実行しない）。
+  const tlsMode = raw["tlsMode"];
+  if (tlsMode !== undefined && tlsMode !== "proxy") return invalid;
   if (
     !isPlainRecord(policy) ||
     !["minCredentialLifetimeMs", "sessionTimeoutMs", "attestTimeoutMs", "retentionMs"].every((key) => positiveInt(policy[key])) ||
@@ -276,8 +280,24 @@ export function privateFieldsOf(patch: Patch): { readonly private?: IntentPrivat
         retentionMs: policy["retentionMs"] as number,
       },
       limits: { maxIntentBytes: limits["maxIntentBytes"] as number, maxBundleBytes: limits["maxBundleBytes"] as number, maxRecordBytes: limits["maxRecordBytes"] as number },
+      ...(tlsMode === "proxy" ? { tlsMode: "proxy" as const } : {}),
     },
   };
+}
+
+/**
+ * proxy 型の発行予約の `proxy` 欄（`docs/zktls-router-proxy-design.md` §8）: ちょうど `{providerAddr, vettedAddress}`（≤ 64 B の空でない文字列）。
+ * 欄が無ければ `undefined`、形が違えば `"malformed"`。
+ */
+export function proxyReservationOf(value: unknown): ProxyReservation | undefined | "malformed" {
+  if (value === undefined) return undefined;
+  if (!isPlainRecord(value)) return "malformed";
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== "providerAddr" || keys[1] !== "vettedAddress") return "malformed";
+  const { providerAddr, vettedAddress } = value;
+  const ok = (text: unknown): text is string => typeof text === "string" && text !== "" && Buffer.byteLength(text, "utf8") <= 64;
+  if (!ok(providerAddr) || !ok(vettedAddress)) return "malformed";
+  return { providerAddr, vettedAddress };
 }
 
 /** 秘匿購入の受信 offer の束縛（`dynamicBindingOf` と同じ形で先頭語と 5 要素目だけ違う。設計 §3.1 7）。 */
@@ -508,7 +528,11 @@ function reducePrivate(current: Intent, event: string, patch: Patch, base: Inten
   }
   switch (event) {
     case "private_issuance_reserved":
-      return { ...base, status: "private_issuance_reserved", private: { ...priv, reservation: { intentSha256: asString(patch["intentSha256"]), inboundIdentity: asString(patch["inboundIdentity"]) } } };
+    {
+      // `proxy` 欄の形と型の整合は `#applyRecord` が先に検査済み（形違いなら起動を止める）。
+      const proxy = proxyReservationOf(patch["proxy"]);
+      return { ...base, status: "private_issuance_reserved", private: { ...priv, reservation: { intentSha256: asString(patch["intentSha256"]), inboundIdentity: asString(patch["inboundIdentity"]), ...(proxy === undefined || proxy === "malformed" ? {} : { proxy }) } } };
+    }
     case "private_released": {
       const expectedRef = patch["expectedRef"];
       return {
@@ -690,11 +714,23 @@ export class IntentStore {
       if (typeof intentSha256 !== "string" || !HEX64.test(intentSha256) || typeof inboundIdentity !== "string" || inboundIdentity === "") {
         throw new Error("journal: malformed private_issuance_reserved row");
       }
+      // proxy 型の宛先（増分 v1.5、設計 §8）: 形が違う、または記録の型と合わない（proxy 型で欠落・MPC 型で存在）なら起動を止める。
+      const proxy = proxyReservationOf(patch["proxy"]);
+      if (proxy === "malformed") throw new Error("journal: malformed private_issuance_reserved row");
+      const owner = this.#intents.get(paymentId)?.private;
+      if (owner !== undefined && (owner.tlsMode === "proxy") !== (proxy !== undefined)) {
+        throw new Error("journal: private_issuance_reserved row does not match the recorded tls mode");
+      }
       this.#issuedIntents.add(intentSha256);
       this.#consumedInbound.add(inboundIdentity);
       // 状態の遷移は下の reduce で（intent が無ければ集合だけ）。
     }
     if (event === "created") {
+      // TLS の型（増分 v1.5、設計 §8）: 欄があって `"proxy"` 以外なら起動を止める（形違いの型を MPC 型にも proxy 型にも読み替えない）。
+      const privateRaw = patch["private"];
+      if (privateRaw !== null && typeof privateRaw === "object" && Object.hasOwn(privateRaw, "tlsMode") && (privateRaw as Record<string, unknown>)["tlsMode"] !== "proxy") {
+        throw new Error("journal: malformed tls mode in a private created row");
+      }
       this.#assertFreshIdentity(paymentId, asString(patch["quoteId"]));
       const intent = intentFromCreated(paymentId, at, patch);
       this.#intents.set(paymentId, intent);
@@ -784,8 +820,8 @@ export class IntentStore {
    * 不可分に行う。どちらかが使用済みなら `collision`（別の発行が既にある）。journal に書けなければ `unavailable`（集合には入れない。呼び出し側は `unknown` に写す）。
    * 対象の intent が `source_settled` で `private` 欄を持つのでなければ `unavailable`。
    */
-  reservePrivateIssuance(paymentId: string, intentSha256: string, inboundIdentity: string): Promise<MessageReservation> {
-    const reserved = this.#queue.then(() => this.#reservePrivateLocked(paymentId, intentSha256, inboundIdentity));
+  reservePrivateIssuance(paymentId: string, intentSha256: string, inboundIdentity: string, proxy?: ProxyReservation): Promise<MessageReservation> {
+    const reserved = this.#queue.then(() => this.#reservePrivateLocked(paymentId, intentSha256, inboundIdentity, proxy));
     this.#queue = reserved.then(
       () => undefined,
       () => undefined,
@@ -793,13 +829,19 @@ export class IntentStore {
     return reserved;
   }
 
-  async #reservePrivateLocked(paymentId: string, intentSha256: string, inboundIdentity: string): Promise<MessageReservation> {
+  async #reservePrivateLocked(paymentId: string, intentSha256: string, inboundIdentity: string, proxy: ProxyReservation | undefined): Promise<MessageReservation> {
     if (!HEX64.test(intentSha256) || inboundIdentity === "") return "unavailable";
     const intent = this.#intents.get(paymentId);
     if (intent === undefined || intent.status !== "source_settled" || intent.private === undefined || intent.private.intentSha256 !== intentSha256) return "unavailable";
+    // proxy 型は宛先が必須、MPC 型は禁止（設計 §8）。形も書く前に確かめる（読み戻しで起動を止める行を書かない）。
+    if ((intent.private.tlsMode === "proxy") !== (proxy !== undefined)) return "unavailable";
+    if (proxy !== undefined) {
+      const checked = proxyReservationOf({ providerAddr: proxy.providerAddr, vettedAddress: proxy.vettedAddress });
+      if (checked === undefined || checked === "malformed") return "unavailable";
+    }
     if (this.#issuedIntents.has(intentSha256) || this.#consumedInbound.has(inboundIdentity)) return "collision";
     try {
-      await this.#appendLocked(paymentId, PRIVATE_RESERVED_EVENT, { intentSha256, inboundIdentity });
+      await this.#appendLocked(paymentId, PRIVATE_RESERVED_EVENT, { intentSha256, inboundIdentity, ...(proxy === undefined ? {} : { proxy: { providerAddr: proxy.providerAddr, vettedAddress: proxy.vettedAddress } }) });
     } catch {
       return "unavailable";
     }

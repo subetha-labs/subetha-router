@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { open as openFile } from "node:fs/promises";
 
 import { openJournal, type Journal } from "../../src/core/journal.js";
-import { IntentStore, intentFromCreated, privateBindingOf, privateFieldsOf } from "../../src/core/store.js";
+import { IntentStore, intentFromCreated, privateBindingOf, privateFieldsOf, proxyReservationOf } from "../../src/core/store.js";
 import { toPublicStatus } from "../../src/core/intent.js";
 import { privateProjectionOf } from "../../src/core/orchestrator.js";
 
@@ -379,5 +379,81 @@ describe("private_* 行の reduce と再起動の帰結（§7.1）", () => {
       expect(store.byPaymentId("pay-1")).toMatchObject({ status: "unknown", terminalReason: "interrupted_after_release" });
       expect(store.byPaymentId("pay-1")?.private?.issuance?.sessionBy).toBe(releasePatch.sessionBy);
     }
+  });
+});
+
+/** 増分 v1.5（proxy 型）T-X5: 記録の型と予約の行の宛先（`docs/zktls-router-proxy-design.md` §8）。 */
+describe("proxy 型の記録（T-X5）", () => {
+  const PROXY = { providerAddr: "93.184.216.34:443", vettedAddress: "93.184.216.34" };
+  async function settledProxy(store: IntentStore, paymentId: string, quoteId: string): Promise<void> {
+    await store.append(paymentId, "created", createdPatch({ quoteId, privatePatch: { tlsMode: "proxy" } }));
+    await store.append(paymentId, "source_pending", {});
+    await store.append(paymentId, "source_settled", { txRef: `0xtx-${paymentId}`, eventId: "0xnonce-auth" });
+  }
+
+  test("tlsMode: 無ければ MPC 型（欄を足さない）、proxy なら写す、それ以外は privateInvalid", () => {
+    const mpc = privateFieldsOf(createdPatch());
+    expect(Object.hasOwn(mpc.private!, "tlsMode")).toBe(false);
+    expect(privateFieldsOf(createdPatch({ privatePatch: { tlsMode: "proxy" } })).private?.tlsMode).toBe("proxy");
+    for (const bad of ["mpc", "PROXY", "", 1, null, true, {}]) {
+      expect(privateFieldsOf(createdPatch({ privatePatch: { tlsMode: bad } }))).toEqual({ privateInvalid: true });
+    }
+  });
+  test("proxyReservationOf: ちょうど 2 欄の短い文字列だけ", () => {
+    expect(proxyReservationOf(undefined)).toBeUndefined();
+    expect(proxyReservationOf(PROXY)).toEqual(PROXY);
+    for (const bad of [null, "x", [], {}, { providerAddr: "a:1" }, { ...PROXY, extra: 1 }, { ...PROXY, providerAddr: "" }, { ...PROXY, vettedAddress: 4 }, { ...PROXY, providerAddr: "a".repeat(65) }]) {
+      expect(proxyReservationOf(bad)).toBe("malformed");
+    }
+  });
+  test("proxy 型は宛先つきでだけ予約でき、復元後の reservation に宛先が載る", async () => {
+    const { store } = await load();
+    await settledProxy(store, "pay-1", "0xq1");
+    expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "id-1")).toBe("unavailable"); // 宛先が無い
+    expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "id-1", { providerAddr: "", vettedAddress: "x" })).toBe("unavailable"); // 形違い
+    expect(await events()).not.toContain("private_issuance_reserved");
+    expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "id-1", PROXY)).toBe("reserved");
+    expect(store.byPaymentId("pay-1")?.private?.reservation).toEqual({ intentSha256: INTENT_SHA, inboundIdentity: "id-1", proxy: PROXY });
+    while (opened.length > 0) await opened.pop()!.close();
+    const reloaded = (await load()).store;
+    expect(reloaded.byPaymentId("pay-1")?.private?.tlsMode).toBe("proxy");
+    expect(reloaded.byPaymentId("pay-1")?.private?.reservation?.proxy).toEqual(PROXY);
+  });
+  test("MPC 型は宛先つきでは予約できず、行も今と同じ形（proxy 欄なし）", async () => {
+    const { store } = await load();
+    await settled(store, "pay-1", "0xq1");
+    expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "id-1", PROXY)).toBe("unavailable");
+    expect(await store.reservePrivateIssuance("pay-1", INTENT_SHA, "id-1")).toBe("reserved");
+    const rows = (await readFile(journalPath, "utf8")).split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as { event: string; patch: Record<string, unknown> });
+    const reservedRow = rows.find((row) => row.event === "private_issuance_reserved")!;
+    expect(reservedRow.patch).toStrictEqual({ intentSha256: INTENT_SHA, inboundIdentity: "id-1" });
+    expect(Object.hasOwn(store.byPaymentId("pay-1")!.private!.reservation!, "proxy")).toBe(false);
+  });
+  test.each<[string, boolean, Record<string, unknown>]>([
+    ["proxy 型で宛先の欠落", true, { intentSha256: INTENT_SHA, inboundIdentity: "id-1" }],
+    ["MPC 型で宛先がある", false, { intentSha256: INTENT_SHA, inboundIdentity: "id-1", proxy: { providerAddr: "93.184.216.34:443", vettedAddress: "93.184.216.34" } }],
+    ["宛先の形違い", true, { intentSha256: INTENT_SHA, inboundIdentity: "id-1", proxy: { providerAddr: "93.184.216.34:443" } }],
+  ])("journal の予約の行が記録の型と合わなければ起動を止める: %s", async (_name, proxy, patch) => {
+    const { store, journal } = await load();
+    if (proxy) await settledProxy(store, "pay-1", "0xq1");
+    else await settled(store, "pay-1", "0xq1");
+    await journal.append({ paymentId: "pay-1", event: "private_issuance_reserved", patch });
+    while (opened.length > 0) await opened.pop()!.close();
+    await expect(load()).rejects.toThrow(/private_issuance_reserved/);
+  });
+  test("本増分の前の journal（tlsMode も proxy 欄も無い）は MPC 型として今と同じに読む", async () => {
+    const { store } = await load();
+    await settled(store, "pay-1", "0xq1");
+    await store.reservePrivateIssuance("pay-1", INTENT_SHA, "id-1");
+    while (opened.length > 0) await opened.pop()!.close();
+    const intent = (await load()).store.byPaymentId("pay-1")!;
+    expect(Object.hasOwn(intent.private!, "tlsMode")).toBe(false);
+    expect(intent.private!.reservation).toEqual({ intentSha256: INTENT_SHA, inboundIdentity: "id-1" });
+  });
+  test.each<[string, unknown]>([["mpc", "mpc"], ["空文字", ""], ["数", 1], ["null", null], ["オブジェクト", {}]])("created の tlsMode が形違い（%s）なら journal の読み込みを止める", async (_name, bad) => {
+    const { journal } = await load();
+    await journal.append({ paymentId: "pay-1", event: "created", patch: createdPatch({ privatePatch: { tlsMode: bad } }) });
+    while (opened.length > 0) await opened.pop()!.close();
+    await expect(load()).rejects.toThrow(/malformed tls mode/);
   });
 });

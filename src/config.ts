@@ -9,6 +9,8 @@
 export * from "./shared/networks.js";
 import path from "node:path";
 
+import { PROXY_RELAY_LIMITS } from "./private/proxy.js";
+
 import {
   assetKeyOf,
   evmChainIdOf,
@@ -276,6 +278,16 @@ export interface PrivateConfig {
   readonly maxChildOutputBytes: number;
   readonly maxRetainedBytes: number;
   readonly maxRetainedPurchases: number;
+  /**
+   * MPC 型にするプロファイル（`profiles` の部分集合。`docs/zktls-router-proxy-requirements.md` FR-X01）。**設定に書かれたときだけ**解析結果に載る
+   * （省略時の解析結果は本増分の前と同じ）。載らないプロファイルの型は `tlsModeOf` が決める。承認の指紋には入れない（MPC 型の指紋を今と同じに保つ。設計 §2）。
+   */
+  readonly mpcProfiles?: readonly string[];
+  /**
+   * **試験専用・有効化の前だけ**（`docs/zktls-router-proxy-tasks.md` の「有効化の境界」）。設定の解析では作れず（`parsePrivate` は拒否する）、`src/main.ts` も付けない。
+   * 試験が設定の値を直接組むときにだけ付け、proxy 型の経路を有効化の前に試す。無ければ `tlsModeOf` は常に `"mpc"`。
+   */
+  readonly proxyActivatedForTest?: true;
 }
 
 export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
@@ -303,8 +315,17 @@ export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
  * 秘匿購入の**承認の権威**（設計 §3.1 7）: allowlist・trust・バイナリと SRS の指紋・方針・上限。動的の権威（`dynamicAuthoritativeTermsOf`）と合成して
  * `routeFingerprint` に入れる。変われば（profiles からの除外を含む）既存の quote は `quote_changed` で止まる。
  */
+/**
+ * プロファイルの TLS の型（`docs/zktls-router-proxy-design.md` §2）。有効化の前（T-X1〜T-X7）は `proxyActivatedForTest` の無い設定で常に `"mpc"`。
+ * 有効化の後は `mpcProfiles` に載るものが `"mpc"`、それ以外が `"proxy"`。
+ */
+export function tlsModeOf(config: PrivateConfig, profileId: string): "mpc" | "proxy" {
+  if (config.proxyActivatedForTest !== true) return "mpc";
+  return (config.mpcProfiles ?? []).includes(profileId) ? "mpc" : "proxy";
+}
+
 export function privateAuthoritativeTermsOf(config: PrivateConfig, profileId: string, rail: "x402" | "mpp", trust: "mozilla" | "lab-fixture-ca"): unknown {
-  return {
+  const base = {
     private: true,
     allowlisted: config.profiles.includes(profileId),
     trust,
@@ -313,6 +334,9 @@ export function privateAuthoritativeTermsOf(config: PrivateConfig, profileId: st
     policy: { minCredentialLifetimeMs: config.minCredentialLifetimeMs[rail], sessionTimeoutMs: config.sessionTimeoutMs, attestTimeoutMs: config.attestTimeoutMs, retentionMs: config.retentionMs },
     limits: { maxIntentBytes: config.maxIntentBytes, maxBundleBytes: config.maxBundleBytes, maxRecordBytes: config.maxRecordBytes },
   };
+  // MPC 型は今と同じオブジェクト（キーも順序も同じ）。proxy 型だけ末尾に型と中継の上限を足す（要件 FR-X03、設計 §2）。
+  if (tlsModeOf(config, profileId) !== "proxy") return base;
+  return { ...base, tlsMode: "proxy", proxyRelay: { maxSentBytes: PROXY_RELAY_LIMITS.maxSentBytes, maxRecvBytes: PROXY_RELAY_LIMITS.maxRecvBytes } };
 }
 
 export interface RouterConfig {
@@ -1054,6 +1078,9 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
   if (Object.hasOwn(raw, "trust")) {
     throw new ConfigError(`${at}.trust is not a field (trust is fixed to mozilla; the test trust is injected only by test capabilities)`);
   }
+  if (Object.hasOwn(raw, "proxyActivatedForTest")) {
+    throw new ConfigError(`${at}.proxyActivatedForTest is not a field (test-only; it cannot be set from a config file)`);
+  }
   if (dynamic === undefined) {
     throw new ConfigError(`${at} requires router.dynamic (private profiles are dynamic profiles)`);
   }
@@ -1093,6 +1120,12 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
       throw new ConfigError(`${at}.profiles: ${profileId} must pay MPP on Tempo (EVM family) with feeAsset and maxFee (pull)`);
     }
   }
+  const mpcProfiles = raw["mpcProfiles"];
+  if (mpcProfiles !== undefined) {
+    if (!Array.isArray(mpcProfiles) || mpcProfiles.some((id) => typeof id !== "string" || id === "" || !(profiles as string[]).includes(id)) || new Set(mpcProfiles).size !== mpcProfiles.length) {
+      throw new ConfigError(`${at}.mpcProfiles must be a subset of ${at}.profiles without repeats`);
+    }
+  }
   const verifierListen = (raw["verifierListen"] ?? DEFAULT_PRIVATE_CONFIG.verifierListen) as unknown;
   if (verifierListen !== "127.0.0.1:0") {
     throw new ConfigError(`${at}.verifierListen must be "127.0.0.1:0" (loopback only)`);
@@ -1130,6 +1163,8 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
     maxChildOutputBytes: requirePositiveInt(raw, "maxChildOutputBytes", at, defaults.maxChildOutputBytes),
     maxRetainedBytes: requirePositiveInt(raw, "maxRetainedBytes", at, defaults.maxRetainedBytes),
     maxRetainedPurchases: requirePositiveInt(raw, "maxRetainedPurchases", at, defaults.maxRetainedPurchases),
+    // 書かれたときだけ載せる（省略時の解析結果は本増分の前と同じ）。
+    ...(mpcProfiles === undefined ? {} : { mpcProfiles: [...(mpcProfiles as string[])] }),
   };
   // record は attest と検証が終わるまで取得できること（設計 §3.5）: 保持期限 ≥ attest の期限 + 検証の上限。
   if (parsed.retentionMs < parsed.attestTimeoutMs + parsed.verifyTimeoutMs) {

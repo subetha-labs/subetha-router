@@ -72,9 +72,12 @@ export function createPrivateX402Rail(capability: EvmSigningCapability, options:
 
   return {
     rail: "x402",
-    async discover(profileId: string, target: UpstreamTarget): Promise<PrivateDiscovery> {
+    async discover(profileId: string, target: UpstreamTarget, discoverOptions?: { readonly transport?: GuardedTransport }): Promise<PrivateDiscovery> {
       const profile = profileFor(profileId);
-      const challenge = await reader.getChallenge(target, { routeId: profileId, operation: "private_probe" });
+      // proxy 型: 固定した宛先の transport で送る（読み手は同じ規則で作り直す）。無ければ今と同じ読み手。
+      const override = discoverOptions?.transport;
+      const read = override === undefined ? reader : createX402ChallengeReader({ transport: override, denyHosts: options.denyHosts ?? [], unpaidTimeoutMs: options.unpaidTimeoutMs ?? X402_DYNAMIC_UNPAID_TIMEOUT_MS });
+      const challenge = await read.getChallenge(target, { routeId: profileId, operation: "private_probe" });
       const operators = operatorAddressesOf(profile);
       const offers: DestinationOffer[] = [];
       for (const entry of challenge.accepts) {

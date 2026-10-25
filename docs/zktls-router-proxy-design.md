@@ -1,8 +1,8 @@
-# 秘匿購入の proxy 型 TLS（増分 v1.5）設計 v2.1
+# 秘匿購入の proxy 型 TLS（増分 v1.5）設計 v2.2
 
 要件: `docs/zktls-router-proxy-requirements.md` v3.2（以下「要件」）。基礎の設計 `docs/zktls-router-design.md` v5.1（以下「基礎設計」）の上に足す。
 対象 worktree `subetha-router/zktls-proxy-20261026`（branch `task/zktls-proxy`）。設計フェーズの成果物で、実装は含まない。
-v1 は Codex の独立レビュー（`.claude_workflow/local/proxy-design-review1.md`、REJECT、blocking 2・should 5・minor 2）を受けて v2 に、v2 の再レビュー（`proxy-design-review2.md`、APPROVE WITH CHANGES、should 2・minor 1）を受けて v2.1 に改めた（§15 に対応表）。
+v1 は Codex の独立レビュー（`.claude_workflow/local/proxy-design-review1.md`、REJECT、blocking 2・should 5・minor 2）を受けて v2 に、v2 の再レビュー（`proxy-design-review2.md`、APPROVE WITH CHANGES、should 2・minor 1）を受けて v2.1 に改めた（§15 に対応表）。v2.2 は実装（T-X3）で `guarded-fetch.ts` が `@subetha/payer` の vendor の写しと byte 単位で同じであること（`packages/payer/test/unit/vendor.test.ts`）が分かり、§4.1 を「別モジュールで固定し、固定の宛先だけを返す transport を購入ごとに作る」形に改めた（§16）。
 lab の `delivery` の proxy 対応（要件 §5 の LX-1〜LX-7）は依頼済みで回答待ち（2026-10-26）。本書は LX の名前と意味をそのまま前提にし、lab が形を変えた場合は §12 の手順で追従する。
 
 ## 1. 役割とシーケンス（proxy 型。MPC 型は基礎設計 §1 のまま）
@@ -54,24 +54,23 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
 
 ## 4. 宛先の固定（要件 FR-X05・X06、`src/net/guarded-fetch.ts`・`src/core/dynamic.ts`・`src/core/private.ts`）
 
-### 4.1 transport の口（追加のみ。既存の呼び出しは不変）
-- `TransportContext` に任意の欄 `pin?: TransportPin` を足す。`TransportPin = { host: string; address: ParsedAddress; dial?: { host: string; port: number } }`（`ParsedAddress` は
-  `destination-policy.ts` の正規化済みの値。`dial` は pin を作ったときの `dialForTest` の答え。本番は無い）。`TransportPin` は `pinDestination` だけが作る内部の値で、
-  要求・journal・復元した JSON から組まない（core は `pins` の Map の値をそのまま渡すだけ）。
-  **`pin` の無い呼び出しの挙動は 1 つも変えない。**
-- `GuardedTransport` に任意の能力 `pinDestination?(host: string, context: TransportContext): Promise<PinnedDestination>` を足す（`options.dns` があるとき = 動的 transport だけ）:
-  1. 既存の `vet(host, context)` をそのまま呼ぶ（名前なら `resolveBounded`（期限 3 s・同時数 16）で**全回答**、1 つでも `classifyAddress` で禁止なら `destination_blocked`、
-     0 件・失敗は `dns_failed`）。方針は動的 transport の `allowLoopback: false` と `interfaces`（Router 自身のアドレス `own_address`）。**URL・ホスト名の deny list
-     （`parseUpstreamUrl`）は pin の前に購入の既存の段（`dynamic.ts` の upstream の検査）で済んでいる**（pin は名前の deny list を見ない。§12 の試験も購入の経路で行う）。
-  2. 選び方: 検査済みの回答のうち、**解決の順で最初の IPv4**、無ければ最初の IPv6（決定的。IPv4-mapped IPv6 は `parseAddress` が IPv4 に正規化する）。
-  3. 枠: `options.admit?.([chosen.text], context)`。`undefined` なら `TransportError("admission_refused")`。**これがこの購入の宛先アドレスの枠の全部**（§4.3）。
-  4. 接続先: `dialForTest` があれば `dialForTest({hostname: host, port: 443})`。`undefined` を返したら `{host: chosen.text, port: 443}`、値を返したらその host と port
-     （試験の loopback の fixture の任意のポート）。`dialForTest` が例外を投げたら、3 の枠を返してから `TransportError("connect_failed")`。
-  5. 戻り値 `PinnedDestination = { pin: TransportPin; vettedAddress: string; dialAddr: string; release(): void }`。`dialAddr` は `host:port`（IPv6 は `[x::y]:port`）。
-     `release` は冪等。例外は `TransportError` だけ（宛先を含まない固定文）。4・5 のどこで失敗しても 3 の枠は返す。
-- `fetch`（`run`）は `context.pin` があり、かつ `context.pin.host === url.hostname` のときだけ: `vet` を呼ばず `vetted = [context.pin.address]` とし、**`admit` を呼ばない**
-  （枠は pin が持っている）。試験の差し替えは **`dialForTest` を呼び直さず** `context.pin.dial` を使う（`dial` が無ければ差し替えない）。これで pin・2 回の探り・Verifier の
-  接続先は同じ。それ以外の検査（scheme・userinfo・h2 無し・1 回の dispatch・redirect の拒否）は同じ。host が違う要求（RPC 等）は今と同じ。
+### 4.1 宛先の固定のモジュール（`src/net/pinned-destination.ts`、新。`guarded-fetch.ts` は変えない）
+- `guarded-fetch.ts` と `destination-policy.ts` は `@subetha/payer` が byte 単位で同じ写しを持つ（vendor の試験）ので**変えない**。公開の部品（`createGuardedTransport`・
+  `classifyAddress`・`TransportError`）だけを使う。
+- `createDestinationPinner({report, dns, admit?, maxHeaderSize?, lookup?, interfaces?, tls?, dialForTest?})` → `{ pinDestination(host, context) }`:
+  1. 名前なら期限・同時数の上限つきで解決（`guarded-fetch.ts` の `resolveBounded` と同じ規則。待つのをやめた解決も終わるまで枠を持つ）、**全回答**を
+     `classifyAddress(candidate, {allowLoopback: false, interfaces})` で分類し 1 つでも禁止なら `destination_blocked`、0 件・失敗は `dns_failed`。URL・名前の deny list は
+     pin の前に購入の既存の段で済んでいる（pin は名前の deny list を見ない）。
+  2. 通った回答の**最初の IPv4**、無ければ最初の IPv6。
+  3. 枠: `admit?.([chosen.text], context)`。`undefined` なら `admission_refused`。**これがこの購入の宛先アドレスの枠の全部**（§4.3）。
+  4. 試験の差し替え: `dialForTest` があれば**ここで 1 回だけ**呼ぶ。`undefined` なら差し替えない、値ならその host:port に固定、例外なら枠を返して `connect_failed`。
+  5. **固定の宛先の transport**: `createGuardedTransport({allowLoopback: false, report, interfaces, dns, maxHeaderSize, tls, lookup: 固定の lookup, dialForTest?: 固定の答え})`。
+     固定の lookup は pin のホスト名にだけ選んだ 1 アドレスを返し、他の名前は `ENOTFOUND`（= `dns_failed`。別のホストには接続しない）。**`admit` を渡さない**（枠は pin が持つ）。
+     `guarded-fetch.ts` の既存の検査（scheme・userinfo・分類・h2 無し・1 回の dispatch・redirect の拒否）はこの transport でもそのまま走る。
+  6. 戻り値 `PinnedDestination = { pin, vettedAddress, dialAddr, transport, release() }`。`dialAddr` は `host:port`（IPv6 は `[x::y]:port`）。`release` は冪等。
+     例外は `TransportError` だけ（宛先を含まない固定文）。2〜6 のどこで失敗しても取った枠は返す。
+- `main.ts` は動的 transport と同じ hooks（`capabilities.dynamicTransportHooksForTest` を展開。`main.ts` に `dialForTest` の文字列は書かない = 既存の静的検査）・
+  `report`・`DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes`・`dns: {timeoutMs: 3_000, maxInFlight: 16}`・動的の門の `admitAddresses` で pinner を作る。
 
 ### 4.2 段の位置（受信 verify の前）
 - `dynamic.ts` の `purchaseWithHost` の**先頭**（宛先ホストの枠 `admitHost` の内側、最初の探り `readOffers` の前）で、秘匿購入のときだけ private の依存
@@ -81,9 +80,9 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
   （`main.ts` が動的 transport の `pinDestination` を渡す。proxy 型のプロファイルがあるのに渡されていなければ `createPrivateCore` が例外）。成功なら `pins.set(paymentId, pinned)`。
   失敗 → `awaiting("private_proxy_dial_refused")`（`awaiting_payment`。**受信 verify・settle を呼ばない**。容量は既存の `finally` が返す）。
   x402 受信では資金は動かない。burn-sale 受信は Payer の burn が purchase の前に済んでおり、基礎設計どおり settle の前の拒否は返金しない（既存の開示の範囲）。
-- 探りの引き継ぎ: private の `outboundFor(intent).readChallenge` と、`deliverInner` の 2 回目の再照合は、`pins.get(paymentId)?.pin` を
-  `rail.discover(profileId, target, { pin })` で渡す。`PrivateOutboundRail.discover` に任意の第 3 引数 `options?: { pin?: TransportPin }` を足し、x402 の
-  `createX402ChallengeReader.getChallenge(target, ctx)` と MPP の `readCandidates` が `ctx` に `pin` を載せて `transport.fetch` に渡す（MPC 型・動的購入の呼び出しは引数が無いので不変）。
+- 探りの引き継ぎ: private の `outboundFor(intent).readChallenge` と、`deliverInner` の 2 回目の再照合は、`pins.get(paymentId)?.transport` を
+  `rail.discover(profileId, target, { transport })` で渡す。`PrivateOutboundRail.discover` に任意の第 3 引数 `options?: { transport?: GuardedTransport }` を足し、x402 は
+  その transport で読み手（`createX402ChallengeReader`）を作り直し、MPP は `readCandidates` の送り先にする（MPC 型・動的購入の呼び出しは引数が無いので不変）。
   これで pin の後の名前解決は 0 回、宛先アドレスの枠は購入につき 1 つ（探りは pin の枠の中）。
 - 発行予約: `deliverInner` は `pins.get(paymentId)` を読み、proxy 型でこれが無ければ `undelivered("private_proxy_dial_refused")`（予約の前。通常は起きない）。あれば
   `store.reservePrivateIssuance(paymentId, intentSha256, inboundIdentity, { providerAddr: pinned.dialAddr, vettedAddress: pinned.vettedAddress })`。予約の行の patch に
@@ -184,7 +183,7 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
 |---|---|---|
 | TR-X1 設定 | `tests/unit/private-config.test.ts` | `mpcProfiles` の検査、`tlsModeOf`、既定値の表の検査は不変、MPC 型の指紋の golden が `mpcProfiles` の追加だけで不変 |
 | TR-X1 能力の門 | `tests/unit/private-capabilities.test.ts`（新） | `readCapabilities` の各形（偽バイナリ）、`main.ts` の門（proxy 型あり + 宣言なし → `ConfigError`、全部 MPC 型 → 呼ばない: 呼び出しを数える） |
-| TR-X1 宛先 | `tests/unit/guarded-pin.test.ts`（新） | `pinDestination` の DENY4/6・自アドレス・IPv4-mapped・1 つだけ禁止・0 件・期限・同時数・門の拒否・選び方・`dialForTest`（値・`undefined`・例外で枠を返す）・`fetch` の `pin` 文脈（vet 0 回・admit 0 回・`dialForTest` 0 回で `pin.dial` へ、答えが呼ぶたびに変わる `dialForTest` でも接続先は同じ・別 host は従来）。名前の deny list は購入の経路の試験（core） |
+| TR-X1 宛先 | `tests/unit/pinned-destination.test.ts`（新） | `pinDestination` の DENY4/6・自アドレス・IPv4-mapped・1 つだけ禁止・0 件・期限・同時数・門の拒否・選び方・`dialForTest`（値・`undefined`・例外で枠を返す）・`fetch` の `pin` 文脈（vet 0 回・admit 0 回・`dialForTest` 0 回で `pin.dial` へ、答えが呼ぶたびに変わる `dialForTest` でも接続先は同じ・別 host は従来）。名前の deny list は購入の経路の試験（core） |
 | TR-X1 core | `tests/unit/private-core.test.ts`（追加） | 型の照合（§8.1 の 3 通り → `quote_changed`、受信 verify 0 回）；移行（quote の 3 通り、進行中の購入）；枠の返却（§4.3 の各出口の後に使用数 0、`perAddressConcurrent: 1` で pin と探りが両立）；予約の後の読み直し；pin の失敗で受信 verify・settle 0 回・予約 0 行・`issueCredential` 0 回・`awaiting_payment`（`private_proxy_dial_refused`）；名前の deny list は pin の前に止まる；固定の維持（pin の後に lookup の答えを変えても serve の引数は同じ、lookup の回数は pin の 1 回だけ）；失敗通知の写像と順序（timer の後の通知は読まない、子が先に終わって lock を待つ間に timer が鳴っても通知を読む、record と通知の両方）；record の型の束縛；移行（旧 journal を proxy 既定の設定で開く） |
 | TR-X1 attest | `tests/unit/private-attest.test.ts`（追加） | `tls_mode`・`provider_addr` のすり替え・欠落、MPC 型の購入への proxy の record → `tls_mode` |
 | TR-X1 store | `tests/unit/private-store.test.ts`（追加） | 予約の行の `proxy` 欄の復元・形違い・proxy 型で欠落・MPC 型で存在の拒否、`created` の `tlsMode` の復元と形違いの拒否、旧 journal は MPC 型 |
@@ -198,8 +197,8 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
 | ファイル | 変更 |
 |---|---|
 | `src/config.ts` | `mpcProfiles`、`tlsModeOf`、指紋の proxy 欄 |
-| `src/net/guarded-fetch.ts` | `TransportContext.pin`、`pinDestination`（`vet` の共有）、`fetch` の `pin` 文脈の分岐（`pin` の無い呼び出しは不変） |
-| `src/adapters/outbound/private-x402.ts`・`private-mpp.ts`・`x402-dynamic.ts`（reader）・`src/ports/private-outbound.ts` | `discover` の任意の第 3 引数 `{pin}` を `ctx` に載せる |
+| `src/net/pinned-destination.ts`（新） | `createDestinationPinner`（§4.1）。`guarded-fetch.ts`・`destination-policy.ts` は変えない（payer の vendor の写し） |
+| `src/adapters/outbound/private-x402.ts`・`private-mpp.ts`・`src/ports/private-outbound.ts` | `discover` の任意の第 3 引数 `{transport}` |
 | `src/private/proxy.ts`（新） | `PROXY_RELAY_LIMITS`、`parseFailureNotice`、`FAILURE_FILE` |
 | `src/private/verifier.ts` | `readCapabilities`、`ServeArgs.proxy` |
 | `src/private/attest.ts` | record の 2 欄、`checkAttest` の `tls_mode` |
@@ -234,3 +233,8 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
 | 再 should 1: 枠の所有の受け渡し | §4.3（容量と同じ受け渡し、`!transferred` のときだけ外側で返す、子の終了は lock の前に返す、`close()` は子の停止の後、`scheduleAt` の取り消し、試験 (a)〜(d)） |
 | 再 should 2: 探りの試験の接続先 | §4.1（`TransportPin.dial` を pin の時に固定し、pin の文脈の fetch は `dialForTest` を呼び直さない。`TransportPin` は内部の値） |
 | 再 minor 3: 配線の経路 | §13（`PrivateWiring`・`RouterCoreOptions.private`・`createPrivateCore` の呼び出し） |
+
+## 16. v2.1 → v2.2（実装で判明）
+| 判明したこと | 対応 |
+|---|---|
+| `src/net/guarded-fetch.ts` は `@subetha/payer` が byte 単位で同じ写しを持つ（`packages/payer/test/unit/vendor.test.ts` R-1）。変えると payer の vendor の更新（= payer パッケージの中身の変更）が要る | `guarded-fetch.ts` を変えず、`src/net/pinned-destination.ts` で固定し、固定の 1 アドレスだけを返す lookup と固定の差し替えを持つ transport を購入ごとに `createGuardedTransport` で作る（§4.1）。rail には `{pin}` の文脈ではなく `{transport}` を渡す（§4.2） |
