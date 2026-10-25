@@ -74,6 +74,7 @@ function config(overrides: Partial<RouterConfig["private"] & {}> = {}, dynamicLi
       verifyTimeoutMs: 5_000,
       retentionMs: 60_000,
       maxChildOutputBytes: 4096,
+      mpcProfiles: [PROFILE_ID, "priv-subetha"],
       ...overrides,
     },
   };

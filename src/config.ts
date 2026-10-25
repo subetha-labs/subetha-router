@@ -283,11 +283,6 @@ export interface PrivateConfig {
    * （省略時の解析結果は本増分の前と同じ）。載らないプロファイルの型は `tlsModeOf` が決める。承認の指紋には入れない（MPC 型の指紋を今と同じに保つ。設計 §2）。
    */
   readonly mpcProfiles?: readonly string[];
-  /**
-   * **試験専用・有効化の前だけ**（`docs/zktls-router-proxy-tasks.md` の「有効化の境界」）。設定の解析では作れず（`parsePrivate` は拒否する）、`src/main.ts` も付けない。
-   * 試験が設定の値を直接組むときにだけ付け、proxy 型の経路を有効化の前に試す。無ければ `tlsModeOf` は常に `"mpc"`。
-   */
-  readonly proxyActivatedForTest?: true;
 }
 
 export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
@@ -316,11 +311,10 @@ export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
  * `routeFingerprint` に入れる。変われば（profiles からの除外を含む）既存の quote は `quote_changed` で止まる。
  */
 /**
- * プロファイルの TLS の型（`docs/zktls-router-proxy-design.md` §2）。有効化の前（T-X1〜T-X7）は `proxyActivatedForTest` の無い設定で常に `"mpc"`。
- * 有効化の後は `mpcProfiles` に載るものが `"mpc"`、それ以外が `"proxy"`。
+ * プロファイルの TLS の型（`docs/zktls-router-proxy-design.md` §2、要件 FR-X01。owner の判断 2026-10-26: 既定は proxy 型）。
+ * `mpcProfiles` に載るものが `"mpc"`、それ以外（`mpcProfiles` の省略を含む）が `"proxy"`。
  */
 export function tlsModeOf(config: PrivateConfig, profileId: string): "mpc" | "proxy" {
-  if (config.proxyActivatedForTest !== true) return "mpc";
   return (config.mpcProfiles ?? []).includes(profileId) ? "mpc" : "proxy";
 }
 
@@ -1077,9 +1071,6 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
   }
   if (Object.hasOwn(raw, "trust")) {
     throw new ConfigError(`${at}.trust is not a field (trust is fixed to mozilla; the test trust is injected only by test capabilities)`);
-  }
-  if (Object.hasOwn(raw, "proxyActivatedForTest")) {
-    throw new ConfigError(`${at}.proxyActivatedForTest is not a field (test-only; it cannot be set from a config file)`);
   }
   if (dynamic === undefined) {
     throw new ConfigError(`${at} requires router.dynamic (private profiles are dynamic profiles)`);

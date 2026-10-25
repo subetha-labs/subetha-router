@@ -1,7 +1,7 @@
 /**
  * `router.private` の設定と合成（設計 §9、T-Z5、要件 FR-Z12・FR-Z13・FR-Z24・FR-Z28）。
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { generatePrivateKey } from "viem/accounts";
 import { afterEach, describe, expect, test } from "vitest";
@@ -10,7 +10,7 @@ import { BURN_SALE_APPROVAL_TTL_MAX_MS, ConfigError, DEFAULT_PRIVATE_CONFIG, loa
 import { PROXY_RELAY_LIMITS } from "../../src/private/proxy.js";
 import { MAX_QUOTE_LIFETIME_MS } from "../../src/core/quote-ledger.js";
 import { KNOWN_NETWORKS } from "../../src/shared/networks.js";
-import { composeRails, profileIdOfBinding, type RouterCapabilities } from "../../src/main.js";
+import { composeRails, profileIdOfBinding, startRouter, type RouterCapabilities } from "../../src/main.js";
 import { privateBindingOf } from "../../src/core/store.js";
 import { sha256File } from "../../src/private/verifier.js";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
@@ -44,7 +44,8 @@ function router(privatePatch: Record<string, unknown> | null = {}, profilesPatch
       budget: { maxPurchases: 50, buckets: [{ network: "eip155:84532", asset: USDC, maxTotal: "10000000", maxPerPurchase: "20000" }, { network: "eip155:42431", asset: PATHUSD, maxTotal: "10000000", maxPerPurchase: "20000" }] },
       denyHosts: [],
     },
-    ...(privatePatch === null ? {} : { private: { deliveryBin: FAKE, deliveryBinSha256: sha256File(FAKE), srsPath: FAKE, srsSha256: sha256File(FAKE), profiles: ["priv-x402", "priv-tempo"], ...privatePatch } }),
+    // 増分 v1.5 の有効化の後は既定が proxy 型: 既存の試験は MPC 型のまま（`mpcProfiles` = 有効な profiles）。proxy 型の試験は `mpcProfiles` を明示する。
+    ...(privatePatch === null ? {} : { private: { deliveryBin: FAKE, deliveryBinSha256: sha256File(FAKE), srsPath: FAKE, srsSha256: sha256File(FAKE), profiles: ["priv-x402", "priv-tempo"], ...privatePatch, ...(Object.hasOwn(privatePatch, "mpcProfiles") ? {} : { mpcProfiles: Array.isArray(privatePatch["profiles"]) ? (privatePatch["profiles"] as unknown[]).filter((id, index, all) => typeof id === "string" && id !== "" && all.indexOf(id) === index) : ["priv-x402", "priv-tempo"] }) } }),
   };
 }
 
@@ -182,9 +183,9 @@ describe("合成（composeRails）", () => {
     expect(() => composeRails(runtime(router()), withoutTempo, quiet, quiet)).toThrow(/signer_not_authorized/);
   });
   /** 増分 v1.5 T-X2: 能力の門（設計 §3）。合成は同期のまま、門は起動の検査の列に入る。 */
+  /** proxy 型の設定（既定 = `mpcProfiles` に載せない）。 */
   function activated(patch: Record<string, unknown> = {}): RuntimeConfig {
-    const rt = runtime(router(patch));
-    return { ...rt, router: { ...rt.router, private: { ...rt.router.private!, proxyActivatedForTest: true } } };
+    return runtime(router({ mpcProfiles: [], ...patch }));
   }
   test("能力の門: proxy 型のプロファイルがあれば起動の検査で 1 回読み、proxy を宣言しなければ起動の検査が ConfigError で失敗する", async () => {
     const calls: string[] = [];
@@ -200,7 +201,16 @@ describe("合成（composeRails）", () => {
     // 本物の読み取り（偽の delivery は両方を宣言する）。
     await expect(composeRails(activated(), capabilities(), quiet, quiet).startup!()).resolves.toBeUndefined();
   });
-  test("能力の門: 全プロファイルが MPC 型（有効化の前、または mpcProfiles に全部）なら読まない", async () => {
+  test("宛先の固定の配線（T-X6）: 実合成の private に pinDestination があり、動的と同じ試験の名前解決で公開アドレスを固定する。loopback は拒否", async () => {
+    const rails = composeRails(activated(), capabilities(), quiet, quiet);
+    expect(rails.private!.pinDestination).toBeTypeOf("function");
+    const pinned = await rails.private!.pinDestination!("test-server.io", { operation: "private_proxy_pin", routeId: "priv-x402" });
+    expect(pinned.dialAddr).toBe("93.184.216.34:443");
+    pinned.release();
+    const loopback = composeRails(activated(), capabilities({ dynamicTransportHooksForTest: { lookup: publicLookup({ "test-server.io": ["127.0.0.1"] }), interfaces: () => [] } }), quiet, quiet);
+    await expect(loopback.private!.pinDestination!("test-server.io", { operation: "private_proxy_pin" })).rejects.toMatchObject({ code: "destination_blocked" });
+  });
+  test("能力の門: 全プロファイルが MPC 型（mpcProfiles に全部）なら読まない", async () => {
     const calls: string[] = [];
     const counting = capabilities({ readCapabilitiesForTest: async (bin) => { calls.push(bin); return undefined; } });
     for (const config of [runtime(router()), activated({ mpcProfiles: ["priv-x402", "priv-tempo"] })]) {
@@ -239,10 +249,9 @@ describe("proxy 型の設定（T-X1）", () => {
     };
   }
 
-  test("mpcProfiles を省略すると解析結果に欄が無い（本増分の前と同じ）", () => {
-    const parsed = parseRouterConfig(router()).private!;
+  test("mpcProfiles を省略すると解析結果に欄が無い（省略の正規化は tlsModeOf がする）", () => {
+    const parsed = parseRouterConfig(router({ mpcProfiles: undefined })).private!;
     expect(Object.hasOwn(parsed, "mpcProfiles")).toBe(false);
-    expect(Object.hasOwn(parsed, "proxyActivatedForTest")).toBe(false);
   });
   test("mpcProfiles を書けば写す", () => {
     expect(parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!.mpcProfiles).toEqual(["priv-x402"]);
@@ -257,25 +266,20 @@ describe("proxy 型の設定（T-X1）", () => {
   ])("拒否: mpcProfiles が%s", (_name, value) => {
     expect(() => parseRouterConfig(router({ mpcProfiles: value }))).toThrow(/mpcProfiles must be a subset of private.profiles without repeats/);
   });
-  test("proxyActivatedForTest は設定から作れない", () => {
-    expect(() => parseRouterConfig(router({ proxyActivatedForTest: true }))).toThrow(/proxyActivatedForTest is not a field/);
-  });
-  test("有効化の前: proxyActivatedForTest の無い設定は、mpcProfiles によらず常に MPC 型", () => {
-    for (const patch of [{}, { mpcProfiles: [] }, { mpcProfiles: ["priv-x402"] }]) {
-      const parsed = parseRouterConfig(router(patch)).private!;
-      expect(tlsModeOf(parsed, "priv-x402")).toBe("mpc");
-      expect(tlsModeOf(parsed, "priv-tempo")).toBe("mpc");
-    }
-  });
-  test("proxyActivatedForTest があれば、mpcProfiles に載るものが MPC 型、それ以外が proxy 型", () => {
-    const parsed: PrivateConfig = { ...parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!, proxyActivatedForTest: true };
-    expect(tlsModeOf(parsed, "priv-x402")).toBe("mpc");
-    expect(tlsModeOf(parsed, "priv-tempo")).toBe("proxy");
-    const all: PrivateConfig = { ...parseRouterConfig(router()).private!, proxyActivatedForTest: true };
-    expect(tlsModeOf(all, "priv-x402")).toBe("proxy");
+  test("既定は proxy 型（owner の判断 2026-10-26）: mpcProfiles に載るものが MPC 型、それ以外（省略を含む）が proxy 型", () => {
+    const partial = parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!;
+    expect(tlsModeOf(partial, "priv-x402")).toBe("mpc");
+    expect(tlsModeOf(partial, "priv-tempo")).toBe("proxy");
+    const omitted = parseRouterConfig(router({ mpcProfiles: undefined })).private!;
+    expect(tlsModeOf(omitted, "priv-x402")).toBe("proxy");
+    expect(tlsModeOf(omitted, "priv-tempo")).toBe("proxy");
+    const empty = parseRouterConfig(router({ mpcProfiles: [] })).private!;
+    expect(tlsModeOf(empty, "priv-x402")).toBe("proxy");
+    const all = parseRouterConfig(router()).private!;
+    expect([tlsModeOf(all, "priv-x402"), tlsModeOf(all, "priv-tempo")]).toEqual(["mpc", "mpc"]);
   });
   test("MPC 型の指紋は本増分の前と完全に同じ（mpcProfiles の欄は入らない）", () => {
-    for (const patch of [{}, { mpcProfiles: ["priv-x402", "priv-tempo"] }]) {
+    for (const patch of [{}, { mpcProfiles: ["priv-x402", "priv-tempo"] }, { mpcProfiles: ["priv-tempo", "priv-x402"] }]) {
       const parsed = parseRouterConfig(router(patch)).private!;
       for (const trust of ["mozilla", "lab-fixture-ca"] as const) {
         expect(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", trust)).toStrictEqual(legacyTerms(parsed, "priv-x402", "x402", trust));
@@ -283,17 +287,60 @@ describe("proxy 型の設定（T-X1）", () => {
       }
       expect(JSON.stringify(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", "mozilla"))).toBe(JSON.stringify(legacyTerms(parsed, "priv-x402", "x402", "mozilla")));
     }
-    // 有効化した設定でも、mpcProfiles に載るプロファイルは今と同じ。
-    const activated: PrivateConfig = { ...parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!, proxyActivatedForTest: true };
-    expect(privateAuthoritativeTermsOf(activated, "priv-x402", "x402", "mozilla")).toStrictEqual(legacyTerms(activated, "priv-x402", "x402", "mozilla"));
+    // 一部だけ MPC 型の設定でも、mpcProfiles に載るプロファイルは今と同じ。
+    const partial = parseRouterConfig(router({ mpcProfiles: ["priv-x402"] })).private!;
+    expect(privateAuthoritativeTermsOf(partial, "priv-x402", "x402", "mozilla")).toStrictEqual(legacyTerms(partial, "priv-x402", "x402", "mozilla"));
   });
   test("proxy 型の指紋は末尾に tlsMode と proxyRelay を足し、型の変更は両方向で指紋を変える", () => {
     const parsed = parseRouterConfig(router()).private!;
-    const proxy: PrivateConfig = { ...parsed, proxyActivatedForTest: true };
+    const proxy: PrivateConfig = { ...parsed, mpcProfiles: [] };
     const terms = privateAuthoritativeTermsOf(proxy, "priv-x402", "x402", "mozilla");
     expect(terms).toStrictEqual({ ...(legacyTerms(proxy, "priv-x402", "x402", "mozilla") as object), tlsMode: "proxy", proxyRelay: { maxSentBytes: PROXY_RELAY_LIMITS.maxSentBytes, maxRecvBytes: PROXY_RELAY_LIMITS.maxRecvBytes } });
     expect(JSON.stringify(terms)).not.toBe(JSON.stringify(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", "mozilla")));
     const backToMpc: PrivateConfig = { ...proxy, mpcProfiles: ["priv-x402"] };
     expect(JSON.stringify(privateAuthoritativeTermsOf(backToMpc, "priv-x402", "x402", "mozilla"))).toBe(JSON.stringify(privateAuthoritativeTermsOf(parsed, "priv-x402", "x402", "mozilla")));
+  });
+});
+
+/**
+ * 増分 v1.5 T-X8: 起動の境界（T-X2 の残り）。`startRouter` を**同じプロセスの中で**呼ぶ（別プロセスの起動ではない）。proxy を宣言しないバイナリでは起動の検査で終わり、
+ * journal のディレクトリを作らない（`startRouter` は journal のディレクトリ → core → HTTP の順に作るので、その前で止まったことを示す）。
+ */
+describe("起動の境界（T-X8）", () => {
+  test("proxy 既定の設定 + proxy を宣言しないバイナリ: startRouter は ConfigError で終わり、journal のディレクトリを作らない（core・HTTP の前）", async () => {
+    mkdirSync(runtimeRoot, { recursive: true });
+    const dir = mkdtempSync(path.join(runtimeRoot, "private-boundary-"));
+    dirs.push(dir);
+    const bin = path.join(dir, "delivery-mpc-only");
+    writeFileSync(bin, `#!/bin/sh\nprintf '{"tls_modes":["mpc"]}'\n`);
+    chmodSync(bin, 0o755);
+    const doc = router({ deliveryBin: bin, deliveryBinSha256: sha256File(bin), mpcProfiles: [] });
+    const configPath = path.join(dir, "router.config.json");
+    writeFileSync(configPath, JSON.stringify({ router: doc, x402: { upstreams: { r1: "https://static.provider.test/v1/x" } }, synthetic: { facilitatorUrl: "http://127.0.0.1:1", upstreams: { r1: "http://127.0.0.1:2/x" } } }));
+    const journalDir = path.join(dir, "journal-dir");
+    const env = {
+      ROUTER_CONFIG_PATH: configPath,
+      ROUTER_PRINCIPAL_TOKENS: "judge:public",
+      ROUTER_ADAPTER_MODE: "real",
+      ROUTER_SUBETHA_FACILITATOR_URL: "https://subetha.other.test",
+      ROUTER_X402_INBOUND_FACILITATOR_URL: "https://facilitator.other.test",
+      ROUTER_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-integration",
+      ROUTER_MPP_INBOUND_RPC_URL: "https://rpc.other.test",
+      ROUTER_CANONICAL_BASE_URL: "https://router.test",
+      ROUTER_JOURNAL_PATH: path.join(journalDir, "journal.ndjson"),
+    };
+    const saved = { ...process.env };
+    try {
+      Object.assign(process.env, env);
+      const evm = createRealEvmCapability(generatePrivateKey());
+      const mpp = createRealMppCapability(generatePrivateKey(), { rpcUrl: "https://rpc.other.test" });
+      await expect(startRouter({ evmSigning: evm.capability("eip155:84532"), mppTempo: mpp.capability(), dependencyUrls: ["https://rpc.other.test/"], dynamicTransportHooksForTest: { lookup: publicLookup(), interfaces: () => [] }, knownNetworksForTest: TEST_NETWORKS })).rejects.toThrow(/does not support proxy mode/);
+      expect(existsSync(journalDir)).toBe(false);
+    } finally {
+      for (const key of Object.keys(env)) {
+        if (Object.hasOwn(saved, key)) process.env[key] = saved[key];
+        else delete process.env[key];
+      }
+    }
   });
 });

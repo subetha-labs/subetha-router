@@ -82,13 +82,23 @@ describe("readCapabilities（子プロセス）", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "caps-grand-"));
     dirs.push(dir);
     const pidFile = path.join(dir, "grandchild.pid");
-    expect(await readCapabilities(script(`sleep 30 & echo $! > ${JSON.stringify(pidFile)}; wait`), { timeoutMs: 300 })).toBeUndefined();
+    // 負荷の下でもシェルが pid を書き終える余裕のある期限（孫は 30 s 眠るので、期限で止めない限り残る）。
+    expect(await readCapabilities(script(`sleep 30 & echo $! > ${JSON.stringify(pidFile)}; wait`), { timeoutMs: 1_500 })).toBeUndefined();
     const { readFileSync } = await import("node:fs");
     const pid = Number(readFileSync(pidFile, "utf8").trim());
     expect(pid).toBeGreaterThan(0);
-    // SIGKILL はグループに届いている。少し待って生存を確かめる（ESRCH = 居ない）。
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
+    // SIGKILL はグループに届いている。回収まで待って生存を確かめる（ESRCH = 居ない。最大 5 s）。
+    const until = Date.now() + 5_000;
+    let alive = true;
+    while (alive && Date.now() < until) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch (error) {
+        alive = (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    }
+    expect(alive).toBe(false);
   });
   test("起動できないパス", async () => {
     expect(await readCapabilities("/nonexistent/delivery")).toBeUndefined();

@@ -214,3 +214,27 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
 
 実行記録（2026-10-22）: 結合 1 件目 `060fd61f…` delivered_private（受信 burn `0x8ec7…a831` eventId `…:151`、送信 `0x12be…cf17` chain settled、transport synthetic）。詳細は `docs/zktls-router-v2-inbound.md` §11。
 実行記録（2026-10-22、2 件目・実 transport）: `56c85a2c…` delivered_private（実合成の Router、V2 facilitator は公開 https トンネル越し、受信 burn `0x50a0…c197` eventId `…:253`、送信 `0x6956…b8c1` chain settled）。詳細は `docs/zktls-router-v2-inbound.md` §12。
+
+## 12. TLS の型（増分 v1.5、`docs/zktls-router-proxy-requirements.md`。2026-10-26）
+
+### 12.1 設定
+- 秘匿購入のプロファイルは**既定で proxy 型**（Router の Verifier が Provider に接続し、TLS の暗号文を中継する）。MPC 型のままにするプロファイルは `private.mpcProfiles` に書く。
+- proxy 型のプロファイルが 1 つでもあると、Router は起動時に `delivery capabilities` を読み、`proxy` を宣言しないバイナリでは起動しない。**lab の proxy 対応の `delivery` が
+  入るまでは、`private.profiles` の全部を `private.mpcProfiles` に書く**（今の lab のバイナリは `capabilities` を持たない）。
+
+```json
+"private": { "...": "§3 と同じ", "profiles": ["priv-c-x402-post", "priv-f-tempo-post"], "mpcProfiles": ["priv-c-x402-post", "priv-f-tempo-post"] }
+```
+
+- 型を変えると承認の指紋が変わり、発行済みの quote は `quote_changed` で止まる（資金は動かない）。
+
+### 12.2 proxy 型の受入（TR-X3。lab の proxy 対応の後）
+1. **支払い範囲の記録**（§2 と同じ形）を先に書く: Provider（C = `provider-x402-post.subethalabs.com`、F = `provider-mpp-post.subethalabs.com`）、額、回数（各 1 件）。
+2. 設定: 対象のプロファイルを `mpcProfiles` から外し、`deliveryBin`・`deliveryBinSha256` を lab の proxy 対応のバイナリにする。Router の起動ログで能力の門を通ったことを確かめる。
+3. quote: `quote.json` の `private.tls.mode` が `proxy`、`private.disclosures` に `routerConnectsToProvider`・`providerSeesRouterAddress`・`trustsRouterProviderPath` があり、
+   payer 道具の出力に `tls mode: proxy` の行があることを読む。`--connect` は付けない（proxy 型では拒否される）。
+4. approve → session → attest → record → `payer-decrypt` は §4・§5 と同じ。
+5. 証跡（§6 のゲートを別々に記録する）: 受信決済、送信決済、秘匿配送（record の `tls_mode: "proxy"` と、射影の `private.tls.providerAddr` が record の `provider_addr` と同じ）、Payer 受領、finality。
+6. 所要時間: `evidence.json` の各段の時刻と、MPC 型の既存の受入（§8）を並べて記録する（判断材料。合否条件ではない）。
+7. 失敗の扱いは §7 と同じ。proxy 型の新しい終端（`private_proxy_dial_failed`・`private_proxy_server_name_mismatch`・`private_proxy_limit`）は発行の後なので `unknown`（払ったかもしれない）。
+   `private_proxy_dial_refused` は受信 verify の前の拒否（`awaiting_payment`。x402 受信なら資金は動いていない）。

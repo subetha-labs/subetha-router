@@ -313,6 +313,26 @@ export function subethaCredentialOf(offer: Record<string, unknown>, burnTxHash: 
 }
 
 /** quote の受信が「credential の前に人が払う」（subetha burn-sale）なら、払う先と額（承認対象 `private.inbound` の写し）。x402 受信では `undefined`。 */
+/** proxy 型で `--connect` を使ったときの拒否の文（設計 §11）。 */
+const PROXY_CONNECT_REFUSAL = "--connect is not used in proxy mode (the Router connects to the Provider)";
+
+/**
+ * quote の TLS の型（増分 v1.5、`docs/zktls-router-proxy-design.md` §11）。`private.tls` が無ければ MPC 型（本増分の前の quote と MPC 型の quote）、
+ * `{mode: "proxy"}` なら proxy 型、それ以外の形は `invalid`（承認の対象にしない）。
+ */
+export function tlsModeOfQuote(priv: unknown): "mpc" | "proxy" | "invalid" {
+  if (!isRecord(priv) || !Object.hasOwn(priv, "tls")) return "mpc";
+  const tls = priv["tls"];
+  return isRecord(tls) && tls["mode"] === "proxy" ? "proxy" : "invalid";
+}
+
+/** 承認の前の表示の 1 行（stdout と log）。proxy 型は開示 3 つを平文で。 */
+export function tlsModeLineOf(mode: "mpc" | "proxy"): string {
+  return mode === "proxy"
+    ? "private-payer: tls mode: proxy: the Router connects to the Provider and relays the TLS ciphertext; the Provider sees the Router's IP address (its IP limits and blocks apply to every Router user); the claim trusts the network path between the Router and the Provider"
+    : "private-payer: tls mode: mpc";
+}
+
 export function payFirstOf(quote: PrivateQuoteView, nowMs: number = Date.now()): { payTo: string; amount: string; network: string; asset: string; payBy: string | null; note?: string } | undefined {
   const inbound = (quote as unknown as { private?: { inbound?: Record<string, unknown> } }).private?.inbound;
   if (inbound === undefined || inbound["fundsMoveAt"] !== "payer_burn_before_credential") return undefined;
@@ -526,6 +546,11 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
     writeCheckpoint(options.outDir, checkpoint);
     evidence.stage = "quoted";
     persistEvidence();
+    // TLS の型（増分 v1.5、`docs/zktls-router-proxy-design.md` §11）: 知らない型の quote は承認の対象にしない。proxy 型は開示を出し、`--connect` を拒む（何も払っていない）。
+    const quotedMode = tlsModeOfQuote(quote.private);
+    if (quotedMode === "invalid") return fail("quote", "the quote carries an unknown tls mode; nothing was paid");
+    if (quotedMode === "proxy" && options.connect !== undefined) return fail("prerequisites", PROXY_CONNECT_REFUSAL);
+    log(tlsModeLineOf(quotedMode));
     const payFirst = payFirstOf(quote);
     log(`private-payer: quoted paymentId=${quote.paymentId} intentSha256=${evidence.intentSha256} total=${String((quote.pricing as Record<string, unknown>)["total"])}${payFirst === undefined ? "" : ` payFirst=${payFirst.amount} ${payFirst.asset}@${payFirst.network} to ${payFirst.payTo} payBy=${payFirst.payBy ?? "none (do not pay: window too short)"} (burn-sale: transfer first, then --approve --burn-tx-hash)`} (review ${quoteFile}, then re-run with --approve)`);
     return { ok: true, stage: "quoted", quote, evidence };
@@ -554,6 +579,11 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   if (offerIsSubetha && typeof offerExtra["challengeNonce"] !== "string") return fail("approve", `the reviewed quote's offer has no challengeNonce; nothing was signed or submitted${burnNote}`);
   if (!offerIsSubetha && options.burnTxHash !== undefined) return fail("approve", "--burn-tx-hash applies only to a SubEtha burn-sale inbound; this quote's inbound is x402 (nothing was signed or submitted)");
   if (!offerIsSubetha && options.payerPrivateKey === undefined) return fail("approve", "SUBETHA_PAYER_PRIVATE_KEY is required for an x402 inbound (env only)");
+  // TLS の型（設計 §11）: latch・受信 credential の前に決める。知らない型は拒否、proxy 型で `--connect` は拒否（何も署名・提出していない）。
+  const tlsMode = tlsModeOfQuote(quote.private);
+  if (tlsMode === "invalid") return fail("approve", `the reviewed quote carries an unknown tls mode; nothing was signed or submitted${burnNote}`);
+  if (tlsMode === "proxy" && options.connect !== undefined) return fail("prerequisites", PROXY_CONNECT_REFUSAL);
+  log(tlsModeLineOf(tlsMode));
   if (checkpoint.args.providerFileSha256 !== undefined) evidence.providerFileSha256 = checkpoint.args.providerFileSha256;
   evidence.intentSha256 = checkpoint.intentSha256;
   evidence.orderId = checkpoint.orderId;
@@ -655,7 +685,9 @@ export async function runPrivatePayer(options: PrivatePayerOptions): Promise<Pri
   const timeoutSecs = options.sessionTimeoutSecs ?? Math.max(30, Math.floor((handover.deadlines.sessionBy - now()) / 1000));
   const sessionArgs = ["executor-session", "--executor-dir", exec, "--order", orderFinal, "--verifier-addr", handover.verifier.address, "--host", options.host, "--port", "443", "--path", options.path, "--trust", options.trust, "--timeout-secs", String(timeoutSecs)];
   if (options.method === "POST") sessionArgs.push("--request-private", requestPrivate);
-  if (options.connect !== undefined) sessionArgs.push("--connect", options.connect);
+  // proxy 型は TLS を Verifier 経由で行う（Provider へ直接接続しない。`--connect` は上で拒否済み）。MPC 型は今と同じ。
+  if (tlsMode === "proxy") sessionArgs.push("--tls-mode", "proxy");
+  else if (options.connect !== undefined) sessionArgs.push("--connect", options.connect);
   const session = await runBinary(bin, srs, sessionArgs, (timeoutSecs + 60) * 1000, path.join(options.outDir, "lab-session.log"));
   if (session.code !== 0) return failAfterHandover("session", "executor-session failed");
   const until = handover.deadlines.sessionBy + 60_000;

@@ -32,7 +32,7 @@ import { openJournal, type Journal } from "./journal.js";
 import { classifyTransportError } from "../net/guarded-fetch.js";
 import type { DiagnosticsSink } from "../shared/diagnostics.js";
 import { DISABLED_PURCHASE_DIAGNOSTICS, withPurchaseDiagnostics, type PurchaseDiagnostics } from "./purchase-diagnostics.js";
-import { createPrivateCore, type AttestOutcome, type HandoverView, type PrivateCore, type PrivateHooksForTest, type PrivateQuoteFields, type RecordOutcome } from "./private.js";
+import { createPrivateCore, type AttestOutcome, type HandoverView, type PrivateCore, type PrivateCoreOptions, type PrivateHooksForTest, type PrivateQuoteFields, type RecordOutcome } from "./private.js";
 import type { PrivateOutboundRail } from "../ports/private-outbound.js";
 import type { VerifierRunner } from "../private/verifier.js";
 import { IntentCollisionError, IntentStore } from "./store.js";
@@ -149,6 +149,10 @@ export interface PrivateProjection {
   readonly deadlines: { readonly credentialExpiresAt?: number; readonly sessionBy?: number; readonly attestBy?: number };
   readonly artifacts: { readonly record: "none" | "available" | "expired"; readonly recordAvailableUntil?: number; readonly late?: boolean };
   readonly attest?: { readonly bundleSha256: string; readonly result: "delivered_private" | "unknown"; readonly reason?: string };
+  /**
+   * proxy 型の購入だけ（増分 v1.5、設計 §8、要件 FR-X13）。`providerAddr` は発行予約の後だけ。開示は常に出す。MPC 型の射影には欄が無い。
+   */
+  readonly tls?: { readonly mode: "proxy"; readonly providerAddr?: string; readonly disclosures: { readonly routerConnectsToProvider: true; readonly providerSeesRouterAddress: true; readonly trustsRouterProviderPath: true } };
 }
 
 /** 秘匿購入の射影の欄（§7.3）。復元した `Intent.private` だけから組む（値・record 本体・封筒は出さない）。 */
@@ -172,6 +176,15 @@ export function privateProjectionOf(intent: Intent): PrivateProjection | undefin
       ...(record?.late === true ? { late: true } : {}),
     },
     ...(priv.attest === undefined ? {} : { attest: { ...priv.attest } }),
+    ...(priv.tlsMode === "proxy"
+      ? {
+          tls: {
+            mode: "proxy" as const,
+            ...(priv.reservation?.proxy === undefined ? {} : { providerAddr: priv.reservation.proxy.providerAddr }),
+            disclosures: { routerConnectsToProvider: true as const, providerSeesRouterAddress: true as const, trustsRouterProviderPath: true as const },
+          },
+        }
+      : {}),
   };
 }
 
@@ -222,6 +235,8 @@ export interface RouterCoreOptions {
     readonly trust: "mozilla" | "lab-fixture-ca";
     readonly hooksForTest?: PrivateHooksForTest;
     readonly workDir?: string;
+    /** proxy 型の宛先の固定（増分 v1.5、設計 §4）。proxy 型のプロファイルがあれば必須。 */
+    readonly pinDestination?: PrivateCoreOptions["pinDestination"];
   };
 }
 
@@ -393,6 +408,11 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "private_session_timeout",
   "private_record_unknown",
   "private_attest_timeout",
+  // proxy 型（増分 v1.5、要件 FR-X13）。
+  "private_proxy_dial_refused",
+  "private_proxy_dial_failed",
+  "private_proxy_server_name_mismatch",
+  "private_proxy_limit",
   "private_attest_invalid",
   "private_receipt_mismatch",
   "private_verify_timeout",
@@ -475,6 +495,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           note: options.note,
           hooksForTest: options.private.hooksForTest,
           ...(options.private.workDir === undefined ? {} : { workDir: options.private.workDir }),
+          ...(options.private.pinDestination === undefined ? {} : { pinDestination: options.private.pinDestination }),
         });
       }
       dynamicCore = createDynamicCore({

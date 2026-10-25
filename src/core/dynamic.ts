@@ -574,6 +574,12 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       note?.(`dynamic profile mismatch (profileId=${intent.routeId})`);
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "quote_changed" };
     }
+    // 秘匿購入の型の照合（増分 v1.5、`docs/zktls-router-proxy-design.md` §8.1）: 指紋は設定から計算するので、記録の型の欄だけを消しても一致してしまう。
+    // 記録の型と設定の型が違えば同じ `quote_changed`（受信 verify の前。資金は動かない）。
+    if (isPrivate && !options.private!.modeMatches(intent, profile)) {
+      note?.(`private tls mode mismatch (profileId=${intent.routeId})`);
+      return { paymentId: intent.paymentId, status: "awaiting_payment", code: "quote_changed" };
+    }
     if (intent.approvalDeadlineMs <= 0 || now() >= intent.approvalDeadlineMs) {
       return { paymentId: intent.paymentId, status: "rejected", code: "approval_expired" };
     }
@@ -656,6 +662,8 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       );
     } finally {
       if (capacity !== undefined && !transferred) capacity.release();
+      // proxy 型の宛先の枠も容量と同じ条件で（まだ dynamic core が持っているときだけ）返す。渡した後は private core が子の終了で返す（設計 §4.3）。
+      if (isPrivate && !transferred) options.private!.releasePin(intent.paymentId);
     }
   }
 
@@ -676,6 +684,11 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       return { paymentId, status: "awaiting_payment", code };
     };
     const plainAwaiting = (code: string): DynamicPurchaseOutcome => ({ paymentId, status: "awaiting_payment", code });
+    // proxy 型の宛先の固定（増分 v1.5、設計 §4.2）: 宛先ホストの枠の内側・最初の探りの前・受信 verify の前。失敗は資金を動かさずに止める。
+    if (options.private !== undefined && options.private.isPrivate(intent)) {
+      const pinned = await options.private.pinBeforeSettle(intent);
+      if (!pinned.ok) return awaiting(pinned.code);
+    }
     // 読み直しは記録の要求（URL・方法・本文）そのもので行う（FR-P2）。秘匿購入は探りの要求（本文 `{}`）。
     const read = await readOffers(profile.profileId, target, reader);
     if (!read.ok) {

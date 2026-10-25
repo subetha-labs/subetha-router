@@ -16,6 +16,7 @@ import {
   parseRecvHeaders,
   parseVerifierRecord,
   receiptHeaderOf,
+  recordModeMatches,
   recordCompletedAtMsOf,
   requestLengthBoundOf,
   validatePaymentHeader,
@@ -23,6 +24,7 @@ import {
   type VerifierRecord,
 } from "../../src/private/attest.js";
 import { parseIntent, sha256Hex, type IntentOrder } from "../../src/private/intent.js";
+import { parseFailureNotice, PROXY_REASONS } from "../../src/private/proxy.js";
 
 const goldenDir = path.join(import.meta.dirname, "../fixtures/private/golden");
 const golden = (name: string): unknown => JSON.parse(readFileSync(path.join(goldenDir, name), "utf8"));
@@ -206,5 +208,52 @@ describe("checkAttest（GET の golden）", () => {
     // GET に要求束縛証明があれば wrong-mode
     expect(checkAttest({ ...base, intentSha256: "a".repeat(64), releaseSha256: "b".repeat(64), inboundTx: "0x02" }, bound, { ok: true, checks: ["UltraHonk delivery proof verified against verifier-derived VK", "UltraHonk request-binding proof verified against verifier-derived VK"] }, bundle)).toEqual({ ok: false, reason: "verify_checks" });
     expect(checkBundleBinding(getOrder(), bound, { ...bundle, request: { public: { tls_body_hash_hex: "", tls_cred_hash_hex: "", payer_commitment_hex: "", body_len: 0, cred_len: 0 } } })).toBe("bundle_request_forbidden");
+  });
+});
+
+/** 増分 v1.5（proxy 型）T-X6: record の proxy 欄、attest の型の照合、失敗通知の解析（`docs/zktls-router-proxy-design.md` §6・§7）。 */
+describe("proxy 型の record と attest（T-X6）", () => {
+  const bundle = parseBundlePublic({ ...(golden("post-bundle-public.json") as Record<string, unknown>), proof_hex: "00", request: { ...((golden("post-bundle-public.json") as { request: Record<string, unknown> }).request), proof_hex: "00" } });
+  if (bundle === undefined) throw new Error("golden bundle unreadable");
+  const raw = (): Record<string, unknown> => JSON.parse(JSON.stringify(golden("post-record.json"))) as Record<string, unknown>;
+  const ADDR = "203.0.113.10:443";
+  test("parseVerifierRecord: proxy 欄は形どおりに読み、MPC 型の record の解析は今と同じ（欄が増えない）", () => {
+    const mpc = parseVerifierRecord(raw())!;
+    expect(Object.hasOwn(mpc, "tls_mode")).toBe(false);
+    expect(Object.hasOwn(mpc, "provider_addr")).toBe(false);
+    expect(parseVerifierRecord({ ...raw(), tls_mode: "proxy", provider_addr: ADDR })).toMatchObject({ tls_mode: "proxy", provider_addr: ADDR });
+    for (const bad of [{ tls_mode: "mpc" }, { tls_mode: 1 }, { tls_mode: null }, { provider_addr: "" }, { provider_addr: 443 }, { provider_addr: "a".repeat(65) }]) {
+      expect(parseVerifierRecord({ ...raw(), ...bad }), JSON.stringify(bad)).toBeUndefined();
+    }
+  });
+  test("recordModeMatches: proxy 型は tls_mode と接続先の一致、MPC 型は欄が無いこと", () => {
+    expect(recordModeMatches({ tls_mode: "proxy", provider_addr: ADDR }, { providerAddr: ADDR })).toBe(true);
+    expect(recordModeMatches({ tls_mode: "proxy", provider_addr: "198.51.100.1:443" }, { providerAddr: ADDR })).toBe(false);
+    expect(recordModeMatches({ provider_addr: ADDR }, { providerAddr: ADDR })).toBe(false);
+    expect(recordModeMatches({ tls_mode: "proxy" }, { providerAddr: ADDR })).toBe(false);
+    expect(recordModeMatches({}, undefined)).toBe(true);
+    expect(recordModeMatches({ tls_mode: "proxy", provider_addr: ADDR }, undefined)).toBe(false);
+    expect(recordModeMatches({ provider_addr: ADDR }, undefined)).toBe(false);
+  });
+  test("checkAttest: 型の照合は他の検査の前（外れたら tls_mode）。MPC 型の期待（proxy 欄なし）は今と同じに通る", () => {
+    const base = (): AttestExpectation => expectation("mpp", postOrder(), postHeader(), postRecord());
+    expect(checkAttest(base(), postRecord(), verifyOkPost, bundle).ok).toBe(true);
+    const proxyRecord = parseVerifierRecord({ ...raw(), tls_mode: "proxy", provider_addr: ADDR })!;
+    expect(checkAttest({ ...base(), proxy: { providerAddr: ADDR } }, proxyRecord, verifyOkPost, bundle).ok).toBe(true);
+    expect(checkAttest({ ...base(), proxy: { providerAddr: "198.51.100.1:443" } }, proxyRecord, verifyOkPost, bundle)).toEqual({ ok: false, reason: "tls_mode" });
+    expect(checkAttest({ ...base(), proxy: { providerAddr: ADDR } }, postRecord(), verifyOkPost, bundle)).toEqual({ ok: false, reason: "tls_mode" });
+    expect(checkAttest(base(), proxyRecord, verifyOkPost, bundle)).toEqual({ ok: false, reason: "tls_mode" });
+    // trust を同時に壊しても、先に型で止まる。
+    expect(checkAttest({ ...base(), trust: "mozilla", proxy: { providerAddr: "x:1" } }, proxyRecord, verifyOkPost, bundle)).toEqual({ ok: false, reason: "tls_mode" });
+  });
+  test("parseFailureNotice: ちょうど {reason: 3 語} だけ", () => {
+    const enc = (text: string): Uint8Array => Buffer.from(text, "utf8");
+    expect(parseFailureNotice(enc('{"reason":"proxy_dial_failed"}'))).toBe("private_proxy_dial_failed");
+    expect(parseFailureNotice(enc('{"reason":"proxy_server_name_mismatch"}'))).toBe("private_proxy_server_name_mismatch");
+    expect(parseFailureNotice(enc('{"reason":"proxy_limit"}'))).toBe("private_proxy_limit");
+    for (const bad of ['{"reason":"proxy_other"}', '{"reason":"proxy_limit","x":1}', '{"Reason":"proxy_limit"}', '["proxy_limit"]', "proxy_limit", "", '{"reason":"constructor"}', '{"reason":"__proto__"}', JSON.stringify({ reason: "proxy_limit" }).padEnd(257, " ")]) {
+      expect(parseFailureNotice(enc(bad)), bad).toBeUndefined();
+    }
+    expect(PROXY_REASONS).toEqual(["private_proxy_dial_refused", "private_proxy_dial_failed", "private_proxy_server_name_mismatch", "private_proxy_limit"]);
   });
 });

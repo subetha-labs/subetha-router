@@ -191,6 +191,7 @@ function configDocument(world: World, options: WorldOptions): unknown {
         srsPath: lab.srs,
         srsSha256: lab.available ? sha256File(lab.srs) : "0".repeat(64),
         profiles: [PROFILE_ID, SUBETHA_PROFILE_ID],
+        mpcProfiles: [PROFILE_ID, SUBETHA_PROFILE_ID],
         workDir: world.privateDir,
         sessionTimeoutMs: options.sessionTimeoutMs ?? 600_000,
         attestTimeoutMs,

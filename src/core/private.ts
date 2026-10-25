@@ -13,12 +13,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { dynamicAuthoritativeTermsOf, privateAuthoritativeTermsOf, resolveProfile, usesGasIndexedFee, type DynamicProfile, type PrivateConfig, type RouterConfig } from "../config.js";
+import { dynamicAuthoritativeTermsOf, privateAuthoritativeTermsOf, resolveProfile, tlsModeOf, usesGasIndexedFee, type DynamicProfile, type PrivateConfig, type RouterConfig } from "../config.js";
+import type { TransportContext } from "../net/guarded-fetch.js";
+import type { PinnedDestination } from "../net/pinned-destination.js";
+import { FAILURE_FILE, FAILURE_MAX_BYTES, parseFailureNotice, PROXY_RELAY_LIMITS } from "../private/proxy.js";
 import { parseUpstreamUrl } from "../net/upstream-url.js";
 import type { InboundRail } from "../ports/inbound.js";
 import type { DestinationOffer, FeeEstimate, UpstreamTarget } from "../ports/outbound.js";
 import type { IssuedCredential, PrivateDiscovery, PrivateOutboundRail } from "../ports/private-outbound.js";
-import { checkAttest, checkBundleBinding, maxPaymentValueOf, MAX_SENT_BYTES, parseBundlePublic, parseRecvHeaders, parseVerifierRecord, parseVerifyResult, recordCompletedAtMsOf, requestLengthBoundOf, validatePaymentHeader, type VerifierRecord } from "../private/attest.js";
+import { checkAttest, checkBundleBinding, recordModeMatches, maxPaymentValueOf, MAX_SENT_BYTES, parseBundlePublic, parseRecvHeaders, parseVerifierRecord, parseVerifyResult, recordCompletedAtMsOf, requestLengthBoundOf, validatePaymentHeader, type VerifierRecord } from "../private/attest.js";
 import { finalOrderBytesOf, headerFileOf, parseIntent, type IntentOrder, type ParsedIntent } from "../private/intent.js";
 import { releaseBytesOf } from "../private/release.js";
 import { readBounded, type Child, type VerifierRunner } from "../private/verifier.js";
@@ -50,7 +53,9 @@ export type StopPoint =
   | "afterRecordPublish"
   | "afterAttestAdmission"
   | "beforeResultPersist"
-  | "duringRecoveryInventory";
+  | "duringRecoveryInventory"
+  /** 増分 v1.5: session の終了の処理の入口（payment の lock の内側）。lock を握ったまま期限を越える競合の試験のため（設計 §4.3・§6）。 */
+  | "sessionExitLocked";
 
 /** 試験専用の停止点（`docs/zktls-router-design.md` §11）。本番の入口は渡さない。検査の順序は変えない。 */
 export interface PrivateHooksForTest {
@@ -112,6 +117,11 @@ export interface PrivateCoreOptions {
   readonly hooksForTest?: PrivateHooksForTest | undefined;
   /** 作業ディレクトリ（既定は設定の `workDir`）。試験が差し替える。 */
   readonly workDir?: string;
+  /**
+   * proxy 型の宛先の固定（増分 v1.5、`docs/zktls-router-proxy-design.md` §4）。`main.ts` が動的 transport と同じ方針・同じ門で作る。
+   * proxy 型のプロファイルがあるのに無ければ `createPrivateCore` が例外（構成の誤り）。
+   */
+  readonly pinDestination?: (host: string, context: TransportContext) => Promise<PinnedDestination>;
 }
 
 export interface PrivateCore {
@@ -127,6 +137,12 @@ export interface PrivateCore {
     reserveCapacity(intent: Intent): CapacityLease | undefined;
     deliver(paymentId: string, diag: PurchaseDiagnostics, lease: CapacityLease | undefined): Promise<DynamicPurchaseOutcome>;
     routeFingerprintOf(profile: DynamicProfile): string;
+    /** 記録の型と設定の型の照合（増分 v1.5、設計 §8.1）。違えば purchase は `quote_changed`（受信 verify の前）。 */
+    modeMatches(intent: Intent, profile: DynamicProfile): boolean;
+    /** proxy 型の宛先の固定（設計 §4.2）。受信 verify の前。失敗は `awaiting_payment`。MPC 型は何もしない。 */
+    pinBeforeSettle(intent: Intent): Promise<{ readonly ok: true } | { readonly ok: false; readonly code: "private_proxy_dial_refused" }>;
+    /** 宛先の枠を返す（冪等。設計 §4.3）。dynamic core は容量を渡す前の出口でだけ呼ぶ。 */
+    releasePin(paymentId: string): void;
   };
   attest(paymentId: string, principalId: string, ownerKey: string | undefined, bundleB64: string): Promise<AttestOutcome>;
   record(paymentId: string, principalId: string, ownerKey: string | undefined): RecordOutcome;
@@ -183,6 +199,9 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   const config = options.config.private;
   if (config === undefined) throw new Error("private core requires config.router.private");
   const privateConfig: PrivateConfig = config;
+  if (privateConfig.profiles.some((profileId) => tlsModeOf(privateConfig, profileId) === "proxy") && options.pinDestination === undefined) {
+    throw new Error("private core: proxy-mode profiles require pinDestination");
+  }
   // 作業ディレクトリは絶対パスに正規化する（子の cwd は購入ディレクトリ: 相対のままだと子の側で別の場所を指す）。
   const workDir = path.resolve(options.workDir ?? privateConfig.workDir);
   const capacity = new PrivateCapacity(
@@ -239,6 +258,23 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
   const children = new Map<string, Child>();
   const timers = new Set<NodeJS.Timeout>();
   const handovers = new Map<string, HandoverView>();
+  /** proxy 型の固定した宛先と、その宛先アドレスの枠（設計 §4.3。網の資源。成果物の容量とは別）。 */
+  const pins = new Map<string, PinnedDestination>();
+  function releasePin(paymentId: string): void {
+    const pinned = pins.get(paymentId);
+    if (pinned === undefined) return;
+    pins.delete(paymentId);
+    try {
+      pinned.release();
+    } catch {
+      note?.("private: pin release failed");
+    }
+  }
+  /** 固定した宛先の transport（あれば）。探りはこれで送る（設計 §4.2）。 */
+  function discoverOptionsOf(paymentId: string): { readonly transport?: PinnedDestination["transport"] } {
+    const pinned = pins.get(paymentId);
+    return pinned === undefined ? {} : { transport: pinned.transport };
+  }
   /** attest の受理済み（待ち行列か実行中）の digest と結果の約束。 */
   const pendingAttest = new Map<string, { bundleSha256: string; done: Promise<AttestOutcome> }>();
   /** 保持期限が、受理済み（待ち行列か実行中）の検証の最中に来た購入。取得は 410 になるが、入力ファイルと容量の計上は検証ジョブの終わりまで残す（§3.5・§3.7）。 */
@@ -250,25 +286,40 @@ export function createPrivateCore(options: PrivateCoreOptions): PrivateCore {
    * 絶対時刻 `untilMs` に `run` を 1 回。Node の timer は 2^31−1 ms が上限なので、それより先の期限は刻んで待ち、発火のたびに絶対時刻を確かめる
    * （長い保持期限が即座に満了したことにならない）。
    */
-  function scheduleAt(untilMs: number, run: () => void): void {
-    if (closing) return;
-    const delay = Math.min(Math.max(0, untilMs - now()), MAX_TIMER_MS);
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      if (closing) return;
-      if (now() < untilMs) {
-        scheduleAt(untilMs, run);
-        return;
+  /** 取り消しの handle を返す（設計 §4.3: 刻んで待つ再登録も止める。登録表からも外す）。 */
+  function scheduleAt(untilMs: number, run: () => void): () => void {
+    const token = { cancelled: false, timer: undefined as NodeJS.Timeout | undefined };
+    const arm = (): void => {
+      if (closing || token.cancelled) return;
+      const delay = Math.min(Math.max(0, untilMs - now()), MAX_TIMER_MS);
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        token.timer = undefined;
+        if (closing || token.cancelled) return;
+        if (now() < untilMs) {
+          arm();
+          return;
+        }
+        try {
+          run();
+        } catch {
+          // タイマの中の例外は固定の note だけ（journal・応答には出さない）。
+          note?.("private: timer callback failed");
+        }
+      }, delay);
+      timer.unref();
+      timers.add(timer);
+      token.timer = timer;
+    };
+    arm();
+    return () => {
+      token.cancelled = true;
+      if (token.timer !== undefined) {
+        clearTimeout(token.timer);
+        timers.delete(token.timer);
+        token.timer = undefined;
       }
-      try {
-        run();
-      } catch {
-        // タイマの中の例外は固定の note だけ（journal・応答には出さない）。
-        note?.("private: timer callback failed");
-      }
-    }, delay);
-    timer.unref();
-    timers.add(timer);
+    };
   }
   function railFor(profile: DynamicProfile): PrivateOutboundRail | undefined {
     return rails[profile.profileId];
@@ -338,7 +389,16 @@ function sameAsset(a: string, b: string): boolean {
         maxPathBytes: 256,
         tls: { version: "TLSv1.2", cipherSuites: ["TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"], responseFraming: "content-length-identity-single-response" },
       },
-      disclosures: { noRefund: true, unknownPossible: true, verifierLoopbackOnly: true, deliveredPrivateMeaning: "verified delivery to payer_pk, not human receipt", trust: options.trust === "mozilla" ? "mozilla-webpki-roots" : "lab-fixture-ca (synthetic)" },
+      disclosures: {
+        noRefund: true,
+        unknownPossible: true,
+        verifierLoopbackOnly: true,
+        deliveredPrivateMeaning: "verified delivery to payer_pk, not human receipt",
+        trust: options.trust === "mozilla" ? "mozilla-webpki-roots" : "lab-fixture-ca (synthetic)",
+        // proxy 型だけ（増分 v1.5、要件 FR-X02）。MPC 型の文書は今と同じ。
+        ...(tlsModeOf(privateConfig, profile.profileId) === "proxy" ? { routerConnectsToProvider: true, providerSeesRouterAddress: true, trustsRouterProviderPath: true } : {}),
+      },
+      ...(tlsModeOf(privateConfig, profile.profileId) === "proxy" ? { tls: { mode: "proxy", relay: { maxSentBytes: PROXY_RELAY_LIMITS.maxSentBytes, maxRecvBytes: PROXY_RELAY_LIMITS.maxRecvBytes } } } : {}),
     };
   }
 
@@ -436,6 +496,8 @@ function sameAsset(a: string, b: string): boolean {
         bodyCommitmentHex: intent.order.request.body_commitment_hex,
         policy: { minCredentialLifetimeMs: privateConfig.minCredentialLifetimeMs[profile.rail], sessionTimeoutMs: privateConfig.sessionTimeoutMs, attestTimeoutMs: privateConfig.attestTimeoutMs, retentionMs: privateConfig.retentionMs },
         limits: { maxIntentBytes: privateConfig.maxIntentBytes, maxBundleBytes: privateConfig.maxBundleBytes, maxRecordBytes: privateConfig.maxRecordBytes },
+        // proxy 型だけ型を記録する（MPC 型の記録は今と同じ。設計 §8）。
+        ...(tlsModeOf(privateConfig, profile.profileId) === "proxy" ? { tlsMode: "proxy" } : {}),
       };
       const record: Record<string, unknown> = {
         quoteId,
@@ -478,7 +540,19 @@ function sameAsset(a: string, b: string): boolean {
   /* ------------------------------------------------------------------ 送信レグ（§3.2） */
 
   function deliver(paymentId: string, diag: PurchaseDiagnostics, lease: CapacityLease | undefined): Promise<DynamicPurchaseOutcome> {
-    return track(deliverInner(paymentId, diag, lease));
+    // 宛先の枠（設計 §4.3）: handover して子が動いている（`awaiting_session`、子は `children` にいる）なら子の終了で返す。それ以外の出口はここで返す。
+    return track(
+      deliverInner(paymentId, diag, lease).then(
+        (outcome) => {
+          if (outcome.status !== "awaiting_session" && !children.has(paymentId)) releasePin(paymentId);
+          return outcome;
+        },
+        (error: unknown) => {
+          if (!children.has(paymentId)) releasePin(paymentId);
+          throw error;
+        },
+      ),
+    );
   }
 
   async function deliverInner(paymentId: string, _diag: PurchaseDiagnostics, lease: CapacityLease | undefined): Promise<DynamicPurchaseOutcome> {
@@ -525,7 +599,7 @@ function sameAsset(a: string, b: string): boolean {
     const target = probeTargetOf(priv);
     let discovered: PrivateDiscovery | undefined;
     try {
-      discovered = await rail.discover(profile.profileId, target);
+      discovered = await rail.discover(profile.profileId, target, discoverOptionsOf(paymentId));
     } catch {
       return undelivered("offer_unavailable");
     }
@@ -540,8 +614,11 @@ function sameAsset(a: string, b: string): boolean {
     // x402 と subetha（burn-sale）は支払いイベントの識別子が無ければ発行しない（FR-Z06 (b)、v1.3 FR-V4）。
     if ((profile.sourceRail === "x402" || profile.sourceRail === "subetha") && (typeof eventId !== "string" || eventId === "")) return undelivered("private_inbound_identity_missing");
     const inboundIdentity = `${profile.sourceRail}|${intent.source.network}|${txRef}|${eventId ?? ""}`;
-    // 3. 発行予約（FR-Z06）。以後の失敗はすべて unknown。
-    const reserved = await store.reservePrivateIssuance(paymentId, priv.intentSha256, inboundIdentity);
+    // proxy 型（設計 §4.2）: 受信 verify の前に固定した宛先が無ければ発行しない（予約の前 = 発行無し）。
+    const pinned = priv.tlsMode === "proxy" ? pins.get(paymentId) : undefined;
+    if (priv.tlsMode === "proxy" && pinned === undefined) return undelivered("private_proxy_dial_refused");
+    // 3. 発行予約（FR-Z06）。以後の失敗はすべて unknown。proxy 型は固定した宛先を同じ行に書く。
+    const reserved = await store.reservePrivateIssuance(paymentId, priv.intentSha256, inboundIdentity, pinned === undefined ? undefined : { providerAddr: pinned.dialAddr, vettedAddress: pinned.vettedAddress });
     if (reserved === "collision") return unknown("private_issuance_duplicate");
     if (reserved !== "reserved") {
       // 予約の追記が失敗した（journal は以後の追記を拒む）: もう一度追記せず、固定の unknown を返して受付を閉じる（耐久だとは言わない。成果物と容量の計上は残す）。
@@ -549,8 +626,12 @@ function sameAsset(a: string, b: string): boolean {
       return { paymentId, status: "unknown", terminalReason: "private_issuance_unknown" };
     }
     const settledTxRef: string = txRef;
+    // 予約の後の記録を読み直す（先頭で取った `priv` は予約の前の写しで `reservation` を持たない。設計 §4.2）。serve の引数と束縛はこれを使う。
+    const reservedPrivate = store.byPaymentId(paymentId)?.private;
+    const proxyAddr = reservedPrivate?.reservation?.proxy?.providerAddr;
     const afterReservation = async (): Promise<DynamicPurchaseOutcome> => {
     await stop("afterReserve", paymentId);
+    if (priv.tlsMode === "proxy" && (pinned === undefined || proxyAddr !== pinned.dialAddr || reservedPrivate?.tlsMode !== "proxy")) return unknown("private_verifier_unavailable");
     // 4. 発行（送らない）。
     let issued: IssuedCredential;
     try {
@@ -604,6 +685,7 @@ function sameAsset(a: string, b: string): boolean {
       path: priv.target.path,
       timeoutSecs: Math.max(1, Math.floor((sessionBy - now()) / 1000)),
       readyByMs: Math.min(sessionBy, now() + READY_WAIT_MS),
+      ...(proxyAddr === undefined ? {} : { proxy: { providerAddr: proxyAddr } }),
     });
     await stop("afterSpawn", paymentId);
     if (!served.ok) return unknown(served.reason === "expired" ? "private_session_timeout" : "private_verifier_unavailable");
@@ -654,24 +736,34 @@ function sameAsset(a: string, b: string): boolean {
   /* ------------------------------------------------------------------ session と record（§3.3） */
 
   function superviseSession(paymentId: string, child: Child, sessionBy: number): void {
-    scheduleAt(sessionBy, () => {
+    // 終了と期限の順序（設計 §6）: 期限の timer は、子がまだ終わっていなければ `timerFired` を立ててから止める。子の終了の解決（lock を待つ前に同期で）が
+    // `exitedFirst` を決め、timer を取り消し、宛先の枠を返す（lock を待つ間は枠を持たない。設計 §4.3）。
+    const state = { exited: false, timerFired: false };
+    const cancelTimer = scheduleAt(sessionBy, () => {
+      if (state.exited) return;
+      state.timerFired = true;
       void child.kill();
     });
     void track(
-      child.exited.then(() =>
-        withPayment(paymentId, async () => {
+      child.exited.then(() => {
+        state.exited = true;
+        const exitedFirst = !state.timerFired;
+        cancelTimer();
+        releasePin(paymentId);
+        return withPayment(paymentId, async () => {
           try {
-            await onSessionExit(paymentId, sessionBy);
+            await onSessionExit(paymentId, sessionBy, exitedFirst);
           } catch {
             note?.("private: session completion handling failed");
           }
-        }),
-      ),
+        });
+      }),
     );
   }
 
-  async function onSessionExit(paymentId: string, sessionBy: number): Promise<void> {
+  async function onSessionExit(paymentId: string, sessionBy: number, exitedFirst = false): Promise<void> {
     children.delete(paymentId);
+    await stop("sessionExitLocked", paymentId);
     if (closing) return; // drain: 永続化しない（再起動の再構成が record を回収する）。
     const intent = store.byPaymentId(paymentId);
     const lease = leases.get(paymentId);
@@ -680,13 +772,23 @@ function sameAsset(a: string, b: string): boolean {
     const priv = intent.private;
     const dir = lease.dir;
     const recordFile = path.join(dir, RECORD_FILE);
+    const failureFile = path.join(dir, FAILURE_FILE);
+    // record と失敗通知は排他（要件 LX-7）。両方あれば record を保持せず最も弱い結論（設計 §6）。
+    const hasRecord = existsSync(recordFile);
+    const hasFailure = existsSync(failureFile);
     const read = readBounded(recordFile, priv.limits.maxRecordBytes);
-    const record = read.ok ? parseRecordBytes(read.bytes) : undefined;
+    const record = !hasFailure && read.ok ? parseRecordBytes(read.bytes) : undefined;
     const bound = record !== undefined && recordIsBound(record, intent);
     if (!bound) {
+      // 失敗通知（proxy 型・子が自分で終わった・record が無い）だけが理由を区別する。それ以外は今と同じ `private_session_timeout`。
+      let reason = "private_session_timeout";
+      if (!hasRecord && hasFailure && exitedFirst && priv.tlsMode === "proxy") {
+        const notice = readBounded(failureFile, FAILURE_MAX_BYTES);
+        reason = (notice.ok ? parseFailureNotice(notice.bytes) : undefined) ?? "private_session_timeout";
+      }
       // 完成していない・この購入に束縛されていない record は保持しない（ディレクトリごと消し、量と件数を返す）。
       try {
-        await unknownReason(paymentId, "private_session_timeout");
+        await unknownReason(paymentId, reason);
       } catch {
         persistenceLost();
         return;
@@ -755,6 +857,10 @@ function sameAsset(a: string, b: string): boolean {
     const issuance = priv?.issuance;
     if (priv === undefined || issuance === undefined) return false;
     const binding = record.intent_binding;
+    // 型の照合（増分 v1.5、設計 §7）: proxy 型は `tls_mode` と予約の行の接続先、MPC 型は proxy の欄が無いこと。
+    const proxy = priv.tlsMode === "proxy" ? priv.reservation?.proxy : undefined;
+    if (priv.tlsMode === "proxy" && proxy === undefined) return false;
+    if (!recordModeMatches(record, proxy === undefined ? undefined : { providerAddr: proxy.providerAddr })) return false;
     return (
       record.order_id === priv.orderId &&
       record.target.host === priv.target.host &&
@@ -1013,6 +1119,8 @@ function sameAsset(a: string, b: string): boolean {
                 releaseSha256: sha256Hex(Buffer.from(priv.issuance.releaseB64, "base64")),
                 inboundTx: store.byPaymentId(paymentId)!.source.txRef ?? "",
                 trust: options.trust,
+                // proxy 型は予約の行の接続先と照合する（設計 §7）。予約の行が無い proxy 型は空の接続先 = 一致しない（fail closed）。
+                ...(priv.tlsMode === "proxy" ? { proxy: { providerAddr: priv.reservation?.proxy?.providerAddr ?? "" } } : {}),
               },
               record,
               result,
@@ -1164,6 +1272,8 @@ function sameAsset(a: string, b: string): boolean {
     await runner.closeAll();
     await Promise.allSettled([...inflight]);
     await runner.closeAll();
+    // 子の停止と進行中の継続の後に、残った宛先の枠を返す（設計 §4.3）。
+    for (const paymentId of [...pins.keys()]) releasePin(paymentId);
     // 進行中の作業成果物を消す（購入は再起動時の規則で終端になる）。完成した record（journal に届く前のものを含む）は残し、再構成が回収する。
     for (const [, lease] of leases) {
       try {
@@ -1189,7 +1299,7 @@ function sameAsset(a: string, b: string): boolean {
         return {
           readChallenge: async (profileId, target) => {
             if (rail === undefined) throw new Error("no private rail");
-            return (await rail.discover(profileId, target)).offers;
+            return (await rail.discover(profileId, target, discoverOptionsOf(intent.paymentId))).offers;
           },
           ...(rail?.estimateFee === undefined ? {} : { estimateFee: (profileId: string, offer: DestinationOffer, target: UpstreamTarget) => rail.estimateFee!(profileId, offer, target) }),
         };
@@ -1197,6 +1307,21 @@ function sameAsset(a: string, b: string): boolean {
       reserveCapacity: (intent) => (unavailable || closing ? undefined : capacity.reserve(intent.paymentId)),
       deliver,
       routeFingerprintOf,
+      modeMatches: (intent, profile) => (intent.private?.tlsMode === "proxy") === (tlsModeOf(privateConfig, profile.profileId) === "proxy"),
+      pinBeforeSettle: async (intent) => {
+        const priv = intent.private;
+        if (priv?.tlsMode !== "proxy") return { ok: true };
+        if (unavailable || closing || options.pinDestination === undefined) return { ok: false, code: "private_proxy_dial_refused" };
+        releasePin(intent.paymentId);
+        try {
+          const pinned = await options.pinDestination(priv.target.host, { operation: "private_proxy_pin", routeId: intent.routeId });
+          pins.set(intent.paymentId, pinned);
+          return { ok: true };
+        } catch {
+          return { ok: false, code: "private_proxy_dial_refused" };
+        }
+      },
+      releasePin,
     },
     attest,
     record,

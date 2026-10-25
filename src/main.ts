@@ -30,7 +30,8 @@ import { createSyntheticX402Outbound, createX402Outbound } from "./adapters/outb
 import { createX402SvmOutbound, type X402SvmOutboundOptions } from "./adapters/outbound/x402-svm.js";
 import { createMppSolanaOutbound } from "./adapters/outbound/mpp-solana.js";
 import { DYNAMIC_RESPONSE_LIMITS } from "./net/bounded-body.js";
-import { createGuardedTransport, formatTransportEvent, TransportError, type GuardedTransport, type GuardedTransportOptions, type TransportEvent } from "./net/guarded-fetch.js";
+import { createGuardedTransport, formatTransportEvent, TransportError, type GuardedTransport, type GuardedTransportOptions, type TransportContext, type TransportEvent } from "./net/guarded-fetch.js";
+import { createDestinationPinner, type PinnedDestination } from "./net/pinned-destination.js";
 import { classifyAddress, POLICY_VERSION } from "./net/destination-policy.js";
 import { denyHostsOf } from "./net/upstream-url.js";
 import {
@@ -644,6 +645,8 @@ export interface PrivateWiring {
   readonly runner: VerifierRunner;
   readonly trust: "mozilla" | "lab-fixture-ca";
   readonly hooksForTest?: PrivateHooksForTest;
+  /** proxy 型の宛先の固定（増分 v1.5、`docs/zktls-router-proxy-design.md` §4.1）。動的 transport と同じ方針・同じ門。 */
+  readonly pinDestination?: (host: string, context: TransportContext) => Promise<PinnedDestination>;
 }
 
 export interface ComposedRails {
@@ -1297,7 +1300,29 @@ export function composeRails(
       note,
       ...(capabilities.launchHooksForTest === undefined ? {} : { launchHooksForTest: capabilities.launchHooksForTest }),
     });
-    privateWiring = { rails: privateRails, runner, trust, ...(capabilities.privateHooksForTest === undefined ? {} : { hooksForTest: capabilities.privateHooksForTest }) };
+    // proxy 型の宛先の固定（設計 §4.1）: 動的 transport と同じ試験の hooks（展開して渡す）・同じ報告・同じ応答ヘッダの上限・同じ門（宛先アドレスの枠）。
+    // loopback は許さない（pinner は常に `allowLoopback: false`）。
+    const pinner = createDestinationPinner({
+      ...(capabilities.dynamicTransportHooksForTest ?? {}),
+      report,
+      maxHeaderSize: DYNAMIC_RESPONSE_LIMITS.maxHeaderBytes,
+      dns: { timeoutMs: 3_000, maxInFlight: 16 },
+      ...(gate === undefined
+        ? {}
+        : {
+            admit: (addresses: readonly string[]) => {
+              const admitted = gate.admitAddresses(addresses);
+              return admitted.ok ? admitted.lease : undefined;
+            },
+          }),
+    });
+    privateWiring = {
+      rails: privateRails,
+      runner,
+      trust,
+      pinDestination: (host, context) => pinner.pinDestination(host, context),
+      ...(capabilities.privateHooksForTest === undefined ? {} : { hooksForTest: capabilities.privateHooksForTest }),
+    };
   }
 
   // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。

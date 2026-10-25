@@ -57,6 +57,11 @@ const mode = control.mode ?? "record";
 const delayMs = Number(control.delayMs ?? 100);
 writeFileSync(path.join(dir, `fake-args.${sub}.json`), JSON.stringify({ sub, kv: Object.fromEntries(kv), flags, env: { DELIVERY_SRS_DAT: process.env["DELIVERY_SRS_DAT"], RUST_LOG: process.env["RUST_LOG"], umask: process.umask().toString(8), keys: Object.keys(process.env).sort() }, pid: process.pid }));
 process.stdout.write(`fake-delivery: ${sub} pid=${process.pid}\n`);
+// 増分 v1.5 の秘匿の試験: 子の出力に canary を出す（Router が journal・射影・診断に写さないことを見る）。
+if (control.printCanary) {
+  process.stdout.write(`${control.printCanary}\n`);
+  process.stderr.write(`${control.printCanary}\n`);
+}
 if (control.spamBytes) process.stderr.write("x".repeat(Number(control.spamBytes)));
 
 /**
@@ -117,7 +122,25 @@ function boundRecord() {
       sent_body_hash_hex: control.sentBodyHash ?? "d".repeat(64),
     },
     intent_binding: { intent_sha256: sha256(intentBytes), release_sha256: sha256(releaseBytes), header_sha256: sha256(h.value), inbound_tx: release.inbound.tx },
+    // proxy 型（増分 v1.5、要件 LX-3）: `--tls-mode proxy` で起動されたときだけ。`control.recordTlsMode` / `control.recordProviderAddr` で上書き（null は欄を消す）。
+    ...proxyRecordFields(),
+    // 秘匿の試験: 束縛された record に任意の欄を足す（例: 暗号文の canary）。
+    ...(control.recordExtra ?? {}),
   };
+}
+
+function proxyRecordFields() {
+  const proxy = kv.get("tls-mode") === "proxy";
+  const fields = proxy ? { tls_mode: "proxy", provider_addr: kv.get("provider-addr") } : {};
+  if (Object.hasOwn(control, "recordTlsMode")) {
+    if (control.recordTlsMode === null) delete fields.tls_mode;
+    else fields.tls_mode = control.recordTlsMode;
+  }
+  if (Object.hasOwn(control, "recordProviderAddr")) {
+    if (control.recordProviderAddr === null) delete fields.provider_addr;
+    else fields.provider_addr = control.recordProviderAddr;
+  }
+  return fields;
 }
 
 if (sub === "verifier-serve") {
@@ -139,10 +162,25 @@ if (sub === "verifier-serve") {
   const port = Number(control.port ?? 40001);
   writeNew(`${addr}.tmp`, `127.0.0.1:${port}`);
   renameSync(`${addr}.tmp`, addr);
+  if (kv.get("tls-mode") !== undefined && (kv.get("tls-mode") !== "proxy" || !kv.has("provider-addr") || !kv.has("max-relay-sent") || !kv.has("max-relay-recv"))) process.exit(2);
   if (mode === "hang") {
     setInterval(() => {}, 1_000);
   } else if (mode === "fail") {
     setTimeout(() => process.exit(1), delayMs);
+  } else if (mode === "failure-notice" || mode === "failure-and-record") {
+    // proxy 型の固定形の失敗通知（要件 LX-7）。`control.failureBody` は書く内容そのもの（形違いの試験用）、無ければ `{"reason": control.failureReason}`。
+    setTimeout(() => {
+      const body = control.failureBody ?? JSON.stringify({ reason: control.failureReason ?? "proxy_dial_failed" });
+      writeNew(path.join(dir, "failure.json"), Buffer.from(body));
+      if (mode === "failure-and-record") writeNew(path.join(dir, "record.json"), Buffer.from(JSON.stringify(boundRecord())));
+      process.exit(1);
+    }, delayMs);
+  } else if (mode === "failure-after-delay-hang") {
+    // 期限の後に通知を書く（Router が先に止める）: 通知は読まれないこと。
+    setTimeout(() => {
+      writeNew(path.join(dir, "failure.json"), Buffer.from(JSON.stringify({ reason: "proxy_limit" })));
+    }, delayMs);
+    setInterval(() => {}, 1_000);
   } else {
     setTimeout(() => {
       const src = control.recordSrc;

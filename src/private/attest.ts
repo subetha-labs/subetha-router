@@ -112,6 +112,16 @@ export interface VerifierRecord {
     readonly sent_body_hash_hex: string;
   };
   readonly intent_binding?: { readonly intent_sha256: string; readonly release_sha256: string; readonly header_sha256: string; readonly inbound_tx: string };
+  /** proxy 型の record だけ（増分 v1.5、要件 LX-3）。MPC 型の record には無い。 */
+  readonly tls_mode?: "proxy";
+  /** proxy 型で Verifier が接続した Provider の `host:port`。 */
+  readonly provider_addr?: string;
+}
+
+/** proxy 型の record の型の照合（`docs/zktls-router-proxy-design.md` §7）。proxy 型の購入は `tls_mode` と接続先の一致、MPC 型の購入はどちらも無いこと。 */
+export function recordModeMatches(record: Pick<VerifierRecord, "tls_mode" | "provider_addr">, proxy: { readonly providerAddr: string } | undefined): boolean {
+  if (proxy === undefined) return record.tls_mode === undefined && record.provider_addr === undefined;
+  return record.tls_mode === "proxy" && record.provider_addr === proxy.providerAddr;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -148,6 +158,11 @@ export function parseVerifierRecord(raw: unknown): VerifierRecord | undefined {
   ) {
     return undefined;
   }
+  // proxy 型の欄（増分 v1.5）: あれば形を厳密に。`tls_mode` は `"proxy"` だけ、`provider_addr` は ≤ 64 B の空でない文字列。
+  const tlsMode = raw["tls_mode"];
+  const providerAddr = raw["provider_addr"];
+  if (tlsMode !== undefined && tlsMode !== "proxy") return undefined;
+  if (providerAddr !== undefined && (typeof providerAddr !== "string" || providerAddr === "" || Buffer.byteLength(providerAddr, "utf8") > 64)) return undefined;
   let intentBinding: VerifierRecord["intent_binding"];
   if (raw["intent_binding"] !== undefined) {
     const binding = raw["intent_binding"];
@@ -177,6 +192,8 @@ export function parseVerifierRecord(raw: unknown): VerifierRecord | undefined {
       sent_body_hash_hex: request["sent_body_hash_hex"],
     },
     ...(intentBinding === undefined ? {} : { intent_binding: intentBinding }),
+    ...(tlsMode === undefined ? {} : { tls_mode: "proxy" as const }),
+    ...(providerAddr === undefined ? {} : { provider_addr: providerAddr as string }),
   };
 }
 
@@ -241,6 +258,8 @@ export interface AttestExpectation {
   readonly inboundTx: string;
   /** 実モードは `mozilla-webpki-roots` + external_gate。試験 trust は `lab-fixture-ca`（external_gate false）。 */
   readonly trust: "mozilla" | "lab-fixture-ca";
+  /** proxy 型の購入だけ（増分 v1.5、設計 §7）。無ければ MPC 型（record に proxy の欄が無いことを要求する）。 */
+  readonly proxy?: { readonly providerAddr: string };
 }
 
 export interface VerifyResultView {
@@ -254,6 +273,7 @@ export function parseVerifyResult(raw: unknown): VerifyResultView | undefined {
 }
 
 export type AttestRejection =
+  | "tls_mode"
   | "trust"
   | "target"
   | "server_name"
@@ -318,6 +338,8 @@ export function checkAttest(expect: AttestExpectation, record: VerifierRecord, v
   const no = (reason: AttestRejection): AttestCheck => ({ ok: false, reason });
   const { order, header } = expect;
   const isGet = order.request.framing === FRAMING_GET_PUBLIC;
+  // 型の照合（増分 v1.5、設計 §7）: 他の検査の前。外れたら `tls_mode`（→ `private_attest_invalid`）。
+  if (!recordModeMatches(record, expect.proxy)) return no("tls_mode");
   if (expect.trust === "mozilla" ? record.trust !== TRUST_MOZILLA || record.external_gate !== true : record.trust !== TRUST_LAB_FIXTURE || record.external_gate !== false) return no("trust");
   if (record.target.host !== order.target.host || record.target.port !== 443 || record.target.path !== order.target.path) return no("target");
   if (record.server_name !== order.target.host) return no("server_name");

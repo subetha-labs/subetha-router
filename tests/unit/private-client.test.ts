@@ -101,6 +101,8 @@ describe("privatePurchase の束縛", () => {
     ["payerPk", (q) => ({ ...q, private: { ...q.private, payerPk: { x: "9", y: "9" } } })],
     ["body の commitment", (q) => ({ ...q, private: { ...q.private, body: { len: 88, commitmentHex: "0".repeat(64) } } })],
     ["paymentId", (q) => ({ ...q, paymentId: "pay-2" })],
+    // 増分 v1.5: TLS の型の欄も承認の束縛に入る（足す・変える）。
+    ["tls を足す（MPC 型の quote を proxy 型に）", (q) => ({ ...q, private: { ...q.private, tls: { mode: "proxy" } } })],
   ])("1 欄でも変わった quote は resource_mismatch で購入要求を出さない: %s", async (_name, mutate) => {
     const { client, seen, quote } = await issued();
     const result = await client.privatePurchase({ quote: mutate(quote), requestId: "r1", approval: { approved: true, quoteId: "0xq1" }, credential: "cred" });

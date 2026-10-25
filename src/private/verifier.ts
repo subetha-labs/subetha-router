@@ -16,6 +16,8 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 
+import { PROXY_RELAY_LIMITS } from "./proxy.js";
+
 export type LaunchKind = "serve" | "verify";
 
 /** 試験専用: wrapper の 3 つの段（pid の公開の前・公開の後で門の確認の前・門の確認の後で exec の前）に「到着を書いて解放ファイルを待つ」1 行を挟む。本番は渡さない。 */
@@ -48,6 +50,11 @@ export interface ServeArgs {
   readonly timeoutSecs: number;
   /** pid・addr を待つ絶対期限（ミリ秒）。 */
   readonly readyByMs: number;
+  /**
+   * proxy 型だけ（増分 v1.5、設計 §5、要件 LX-1・LX-4）: 固定した Provider の接続先。ある場合だけ `--tls-mode proxy --provider-addr … --max-relay-*` を足す。
+   * 無ければ引数は今と同じ（MPC 型）。
+   */
+  readonly proxy?: { readonly providerAddr: string };
 }
 
 export interface VerifyArgs {
@@ -448,6 +455,9 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
         "--timeout-secs", String(Math.floor(args.timeoutSecs)),
         "--intent", args.intentPath,
         "--release", args.releasePath,
+        ...(args.proxy === undefined
+          ? []
+          : ["--tls-mode", "proxy", "--provider-addr", args.proxy.providerAddr, "--max-relay-sent", String(PROXY_RELAY_LIMITS.maxSentBytes), "--max-relay-recv", String(PROXY_RELAY_LIMITS.maxRecvBytes)]),
       ]);
       if (child === undefined) return { ok: false, reason: "launch_failed" };
       if (!(await waitPid(args.dir, "serve", child as Child & { markHandshake(): void }, args.readyByMs))) {
