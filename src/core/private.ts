@@ -421,7 +421,9 @@ function sameAsset(a: string, b: string): boolean {
         return { ok: false, code: "quote_failed", reason: "pay_to_conflict" };
       }
       const issuedAtMs = now();
-      const approvalDeadlineMs = Math.min(issuedAtMs + options.config.approvalTtlMs, sourceOffer.extra.expiresAt * 1000);
+      // burn-sale 受信は人手の受け渡し（payFirst → transfer → hash）が入るので別の TTL（`docs/zktls-router-burn-sale-hardening.md` FR-H1）。新しく発行する quote だけに効く。
+      const ttlMs = profile.sourceRail === "subetha" ? options.config.private!.burnSaleApprovalTtlMs : options.config.approvalTtlMs;
+      const approvalDeadlineMs = Math.min(issuedAtMs + ttlMs, sourceOffer.extra.expiresAt * 1000);
       const paymentId = options.nextPaymentId();
       const quoteId = sourceOffer.extra.challengeNonce;
       const privateRecord = {

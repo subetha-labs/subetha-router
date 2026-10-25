@@ -262,6 +262,11 @@ export interface PrivateConfig {
   readonly minSessionRemainingMs: number;
   readonly workDir: string;
   readonly retentionMs: number;
+  /**
+   * SubEtha V2 burn-sale 受信（`sourceRail: "subetha"`）の秘匿 quote の承認期限（`docs/zktls-router-burn-sale-hardening.md` FR-H1）。
+   * 期限は `min(issuedAt + これ, challenge の expiresAt)`。ほかの quote は `router.approvalTtlMs` のまま。
+   */
+  readonly burnSaleApprovalTtlMs: number;
   readonly maxConcurrentSessions: number;
   readonly maxConcurrentVerifications: number;
   readonly maxQueuedVerifications: number;
@@ -282,6 +287,7 @@ export const DEFAULT_PRIVATE_CONFIG = Object.freeze({
   minSessionRemainingMs: 5_000,
   workDir: "runtime/private",
   retentionMs: 3_600_000,
+  burnSaleApprovalTtlMs: 1_200_000,
   maxConcurrentSessions: 2,
   maxConcurrentVerifications: 1,
   maxQueuedVerifications: 4,
@@ -1019,6 +1025,27 @@ function requirePositiveInt(source: Record<string, unknown>, key: string, at: st
  * `profiles` は動的プロファイルに存在し、**受信**が x402 の Base Sepolia USDC、**送信**が x402（EVM、`tokenDomain` あり）か mpp（Tempo = EVM の family、`feeAsset`・`maxFee` あり）
  * であること。`verifierListen` は `127.0.0.1:0` だけ。trust は設定に無い（`mozilla` 固定）。
  */
+/** burn-sale の承認期限の下限と上限（FR-H1）。上限は quote ledger が受ける期限の上限（`MAX_QUOTE_LIFETIME_MS` = 1 日、`src/core/quote-ledger.ts`）と同じ値。 */
+export const BURN_SALE_APPROVAL_TTL_MIN_MS = 60_000;
+export const BURN_SALE_APPROVAL_TTL_MAX_MS = 86_400_000;
+
+/** FR-H1 の検査の表: 明示の値は常に [MIN, MAX]。subetha があれば `cap = min(retentionMs, MAX)` も見て、`cap < MIN` は省略でも拒む。省略時は `min(既定, cap)`。 */
+function burnSaleApprovalTtlOf(raw: Record<string, unknown>, at: string, retentionMs: number, usesSubetha: boolean): number {
+  const key = "burnSaleApprovalTtlMs";
+  const explicit = raw[key];
+  if (explicit !== undefined && (typeof explicit !== "number" || !Number.isSafeInteger(explicit) || explicit < BURN_SALE_APPROVAL_TTL_MIN_MS || explicit > BURN_SALE_APPROVAL_TTL_MAX_MS)) {
+    throw new ConfigError(`${at}.${key} must be an integer between ${String(BURN_SALE_APPROVAL_TTL_MIN_MS)} and ${String(BURN_SALE_APPROVAL_TTL_MAX_MS)} ms`);
+  }
+  if (!usesSubetha) return explicit === undefined ? DEFAULT_PRIVATE_CONFIG.burnSaleApprovalTtlMs : explicit;
+  const cap = Math.min(retentionMs, BURN_SALE_APPROVAL_TTL_MAX_MS);
+  if (cap < BURN_SALE_APPROVAL_TTL_MIN_MS) {
+    throw new ConfigError(`${at}.retentionMs is too short for a burn-sale approval window (subetha profiles need at least ${String(BURN_SALE_APPROVAL_TTL_MIN_MS)} ms)`);
+  }
+  if (explicit === undefined) return Math.min(DEFAULT_PRIVATE_CONFIG.burnSaleApprovalTtlMs, cap);
+  if (explicit > cap) throw new ConfigError(`${at}.${key} must be at most retentionMs (${String(cap)} ms)`);
+  return explicit;
+}
+
 function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): PrivateConfig {
   const at = "private";
   if (!isRecord(raw)) {
@@ -1093,6 +1120,7 @@ function parsePrivate(raw: unknown, dynamic: DynamicConfig | undefined): Private
     minSessionRemainingMs: requirePositiveInt(raw, "minSessionRemainingMs", at, defaults.minSessionRemainingMs),
     workDir,
     retentionMs: requirePositiveInt(raw, "retentionMs", at, defaults.retentionMs),
+    burnSaleApprovalTtlMs: burnSaleApprovalTtlOf(raw, at, requirePositiveInt(raw, "retentionMs", at, defaults.retentionMs), (profiles as string[]).some((id) => dynamic.profiles[id]?.sourceRail === "subetha")),
     maxConcurrentSessions: requirePositiveInt(raw, "maxConcurrentSessions", at, defaults.maxConcurrentSessions),
     maxConcurrentVerifications: requirePositiveInt(raw, "maxConcurrentVerifications", at, defaults.maxConcurrentVerifications),
     maxQueuedVerifications: requirePositiveInt(raw, "maxQueuedVerifications", at, defaults.maxQueuedVerifications),

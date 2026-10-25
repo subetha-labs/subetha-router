@@ -191,7 +191,8 @@ C・A・B・F の 4 Provider すべてで 5 ゲート成立（設計 §14.6）�
 **前提**: プロファイルの `source.asset` は `SUBETHA_ZERC20_ASSETS`（`src/shared/networks.ts`）にある token でなければ Router が起動時に拒む。V2 の zUSDC（`0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f`）は 2026-10-22 時点で表に無い（V1 の `0x132C…` だけ）: 結合の前に表の行を足す増分が要る（設計 §4）。
 
 ```sh
-# 1. quote（鍵無し）。stdout の payFirst（注文別 burn address と atomic の額）を V2 側の支払い道具に渡す。
+# 1. quote（鍵無し）。stdout の payFirst（注文別 burn address・atomic の額・payBy = この時刻までに transfer が mine されていること）を V2 側の支払い道具に渡す。
+#    payBy が null なら払わない（承認期限が短すぎる。private.burnSaleApprovalTtlMs を見直して quote し直す）。
 PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
   --router http://127.0.0.1:<port> --principal owner --profile <priv-subetha-…> \
   --method GET --host <provider host> --path <path> \
@@ -201,8 +202,12 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
   --trust mozilla --scope-file runtime/private-live/scope.json --out runtime/private-live/<run>
 # 2. quote.json を読む（private.inbound.payTo = burn address、total、fundsMoveAt = payer_burn_before_credential、両レグの額）。承認してから払う。
 # 3. V2 側: pos-pay-token A <payTo> zUSDC <total を 6 桁の decimal に>（例 11000 → 0.011）。transfer の tx hash を受け取る。
-# 4. 同じ --out に --approve --burn-tx-hash <tx hash>（challenge の期限内。鍵無し）。
-# 応答を失った・途中で止まった: 同じ --out に --recover（--chain は送信レグだけ読む。受信の burn は V2 の台帳と Sepolia の receipt で確かめる）。
+# 4. 同じ --out に --approve --burn-tx-hash <tx hash>（payBy までに。鍵無し）。latch の前に Sepolia の receipt を読み、
+#    この tx でこの quote の token が burn address に届いた合計が quote の額以上でなければ拒む（何も起きない。V2 facilitator と同じ判定。過払いは警告して進む）。RPC は
+#    --sepolia-rpc-url > SUBETHA_SEPOLIA_RPC_URL > 公開 RPC。照合を飛ばすのは --burn-precheck off（証跡に skipped_by_operator）。
+#    拒否の文はどれも「この結果だけで払い直さない」（reverted も払い直しの許可ではない。照合してから）。
+# 応答を失った・途中で止まった: 同じ --out に --recover --chain（送信レグの EIP-3009 の照合に加え、受信の burn の receipt を evidence.burn に観測として書く。
+#    受信の決済のゲートは変えない: burn が見えても Router の settle の確立ではない）。
 ```
 
 受信レールの取り違えは latch の前で拒む（x402 の quote に `--burn-tx-hash`、subetha の quote に無し）。`--burn-tx-hash` は再開点と `evidence.json`（`claimedTxRef`）に小文字で残り、facilitator が確定した `txRef` と並ぶ。**burn は Router の拒否で戻らない**（quote の期限切れ・facilitator の rejected・容量拒否: `awaiting_payment` は未払いの証明ではない）。
