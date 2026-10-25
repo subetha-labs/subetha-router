@@ -1,9 +1,9 @@
-# 秘匿購入の proxy 型 TLS（増分 v1.5）要件定義 v3.1
+# 秘匿購入の proxy 型 TLS（増分 v1.5）要件定義 v3.2
 
 対象: 本 worktree（`subetha-router/zktls-proxy-20261026`、branch `task/zktls-proxy`、基点 `origin/main` `b9e7710`）。
 要件フェーズの成果物であり、設計・実装は含まない。既存の秘匿購入の要件 `docs/zktls-router-requirements.md` v3.3（以下「基礎要件」）の上に足す増分で、
 基礎要件の FR-Z*・SR-Z*・TR-* は、本書が明示して置き換えるもの以外すべてそのまま効く。
-v1 は Codex の独立レビュー（`.claude_workflow/local/proxy-req-review1.md`、REJECT、blocking 1・should 3・minor 1）を受けて v2 に、v2 の再レビュー（`proxy-req-review2.md`、APPROVE WITH CHANGES、should 1）を受けて v2.1 に改めた（§10 に対応表）。v3 は owner の判断（既定を proxy 型にする）で FR-X01・X00・X14・SR-X1・TR-X1・TR-X2・TR-X4 を改めた（§11）。v3 の再レビュー（`proxy-req-review3.md`、APPROVE WITH CHANGES、should 3）を v3.1 に反映した（§11）。
+v1 は Codex の独立レビュー（`.claude_workflow/local/proxy-req-review1.md`、REJECT、blocking 1・should 3・minor 1）を受けて v2 に、v2 の再レビュー（`proxy-req-review2.md`、APPROVE WITH CHANGES、should 1）を受けて v2.1 に改めた（§10 に対応表）。v3 は owner の判断（既定を proxy 型にする）で FR-X01・X00・X14・SR-X1・TR-X1・TR-X2・TR-X4 を改めた（§11）。v3 の再レビュー（`proxy-req-review3.md`、APPROVE WITH CHANGES、should 3）を v3.1 に反映した（§11）。v3.2 は設計で、宛先の固定を受信 verify の前に置けることが分かったので FR-X06・FR-X13・TR-X1 を前倒しの形に直した（§11）。
 
 owner の依頼（2026-10-26）: 「proxy 型を Router に組み込むための要件定義から進めていきましょう」。前提となった owner の判断（同日）:
 - 利用先の Provider を Router に隠す設計はしない（受信・送信の `payTo` で Provider は Router に分かるため）。既存の TLS・zkTLS の経路を続ける。
@@ -91,12 +91,14 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 - FR-X05 **接続先の固定**: proxy 型の Verifier が接続してよいのは、記録の `target`（host・port 443）を FR-X06 で解決・検査して固定した IP:443 だけ。
   Verifier は Payer から受け取る proxy の設定のサーバー名（上流 `ProxyTlsConfig::server_name`。commit の受付の時点で読める）が記録の host と一致することを、
   **Provider に接続する前に**確かめ、違えば接続せずに拒否する（LX-1）。
-- FR-X06 **名前解決・宛先の検査・固定は発行の前**: Router は、発行予約（基礎要件 FR-Z06）の**前**、FR-Z18 の 2 回目の再照合と同じ段で Provider の host を解決し、
+- FR-X06 **名前解決・宛先の検査・固定は受信 verify の前**: Router は、受信 verify・settle の**前**（秘匿購入の容量の予約の直後。基礎要件 FR-Z27 と同じ段）で Provider の host を解決し、
   既存の上流の宛先の方針を**そのまま継承**して検査する: `parseUpstreamUrl` と deny list、`src/net/destination-policy.ts` の `classifyAddress`（DENY4・DENY6、
   Router 自身のインターフェースのアドレス `own_address`、loopback・unspecified・special purpose、IPv4-mapped IPv6 の正規化）、`src/net/guarded-fetch.ts` の解決の規則
   （**全回答**を分類し 1 つでも禁止なら拒否、解決の期限と同時数の上限、回答 0 件は失敗）。通った回答のうち 1 つ（選び方は設計で決める）を**固定**して journal に書き、
   Verifier には IP:443 として渡す。Verifier と Router は以後その名前を引き直さない（探りの時と session の時で宛先がすり替わる DNS rebinding を、発行前の解決と固定で防ぐ）。
-  検査に通らない・解決できない場合は**発行しない**: 発行予約の前の失敗なので、基礎要件 FR-Z09 の規則どおり `paid_undelivered`（理由 `private_proxy_dial_refused`）。
+  検査に通らない・解決できない・同時接続の枠が取れない場合は、受信 verify・settle を行わずに `awaiting_payment`（理由 `private_proxy_dial_refused`）で止める
+  （x402 受信では資金は動かない。burn-sale 受信は Payer の burn が purchase の前なので、基礎要件どおり Router の settle の前の拒否は返金しない）。固定した宛先は
+  発行予約の行に書き、以後は引き直さない。
   試験では、既存の `*ForTest` と同じく合成に注入した試験用の解決だけが loopback の fixture の IP を返せる（実入口 `src/main.ts` は渡さない）。
 - FR-X07 **中継の上限**: Verifier は方向ごとの中継バイト数（TLS の記録の暗号文と handshake を含む）に上限を課す。Payer→Provider は要求の上限 4096 B に TLS の handshake と
   記録の余裕を、Provider→Payer は応答（ヘッダ + 本文 ≤ 704 B）に証明書の連鎖と記録の余裕を足した値（具体値は設計で決め、lab に引数で渡す。LX-4）。
@@ -124,7 +126,7 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 
 ### 4.5 状態・射影・理由コード
 - FR-X13 proxy 型の購入の射影の `private` 欄に `tls: {mode: "proxy", providerAddr}` と FR-X02 の開示を足す（MPC 型の射影は不変。FR-X00）。保存と再起動の後も同じ値を読む。
-  新しい理由コードは `private_proxy_dial_refused`（発行前、`paid_undelivered`）・`private_proxy_dial_failed`・`private_proxy_server_name_mismatch`・`private_proxy_limit`
+  新しい理由コードは `private_proxy_dial_refused`（受信 verify の前、`awaiting_payment`）・`private_proxy_dial_failed`・`private_proxy_server_name_mismatch`・`private_proxy_limit`
   （発行後、`unknown`）の 4 つだけ（固定語。SR-Z3）。既存の状態・理由・journal の行の形は変えない。
 
 ## 5. lab の `delivery` に求める契約（依頼の内容。lab の判断で形を変えてよいが、Router はこの意味を前提にする）
@@ -163,7 +165,7 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
     能力の門による受付の停止以外の変化が無いこと（発行・接続は 0 回）。
   - quote: proxy 型の `tls`・`disclosures`・指紋の `tlsMode`。型の変更（proxy ↔ MPC）で `quote_changed`。proxy 型の quote の記録から型の欄を消すと fail closed。
   - 宛先（FR-X06）: deny list、DENY4/DENY6 の各種、Router 自身のアドレス、IPv4-mapped IPv6、回答のうち 1 つだけ禁止、回答 0 件、解決の期限切れ、同時数の上限。
-    いずれも発行予約の行を書かず、送信 adapter の `issueCredential` が 0 回、結果は `paid_undelivered`（`private_proxy_dial_refused`）。
+    いずれも受信 verify・settle が 0 回、発行予約の行を書かず、送信 adapter の `issueCredential` が 0 回、結果は `awaiting_payment`（`private_proxy_dial_refused`）。
   - **固定の維持**: 発行前に固定した IP の後に解決の答えを変えても、Verifier の引数は固定した IP のまま（解決の呼び出し回数を spy で数え、発行後は 0 回）。
   - record・attest: `tls_mode` と `provider_addr` のすり替え・欠落、MPC 型の購入への proxy 型の record、で fail closed。
   - 失敗通知（LX-7）: 3 つの固定語 → 対応する理由コード、通知無し・形違い・大きすぎ → `private_session_timeout`、Router の期限で止めた後の通知は読まない、再起動では読まない。
@@ -216,3 +218,4 @@ Payer は TLS の鍵を自分だけで持ち、TLS の通信を **Verifier 経�
 | v3 再レビュー should 1: 旧 quote が購入できる条件 | TR-X1 の移行（quote）を 3 通りに分けた（バイナリの sha256 が変われば MPC 型でも `quote_changed`） |
 | v3 再レビュー should 2: 「入れても害は無い」の残り | §8 を「lab の対応の前に入れるなら全プロファイルを `mpcProfiles` に書き出す。書き出さなければ意図して起動しない」に改めた |
 | v3 再レビュー should 3: 進行中の購入の移行 | TR-X1 に移行（進行中の購入）を足した（旧 journal を proxy 既定の設定で開いても MPC 型として読み、帰結・record の保持が同じ、発行・接続 0 回）。既定値の表の検査を弱めないことを FR-X00 に足した |
+| 設計で判明（v3.2） | 宛先の固定を受信 verify の前（容量の予約の直後）に前倒しし、拒否を `paid_undelivered` から `awaiting_payment` に改めた（FR-X06・FR-X13・TR-X1） |
