@@ -14,7 +14,7 @@
 
 | 項目 | 値・確認 |
 |---|---|
-| lab | `SUBETHA_ZKTLS_LAB_DIR`（既定 `~/.worktrees/subetha-zktls-router/private-payment-binding-20261017`）。バイナリ `phase5/runner/target/release/delivery`（sha256 `1b3180c8…f18f`）、SRS `SUBETHA_ZKTLS_SRS_DAT`（既定 `~/.hermes/research/subetha-zktls-delivery-spike/tools/srs/bn254_g1.dat`、sha256 `7eaff854…fb25`）。Router は起動時に両方の sha256 を設定値と照合し、違えば起動しない |
+| lab | `SUBETHA_ZKTLS_LAB_DIR`（既定 `~/.worktrees/subetha-zktls-router/private-payment-binding-20261017`）。バイナリ `phase5/runner/target/release/delivery`（sha256 `1b3180c8…f18f` = MPC 型だけの旧版。proxy 型に対応した版は `610c7bca…e15f`、lab の main `2e51fbb`）、SRS `SUBETHA_ZKTLS_SRS_DAT`（既定 `~/ghq/github.com/subetha-labs/subetha-zktls-router/tools/srs/bn254_g1.dat`、sha256 `7eaff854…fb25`）。Router は起動時に両方の sha256 を設定値と照合し、違えば起動しない |
 | Router と Payer | **同一ホスト**（Verifier は loopback にしか listen しない。設計 §12） |
 | 受信レグ | Base Sepolia USDC（`eip155:84532`、`0x036C…CF7e`）。facilitator は公式 `https://www.x402.org/facilitator`（`ROUTER_X402_INBOUND_FACILITATOR_URL`） |
 | 送信レグの鍵 | Router の運用者鍵: x402 は `SUBETHA_OUTBOUND_X402_KEY`、Tempo は `SUBETHA_OUTBOUND_MPP_KEY`（+ `SUBETHA_TEMPO_RPC_URL`、認証付きを推奨）。`tools/remote-router-process.ts` が env から読んで能力として注入する（`src/**` は env から鍵を読まない） |
@@ -253,3 +253,5 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
 - canary: Router の journal・quote の控え・診断・ログ・作業ディレクトリに、本文・本文の base64・bearer・平文は無い。
 - 中継量: 実 Provider では tap を挟んでいないので未計測（record の `len_sent` は C 1,463 B）。証明書の連鎖を含む実測は次の受入で tap を挟んで行う。
 - 証跡: `.claude_workflow/local/zktls-proxy-live-20261026.json`。bearer・ownerKey・鍵の作業ファイルは削除済み。
+
+**lab の置き場所（2026-10-26）**: lab のリポジトリ本体は `~/ghq/github.com/subetha-labs/subetha-zktls-router`（GitHub `subetha-labs/subetha-zktls-router`、main = `2e51fbb`）。旧パス `~/.hermes/research/subetha-zktls-delivery-spike` は互換の symlink として残る（lab のスクリプトと `phase5/.local/upstream-tlsn` が旧パスを参照するため。外すときは lab の担当に先に知らせる）。バイナリは lab の worktree `private-payment-binding-20261017` の `phase5/runner/target/release/delivery`。
