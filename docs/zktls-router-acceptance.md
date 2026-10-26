@@ -238,3 +238,18 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
 6. 所要時間: `evidence.json` の各段の時刻と、MPC 型の既存の受入（§8）を並べて記録する（判断材料。合否条件ではない）。
 7. 失敗の扱いは §7 と同じ。proxy 型の新しい終端（`private_proxy_dial_failed`・`private_proxy_server_name_mismatch`・`private_proxy_limit`）は発行の後なので `unknown`（払ったかもしれない）。
    `private_proxy_dial_refused` は受信 verify の前の拒否（`awaiting_payment`。x402 受信なら資金は動いていない）。
+
+### 12.3 実行記録（2026-10-26、proxy 型、owner の testnet 包括承認のもと作者が実行）
+- 構成: 実合成の Router（`tools/remote-router-process.ts`、`mpcProfiles` なし = 両プロファイル proxy 型。能力の門を通過）× lab の proxy 対応 `delivery`（`610c7bca…`）。Payer と Router の送信の鍵は
+  どちらも Router のテスト鍵 `0x4460…9515`（owner が Base Sepolia USDC を faucet、Tempo pathUSD は `tempo_fundAddress` の faucet）。Router の受取先は `0x5cb0…DC3D`。
+- 結果（5 ゲートすべて成立）:
+
+| Provider | 結果 | 受信 tx（Base Sepolia） | 送信 tx | record | 平文 | 承認→復号 |
+|---|---|---|---|---|---|---|
+| C（x402 POST `/select`） | **delivered_private** | `0x5348b6be…4d99`（11000 USDC → Router） | `0x9a6434fa…424e`（10000 USDC → `0x9014…6fE1`） | `tls_mode: proxy`、`provider_addr: 104.21.91.179:443`、`mozilla-webpki-roots`、session 1.7 s | `select-post-c` / `lab.select.v1`、`received_sha256` = 承認本文 | 14.3 s |
+| F（Tempo pull POST `/select`） | **delivered_private** | `0x71f60dd6…60b7`（11000 USDC → Router） | Tempo `0x5395d8b6…757b`（10000 pathUSD + fee 29） | `tls_mode: proxy`、`provider_addr: 104.21.91.179:443`、session 2.6 s | `select-post-f` / `lab.select.v1`、`received_sha256` = 承認本文 | 16.0 s |
+
+- finality（読み取りのみ、viem の receipt と Transfer の log）: 4 件とも `success`、送金先と額は承認対象どおり。
+- canary: Router の journal・quote の控え・診断・ログ・作業ディレクトリに、本文・本文の base64・bearer・平文は無い。
+- 中継量: 実 Provider では tap を挟んでいないので未計測（record の `len_sent` は C 1,463 B）。証明書の連鎖を含む実測は次の受入で tap を挟んで行う。
+- 証跡: `.claude_workflow/local/zktls-proxy-live-20261026.json`。bearer・ownerKey・鍵の作業ファイルは削除済み。

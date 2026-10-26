@@ -257,3 +257,8 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
   proxy を宣言しないときは skip（未検証）。
 - 既存の試験の変更の範囲: 既存の試験の本体と期待は変えていない。設定に `mpcProfiles` を足したほか、wire の共通の helper（world の設定・executor の起動）に proxy 型の選択肢・Provider のポート・
   executor の期限の任意の引数を足した（既定値は今の MPC 型の引数と設定そのまま）。§12 の「`mpcProfiles` を足すことだけ」の文言からの、足すだけの逸脱として記録する。
+
+## 18. 受入（T-X12、2026-10-26）
+- Provider C（x402 POST）と F（Tempo pull POST）を実合成の Router・実 PKI（`mozilla`）・proxy 型で 1 件ずつ実行し、両方 `delivered_private`、5 ゲート成立（受信決済・送信決済・秘匿配送・Payer 受領・finality）。
+  record は `tls_mode: proxy` と実 Provider の接続先。詳細は `docs/zktls-router-acceptance.md` §12.3。
+- 未計測: 実 Provider の証明書の連鎖を含む中継量（§5 の上限の見直しの材料。次の受入で tap を挟んで測る）。
