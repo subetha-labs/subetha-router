@@ -217,7 +217,7 @@ export function defaultLabDir(): string {
   return process.env["SUBETHA_ZKTLS_LAB_DIR"] ?? path.join(os.homedir(), ".worktrees/subetha-zktls-router/private-payment-binding-20261017");
 }
 export function defaultSrsPath(): string {
-  return process.env["SUBETHA_ZKTLS_SRS_DAT"] ?? path.join(os.homedir(), ".hermes/research/subetha-zktls-delivery-spike/tools/srs/bn254_g1.dat");
+  return process.env["SUBETHA_ZKTLS_SRS_DAT"] ?? path.join(os.homedir(), "ghq/github.com/subetha-labs/subetha-zktls-router/tools/srs/bn254_g1.dat");
 }
 
 function sha256Hex(bytes: Buffer | string): string {
