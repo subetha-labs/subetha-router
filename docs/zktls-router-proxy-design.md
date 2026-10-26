@@ -238,3 +238,22 @@ Router が新たに得るのは TLS の暗号文（復号できない）・方�
 | 判明したこと | 対応 |
 |---|---|
 | `src/net/guarded-fetch.ts` は `@subetha/payer` が byte 単位で同じ写しを持つ（`packages/payer/test/unit/vendor.test.ts` R-1）。変えると payer の vendor の更新（= payer パッケージの中身の変更）が要る | `guarded-fetch.ts` を変えず、`src/net/pinned-destination.ts` で固定し、固定の 1 アドレスだけを返す lookup と固定の差し替えを持つ transport を購入ごとに `createGuardedTransport` で作る（§4.1）。rail には `{pin}` の文脈ではなく `{transport}` を渡す（§4.2） |
+
+## 17. lab との突き合わせ（T-X10）と実バイナリの wire（T-X11）、2026-10-26
+- lab の実装: worktree `subetha-zktls-router/private-payment-binding-20261017` の local commit `2e51fbb`（lab の担当セッションが実装。Codex レビュー 6 回目で APPROVE）。
+  バイナリ `phase5/runner/target/release/delivery` の sha256 `610c7bca5b3154ab86da721f18ed3dd5b1cc0d297da96996d8530c8b2a50e15f`（作者が照合）。
+- 契約の照合（Codex の照合の表は `.claude_workflow/local/proxy-impl-review3.md`）: `capabilities` は `{"tls_modes":["mpc","proxy"]}`（末尾の改行は JSON の解析で問題なし。Router の `readCapabilities` で実バイナリを読んで確認）、
+  `verifier-serve` の proxy の 4 つの引数・`executor-session --tls-mode proxy`（`--connect` は拒否）・record の `tls_mode`/`provider_addr`（接続した socket の peer = Router の `dialAddr` と同じ表記）・
+  `failure.json` の 3 語は §3・§5・§6・§7 の名前のとおり。**名前の差し替えは無い。**
+- lab の追加の挙動（Router への影響の確認）: (a) proxy 型で Verifier がセッションを途中で切ると executor は自分の `--timeout-secs` まで戻らない（Router の `exitedFirst` + `failure.json` の経路は影響なし。payer 道具の
+  executor の期限は `sessionBy` から決まる）。(b) Verifier は作業ディレクトリに flock と `verifier.lock` を取る。Router は購入ごとに新しいディレクトリを使い、再構成は record 以外のファイルを消すので両立する。
+  (c) `failure.json` は 0644 で作られるが、Router の wrapper の umask 077 で 0600 になる。
+- 中継量の実測（wire の tap。fixture の CA の連鎖・小さい応答）: POST は Payer→Provider 1,626 B・Provider→Payer 2,251 B、GET は 1,448 B・2,194 B。上限 16,384 / 65,536 B（§5）に 7 倍以上の余裕。
+  実 Provider の長い証明書の連鎖では受入（T-X12）で測り直す。
+- wire（`tests/wire/private-x402.test.ts`、実バイナリ・実プロセス・loopback TLS、試験 trust = synthetic）: 既存の MPC 型 14 件 + proxy 型 10 件が通る（2026-10-26 の最新の全体の実行で 24 passed、1 skipped は lab 無しの代わりの試験）。
+  proxy 型の 10 件: POST・GET・SubEtha V2 受信の全経路、executor が来ないままの期限切れ（発行 1・Verifier の接続 0・有料要求 0）、サーバー名の不一致（Verifier の接続 0）、中継の上限（`private_proxy_limit`）、型のすり替え（MPC の executor は受けない）、TLS の途中での停止
+  （`private_session_timeout`）、Provider への接続の失敗（`private_proxy_dial_failed`）、再起動。Router↔Provider の TCP の tap で、Verifier の接続の数（探りを除く）、発行の数（`private_released` の行）、
+  有料要求の数を数え、中継した暗号文の断片（生と hex）が Router の journal・控え・子の出力・診断・作業ディレクトリ（掃除の前の写しを含む）に無いことを確かめる。proxy 型の試験は、バイナリが `capabilities` で
+  proxy を宣言しないときは skip（未検証）。
+- 既存の試験の変更の範囲: 既存の試験の本体と期待は変えていない。設定に `mpcProfiles` を足したほか、wire の共通の helper（world の設定・executor の起動）に proxy 型の選択肢・Provider のポート・
+  executor の期限の任意の引数を足した（既定値は今の MPC 型の引数と設定そのまま）。§12 の「`mpcProfiles` を足すことだけ」の文言からの、足すだけの逸脱として記録する。
