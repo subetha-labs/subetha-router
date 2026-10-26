@@ -156,6 +156,14 @@ export interface IntentDynamic {
   readonly reservation?: { readonly legs: readonly { readonly network: string; readonly asset: string; readonly amount: string }[] };
 }
 
+/** proxy 型の発行予約に書く、固定した Provider の宛先（`docs/zktls-router-proxy-design.md` §4.2）。 */
+export interface ProxyReservation {
+  /** Verifier に渡す接続先 `host:port`。 */
+  readonly providerAddr: string;
+  /** 宛先の方針を通った、接続に使うアドレス。 */
+  readonly vettedAddress: string;
+}
+
 /** 秘匿購入の記録（`docs/zktls-router-design.md` §7.2）。`created` 行の `private` 欄と、以後の private_* 行から組む。 */
 export interface IntentPrivate {
   readonly intentSha256: string;
@@ -175,8 +183,12 @@ export interface IntentPrivate {
   /** 承認した方針の写し（期限はここから導く。設定の変更は指紋で検出する）。 */
   readonly policy: { readonly minCredentialLifetimeMs: number; readonly sessionTimeoutMs: number; readonly attestTimeoutMs: number; readonly retentionMs: number };
   readonly limits: { readonly maxIntentBytes: number; readonly maxBundleBytes: number; readonly maxRecordBytes: number };
-  /** `private_issuance_reserved` 行。 */
-  readonly reservation?: { readonly intentSha256: string; readonly inboundIdentity: string };
+  /**
+   * TLS の型（増分 v1.5、`docs/zktls-router-proxy-design.md` §8）。**proxy 型のときだけ**欄がある。無ければ MPC 型（本増分の前の行と MPC 型の行）。
+   */
+  readonly tlsMode?: "proxy";
+  /** `private_issuance_reserved` 行。`proxy` は proxy 型の購入で必須・MPC 型で禁止（設計 §8。固定した Provider の宛先）。 */
+  readonly reservation?: { readonly intentSha256: string; readonly inboundIdentity: string; readonly proxy?: ProxyReservation };
   /** `private_released` 行（credential の値は無い）。 */
   readonly issuance?: { readonly headerName: string; readonly headerSha256: string; readonly expiresAtMs: number; readonly expectedRef?: string; readonly releaseB64: string; readonly sessionBy: number };
   /** `private_handed_over` 行。 */

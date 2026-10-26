@@ -426,6 +426,7 @@ export async function buildServer(options: McpServerOptions = {}): Promise<McpSe
         "**This tool starts no payment.** The returned `subject.private` shows both legs, the target host/path/method, the body commitment and length, the payer key, intentSha256, " +
         "the deadline policies and that nothing is refunded. `subject.private.inbound.fundsMoveAt` says when the inbound funds move: for x402 at the Router's purchase (settle), " +
         "for a SubEtha (zERC20 burn-sale) inbound at the payer's burn BEFORE the credential exists (`payer_burn_before_credential`, `fundsMoveOnCredential: true`): get approval before the burn, and the recipient is a per-quote burn address. " +
+        "When `subject.private.tls.mode` is `proxy`, the Router connects to the Provider and relays the TLS ciphertext (it still cannot read the body or the response), the Provider sees the Router's IP address, and the claim trusts the network path between the Router and the Provider: show these three disclosures (`subject.private.disclosures`) to the human. " +
         "The quote document carries an `ownerKey`: pass the whole document to " +
         `${TOOL_NAMES.privatePurchase}, and its \`ownerKey\` to ${TOOL_NAMES.privateAttest} / ${TOOL_NAMES.privateRecord} / ${TOOL_NAMES.status}.`,
       inputSchema: {

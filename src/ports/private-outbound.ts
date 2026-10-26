@@ -6,6 +6,7 @@
  * MPC-TLS で送る。
  */
 
+import type { GuardedTransport } from "../net/guarded-fetch.js";
 import type { DestinationOffer, FeeEstimate, UpstreamTarget } from "./outbound.js";
 
 /** 探りの結果。`challenge` は adapter 内の不透明な handle（再照合で得たものを発行に渡す。発行は HTTP の発見をしない）。 */
@@ -46,8 +47,12 @@ export interface IssueCredentialArgs {
 
 export interface PrivateOutboundRail {
   readonly rail: "x402" | "mpp";
-  /** 本文に依存しない未払い探り（GET、または `{}` の POST）。検査を通った offer だけを上流の順で返す。 */
-  discover(profileId: string, target: UpstreamTarget): Promise<PrivateDiscovery>;
+  /**
+   * 本文に依存しない未払い探り（GET、または `{}` の POST）。検査を通った offer だけを上流の順で返す。
+   * `options.transport`（proxy 型の固定した宛先の transport、`docs/zktls-router-proxy-design.md` §4.2）があれば、探りはそれで送る（名前を引き直さず、
+   * 宛先の枠を取らない）。無ければ今と同じ（rail を作ったときの transport）。
+   */
+  discover(profileId: string, target: UpstreamTarget, options?: { readonly transport?: GuardedTransport }): Promise<PrivateDiscovery>;
   /** Tempo だけ。既存 `estimateFee` と同じ契約（読取 RPC だけ）。 */
   estimateFee?(profileId: string, offer: DestinationOffer, target: UpstreamTarget): Promise<FeeEstimate>;
   /** 送らずに 1 件だけ作る。HTTP の発見はしない。 */

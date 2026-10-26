@@ -71,6 +71,7 @@ export type DiagTransportCode = (typeof DIAG_TRANSPORT_CODES)[number];
 export const DIAG_OPS = [
   // 秘匿購入の探り（未払いの 402 の読み取り）と Tempo の読取 RPC（`src/adapters/outbound/private-*.ts`）
   "private_probe",
+  "private_proxy_pin",
   "private_rpc",
   "facilitator_verify",
   "facilitator_settle",
@@ -273,6 +274,11 @@ const ROUTER_CODES = [
   "private_record_unknown",
   "private_release_unknown",
   "private_session_timeout",
+  // proxy 型（増分 v1.5、要件 FR-X13）
+  "private_proxy_dial_refused",
+  "private_proxy_dial_failed",
+  "private_proxy_server_name_mismatch",
+  "private_proxy_limit",
   "private_unavailable",
   "private_verifier_unavailable",
   "private_verify_timeout",

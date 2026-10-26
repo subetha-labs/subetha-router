@@ -332,6 +332,13 @@ and the following remain behind separate gates, **not done**.
   testnet Providers (2026-10-21), third-party public-GET x402 Providers after an unpaid pre-check (`docs/zktls-router-thirdparty.md`,
   2026-10-22) and, with the SubEtha V2 burn-sale as the inbound rail, two joint runs with the V2 facilitator (`docs/zktls-router-v2-inbound.md`
   §11 synthetic inbound transport, §12 real composition over a public tunnel, 2026-10-22). **The hosted Router does not enable it.**
+  **TLS mode (increment v1.5, `docs/zktls-router-proxy-requirements.md`).** Private profiles default to TLSNotary **proxy mode**:
+  the Router's Verifier connects to the Provider and relays the TLS ciphertext (it still cannot read the body or the response),
+  the Provider sees the Router's IP address, and the claim additionally trusts the network path between the Router and the Provider.
+  The quote's `private.tls.mode` and three `private.disclosures` flags say so before approval. List a profile in
+  `private.mpcProfiles` to keep **MPC-TLS** for it (unchanged behaviour and fingerprint). A Router with any proxy-mode profile refuses
+  to start unless `delivery capabilities` declares `proxy`; **until the lab ships a proxy-capable `delivery`, list every private
+  profile in `private.mpcProfiles`**.
 
 ## Where the detail went
 
@@ -343,6 +350,7 @@ This file is the entry point. The working records live next to it:
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | Deploying the hosted Router (EC2 + Docker + TLS) |
 | [`CLAUDE.md`](CLAUDE.md) | The steps an agent follows to pay through this Router |
 | [`docs/zktls-router-requirements.md`](docs/zktls-router-requirements.md), [`docs/zktls-router-design.md`](docs/zktls-router-design.md), [`docs/zktls-router-tasks.md`](docs/zktls-router-tasks.md), [`docs/zktls-router-acceptance.md`](docs/zktls-router-acceptance.md) | Private purchases (zkTLS): requirements, design (+§14 implementation deltas), task record, owner-run acceptance procedure (Japanese) |
+| [`docs/zktls-router-proxy-requirements.md`](docs/zktls-router-proxy-requirements.md), [`docs/zktls-router-proxy-design.md`](docs/zktls-router-proxy-design.md), [`docs/zktls-router-proxy-tasks.md`](docs/zktls-router-proxy-tasks.md) | Private purchases over TLSNotary proxy mode (increment v1.5): default proxy with `private.mpcProfiles` opt-out, capability gate, Provider address pinned before inbound verify, lab contract LX-1..LX-7 (Japanese) |
 | [`docs/zktls-router-thirdparty.md`](docs/zktls-router-thirdparty.md) | Private purchases against a third-party public-GET x402 Provider: compatibility conditions, unpaid pre-check tool (`tools/private-provider-precheck.ts`), `--provider-file` input path, owner gate (Japanese) |
 | [`docs/zktls-router-v2-inbound.md`](docs/zktls-router-v2-inbound.md) | Private purchases paid over the SubEtha V2 burn-sale inbound (`sourceRail: subetha`, settle `eventId` as the issuance identity, payer tool `--burn-tx-hash`, V2 zUSDC table row, joint live records §11/§12) (Japanese) |
 | [`docs/zktls-router-open-items.md`](docs/zktls-router-open-items.md) | Open items with the zkTLS lab (704 B payload cap, framing; lab's answers §A-4) and the V2 facilitator boundary (§B, agreements and joint-run outcomes) (Japanese) |

@@ -72,9 +72,14 @@ interface WorldOptions {
   readonly verifyTimeoutMs?: number;
   /** v1.4: burn-sale の承認期限（`private.burnSaleApprovalTtlMs`）。 */
   readonly burnSaleApprovalTtlMs?: number;
+  /** v1.5: proxy 型（`mpcProfiles` を空にする = 既定の proxy 型）。無ければ MPC 型（既存の試験）。 */
+  readonly proxy?: boolean;
+  /** v1.5: この world だけの Provider fixture のポート（接続の失敗の試験で、途中で閉じる Provider を使う）。 */
+  readonly providerPort?: number;
 }
 interface World {
   readonly subethaPort: number;
+  readonly providerPort?: number;
   readonly dir: string;
   readonly privateDir: string;
   readonly control: string;
@@ -191,6 +196,7 @@ function configDocument(world: World, options: WorldOptions): unknown {
         srsPath: lab.srs,
         srsSha256: lab.available ? sha256File(lab.srs) : "0".repeat(64),
         profiles: [PROFILE_ID, SUBETHA_PROFILE_ID],
+        mpcProfiles: options.proxy === true ? [] : [PROFILE_ID, SUBETHA_PROFILE_ID],
         workDir: world.privateDir,
         sessionTimeoutMs: options.sessionTimeoutMs ?? 600_000,
         attestTimeoutMs,
@@ -206,7 +212,7 @@ function configDocument(world: World, options: WorldOptions): unknown {
 function newWorld(options: WorldOptions = {}): World {
   mkdirSync(runtimeRoot, { recursive: true });
   const dir = mkdtempSync(path.join(runtimeRoot, "private-x402-"));
-  const world: World = { dir, privateDir: path.join(dir, "private"), control: path.join(dir, "control"), journalPath: path.join(dir, "journal.ndjson"), configPath: path.join(dir, "router.config.json"), ledgerDir: path.join(dir, "dynamic-quotes"), diagnosticsPath: path.join(dir, "diagnostics.ndjson"), router: undefined, outputs: [], operatorAddress: undefined, subethaPort: options.subethaPort ?? subethaFacilitator.port };
+  const world: World = { dir, privateDir: path.join(dir, "private"), control: path.join(dir, "control"), journalPath: path.join(dir, "journal.ndjson"), configPath: path.join(dir, "router.config.json"), ledgerDir: path.join(dir, "dynamic-quotes"), diagnosticsPath: path.join(dir, "diagnostics.ndjson"), router: undefined, outputs: [], operatorAddress: undefined, subethaPort: options.subethaPort ?? subethaFacilitator.port, ...(options.providerPort === undefined ? {} : { providerPort: options.providerPort }) };
   mkdirSync(world.control, { recursive: true });
   writeFileSync(world.configPath, JSON.stringify(configDocument(world, options)));
   worlds.push(world);
@@ -218,7 +224,7 @@ interface StartOptions {
   readonly launch?: LaunchHooksForTest;
 }
 function routerArgs(world: World): string[] {
-  return ["--control", world.control, "--dial", `${HOST}=${provider.port},${FACILITATOR_HOST}=${facilitator.port},${SUBETHA_HOST}=${world.subethaPort}`, "--ca", lab.rootCa, "--ca", path.join(TLS.dir, "ca.pem"), "--diagnostics", world.diagnosticsPath];
+  return ["--control", world.control, "--dial", `${HOST}=${world.providerPort ?? provider.port},${FACILITATOR_HOST}=${facilitator.port},${SUBETHA_HOST}=${world.subethaPort}`, "--ca", lab.rootCa, "--ca", path.join(TLS.dir, "ca.pem"), "--diagnostics", world.diagnosticsPath];
 }
 function routerEnv(world: World): Record<string, string> {
   return {
@@ -387,8 +393,9 @@ async function finalize(dirs: PayerDirs, handover: Handover, intentBytes: Buffer
   return { orderFinal, intent, release };
 }
 /** executor（Payer 側）: 実 MPC-TLS セッション（Router が起動した Verifier へ loopback、Provider fixture へ `--connect`）。 */
-async function session(dirs: PayerDirs, kg: Keygen, orderFinal: string, verifierAddress: string): Promise<{ code: number | null; stderr: string }> {
-  const args = ["executor-session", "--executor-dir", dirs.exec, "--order", orderFinal, "--verifier-addr", verifierAddress, "--host", HOST, "--port", "443", "--path", kg.path, "--trust", "lab-fixture-ca", "--timeout-secs", "600", "--connect", `127.0.0.1:${provider.port}`];
+async function session(dirs: PayerDirs, kg: Keygen, orderFinal: string, verifierAddress: string, proxy = false, timeoutSecs = 600): Promise<{ code: number | null; stderr: string }> {
+  // v1.5: proxy 型は TLS を Verifier 経由で行う（Provider へ直接つながない = `--connect` 無し）。MPC 型は今と同じ。
+  const args = ["executor-session", "--executor-dir", dirs.exec, "--order", orderFinal, "--verifier-addr", verifierAddress, "--host", HOST, "--port", "443", "--path", kg.path, "--trust", "lab-fixture-ca", "--timeout-secs", String(timeoutSecs), ...(proxy ? ["--tls-mode", "proxy"] : ["--connect", `127.0.0.1:${provider.port}`])];
   if (kg.method === "POST") {
     const requestPrivate = path.join(dirs.privateInbox, "request_private.json");
     copyFileSync(path.join(dirs.keys, "request_private.json"), requestPrivate);
@@ -438,9 +445,9 @@ async function quoteAndPurchase(world: World, env: { b64: string }, requestId: s
   return { quote: quoted.body, purchase, credential, inboundSignature: signature };
 }
 /** purchase の後、Payer 側の工程を最後まで（finalize → session → prove）。Router は `attesting` になる。 */
-async function completeSession(world: World, dirs: PayerDirs, kg: Keygen, handover: Handover, intentBytes: Buffer, ownerKey: unknown): Promise<{ files: PayerFiles; bundle: Buffer }> {
+async function completeSession(world: World, dirs: PayerDirs, kg: Keygen, handover: Handover, intentBytes: Buffer, ownerKey: unknown, proxy = false): Promise<{ files: PayerFiles; bundle: Buffer }> {
   const files = await finalize(dirs, handover, intentBytes);
-  const ran = await session(dirs, kg, files.orderFinal, handover.verifier.address);
+  const ran = await session(dirs, kg, files.orderFinal, handover.verifier.address, proxy);
   if (ran.code !== 0) throw new Error(`executor-session failed: ${ran.stderr.slice(-2000)}`);
   await waitFor(async () => (await statusOf(world, handover.paymentId, ownerKey)).body["status"] === "attesting", 120_000, "attesting after the session");
   const bundle = await prove(dirs, kg, files.orderFinal);
@@ -1489,6 +1496,419 @@ describe.skipIf(!lab.available)(`秘匿購入 wire: lab 実バイナリ × x402 
       worlds.pop();
     }
   }, 4 * LONG);
+
+  /* ------------------------------------------------------------------ 増分 v1.5: proxy 型（`docs/zktls-router-proxy-design.md` §12 TR-X2） */
+
+  /** proxy 型の購入の record（取得の応答から）。 */
+  async function recordOf(world: World, paymentId: string, ownerKey: unknown): Promise<{ text: string; record: Record<string, unknown>; b64: string }> {
+    const got = await http(world, "GET", `/v1/private/purchases/${paymentId}/record`, undefined, ownerHeaders(ownerKey));
+    if (got.status !== 200) throw new Error(`record failed: ${got.text}`);
+    const b64 = String(got.body["recordB64"]);
+    const text = Buffer.from(b64, "base64").toString("utf8");
+    return { text, record: JSON.parse(text) as Record<string, unknown>, b64 };
+  }
+  /** journal の行のうち、この購入の `event` の数（発行 = `private_released` の数）。 */
+  function eventCount(world: World, paymentId: string, event: string): number {
+    return readFileSync(world.journalPath, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as { event: string; paymentId: string }).filter((row) => row.paymentId === paymentId && row.event === event).length;
+  }
+  /** Router↔Provider の TCP の盗聴口: 接続ごとに両方向のバイトを残し、モードで途中の停止・注入をする（モードは接続の受付の時点のものが効く）。 */
+  interface Tap {
+    readonly port: number;
+    /** 接続ごと: `c2s` = Verifier から Provider へ渡したバイト、`s2c` = Provider から届いたバイト、`delivered` = Verifier に実際に渡したバイト（注入・停止の後）。 */
+    readonly conns: { c2s: Buffer[]; s2c: Buffer[]; delivered: Buffer[] }[];
+    mode: { stallS2CAfter?: number; injectS2C?: number };
+    /** Verifier が実際に送受信したバイト（c2s = 送った、s2c = 受け取った）。 */
+    bytesOf(index: number): { c2s: Buffer; s2c: Buffer };
+    close(): Promise<void>;
+  }
+  async function startTap(target: number): Promise<Tap> {
+    const { createServer: createTcpServer, connect } = await import("node:net");
+    const sockets = new Set<import("node:net").Socket>();
+    const tap: Tap = {
+      port: 0,
+      conns: [],
+      mode: {},
+      bytesOf: (index) => ({ c2s: Buffer.concat(tap.conns[index]?.c2s ?? []), s2c: Buffer.concat(tap.conns[index]?.delivered ?? []) }),
+      close: async () => {
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+    const server = createTcpServer((client) => {
+      const mode = { ...tap.mode };
+      const record = { c2s: [] as Buffer[], s2c: [] as Buffer[], delivered: [] as Buffer[] };
+      const deliver = (bytes: Buffer): void => {
+        record.delivered.push(Buffer.from(bytes));
+        client.write(bytes);
+      };
+      tap.conns.push(record);
+      sockets.add(client);
+      const upstream = connect(target, "127.0.0.1");
+      sockets.add(upstream);
+      let s2c = 0;
+      let injected = false;
+      client.on("data", (chunk: Buffer) => {
+        record.c2s.push(Buffer.from(chunk));
+        upstream.write(chunk);
+      });
+      upstream.on("data", (chunk: Buffer) => {
+        record.s2c.push(Buffer.from(chunk));
+        if (mode.injectS2C !== undefined && !injected) {
+          injected = true;
+          deliver(randomBytes(mode.injectS2C));
+          return;
+        }
+        if (mode.stallS2CAfter !== undefined && s2c + chunk.length > mode.stallS2CAfter) {
+          const keep = Math.max(0, mode.stallS2CAfter - s2c);
+          s2c = mode.stallS2CAfter;
+          if (keep > 0) deliver(chunk.subarray(0, keep));
+          return;
+        }
+        s2c += chunk.length;
+        deliver(chunk);
+      });
+      const end = (): void => {
+        client.destroy();
+        upstream.destroy();
+      };
+      client.on("error", end);
+      upstream.on("error", end);
+      client.on("close", end);
+      upstream.on("close", end);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    (tap as { port: number }).port = (server.address() as import("node:net").AddressInfo).port;
+    return tap;
+  }
+  /** 中継したバイトの canary（生のバイト列の latin1 と hex）。Router の成果物のどこにも無いこと。 */
+  function relayCanaries(bytes: { c2s: Buffer; s2c: Buffer }): string[] {
+    // 先頭 32 B は常に、長ければ中ほどと末尾の近くも（TLS の記録の暗号文を含む）。
+    const pick = (buffer: Buffer): Buffer[] => (buffer.length >= 96 ? [buffer.subarray(0, 32), buffer.subarray(Math.floor(buffer.length / 2) - 16, Math.floor(buffer.length / 2) + 16), buffer.subarray(buffer.length - 48, buffer.length - 16)] : buffer.length >= 32 ? [buffer.subarray(0, 32)] : []);
+    return [...pick(bytes.c2s), ...pick(bytes.s2c)].flatMap((slice) => [slice.toString("latin1"), slice.toString("hex")]);
+  }
+  function expectNoRelayBytes(world: World, canaries: readonly string[], snapshot?: Map<string, string>, publicText = ""): void {
+    const texts = routerTexts(world);
+    const surfaces = [texts.journal, texts.ledger, texts.outputs, texts.diagnostics, publicText, ...texts.work.values(), ...(snapshot?.values() ?? [])];
+    expect(canaries.length).toBeGreaterThan(0);
+    for (const canary of canaries) for (const text of surfaces) expect(text.includes(canary), "relayed bytes in a Router artifact").toBe(false);
+  }
+  /** Verifier が Provider に張った接続の数 = tap の接続 − 探り（未払いの 402 は 1 要求 = 1 接続）。 */
+  function verifierConnections(tap: Tap, connsBefore: number, probesBefore: number, own: ZktlsProvider = provider): number {
+    return tap.conns.length - connsBefore - (own.seen.probes.length - probesBefore);
+  }
+  /** v1.5 の試験の前提: lab のバイナリが proxy 型を宣言する（MPC だけのバイナリなら skip = 未検証）。 */
+  const labProxy = ((): boolean => {
+    if (!lab.available) return false;
+    try {
+      return (JSON.parse(execFileSync(lab.bin, ["capabilities"], { encoding: "utf8", timeout: 10_000 })) as { tls_modes?: string[] }).tls_modes?.includes("proxy") === true;
+    } catch {
+      return false;
+    }
+  })();
+  /** proxy 型の world: Router の Provider への接続（探り・Verifier）は tap 越し。 */
+  async function proxyWorld(options: WorldOptions = {}, target = provider.port): Promise<{ world: World; tap: Tap }> {
+    const tap = await startTap(target);
+    taps.push(tap);
+    return { world: newWorld({ proxy: true, providerPort: tap.port, ...options }), tap };
+  }
+  const taps: Tap[] = [];
+  afterEach(async () => {
+    while (taps.length > 0) await taps.pop()!.close();
+  });
+
+  test.skipIf(!labProxy)("proxy 型 HTTP 全経路（POST）: 開示 → Verifier に proxy の引数 → executor は Verifier 経由 → record に tls_mode と接続先 → attest → decrypt → status。発行 1・Verifier の接続 1・有料要求 1、中継のバイトと平文は掃除の前後とも Router に無い。中継量を測る", async () => {
+    const { world, tap } = await proxyWorld();
+    await startRouter(world, { stops: ["beforeResultPersist"] });
+    const dirs = payerDirs(world, "proxy-post");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const connsBefore = tap.conns.length;
+    const probesBefore = provider.seen.probes.length;
+    const paidBefore = provider.seen.paid.length;
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-post");
+    expect(quote["private"]).toMatchObject({ tls: { mode: "proxy" }, disclosures: { routerConnectsToProvider: true, providerSeesRouterAddress: true, trustsRouterProviderPath: true } });
+    expect(purchase.status, `${purchase.text}\n${world.router!.stderr().slice(-3000)}`).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    const paymentId = handover.paymentId;
+    const ownerKey = quote["ownerKey"];
+    const purchaseDir = path.join(world.privateDir, paymentId);
+    const serveCommand = execFileSync("ps", ["-ww", "-o", "command=", "-A"], { encoding: "utf8" }).split("\n").find((line) => line.includes("verifier-serve") && line.includes(purchaseDir));
+    expect(serveCommand, "verifier-serve process").toBeDefined();
+    expect(serveCommand).toContain("--tls-mode proxy");
+    expect(serveCommand).toContain(`--provider-addr 127.0.0.1:${tap.port}`);
+    expect(serveCommand).toMatch(/--max-relay-sent 16384 --max-relay-recv 65536/);
+    const { files, bundle } = await completeSession(world, dirs, kg, handover, env.bytes, ownerKey, true);
+    expect(provider.seen.paid.length - paidBefore).toBe(1);
+    expect(provider.seen.paid.at(-1)).toMatchObject({ method: "POST", path: POST_PATH, body: kg.bodyText, payer: world.operatorAddress });
+    expect(verifierConnections(tap, connsBefore, probesBefore)).toBe(1);
+    const relayed = tap.bytesOf(tap.conns.length - 1);
+    // 中継量（T-X10 の上限の見直しの実測。fixture の CA の連鎖・小さい応答）。
+    process.stdout.write(`${JSON.stringify({ event: "proxy-relay-bytes", path: "POST", c2s: relayed.c2s.length, s2c: relayed.s2c.length })}\n`);
+    expect(relayed.c2s.length).toBeLessThan(16_384);
+    expect(relayed.s2c.length).toBeLessThan(65_536);
+    const attestPending = http(world, "POST", `/v1/private/purchases/${paymentId}/attest`, { bundleB64: bundle.toString("base64"), ownerKey });
+    await waitFor(() => existsSync(path.join(world.control, `arrive.beforeResultPersist.${paymentId}`)), 600_000, "verify finished (before persist)");
+    const snapshot = readDirFiles(purchaseDir);
+    writeFileSync(path.join(world.control, "release.beforeResultPersist"), "1");
+    const attested = await attestPending;
+    expect(attested.body, attested.text).toMatchObject({ paymentId, status: "delivered_private", private: { proof: { delivery: true, requestBinding: true }, tls: { mode: "proxy", providerAddr: `127.0.0.1:${tap.port}` } } });
+    const { record, b64 } = await recordOf(world, paymentId, ownerKey);
+    expect(record).toMatchObject({ tls_mode: "proxy", provider_addr: `127.0.0.1:${tap.port}`, trust: "lab-fixture-ca", server_name: HOST });
+    const decrypted = await decrypt(dirs, kg, files, b64, bundle);
+    expect(decrypted.code, JSON.stringify(decrypted.result)).toBe(0);
+    const expectedBody = provider.respond({ method: "POST", path: POST_PATH, body: kg.bodyText });
+    expect(decrypted.plaintext?.toString("utf8")).toBe(expectedBody);
+    const status = await statusOf(world, paymentId, ownerKey);
+    expect(status.body).toMatchObject({ status: "delivered_private", private: { tls: { mode: "proxy", providerAddr: `127.0.0.1:${tap.port}`, disclosures: { trustsRouterProviderPath: true } } }, destination: { outcome: "paid" } });
+    expect(eventCount(world, paymentId, "private_released")).toBe(1);
+    const publicResponses = [quote, attested.body, status.body].map((body) => JSON.stringify(body)).join("\n");
+    const everywhere = [kg.canary, kg.bodyText, expectedBody, ...executorSecrets(dirs, kg, bundle), decrypted.plaintext!.toString("latin1")];
+    expectCanaries(world, { public: publicResponses, authenticated: purchase.text, snapshot }, everywhere, [handover.releasedHeader.value], env.b64);
+    expectNoRelayBytes(world, relayCanaries(relayed), snapshot, `${publicResponses}\n${purchase.text}`);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型 GET 全経路: delivered_private、平文は Provider の応答、status、発行 1・Verifier の接続 1・有料要求 1", async () => {
+    const { world, tap } = await proxyWorld();
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-get");
+    const kg = await keygen(dirs, "GET");
+    const env = envelopeOf(kg.order);
+    const connsBefore = tap.conns.length;
+    const probesBefore = provider.seen.probes.length;
+    const paidBefore = provider.seen.paid.length;
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-get");
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    const { files, bundle } = await completeSession(world, dirs, kg, handover, env.bytes, quote["ownerKey"], true);
+    const attested = await http(world, "POST", `/v1/private/purchases/${handover.paymentId}/attest`, { bundleB64: bundle.toString("base64"), ownerKey: quote["ownerKey"] });
+    expect(attested.body, attested.text).toMatchObject({ status: "delivered_private", private: { proof: { delivery: true, requestBinding: false }, tls: { mode: "proxy" } } });
+    const { record, b64 } = await recordOf(world, handover.paymentId, quote["ownerKey"]);
+    expect(record).toMatchObject({ tls_mode: "proxy", provider_addr: `127.0.0.1:${tap.port}` });
+    const decrypted = await decrypt(dirs, kg, files, b64, bundle);
+    expect(decrypted.code, JSON.stringify(decrypted.result)).toBe(0);
+    expect(decrypted.plaintext?.toString("utf8")).toBe(provider.respond({ method: "GET", path: GET_PATH, body: "" }));
+    expect((await statusOf(world, handover.paymentId, quote["ownerKey"])).body).toMatchObject({ status: "delivered_private", private: { tls: { mode: "proxy" } }, destination: { outcome: "paid" } });
+    expect([provider.seen.paid.length - paidBefore, verifierConnections(tap, connsBefore, probesBefore), eventCount(world, handover.paymentId, "private_released")]).toEqual([1, 1, 1]);
+    const relayed = tap.bytesOf(tap.conns.length - 1);
+    process.stdout.write(`${JSON.stringify({ event: "proxy-relay-bytes", path: "GET", c2s: relayed.c2s.length, s2c: relayed.s2c.length })}\n`);
+    expectNoRelayBytes(world, relayCanaries(relayed), undefined, `${JSON.stringify(quote)}\n${attested.text}\n${purchase.text}`);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型: executor が来ないまま期限切れなら unknown（private_session_timeout）。発行 1・Verifier の接続 0・有料要求 0", async () => {
+    const { world, tap } = await proxyWorld({ sessionTimeoutMs: 15_000 });
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-timeout");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const connsBefore = tap.conns.length;
+    const probesBefore = provider.seen.probes.length;
+    const paidBefore = provider.seen.paid.length;
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-timeout");
+    expect(purchase.status, purchase.text).toBe(200);
+    const paymentId = String(quote["paymentId"]);
+    await waitFor(async () => (await statusOf(world, paymentId, quote["ownerKey"])).body["status"] === "unknown", 120_000, "session timeout");
+    expect((await statusOf(world, paymentId, quote["ownerKey"])).body).toMatchObject({ status: "unknown", terminalReason: "private_session_timeout", private: { tls: { mode: "proxy" } } });
+    expect([provider.seen.paid.length - paidBefore, verifierConnections(tap, connsBefore, probesBefore), eventCount(world, paymentId, "private_released")]).toEqual([0, 0, 1]);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型 × 受信 SubEtha V2（burn-sale）: GET の全経路が proxy 型で成立（発行予約の identity は settle の eventId、record は proxy）", async () => {
+    const { world, tap } = await proxyWorld();
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-subetha");
+    const kg = await keygen(dirs, "GET");
+    const envDoc = JSON.parse(envelopeOf(kg.order).bytes.toString("utf8")) as { inbound: Record<string, unknown> };
+    envDoc.inbound = { network: SEPOLIA, asset: ZUSDC, maxTotal: "11000" };
+    const envBytes = Buffer.from(JSON.stringify(envDoc), "utf8");
+    const quoted = await http(world, "POST", "/v1/private/quotes", { profileId: SUBETHA_PROFILE_ID, requestId: "r-proxy-sub", intentB64: envBytes.toString("base64") });
+    expect(quoted.status, quoted.text).toBe(200);
+    expect(quoted.body["private"]).toMatchObject({ tls: { mode: "proxy" }, inbound: { rail: "subetha", fundsMoveAt: "payer_burn_before_credential" } });
+    const offer = (quoted.body["source"] as { offer: Record<string, unknown> }).offer;
+    const ownerKey = quoted.body["ownerKey"];
+    const burnTxHash = `0x${randomBytes(32).toString("hex")}`;
+    const credential = Buffer.from(JSON.stringify({ x402Version: 2, accepted: offer, payload: { challengeNonce: (offer["extra"] as Record<string, unknown>)["challengeNonce"], burnTxHash } })).toString("base64");
+    const purchase = await http(world, "POST", "/v1/private/purchases", { quoteId: quoted.body["quoteId"], requestId: "r-proxy-sub", approval: quoted.body["quoteId"], credential, ownerKey });
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    const reserved = readFileSync(world.journalPath, "utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { event: string; paymentId: string; patch: Record<string, unknown> }).find((e) => e.event === "private_issuance_reserved" && e.paymentId === handover.paymentId);
+    expect(reserved?.patch).toMatchObject({ inboundIdentity: `subetha|${SEPOLIA}|${burnTxHash.toLowerCase()}|11155111:${burnTxHash.toLowerCase()}:121`, proxy: { providerAddr: `127.0.0.1:${tap.port}` } });
+    const connsBefore = tap.conns.length;
+    const paidBefore = provider.seen.paid.length;
+    const { files, bundle } = await completeSession(world, dirs, kg, handover, envBytes, ownerKey, true);
+    // 購入の後の接続は Verifier のものだけ（探りは purchase の中で済んでいる）。
+    expect([tap.conns.length - connsBefore, provider.seen.paid.length - paidBefore, eventCount(world, handover.paymentId, "private_released")]).toEqual([1, 1, 1]);
+    const attested = await http(world, "POST", `/v1/private/purchases/${handover.paymentId}/attest`, { bundleB64: bundle.toString("base64"), ownerKey });
+    expect(attested.body, attested.text).toMatchObject({ status: "delivered_private", private: { tls: { mode: "proxy" } } });
+    expect((await statusOf(world, handover.paymentId, ownerKey)).body).toMatchObject({ status: "delivered_private", private: { tls: { mode: "proxy" } }, dynamic: { fundsMoveOnCredential: true } });
+    const { record, b64 } = await recordOf(world, handover.paymentId, ownerKey);
+    expect(record).toMatchObject({ tls_mode: "proxy" });
+    const decrypted = await decrypt(dirs, kg, files, b64, bundle);
+    expect(decrypted.plaintext?.toString("utf8")).toBe(provider.respond({ method: "GET", path: GET_PATH, body: "" }));
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型 否定: サーバー名の不一致は Provider に接続せず unknown（private_proxy_server_name_mismatch）。発行 1・Verifier の接続 0・有料要求 0", async () => {
+    const { world, tap } = await proxyWorld({ sessionTimeoutMs: 120_000 });
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-sni");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const connsBefore = tap.conns.length;
+    const probesBefore = provider.seen.probes.length;
+    const paidBefore = provider.seen.paid.length;
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-sni");
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    const files = await finalize(dirs, handover, env.bytes);
+    // executor に別のホスト名の注文を渡す（Proxy-TLS の server_name が Router の期待と違う）。
+    const evil = "evil.other.test";
+    const order = JSON.parse(readFileSync(files.orderFinal, "utf8")) as { target: { host: string } };
+    order.target.host = evil;
+    const evilOrder = path.join(dirs.root, "order_final_evil.json");
+    writeFileSync(evilOrder, JSON.stringify(order), { mode: 0o600 });
+    const args = ["executor-session", "--executor-dir", dirs.exec, "--order", evilOrder, "--verifier-addr", handover.verifier.address, "--host", evil, "--port", "443", "--path", kg.path, "--trust", "lab-fixture-ca", "--timeout-secs", "30", "--tls-mode", "proxy"];
+    const requestPrivate = path.join(dirs.privateInbox, "request_private.json");
+    copyFileSync(path.join(dirs.keys, "request_private.json"), requestPrivate);
+    args.push("--request-private", requestPrivate);
+    const ran = runDelivery(lab, args, { timeoutMs: 120_000 });
+    await waitFor(async () => (await statusOf(world, handover.paymentId, quote["ownerKey"])).body["status"] === "unknown", 120_000, "server name mismatch recorded");
+    expect((await statusOf(world, handover.paymentId, quote["ownerKey"])).body).toMatchObject({ terminalReason: "private_proxy_server_name_mismatch", private: { artifacts: { record: "none" } } });
+    await ran;
+    expect([provider.seen.paid.length - paidBefore, verifierConnections(tap, connsBefore, probesBefore), eventCount(world, handover.paymentId, "private_released")]).toEqual([0, 0, 1]);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型 否定: Provider 側から上限を超えるバイトが来ると unknown（private_proxy_limit）。有料要求は成立せず、中継のバイトは Router に無い", async () => {
+    const { world, tap } = await proxyWorld({ sessionTimeoutMs: 120_000 });
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-limit");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-limit");
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    // ここから受け付ける接続（= Verifier の接続）に、Provider の最初の応答の代わりに 70,000 B を流す（受信の上限 65,536 を超える）。
+    tap.mode = { injectS2C: 70_000 };
+    const connsBefore = tap.conns.length;
+    const paidBefore = provider.seen.paid.length;
+    const files = await finalize(dirs, handover, env.bytes);
+    const ran = session(dirs, kg, files.orderFinal, handover.verifier.address, true, 30);
+    await waitFor(async () => (await statusOf(world, handover.paymentId, quote["ownerKey"])).body["status"] === "unknown", 120_000, "relay limit recorded");
+    const limited = await statusOf(world, handover.paymentId, quote["ownerKey"]);
+    expect(limited.body).toMatchObject({ terminalReason: "private_proxy_limit" });
+    await ran;
+    expect([tap.conns.length - connsBefore, provider.seen.paid.length - paidBefore, eventCount(world, handover.paymentId, "private_released")]).toEqual([1, 0, 1]);
+    // Verifier に実際に渡したバイト（注入した 70,000 B を含む）が Router の成果物・公開の応答に無い。
+    const relayed = tap.bytesOf(tap.conns.length - 1);
+    expect(relayed.s2c.length).toBeGreaterThanOrEqual(70_000);
+    expectNoRelayBytes(world, relayCanaries(relayed), undefined, limited.text);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型 否定: executor が MPC 型で来ても（型のすり替え）Verifier は受けず、Verifier は Provider に接続しない（unknown、Verifier の接続 0、発行 1）", async () => {
+    const { world, tap } = await proxyWorld({ sessionTimeoutMs: 60_000 });
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-mpc-sub");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const connsBefore = tap.conns.length;
+    const probesBefore = provider.seen.probes.length;
+    const paidBefore = provider.seen.paid.length;
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-mpc-sub");
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    const files = await finalize(dirs, handover, env.bytes);
+    // MPC 型の executor（`--connect` で Provider に直接）。Router の Verifier は proxy 型だけ受ける。
+    const ran = await session(dirs, kg, files.orderFinal, handover.verifier.address, false, 30);
+    expect(ran.code).not.toBe(0);
+    await waitFor(async () => (await statusOf(world, handover.paymentId, quote["ownerKey"])).body["status"] === "unknown", 120_000, "mode substitution refused");
+    expect((await statusOf(world, handover.paymentId, quote["ownerKey"])).body).toMatchObject({ status: "unknown", private: { artifacts: { record: "none" } } });
+    expect(verifierConnections(tap, connsBefore, probesBefore)).toBe(0);
+    expect(eventCount(world, handover.paymentId, "private_released")).toBe(1);
+    // 直接の接続（executor の `--connect`）は tap を通らない Provider への TCP: 有料要求が届いても Router の record にはならない（Verifier は MPC を拒否）。
+    expect(provider.seen.paid.length - paidBefore).toBeLessThanOrEqual(1);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型 否定: TLS の途中で止まれば Router の期限で unknown（private_session_timeout）。掃除の前の作業ディレクトリにも中継のバイトが無い", async () => {
+    const { world, tap } = await proxyWorld({ sessionTimeoutMs: 25_000 });
+    await startRouter(world, { stops: ["sessionExitLocked"] });
+    const dirs = payerDirs(world, "proxy-stall");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const paidBefore = provider.seen.paid.length;
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-stall");
+    expect(purchase.status, purchase.text).toBe(200);
+    const handover = purchase.body as unknown as Handover;
+    // Verifier の接続で、Provider からの最初の 200 B だけを通して止める（ServerHello の途中）。
+    tap.mode = { stallS2CAfter: 200 };
+    const connsBefore = tap.conns.length;
+    const files = await finalize(dirs, handover, env.bytes);
+    const ran = session(dirs, kg, files.orderFinal, handover.verifier.address, true, 60);
+    await waitFor(() => existsSync(path.join(world.control, `arrive.sessionExitLocked.${handover.paymentId}`)), 120_000, "session exit (locked)");
+    const snapshot = readDirFiles(path.join(world.privateDir, handover.paymentId));
+    writeFileSync(path.join(world.control, "release.sessionExitLocked"), "1");
+    await waitFor(async () => (await statusOf(world, handover.paymentId, quote["ownerKey"])).body["status"] === "unknown", 120_000, "session timeout recorded");
+    expect((await statusOf(world, handover.paymentId, quote["ownerKey"])).body).toMatchObject({ terminalReason: "private_session_timeout" });
+    await ran;
+    expect([tap.conns.length - connsBefore, provider.seen.paid.length - paidBefore, eventCount(world, handover.paymentId, "private_released")]).toEqual([1, 0, 1]);
+    const relayed = tap.bytesOf(tap.conns.length - 1);
+    expect(relayed.c2s.length).toBeGreaterThan(0);
+    expect(relayed.s2c.length).toBeLessThanOrEqual(200);
+    expectNoRelayBytes(world, relayCanaries(relayed), snapshot, JSON.stringify((await statusOf(world, handover.paymentId, quote["ownerKey"])).body));
+    expectCanaries(world, { public: JSON.stringify((await statusOf(world, handover.paymentId, quote["ownerKey"])).body), snapshot }, [kg.canary, kg.bodyText, ...executorSecrets(dirs, kg)], [handover.releasedHeader.value], env.b64);
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型: Verifier が Provider に接続できなければ unknown（private_proxy_dial_failed）。発行 1・有料要求 0、掃除の前の成果物にも秘密が無い", async () => {
+    const own = await startZktlsProvider({ certPath: lab.serverCert, keyPath: lab.serverKey, host: HOST, network: NETWORK, asset: USDC, payTo: PROVIDER_PAY_TO, amount: PRICE, tokenDomain: { name: "USDC", version: "2" } });
+    let closed = false;
+    try {
+      const { world, tap } = await proxyWorld({ sessionTimeoutMs: 120_000 }, own.port);
+      await startRouter(world, { stops: ["sessionExitLocked"] });
+      const dirs = payerDirs(world, "proxy-dial");
+      const kg = await keygen(dirs);
+      const env = envelopeOf(kg.order);
+      const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-dial");
+      expect(purchase.status, purchase.text).toBe(200);
+      const handover = purchase.body as unknown as Handover;
+      // Provider と tap を閉じる（Verifier の接続先のポートが接続を拒否する = 接続の失敗）。
+      await own.close();
+      closed = true;
+      await tap.close();
+      taps.splice(taps.indexOf(tap), 1);
+      const files = await finalize(dirs, handover, env.bytes);
+      const ran = session(dirs, kg, files.orderFinal, handover.verifier.address, true, 30);
+      await waitFor(() => existsSync(path.join(world.control, `arrive.sessionExitLocked.${handover.paymentId}`)), 120_000, "session exit (locked)");
+      const snapshot = readDirFiles(path.join(world.privateDir, handover.paymentId));
+      expect([...snapshot.keys()].map((file) => path.basename(file))).toContain("failure.json");
+      writeFileSync(path.join(world.control, "release.sessionExitLocked"), "1");
+      await waitFor(async () => (await statusOf(world, handover.paymentId, quote["ownerKey"])).body["status"] === "unknown", 120_000, "dial failure recorded");
+      const status = await statusOf(world, handover.paymentId, quote["ownerKey"]);
+      expect(status.body).toMatchObject({ terminalReason: "private_proxy_dial_failed", private: { outbound: { issued: true }, artifacts: { record: "none" } } });
+      expect(own.seen.paid).toHaveLength(0);
+      // 再試行が無い: Router の発行・引き渡しは 1 回ずつ、この購入の Verifier はもう居ない（再起動して接続し直さない）。Verifier の中の再接続は lab の範囲。
+      expect([eventCount(world, handover.paymentId, "private_released"), eventCount(world, handover.paymentId, "private_handed_over")]).toEqual([1, 1]);
+      expect(execFileSync("ps", ["-ww", "-o", "command=", "-A"], { encoding: "utf8" }).split("\n").some((line) => line.includes("verifier-serve") && line.includes(handover.paymentId))).toBe(false);
+      expect((await ran).code).not.toBe(0);
+      expect(existsSync(path.join(world.privateDir, handover.paymentId))).toBe(false);
+      expectCanaries(world, { public: JSON.stringify(status.body), snapshot }, [kg.canary, kg.bodyText, ...executorSecrets(dirs, kg)], [handover.releasedHeader.value], env.b64);
+    } finally {
+      if (!closed) await own.close();
+    }
+  }, LONG);
+
+  test.skipIf(!labProxy)("proxy 型: handover の後に Router が落ちて再起動すると unknown（interrupted_after_release）。型・接続先・開示は射影に残り、発行と接続は増えない", async () => {
+    const { world, tap } = await proxyWorld();
+    await startRouter(world);
+    const dirs = payerDirs(world, "proxy-restart");
+    const kg = await keygen(dirs);
+    const env = envelopeOf(kg.order);
+    const { quote, purchase } = await quoteAndPurchase(world, env, "r-proxy-restart");
+    expect(purchase.status, purchase.text).toBe(200);
+    const paymentId = String(quote["paymentId"]);
+    await killRouter(world);
+    const connsAfterKill = tap.conns.length;
+    await startRouter(world);
+    const status = await statusOf(world, paymentId, quote["ownerKey"]);
+    expect(status.body).toMatchObject({ status: "unknown", terminalReason: "interrupted_after_release", private: { tls: { mode: "proxy", providerAddr: `127.0.0.1:${tap.port}`, disclosures: { routerConnectsToProvider: true, providerSeesRouterAddress: true, trustsRouterProviderPath: true } } } });
+    expect(eventCount(world, paymentId, "private_released")).toBe(1);
+    expect(tap.conns.length).toBe(connsAfterKill);
+  }, LONG);
 });
 
 describe.skipIf(lab.available)("秘匿購入 wire（lab 無し）", () => {

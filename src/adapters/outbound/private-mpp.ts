@@ -167,7 +167,7 @@ export function createPrivateMppRail(capability: MppTempoCapability, options: Pr
   // 見積りは既存の動的経路のもの（読取だけ・同じ guard）。push 専用の `pay` はここからは呼ばない。
   const estimator = createMppDynamicPath({ ...capability, mode: "push" }, { profiles: Object.fromEntries(profiles), transport, denyHosts, now, ...(options.operatorAddresses === undefined ? {} : { operatorAddresses: options.operatorAddresses }) });
 
-  async function readCandidates(profile: DynamicProfile, target: UpstreamTarget, ctx: { routeId: string; operation: string }): Promise<Candidate[]> {
+  async function readCandidates(profile: DynamicProfile, target: UpstreamTarget, ctx: { routeId: string; operation: string }, via: GuardedTransport = transport): Promise<Candidate[]> {
     const parsed = parseUpstreamUrl(target.url, { denyHosts });
     if (!parsed.ok) throw new Error("private mpp probe rejected: url");
     const method = target.method ?? "GET";
@@ -175,7 +175,7 @@ export function createPrivateMppRail(capability: MppTempoCapability, options: Pr
       method === "POST"
         ? { method: "POST", headers: { "content-type": "application/json" }, body: target.body ?? "{}", redirect: "error", signal: AbortSignal.timeout(unpaidTimeoutMs) }
         : { method: "GET", redirect: "error", signal: AbortSignal.timeout(unpaidTimeoutMs) };
-    const response = await transport.fetch(target.url, init, ctx);
+    const response = await via.fetch(target.url, init, ctx);
     const header = response.headers.get(Constants.Headers.wwwAuthenticate);
     discardBody(response);
     if (response.status !== 402) throw new Error("private mpp probe rejected: status");
@@ -198,9 +198,10 @@ export function createPrivateMppRail(capability: MppTempoCapability, options: Pr
 
   return {
     rail: "mpp",
-    async discover(profileId: string, target: UpstreamTarget): Promise<PrivateDiscovery> {
+    async discover(profileId: string, target: UpstreamTarget, discoverOptions?: { readonly transport?: GuardedTransport }): Promise<PrivateDiscovery> {
       const profile = profileFor(profileId);
-      const candidates = await readCandidates(profile, target, { routeId: profileId, operation: "private_probe" });
+      // proxy 型: 固定した宛先の transport で送る（設計 §4.2）。無ければ今と同じ。
+      const candidates = await readCandidates(profile, target, { routeId: profileId, operation: "private_probe" }, discoverOptions?.transport ?? transport);
       return { offers: candidates.map((candidate) => candidate.offer), challenge: candidates };
     },
 

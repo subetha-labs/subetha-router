@@ -98,7 +98,7 @@ beforeEach(async () => {
     routes: {},
     budget: { maxPurchases: 10, buckets: [{ network: NETWORK, asset: USDC, maxTotal: "10000000", maxPerPurchase: "200000" }] },
     dynamic: { enabled: true, profiles: { [PROFILE_ID]: PROFILE }, budget: { maxPurchases: 20, buckets: [{ network: NETWORK, asset: USDC, maxTotal: "10000000", maxPerPurchase: "200000" }] }, limits: { ...DEFAULT_DYNAMIC_LIMITS, quotesPerMinuteGlobal: 1000, quotesPerMinutePerSource: 1000, purchasesPerMinuteGlobal: 1000, purchasesPerMinutePerSource: 1000, perHostPerMinute: 1000 }, denyHosts: [] },
-    private: { ...DEFAULT_PRIVATE_CONFIG, deliveryBin: FAKE, deliveryBinSha256: sha256File(FAKE), srsPath: FAKE, srsSha256: sha256File(FAKE), profiles: [PROFILE_ID], maxBundleBytes: 4096, maxChildOutputBytes: 4096 },
+    private: { ...DEFAULT_PRIVATE_CONFIG, deliveryBin: FAKE, deliveryBinSha256: sha256File(FAKE), srsPath: FAKE, srsSha256: sha256File(FAKE), profiles: [PROFILE_ID], mpcProfiles: [PROFILE_ID], maxBundleBytes: 4096, maxChildOutputBytes: 4096 },
   };
   const runner = createVerifierRunner({ deliveryBin: FAKE, srsPath: FAKE, trust: "lab-fixture-ca", maxChildOutputBytes: 4096 });
   core = await createRouterCore({ journalPath: path.join(workDir, "journal.ndjson"), config, inbound: new SyntheticInbound(), outbound: new NeverOutbound(), dynamic: { ledgerDir: path.join(workDir, "dynamic-quotes") }, private: { rails: { [PROFILE_ID]: new FakePrivateRail() }, runner, trust: "lab-fixture-ca", workDir: privateDir } });

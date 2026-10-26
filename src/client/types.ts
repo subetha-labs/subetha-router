@@ -192,7 +192,22 @@ export interface PrivateQuoteView {
   readonly destination: Readonly<Record<string, unknown>>;
   readonly pricing: Readonly<Record<string, unknown>>;
   readonly disclosures: Readonly<Record<string, unknown>>;
-  readonly private: Readonly<Record<string, unknown>> & { readonly intentSha256: string; readonly orderId: string; readonly payerPk: unknown; readonly target: unknown; readonly method: string; readonly framing: string; readonly body: unknown; readonly outbound: unknown; readonly inbound: unknown; readonly policy: unknown; readonly limits: unknown; readonly disclosures: unknown };
+  readonly private: Readonly<Record<string, unknown>> & {
+    readonly intentSha256: string;
+    readonly orderId: string;
+    readonly payerPk: unknown;
+    readonly target: unknown;
+    readonly method: string;
+    readonly framing: string;
+    readonly body: unknown;
+    readonly outbound: unknown;
+    readonly inbound: unknown;
+    readonly policy: unknown;
+    readonly limits: unknown;
+    readonly disclosures: unknown;
+    /** proxy 型の quote だけ（増分 v1.5、`docs/zktls-router-proxy-design.md` §8）。無ければ MPC 型。承認の束縛（`privateBindingOf`）は `private` 全体を含むので、この欄も束縛される。 */
+    readonly tls?: { readonly mode: "proxy"; readonly relay?: { readonly maxSentBytes: number; readonly maxRecvBytes: number } };
+  };
   readonly approval: { readonly required: boolean; readonly boundTo: string; readonly deadlineMs: number };
   /** 持ち主の証明。purchase・attest・record・status で Router に返す。**表示・保存の対象ではない。** */
   readonly ownerKey: string;

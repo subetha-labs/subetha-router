@@ -214,3 +214,42 @@ PRIVATE_PAYER_TOKEN=<token> npx tsx tools/private-payer.ts \
 
 実行記録（2026-10-22）: 結合 1 件目 `060fd61f…` delivered_private（受信 burn `0x8ec7…a831` eventId `…:151`、送信 `0x12be…cf17` chain settled、transport synthetic）。詳細は `docs/zktls-router-v2-inbound.md` §11。
 実行記録（2026-10-22、2 件目・実 transport）: `56c85a2c…` delivered_private（実合成の Router、V2 facilitator は公開 https トンネル越し、受信 burn `0x50a0…c197` eventId `…:253`、送信 `0x6956…b8c1` chain settled）。詳細は `docs/zktls-router-v2-inbound.md` §12。
+
+## 12. TLS の型（増分 v1.5、`docs/zktls-router-proxy-requirements.md`。2026-10-26）
+
+### 12.1 設定
+- 秘匿購入のプロファイルは**既定で proxy 型**（Router の Verifier が Provider に接続し、TLS の暗号文を中継する）。MPC 型のままにするプロファイルは `private.mpcProfiles` に書く。
+- proxy 型のプロファイルが 1 つでもあると、Router は起動時に `delivery capabilities` を読み、`proxy` を宣言しないバイナリでは起動しない。**lab の proxy 対応の `delivery` が
+  入るまでは、`private.profiles` の全部を `private.mpcProfiles` に書く**（今の lab のバイナリは `capabilities` を持たない）。
+
+```json
+"private": { "...": "§3 と同じ", "profiles": ["priv-c-x402-post", "priv-f-tempo-post"], "mpcProfiles": ["priv-c-x402-post", "priv-f-tempo-post"] }
+```
+
+- 型を変えると承認の指紋が変わり、発行済みの quote は `quote_changed` で止まる（資金は動かない）。
+
+### 12.2 proxy 型の受入（TR-X3。lab の proxy 対応の後）
+1. **支払い範囲の記録**（§2 と同じ形）を先に書く: Provider（C = `provider-x402-post.subethalabs.com`、F = `provider-mpp-post.subethalabs.com`）、額、回数（各 1 件）。
+2. 設定: 対象のプロファイルを `mpcProfiles` から外し、`deliveryBin`・`deliveryBinSha256` を lab の proxy 対応のバイナリにする。Router の起動ログで能力の門を通ったことを確かめる。
+3. quote: `quote.json` の `private.tls.mode` が `proxy`、`private.disclosures` に `routerConnectsToProvider`・`providerSeesRouterAddress`・`trustsRouterProviderPath` があり、
+   payer 道具の出力に `tls mode: proxy` の行があることを読む。`--connect` は付けない（proxy 型では拒否される）。
+4. approve → session → attest → record → `payer-decrypt` は §4・§5 と同じ。
+5. 証跡（§6 のゲートを別々に記録する）: 受信決済、送信決済、秘匿配送（record の `tls_mode: "proxy"` と、射影の `private.tls.providerAddr` が record の `provider_addr` と同じ）、Payer 受領、finality。
+6. 所要時間: `evidence.json` の各段の時刻と、MPC 型の既存の受入（§8）を並べて記録する（判断材料。合否条件ではない）。
+7. 失敗の扱いは §7 と同じ。proxy 型の新しい終端（`private_proxy_dial_failed`・`private_proxy_server_name_mismatch`・`private_proxy_limit`）は発行の後なので `unknown`（払ったかもしれない）。
+   `private_proxy_dial_refused` は受信 verify の前の拒否（`awaiting_payment`。x402 受信なら資金は動いていない）。
+
+### 12.3 実行記録（2026-10-26、proxy 型、owner の testnet 包括承認のもと作者が実行）
+- 構成: 実合成の Router（`tools/remote-router-process.ts`、`mpcProfiles` なし = 両プロファイル proxy 型。能力の門を通過）× lab の proxy 対応 `delivery`（`610c7bca…`）。Payer と Router の送信の鍵は
+  どちらも Router のテスト鍵 `0x4460…9515`（owner が Base Sepolia USDC を faucet、Tempo pathUSD は `tempo_fundAddress` の faucet）。Router の受取先は `0x5cb0…DC3D`。
+- 結果（5 ゲートすべて成立）:
+
+| Provider | 結果 | 受信 tx（Base Sepolia） | 送信 tx | record | 平文 | 承認→復号 |
+|---|---|---|---|---|---|---|
+| C（x402 POST `/select`） | **delivered_private** | `0x5348b6be…4d99`（11000 USDC → Router） | `0x9a6434fa…424e`（10000 USDC → `0x9014…6fE1`） | `tls_mode: proxy`、`provider_addr: 104.21.91.179:443`、`mozilla-webpki-roots`、session 1.7 s | `select-post-c` / `lab.select.v1`、`received_sha256` = 承認本文 | 14.3 s |
+| F（Tempo pull POST `/select`） | **delivered_private** | `0x71f60dd6…60b7`（11000 USDC → Router） | Tempo `0x5395d8b6…757b`（10000 pathUSD + fee 29） | `tls_mode: proxy`、`provider_addr: 104.21.91.179:443`、session 2.6 s | `select-post-f` / `lab.select.v1`、`received_sha256` = 承認本文 | 16.0 s |
+
+- finality（読み取りのみ、viem の receipt と Transfer の log）: 4 件とも `success`、送金先と額は承認対象どおり。
+- canary: Router の journal・quote の控え・診断・ログ・作業ディレクトリに、本文・本文の base64・bearer・平文は無い。
+- 中継量: 実 Provider では tap を挟んでいないので未計測（record の `len_sent` は C 1,463 B）。証明書の連鎖を含む実測は次の受入で tap を挟んで行う。
+- 証跡: `.claude_workflow/local/zktls-proxy-live-20261026.json`。bearer・ownerKey・鍵の作業ファイルは削除済み。

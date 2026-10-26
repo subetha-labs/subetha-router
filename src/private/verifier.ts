@@ -16,6 +16,8 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 
+import { PROXY_RELAY_LIMITS } from "./proxy.js";
+
 export type LaunchKind = "serve" | "verify";
 
 /** 試験専用: wrapper の 3 つの段（pid の公開の前・公開の後で門の確認の前・門の確認の後で exec の前）に「到着を書いて解放ファイルを待つ」1 行を挟む。本番は渡さない。 */
@@ -48,6 +50,11 @@ export interface ServeArgs {
   readonly timeoutSecs: number;
   /** pid・addr を待つ絶対期限（ミリ秒）。 */
   readonly readyByMs: number;
+  /**
+   * proxy 型だけ（増分 v1.5、設計 §5、要件 LX-1・LX-4）: 固定した Provider の接続先。ある場合だけ `--tls-mode proxy --provider-addr … --max-relay-*` を足す。
+   * 無ければ引数は今と同じ（MPC 型）。
+   */
+  readonly proxy?: { readonly providerAddr: string };
 }
 
 export interface VerifyArgs {
@@ -114,6 +121,86 @@ export function wrapperOf(hooks?: LaunchHooksForTest): string {
 
 export function sha256File(file: string): string {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
+
+/** `delivery capabilities` の出力の上限（B）と待つ上限（ms）。`docs/zktls-router-proxy-design.md` §3、要件 LX-6・FR-X14。 */
+export const CAPABILITIES_MAX_BYTES = 256;
+export const CAPABILITIES_TIMEOUT_MS = 5_000;
+const TLS_MODES = new Set(["mpc", "proxy"]);
+
+/**
+ * バイナリの能力の宣言を読む（起動時の門。設計 §3）。`capabilities` を引数に起動し、**stderr は捨て**、stdout を `CAPABILITIES_MAX_BYTES` まで読む
+ * （超えたら SIGKILL）。`CAPABILITIES_TIMEOUT_MS` で SIGKILL。終了コード 0 で stdout が JSON で**ちょうど** `{"tls_modes": [...]}`（他のキー無し、
+ * 要素は `"mpc"`/`"proxy"` だけ、重複無し）のときだけ値を返す。それ以外はすべて `undefined`（宣言を読めないバイナリ = 今の lab のバイナリも含む）。
+ */
+export function readCapabilities(deliveryBin: string, options: { readonly timeoutMs?: number } = {}): Promise<{ readonly tlsModes: readonly ("mpc" | "proxy")[] } | undefined> {
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      // 自分のプロセスグループで起動し、止めるときはグループごと止める（孫が stdout を握ったまま残らないように）。
+      child = spawn(deliveryBin, ["capabilities"], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, detached: true });
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let failed = false;
+    let settled = false;
+    const finish = (value: { readonly tlsModes: readonly ("mpc" | "proxy")[] } | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    /** グループごと SIGKILL し、stdout を閉じて、待たずに `undefined` で終える。 */
+    const abort = (): void => {
+      failed = true;
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      child.stdout?.destroy();
+      finish(undefined);
+    };
+    const timer = setTimeout(abort, options.timeoutMs ?? CAPABILITIES_TIMEOUT_MS);
+    child.on("error", () => {
+      failed = true;
+      finish(undefined);
+    });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > CAPABILITIES_MAX_BYTES) {
+        abort();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.on("close", (code, signal) => {
+      if (failed || code !== 0 || signal !== null) {
+        finish(undefined);
+        return;
+      }
+      finish(parseCapabilities(Buffer.concat(chunks).toString("utf8")));
+    });
+  });
+}
+
+/** `{"tls_modes": [...]}` の厳密な解析（`readCapabilities` の中身。試験が直接呼ぶ）。 */
+export function parseCapabilities(text: string): { readonly tlsModes: readonly ("mpc" | "proxy")[] } | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "tls_modes") return undefined;
+  const modes = (value as { tls_modes: unknown }).tls_modes;
+  if (!Array.isArray(modes) || modes.some((mode) => typeof mode !== "string" || !TLS_MODES.has(mode)) || new Set(modes).size !== modes.length) return undefined;
+  return { tlsModes: [...(modes as ("mpc" | "proxy")[])] };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -368,6 +455,9 @@ export function createVerifierRunner(options: VerifierRunnerOptions): VerifierRu
         "--timeout-secs", String(Math.floor(args.timeoutSecs)),
         "--intent", args.intentPath,
         "--release", args.releasePath,
+        ...(args.proxy === undefined
+          ? []
+          : ["--tls-mode", "proxy", "--provider-addr", args.proxy.providerAddr, "--max-relay-sent", String(PROXY_RELAY_LIMITS.maxSentBytes), "--max-relay-recv", String(PROXY_RELAY_LIMITS.maxRecvBytes)]),
       ]);
       if (child === undefined) return { ok: false, reason: "launch_failed" };
       if (!(await waitPid(args.dir, "serve", child as Child & { markHandshake(): void }, args.readyByMs))) {
