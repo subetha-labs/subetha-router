@@ -1,8 +1,8 @@
 # Colosseum Crypto World's Fair — submission kit (draft 1, 2026-10-10)
 
-Owner decisions (2026-10-10): tracks **Tempo, Base, Solana**; the owner narrates both videos in English; the repository becomes public under MIT; the pitch should quantify what providers gain (reach they did not have) with sourced numbers.
+Owner decisions (2026-10-10): tracks **Tempo, Base, Solana**; the owner narrates both videos in English; the repository becomes public under MIT; the pitch should quantify what providers gain (reach they did not have) with sourced numbers; the spoken pitch is confident hackathon language, and the qualifications live in §4/§5, not in the script; the pitch names SubEtha's zERC20 confidential payments as its existing first piece, the Router as the second, and their integration as the plan; the ask for fifty providers, the local payer and "dynamic" are not spoken (owner, 2026-10-10 evening).
 
-Deadline: 2026-10-12 23:59 PT = **2026-10-13 15:59 JST**. Pitch video ≤ 3 min. Technical demo video 2–3 min. All content in English.
+Deadline: 2026-10-12 23:59 PT = **2026-10-13 15:59 JST**. Pitch video ≤ 2 min (form, read 2026-10-10: "introduce yourselves, tell us what you're building, and tell us why you're the people to build it. Nothing fancy required. We're interested in how you think and communicate. YouTube, Loom, or Vimeo. Up to 2 minutes."). Technical demo video 2–3 min. All content in English.
 
 Everything below is honest to the repository's records. Numbers carry a source in §5; the matrix marks what is measured by us, what is third-party, and what is a forecast.
 
@@ -18,45 +18,71 @@ Submission description (form; 590 characters, confirm the form's limit):
 
 ---
 
-## 2. Pitch video script (404 spoken words in the quoted paragraphs: 3:07 at 130 wpm, 2:42 at 150 wpm; segment times below assume 150 wpm, rounded up — the owner must time a read-through before recording and cut until the measured length is ≤ 2:50; "why", not a demo)
+## 2. Pitch video script (295 spoken words in the quoted paragraphs: 2:16 at 130 wpm, 1:58 at 150 wpm; segment times below assume 150 wpm, rounded up — the form's limit is 2 minutes, so the owner must time a read-through before recording and cut until the measured length is ≤ 1:55; Codex round 4 suggests a planning budget of 220–230 words for an unrehearsed non-native read at 120 wpm; the form asks for an introduction, what you are building and why you are the people to build it, "nothing fancy")
 
-**[0:00–0:15] Founder and problem.**
-"I'm Fujita, solo builder of SubEtha, after years building chains and cross-chain protocols. The problem I keep hitting: an agent finds the right paid API and still cannot pay, because the two sides speak different payment protocols."
+**[0:00–0:17] Who I am.**
+"I'm Takuya Fujita, building SubEtha, after years building chains and cross-chain protocols. The problem I ran into: an agent finds the right paid API and still cannot pay, because the two sides share no payment protocol, no chain, not even a currency."
 
-**[0:15–0:45] Two ecosystems that cannot pay each other.**
-"x402, started by Coinbase, passed 100 million transactions on Base in the first quarter of 2026; by August Solana carried about 70 percent of monthly x402 volume. MPP, Stripe's protocol on Tempo, launched in March with over 100 paid services. On October 10th I crawled its directory: 118 of 129 services advertise MPP as their only payment interface, one an x402 client does not speak. Pick one rail, and the other side cannot see you."
+**[0:17–0:42] The gap.**
+"x402 passed 100 million transactions on Base by the first quarter of 2026, and Solana has grown into a major x402 chain as well. MPP, Stripe's protocol on Tempo: 118 of the 129 services in its directory advertise MPP only. An agent holding USDC on Base cannot buy from a Tempo service priced in pathUSD; each side is invisible to the other."
 
-**[0:45–1:11] Product.**
-"SubEtha Router is the bridge, a hosted MCP server. The agent takes a quote; with the local payer a human approves it in a native dialog; the agent pays the Router on its rail, the Router pays the provider on the provider's rail from its own balance and returns the response. Two independent payments. No swap, no key custody. A compatible provider changes nothing."
+**[0:42–1:10] What I'm building.**
+"SubEtha Router is the bridge, a hosted MCP server. The agent pays the Router on its rail; the Router pays the provider on the provider's rail from its own balance. No swap, no key custody. All 20 cross-rail pairs settle on testnets: buyers on Base, Solana, Arc and Tempo reach providers on the other side, and the ecosystems grow each other. And the Router is already proven on mainnet."
 
-**[1:11–1:41] Evidence.**
-"On testnets, all 20 cross-rail pairs, x402 on Base, Arc and Solana, MPP on Tempo and Solana, settle end to end, both legs on chain. On October 10th, running the Router on my own machine, I made one bounded mainnet purchase: an MPP wallet on Tempo bought from an API that accepts only x402 on Base. The local payer is on npm; its first route, Base Sepolia to Tempo testnet, works in Claude Code today."
+**[1:10–1:35] Why me, and where this goes.**
+"SubEtha already has its first piece: confidential payments for AI agents, built on zERC20, so an agent can use on-chain services without revealing what it does or why. The Router is the second piece. Bring the two together, and agents whose strategy must stay private get every rail at once; that expands the on-chain agent market far beyond any single rail."
 
-**[1:41–2:20] What providers gain, and the business.**
-"For providers the value is reach. Through its advertised Tempo interface, a provider is paid directly only by agents holding Tempo stablecoins. Through the Router the x402 side could pay it too, an ecosystem past 100 million transactions, once its challenge is compatible and the mainnet prerequisites are met. Potential reach, not measured customers. The Router earns a routing fee per purchase: 0.001 in the agent's stablecoin on dynamic routes to x402 providers. Juniper expects agentic commerce to reach 1.5 trillion dollars by 2030. I need the first fifty providers who want buyers from the other rail."
+**[1:35–1:59] Business and close.**
+"Providers gain reach: a provider on a supported route gets buyers from the other rail at once, and the Router takes a routing fee. Our vision for SubEtha is a payment layer that lets AI pay without friction, on any rail, with no third party learning its intent. This is the infrastructure agentic commerce will need as it grows. Thank you."
 
-**[2:20–2:43] Validation, honesty, ask.**
-"This is engineering validation, not customer validation: a design-to-test trail for every feature, independent model reviews, fourteen agent-side issues found by dogfooding and those reviews. I'm looking for design partners: paid-API providers and agent developers who will run real purchases and tell me where it breaks. Testnet today, one mainnet route proven, prerequisites documented. Thank you."
+Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification. The hedges were removed by owner decision (2026-10-10); the matrix in §5 still carries every qualification, and the script is meant to stay true, only unqualified. Codex rounds of 2026-10-10: round 3 approved the unhedged 3-minute draft; round 4 requested corrections to the 2-minute cut, subsequently applied; round 5 required three wording changes on the owner's rewrite (confidential payments stated as a plan, no blanket "cannot use public chains", "advertise" not "accept" for the 118 services), applied; round 6 found no further correction to the spoken script and corrected this history line; round 7 reviews the owner's second rewrite (name, Solana share, zERC20 as the existing first piece, payer sentence removed, "dynamic" dropped from the fee statement, provider ask replaced, new close); it found no false spoken sentence and three note/translation corrections, applied. Round 8 reviews the owner's third pass (Solana share softened, mainnet sentence generalized, "use on-chain services", value sentence before the close); it passed the spoken facts and required the value sentence to carry an explicit vision cue plus two translation fixes, applied. The 3-minute draft is in this file's history (commit 87b1185).
 
-Do not say in the pitch: partners, customers, audited, production-ready, all APIs, anonymous, or secure without qualification.
+### 2b. Candidate B: value-first (239 spoken words: 1:51 at 130 wpm, 1:36 at 150 wpm; segment times at 150 wpm, rounded up)
+
+Added 2026-10-11 at the owner's request as an alternative to the script above (candidate A), which stays as is. Same facts and the same "Do not say" line; the mechanics (MCP, the Router's own balance, swap and custody, the 20-pair matrix, zERC20, rail names) are left to the technical demo, and the spoken words carry the value: pay with what you hold, receive what you accept, intent stays private. The owner picks one candidate before recording. The owner (2026-10-11) replaced 'pay freely' with 'pay without friction' in the vision sentence (here and in candidate A) so it cannot be heard as 'free of charge'. The owner (2026-10-11) also asked the opening to mention AI-driven crypto products (kit §5 founder background: AI-driven DeFi platform; earlier projects include HiveFi and Flovia). The owner (2026-10-11) asked that the first problem name all three layers of the mismatch, so 'no shared way to pay' became 'share no payment protocol, no chain, not even a currency' (the same wording as candidate A). Codex round 9 (2026-10-11) reviewed candidate B and required five corrections (strategy "clues" not "read", directory scope, keys not funds, no "stop competing", the Japanese promise line), applied. Codex brush-up review (2026-10-12, gpt-6-astra, read-only) proposed eight script changes; the owner adopted six — open with the blocked purchase (the founder's name is spoken second; the segment is still the form's introduction), one provider-reach sentence, a future-facing integration sentence ('Next, we'll combine them …'), 'a mainnet purchase is verified' (owner's wording; kit §5: one purchase, 2026-10-10), a market passage that answers 'why now' ('Adoption is growing' is editorial synthesis of the dated third-party figures, not Router traction), and 'charges a routing fee on purchases it handles' — and declined two (a GitHub ask at the close; framing the promise as a vision). 264 → 230 words; the first problem now reads 'The barrier: no shared payment protocol, no chain, not even a currency.' The owner (2026-10-12, after watching the sample) restored the bridge sentence 'Two things hold AI agents back today.' between the background and the barrier, because the jump from the introduction to 'The barrier:' was abrupt and the two-card screen it names had lost its spoken cue: 237 words. The owner (2026-10-12, while rehearsing) added a greeting, 'Hi everyone.', as the first spoken sentence (captioned like every other sentence): 239 words.
+
+**[0:00–0:22] An agent that cannot pay, and who I am.**
+"Hi everyone. An AI agent finds the right service and cannot pay. I'm Takuya Fujita, building SubEtha. I've built chains, cross-chain protocols and AI-driven crypto products. Two things hold AI agents back today. The barrier: no shared payment protocol, no chain, not even a currency. And public on-chain payments can reveal clues about its strategy."
+
+**[0:22–0:33] The promise.**
+"That is what SubEtha is for: the agent pays with what it holds, the provider receives what it accepts, and the agent's intent stays its own."
+
+**[0:33–0:48] A large market, split in two.**
+"x402 passed 100 million transactions on Base, with Solana another major chain. Stripe's MPP directory on Tempo lists 129 services; 118 advertise MPP only. Adoption is growing, but the payment systems cannot pay each other directly."
+
+**[0:48–1:04] What changes.**
+"With SubEtha Router, agents pay with what they hold. Compatible providers reach buyers across payment systems without changing their setup. The agent keeps its keys. Every supported rail pair settled on testnets, and a mainnet purchase is verified."
+
+**[1:04–1:21] Intent stays private.**
+"SubEtha already has confidential payments for AI agents: an agent uses on-chain services without revealing what it does or why. The Router is the second piece. Next, we'll combine them so agents can reach supported rails while keeping their strategy private."
+
+**[1:21–1:39] Business and close.**
+"The Router charges a routing fee on purchases it handles. Our vision is a payment layer that lets AI pay without friction, on any rail, with no third party learning its intent: the infrastructure agentic commerce will need as it grows. Thank you."
 
 ---
 
-## 3. Technical demo video (target 2:50; "how")
+## 3. Technical demo video (target 2:45–2:55, hard limit 3:00; "how")
 
-Record on the owner's Mac. One real purchase through the published payer (testnet, Base Sepolia → Tempo MPP), then the mainnet evidence as recorded material. Keep a persistent on-screen label: **TESTNET** during the live part, **MAINNET (owner-run, loopback)** during the evidence part. Use a fresh security phrase; mask the passphrase; never show the key files.
+Revised 2026-10-13, **v5** (v4 with the demo provider changed to our SOL price API that accepts only USDC on Solana devnet — owner's call for the Solana-centred judges, 2026-10-13; the Worker's second resource is PR #170. v4's direction after v3.2: say what we are going to do first, then run the demo while explaining what happens behind it; **split screen** during the demo — left, Claude Code as recorded; right, an animated flow of what happens behind it; the provider is described by what it sells and what it accepts, never by our internal name "Provider B"). Three parts: **A. intro** (full-screen animation: the problem and what we will do), **B. the demo** (split screen: the agent sets the Router up by itself, we name a SOL price API that accepts only USDC on Solana devnet while I hold USDC on Base Sepolia, the payer on this Mac quotes it by URL, I approve in the native dialog, two payments, the data arrives), **C. wrap-up** (full-screen: where the key lives, no human-facing app, the twenty settled pairs, the dated mainnet evidence, the end card). Nothing about open source. 23 spoken sentences / 332 words (JSON count; the owner's measured read decides the length — trim if it runs past 2:55), plus one on-screen line in A that is not read; a continuous read at ≈110 wpm (≈2:25) plus 25–30 s of holds lands in 2:40–2:50 (hard limit 3:00). The three-CLI line stays in the setup scene. Record on the owner's Mac: screen first (a 1280×800 region of Claude Code at 18–20 pt so it stays legible at ≈1150 px wide on the left; the payer terminal and the native dialog in the same region), then one continuous narration read against the assembled footage (continuous mode, pauses kept; if screen waits are cut, the film says "Waits cut"). Persistent labels: **TESTNET** during A and B and the coverage statement; **MAINNET · OWNER-RUN · LOOPBACK** plus a large **Recorded evidence · 2026-10-13** during the mainnet part. No small print, no file paths on screen. Fresh security phrase, redacted in the published footage; passphrase masked by the dialog; no key files, `ownerKey`, credentials or notifications on screen. Each sentence names the §5 row it rests on (tags are not spoken). **Recorded 2026-10-13 01:25–04:08 JST** (silent screen, captured by the agent with `screencapture` on the owner's Mac while the owner approved in the payer dialog): the official page (Safari), the setup session (Claude Code finds the README → llms.txt, registers at user scope, restart, listing), the payer daemon window, and the purchase take with the payer 0.2.2 plain-words dialog (`dyn-x402-to-sol`, ref `p_prilpkl5ytkik`); the terminal was 112×34 at 18 pt in a 1269×762 pt region (42 rows / 1269×930 for the purchase take so the dialog fits); the dialog's security-phrase line is covered in the published footage.
 
-| Time | On screen | Narration (owner) |
+The right panel in B is one persistent flow diagram, vertical: **AI agent (Claude Code)** → **payer · native dialog (This Mac)** → **hosted Router (MCP)** → **SOL price API · USDC on Solana devnet only**, with a "This Mac | Hosted" boundary; each sentence lights the box or arrow it talks about (register, quote, approve, payment 1, payment 2, data back), and the price breakdown (10000 + 1000 = 11000) appears on the quote. Captions stay in the bottom band, full width.
+
+| Time | On screen | Sentences (owner) |
 |---|---|---|
-| 0:00–0:15 | Title card; the mismatch diagram: agent holds Base USDC → provider accepts only MPP on Tempo. Caption: "Provider: our reference Provider B (testnet)" | "The agent holds USDC on Base and speaks x402. The provider, our own reference provider for this demo, only accepts MPP on Tempo. Here is a purchase going through." |
-| 0:15–0:30 | Terminal: `npm i -g @subetha/payer`, `subetha-payer daemon` already running; a fresh Claude Code session outside the repo with `claude mcp add --scope user subetha-payer -- subetha-payer mcp` | "The payer is on npm. The human starts a daemon that holds the key; Claude Code only talks to it through a local shim." |
-| 0:30–0:50 | Claude Code: find_routes → quote; the subject (amount 0.01 USDC, decimals, recipient, deadline) | "The agent discovers the route and takes a quote. Nothing has been paid." |
-| 0:50–1:15 | The native macOS dialog: security phrase, exact terms, passphrase entry, Approve | "Every purchase on this route is confirmed by a human in a native dialog: I check the security phrase I chose at startup and the exact terms, then enter my passphrase. Tool arguments cannot approve a payment. This relies on the payer's documented trust assumptions: an unmodified installation and runtime, an operating system that keeps other processes from inspecting the daemon or driving its dialog, and a security phrase I keep to myself." |
-| 1:15–1:40 | purchase → `delivered`; the provider's JSON; `subetha_payer_status` showing the saved ref | "The Router paid the provider over MPP from its own balance and returned the data. The result is saved locally with its reference." (If the restart is shown: stop and restart the daemon on camera, then read the status again; otherwise do not claim reopening.) |
-| 1:40–2:00 | Explorer pages for **that** purchase (same paymentId and tx hashes as the result on screen): Base Sepolia transfer from my wallet to the Router; Tempo transfer from the Router to the provider. Caption: "recorded after the purchase; waits cut" | "Two independent payments, both on chain. The agent's key never left the machine." |
-| 2:00–2:20 | Architecture diagram: Claude → stdio shim → local daemon → HTTPS Router (MCP) → provider; two payment arrows; hash-chained ledger | "Design choices: the hosted Router never holds the caller's key; the daemon writes a hash-chained ledger before every side effect; an uncertain outcome is never retried blindly." |
-| 2:20–2:40 | Recorded evidence, dated 2026-10-10: the mainnet purchase — Tempo mainnet inbound tx, Base mainnet outbound tx to the x402-only API, the delivered JSON. Caption: "2026-10-10, Router run on the owner's machine, loopback only, signed with the repository's tools" | "The same Router code, run on my machine, made one mainnet purchase on October 10th: an MPP wallet on Tempo bought from an API that accepts only x402 on Base. The hosted Router stays on testnets." |
-| 2:40–2:50 | Repo (only if public by recording time), npm, hosted MCP URL; the 20-pair matrix | "Our Router and payer code are open source under MIT. The hosted endpoint, the payer on npm, and the full design and review trail are in the repository." |
+| 0:00–0:22 | **A.** Full-screen: the problem card "the agent holds one rail · the provider accepts another" (no page backdrop — owner 2026-10-13); then a three-step plan card "1 the agent sets it up itself · 2 a price API on another rail, by URL · 3 I approve, the Router pays"; no on-screen-only line (it became the first spoken sentence of B — owner 2026-10-13) | 1. Different payment rails block an agent's purchases; SubEtha Router pays across them. [payment architecture row] 2. Here is the plan: an agent sets up the Router itself, buys data on another rail, and I approve at the end. [official page row; dynamic upstream row; payer architecture row] |
+| 0:22–0:46 | **B.** Split screen from here. Left: Claude Code (fresh session, nothing registered); the owner types only "Make SubEtha Router usable from here."; the agent finds the official page on its own (verified 2026-10-12 for Claude Code, Codex CLI and Grok Build with no URL given), reads its llms.txt, runs `claude mcp add --scope user --transport http subetha-router https://router.subethalabs.com/mcp` itself and asks for a restart; cut ("Waits cut"); the restarted session lists the routes. Right: page → llms.txt → "register MCP" steps light up; on sentence 6 three pills "Claude Code · Codex CLI · Grok Build" and "Recorded testnet purchases · 2026-10-12" | 3. On the left, Claude Code as it runs; on the right, what happens behind it. [production plan §6] 4. I just ask Claude Code to make SubEtha Router usable. [official page row] 5. It finds the official page and registers the hosted Router, an MCP server, by itself; I only restart. [official page row; hosted endpoint row] 6. Today it is Claude Code; Codex CLI and Grok Build are verified too, so pick whichever you use. [three agent CLIs row] |
+| 0:46–1:02 | Left: the route listing with the dynamic profiles visible. Right: the provider box appears, "SOL/USD price API · accepts USDC on Solana devnet only (x402)" with the URL `provider-x402-sol.subethalabs.com/v1/sol/snapshot`; then my rail tag "USDC · Base Sepolia (x402)" on the agent's side | 7. Its dynamic routes take a provider's URL; today, a SOL price API we run that accepts only USDC on Solana devnet. [dynamic upstream row; demo provider row] 8. I hold USDC on Base Sepolia, a different rail. [payment architecture row] |
+| 1:02–1:10 | Left: the payer's terminal running (daemon), held through sentence 10. Right: the payer box on the This Mac side, "holds the key · native dialog"; on sentence 10 "npm i -g @subetha/payer · your wallet · any testnet faucet" and "budget mode: planned" | 9. To pay, I run the payer on this Mac; it asks me before every payment. [payer architecture row; payer npm row] 10. The payer is an npm package that holds the agent's wallet: fund its address from any testnet faucet and try it; a budget mode without per-purchase approval is planned. [payer npm row; payer architecture row; planned approval policy row] |
+| 1:10–1:28 | Left: `subetha_payer_quote` with `dyn-x402-to-sol` and the URL, then the quote subject enlarged (upstream URL, 11000 base units with decimals, recipient, upstream + fee = total, deadline). Right: the quote arrow agent → payer → Router → provider "reads the price"; the breakdown 10000 + 1000 = 11000 | 11. I give Claude Code the URL and ask for a quote. [dynamic upstream row; payer architecture row] 12. The Router reads the provider's price and quotes it plus a small fee. [dynamic upstream row] |
+| 1:28–1:44 | Left: the native macOS dialog (security phrase redacted, terms readable: Profile, Upstream URL, Price; passphrase masked; Approve clicked); a short readable trust line ("relies on an unmodified install and a secret phrase"). Right: "approval happens on this Mac" lights on the payer box, then "the agent never sees my key" (sentence 12; owner 2026-10-13: say why the dialog exists) | 13. I check the terms and my security phrase in the native dialog, then approve. [payer architecture row; trust assumptions row] 14. The agent never sees my passphrase or my key; only this dialog can approve a payment. [payer architecture row] |
+| 1:44–2:00 | Left: the purchase running. Right: payment 1 arrow my wallet → Router (Base Sepolia USDC, x402), then payment 2 arrow Router → provider (from the Router's balance, USDC on Solana devnet, x402), then the data arrow back to the agent | 15. Payment one: my wallet pays the Router on Base Sepolia. [payment architecture row] 16. Payment two: the Router pays the provider on Solana devnet, from its own balance. [payment architecture row; demo provider row] |
+| 2:00–2:12 | Left: `delivered` and the JSON (the SOL mark price from Hyperliquid, `fetchedAt`) held long enough to read; the purchase reference. Right: the whole path lit | 17. Here is the delivered response: the SOL price, as JSON. [payer npm row; demo provider row; requires the successful capture] |
+| 2:12–2:28 | **C.** Full-screen architecture with the "This Mac / Hosted" boundary: agent → local payer (key, native dialog) → hosted Router (MCP) → provider; a dashed "quote · agent → Router directly" path; no screen or person on the agent's side | 18. The payer holds my key on this Mac; the hosted Router never does. [payer architecture row] 19. There is no human-facing app: the Router is an MCP server, and the agent calls it directly. [hosted endpoint row; payer architecture row] |
+| 2:28–2:35 | Large "20 cross-rail pairs settled on testnets" (the matrix optional, labelled as recorded test results) | 20. All twenty supported cross-rail pairs have settled on testnets. [20 pairs row] |
+| 2:35–2:48 | The two dated explorer screenshots (Tempo inbound 0x7ab25ff5…, Base outbound 0x3ab9b229…) with the upstream card (Exa's logo, `POST api.exa.ai/search`, the request body; nothing below it — owner 2026-10-13); labels MAINNET · OWNER-RUN · LOOPBACK and Recorded evidence · 2026-10-13 | 21. This is recorded mainnet evidence: a real search on Exa, the well-known AI search API, paid through the Router from Tempo with MPP on my own machine. [mainnet purchase row (2026-10-13 Exa); dynamic upstream row] |
+| 2:48–2:56 | End card: subethalabs.com/router (largest), "Try a quote without a wallet", router.subethalabs.com/mcp with TESTNET, npm @subetha/payer — no repository or licence line | 22. Try a quote without a wallet. [official page row] 23. Start at subethalabs.com/router. [official page row] |
+
+Not in the demo: open source or the licence (owner 2026-10-12), the npm install on camera (done beforehand; npm on the end card), the hash-chained ledger and retry narration, any privacy or "private intent" claim on the working Router (the integration is planned, §5), a new mainnet purchase. Not shown either (owner, v3.1/v4): the fixed-route count, any third-party quote (the x402.org demo endpoint returns a page after payment; it stays a §5 row and a quote example in `llms.txt`), the explorer pages of the live purchase (the right panel's arrows explain the two payments; the hashes go into the §5 record), and the name "Provider B" (the API is described by what it sells and what it accepts). The funded purchase is a dynamic one through the payer (`dyn-x402-to-sol`, the URL of our SOL price API that accepts only USDC on Solana devnet: `provider-x402-sol.subethalabs.com/v1/sol/snapshot`, PR #170), which payer 0.2.0 supports; the Router pays the provider on Solana devnet with its own key. Fallback order if the payer purchase fails: use the saved successful rehearsal capture; inspect status before anything else (a timeout is not proof of nonpayment, never retry blindly); a genuine hosted-Router purchase with the signing tools labelled "Developer tools · TESTNET"; otherwise recorded acceptance evidence with the missing fresh capture disclosed. Troubleshooting on camera is capped at about an hour.
 
 ---
 
@@ -75,25 +101,32 @@ Record on the owner's Mac. One real purchase through the published payer (testne
 | Claim | Kind | Source |
 |---|---|---|
 | Founder background (chains, cross-chain protocols, AI-driven DeFi platform) | owner-attested (Onlab application, 2026-09) | owner |
+| SubEtha's first piece, confidential payments for AI agents built on zERC20, already developed by the owner outside this repository; the Router is the second piece; bringing the two together is the plan, and nothing in the Router today hides intent | owner-attested (2026-10-10), not in this repository; the pitch states the zERC20 payments as existing SubEtha work and the integration as a plan | owner |
 | Repository `github.com/subetha-labs/subetha-router` public under the MIT license since 2026-10-10 | measured by us | GitHub repository settings; `LICENSE`; README "Sources and license" |
+| Official page `subethalabs.com/router` (EN/JA) and its agent-readable twin `subethalabs.com/router/llms.txt` (live since 2026-10-12, subetha-lp PR #27: registration command, the Claude Code restart, discovery/quote tools incl. dynamic profiles and how to choose one, the local payer flow with the human-started daemon, money-safety rules; a 'For agents' section on the page carries the prompt a user pastes into Claude Code): "Try without a wallet" (discovery and quotes without signing), the Claude Code registration command `claude mcp add --transport http subetha-router https://router.subethalabs.com/mcp`, the five rails on four test networks, "10 fixed routes · 20 dynamic profiles", caveats (testnet-only proof of concept, unaudited, not for production; no automatic retry of `paid_data_unavailable` / `unknown` / `awaiting_payment`; payments not atomic; no anonymity claims; `approval=quoteId` is not proof of human consent) | measured by us (page read 2026-10-12) | https://subethalabs.com/router/ |
 | Hosted Router MCP endpoint `https://router.subethalabs.com/mcp` (testnet only) | measured by us | `docs/DEPLOY.md`; README |
 | `@subetha/payer` on npm (`npm i -g @subetha/payer`) | measured by us | npm registry; `packages/payer/README.md` |
 | Payment architecture: two independent payments, the outbound leg from the Router's prefunded balance; no swap, no bridge, no key custody | measured by us (design and acceptance records) | README; `docs/ENGINEERING.md`; `docs/public-brief-2026-10-08.md` |
-| The demo's live provider is our reference Provider B (MPP on Tempo testnet), hosted by us | measured by us | `docs/public-brief-2026-10-08.md`; README "Providers A/B are hosted by us" |
+| The demo's live provider is our Solana x402 provider Worker (accepts only USDC on Solana devnet; second resource `GET /v1/sol/snapshot`, Hyperliquid SOL perpetual mark price, PR #170 merged 2026-10-13; deployed by the owner with `wrangler deploy --env sol` at 02:31 JST; demo purchase through the payer `dyn-x402-to-sol` → delivered, ref `p_6hfrl77gleu3e`, paymentId `7324b149-ec69-4274-a3da-0fe1aea9b8cb`, 2026-10-13 02:33 JST; later takes: ref `p_vyzw5jyl57452` (02:44 JST, SOL mark 107.35, payer 0.2.0 dialog) and the one used in the film, ref `p_prilpkl5ytkik`, paymentId `2a457930-27b1-4c15-8629-2fcc3894d0d2`, 04:03 JST, with the payer 0.2.2 plain-words approval dialog), hosted by us on Cloudflare Workers | measured by us | `docs/provider-x402-workers.md` §10–§11; README "Providers A/B are hosted by us" |
 | Approval guarantee of the payer rests on its trust assumptions (unmodified install/runtime, OS isolation of the daemon and its dialog, secret security phrase) | measured by us (documented threat model) | `docs/agent-payer-requirements.md` T1–T4′; `packages/payer/README.md` "Limits of this trust model" |
 | Design-to-test trail and independent model reviews for every feature | measured by us | review tables in `docs/*-tasks.md`; `docs/agent-usability-study.md` |
 | "First fifty providers" and "design partners" | owner's intent (ask), not a claim about the market | this document §4 |
 | Payer architecture: Claude Code → stdio shim (no key) → human-started local daemon (holds the key, native dialog, hash-chained ledger written before every side effect, no blind retry of uncertain outcomes) → hosted Router over HTTPS (MCP) → provider; the quote `subject` shows amount, decimals, recipient and deadline | measured by us (design and acceptance records) | `packages/payer/README.md`; `docs/agent-payer-design.md`; `docs/agent-payer-tasks.md` G-A2 |
+| Three agent CLIs, one page: fresh sessions of Claude Code, OpenAI Codex CLI 0.157.1 and Grok Build 1.0.50 each registered the hosted Router and the payer's MCP shim from `subethalabs.com/router/llms.txt` alone (no human-typed commands), and Codex CLI and Grok Build each completed a funded testnet purchase through the payer (`md-mpp-eth-snapshot`, owner-approved native dialog; Grok's first attempt on another route ended `paid_data_unavailable` on the Router's outbound leg); asked only to "make SubEtha Router usable" with no URL, each CLI found the official guide by itself (Grok and Codex by web search, Claude Code through the repository README's pointer, 2026-10-12) | measured by us (2026-10-12; records with refs and paymentIds) | `docs/payer-rails-design.md` §6; subetha-lp PR #29/#30 (llms.txt) |
 | x402: "well over 100 million cumulative transactions" on Base through Q1 2026 | third-party (Chainalysis) | https://www.chainalysis.com/blog/x402-agentic-payments-adoption/ |
 | Base: 3.1M x402 transactions, $1.2M in 30 days (as of 2026-05-29) | third-party, secondary (CryptoBriefing attributes it to Base; given, returned 403 during review, not independently verified) | https://cryptobriefing.com/agent-payments-growth-x402/ |
 | Solana ~70% of monthly x402 volume (reported 2026-08-24), 35M+ cumulative x402 transactions on Solana | third-party | https://solanacompass.com/news/solana-claims-top-spot-on-x402-as-ai-agents-settle-33m-usdc-in-a-single-week ; https://cryptobriefing.com/solana-x402-market-share-dominance/ (given; returned 403 during review, not independently verified) |
 | Tempo mainnet live 2026-03-18 with MPP; directory of 100+ providers at launch | third-party | https://www.coindesk.com/tech/2026/03/18/stripe-led-payments-blockchain-tempo-goes-live-with-protocol-for-ai-agents ; https://www.theblock.co/post/394131/tempo-mainnet-goes-live-with-machine-payments-protocol-for-agents |
 | mpp.dev catalog: 129 services, 118 advertise MPP only (`methods` lists only `tempo`); directory metadata, not a test that they refuse other methods | **measured by us, 2026-10-10** | `docs/evidence/mpp-catalog-2026-10-10.json`, `docs/mainnet-first-route.md` §3 |
-| Agentic commerce $1.5T in 2030 (press release of 2026-04-07; no 2026 figure given there) | forecast (Juniper Research) | https://www.juniperresearch.com/press/agentic-commerce-set-to-generate-15-trillion-globally-by-2030-as-payments-infrastructure-leaders-revealed/ |
+| Agentic commerce $1.5T in 2030 (press release of 2026-04-07; no 2026 figure given there; dropped from the 2-minute pitch, kept for the form) | forecast (Juniper Research) | https://www.juniperresearch.com/press/agentic-commerce-set-to-generate-15-trillion-globally-by-2030-as-payments-infrastructure-leaders-revealed/ |
 | 20 cross-rail pairs settled on testnets, both legs on chain | measured by us | `docs/public-brief-2026-10-08.md` §3, `docs/DEPLOY.md` §2b–§2e |
-| One mainnet purchase (Tempo USDC.e MPP → x402-only API on Base), signed with the repository's tools, Router on the owner's machine (loopback) | measured by us, 2026-10-10 | `docs/mainnet-first-route.md` §3 |
+| One mainnet purchase (Tempo USDC.e MPP → x402-only API on Base), signed with the repository's tools, Router on the owner's machine (loopback); the upstream was a third-party price API chosen by URL through a dynamic profile (not verified by the operator) | measured by us, 2026-10-10 | `docs/mainnet-first-route.md` §3 |
+| Second mainnet purchase, 2026-10-13: **Exa's search API** (`POST https://api.exa.ai/search`, x402 on Base mainnet USDC, $0.007) bought through the same loopback Router and profile with a **POST body chosen by the caller** (Router PR #173 adds request bodies to dynamic upstreams; the body is bound into the quote and shown in the approval subject); inbound Tempo tx `0x7ab25ff5…46d7` (0.008 USDC.e incl. the Router fee), outbound Base tx `0x3ab9b229…4558` (7,000 base units to Exa), `delivered` with three JSON search results | measured by us, 2026-10-13 | `docs/mainnet-first-route.md` §3 (2026-10-13 entry), `docs/dynamic-upstream-post-design.md` |
+| x402.org demo endpoint `https://x402.vercel.app/protected` (served at x402.org/protected; third party to us): its 402 offer asks 10000 base units of USDC on Base Sepolia (or Solana devnet); on 2026-10-12 the hosted Router quoted it through `dyn-sol-to-x402` as upstream 10000 + fee 1000 = total 11000, `destinationVerifiedByOperator: false`; no funds moved | measured by us, 2026-10-12 | the endpoint's `payment-required` header; the quote's `subject` |
+| Dynamic upstream URLs: the hosted Router quotes and pays an x402 or MPP upstream URL the caller chooses (twenty profiles enabled since 2026-10-08; the operator has not verified the destinations; every pair settled on testnets) | measured by us | README "Dynamic upstream URLs"; `docs/DEPLOY.md` §2b–§2e; `docs/public-brief-2026-10-08.md` §3 |
 | `@subetha/payer` on npm (0.1.0 published 2026-10-10, funded purchase through 0.1.0; 0.1.2 accepted with a cancel test); supports one route, Base Sepolia → Tempo testnet | measured by us | `docs/agent-payer-tasks.md` G-A1/G-A2, `docs/agent-payer-followups-tasks.md` G-F |
 | 14 agent-side issues (10 from dogfooding, F-11–F-14 from Codex review) | measured by us | `docs/agent-usability-study.md` §3 |
+| Planned, not built: a payer approval policy that lets the agent purchase within a human-set budget without a per-purchase dialog (today every purchase needs the native dialog; stated as a plan in the demo) | owner statement, 2026-10-13 | §7 (open items); `packages/payer/README.md` (current behaviour: a dialog per purchase) |
 | Router fee: flat 1,000 base units of the source asset on dynamic routes to x402 providers; max(1,000, gas-derived cap) on dynamic routes to Tempo providers | measured by us | `tools/remote-mcp-config.ts` (`DYNAMIC_FEE_*`, `DYNAMIC_MAX_FEE_CEILING`) |
 
 Figures deliberately not used: "165 million transactions / 69,000 active agents / $50M" circulate in secondary articles without a primary source, so the pitch cites Chainalysis (Base, through Q1 2026) and the dated Solana share instead; the 30-day Base figure stays in this matrix only. Reach statements describe the ecosystem a provider becomes reachable from, not users of the Router.
@@ -107,7 +140,7 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 1. Freeze the two scripts above (after Codex review and the owner's edits). Split each into numbered units (one sentence or two per unit) in a `script.en.json` for a new `production/colosseum-v1/` (pitch) and `production/colosseum-demo-v1/` (demo).
 2. The owner records each unit as a separate WAV/M4A in a quiet room (phone or Mac mic is fine), naming files by unit id. For the demo, the screen capture is recorded first (QuickTime), then narration is recorded while watching it, per unit.
 3. The earlier `mix_range.py` expects Fish Audio synthesis receipts and cache keys, so it is not reused as is: a small new mixer for the new directories takes human-recorded stems by unit id, records each stem's hash and duration, normalizes to −16 LUFS, aligns to the timeline, and writes a truthful provenance record (owner recording, no synthesis). Old artifacts stay untouched. Subtitles come from the canonical script.
-4. Final checks as before: full decode, duration ≤ 3:00 / 2:50, stem alignment, captions match the script, stills reviewed. The owner watches the whole film once before upload.
+4. Final checks as before: full decode, duration ≤ 2:00 / 2:50, stem alignment, captions match the script, stills reviewed. The owner watches the whole film once before upload.
 
 ---
 
@@ -116,3 +149,81 @@ The earlier explainer was produced by Claude Code (`claude-opus-5-5`) in that wo
 - README reconciliation (route counts, caveats, payer version) and a "judges: try it in 5 minutes / 15 minutes" guide.
 - Repository visibility: LICENSE merged; the owner flips the repository to public after the final audit note.
 - The videos (owner recording), the form fields, and the upload with time to spare before 2026-10-13 15:59 JST.
+
+---
+
+## Appendix A. 動画用内容の日本語訳（オーナーのレビュー用）
+
+この付録は §2（ピッチ動画スクリプト）と §3（技術デモ動画）をオーナーがレビューするための日本語訳であり、提出物ではない。英語の原文が正本であり、両者が食い違う場合は原文に従う。数値、固有名詞、限定表現（「潜在的」「計測していない」など）は原文どおりに訳している。収録はこの訳ではなく §2 / §3 の英語で行う。
+
+### A.2 ピッチ動画スクリプト（§2 の訳）
+
+見出しの注記: 引用段落の話し言葉は 295 語。130 wpm で 2:16、150 wpm で 1:58。下記の各区間の所要時間は 150 wpm を前提に算出し、切り上げている。フォームの上限は 2 分なので、オーナーは収録前に一度通し読みして時間を計り、実測が 1:55 以下になるまで削ること。Codex 第 4 回は、リハーサルなしの非ネイティブの読みを 120 wpm と見て、220〜230 語を計画上の目安として提案している。フォームは自己紹介、何を作っているか、なぜ自分たちがそれを作るべき人なのかを求めており、「凝ったものは不要」としている。
+
+**[0:00–0:17] 自己紹介。**
+「SubEtha を開発している Takuya Fujita です。チェーンやクロスチェーンのプロトコルを何年も作ってきて、この問題にぶつかりました。エージェントが必要な有料 API を見つけても、支払えない。決済プロトコルも、チェーンも、通貨さえも、両者で揃っていないからです。」
+
+**[0:17–0:42] ギャップ。**
+「x402 は 2026 年第 1 四半期までに Base 上で 1 億トランザクションを超え、Solana も x402 の主要なチェーンへと成長しています。MPP は Tempo 上で使われる Stripe の決済プロトコルです。そのディレクトリに掲載された 129 サービスのうち、118 は決済方法として MPP だけを掲げています。Base に USDC を持つエージェントは、pathUSD 建ての Tempo のサービスを買えません。どちらの側からも、相手が見えないのです。」
+
+**[0:42–1:10] 何を作っているか。**
+「SubEtha Router がその橋渡しです。ホスティングされた MCP サーバーです。エージェントは自分のレールで Router に支払い、Router は自身の残高からプロバイダーのレールでプロバイダーに支払います。スワップなし、鍵の預かりなし。クロスレール 20 ペアすべてがテストネットで決済されています。Base・Solana・Arc・Tempo の買い手が別のレールのプロバイダーも利用でき、互いのエコシステムの成長につながります。そして Router は、メインネットでも検証済みです。」
+
+**[1:10–1:35] なぜ私か、そしてこの先。**
+「SubEtha にはすでに最初のピースがあります。zERC20 を用いた AI エージェント向けの秘匿決済で、エージェントは何を、なぜしているのかを明かさずにオンチェーンのサービスを利用できます。Router は二つ目のピースです。この二つを組み合わせれば、戦略を秘密にしておく必要があるエージェントがすべてのレールを一度に使えるようになり、エージェントのオンチェーン市場は一つのレールの枠をはるかに超えて広がります。」
+
+**[1:35–1:59] ビジネスと締め。**
+「プロバイダーは、これまで届かなかった買い手にもサービスを提供できます。対応ルート上のプロバイダーは、もう一方のレールの買い手にも、すぐにサービスを提供でき、Router はルーティング手数料を得ます。SubEtha が目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。これは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
+
+ピッチで言わないこと: パートナー、顧客、監査済み、本番対応（production-ready）、すべての API、匿名、限定なしの「安全（secure）」。控えめな限定表現はオーナーの決定（2026-10-10）で削除した。§5 のマトリクスには引き続きすべての限定が残っているので、スクリプトは真のまま、限定を付けていないだけという方針である。2026-10-10 の Codex レビュー: 第 3 回で限定なしの 3 分版を承認。第 4 回は 2 分版に修正を求め、その後反映済み。第 5 回はオーナーの書き直しに 3 件の文言修正（秘匿決済は計画として述べる、「パブリックチェーンを使えない」と断定しない、118 件は「受け付ける」ではなく「掲げている」）を求め、反映済み。第 6 回は話し言葉のスクリプトに追加の修正なし、この履歴の記述を訂正。第 7 回はオーナーの二度目の書き直し（名前、Solana の割合、既存の最初のピースとしての zERC20、payer の文を削除、手数料の文から「dynamic」を削除、プロバイダー募集の文を差し替え、新しい締め）をレビューし、話し言葉に虚偽なし、注記と訳の修正 3 件を反映。第 8 回はオーナーの三度目の手直し（Solana の割合を和らげる、メインネットの文を一般化、「サービスを利用できる」、締めの前の価値の一文）をレビューし、話し言葉の事実関係は通過、価値の一文に「目指す」の明示と訳の修正 2 件を求め、反映。3 分版の草稿はこのファイルの履歴（コミット 87b1185）にある。
+
+### A.2b 候補 B: 価値中心（§2b の訳。239 語。130 wpm で 1:51、150 wpm で 1:36。区間時間は 150 wpm、切り上げ）
+
+2026-10-11 にオーナーの依頼で、上のスクリプト（候補 A）の代案として追加した。候補 A はそのまま残す。事実関係と「言わないこと」は同じ。仕組みの説明（MCP、Router 自身の残高、スワップと鍵の預かり、20 ペアのマトリクス、zERC20、レール名）は技術デモ動画に任せ、話し言葉は価値を伝える。持っているもので払い、対応する決済手段で受け取り、意図は秘密のまま。収録前にオーナーがどちらかを選ぶ。Codex 第 9 回（2026-10-11）が候補 B をレビューし、5 件の修正（戦略を「読める」ではなく「手掛かり」、ディレクトリの範囲、資金ではなく鍵、「奪い合いをやめる」の削除、約束の訳文）を求め、反映済み。Codex のブラッシュアップレビュー（2026-10-12）の脚本提案 8 件のうち 6 件をオーナーが採用し、264 語から 230 語になった（冒頭を「買えない瞬間」から始める、提供者の到達は 1 文に、統合は将来形に、メインネットの購入は「検証済み」、市場の段落に「今なぜ」、手数料の文を自然に）。採用しなかったのは GitHub への誘導と、約束を「ビジョン」として語ること。オーナーはサンプル視聴後（2026-10-12）、自己紹介から「壁」への飛躍が唐突だったため、つなぎの一文「今日、AI エージェントを縛っているものが二つあります。」を戻した（237 語）。練習中に冒頭の挨拶「Hi everyone.」を追加（239 語、字幕にも出す）。
+
+**[0:00–0:22] エージェントが支払えない瞬間と、自己紹介。**
+「皆さん、こんにちは。AI エージェントが必要なサービスを見つけても、支払えない。SubEtha を開発している Takuya Fujita です。チェーン、クロスチェーンのプロトコル、そして AI とクリプトを組み合わせたプロダクトを作ってきました。今日、AI エージェントを縛っているものが二つあります。壁になっているのは、共通する決済プロトコルも、チェーンも、通貨さえもないことです。そして、公開されるオンチェーン決済は、エージェントの戦略を推測する手掛かりになります。」
+
+**[0:22–0:33] 約束。**
+「SubEtha が目指すのは、エージェントが持っているもので支払い、提供者が対応する決済手段で代金を受け取り、エージェントの意図が外部に知られないことです。」
+
+**[0:33–0:48] 大きな市場が、二つに割れている。**
+「x402 は Base 上で 1 億トランザクションを超え、Solana ももう一つの主要なチェーンです。Stripe の MPP ディレクトリは Tempo 上に 129 のサービスを掲載し、そのうち 118 は MPP だけを掲げています。利用は広がっていますが、二つの決済方式は互いに直接支払えません。」
+
+**[0:48–1:04] 何が変わるか。**
+「SubEtha Router があれば、エージェントは持っているもので支払えます。互換性のある提供者は、設定を何も変えずに、別の決済方式の買い手に届きます。エージェントは鍵を自分で管理します。対応レールのすべての組み合わせがテストネットで決済され、メインネットでの購入も検証済みです。」
+
+**[1:04–1:21] 意図は秘密のまま。**
+「SubEtha にはすでに AI エージェント向けの秘匿決済があります。エージェントは何を、なぜしているのかを明かさずにオンチェーンのサービスを利用できます。Router は二つ目のピースです。次に、この二つを組み合わせ、戦略を秘密にしたままのエージェントが対応レールに届くようにします。」
+
+**[1:21–1:39] ビジネスと締め。**
+「Router は、取り扱う購入に対してルーティング手数料を課します。目指すのは、AI が第三者に意図を知られることなく、どのレールでも滞りなく決済できる決済基盤です。それは、これから成長していくエージェント型コマースに欠かせないインフラです。ありがとうございました。」
+
+### A.3 技術デモ動画（§3 v5.6 の訳、23 文。目標 2:40〜2:50、上限 3:00、「どのように」）
+
+2026-10-13 改訂 v5（オーナーの指示: 先に「何をやるか」を説明してから、裏で何が起きているかを右側のアニメーションで示しつつデモを動かす。提供者は内部名で呼ばず「何を売り、何を受け取るか」で説明する。Solana 中心の審査員向けに、提供者は私たちの Solana x402 Provider の SOL 価格 API（Solana devnet の USDC しか受け取らない）に変更。オープンソースには触れない）。構成: A 導入（全画面: 問題と段取り）→ B デモ（分割画面: 左は実際の Claude Code、右は常駐の流れ図。エージェントが自分でセットアップ → URL で見積もり → ネイティブダイアログで承認 → 2 つの支払い → データ到着）→ C まとめ（鍵の所在、人間向けアプリは無い、20 ペア、メインネット証拠、エンドカード）。導入の背景に公式ページは出さない（オーナー 2026-10-13）→ 公式ページで締め。260 語・28 文（最長 17 語）。先に画面（動的見積もりと payer の購入）を収録し、その映像に合わせてナレーションを 1 本通しで収録する。常時表示: TESTNET（ライブ部分と実績）、MAINNET · OWNER-RUN · LOOPBACK と「Recorded evidence · 2026-10-10」（メインネット証拠）。
+
+1. 決済レールの違いがエージェントの購入を阻みます。SubEtha Router はレールをまたいで支払います。
+2. 段取りはこうです: エージェントが Router を自分でセットアップし、別のレールでデータを買い、最後に私が承認します。
+3. 左は実際に動いている Claude Code、右はその裏で起きていることです。
+4. Claude Code に「SubEtha Router を使えるようにして」と頼むだけです。
+5. エージェントが自分で公式ページを見つけ、ホストされた Router（MCP サーバ）を自分で登録します。私は再起動するだけです。
+6. 今日は Claude Code ですが、Codex CLI と Grok Build でも検証済みなので、お好きなものでどうぞ。
+7. 動的ルートは提供者の URL を受け取ります。今日の相手は、私たちが運用する SOL 価格 API で、Solana devnet の USDC でしか支払いを受け付けません。
+8. 私が持っているのは Base Sepolia の USDC、別のレールです。
+9. 支払いには、この Mac で payer を動かします。支払いのたびに、まず私に確認します。
+10. payer は npm パッケージで、エージェントのウォレットを保持します。作ったアドレスに好きなテストネットの faucet で入金して試してください。1 件ごとの承認なしで予算内で買えるモードも予定しています。
+11. Claude Code に URL を渡し、見積もりを求めます。
+12. Router が提供者の価格を読み取り、少額の手数料を足して見積もります。
+13. ネイティブのダイアログで条件と合言葉を確認し、承認します。
+14. エージェントは私のパスフレーズも鍵も決して見ません。支払いを承認できるのはこのダイアログだけです。
+15. 支払い 1: 私のウォレットが Base Sepolia で Router に払います。
+16. 支払い 2: Router が自分の残高から Solana devnet で提供者に払います。
+17. これが届いた応答、SOL の価格の JSON です。
+18. 鍵はこの Mac の payer が持ち、ホストされた Router は決して持ちません。
+19. 人間向けのアプリはありません。Router は MCP サーバで、エージェントが直接呼びます。
+20. 対応する 20 のクロスレールの組み合わせすべてが、テストネットで決済済みです。
+21. これはメインネットでの記録です。有名な AI 検索 API の Exa で実際に検索し、私自身のマシンから Tempo の MPP で Router 経由で支払いました。
+22. ウォレットなしで見積もりを試せます。
+23. subethalabs.com/router から始めてください。
+
