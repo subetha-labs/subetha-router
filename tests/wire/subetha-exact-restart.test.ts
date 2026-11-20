@@ -35,28 +35,32 @@ async function waitFor(condition: () => Promise<boolean> | boolean, label: strin
   throw new Error(`timed out waiting for ${label}`);
 }
 /** 停止点で止まった購入: 合図を待って SIGKILL し、停止点なしで再起動する。purchase の fetch は切れる。 */
-async function crashAt(h: ExactHarness, stopAt: string, requestId: string): Promise<{ paymentId: string; orderId: string }> {
+async function crashAt(h: ExactHarness, stopAt: string, requestId: string): Promise<{ paymentId: string; orderId: string; quote: Awaited<ReturnType<typeof quoteOf>>["body"]; credential: string }> {
   await h.restartRouter({ stopAt });
   const quote = await quoteOf(h, requestId);
-  const purchase = purchaseOf(h, quote.body, requestId, await credentialOf(h, quote.body.source.offer)).catch(() => undefined);
+  const credential = await credentialOf(h, quote.body.source.offer);
+  const purchase = purchaseOf(h, quote.body, requestId, credential).catch(() => undefined);
   await waitFor(() => existsSync(h.signalPath), `stop point ${stopAt}`);
   const signal = JSON.parse(await readFile(h.signalPath, "utf8")) as { point: string };
   expect(signal.point).toBe(stopAt);
   await h.killRouter();
   await purchase;
   await h.restartRouter();
-  return { paymentId: quote.body.paymentId, orderId: quote.body.source.offer.extra.challengeNonce };
+  return { paymentId: quote.body.paymentId, orderId: quote.body.source.offer.extra.challengeNonce, quote: quote.body, credential };
 }
 const upstreamPays = async (h: ExactHarness) => ((await (await fetch(`${h.upstream.baseUrl}/calls`)).json()) as { payCalls: number }).payCalls;
 
 test("§6: before_source_settle → unknown、settle 0・release 0・complete 0・上流 0。再提出でも何も呼ばない", async () => {
   const h = await boot({ skipRouter: true });
-  const { paymentId, orderId } = await crashAt(h, "before_source_settle", "req-1");
+  const { paymentId, orderId, quote: original, credential } = await crashAt(h, "before_source_settle", "req-1");
   expect((await statusOf(h, paymentId)).body).toMatchObject({ status: "unknown", terminalReason: "interrupted_at_restart", source: { mayStillSettleUntil: expect.any(Number), awaitingPaymentDoesNotMeanUnpaid: true } });
   expect((await h.calls()).byOrder[orderId]).toEqual({ create: 1, verify: 1 });
   expect(await upstreamPays(h)).toBe(0);
-  const quote = await quoteOf(h, "req-1");
-  const resent = await purchaseOf(h, quote.body, "req-1", await credentialOf(h, quote.body.source.offer));
+  // 同じ requestId の再 quote は閉じた文書（FR-4.5: 署名の対象を再提示しない）。元の文書と credential の再提出は現在の状態を返す。
+  const requoted = await quoteOf(h, "req-1");
+  expect(requoted.body).toMatchObject({ closed: true, status: "unknown" });
+  expect(requoted.body.source).not.toHaveProperty("offer");
+  const resent = await purchaseOf(h, original, "req-1", credential);
   expect(resent.body).toMatchObject({ status: "unknown" });
   // 同じ requestId の再 quote は journal の intent を返す（createOffer を呼ばない）: 作成の POST は増えない（設計 §3.2 の試験）。
   expect((await h.calls()).byOrder[orderId]).toEqual({ create: 1, verify: 1 });

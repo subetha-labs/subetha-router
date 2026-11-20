@@ -71,6 +71,13 @@ export interface QuoteDocument {
     readonly boundTo: string;
     readonly deadlineMs: number;
   };
+  /**
+   * 閉じた quote（`docs/subetha-exact-inbound-design.md` §4.1、要件 FR-4.5。全 rail）: `created` を離れた quote の再 quote にだけ付く。
+   * `status` は公開の状態。core の文書には `source.offer` が残る（in-process の利用者のため）が、**公開の面（HTTP・MCP）は offer を出さない**:
+   * 使用済みの quote を署名の対象として再提示しない。
+   */
+  readonly closed?: true;
+  readonly status?: PublicStatus;
   /** 動的 quote だけ。`ownerKey` は**この応答にしか載らない**。 */
   readonly upstream?: DynamicQuoteFields["upstream"];
   readonly dynamic?: DynamicQuoteFields["dynamic"];
@@ -607,7 +614,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       if (existing.routeId !== request.routeId || existing.dynamic !== undefined || existing.dynamicInvalid === true) {
         return { ok: false, code: "request_id_conflict" };
       }
-      return { ok: true, ...quoteDocumentOf(existing) };
+      // `created` のままなら今までどおり同じ文書。離れた後は閉じた quote（FR-4.5: 同じ注文に新しい署名を求めない）。
+      return existing.status === "created" ? { ok: true, ...quoteDocumentOf(existing) } : { ok: true, ...quoteDocumentOf(existing), closed: true, status: toPublicStatus(existing.status) };
     }
     if (dynamicCore?.requestInUse(request.principalId, request.requestId) === true) {
       return { ok: false, code: "request_id_conflict" };

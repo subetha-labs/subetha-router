@@ -246,3 +246,84 @@ describe("実装レビュー 1 の追加（design v5.2 §18）", () => {
     expect(status).not.toHaveProperty("nextStep");
   });
 });
+
+describe("閉じた quote（FR-4.5）: 公開の面は署名の対象を出さない", () => {
+  test("HTTP の本文に offer・payTo・expiresAt が無く、closed・status・id・approval はある。client は closed を読み、MCP は署名しない案内（subject 無し）で、purchase は quote_closed", async () => {
+    const document = quoteDocument();
+    if (!document.ok) throw new Error("unreachable");
+    const served = await serve({ quote: { ...document, closed: true, status: "awaiting_payment" } });
+    const response = await fetch(`${served.baseUrl}/v1/quotes`, { method: "POST", headers: { ...served.headers, "content-type": "application/json" }, body: JSON.stringify({ routeId: ROUTE_ID, requestId: "r1" }) });
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ quoteId: document.quoteId, paymentId: "pay-1", closed: true, status: "awaiting_payment", approval: { boundTo: document.quoteId } });
+    expect(body["source"]).toEqual({ rail: "subetha-exact", amount: "2000", asset: OFFER.asset, decimals: 6, network: OFFER.network });
+    expect(JSON.stringify(body)).not.toContain(OFFER.payTo);
+    // offer の中身（domain の名前・束縛）は本文のどこにも無い（quoteId = nonce は id として出る）。
+    expect(JSON.stringify(body)).not.toContain("zERC20 USD Coin");
+    expect(JSON.stringify(body)).not.toContain("routeBinding");
+    const viaClient = await served.client.quote({ routeId: ROUTE_ID, requestId: "r1" });
+    expect(viaClient.ok && viaClient.quote).toMatchObject({ closed: true, status: "awaiting_payment" });
+    const tool = await served.mcp.quote({ routeId: ROUTE_ID, requestId: "r1" });
+    expect(tool).toMatchObject({ ok: true, closed: true, approvalRequired: false });
+    expect(tool).not.toHaveProperty("subject");
+    expect(String(tool["nextStep"])).toMatch(/already used \(status: awaiting_payment\)\. Do not sign anything/);
+    const purchase = await served.mcp.purchase({ quoteId: document.quoteId, requestId: "r1", approval: document.quoteId, quote: (viaClient.ok ? viaClient.quote : undefined) as never, credential: "x" });
+    expect(purchase).toMatchObject({ ok: false, error: "quote_closed" });
+  });
+  test("closed で無い文書は今までどおり（offer・payTo・expiresAt あり、closed の欄なし）", async () => {
+    const served = await serve({});
+    const body = (await (await fetch(`${served.baseUrl}/v1/quotes`, { method: "POST", headers: { ...served.headers, "content-type": "application/json" }, body: JSON.stringify({ routeId: ROUTE_ID, requestId: "r1" }) })).json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("closed");
+    expect(body).not.toHaveProperty("status");
+    expect(body["source"]).toMatchObject({ payTo: OFFER.payTo, expiresAt: OFFER.extra.expiresAt, offer: OFFER });
+  });
+});
+
+describe("閉じた quote: 控えと敵対的な値（実装レビュー 5）", () => {
+  test("open の quote → 閉じた再 quote → 控えの文書での purchase は credential を作らず quote_closed（payer の呼び出し 0）。ids だけの purchase も同じ", async () => {
+    const document = quoteDocument();
+    if (!document.ok) throw new Error("unreachable");
+    const script: { quote?: QuoteOutcome } = {};
+    const served = await serve(script);
+    let payerCalls = 0;
+    const mcp = createToolHandlers({ client: served.client, mode: "real", evidence: EVIDENCE, payer: { address: "0xpayer", credentialFor: async () => { payerCalls += 1; return "credential"; } } as never });
+    const open = await mcp.quote({ routeId: ROUTE_ID, requestId: "r1" });
+    expect(open).toMatchObject({ ok: true, approvalRequired: true });
+    script.quote = { ...document, closed: true, status: "unknown" };
+    expect(await mcp.quote({ routeId: ROUTE_ID, requestId: "r1" })).toMatchObject({ closed: true });
+    expect(await mcp.purchase({ quoteId: document.quoteId, requestId: "r1", approval: document.quoteId })).toMatchObject({ ok: false, error: "quote_closed" });
+    expect(await mcp.purchase({ quoteId: document.quoteId, requestId: "r1", approval: document.quoteId, quote: open["quote"] as never })).toMatchObject({ ok: false, error: "quote_closed" });
+    expect(payerCalls).toBe(0);
+  });
+  test("client: 閉じた再 quote は発行の控え（束縛）を上書きしない: 最初の文書での execute は束縛の不一致にならず Router まで届く", async () => {
+    const document = quoteDocument();
+    if (!document.ok) throw new Error("unreachable");
+    const script: { quote?: QuoteOutcome; purchase?: PurchaseOutcome } = { purchase: { paymentId: "pay-1", status: "awaiting_payment", code: "verify_failed" } };
+    const served = await serve(script);
+    const strict = createRouterClient({ baseUrl: served.baseUrl, principalId: "alice", token: "tok" });
+    const first = await strict.quote({ routeId: ROUTE_ID, requestId: "r1" });
+    if (!first.ok) throw new Error("quote");
+    script.quote = { ...document, closed: true, status: "awaiting_payment" };
+    const closed = await strict.quote({ routeId: ROUTE_ID, requestId: "r1" });
+    expect(closed.ok && closed.quote.closed).toBe(true);
+    // canonical の origin は Router の設定値（router.invalid）なので resource の照合は client の baseUrl とは独立。
+    const executed = await strict.execute({ quote: first.quote, requestId: "r1", approval: { approved: true, quoteId: first.quote.quoteId }, credential: paymentHeader(OFFER) });
+    expect(executed).toEqual({ outcome: "payment_required", error: "verify_failed", paymentId: "pay-1" });
+  });
+  test.each<[string, unknown, unknown]>([["closed が文字列", "true", "x"], ["closed が 1", 1, "x"], ["status が自由な文", true, "https://leak.example SECRET"], ["status が数", true, 7]])("相手の値が %s: closed は厳密な true だけ、status は閉じた形の token だけ", async (_n, closedValue, statusValue) => {
+    const document = quoteDocument();
+    if (!document.ok) throw new Error("unreachable");
+    const served = await serve({ quote: { ...document, closed: closedValue as true, status: statusValue as never } });
+    const viaClient = await served.client.quote({ routeId: ROUTE_ID, requestId: "r1" });
+    if (!viaClient.ok) throw new Error("quote");
+    if (closedValue === true) {
+      expect(viaClient.quote.closed).toBe(true);
+      expect(viaClient.quote).not.toHaveProperty("status");
+      const tool = await served.mcp.quote({ routeId: ROUTE_ID, requestId: "r1" });
+      expect(String(tool["nextStep"])).toMatch(/status: unknown/);
+      expect(JSON.stringify(tool)).not.toContain("leak.example");
+    } else {
+      expect(viaClient.quote).not.toHaveProperty("closed");
+    }
+  });
+});

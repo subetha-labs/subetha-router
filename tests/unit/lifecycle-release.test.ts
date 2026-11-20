@@ -779,3 +779,36 @@ describe("実装レビュー 1 の追加（design v5.2 §18）", () => {
     expect(await core.quote({ principalId: "alice", requestId: "h5", routeId: ROUTE_ID })).toEqual({ ok: false, code: "source_offer_unavailable", reason: "facilitator_busy" });
   });
 });
+
+describe("閉じた quote の再 quote（FR-4.5、全 rail。設計 §4.1）", () => {
+  test("created のままの再 quote は同じ文書（closed 無し）。created を離れた後は closed: true と公開の status が付き、createOffer は呼ばれない", async () => {
+    const core = await boot();
+    const quote = await quoteOf(core);
+    const same = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+    expect(same).toEqual(quote);
+    expect(same).not.toHaveProperty("closed");
+    inbound.verify = async (offer) => ({ isValid: false, mayStillSettleUntil: offer.extra.expiresAt - 1 });
+    await core.purchase(purchaseArgs(quote));
+    const closed = await core.quote({ principalId: "alice", requestId: "req-1", routeId: ROUTE_ID });
+    expect(closed).toMatchObject({ ok: true, quoteId: quote.quoteId, paymentId: quote.paymentId, closed: true, status: "awaiting_payment" });
+    expect(inbound.requesters).toHaveLength(1);
+    // その quote への purchase（元の credential でも）は rail を呼ばずに現在の状態。
+    const verifyCalls = inbound.verifyCalls;
+    expect(await core.purchase(purchaseArgs(quote))).toMatchObject({ status: "awaiting_payment" });
+    expect(inbound.verifyCalls).toBe(verifyCalls);
+    expect(inbound.settleCalls).toBe(0);
+  });
+  test("delivered・unknown の後も closed（status はその状態）。release を持たない既存の rail でも同じ", async () => {
+    const core = await boot({ inbound: plainRail(inbound) });
+    const q1 = await quoteOf(core, "r1");
+    await core.purchase(purchaseArgs(q1, "r1"));
+    expect(await core.quote({ principalId: "alice", requestId: "r1", routeId: ROUTE_ID })).toMatchObject({ closed: true, status: "delivered" });
+    inbound.settleResult = { outcome: "unknown", reason: "source_settle_unknown" };
+    const q2 = await quoteOf(core, "r2");
+    await core.purchase(purchaseArgs(q2, "r2"));
+    expect(await core.quote({ principalId: "alice", requestId: "r2", routeId: ROUTE_ID })).toMatchObject({ closed: true, status: "unknown" });
+    await core.close();
+    const restarted = await boot({ inbound: plainRail(inbound) });
+    expect(await restarted.quote({ principalId: "alice", requestId: "r2", routeId: ROUTE_ID })).toMatchObject({ closed: true, status: "unknown" });
+  });
+});

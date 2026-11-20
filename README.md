@@ -351,6 +351,10 @@ at your tenant and `ROUTER_SUBETHA_EXACT_TOKEN_FILE` at a 0600 file holding the 
 requirements: `docs/subetha-exact-inbound-design.md`, `docs/subetha-exact-inbound-requirements.md`; the registration and
 the funded run are separate owner gates recorded in `docs/subetha-exact-inbound-acceptance.md`. **Not on the hosted Router.**
 
+Since the same change, on **every** rail, a quote that was already used for a purchase attempt is no longer re-presented
+for signing: re-quoting its `requestId` returns `closed: true` with the current `status` and without `source.offer`, and
+`npm run sign` refuses such a document (take a new quote with a new `requestId`).
+
 Two things a buyer must know: a refused, failed, `awaiting_payment` or `unknown` purchase **is not proof that nothing was
 paid** (the signed authorization stays valid until `validBefore`; the response carries `mayStillSettleUntil` and
 `awaitingPaymentDoesNotMeanUnpaid: true`), and the operator can list every order and compare it with the facilitator

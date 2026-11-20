@@ -412,6 +412,8 @@ function privateNextStep(quote: PrivateQuoteView): string {
 export function createToolHandlers(deps: ToolDeps): ToolHandlers {
   /** `quoteId → QuoteView`。`execute()` が QuoteView 全体を要求するため保持する。 */
   const issued = new Map<string, QuoteView>();
+  /** 閉じたと分かった quote（Router FR-4.5）。控えの文書（署名できる形）が残っていても、purchase は credential を作る前に断る。 */
+  const closedQuotes = new Set<string>();
   const privateIssued = new Map<string, PrivateQuoteView>();
   const privateUnavailable = (): Record<string, unknown> => withEvidence(deps, { ok: false, error: "private_disabled", detail: "This Router client has no private purchase operations." });
 
@@ -483,6 +485,20 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
       if (!result.ok) {
         return withEvidence(deps, quoteFailureOf(result));
       }
+      if (result.quote.closed === true) {
+        // 閉じた quote（Router FR-4.5）: 使用済み。署名の対象も承認の対象も無い（`subject` を出さない）。控えの署名できる文書は捨て、閉じた印を残す。
+        issued.delete(result.quote.quoteId);
+        closedQuotes.add(result.quote.quoteId);
+        return withEvidence(deps, {
+          ok: true,
+          closed: true,
+          approvalRequired: false,
+          quote: result.quote,
+          nextStep:
+            `This quote was already used (status: ${result.quote.status ?? "unknown"}). Do not sign anything for it and do not call ${TOOL_NAMES.purchase} with it; ` +
+            `read its result with ${TOOL_NAMES.status}, and take a new quote with a new requestId if a new purchase is wanted (that needs a new human approval).`,
+        });
+      }
       issued.set(result.quote.quoteId, result.quote);
       return withEvidence(deps, {
         ok: true,
@@ -535,6 +551,11 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
       // ステートレス運用では呼び出し側が quote を持ち回る。
       // プロセス内の `issued` はローカル（stdio）運用の補助でしかない。
       const quote = (input.quote as QuoteView | undefined) ?? issued.get(input.quoteId);
+      const closedDetail = `This quote was already used. Read its result with ${TOOL_NAMES.status}; a new purchase needs a new quote (new requestId) and a new human approval.`;
+      // 閉じたと分かった quote は、呼び出し側が最初の（署名できる）文書を持ち回っても、credential を作る前に断る。
+      if (closedQuotes.has(input.quoteId) || (quote !== undefined && (quote.closed === true || closedQuotes.has(quote.quoteId)))) {
+        return withEvidence(deps, { ok: false, error: "quote_closed", detail: closedDetail });
+      }
       if (quote === undefined) {
         // MCP サーバを再起動すると発行元 client が消えるため必ずここに来る。
         return withEvidence(deps, {

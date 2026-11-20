@@ -11,9 +11,9 @@
 | AC-1 通し（実 CLI・実 TCP・実 EIP-712） | `tests/wire/subetha-exact-cli.test.ts` 「AC-1」: journal `created → source_pending → budget_reserved → source_settled → source_released → destination_pending → delivered → source_completed`、fixture の注文は `release.completed.outcome: "delivered"`、上流 1 回 | 通過 |
 | AC-2 (a)(b)(c)(c′)(d)(e)(f)(f′)(h)(i)(j)(k)(l)(l′)(n) | `tests/unit/subetha-exact-adapter.test.ts`（29）、`tests/unit/subetha-exact-classify.test.ts`（55）、`tests/unit/lifecycle-release.test.ts`（40）、`tests/wire/subetha-exact-cli.test.ts`（7） | 通過 |
 | AC-2 (g) 再起動の表 | `tests/wire/subetha-exact-restart.test.ts`（7。`destination_submitted` だけは `lifecycle-release.test.ts` で行を直接書く: 設計 §6 の逸脱の記録） | 通過 |
-| AC-2 (m) 閉じた quote | **保留**（FR-4.5 は全 rail の公開契約の変更。オーナーの承認待ち。現状は `created` を離れた quote の再 quote も同じ文書を返し、purchase は facilitator を呼ばずに現在の状態を返す） | 未実装（承認待ち） |
+| AC-2 (m) 閉じた quote（FR-4.5、**全 rail**。オーナーの承認 2026-11-20「1で進めて良いです」） | `tests/unit/lifecycle-release.test.ts`「閉じた quote の再 quote」（core: `closed`・`status`、rail を呼ばない、既存 rail・再起動の後も）、`tests/unit/http-subetha-exact.test.ts`（HTTP の本文に offer・payTo・expiresAt 無し、client、MCP の `nextStep` と `quote_closed`）、`tests/unit/sign-run.test.ts`（`npm run sign` の拒否）、`tests/wire/subetha-exact-cli.test.ts`（実 process） | 通過 |
 | AC-3 既存の試験 | `npm test`（§1.1） | 既知のフレーク以外は通過 |
-| AC-4 `npm run sign` | `tests/unit/sign-subetha-exact.test.ts`（6）、`tests/unit/subetha-exact-table.test.ts`（27）、payer `hosted-contract.test.ts` | 通過（`closed: true` の拒否は AC-2 (m) と同じ保留） |
+| AC-4 `npm run sign` | `tests/unit/sign-subetha-exact.test.ts`（6）、`tests/unit/subetha-exact-table.test.ts`、`tests/unit/sign-run.test.ts`（`closed: true` の拒否）、payer `hosted-contract.test.ts` | 通過 |
 | AC-5 運用者の確認 | `tests/unit/subetha-exact-inspect.test.ts`（3）、`tests/wire/subetha-exact-cli.test.ts` 「AC-5」 | 通過 |
 | AC-6 Codex のレビュー | `.claude_workflow/local/`（要件 4 回、設計 5 回、タスク 4 回、実装 3 回） | 記録あり |
 | AC-7 上限の既定値 | `SUBETHA_EXACT_DEFAULT_LIMITS = { maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 6 }`（`src/shared/subetha-exact.ts`）。期間と停止の条件は §3 | 入っている |
@@ -24,6 +24,7 @@
 |---|---|---|---|
 | 2026-11-20 20:30（T-5 の後） | 3925 通過 / 5 失敗 / 33 skip（174 ファイル） | `guarded-transport` T-A5/T-A6/T-A8（既知: macOS で `127.0.0.2` の alias が要る）、`subetha-exact-restart` の 2 件（全体の負荷で vitest の既定 5 秒を超えた。単独では通過。以後 wire の 2 ファイルは `testTimeout` 90 秒） | 実装レビュー 3 の前 |
 | 2026-11-20 21:35（実装レビュー 3 の反映の後） | 3944 通過 / 6 失敗 / 33 skip（176 ファイル） | `guarded-transport` T-A5/T-A6/T-A8（既知の alias）、`diagnostics-sink` の p99 の 2 件（既知の時間）、`sign-diagnostics-entry` の viem の期限 1 件（負荷。単独では通過） | 本スライスの新しい試験は全部通過 |
+| 2026-11-20 22:40（FR-4.5 の実装の後） | 3949 通過 / 6 失敗 / 33 skip（176 ファイル） | `guarded-transport` T-A5/T-A6/T-A8、`diagnostics-sink` の p99 の 2 件（既知）、`subetha-exact-restart` の 1 件（**本物の影響**: 使用済みの requestId を再 quote して署名し直す試験が、閉じた文書を受けて落ちた。FR-4.5 の意図どおりなので試験を「再 quote は closed、元の文書と credential の再提出は現在の状態」に直し、単独で 9 件通過） | 実装レビュー 5（REVISE → 反映） |
 
 既知のフレークの一覧: `guarded-transport` T-A5/6/8（alias）、`diagnostics-sink` の p99 の時間（負荷）、負荷で落ちる wire（`private-x402` の proxy、`sign-diagnostics-entry`）。失敗がこの一覧の外なら、単独で再実行して記録する。
 
@@ -95,5 +96,5 @@
 ## 4. 段 5 に持ち越すもの
 
 - hosted に載せる条件（quote の入口の認証、買い手ごとの制限、全体の割り当ての予算、復旧の呼び出しが quote の負荷で妨げられないこと）は計画 §7 段 5 のまま、本スライスでは扱わない。
-- FR-4.5（閉じた quote）の承認と実装。
+- FR-4.5（閉じた quote）は 2026-11-20 にオーナーが承認し実装済み（全 rail）。hosted への反映は次の deploy のとき: 公開の契約の変更（使用済みの quote の再取得に `source.offer` が無い）として `docs/DEPLOY.md` の記録に書く。
 - 受信の取り消し（reorg）の検知は既存どおり無い（`afterRelease` は FR-11 で見えるだけ）。

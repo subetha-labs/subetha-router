@@ -1,4 +1,4 @@
-# 受信レール `subetha-exact`（Router = SubEtha v2 facilitator の Provider）設計 v5.3
+# 受信レール `subetha-exact`（Router = SubEtha v2 facilitator の Provider）設計 v5.4
 
 > 入力: `docs/subetha-exact-inbound-requirements.md` v4.2（Codex review 4 回、APPROVE WITH CHANGES + 註）。本書は設計フェーズの成果物で、実装は含まない。
 > facilitator は protocol repo `origin/main` `68e061b`（`P:`）、Router は本 branch の基点 `1dc29ad`。行番号は `grep -n` で確かめた。
@@ -611,6 +611,16 @@ facilitator への POST は 1 つも無い。`--abandon` は **adapter の ledge
 | 5 should | D／D′ の成功で上流 0 の誤り | §10: 成功した復元は送信へ 1 回、失敗は 0 |
 
 v5 → v5.1（`design-review5.md`、APPROVE WITH CHANGES）: should 2 → §10 の wire の試験に D／D′ の成功で `delivered`・上流 1 回、失敗で 0（adapter の単体試験は結果の分類だけ）；should 3 → §3.2 の操作の行の持ち主を耐久の index で解決（process の map を持たない。quote → 再起動 → 最初の purchase の試験）；should 4 → §3.2 の集計の試験を合計 3 → 2 → 1 で明記。
+
+### 3.11 閉じた quote の実装（FR-4.5、v5.4）
+
+オーナーの承認（2026-11-20、選択肢 1「全 rail に入れる」）を受けて §4.1 のとおり実装した。
+- core: `quoteLocked` の既存の quote の分岐で、`created` を離れていれば文書に `closed: true`・`status`（公開の状態）を足す（`QuoteDocument` の任意の欄。`source.offer` は in-process の文書には残る）。`createOffer` は呼ばない。動的・秘匿の再 quote は今までどおり `request_id_conflict`。
+- 公開の面: `quoteBody`（HTTP R2）は `closed` のとき `source.offer`・`source.payTo`・`source.expiresAt` を出さない。402 の再提示（`offerFor`）は以前から `created` のときだけ offer を返す。
+- client: `QuoteView.closed`・`status`。閉じた文書は発行の控え（束縛の snapshot）を上書きしない。
+- MCP: quote は `closed: true`・`approvalRequired: false`・`subject` 無し・「署名しない」の `nextStep`。purchase は `quote_closed`（credential も作らない）。
+- `npm run sign`: `closed: true` の文書を拒む（offer があっても。offer 無しの拒否より先。`status` は閉じた形の token だけを文に写す）。
+- payer（`@subetha/payer`）は quote ごとに新しい requestId を使うので閉じた文書を受け取らない（変更なし）。
 
 ### 3.10 実装で確定した契約の補足（実装レビュー 3、v5.3）
 

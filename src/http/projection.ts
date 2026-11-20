@@ -91,10 +91,13 @@ export function quoteBody(
   route: RouteConfig,
   canonicalBaseUrl: string,
 ): unknown {
+  // 閉じた quote（FR-4.5、全 rail）: 署名の対象（offer・payTo・expiresAt）を出さない。`closed`・`status`・id・approval は出す。
+  const closed = quote.closed === true;
   return {
     quoteId: quote.quoteId,
     paymentId: quote.paymentId,
     routeId: quote.routeId,
+    ...(closed ? { closed: true, status: quote.status } : {}),
     resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },
     source: {
       // 実レールを名乗る。**既定は `subetha`**（`sourceRail` 未指定の既存 route を壊さない）。
@@ -103,9 +106,7 @@ export function quoteBody(
       asset: quote.source.asset,
       decimals: route.source.decimals,
       network: quote.source.network,
-      payTo: quote.source.offer.payTo,
-      expiresAt: quote.source.offer.extra.expiresAt,
-      offer: quote.source.offer,
+      ...(closed ? {} : { payTo: quote.source.offer.payTo, expiresAt: quote.source.offer.extra.expiresAt, offer: quote.source.offer }),
     },
     destination: {
       rail: route.rail ?? route.destination.scheme,

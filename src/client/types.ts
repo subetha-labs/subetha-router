@@ -87,6 +87,9 @@ export interface QuoteView {
     readonly boundTo: string;
     readonly deadlineMs: number;
   };
+  /** 閉じた quote（Router FR-4.5）: 使用済みの quote の再取得。`source.offer` は無い。署名・購入の対象ではない。 */
+  readonly closed?: true;
+  readonly status?: string;
   /** 動的 quote だけ（設計 §8）。 */
   readonly upstream?: { readonly url: string; readonly method: string; readonly body?: string; readonly bodySha256?: string };
   readonly pricing?: Readonly<Record<string, unknown>>;

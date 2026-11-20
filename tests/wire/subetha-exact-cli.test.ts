@@ -100,11 +100,27 @@ test("(a) 署名の無い購入は 402 + offer の再提示 + 開示（上限）
   expect((await h.journal()).at(-1)).toMatchObject({ event: "source_failed", patch: { reason: "verify_failed", mayStillSettleUntil: quote.body.source.offer.extra.expiresAt } });
   const status = await statusOf(h, quote.body.paymentId);
   expect(status.body["source"]).toMatchObject({ mayStillSettleUntil: quote.body.source.offer.extra.expiresAt, awaitingPaymentDoesNotMeanUnpaid: true });
-  // (m) 同じ quote の再 quote は created を離れた後も今の文書（閉じた quote は保留中: 既存の形のまま）。
+  // (m) created を離れた後の再 quote は閉じた quote: closed・status があり、署名の対象（offer・payTo・expiresAt）は無い。facilitator の作成も呼ばない。
   await h.setMode("verify", "ok");
+  const createsBefore = (await h.calls()).byRoute["create"];
+  const closed = await quoteOf(h, "req-a");
+  expect(closed.status).toBe(200);
+  expect(closed.body).toMatchObject({ quoteId: quote.body.quoteId, paymentId: quote.body.paymentId, closed: true, status: "awaiting_payment" });
+  expect(closed.body.source).not.toHaveProperty("offer");
+  expect(closed.body.source).not.toHaveProperty("payTo");
+  expect(closed.body.source).not.toHaveProperty("expiresAt");
+  expect(JSON.stringify(closed.body)).not.toContain(quote.body.source.payTo);
+  expect((await h.calls()).byRoute["create"]).toBe(createsBefore);
+  // `npm run sign` はその文書を拒む（鍵を読まない）。
+  const { runSign } = await import("../../tools/sign-run.js");
+  const signed = await runSign(closed.body, { nowMs: () => Date.now(), readEvmKey: () => { throw new Error("key must not be read"); } } as never);
+  expect(signed).toMatchObject({ ok: false, reason: expect.stringMatching(/already used \(status awaiting_payment\)/) });
+  // 元の credential での purchase も facilitator を呼ばずに現在の状態。402 の再提示にも offer は無い。
   const once = await purchaseOf(h, quote.body, "req-a", credential);
   expect(once.status).toBe(402);
   expect(once.body["error"]).toBe("verify_failed");
+  expect(once.body["accepts"]).toEqual([]);
+  expect((await h.calls()).byRoute).toMatchObject({ verify: 1 });
   expect((await h.calls()).byRoute["settle"]).toBeUndefined();
 });
 

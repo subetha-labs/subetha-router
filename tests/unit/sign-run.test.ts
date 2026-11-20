@@ -130,6 +130,27 @@ describe("runSign", () => {
       expect(trace.calls, name).toEqual([]);
     }
   });
+
+  test("閉じた quote（Router FR-4.5）は署名しない: closed: true なら offer が付いていても拒み（offer 無しの拒否より先）、鍵を読まない。status の自由な文は写さない", async () => {
+    const offer = evm();
+    const cases: [unknown, RegExp][] = [
+      [{ ...(quoteOf(offer) as object), closed: true, status: "awaiting_payment" }, /already used \(status awaiting_payment\); take a new quote with a new requestId/],
+      [{ source: {}, closed: true, status: "delivered" }, /already used \(status delivered\)/],
+      [{ ...(quoteOf(offer) as object), closed: true, status: "https://leak.example/x" }, /already used \(status unknown\)/],
+    ];
+    for (const [quote, pattern] of cases) {
+      const trace: Trace = { keyReads: [], calls: [], stderr: [] };
+      const outcome = await runSign(quote, depsOf(trace));
+      expect(outcome.ok).toBe(false);
+      expect((outcome as { reason: string }).reason).toMatch(pattern);
+      expect((outcome as { reason: string }).reason).not.toContain("leak.example");
+      expect(trace.keyReads).toEqual([]);
+      expect(trace.calls).toEqual([]);
+    }
+    // closed: false・欄なしは今までどおり署名する。
+    const trace: Trace = { keyReads: [], calls: [], stderr: [] };
+    expect((await runSign({ ...(quoteOf(offer) as object), closed: false }, depsOf(trace))).ok).toBe(true);
+  });
 });
 
 /** MPP の Solana（`solana/charge`。`docs/mpp-solana-design.md` §7、FR-49。タスク M6）。 */

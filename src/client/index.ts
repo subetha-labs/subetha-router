@@ -142,6 +142,7 @@ function quoteViewOf(body: unknown): QuoteView | undefined {
       boundTo,
       deadlineMs: typeof approval["deadlineMs"] === "number" ? approval["deadlineMs"] : 0,
     },
+    ...(body["closed"] === true ? { closed: true as const, ...(typeof body["status"] === "string" && /^[a-z_]{1,32}$/.test(body["status"]) ? { status: body["status"] } : {}) } : {}),
     ...dynamic,
   };
 }
@@ -350,7 +351,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
       }
       // 発行時の値を凍結して渡し、束縛スナップショットを控える（後の改変を検知する）。
       const quote = frozenClone(parsed);
-      issued.set(quote.quoteId, { binding: bindingOf(quote), requestId });
+      // 閉じた quote（使用済みの再取得）は発行の控えを上書きしない（最初の文書の束縛を保つ）。
+      if (quote.closed !== true) issued.set(quote.quoteId, { binding: bindingOf(quote), requestId });
       return { ok: true, quote };
     },
 
