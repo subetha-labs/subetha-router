@@ -9,7 +9,7 @@
  * 組み立てる（任意のプラグイン読み込みは行わない）。
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +37,7 @@ import { denyHostsOf } from "./net/upstream-url.js";
 import {
   ConfigError,
   KNOWN_NETWORKS,
+  type KnownAsset,
   LEGACY_X402_INBOUND_NETWORK,
   knownAssetOf,
   knownNetworkOf,
@@ -53,11 +54,13 @@ import { getBase58Encoder } from "@solana/kit";
 import { tempo as tempoMainnet, tempoModerato } from "viem/tempo/chains";
 
 import { DynamicGate } from "./core/dynamic-gate.js";
-import { createRouterCore } from "./core/orchestrator.js";
+import { createRouterCore, type RouterCore, type RouterCoreOptions } from "./core/orchestrator.js";
 import { startHttpServer } from "./http/app.js";
 import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
 import { currentDiagnosticScopeFrame, NOOP_DIAGNOSTICS, safeEmit, type DiagnosticsSink } from "./shared/diagnostics.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
+import { createSubethaExactInbound, type SubethaExactInbound, type SubethaExactInboundOptions } from "./adapters/inbound/subetha-exact.js";
+import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
 import type {
   EvmSigningCapability,
   MppTempoCapability,
@@ -133,6 +136,10 @@ export interface RouterCapabilities {
   readonly knownNetworksForTest?: readonly KnownNetwork[];
   /** drain の上限（ms）。試験専用（本番は `DRAIN_TIMEOUT_MS`）。 */
   readonly drainTimeoutMsForTest?: number;
+  /** 試験だけ: 受信レール `subetha-exact` の adapter の停止点（`after_release_remote`。`docs/subetha-exact-inbound-design.md` §4.6）。 */
+  readonly subethaExactHooksForTest?: SubethaExactInboundOptions["hooksForTest"];
+  /** 試験だけ: core の停止点（`before_source_settle`／`after_source_settled`／`after_source_released`／`after_terminal`）。本番の入口は渡さない。 */
+  readonly coreHooksForTest?: RouterCoreOptions["hooksForTest"];
   /**
    * Circle の facilitator（kind `circle`）を使う network ごとの売り手証明の能力（multirail 設計 §3）。起動側が
    * `tools/real-seller-proof-capability.ts` で作る。route／プロファイルの `source.payTo` と一致しなければ起動しない。
@@ -566,7 +573,7 @@ function railByRoute(
  *
  * `preflight` は**同期**（core は await しない）。ここを async にすると全購入が落ちる。
  */
-function inboundByRoute(
+export function inboundByRoute(
   routes: Readonly<Record<string, RouteConfig>>,
   rails: Readonly<Record<string, InboundRail>>,
   profiles: Readonly<Record<string, DynamicProfile>> = {},
@@ -615,13 +622,65 @@ function inboundByRoute(
     }
     return rail;
   };
+  /** `complete` だけの fallback（`docs/subetha-exact-inbound-design.md` §2）: 束縛が設定から消えた後でも、`ownsOffer` が真の rail に届ける。他の操作は fallback しない。 */
+  const forOfferOrOwner = (offer: InboundOffer): InboundRail | undefined => {
+    try {
+      return forOffer(offer);
+    } catch {
+      for (const rail of new Set(Object.values(rails))) {
+        if (typeof rail.ownsOffer === "function" && rail.ownsOffer(offer) === true) return rail;
+      }
+      return undefined;
+    }
+  };
   return {
     createOffer: (request) => forRoute(request.routeId).createOffer(request),
     preflight: (offer, credential, nowMs) => forOffer(offer).preflight(offer, credential, nowMs),
     // 呼び出しの文脈（route）を落とさない（運用者向け診断の route はここを通る。設計 A §3.5）。
     verify: (offer, credential, context) => forOffer(offer).verify(offer, credential, context),
     settle: (offer, credential, context) => forOffer(offer).settle(offer, credential, context),
+    /*
+     * 受信レール `subetha-exact` の任意の操作（設計 §2 の wrapper の契約）: **常に定義**し、下の rail に method が無ければ `settleWindowOf` は `undefined`、
+     * `release`・`complete` は `{ outcome: "none" }`（core は「持たない」= 今までどおりと読む）。下の rail が持つなら結果をそのまま渡す。
+     */
+    settleWindowOf: (offer) => {
+      const rail = forOffer(offer);
+      return typeof rail.settleWindowOf === "function" ? rail.settleWindowOf(offer) : undefined;
+    },
+    ownsOffer: (offer) => forOfferOrOwner(offer) !== undefined,
+    release: async (offer, context) => {
+      const rail = forOffer(offer);
+      return typeof rail.release === "function" ? rail.release(offer, context) : { outcome: "none" };
+    },
+    complete: async (offer, deliveryKey, outcome, context) => {
+      const rail = forOfferOrOwner(offer);
+      return rail !== undefined && typeof rail.complete === "function" ? rail.complete(offer, deliveryKey, outcome, context) : { outcome: "none" };
+    },
   };
+}
+
+/**
+ * 秘密のファイル（`docs/subetha-exact-inbound-design.md` §5.3）: `lstat` で通常のファイル（symlink 不可）、mode が **ちょうど 0600**、サイズ ≤ 4096、
+ * UTF-8、trim 後が `^[\x21-\x7e]{16,4096}$`。違えば `ConfigError`（値・パスの中身は含めない）。
+ */
+export function readSecretFile(file: string, label: string): string {
+  let stat;
+  try {
+    stat = lstatSync(file);
+  } catch {
+    throw new ConfigError(`${label}: the secret file cannot be read`);
+  }
+  if (!stat.isFile()) throw new ConfigError(`${label}: the secret file must be a regular file (not a symlink)`);
+  if ((stat.mode & 0o777) !== 0o600) throw new ConfigError(`${label}: the secret file must have mode 0600`);
+  if (stat.size > 4096) throw new ConfigError(`${label}: the secret file is too large`);
+  let value: string;
+  try {
+    value = readFileSync(file, "utf8").trim();
+  } catch {
+    throw new ConfigError(`${label}: the secret file cannot be read`);
+  }
+  if (!/^[\x21-\x7e]{16,4096}$/.test(value)) throw new ConfigError(`${label}: the secret must be 16 to 4096 printable ASCII characters`);
+  return value;
 }
 
 /** 運用者向けの transport 診断の出口（core の `note` と同じ stderr）。 */
@@ -657,6 +716,8 @@ export interface ComposedRails {
   readonly balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>;
   readonly dynamic?: DynamicWiring;
   readonly startup?: () => Promise<void>;
+  /** adapter の資源の解放（`subetha-exact` の ledger の lock）。`startRouter` は core の `close()` の後に呼ぶ（起動の失敗の片付けと drain の両方）。 */
+  readonly shutdown?: () => Promise<void>;
   /** `createRouterCore` の `onStoreLoaded` に渡す（`docs/mpp-solana-design.md` §2.3）。MPP Solana 受信の replay 検査が journal の消費済み署名を読む。 */
   readonly bindConsumed: (view: { readonly settledSourceTxRefs: ReadonlySet<string> }) => void;
 }
@@ -758,6 +819,7 @@ export function composeRails(
       ? []
       : denyHostsOf(dynamicConfig.denyHosts, [
           real.subethaFacilitatorUrl,
+          real.subethaExact?.facilitator.url,
           real.x402InboundFacilitatorUrl,
           ...Object.values(real.x402InboundFacilitators ?? {}).map((facilitator) => facilitator.url),
           solanaRpcUrl,
@@ -932,6 +994,53 @@ export function composeRails(
     }),
   };
   const usesX402Inbound = x402InboundNetworks.size > 0;
+  /**
+   * 受信レール `subetha-exact`（Router = SubEtha v2 facilitator の Provider。`docs/subetha-exact-inbound-design.md` §5.4）。adapter は 1 つ。
+   * 作る条件: `subetha-exact` の route がある、または env（URL と token ファイル）があり過去の ledger がある（過去の注文の complete の報告のため）。
+   * route も env も無ければ何も作らない（FR-1）。route が無く env だけあって ledger も無ければ作らない（固定文の note）。
+   */
+  const subethaExactRoutes = Object.values(config.router.routes).filter((route) => route.sourceRail === "subetha-exact");
+  const subethaExactLedgerDir = path.join(path.dirname(path.resolve(config.journalPath)), "subetha-exact");
+  let subethaExactAdapter: SubethaExactInbound | undefined;
+  if (real.subethaExact !== undefined && (subethaExactRoutes.length > 0 || existsSync(path.join(subethaExactLedgerDir, "orders.ndjson")))) {
+    const section = real.subethaExact;
+    const first = subethaExactRoutes[0];
+    const assetRow = first === undefined ? undefined : knownAssetOf(knownNetworkOf(networks, first.source.network)!, first.source.asset);
+    // route が無いとき（過去の注文の報告だけ）は表の `subetha-exact` を許す唯一の行を使う。
+    const fallbackRow = ((): { network: string; asset: KnownAsset } | undefined => {
+      for (const entry of networks) for (const asset of entry.assets) if (asset.rails?.inbound.includes("subetha-exact")) return { network: entry.network, asset };
+      return undefined;
+    })();
+    const network = first?.source.network ?? fallbackRow?.network;
+    const row = assetRow ?? fallbackRow?.asset;
+    if (network === undefined || row === undefined || row.domain === undefined) {
+      throw new ConfigError("subetha-exact: the table has no asset that allows this inbound rail");
+    }
+    // loopback の facilitator は fixture の能力があるときだけ（設計 §5.2: 実能力の構成では起動を止める。transport も拒むが、quote の時ではなく起動時に）。
+    if (section.facilitator.loopback && capabilities.fixtureFacilitators !== true) {
+      throw new ConfigError(`${SUBETHA_EXACT_FACILITATOR_URL_ENV}: a loopback facilitator is only allowed with fixture capabilities`);
+    }
+    // token は閉包の中だけ（読む値は adapter にしか渡さない。0600 の通常のファイル。§5.3）。
+    const token = readSecretFile(section.tokenFile, SUBETHA_EXACT_TOKEN_FILE_ENV);
+    subethaExactAdapter = createSubethaExactInbound({
+      facilitatorUrl: section.facilitator.url,
+      token: () => token,
+      transport: createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }),
+      asset: { network, id: row.id, decimals: row.decimals, domain: row.domain },
+      ledgerDir: subethaExactLedgerDir,
+      limits: section.limits,
+      ...(section.offerSeconds === undefined ? {} : { offerSeconds: section.offerSeconds }),
+      note,
+      ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
+      ...(capabilities.subethaExactHooksForTest === undefined ? {} : { hooksForTest: capabilities.subethaExactHooksForTest }),
+    });
+    inboundRails["subetha-exact"] = subethaExactAdapter;
+  } else if (real.subethaExact !== undefined) {
+    note("subetha-exact: facilitator env is set but no route uses the rail and no ledger exists; the adapter is not created");
+  } else if (existsSync(path.join(subethaExactLedgerDir, "orders.ndjson"))) {
+    // 過去の注文の記録があるのに env が無い: 未報告の complete は送られない（運用者は `npm run subetha-exact:inspect -- --remote` で見る）。
+    note("subetha-exact: a ledger exists but the facilitator env is not set; pending complete reports are not sent (inspect with the operator tool)");
+  }
   /** 受信の network と asset を表で引く（x402 と MPP Solana の受信が共有）。 */
   const knownAssetFor = (network: string, asset: string, at: string) => {
     const entry = knownNetworkOf(networks, network);
@@ -1325,11 +1434,16 @@ export function composeRails(
     };
   }
 
-  // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。
+  // 送信（SVM）の startup は受信の検査の後（送信の設計 §2.2・§4.4）。`subetha-exact` の ledger の open と照会の 1 巡はその前。
+  if (subethaExactAdapter !== undefined) {
+    const adapter = subethaExactAdapter;
+    startupChecks.unshift(() => adapter.startup());
+  }
   startupChecks.push(...svmStartups);
   return {
     ...(privateWiring === undefined ? {} : { private: privateWiring }),
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
+    ...(subethaExactAdapter === undefined ? {} : { shutdown: () => subethaExactAdapter!.close() }),
     inbound: inboundByRoute(config.router.routes, inboundRails, profiles),
     outbound: railByRoute(config.router.routes, rails, profiles),
     // 残高の hook は動的の設定の有無と独立に渡す（静的だけの構成でも静的 route の残高を見る。送信の設計 §2.6）。
@@ -1428,7 +1542,22 @@ export function warnIfInternalUpstream(
 export async function startRouter(capabilities: RouterCapabilities = {}): Promise<void> {
   const config = loadRuntimeConfig(process.env, (file) => readFileSync(file, "utf8"), { networks: capabilities.knownNetworksForTest ?? KNOWN_NETWORKS });
   const rails = composeRails(config, capabilities);
-  // 起動時の検査（SVM 受信の `/supported`・ATA。multirail 設計 §5.1）。失敗すれば起動しない。
+  /**
+   * 起動の途中の失敗の片付け（`docs/subetha-exact-inbound-design.md` §5.4）: core があれば `core.close()`（掃き出しを待ち journal を閉じる）→
+   * `rails.shutdown?.()`（adapter の ledger の lock を解放）の順。既存の経路の順は変えない（検査 → verify → core → listen）。
+   */
+  let core: RouterCore | undefined;
+  try {
+    await startRouterComposed(config, capabilities, rails, (created) => { core = created; });
+  } catch (error) {
+    await core?.close().catch(() => undefined);
+    await rails.shutdown?.().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function startRouterComposed(config: RuntimeConfig, capabilities: RouterCapabilities, rails: ComposedRails, onCore: (core: RouterCore) => void): Promise<void> {
+  // 起動時の検査（SVM 受信の `/supported`・ATA。multirail 設計 §5.1。`subetha-exact` の ledger と照会）。失敗すれば起動しない。
   await rails.startup?.();
   // 動的プロファイルの MPP 能力の起動時の確認（client が素の http transport で、プロファイルの chain のものか）。
   await rails.dynamic?.verify();
@@ -1452,7 +1581,9 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
     ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
     // 秘匿購入（設定があるときだけ）。作業ディレクトリは設定の `workDir`（journal と同じく相対なら cwd 基準）。
     ...(rails.private === undefined ? {} : { private: rails.private }),
+    ...(capabilities.coreHooksForTest === undefined ? {} : { hooksForTest: capabilities.coreHooksForTest }),
   });
+  onCore(core);
 
   // 合成構成が `crashBarrierPath` を指定したときだけ、応答直前で停止するシームを渡す。
   // 到達を書き出したあとは自分からは進まない（応答バイトを出さない）。
@@ -1468,23 +1599,17 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
   // graceful drain（タスク R-0）: SIGTERM の後は新しい要求を 503 で断り、進行中の要求（購入・quote・status の読み取り。相手が切った購入も、
   // HTTP の処理が終わるまで）が 0 になるのを待ってから閉じる。
   const drain = createDrainGate();
-  let server;
-  try {
-    server = await startHttpServer({
-      drain,
-      core,
-      config: config.router,
-      canonicalBaseUrl: config.http.canonicalBaseUrl,
-      principals: config.principals,
-      host: config.http.host,
-      port: config.http.port,
-      ...(beforeDeliveredResponse === undefined ? {} : { beforeDeliveredResponse }),
-    });
-  } catch (error) {
-    // listen できなければ journal ロックも解放してから落ちる。
-    await core.close();
-    throw error;
-  }
+  // listen できなければ `startRouter` の片付けが journal と adapter の lock を解放してから落ちる。
+  const server = await startHttpServer({
+    drain,
+    core,
+    config: config.router,
+    canonicalBaseUrl: config.http.canonicalBaseUrl,
+    principals: config.principals,
+    host: config.http.host,
+    port: config.http.port,
+    ...(beforeDeliveredResponse === undefined ? {} : { beforeDeliveredResponse }),
+  });
 
   process.stdout.write(
     `${JSON.stringify({
@@ -1521,6 +1646,8 @@ export async function startRouter(capabilities: RouterCapabilities = {}): Promis
       }
       // 進行中の要求は 0。残る接続（keep-alive の空き）は process の終了で閉じる（`server.close()` の完了は待たない）。
       await core.close();
+      // adapter の資源（`subetha-exact` の ledger の lock）は core の後。
+      await rails.shutdown?.().catch(() => undefined);
       // 診断の記録を短い上限つきで書き出して閉じる（journal を閉じた後。失敗・時間切れは無視）。
       await closeDiagnosticsWithin(capabilities.diagnostics);
       process.stderr.write("router drain: complete\n");

@@ -31,7 +31,7 @@ export function payerAssetOf(network: string, asset: string): KnownAsset | undef
   return entry === undefined ? undefined : knownAssetOf(entry, asset);
 }
 
-/** Inbound rails the table allows on a payer network (`x402`, `mpp`), or `[]`. */
+/** Inbound rails the table allows on a payer network (`x402`, `mpp`), or `[]`. Rails this payer does not pay on (the Router's `subetha-exact`) are left out. */
 export function inboundRailsOf(network: string): readonly ("x402" | "mpp")[] {
-  return payerNetworkOf(network)?.inbound ?? [];
+  return (payerNetworkOf(network)?.inbound ?? []).filter((rail): rail is "x402" | "mpp" => rail === "x402" || rail === "mpp");
 }

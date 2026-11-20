@@ -14,7 +14,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { assetKeyOf, dynamicAuthoritativeTermsOf, resolveProfile, type DynamicProfile, type RouterConfig, usesGasIndexedFee } from "../config.js";
 import { parseUpstreamUrl } from "../net/upstream-url.js";
-import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
+import type { InboundOffer, InboundRail, InboundVerifyResult, PaymentCredential } from "../ports/inbound.js";
 import { UpstreamMethodUnsupportedError, type DestinationOffer, type FeeEstimate, type OutboundRail, type UpstreamTarget } from "../ports/outbound.js";
 import type { Budget, DynamicReservation } from "./budget.js";
 import { PromotionNotWrittenError } from "./budget.js";
@@ -455,6 +455,8 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         network: profile.source.network,
         routeBinding: binding,
         nowMs: now(),
+        // quote の要求の識別（`subetha-exact` だけが読む。動的プロファイルはその rail を使えないので値は使われない。設計 §4.1）。
+        requester: { principalId: request.principalId, requestId: request.requestId },
       });
       if (
         sourceOffer.amount !== pricing.total ||
@@ -468,12 +470,14 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       const approvalDeadlineMs = Math.min(issuedAtMs + config.approvalTtlMs, sourceOffer.extra.expiresAt * 1000);
       const paymentId = options.nextPaymentId();
       const quoteId = sourceOffer.extra.challengeNonce;
+      // 「払われたかもしれない」の上限（静的と同じ対称。`docs/subetha-exact-inbound-design.md` §4.2。持たない rail では欄なし = 記録は不変）。
+      const settleWindow = settleWindowOf(sourceOffer);
       const record: Record<string, unknown> = {
         quoteId,
         routeId: profile.profileId,
         principalId: request.principalId,
         requestId: request.requestId,
-        source: { amount: pricing.total, asset: profile.source.asset, network: profile.source.network, offer: sourceOffer },
+        source: { amount: pricing.total, asset: profile.source.asset, network: profile.source.network, offer: sourceOffer, ...(settleWindow === undefined ? {} : { settleWindow }) },
         destination: { quoted: selected.amount, asset: selected.asset, network: selected.network, selectedOffer: selected },
         quoteFingerprint: fingerprintOf(selected),
         routeFingerprint: fingerprintOf(dynamicAuthoritativeTermsOf(dynamic, profile)),
@@ -503,6 +507,18 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
 
   function missing(): DynamicPurchaseOutcome {
     return { status: "rejected", code: "unknown_quote" };
+  }
+
+  /** rail の同期の問い合わせ（静的の `orchestrator.ts` と同じ契約: method が無い・正の整数でない → 欄なし）。 */
+  function settleWindowOf(offer: InboundOffer): number | undefined {
+    if (typeof inbound.settleWindowOf !== "function") return undefined;
+    let value: unknown;
+    try {
+      value = inbound.settleWindowOf(offer);
+    } catch {
+      return undefined;
+    }
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
   }
 
   function currentOutcome(intent: Intent): DynamicPurchaseOutcome {
@@ -722,7 +738,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
         }
       }
     }
-    let verified: { isValid: boolean; fundsMoved?: boolean };
+    let verified: InboundVerifyResult;
     const verifyStartedAt = diag.start();
     try {
       verified = await diag.stage({ promoted: isPromoted }, () => inbound.verify(intent.source.offer, credential, { routeId: intent.routeId }));
@@ -739,6 +755,10 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     }
     // 成立の記録も控えるだけ（push は購入の終わり = 昇格・settle の期限の判定の後。§12.3）。
     diag.note(() => ({ stage: "source_verify", outcome: "valid", promoted: isPromoted, ...(verifyElapsedMs === undefined ? {} : { elapsedMs: verifyElapsedMs }) }));
+    // 手元の検査の後の正確な上限（静的と同じ対称。§4.2 (ii)）。adapter が返さなければ quote のときの上限（持たない rail では欄なし）。昇格の後の行にだけ写る。
+    const preciseRaw = verified.mayStillSettleUntil;
+    const precise = typeof preciseRaw === "number" && Number.isSafeInteger(preciseRaw) && preciseRaw > 0 ? preciseRaw : intent.source.settleWindow;
+    const precisePatch = precise === undefined ? {} : { mayStillSettleUntil: precise };
 
     // 4. 期限の再検査
     const beforeSettleMs = now();
@@ -787,11 +807,11 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
       // 資金が既に動いた credential（adapter の `fundsMoved`、無ければ offer の `fundsMoveOnCredential`）は `not_sent` にしない: 耐久的な `unknown`。
       const fundsMoved = verified.fundsMoved ?? current.source.offer.extra["fundsMoveOnCredential"] === true;
       if (fundsMoved) {
-        await store.append(paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled" });
+        await store.append(paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled", ...precisePatch });
         diag.note(() => ({ stage: "dynamic_precheck", outcome: "unknown", promoted: true, code: "source_paid_unsettled" }));
         return { paymentId, status: "unknown", terminalReason: "source_paid_unsettled" };
       }
-      await store.append(paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired" });
+      await store.append(paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired", ...precisePatch });
       // 昇格の後の期限切れ（記録の欄で `promoted:true`。push は購入の scope の値なので明示する）。
       diag.note(() => ({ stage: "dynamic_precheck", outcome: "awaiting", promoted: true, code: "approval_expired" }));
       return plainAwaiting("approval_expired");
@@ -801,7 +821,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
     try {
       settled = await diag.stage({ promoted: true }, () => inbound.settle(current.source.offer, credential, { routeId: current.routeId }));
     } catch (error) {
-      await store.append(paymentId, "unknown", { outcome: "none", reason: "source_settle_unknown" });
+      await store.append(paymentId, "unknown", { outcome: "none", reason: "source_settle_unknown", ...precisePatch });
       const elapsedMs = diag.elapsedSince(settleStartedAt);
       diag.note(() => ({ stage: "source_settle", outcome: "threw", promoted: true, transport: classifyTransportError(error), code: "source_settle_unknown", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
       return { paymentId, status: "unknown", terminalReason: "source_settle_unknown" };
@@ -838,7 +858,7 @@ export function createDynamicCore(options: DynamicCoreOptions): DynamicCore {
      * 応答で確実には区別できないので、`rejected` を「未払い」と確定しない。予約は保持する。
      */
     const reason = outcome === "rejected" ? safeSettleReason(isRecord(settled) ? settled["reason"] : undefined) : "source_settle_unknown";
-    await store.append(paymentId, "unknown", { outcome: "none", reason });
+    await store.append(paymentId, "unknown", { outcome: "none", reason, ...precisePatch });
     settleNote(outcome === "rejected" ? "rejected" : "unknown", reason);
     return { paymentId, status: "unknown", terminalReason: reason };
   }

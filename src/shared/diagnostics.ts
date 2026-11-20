@@ -110,6 +110,12 @@ export const DIAG_OPS = [
   "sdk_read_contract",
   "sdk_verify_typed_data",
   "sdk_get_code",
+  // 受信レール `subetha-exact`（facilitator の Provider API。`docs/subetha-exact-inbound-design.md` §3.9・§9。verify・settle は上の `facilitator_verify`／`facilitator_settle`）
+  "facilitator_order_create",
+  "facilitator_order_status",
+  "facilitator_requester_orders",
+  "facilitator_release",
+  "facilitator_complete",
   "other",
 ] as const;
 export type DiagOp = (typeof DIAG_OPS)[number];
@@ -161,6 +167,12 @@ const ROUTER_CODES = [
   "source_settle_unknown",
   "source_verify_unavailable",
   "source_paid_unsettled",
+  // 受信レール `subetha-exact`（`docs/subetha-exact-inbound-design.md` §4.6）
+  "source_offer_unavailable",
+  "source_offer_refused",
+  "source_release_refused",
+  "source_release_unknown",
+  "source_complete_unreported",
   "destination_rejected",
   "destination_pay_unknown",
   "paid_data_unavailable",

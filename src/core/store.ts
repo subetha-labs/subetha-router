@@ -397,6 +397,8 @@ export function capCoversFee(
 export function intentFromCreated(paymentId: string, at: string, patch: Patch, options: { readonly requireReservation?: boolean } = { requireReservation: true }): Intent {
   const source = asObject(patch["source"]);
   const destination = asObject(patch["destination"]);
+  // quote のときの開示の上限（`docs/subetha-exact-inbound-design.md` §4.3）。正の安全な整数のときだけ復元する（この関数は欄を列挙するので、ここで拾わないと append の直後に消える）。
+  const settleWindow = source["settleWindow"];
   return {
     paymentId,
     quoteId: asString(patch["quoteId"]),
@@ -409,6 +411,7 @@ export function intentFromCreated(paymentId: string, at: string, patch: Patch, o
       asset: asString(source["asset"]),
       network: asString(source["network"]),
       offer: source["offer"] as InboundOffer,
+      ...(positiveInt(settleWindow) ? { settleWindow } : {}),
     },
     destination: {
       quoted: asString(destination["quoted"]),
@@ -445,13 +448,36 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
         source: { ...current.source, txRef: asString(patch["txRef"]), outcome: "settled", ...(typeof eventId === "string" && eventId !== "" ? { eventId } : {}) },
       };
     }
-    case "source_failed":
+    case "source_failed": {
+      const until = patch["mayStillSettleUntil"];
       return {
         ...base,
         status: "source_failed",
-        source: { ...current.source, outcome: asString(patch["outcome"], "failed") },
+        source: { ...current.source, outcome: asString(patch["outcome"], "failed"), ...(positiveInt(until) ? { mayStillSettleUntil: until } : {}) },
         terminalReason: asString(patch["reason"], current.terminalReason ?? ""),
       };
+    }
+    /*
+     * facilitator の release と complete（`docs/subetha-exact-inbound-design.md` §4.3）。状態は変えない: `source_released` は `source_settled` の intent に欄を足す。
+     * `source_completed` が来れば `unreported` は消える（後からの成功が優先）。既に release がある intent への二重の `source_released` は上書きしない。
+     */
+    case "source_released": {
+      if (current.source.release !== undefined) return current;
+      return { ...base, source: { ...current.source, release: { deliveryKey: asString(patch["deliveryKey"]), txRef: asString(patch["txRef"]), eventId: asString(patch["eventId"]), at } } };
+    }
+    case "source_completed": {
+      const release = current.source.release;
+      if (release === undefined) return current;
+      const outcome = patch["outcome"] === "delivered" ? "delivered" : "failed";
+      const { unreported: _dropped, ...rest } = release;
+      return { ...base, source: { ...current.source, release: { ...rest, completed: { outcome, at } } } };
+    }
+    case "source_complete_unreported": {
+      const release = current.source.release;
+      if (release === undefined || release.completed !== undefined) return current;
+      const outcome = patch["outcome"] === "delivered" ? "delivered" : "failed";
+      return { ...base, source: { ...current.source, release: { ...release, unreported: { outcome, reason: asString(patch["reason"], "unavailable"), at } } } };
+    }
     case "destination_pending":
       return {
         ...base,
@@ -500,9 +526,11 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
     case "unknown": {
       const attest = patch["attest"];
       const bundleSha256 = isPlainRecord(attest) ? attest["bundleSha256"] : undefined;
+      const until = patch["mayStillSettleUntil"];
       return {
         ...base,
         status: "unknown",
+        ...(positiveInt(until) ? { source: { ...current.source, mayStillSettleUntil: until } } : {}),
         destination: {
           ...current.destination,
           outcome: asString(patch["outcome"], current.destination.outcome) as DestinationOutcome,
@@ -879,6 +907,11 @@ export class IntentStore {
 
   /** 中断された途中状態を `unknown` へ確定する（再起動時）。 */
   interrupted(): readonly Intent[] {
+    return [...this.#intents.values()];
+  }
+
+  /** すべての intent（読取だけ。起動時の complete の掃き出しの候補の snapshot に使う。`docs/subetha-exact-inbound-design.md` §4.5）。 */
+  all(): readonly Intent[] {
     return [...this.#intents.values()];
   }
 

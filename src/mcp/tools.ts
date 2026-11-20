@@ -93,6 +93,9 @@ const RATE_LIMITED_DEFAULT_RETRY_AFTER_MS = 60_000;
 function quoteFailureOf(result: { readonly error: string; readonly status: number; readonly reason?: string; readonly retryAfterMs?: number }): Record<string, unknown> {
   const rateLimited = result.error === "rate_limited";
   const retryAfterMs = rateLimited ? (result.retryAfterMs ?? RATE_LIMITED_DEFAULT_RETRY_AFTER_MS) : result.retryAfterMs;
+  // 受信 offer の発行の失敗（Router `docs/subetha-exact-inbound-design.md` §4.1）: 一時なら quote の取り直しの目安、`order_reused_*` なら新しい requestId。
+  const offerUnavailable = result.error === "source_offer_unavailable";
+  const orderReused = result.error === "source_offer_refused" && typeof result.reason === "string" && result.reason.startsWith("order_reused_");
   return {
     ok: false,
     error: result.error,
@@ -105,8 +108,38 @@ function quoteFailureOf(result: { readonly error: string; readonly status: numbe
             `The Router's quote rate limit was hit. You may retry the quote after about ${String(Math.ceil((retryAfterMs ?? RATE_LIMITED_DEFAULT_RETRY_AFTER_MS) / 1000))} seconds ` +
             "with a fresh requestId. Never retry a purchase on your own because of this: a purchase that failed or ended unknown may already have moved funds.",
         }
-      : {}),
+      : offerUnavailable
+        ? {
+            nextStep:
+              "The Router could not obtain an inbound payment offer from its facilitator right now; no payment was started. " +
+              `You may retry the quote after about ${String(Math.ceil((retryAfterMs ?? 30_000) / 1000))} seconds (the same requestId is fine). ` +
+              "Never retry a purchase on your own because of this.",
+          }
+        : orderReused
+          ? { nextStep: "This requestId can no longer be quoted on this route; take a new quote with a new requestId. No payment was started." }
+          : {}),
   };
+}
+
+/**
+ * 応答の `mayStillSettleUntil` を読む（相手の値は信用しない: 正の安全な整数で、Date にできる範囲だけ。それ以外は欄なし = 文も出さない。投げない）。
+ */
+function disclosureUntilOf(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return undefined;
+  return Number.isFinite(new Date(value * 1000).getTime()) ? value : undefined;
+}
+/** `disclosureUntilOf` を通った値だけが来る。それでも投げない（範囲外なら数字のまま）。 */
+function isoOf(until: number): string {
+  const date = new Date(until * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : `unix ${String(until)}`;
+}
+/**
+ * 「払われたかもしれない」の文（Router `docs/subetha-exact-inbound-design.md` §4.2・§5.5、要件 FR-4.4）。purchase・status の応答に `mayStillSettleUntil` があるときだけ添える。
+ */
+function mayStillSettleNote(until: number): string {
+  return `The signature you built for this quote stays executable outside the Router until ${isoOf(until)} (mayStillSettleUntil). ` +
+    "A refused, failed, awaiting_payment or unknown result is NOT proof that nothing was paid: whoever holds that authorization can still settle it through the facilitator. " +
+    "Do not sign again for this quote (the same order gives the same authorization, which can settle at most once). Check status later; a new purchase needs a new quote and a new approval.";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -209,6 +242,13 @@ function railHintOf(quote: QuoteView): string {
   }
   if (network === "eip155:5042002") {
     return " This offer is paid on Arc testnet (x402 exact via Circle's facilitator): `npm run sign` only signs; settlement can take up to about a minute.";
+  }
+  const extra = isRecord(offer) && isRecord(offer["extra"]) ? offer["extra"] : undefined;
+  if (scheme === "exact" && extra !== undefined && extra["name"] === "zERC20 USD Coin") {
+    // SubEtha v2 facilitator の注文に払う標準の x402 `exact`（Router `docs/subetha-exact-inbound-design.md` §5.5、要件 FR-4.5・FR-10.2）。
+    return " This offer pays a SubEtha facilitator order in zUSDC (x402 exact, EIP-3009): `npm run sign` only signs and the funds move at purchase. " +
+      "The signature stays valid until the offer's validBefore even if the Router refuses, and signing the same quote again yields the same authorization (it can settle at most once). " +
+      "An `unknown` or `awaiting_payment` result is not proof that nothing was paid.";
   }
   return "";
 }
@@ -555,7 +595,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" },
         });
       }
-      return withEvidence(deps, { ok: result.outcome === "delivered", ...result });
+      const until = disclosureUntilOf("mayStillSettleUntil" in result ? result.mayStillSettleUntil : undefined);
+      return withEvidence(deps, { ok: result.outcome === "delivered", ...result, ...(until === undefined ? {} : { awaitingPaymentDoesNotMeanUnpaid: true, nextStep: mayStillSettleNote(until) }) });
     },
 
     async status(input): Promise<Record<string, unknown>> {
@@ -569,7 +610,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
           proof: { upstreamReceipt: "claimed", onChainFinality: "not_checked" },
         });
       }
-      return withEvidence(deps, { ...result });
+      const until = disclosureUntilOf(result.found ? result.projection.source["mayStillSettleUntil"] : undefined);
+      return withEvidence(deps, { ...result, ...(until === undefined ? {} : { nextStep: mayStillSettleNote(until) }) });
     },
 
     issuedCount(): number {

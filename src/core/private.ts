@@ -467,7 +467,7 @@ function sameAsset(a: string, b: string): boolean {
 
       const ownerKey = randomBytes(32).toString("base64url");
       const binding = privateBindingOf(profile.profileId, intent.method, intent.url, intent.sha256);
-      const sourceOffer = await inbound.createOffer({ routeId: profile.profileId, amount: pricing.total, asset: profile.source.asset, network: profile.source.network, routeBinding: binding, nowMs: now() });
+      const sourceOffer = await inbound.createOffer({ routeId: profile.profileId, amount: pricing.total, asset: profile.source.asset, network: profile.source.network, routeBinding: binding, nowMs: now(), requester: { principalId: request.principalId, requestId: request.requestId } });
       // 資産は EVM の 0x アドレスなら大小文字を区別しない（設定は checksum、facilitator の challenge は別の綴りで返り得る。v1.3.2 レビュー 2）。offer 自体はそのまま credential の束縛に使う。
       if (sourceOffer.amount !== pricing.total || !sameAsset(sourceOffer.asset, profile.source.asset) || sourceOffer.network !== profile.source.network || sourceOffer.extra.routeBinding !== binding) {
         return { ok: false, code: "source_terms_mismatch" };

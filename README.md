@@ -340,6 +340,22 @@ and the following remain behind separate gates, **not done**.
   to start unless `delivery capabilities` declares `proxy`; **until the lab ships a proxy-capable `delivery`, list every private
   profile in `private.mpcProfiles`**.
 
+## Inbound as a Provider of the SubEtha v2 facilitator (`subetha-exact`, local testnet only)
+
+Since 2026-11-20 a **local** Router can take **standard x402 `exact` (EIP-3009) payments in zUSDC on Base Sepolia** as a
+registered Provider (tenant) of the multi-tenant SubEtha v2 facilitator: the quote creates a facilitator order (the
+burn address is the order's `payTo`), the buyer signs it with `npm run sign` as usual (funds move at purchase, not at
+sign), and the Router settles, releases and completes the order before and after paying the upstream. Set
+`sourceRail: "subetha-exact"` on a route (no `payTo`, amount at most 20,000), point `ROUTER_SUBETHA_EXACT_FACILITATOR_URL`
+at your tenant and `ROUTER_SUBETHA_EXACT_TOKEN_FILE` at a 0600 file holding the Provider token. Design and
+requirements: `docs/subetha-exact-inbound-design.md`, `docs/subetha-exact-inbound-requirements.md`; the registration and
+the funded run are separate owner gates recorded in `docs/subetha-exact-inbound-acceptance.md`. **Not on the hosted Router.**
+
+Two things a buyer must know: a refused, failed, `awaiting_payment` or `unknown` purchase **is not proof that nothing was
+paid** (the signed authorization stays valid until `validBefore`; the response carries `mayStillSettleUntil` and
+`awaitingPaymentDoesNotMeanUnpaid: true`), and the operator can list every order and compare it with the facilitator
+with `npm run subetha-exact:inspect -- --remote` (read-only; `--abandon` is the only write and needs the Router stopped).
+
 ## Where the detail went
 
 This file is the entry point. The working records live next to it:

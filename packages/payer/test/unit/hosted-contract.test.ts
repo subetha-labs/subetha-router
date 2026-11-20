@@ -14,6 +14,7 @@ import type { QuoteDocument } from "../../../../src/core/orchestrator.js";
 import { HOSTED_ROUTER_URL, HOSTED_RESOURCE_URL, routerIdentity } from "../../src/router/identity.js";
 import { STATIC_ROUTE, statusOf } from "../../src/router/client.js";
 import { createPurchaseCore } from "../../src/daemon/purchase.js";
+import { routeRowsOf } from "../../src/daemon/handler.js";
 import { buildRecord, recordHash, render } from "../../src/daemon/record.js";
 import { Session } from "../../src/daemon/session.js";
 import { realFs } from "../../src/store/fs.js";
@@ -92,7 +93,7 @@ for (const [name, change] of substitutions) test(`producer hostile substitution 
   try {
     const core = createPurchaseCore({ ledger, session, address: identity().address, wallets: { eip155: identity().address }, phrase: "fixture", assertHeld() {},
       purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: ui }, signer: { sign } },
-      router: { quote, purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
+      router: { quote, quoteUrl: async () => ({}), purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
     expect(await core.quote({ routeId: STATIC_ROUTE })).toMatchObject({ error: "quote_inconsistent" });
     expect(quote).toHaveBeenCalledTimes(1); expect(ledger.rows).toHaveLength(0);
     expect(ui).not.toHaveBeenCalled(); expect(sign).not.toHaveBeenCalled(); expect(purchase).not.toHaveBeenCalled();
@@ -119,7 +120,7 @@ test("real producer quote reaches durable core purchase with omitted optional de
   try {
     const core = createPurchaseCore({ ledger, session, address: identity().address, wallets: { eip155: identity().address }, phrase: "fixture", assertHeld() {},
       purchase: { routerUrl: HOSTED_ROUTER_URL, ui: { available: async () => true, confirm }, signer: { sign } },
-      router: { quote: async () => response, purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
+      router: { quote: async () => response, quoteUrl: async () => ({}), purchase, listRoutes: async () => ({}), status: async () => ({ kind: "not_found", reason: "not_found" }) } });
     const q: any = await core.quote({ routeId: STATIC_ROUTE }); expect(q.ok).toBe(true);
     expect(response.quote.destination.decimals).toBeUndefined();
     expect(q.subject.reaches.decimals).toBe(6);
@@ -145,4 +146,29 @@ test("actual projectionBody → client → MCP status preserves recovery identit
   expect((status.projection["source"] as any).txRef).toBe("learned-after-settlement");
   expect(status.projection["result"]).toEqual({ synthetic: true });
   expect(status.projection["quoteId"]).toBeUndefined(); expect(status.projection["requestId"]).toBeUndefined();
+});
+
+/**
+ * Router docs/subetha-exact-inbound-requirements.md FR-10.2: a static route whose `source.rail` is present but not `x402`/`mpp` (the Router's
+ * `subetha-exact`, or a malformed value) is not listed, even though the vendored table now knows zUSDC on Base Sepolia. An absent `rail`
+ * still falls back to the network's table rail; an explicit `x402` is unchanged.
+ */
+test("listing: explicit unknown or malformed source.rail is dropped; absent and x402 rails are unchanged", () => {
+  const zusdc = "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f";
+  const usdc = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+  const destination = { rail: "x402", scheme: "exact", network: "eip155:84532", asset: usdc };
+  const row = (routeId: string, source: Record<string, unknown>) => ({ routeId, resource: { url: `https://router.subethalabs.com/v1/routes/${routeId}/resource`, method: "GET" }, source, destination });
+  const rows = routeRowsOf({
+    routes: [
+      row("md-zusdc-exact", { rail: "subetha-exact", scheme: "exact", fundsMoveOnCredential: false, network: "eip155:84532", asset: zusdc, decimals: 6, amount: "2000" }),
+      row("md-null-rail", { rail: null, network: "eip155:84532", asset: usdc, decimals: 6, amount: "2000", payTo: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405" }),
+      row("md-number-rail", { rail: 1, network: "eip155:84532", asset: usdc, decimals: 6, amount: "2000", payTo: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405" }),
+      row("md-absent-rail", { network: "eip155:84532", asset: usdc, decimals: 6, amount: "2000", payTo: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405" }),
+      row("md-x402-rail", { rail: "x402", scheme: "exact", network: "eip155:84532", asset: usdc, decimals: 6, amount: "2000", payTo: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405" }),
+      // zUSDC without a rail: the network rail (x402) resolves, but the table restricts zUSDC to `subetha-exact` → not a pair this payer pays.
+      row("md-zusdc-absent-rail", { network: "eip155:84532", asset: zusdc, decimals: 6, amount: "2000" }),
+    ],
+  });
+  expect(rows.map((r) => r.routeId).sort()).toEqual(["md-absent-rail", "md-x402-rail"].sort());
+  expect(rows.find((r) => r.routeId === "md-absent-rail")?.pays).toMatchObject({ rail: "x402", asset: usdc });
 });

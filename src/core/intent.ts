@@ -105,6 +105,26 @@ export interface IntentSource {
   /** 受信 settle の支払いイベントの識別子（x402 受信: authorization の nonce。秘匿購入の二重一意性 FR-Z06 (b) の材料）。 */
   readonly eventId?: string;
   readonly outcome?: string;
+  /**
+   * quote のときの「標準の署名が実行可能でいられる上限」（unix 秒。`created` の行。rail の `settleWindowOf`。`docs/subetha-exact-inbound-design.md` §4.2）。
+   * 持たない rail の intent には無い。
+   */
+  readonly settleWindow?: number;
+  /** 手元の署名の検査の後に確定した正確な `validBefore`（`source_failed`／`unknown` の行。要件 FR-4.4 (ii)）。 */
+  readonly mayStillSettleUntil?: number;
+  /** facilitator の release（行 `source_released`。状態は `source_settled` のまま。設計 §4.3）。 */
+  readonly release?: IntentSourceRelease;
+}
+
+export interface IntentSourceRelease {
+  readonly deliveryKey: string;
+  readonly txRef: string;
+  readonly eventId: string;
+  readonly at: string;
+  /** 行 `source_completed`。 */
+  readonly completed?: { readonly outcome: "delivered" | "failed"; readonly at: string };
+  /** 行 `source_complete_unreported`（`source_completed` が後から来れば消える）。 */
+  readonly unreported?: { readonly outcome: "delivered" | "failed"; readonly reason: string; readonly at: string };
 }
 
 export interface IntentDestination {

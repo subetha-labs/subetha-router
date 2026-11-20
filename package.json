@@ -17,7 +17,8 @@
     "wallet:new": "tsx tools/wallet-new.ts",
     "wallet:balance": "tsx tools/wallet-balance.ts",
     "sign": "tsx tools/sign-payment.ts",
-    "wallet:new:solana": "tsx tools/wallet-new-solana.ts"
+    "wallet:new:solana": "tsx tools/wallet-new-solana.ts",
+    "subetha-exact:inspect": "tsx tools/subetha-exact-inspect.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

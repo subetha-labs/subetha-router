@@ -136,9 +136,14 @@ export type ExecutionResult =
       readonly outcome: "paid_data_unavailable";
       readonly paymentId: string;
       readonly terminalReason?: string;
+      readonly mayStillSettleUntil?: number;
     }
-  | { readonly outcome: "unknown"; readonly paymentId: string; readonly reason: string }
-  | { readonly outcome: "payment_required"; readonly error: string; readonly paymentId?: string }
+  | { readonly outcome: "unknown"; readonly paymentId: string; readonly reason: string; readonly mayStillSettleUntil?: number }
+  /**
+   * `mayStillSettleUntil`（unix 秒。Router の `docs/subetha-exact-inbound-design.md` §4.2）: この quote への署名が Router の外で `validBefore` まで実行可能で、
+   * `awaiting_payment`／`unknown` は未払いの証明ではない。持たない rail では欄なし。
+   */
+  | { readonly outcome: "payment_required"; readonly error: string; readonly paymentId?: string; readonly mayStillSettleUntil?: number }
   | {
       readonly outcome: "rejected";
       readonly error: string;
@@ -146,6 +151,7 @@ export type ExecutionResult =
       readonly paymentId?: string;
       /** Router が返した固定コード（形式に合うものだけ）。 */
       readonly reason?: string;
+      readonly mayStillSettleUntil?: number;
     }
   /** 承認が無い／拒否された。Router へ要求を出していない。 */
   | { readonly outcome: "not_approved"; readonly reason: string; readonly paymentId?: string }

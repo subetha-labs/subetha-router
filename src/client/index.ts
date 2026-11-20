@@ -182,6 +182,14 @@ function projectionViewOf(body: unknown): ProjectionView | undefined {
   };
 }
 
+/** Router の purchase の本文の `mayStillSettleUntil`（正の安全な整数だけ。`docs/subetha-exact-inbound-design.md` §4.2）。 */
+function mayStillSettleUntilOf(body: unknown): { mayStillSettleUntil?: number } {
+  if (!isRecord(body)) return {};
+  const value = body["mayStillSettleUntil"];
+  // 正の安全な整数で、Date にできる範囲（相手の値を表示や判断に使う側が投げないように）。
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && Number.isFinite(new Date(value * 1000).getTime()) ? { mayStillSettleUntil: value } : {};
+}
+
 /** 固定の理由コードだけを外に出す（サーバ由来の文字列も安全な短いコードに限る）。 */
 /** Router が返した固定の `reason`（形式に合うものだけ。自由文・例外文字列は通さない）。 */
 function reasonOf(body: unknown): { reason?: string } {
@@ -493,11 +501,14 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
       const headerId = result.paymentId;
       const bodyId = isRecord(result.body) ? requireString(result.body, "paymentId") : undefined;
       const serverStatus = isRecord(result.body) ? result.body["status"] : undefined;
+      /** 「払われたかもしれない」の上限（Router の本文の固定の欄。正の整数だけ）。 */
+      const disclosure = mayStillSettleUntilOf(result.body);
       /** 送金の有無が分からないまま保持する（再送・再 quote はしない）。 */
       const uncertain = (reason: string): ExecutionResult => ({
         outcome: "unknown",
         paymentId,
         reason,
+        ...disclosure,
       });
       const idProblem = (claimed: string | undefined): string =>
         claimed === undefined ? "payment_id_missing" : "payment_id_mismatch";
@@ -538,6 +549,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
           outcome: "paid_data_unavailable",
           paymentId,
           ...(terminalReason === undefined ? {} : { terminalReason }),
+          ...disclosure,
         };
       }
       // 本文を読めない応答は「拒否された」「支払いをやり直せる」と解釈しない
@@ -550,6 +562,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
           outcome: "payment_required",
           error: errorCodeOf(result.body, "payment_required"),
           paymentId,
+          ...disclosure,
         };
       }
       // 5xx も同じく確定させない。
@@ -562,6 +575,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
         status: result.status,
         paymentId,
         ...reasonOf(result.body),
+        ...disclosure,
       };
     },
 
