@@ -4,7 +4,7 @@
  * 全レールの振り分けは `sign-dispatch.ts` の `classifyOffer`（共通の検査 `parseOfferCommon` をここから使う）。
  */
 
-import { assetKeyOf, evmChainIdOf, isWellFormedPayTo, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, networkFamilyOf, type KnownAsset, type KnownNetwork } from "./networks.js";
+import { assetKeyOf, evmChainIdOf, inboundRailsOf, isWellFormedPayTo, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, networkFamilyOf, type KnownAsset, type KnownNetwork } from "./networks.js";
 
 /** 1 回の受信レグで払ってよい上限（base units）。D-7（2026-10-06）: 動的 quote の「上流額＋手数料」を賄う。 */
 export const SIGN_MAX_AMOUNT = 20_000n;
@@ -71,7 +71,10 @@ export function parseOfferCommon(offer: unknown, nowMs: number, networks: readon
 /** x402 の `exact` の共通の検査（EVM・SVM の分岐の前）。 */
 export function checkExactCommon(parsed: ParsedOffer): { readonly kind: "refuse"; readonly reason: string } | undefined {
   if (parsed.scheme !== "exact") return { kind: "refuse", reason: "the offer scheme is neither exact nor tempo/charge nor solana/charge" };
-  if (!parsed.entry.inbound.includes("x402")) return { kind: "refuse", reason: "x402 offers are not accepted on that network" };
+  // 受信の rail は (network, 資産) で引く（資産単位の上書き。`docs/subetha-exact-inbound-design.md` §5.1）。`subetha-exact`（facilitator の注文に払う標準の
+  // x402 `exact`）は署名の形が x402 と同じなので、この signer の対象。
+  const rails = inboundRailsOf(parsed.entry, parsed.known);
+  if (!rails.includes("x402") && !rails.includes("subetha-exact")) return { kind: "refuse", reason: "x402 offers are not accepted on that network" };
   if (parsed.extra?.["fundsMoveOnCredential"] === true) return { kind: "refuse", reason: "an exact offer must not move funds on signing" };
   return undefined;
 }

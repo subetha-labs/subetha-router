@@ -47,3 +47,21 @@ describe("static quote nextStep rail hint", () => {
     expect(text).toBe("Explicit human approval is required. If the human approves, call subetha_router_purchase with this quoteId as `approval`. If not, do not call it.");
   });
 });
+
+describe("subetha-exact (zUSDC order of the SubEtha facilitator)", () => {
+  test("zERC20 USD Coin exact: signs only, funds move at purchase, signature stays valid, unknown is not proof of non-payment", async () => {
+    const quote = quoteWith("eip155:84532");
+    const offer = (quote.source as Record<string, unknown>)["offer"] as Record<string, unknown>;
+    (offer["extra"] as Record<string, unknown>)["name"] = "zERC20 USD Coin";
+    (offer["extra"] as Record<string, unknown>)["version"] = "1";
+    const client = { quote: async () => ({ ok: true, quote }) } as unknown as RouterClient;
+    const handlers = createToolHandlers({ client, mode: "real", evidence: EVIDENCE });
+    const text = String((await handlers.quote({ routeId: "r", requestId: "x" }))["nextStep"]);
+    expect(text).toMatch(/Explicit human approval is required/);
+    expect(text).toMatch(/SubEtha facilitator order in zUSDC/);
+    expect(text).toMatch(/only signs and the funds move at purchase/);
+    expect(text).toMatch(/stays valid until the offer's validBefore/);
+    expect(text).toMatch(/not proof that nothing was paid/);
+    expect(text).not.toMatch(/cannot be undone/);
+  });
+});

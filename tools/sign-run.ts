@@ -58,6 +58,12 @@ export async function runSign(quote: unknown, deps: SignDeps): Promise<SignOutco
   const stage = stageOf(deps);
   stage("dispatch");
   const source = typeof quote === "object" && quote !== null ? (quote as Record<string, unknown>)["source"] : undefined;
+  // 閉じた quote（Router FR-4.5）: 使用済み。offer があっても署名しない（offer 無しの拒否より先に見る）。
+  if (typeof quote === "object" && quote !== null && (quote as Record<string, unknown>)["closed"] === true) {
+    stage("refused");
+    const status = (quote as Record<string, unknown>)["status"];
+    return { ok: false, reason: `Refusing to sign: this quote was already used (status ${typeof status === "string" && /^[a-z_]{1,32}$/.test(status) ? status : "unknown"}); take a new quote with a new requestId.` };
+  }
   const offer = typeof source === "object" && source !== null ? (source as Record<string, unknown>)["offer"] : undefined;
   if (offer === undefined) {
     stage("refused");

@@ -14,6 +14,7 @@ import { PROXY_RELAY_LIMITS } from "./private/proxy.js";
 import {
   assetKeyOf,
   evmChainIdOf,
+  inboundRailsOf,
   isCaip2Network,
   isWellFormedPayTo,
   knownAssetOf,
@@ -21,6 +22,7 @@ import {
   KNOWN_NETWORKS,
   MPP_SOLANA_SCHEME,
   networkFamilyOf,
+  outboundRailsOf,
   type InboundRailName,
   type KnownAsset,
   type KnownNetwork,
@@ -29,6 +31,17 @@ import {
   type X402FacilitatorKind,
   SUBETHA_ZERC20_ASSETS,
 } from "./shared/networks.js";
+import {
+  parseSubethaExactFacilitatorUrl,
+  SUBETHA_EXACT_DEFAULT_LIMITS,
+  SUBETHA_EXACT_FACILITATOR_URL_ENV,
+  SUBETHA_EXACT_MAX_AMOUNT,
+  SUBETHA_EXACT_OFFER_SECONDS_ENV,
+  SUBETHA_EXACT_RAIL,
+  SUBETHA_EXACT_TOKEN_FILE_ENV,
+  type SubethaExactFacilitatorUrl,
+  type SubethaExactLimits,
+} from "./shared/subetha-exact.js";
 
 interface TermsToValidate {
   readonly direction: "inbound" | "outbound";
@@ -51,13 +64,17 @@ function validateTermsAgainstTable(at: string, terms: TermsToValidate, networks:
   if (entry === undefined) {
     throw new ConfigError(`${at}.network is not a known network`);
   }
-  const allowed: readonly string[] = terms.direction === "inbound" ? entry.inbound : entry.outbound;
-  if (!allowed.includes(terms.rail)) {
-    throw new ConfigError(`${at}: ${terms.direction} rail "${terms.rail}" is not allowed on this network`);
-  }
+  /*
+   * 順は network → 資産 → rail（`docs/subetha-exact-inbound-design.md` §5.1）。rail は資産単位の上書き（`KnownAsset.rails`）があればそれ、無ければ
+   * network の列で、上書きの無い既存の資産では結果も文言も今までどおり。rail と資産の両方が表に無い設定だけは、以前の rail の文言ではなく資産の文言で落ちる。
+   */
   const asset = knownAssetOf(entry, terms.asset);
   if (asset === undefined) {
     throw new ConfigError(`${at}.asset is not a known asset on this network`);
+  }
+  const allowed: readonly string[] = terms.direction === "inbound" ? inboundRailsOf(entry, asset) : outboundRailsOf(entry, asset);
+  if (!allowed.includes(terms.rail)) {
+    throw new ConfigError(asset.rails === undefined ? `${at}: ${terms.direction} rail "${terms.rail}" is not allowed on this network` : `${at}: ${terms.direction} rail "${terms.rail}" is not allowed for this asset`);
   }
   if (terms.decimals !== undefined && terms.decimals !== asset.decimals) {
     throw new ConfigError(`${at}.decimals does not match the known asset`);
@@ -537,6 +554,20 @@ export interface RealRailsConfig {
    * 動的上流 URL の拒否ホストにもこのホストを入れる（自分の依存先には向けない）。
    */
   readonly mppInboundRpcUrl?: string;
+  /**
+   * 受信レール `subetha-exact`（`docs/subetha-exact-inbound-design.md` §5.2）。`sourceRail: "subetha-exact"` の route があれば必須。
+   * route が無くても env が**両方**あれば読む（過去の注文の complete の報告のため。片方だけは `ConfigError`）。token の中身はここでは読まない（合成が読む）。
+   */
+  readonly subethaExact?: SubethaExactConfig;
+}
+
+export interface SubethaExactConfig {
+  readonly facilitator: SubethaExactFacilitatorUrl;
+  /** token ファイルのパス（値は起動時に合成が読む。0600 の通常のファイル）。 */
+  readonly tokenFile: string;
+  /** offer の有効期間（秒。承認の時間）。既定は adapter の 120。 */
+  readonly offerSeconds?: number;
+  readonly limits: SubethaExactLimits;
 }
 
 export interface RuntimeConfig {
@@ -632,9 +663,10 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
     sourceRailRaw !== undefined &&
     sourceRailRaw !== "subetha" &&
     sourceRailRaw !== "x402" &&
-    sourceRailRaw !== "mpp"
+    sourceRailRaw !== "mpp" &&
+    sourceRailRaw !== SUBETHA_EXACT_RAIL
   ) {
-    throw new ConfigError(`${at}.sourceRail must be "subetha", "x402" or "mpp" when present`);
+    throw new ConfigError(`${at}.sourceRail must be "subetha", "x402", "mpp" or "subetha-exact" when present`);
   }
   const sourceRail = sourceRailRaw as string | undefined;
   const sourceNetwork = requireString(source, "network", `${at}.source`);
@@ -648,6 +680,16 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
   // SubEtha は facilitator が challenge で payTo を返すので持たない。
   if ((sourceRail === "x402" || sourceRail === "mpp") && sourcePayTo === undefined) {
     throw new ConfigError(`${at}.source.payTo is required when sourceRail is "${sourceRail}"`);
+  }
+  if (sourceRail === SUBETHA_EXACT_RAIL) {
+    // 受取先は facilitator が注文ごとに決める（burn address）。額は買い手の sign の cap 以下（要件 FR-1.1・§3-9）。
+    if (sourcePayTo !== undefined) {
+      throw new ConfigError(`${at}.source.payTo must be absent when sourceRail is "subetha-exact" (the facilitator assigns the burn address per order)`);
+    }
+    const amount = requireString(source, "amount", `${at}.source`);
+    if (!AMOUNT_PATTERN.test(amount) || amount === "0" || BigInt(amount) > SUBETHA_EXACT_MAX_AMOUNT) {
+      throw new ConfigError(`${at}.source.amount must be a positive base-unit integer not above ${SUBETHA_EXACT_MAX_AMOUNT.toString()} for sourceRail "subetha-exact"`);
+    }
   }
   const route: RouteConfig = {
     routeId,
@@ -967,7 +1009,8 @@ function withDestinationDecimals(router: RouterConfig, networks: readonly KnownN
 export function validateRouterConfigAgainstTable(router: RouterConfig, networks: readonly KnownNetwork[]): void {
   for (const route of Object.values(router.routes)) {
     const at = `routes.${route.routeId}`;
-    if (route.sourceRail === "x402" || route.sourceRail === "mpp") {
+    // `subetha-exact` も表で照合する（資産単位の上書きで zUSDC@84532 だけが通る。要件 NFR-1）。
+    if (route.sourceRail === "x402" || route.sourceRail === "mpp" || route.sourceRail === SUBETHA_EXACT_RAIL) {
       validateTermsAgainstTable(`${at}.source`, { direction: "inbound", rail: route.sourceRail, network: route.source.network, asset: route.source.asset, decimals: route.source.decimals, ...(route.source.payTo === undefined ? {} : { payTo: route.source.payTo }) }, networks);
     }
     if (route.rail === "x402" || route.rail === "mpp") {
@@ -1199,6 +1242,12 @@ function parseSynthetic(raw: unknown, router: RouterConfig): SyntheticRailsConfi
   if (!isRecord(raw)) {
     throw new ConfigError("synthetic section is required when ROUTER_ADAPTER_MODE=synthetic");
   }
+  // 合成レールに `subetha-exact` は無い。synthetic は表の照合も `inboundByRoute` も通らないので、ここで明示に止める（タスク「有効化の境界」）。
+  for (const route of Object.values(router.routes)) {
+    if (route.sourceRail === SUBETHA_EXACT_RAIL) {
+      throw new ConfigError(`routes.${route.routeId}.sourceRail "subetha-exact" is not available with the synthetic rails`);
+    }
+  }
   const upstreams = requireRecord(raw, "upstreams", "synthetic");
   const resolved: Record<string, string> = {};
   for (const routeId of Object.keys(router.routes)) {
@@ -1254,12 +1303,63 @@ export function assertAbsoluteHttpUrl(raw: string, at: string, allowQuery = fals
  * 実レールの構成（`ROUTER_ADAPTER_MODE=real`）。合成セクションは読まない。
  * 署名能力は構成ファイルからは読み込まない（任意のプラグイン読み込みをしない）。
  */
+/**
+ * `subetha-exact` の env と設定（設計 §5.2）。route があれば URL と token ファイルの両方が必須。route が無ければ、両方あるときだけ読み、片方だけなら `ConfigError`、
+ * 無ければ `undefined`（何も変わらない。要件 FR-1）。値はメッセージに出さない。
+ */
+function parseSubethaExact(
+  rawSection: unknown,
+  router: RouterConfig,
+  env: Readonly<Record<string, string | undefined>>,
+): SubethaExactConfig | undefined {
+  const hasRoute = Object.values(router.routes).some((route) => route.sourceRail === SUBETHA_EXACT_RAIL);
+  const urlRaw = env[SUBETHA_EXACT_FACILITATOR_URL_ENV];
+  const tokenFile = env[SUBETHA_EXACT_TOKEN_FILE_ENV];
+  const hasUrl = urlRaw !== undefined && urlRaw !== "";
+  const hasToken = tokenFile !== undefined && tokenFile !== "";
+  if (!hasRoute && !hasUrl && !hasToken) {
+    if (rawSection !== undefined) throw new ConfigError("subethaExact section is only allowed with a subetha-exact route or its env");
+    return undefined;
+  }
+  if (!hasUrl) throw new ConfigError(`${SUBETHA_EXACT_FACILITATOR_URL_ENV} is required when a route uses sourceRail "subetha-exact" (or when ${SUBETHA_EXACT_TOKEN_FILE_ENV} is set)`);
+  if (!hasToken) throw new ConfigError(`${SUBETHA_EXACT_TOKEN_FILE_ENV} is required when a route uses sourceRail "subetha-exact" (or when ${SUBETHA_EXACT_FACILITATOR_URL_ENV} is set)`);
+  const facilitator = parseSubethaExactFacilitatorUrl(urlRaw);
+  if (facilitator === undefined) {
+    throw new ConfigError(`${SUBETHA_EXACT_FACILITATOR_URL_ENV} must be https://facilitator-testnet.subethalabs.com/p/<id> (or a loopback URL for fixtures), without query, userinfo or fragment`);
+  }
+  const offerSeconds = parseOfferSeconds(env[SUBETHA_EXACT_OFFER_SECONDS_ENV], SUBETHA_EXACT_OFFER_SECONDS_ENV);
+  let limits: SubethaExactLimits = SUBETHA_EXACT_DEFAULT_LIMITS;
+  if (rawSection !== undefined) {
+    if (!isRecord(rawSection)) throw new ConfigError("subethaExact must be an object when present");
+    const rawLimits = rawSection["limits"];
+    if (rawLimits !== undefined) {
+      if (!isRecord(rawLimits)) throw new ConfigError("subethaExact.limits must be an object when present");
+      const read = (key: keyof SubethaExactLimits): number => {
+        const value = rawLimits[key];
+        if (value === undefined) return SUBETHA_EXACT_DEFAULT_LIMITS[key];
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new ConfigError(`subethaExact.limits.${key} must be a positive integer`);
+        return value;
+      };
+      limits = { maxRequestsTotal: read("maxRequestsTotal"), maxUnresolved: read("maxUnresolved"), requestsPerMinute: read("requestsPerMinute") };
+      for (const key of Object.keys(rawLimits)) {
+        if (!["maxRequestsTotal", "maxUnresolved", "requestsPerMinute"].includes(key)) throw new ConfigError("subethaExact.limits has an unknown field");
+      }
+    }
+    for (const key of Object.keys(rawSection)) {
+      if (key !== "limits") throw new ConfigError("subethaExact has an unknown field");
+    }
+  }
+  return { facilitator, tokenFile, ...(offerSeconds === undefined ? {} : { offerSeconds }), limits };
+}
+
 function parseReal(
   raw: unknown,
   router: RouterConfig,
   env: Readonly<Record<string, string | undefined>>,
   networks?: readonly KnownNetwork[],
+  subethaExactSection?: unknown,
 ): RealRailsConfig {
+  const subethaExact = parseSubethaExact(subethaExactSection, router, env);
   const inboundFacilitatorUrl = env["ROUTER_X402_INBOUND_FACILITATOR_URL"];
   const inboundOfferSeconds = parseOfferSeconds(
     env["ROUTER_X402_INBOUND_OFFER_SECONDS"],
@@ -1300,6 +1400,7 @@ function parseReal(
     resolved[routeId] = assertAbsoluteHttpUrl(upstream, `x402.upstreams.${routeId}`);
   }
   return {
+    ...(subethaExact === undefined ? {} : { subethaExact }),
     ...(inboundOfferSeconds === undefined ? {} : { x402InboundOfferSeconds: inboundOfferSeconds }),
     ...(mppInboundOfferSeconds === undefined ? {} : { mppInboundOfferSeconds }),
     ...(mppInboundRpcUrl === undefined ? {} : { mppInboundRpcUrl }),
@@ -1466,7 +1567,7 @@ export function loadRuntimeConfig(
 
   const rails = mode === "synthetic"
     ? { synthetic: parseSynthetic(document["synthetic"], router) }
-    : { real: parseReal(document["x402"], router, env, networks) };
+    : { real: parseReal(document["x402"], router, env, networks, document["subethaExact"]) };
   if (networks !== undefined) {
     validateRouterConfigAgainstTable(router, networks);
   }

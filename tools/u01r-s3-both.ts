@@ -29,6 +29,11 @@ const j = async (r: Response) => ({ status: r.status, body: await r.json().catch
 const q = await j(await fetch(`${base}/v1/quotes`, { method: "POST", headers: H, body: JSON.stringify({ routeId: "u01r-live", requestId }) }));
 if (q.status !== 200) { console.log("quote failed", q); process.exit(1); }
 const quote = q.body as Record<string, any>;
+// 閉じた quote（使用済みの requestId。Router FR-4.5）や署名の対象の無い文書には何も送らない（受取先が undefined のまま送金を組まない）。
+if (quote.closed === true || typeof quote.source?.payTo !== "string" || quote.source?.offer?.extra?.challengeNonce === undefined) {
+  console.log("quote is closed or carries no offer (REQUEST_ID was already used?); take a new quote with a new REQUEST_ID. Nothing was sent.");
+  process.exit(1);
+}
 console.log(`quote ${quote.quoteId}`);
 console.log(`  inbound : pay ${quote.source.amount} zETH -> ${quote.source.payTo}`);
 console.log(`  outbound: Router pays ${quote.destination.quoted} USDC to Provider A`);

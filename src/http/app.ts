@@ -34,6 +34,16 @@ export interface AppOptions {
 
 /** R2 の body 上限。これを超える要求は読み切らずに切る。 */
 const MAX_BODY_BYTES = 16 * 1024;
+/** `source_offer_unavailable` に `retryAfterMs` が無いときの `Retry-After`（`docs/subetha-exact-inbound-design.md` §4.1）。 */
+const SOURCE_OFFER_RETRY_AFTER_MS = 30_000;
+
+/**
+ * 「払われたかもしれない」の欄（`docs/subetha-exact-inbound-design.md` §4.2、要件 FR-4.4）。core が `mayStillSettleUntil` を出すときは**常に**
+ * `awaitingPaymentDoesNotMeanUnpaid: true` を組にする。無ければ本文は今までどおり。
+ */
+function disclosureFieldsOf(outcome: PurchaseOutcome): Record<string, unknown> {
+  return outcome.mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil: outcome.mayStillSettleUntil, awaitingPaymentDoesNotMeanUnpaid: true };
+}
 
 function sendJson(response: http.ServerResponse, status: number, body: unknown, headers = {}): void {
   const text = JSON.stringify(body ?? null);
@@ -397,8 +407,15 @@ export function createRequestListener(options: AppOptions): http.RequestListener
 
     const outcome = await options.core.quote({ principalId, requestId, routeId });
     if (!outcome.ok) {
-      const status = outcome.code === "request_id_conflict" ? 409 : 502;
-      sendError(response, status, outcome.code);
+      /*
+       * 受信 offer の発行の失敗（`docs/subetha-exact-inbound-design.md` §4.1、要件 FR-2.1）: `source_offer_unavailable` は 503 + `Retry-After`（quote の取り直しの目安。
+       * 既定 30 秒）、`source_offer_refused` は 502。本文に固定の `reason`。ほかの code は今までどおり（`request_id_conflict` 409、それ以外 502）。
+       */
+      const offerFailure = outcome.code === "source_offer_unavailable" || outcome.code === "source_offer_refused";
+      const status = outcome.code === "request_id_conflict" ? 409 : outcome.code === "source_offer_unavailable" ? 503 : 502;
+      const retryAfterSeconds = outcome.code === "source_offer_unavailable" ? Math.max(1, Math.ceil((outcome.retryAfterMs ?? SOURCE_OFFER_RETRY_AFTER_MS) / 1000)) : undefined;
+      // `reason` を本文に出すのはこの 2 つの code だけ（既存の失敗の本文は byte 単位で不変: `quote_failed` の内部の reason は出さない）。
+      sendError(response, status, outcome.code, offerFailure && outcome.reason !== undefined ? { reason: outcome.reason } : {}, retryAfterSeconds === undefined ? {} : { "retry-after": String(retryAfterSeconds) });
       return;
     }
     sendJson(response, 200, quoteBody(outcome, route, options.canonicalBaseUrl));
@@ -496,6 +513,7 @@ export function createRequestListener(options: AppOptions): http.RequestListener
         status: outcome.status,
         ...(outcome.paymentId === undefined ? {} : { paymentId: outcome.paymentId }),
         ...(outcome.terminalReason === undefined ? {} : { terminalReason: outcome.terminalReason }),
+        ...disclosureFieldsOf(outcome),
       });
       return;
     }
@@ -646,12 +664,10 @@ export function createRequestListener(options: AppOptions): http.RequestListener
     if (rawCredential === undefined) {
       const offer =
         quoteId === undefined ? undefined : options.core.offerFor(quoteId, principalId, routeId, ownerKey);
-      respondPaymentRequired(
-        response,
-        routeId,
-        offer,
-        offer === undefined ? "quote_required" : "payment_required",
-      );
+      // 「払われたかもしれない」の上限（設計 §4.2 (i)。持たない rail は欄なし = 今までどおりの本文）。
+      const until = quoteId === undefined ? undefined : options.core.disclosureFor(quoteId, principalId, routeId, ownerKey);
+      const body = paymentRequiredBody(routeId, quoteUrl, offer, offer === undefined ? "quote_required" : "payment_required") as Record<string, unknown>;
+      sendJson(response, 402, until === undefined ? body : { ...body, mayStillSettleUntil: until, awaitingPaymentDoesNotMeanUnpaid: true });
       return;
     }
 
@@ -705,6 +721,7 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       status: outcome.status,
       ...(outcome.paymentId === undefined ? {} : { paymentId: outcome.paymentId }),
       ...(outcome.terminalReason === undefined ? {} : { terminalReason: outcome.terminalReason }),
+      ...disclosureFieldsOf(outcome),
     };
     // 402 は支払いのやり直しに必要な offer を添える（新しい quote は作らない）。
     if (status === 402) {

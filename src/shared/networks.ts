@@ -42,7 +42,8 @@ export function base58DecodedLength(text: string): number | undefined {
  * ────────────────────────────────────────────────────────────────────────────── */
 
 export type NetworkFamily = "evm" | "svm";
-export type InboundRailName = "x402" | "mpp";
+/** 受信レール。`subetha-exact` = SubEtha v2 facilitator の Provider として受ける標準の x402 `exact`（`docs/subetha-exact-inbound-design.md` §5.1）。 */
+export type InboundRailName = "x402" | "mpp" | "subetha-exact";
 export type OutboundRailName = "x402" | "mpp";
 export type X402FacilitatorKind = "x402" | "circle";
 
@@ -57,6 +58,11 @@ export interface KnownAsset {
   readonly domain?: { readonly name: string; readonly version: string };
   /** SVM の token program。 */
   readonly tokenProgram?: string;
+  /**
+   * 資産単位の rail の上書き（`docs/subetha-exact-inbound-design.md` §5.1）。あればこの資産はここに書いた rail でだけ受け・送れる（network の列は見ない）。
+   * 無ければ network の列。`inboundRailsOf`／`outboundRailsOf` で引く。
+   */
+  readonly rails?: { readonly inbound: readonly InboundRailName[]; readonly outbound: readonly OutboundRailName[] };
 }
 
 export interface KnownNetwork {
@@ -79,7 +85,17 @@ export const KNOWN_NETWORKS: readonly KnownNetwork[] = Object.freeze([
     inbound: ["x402"],
     outbound: ["x402"],
     x402Facilitator: "x402",
-    assets: [{ id: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, domain: { name: "USDC", version: "2" } }],
+    assets: [
+      { id: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6, domain: { name: "USDC", version: "2" } },
+      /*
+       * zUSDC（zERC20 V2 "testnet-v2" の Base Sepolia の deployment。Sepolia の同じ address は `SUBETHA_ZERC20_ASSETS`）。
+       * **`subetha-exact` の受信だけ**で受ける（`docs/subetha-exact-inbound-requirements.md` FR-10、NFR-1）: SubEtha v2 facilitator の Provider として、
+       * 注文ごとの burn address に標準の x402 `exact` で払われる。`x402` の受信・送信には開かない（資産単位の上書き）。
+       * EIP-712 domain は facilitator の配備の `TOKEN_NAME=zERC20 USD Coin` / `TOKEN_VERSION=1`（protocol `deploy/public-testnet/facilitator-multi.env`、68e061b。
+       * facilitator は起動時に on-chain の `eip712Domain()` との一致を検査する）。
+       */
+      { id: "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f", decimals: 6, domain: { name: "zERC20 USD Coin", version: "1" }, rails: { inbound: ["subetha-exact"], outbound: [] } },
+    ],
   },
   {
     network: "eip155:42431",
@@ -241,4 +257,14 @@ export function knownNetworkOf(networks: readonly KnownNetwork[], network: strin
 export function knownAssetOf(entry: KnownNetwork, asset: string): KnownAsset | undefined {
   const key = assetKeyOf(entry.network, asset);
   return entry.assets.find((known) => assetKeyOf(entry.network, known.id) === key);
+}
+
+/** この (network, 資産) で許す受信レール: 資産の上書きがあればそれ、無ければ network の列（`docs/subetha-exact-inbound-design.md` §5.1）。 */
+export function inboundRailsOf(entry: KnownNetwork, asset: KnownAsset): readonly InboundRailName[] {
+  return asset.rails?.inbound ?? entry.inbound;
+}
+
+/** この (network, 資産) で許す送信レール（同上）。 */
+export function outboundRailsOf(entry: KnownNetwork, asset: KnownAsset): readonly OutboundRailName[] {
+  return asset.rails?.outbound ?? entry.outbound;
 }

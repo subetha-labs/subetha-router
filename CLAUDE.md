@@ -148,7 +148,10 @@ again or retry on your own**; report the `paymentId`, the status and the signatu
 - **Reuse a previous purchase's `requestId`.** Quotes are **idempotent per `requestId`**,
   so reusing one **returns the earlier quote**, original deadline and all. You would
   receive an already-expired quote while believing you took a fresh one.
-  If a quote comes back expired, suspect **a reused `requestId`**, not clock skew
+  If a quote comes back expired, suspect **a reused `requestId`**, not clock skew.
+  Once a quote has been used for a purchase attempt, re-quoting its `requestId` returns a **closed** document
+  (`closed: true`, a `status`, **no `source.offer`**): do not sign anything for it; `npm run sign` refuses it.
+  Read its result with `subetha_router_status` and take a new quote with a new `requestId` (needs a new approval)
 
 ### Reading the result
 

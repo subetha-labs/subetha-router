@@ -13,7 +13,7 @@ import {
   type RouteConfig,
   type RouterConfig,
 } from "../config.js";
-import type { InboundOffer, InboundRail, PaymentCredential } from "../ports/inbound.js";
+import { COMPLETE_TRANSIENT_REASONS, InboundOfferError, OFFER_REFUSAL_DETAILS, OFFER_RETRY_AFTER_MAX_MS, type InboundOffer, type InboundRail, type InboundVerifyResult, type PaymentCredential } from "../ports/inbound.js";
 import type { DestinationOffer, OutboundRail } from "../ports/outbound.js";
 import { Budget } from "./budget.js";
 import { createDynamicCore, ownerKeyMatches, upstreamFieldsOf, upstreamTargetOf, type DynamicCore, type DynamicPricing, type DynamicQuoteFields } from "./dynamic.js";
@@ -71,6 +71,13 @@ export interface QuoteDocument {
     readonly boundTo: string;
     readonly deadlineMs: number;
   };
+  /**
+   * 閉じた quote（`docs/subetha-exact-inbound-design.md` §4.1、要件 FR-4.5。全 rail）: `created` を離れた quote の再 quote にだけ付く。
+   * `status` は公開の状態。core の文書には `source.offer` が残る（in-process の利用者のため）が、**公開の面（HTTP・MCP）は offer を出さない**:
+   * 使用済みの quote を署名の対象として再提示しない。
+   */
+  readonly closed?: true;
+  readonly status?: PublicStatus;
   /** 動的 quote だけ。`ownerKey` は**この応答にしか載らない**。 */
   readonly upstream?: DynamicQuoteFields["upstream"];
   readonly dynamic?: DynamicQuoteFields["dynamic"];
@@ -79,7 +86,8 @@ export interface QuoteDocument {
 
 export type QuoteOutcome =
   | ({ readonly ok: true } & QuoteDocument)
-  | { readonly ok: false; readonly code: string; readonly reason?: string };
+  /** `retryAfterMs` は受信 offer の発行が一時的に断られたとき（`source_offer_unavailable`）の **quote の取り直し**の目安（`docs/subetha-exact-inbound-design.md` §4.1）。 */
+  | { readonly ok: false; readonly code: string; readonly reason?: string; readonly retryAfterMs?: number };
 
 export interface PurchaseRequest {
   readonly principalId: string;
@@ -104,6 +112,12 @@ export interface PurchaseOutcome {
   readonly terminalReason?: string;
   /** 秘匿購入の引き渡し（`status === "awaiting_session"` のときだけ。credential の値を含む: 認証済みの応答にだけ載せる）。 */
   readonly handover?: HandoverView;
+  /**
+   * 「払われたかもしれない」の開示（`docs/subetha-exact-inbound-design.md` §4.2、要件 FR-4.4）: この quote への標準の署名が Router の外で実行可能でいられる上限
+   * （unix 秒）。手元の検査の後は正確な `validBefore`、その前は quote のときの上限。rail が持たない・受信が settle 済みなら欄なし。出すときは
+   * `awaitingPaymentDoesNotMeanUnpaid: true` と組で公開する（HTTP・MCP の射影）。
+   */
+  readonly mayStillSettleUntil?: number;
 }
 
 /** 秘匿 quote の文書（`docs/zktls-router-design.md` §2・§2.1）。`ownerKey` はこの応答にしか載らない。 */
@@ -119,6 +133,8 @@ export interface Projection {
     readonly asset: string;
     readonly network: string;
     readonly txRef?: string;
+    /** `PurchaseOutcome.mayStillSettleUntil` と同じ（status の射影）。 */
+    readonly mayStillSettleUntil?: number;
   };
   readonly destination: {
     readonly quoted: string;
@@ -238,7 +254,15 @@ export interface RouterCoreOptions {
     /** proxy 型の宛先の固定（増分 v1.5、設計 §4）。proxy 型のプロファイルがあれば必須。 */
     readonly pinDestination?: PrivateCoreOptions["pinDestination"];
   };
+  /**
+   * 試験だけの停止点（`docs/subetha-exact-inbound-design.md` §4.6。秘匿購入の `PrivateHooksForTest.stop` と同じ流儀）。実入口（`src/main.ts` の CLI）は渡さない。
+   * `before_source_settle` は `source_pending` の行の後・`settle` の呼び出しの前。`after_source_settled` は `deliver()` の release の前、`after_source_released` は
+   * `source_released` の行の後・送信の前、`after_terminal` は終端の行の後・complete の報告の前。
+   */
+  readonly hooksForTest?: { readonly stop?: (point: CoreStopPoint, paymentId: string) => Promise<void> };
 }
+
+export type CoreStopPoint = "before_source_settle" | "after_source_settled" | "after_source_released" | "after_terminal";
 
 export interface RouterCore {
   quote(request: QuoteRequest): Promise<QuoteOutcome>;
@@ -249,6 +273,11 @@ export interface RouterCore {
    * 所有 principal・経路一致・未開始の quote のときだけ返し、**journal には何も書かない**。
    */
   offerFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): InboundOffer | undefined;
+  /**
+   * 資格情報なしの R3（402 の再提示）に添える「払われたかもしれない」の上限（`docs/subetha-exact-inbound-design.md` §4.2 (i)）。`disclosureOf` と同じ優先と範囲。
+   * 所有 principal・経路一致のときだけ。journal には何も書かない。持たない rail は `undefined`。
+   */
+  disclosureFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): number | undefined;
   /** 秘匿購入（設計 §2）。設定が無ければ `private_disabled`。 */
   privateQuote(request: { readonly principalId: string; readonly requestId: string; readonly profileId: string; readonly intentB64: string; readonly source?: string }): Promise<PrivateQuoteOutcome>;
   privateAttest(paymentId: string, principalId: string, ownerKey: string | undefined, bundleB64: string): Promise<AttestOutcome>;
@@ -266,6 +295,7 @@ function projectionOf(intent: Intent): Projection {
       asset: intent.source.asset,
       network: intent.source.network,
       ...(intent.source.txRef === undefined ? {} : { txRef: intent.source.txRef }),
+      ...disclosureOf(intent),
     },
     destination: {
       quoted: intent.destination.quoted,
@@ -300,6 +330,19 @@ function projectionOf(intent: Intent): Projection {
     ...(intent.private === undefined ? {} : { private: privateProjectionOf(intent)! }),
   };
   return projection;
+}
+
+/**
+ * 「払われたかもしれない」の値（`docs/subetha-exact-inbound-design.md` §4.2）。**優先**: 行に書いた正確な `source.mayStillSettleUntil`（手元の検査の後）、無ければ quote のときの
+ * 上限 `source.settleWindow`（行を書かない経路・(i′) の前・再起動の後）。上限の方は、受信がまだ settle していない状態（`created`・`source_pending`・`source_failed`、
+ * 受信の `txRef` の無い `unknown`）でだけ出す: settle 済みの購入では authorization は消費済みで「まだ払われ得る」は成り立たない（設計の表は失敗の経路だけを挙げる）。
+ * 持たない rail の intent には欄が無い。
+ */
+function disclosureOf(intent: Intent): { readonly mayStillSettleUntil?: number } {
+  if (intent.source.mayStillSettleUntil !== undefined) return { mayStillSettleUntil: intent.source.mayStillSettleUntil };
+  const window = intent.source.settleWindow;
+  if (window === undefined || intent.source.txRef !== undefined) return {};
+  return intent.status === "created" || intent.status === "source_pending" || intent.status === "source_failed" || intent.status === "unknown" ? { mayStillSettleUntil: window } : {};
 }
 
 function quoteDocumentOf(intent: Intent): QuoteDocument {
@@ -342,6 +385,9 @@ function selectOffer(
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+/** complete の `unreported` の理由の集合（`CompleteUnreportedReason`。journal に写すのはこの固定の token だけ）。 */
+const COMPLETE_UNREPORTED_REASON_SET: ReadonlySet<string> = new Set(["conflicting_outcome", "not_authorized", "delivery_key_mismatch", "unknown_order", "unknown_tenant", "unauthorized", "invalid_request", "refused", "unavailable"]);
 
 /**
  * 公開・永続化してよい理由コードの集合。adapter が返す任意の文字列
@@ -419,6 +465,12 @@ const SAFE_REASONS: ReadonlySet<string> = new Set([
   "interrupted_before_release",
   "interrupted_before_handover",
   "interrupted_after_release",
+  // 受信レール `subetha-exact`（`docs/subetha-exact-inbound-design.md` §4.6。固定文字列で、facilitator の文章・URL・token は含まない）。
+  "source_offer_unavailable",
+  "source_offer_refused",
+  "source_release_refused",
+  "source_release_unknown",
+  "source_complete_unreported",
 ]);
 
 /** adapter が返してよい preflight 理由。これ以外は固定コードに置き換える。 */
@@ -562,7 +614,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       if (existing.routeId !== request.routeId || existing.dynamic !== undefined || existing.dynamicInvalid === true) {
         return { ok: false, code: "request_id_conflict" };
       }
-      return { ok: true, ...quoteDocumentOf(existing) };
+      // `created` のままなら今までどおり同じ文書。離れた後は閉じた quote（FR-4.5: 同じ注文に新しい署名を求めない）。
+      return existing.status === "created" ? { ok: true, ...quoteDocumentOf(existing) } : { ok: true, ...quoteDocumentOf(existing), closed: true, status: toPublicStatus(existing.status) };
     }
     if (dynamicCore?.requestInUse(request.principalId, request.requestId) === true) {
       return { ok: false, code: "request_id_conflict" };
@@ -575,14 +628,34 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return { ok: false, code: "quote_failed", reason: "no_matching_offer" };
     }
 
-    const sourceOffer = await options.inbound.createOffer({
-      routeId: route.routeId,
-      amount: route.source.amount,
-      asset: route.source.asset,
-      network: route.source.network,
-      routeBinding: routeBindingOf(route),
-      nowMs: now(),
-    });
+    let sourceOffer: InboundOffer;
+    try {
+      sourceOffer = await options.inbound.createOffer({
+        routeId: route.routeId,
+        amount: route.source.amount,
+        asset: route.source.asset,
+        network: route.source.network,
+        routeBinding: routeBindingOf(route),
+        nowMs: now(),
+        // quote の要求の識別（`subetha-exact` が facilitator の注文の requester を決定的に導く。他の rail は読まない。設計 §4.1）。
+        requester: { principalId: request.principalId, requestId: request.requestId },
+      });
+    } catch (error) {
+      // 受信 offer の発行の失敗（資金は動いていない。要件 FR-2.1）: 固定の code・detail だけを写す。型は信用せず、閉じた集合と有限の値で照合する
+      // （集合に無い detail は落とし、code は 2 つのどちらか、`retryAfterMs` は正の整数で 1 時間まで）。ほかの例外は今までどおり上へ。
+      if (error instanceof InboundOfferError) {
+        const code = error.code === "source_offer_refused" ? "source_offer_refused" : "source_offer_unavailable";
+        const detail: unknown = error.detail;
+        const retry: unknown = error.retryAfterMs;
+        return {
+          ok: false,
+          code,
+          ...(typeof detail === "string" && OFFER_REFUSAL_DETAILS.has(detail) ? { reason: detail } : {}),
+          ...(typeof retry === "number" && Number.isSafeInteger(retry) && retry > 0 ? { retryAfterMs: Math.min(retry, OFFER_RETRY_AFTER_MAX_MS) } : {}),
+        };
+      }
+      throw error;
+    }
 
     // 発行された offer が設定と食い違うなら quote を成立させない
     // （adapter の型シグネチャを信用せず、実際の値を照合する）。
@@ -601,6 +674,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     const offerExpiryMs = sourceOffer.extra.expiresAt * 1000;
     const approvalDeadlineMs = Math.min(issuedAtMs + config.approvalTtlMs, offerExpiryMs);
 
+    // 「この offer への標準の署名が実行可能でいられる上限」（設計 §4.2。rail が持つときだけ `created` の行に写し、以後の開示は journal から出す）。
+    const settleWindow = settleWindowOf(sourceOffer);
     const paymentId = nextPaymentId();
     try {
       await store.append(paymentId, "created", {
@@ -613,6 +688,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           asset: route.source.asset,
           network: route.source.network,
           offer: sourceOffer,
+          ...(settleWindow === undefined ? {} : { settleWindow }),
         },
         destination: {
           quoted: selectedOffer.amount,
@@ -639,7 +715,36 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     return { ok: true, ...quoteDocumentOf(created) };
   }
 
+  /** rail の同期の問い合わせ（method が無い・結果が正の整数でない → 欄なし。設計 §2 の core の契約）。 */
+  function settleWindowOf(offer: InboundOffer): number | undefined {
+    if (typeof options.inbound.settleWindowOf !== "function") return undefined;
+    let value: unknown;
+    try {
+      value = options.inbound.settleWindowOf(offer);
+    } catch {
+      return undefined;
+    }
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  }
+
+  /** 試験の停止点（設計 §4.6）。実入口は渡さない。 */
+  const stop = async (point: CoreStopPoint, paymentId: string): Promise<void> => {
+    await options.hooksForTest?.stop?.(point, paymentId);
+  };
+
+  /** purchase の応答に「払われたかもしれない」の欄を足す（`disclosureOf` の優先と範囲。応答の status・code は変えない。journal に無い intent はそのまま）。 */
+  function withDisclosure<T extends PurchaseOutcome>(outcome: T): T {
+    if (outcome.paymentId === undefined) return outcome;
+    const intent = store.byPaymentId(outcome.paymentId);
+    const disclosure = intent === undefined ? {} : disclosureOf(intent);
+    return disclosure.mayStillSettleUntil === undefined ? outcome : { ...outcome, ...disclosure };
+  }
+
   async function purchaseLocked(request: PurchaseRequest): Promise<PurchaseOutcome> {
+    return withDisclosure(await purchaseLockedCore(request));
+  }
+
+  async function purchaseLockedCore(request: PurchaseRequest): Promise<PurchaseOutcome> {
     const intent = store.byQuoteId(request.quoteId);
     if (intent === undefined) {
       return outcomeOf("rejected", "unknown_quote");
@@ -746,6 +851,12 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 受信 settle の前に上流の現在の offer を読み直して照合する（未課金）。
     // 読み直せない場合もどちらのレグも開始しない。例外の文字列は記録しない
     // （上流 URL・トークン・内部ホスト名が混ざり得るため固定の理由コードだけ残す）。
+    /*
+     * 「払われたかもしれない」の上限（設計 §4.2 (i′)）: 手元の署名の検査より前に書く終端の行には quote のときの上限を、検査の後の行には正確な `validBefore` を写す。
+     * 持たない rail では `undefined` で、行は今までどおり。
+     */
+    const window = intent.source.settleWindow;
+    const windowPatch = window === undefined ? {} : { mayStillSettleUntil: window };
     let stillOffered: boolean;
     try {
       stillOffered = await readAndMatchDestination(intent);
@@ -753,6 +864,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "source_failed", {
         outcome: "not_sent",
         reason: "offer_unavailable",
+        ...windowPatch,
       });
       return {
         paymentId: intent.paymentId,
@@ -764,6 +876,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "source_failed", {
         outcome: "not_sent",
         reason: "offer_changed",
+        ...windowPatch,
       });
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "offer_changed" };
     }
@@ -780,14 +893,14 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         enough = false;
       }
       if (!enough) {
-        await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "operator_funds_unavailable" });
+        await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "operator_funds_unavailable", ...windowPatch });
         return { paymentId: intent.paymentId, status: "awaiting_payment", code: "operator_funds_unavailable" };
       }
     }
 
     await store.append(intent.paymentId, "source_pending", {});
 
-    let verified: { isValid: boolean; fundsMoved?: boolean };
+    let verified: InboundVerifyResult;
     const verifyStartedAt = diag.start();
     try {
       verified = await diag.stage({ promoted: true }, () => options.inbound.verify(intent.source.offer, credential, { routeId: intent.routeId }));
@@ -796,6 +909,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "unknown", {
         outcome: "none",
         reason: "source_verify_unavailable",
+        ...windowPatch,
       });
       const elapsedMs = diag.elapsedSince(verifyStartedAt);
       diag.note(() => ({ stage: "source_verify", outcome: "threw", transport: classifyTransportError(error), code: "source_verify_unavailable", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
@@ -806,10 +920,15 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       };
     }
     const verifyElapsedMs = diag.elapsedSince(verifyStartedAt);
+    // 手元の検査の後の正確な上限（設計 §4.2 (ii)）。adapter が返さなければ quote のときの上限（持たない rail では欄なし）。実行時に形を見る。
+    const preciseRaw = verified !== null && typeof verified === "object" ? verified.mayStillSettleUntil : undefined;
+    const precise = typeof preciseRaw === "number" && Number.isSafeInteger(preciseRaw) && preciseRaw > 0 ? preciseRaw : window;
+    const precisePatch = precise === undefined ? {} : { mayStillSettleUntil: precise };
     if (verified === null || typeof verified !== "object" || verified.isValid !== true) {
       await store.append(intent.paymentId, "source_failed", {
         outcome: "rejected",
         reason: "verify_failed",
+        ...precisePatch,
       });
       diag.note(() => ({ stage: "source_verify", outcome: "invalid", code: "verify_failed", ...(verifyElapsedMs === undefined ? {} : { elapsedMs: verifyElapsedMs }) }));
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "verify_failed" };
@@ -823,7 +942,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
      */
     const fundsMoved = verified.fundsMoved ?? intent.source.offer.extra["fundsMoveOnCredential"] === true;
     const paidButUnsettled = async (): Promise<PurchaseOutcome> => {
-      await store.append(intent.paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled" });
+      await store.append(intent.paymentId, "unknown", { outcome: "none", reason: "source_paid_unsettled", ...precisePatch });
       return { paymentId: intent.paymentId, status: "unknown", terminalReason: "source_paid_unsettled" };
     };
 
@@ -837,6 +956,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "source_failed", {
         outcome: "not_sent",
         reason: "approval_expired",
+        ...precisePatch,
       });
       return {
         paymentId: intent.paymentId,
@@ -872,6 +992,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "source_failed", {
         outcome: "not_sent",
         reason: reservation.reason,
+        ...precisePatch,
       });
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: reservation.reason };
     }
@@ -883,9 +1004,10 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     const settleAtMs = now();
     if (settleAtMs >= intent.approvalDeadlineMs || settleAtMs >= intent.source.offer.extra.expiresAt * 1000) {
       if (fundsMoved) return paidButUnsettled();
-      await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired" });
+      await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired", ...precisePatch });
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "approval_expired" };
     }
+    await stop("before_source_settle", intent.paymentId);
 
     // 宣言型ではなく実際の値として扱う（相手の振る舞いは型では保証されない）。
     let settled: unknown;
@@ -897,6 +1019,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "unknown", {
         outcome: "none",
         reason: "source_settle_unknown",
+        ...precisePatch,
       });
       const elapsedMs = diag.elapsedSince(settleStartedAt);
       diag.note(() => ({ stage: "source_settle", outcome: "threw", transport: classifyTransportError(error), code: "source_settle_unknown", ...(elapsedMs === undefined ? {} : { elapsedMs }) }));
@@ -915,6 +1038,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await store.append(intent.paymentId, "source_failed", {
         outcome: "rejected",
         reason: safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected"),
+        ...precisePatch,
       });
       // 返す code は今までどおり append の後にもう一度読んだ値（読む回数・順序は変えない）。診断はその local だけを読む（adapter の値を読み足さない）。
       const rejectedCode = safeReason(isRecord(settled) ? settled["reason"] : undefined, "source_rejected");
@@ -948,6 +1072,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     await store.append(intent.paymentId, "unknown", {
       outcome: "none",
       reason: "source_settle_unknown",
+      ...precisePatch,
     });
     settleNote("unknown", "source_settle_unknown");
     return {
@@ -986,6 +1111,41 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       destNote("not_sent", "quote_changed");
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
     }
+    /*
+     * facilitator の release（`docs/subetha-exact-inbound-design.md` §4.4、要件 FR-5）: settle の後・上流への支払いの前に 1 回。method を持たない rail（既存の 3 つ）と
+     * wrapper の `none`（下の rail が持たない）は今までどおり送信へ。`released` だけが送信へ進み、`refused`・`unknown`・契約にない形は送信しない終端
+     * （受信は成立済みなので `paid_undelivered`）。`withKey("purchase\0quoteId")` の中で 1 回だけ。再起動の後は `deliver` に戻らない（FR-7）。
+     */
+    if (intent.status === "source_settled" && intent.source.release === undefined && typeof options.inbound.release === "function") {
+      await stop("after_source_settled", paymentId);
+      let result: unknown;
+      try {
+        result = await options.inbound.release(intent.source.offer, { routeId: intent.routeId, deadlineMs: intent.approvalDeadlineMs, ...(intent.source.txRef === undefined ? {} : { sourceTxRef: intent.source.txRef }) });
+      } catch {
+        result = { outcome: "unknown", reason: "source_release_unknown" };
+      }
+      const releaseOutcome = isRecord(result) ? result["outcome"] : undefined;
+      const deliveryKey = isRecord(result) ? result["deliveryKey"] : undefined;
+      const releaseTxRef = isRecord(result) ? result["txRef"] : undefined;
+      const eventId = isRecord(result) ? result["eventId"] : undefined;
+      if (releaseOutcome === "none") {
+        // wrapper: この rail は release を持たない。
+      } else if (
+        releaseOutcome === "released" &&
+        typeof deliveryKey === "string" && deliveryKey !== "" &&
+        typeof releaseTxRef === "string" && releaseTxRef === intent.source.txRef &&
+        typeof eventId === "string" && eventId !== ""
+      ) {
+        await store.append(paymentId, "source_released", { deliveryKey, txRef: releaseTxRef, eventId });
+        await stop("after_source_released", paymentId);
+      } else {
+        const reason = releaseOutcome === "refused" ? "source_release_refused" : "source_release_unknown";
+        await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason });
+        destNote("not_sent", reason);
+        await reportComplete(paymentId);
+        return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
+      }
+    }
     let stillOffered: boolean;
     try {
       stillOffered = await readAndMatchDestination(intent);
@@ -996,6 +1156,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         reason: "offer_unavailable",
       });
       destNote("not_sent", "offer_unavailable");
+      await reportComplete(paymentId);
       return { paymentId, status: "paid_data_unavailable", terminalReason: "offer_unavailable" };
     }
     if (!stillOffered) {
@@ -1004,6 +1165,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         reason: "quote_changed",
       });
       destNote("not_sent", "quote_changed");
+      await reportComplete(paymentId);
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
     }
 
@@ -1064,6 +1226,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           ...(typeof receiptRef === "string" && receiptRef !== "" ? { receiptRef } : {}),
         });
         destNote("paid", undefined, { attempt, elapsedMs: payElapsedMs });
+        await reportComplete(paymentId);
         // 応答は永続化済みの結果を読み戻す（adapter 所有の可変オブジェクトを返さない）。
         const stored = store.byPaymentId(paymentId);
         return {
@@ -1081,6 +1244,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           ...(typeof receiptRef === "string" && receiptRef !== "" ? { receiptRef } : {}),
         });
         destNote("paid_no_data", reason, { attempt, elapsedMs: payElapsedMs });
+        await reportComplete(paymentId);
         return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
       }
       case "not_sent":
@@ -1093,6 +1257,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
           reason,
         });
         destNote(failedOutcome as "not_sent" | "rejected", reason, { attempt, elapsedMs: payElapsedMs });
+        await reportComplete(paymentId);
         return { paymentId, status: "paid_data_unavailable", terminalReason: reason };
       }
       default:
@@ -1100,6 +1265,61 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         return unknownDestination(safeReason(result["reason"], "destination_pay_unknown"));
     }
   }
+
+  /**
+   * 終端の後の complete の報告（`docs/subetha-exact-inbound-design.md` §4.5、要件 FR-6）。値を返さず、例外も出さない。release の無い intent・報告済み・恒久に断られた
+   * intent・`unknown`／進行中では何もしない。報告の行の追記が失敗しても終端の行は fsync 済みなので購入の応答は変えない（固定文の `note` だけ。次の起動の
+   * 掃き出しが耐久の証拠から再試行する）。
+   */
+  async function reportComplete(paymentId: string): Promise<void> {
+    const intent = store.byPaymentId(paymentId);
+    const release = intent?.source.release;
+    if (intent === undefined || release === undefined || release.completed !== undefined) return;
+    if (release.unreported !== undefined && !(COMPLETE_TRANSIENT_REASONS as ReadonlySet<string>).has(release.unreported.reason)) return;
+    const outcome: "delivered" | "failed" | undefined =
+      intent.status === "delivered" ? "delivered" : intent.status === "paid_undelivered" || intent.status === "dest_failed" ? "failed" : undefined;
+    if (outcome === undefined) return;
+    if (typeof options.inbound.complete !== "function") return;
+    try {
+      await stop("after_terminal", paymentId);
+      let result: unknown;
+      try {
+        result = await options.inbound.complete(intent.source.offer, release.deliveryKey, outcome, { routeId: intent.routeId });
+      } catch {
+        result = { outcome: "unreported", reason: "unavailable" };
+      }
+      const resultOutcome = isRecord(result) ? result["outcome"] : undefined;
+      if (resultOutcome === "none") return;
+      if (resultOutcome === "completed") {
+        await store.append(paymentId, "source_completed", { outcome });
+        return;
+      }
+      const reasonRaw = isRecord(result) && resultOutcome === "unreported" ? result["reason"] : undefined;
+      const reason = typeof reasonRaw === "string" && COMPLETE_UNREPORTED_REASON_SET.has(reasonRaw) ? reasonRaw : "unavailable";
+      await store.append(paymentId, "source_complete_unreported", { outcome, reason });
+    } catch {
+      options.note?.(`complete report could not be journaled (paymentId=${paymentId})`);
+    }
+  }
+
+  /** 起動時の掃き出しの候補（設計 §4.5）: release あり・completed 無し・unreported 無しか一時・状態が終端の 3 つ。起動時に 1 回だけ snapshot する。 */
+  const sweepCandidates: readonly Intent[] = store.all().filter((intent) => {
+    const release = intent.source.release;
+    if (release === undefined || release.completed !== undefined) return false;
+    if (release.unreported !== undefined && !(COMPLETE_TRANSIENT_REASONS as ReadonlySet<string>).has(release.unreported.reason)) return false;
+    return intent.status === "delivered" || intent.status === "paid_undelivered" || intent.status === "dest_failed";
+  });
+  let sweepAbort = false;
+  const sweep: Promise<void> = (async () => {
+    for (const candidate of sweepCandidates) {
+      if (sweepAbort) return;
+      try {
+        await withKey(`purchase\u0000${candidate.quoteId}`, () => reportComplete(candidate.paymentId));
+      } catch {
+        options.note?.(`startup complete sweep failed (paymentId=${candidate.paymentId})`);
+      }
+    }
+  })();
 
   /** 送金直前・settle 直前の再照合（凍結した accepts をそのまま使わない）。 */
   async function readAndMatchDestination(intent: Intent): Promise<boolean> {
@@ -1166,7 +1386,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     if (dynamicCore === undefined) {
       return outcomeOf("rejected", "unknown_quote");
     }
-    const outcome = await dynamicCore.purchase({ ...input, source: input.source ?? input.principalId });
+    const outcome = withDisclosure(await dynamicCore.purchase({ ...input, source: input.source ?? input.principalId }));
     if (outcome.status === "awaiting_session" && outcome.paymentId !== undefined && privateCore !== undefined) {
       const handover = privateCore.takeHandover(outcome.paymentId);
       return handover === undefined ? outcome : { ...outcome, handover };
@@ -1200,6 +1420,11 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       // 再提示しない（Router が断ると分かっている記録に向けて払わせない。`docs/dynamic-gas-fee-design.md` §3.2）。
       return intent.status === "created" && intent.dynamicCapInvalid !== true ? intent.source.offer : undefined;
     },
+    disclosureFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): number | undefined {
+      const intent = readable(store.byQuoteId(quoteId) ?? dynamicCore?.ledgerIntent(quoteId), principalId, ownerKey);
+      if (intent === undefined || (routeId !== undefined && intent.routeId !== routeId)) return undefined;
+      return disclosureOf(intent).mayStillSettleUntil;
+    },
     async privateQuote(request): Promise<PrivateQuoteOutcome> {
       if (privateCore === undefined) return { ok: false, code: "private_disabled" };
       const input = snapshotInput(request);
@@ -1220,6 +1445,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     },
     async close(): Promise<void> {
       if (sweepTimer !== undefined) clearInterval(sweepTimer);
+      // 起動時の complete の掃き出し（設計 §4.5）: 進行中の 1 件を待ってから journal を閉じる。候補の残りは次の起動。
+      sweepAbort = true;
+      await sweep;
       await privateCore?.close();
       await ledger?.close();
       await journal.close();

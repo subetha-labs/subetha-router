@@ -2,7 +2,8 @@ import { createPurchaseCore } from "./purchase.js";
 import { failure, type RoutesSummary } from "../protocol/summary.js";
 import type { QuoteInput } from "../protocol/socket.js";
 import { record, routerFailure, ROUTE_ID_PATTERN } from "../router/client.js";
-import { inboundRailsOf, keyRailOf, payerAssetOf, ARC_TESTNET, BASE_SEPOLIA, SOLANA_DEVNET, TEMPO_TESTNET } from "../sign/networks.js";
+import { inboundRailsOf, keyRailOf, payerAssetOf, payerNetworkOf, ARC_TESTNET, BASE_SEPOLIA, SOLANA_DEVNET, TEMPO_TESTNET } from "../sign/networks.js";
+import { inboundRailsOf as assetInboundRailsOf } from "../vendor/networks.js";
 import type { DaemonContext } from "./interfaces.js";
 import type { Handler } from "./server.js";
 
@@ -19,11 +20,14 @@ type Rail = "x402" | "mpp";
 
 /**
  * Inbound rail of a static route in the hosted listing (docs/payer-rails-design.md FR-R13). `source.rail` when the Router sends it
- * (Routers from R-0 on); otherwise the table's only inbound rail for that network; Solana (x402 and MPP both allowed) falls back to the
- * routeId convention `…-solmpp` = MPP. The quote's offer scheme is authoritative later; this only labels the listing.
+ * (Routers from R-0 on); when the field is **absent**, the table's only inbound rail for that network; Solana (x402 and MPP both allowed)
+ * falls back to the routeId convention `…-solmpp` = MPP. A present `rail` this payer does not know (e.g. the Router's `subetha-exact`,
+ * `null`, a number) is NOT a payable route: no fallback (Router docs/subetha-exact-inbound-requirements.md FR-10.2). The quote's offer
+ * scheme is authoritative later; this only labels the listing.
  */
 export function staticSourceRailOf(routeId: string, source: Record<string, unknown>): Rail | undefined {
   if (source["rail"] === "x402" || source["rail"] === "mpp") return source["rail"];
+  if (source["rail"] !== undefined) return undefined;
   const network = typeof source["network"] === "string" ? source["network"] : "";
   const rails = inboundRailsOf(network);
   if (rails.length === 1) return rails[0];
@@ -33,6 +37,11 @@ export function staticSourceRailOf(routeId: string, source: Record<string, unkno
 
 function payable(network: unknown, asset: unknown, decimals: unknown): network is string {
   return typeof network === "string" && typeof asset === "string" && keyRailOf(network) !== undefined && payerAssetOf(network, asset) !== undefined && payerAssetOf(network, asset)!.decimals === decimals;
+}
+/** The table may restrict an asset to rails this payer does not pay on (Router `KnownAsset.rails`, e.g. zUSDC → `subetha-exact` only): such a pair is never listed. */
+function assetAllowsRail(network: string, asset: string, rail: Rail): boolean {
+  const entry = payerNetworkOf(network), known = payerAssetOf(network, asset);
+  return entry !== undefined && known !== undefined && (assetInboundRailsOf(entry, known) as readonly string[]).includes(rail);
 }
 function reachesOf(destination: Record<string, unknown>): Route["reaches"] | undefined {
   const rail = destination["rail"];
@@ -48,6 +57,7 @@ export function routeRowsOf(response: Record<string, unknown>): Route[] {
     const source = route["source"], reaches = reachesOf(route["destination"]);
     const rail = staticSourceRailOf(route["routeId"], source);
     if (rail === undefined || reaches === undefined || !payable(source["network"], source["asset"], source["decimals"]) || typeof source["amount"] !== "string") continue;
+    if (!assetAllowsRail(source["network"], source["asset"] as string, rail)) continue;
     rows.push({ routeId: route["routeId"], kind: "static", pays: { rail, network: source["network"], asset: source["asset"] as string, amount: source["amount"], decimals: source["decimals"] as number }, reaches,
       fundsMoveOnCredential: rail === "mpp", needsSol: rail === "mpp" && source["network"] === SOLANA_DEVNET });
   }
@@ -58,6 +68,7 @@ export function routeRowsOf(response: Record<string, unknown>): Route[] {
       const source = profile["source"], reaches = reachesOf(profile["destination"]);
       const rail = source["rail"];
       if ((rail !== "x402" && rail !== "mpp") || reaches === undefined || !payable(source["network"], source["asset"], source["decimals"])) continue;
+      if (!assetAllowsRail(source["network"], source["asset"] as string, rail)) continue;
       rows.push({ routeId: profile["profileId"], kind: "dynamic", pays: { rail, network: source["network"], asset: source["asset"] as string, decimals: source["decimals"] as number }, reaches,
         fundsMoveOnCredential: rail === "mpp", needsSol: rail === "mpp" && source["network"] === SOLANA_DEVNET });
     }

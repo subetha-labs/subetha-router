@@ -142,6 +142,7 @@ function quoteViewOf(body: unknown): QuoteView | undefined {
       boundTo,
       deadlineMs: typeof approval["deadlineMs"] === "number" ? approval["deadlineMs"] : 0,
     },
+    ...(body["closed"] === true ? { closed: true as const, ...(typeof body["status"] === "string" && /^[a-z_]{1,32}$/.test(body["status"]) ? { status: body["status"] } : {}) } : {}),
     ...dynamic,
   };
 }
@@ -180,6 +181,14 @@ function projectionViewOf(body: unknown): ProjectionView | undefined {
     ...(isRecord(body["upstream"]) ? { upstream: body["upstream"] } : {}),
     ...(isRecord(body["dynamic"]) ? { dynamic: body["dynamic"] } : {}),
   };
+}
+
+/** Router の purchase の本文の `mayStillSettleUntil`（正の安全な整数だけ。`docs/subetha-exact-inbound-design.md` §4.2）。 */
+function mayStillSettleUntilOf(body: unknown): { mayStillSettleUntil?: number } {
+  if (!isRecord(body)) return {};
+  const value = body["mayStillSettleUntil"];
+  // 正の安全な整数で、Date にできる範囲（相手の値を表示や判断に使う側が投げないように）。
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && Number.isFinite(new Date(value * 1000).getTime()) ? { mayStillSettleUntil: value } : {};
 }
 
 /** 固定の理由コードだけを外に出す（サーバ由来の文字列も安全な短いコードに限る）。 */
@@ -342,7 +351,8 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
       }
       // 発行時の値を凍結して渡し、束縛スナップショットを控える（後の改変を検知する）。
       const quote = frozenClone(parsed);
-      issued.set(quote.quoteId, { binding: bindingOf(quote), requestId });
+      // 閉じた quote（使用済みの再取得）は発行の控えを上書きしない（最初の文書の束縛を保つ）。
+      if (quote.closed !== true) issued.set(quote.quoteId, { binding: bindingOf(quote), requestId });
       return { ok: true, quote };
     },
 
@@ -493,11 +503,14 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
       const headerId = result.paymentId;
       const bodyId = isRecord(result.body) ? requireString(result.body, "paymentId") : undefined;
       const serverStatus = isRecord(result.body) ? result.body["status"] : undefined;
+      /** 「払われたかもしれない」の上限（Router の本文の固定の欄。正の整数だけ）。 */
+      const disclosure = mayStillSettleUntilOf(result.body);
       /** 送金の有無が分からないまま保持する（再送・再 quote はしない）。 */
       const uncertain = (reason: string): ExecutionResult => ({
         outcome: "unknown",
         paymentId,
         reason,
+        ...disclosure,
       });
       const idProblem = (claimed: string | undefined): string =>
         claimed === undefined ? "payment_id_missing" : "payment_id_mismatch";
@@ -538,6 +551,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
           outcome: "paid_data_unavailable",
           paymentId,
           ...(terminalReason === undefined ? {} : { terminalReason }),
+          ...disclosure,
         };
       }
       // 本文を読めない応答は「拒否された」「支払いをやり直せる」と解釈しない
@@ -550,6 +564,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
           outcome: "payment_required",
           error: errorCodeOf(result.body, "payment_required"),
           paymentId,
+          ...disclosure,
         };
       }
       // 5xx も同じく確定させない。
@@ -562,6 +577,7 @@ export function createRouterClient(options: RouterClientOptions): RouterClient &
         status: result.status,
         paymentId,
         ...reasonOf(result.body),
+        ...disclosure,
       };
     },
 

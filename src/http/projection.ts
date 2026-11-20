@@ -73,11 +73,15 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): u
   };
 }
 
-/** 静的 route の受信レールと scheme（x402 → `exact`、mpp → network の family で `tempo/charge` / `solana/charge`、明示の subetha → `subetha-zerc20`）。 */
-export function sourceRailListingOf(route: RouteConfig): { rail: "x402" | "mpp" | "subetha"; scheme: "exact" | "tempo/charge" | "solana/charge" | "subetha-zerc20" } | Record<string, never> {
+/**
+ * 静的 route の受信レールと scheme（x402 → `exact`、mpp → network の family で `tempo/charge` / `solana/charge`、明示の subetha → `subetha-zerc20`、
+ * `subetha-exact` → `exact` + `fundsMoveOnCredential: false`（要件 FR-10.2。この rail だけ 3 欄目を足す）。
+ */
+export function sourceRailListingOf(route: RouteConfig): { rail: "x402" | "mpp" | "subetha" | "subetha-exact"; scheme: "exact" | "tempo/charge" | "solana/charge" | "subetha-zerc20"; fundsMoveOnCredential?: false } | Record<string, never> {
   if (route.sourceRail === "x402") return { rail: "x402", scheme: "exact" };
   if (route.sourceRail === "mpp") return { rail: "mpp", scheme: networkFamilyOf(route.source.network) === "svm" ? "solana/charge" : "tempo/charge" };
   if (route.sourceRail === "subetha") return { rail: "subetha", scheme: "subetha-zerc20" };
+  if (route.sourceRail === "subetha-exact") return { rail: "subetha-exact", scheme: "exact", fundsMoveOnCredential: false };
   return {};
 }
 
@@ -87,10 +91,13 @@ export function quoteBody(
   route: RouteConfig,
   canonicalBaseUrl: string,
 ): unknown {
+  // 閉じた quote（FR-4.5、全 rail）: 署名の対象（offer・payTo・expiresAt）を出さない。`closed`・`status`・id・approval は出す。
+  const closed = quote.closed === true;
   return {
     quoteId: quote.quoteId,
     paymentId: quote.paymentId,
     routeId: quote.routeId,
+    ...(closed ? { closed: true, status: quote.status } : {}),
     resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },
     source: {
       // 実レールを名乗る。**既定は `subetha`**（`sourceRail` 未指定の既存 route を壊さない）。
@@ -99,9 +106,7 @@ export function quoteBody(
       asset: quote.source.asset,
       decimals: route.source.decimals,
       network: quote.source.network,
-      payTo: quote.source.offer.payTo,
-      expiresAt: quote.source.offer.extra.expiresAt,
-      offer: quote.source.offer,
+      ...(closed ? {} : { payTo: quote.source.offer.payTo, expiresAt: quote.source.offer.extra.expiresAt, offer: quote.source.offer }),
     },
     destination: {
       rail: route.rail ?? route.destination.scheme,
@@ -257,6 +262,8 @@ export function projectionBody(projection: Projection): unknown {
       asset: projection.source.asset,
       network: projection.source.network,
       ...(projection.source.txRef === undefined ? {} : { txRef: projection.source.txRef }),
+      // 「払われたかもしれない」（`docs/subetha-exact-inbound-design.md` §4.2、要件 FR-4.4）。出すときは常に組で。持たない rail の射影は不変。
+      ...(projection.source.mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil: projection.source.mayStillSettleUntil, awaitingPaymentDoesNotMeanUnpaid: true }),
     },
     destination: {
       quoted: projection.destination.quoted,
