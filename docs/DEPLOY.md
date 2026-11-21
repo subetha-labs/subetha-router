@@ -763,6 +763,37 @@ sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
     - G-4 `dyn-hyperevm-to-arc`: 0.011 HyperEVM USDC（受信 `0x84aa842d…`）。宛先（Router → Arc の Provider）は送出されず、authorization は期限切れで未使用。
   - **資金が動かなかったもの**: G-3 `dyn-x402-to-hyperevm`（受信の settle を x402.org が拒否、authorization は期限切れで未使用）と、quote の `rate_limited` の 7 件。
 
+### 2h. main の image への入れ替え（2026-11-21 02:06Z。`b-10dd795` → `b-6aa3f20`。rail の有効・無効は変えていない）
+
+owner の決定（2026-11-21）: 「段階的に有効化まで」の第 1 段として、main（`6aa3f20`）の image を **rail の設定を変えずに**入れ替える。
+本番は 2026-10-14 の `b-10dd795` のままだったので、この入れ替えで 121 commit が一度に公開に出た。
+
+**公開の挙動が変わる点（公開の契約の変更）**:
+- **使用済みの quote の再 quote は閉じた文書を返す**（要件 `docs/subetha-exact-inbound-requirements.md` FR-4.5、owner の承認 2026-11-20、PR #203）。全 rail に効く:
+  一度 purchase に使われた `requestId` を再 quote すると、`closed: true`・今の `status`・`source.offer` なし（HTTP と MCP）。`npm run sign` と MCP の purchase はそれを拒む。
+  買い手は新しい `requestId` で quote を取り直す（新しい承認が要る）。`created` のままの再 quote は今までどおり同じ文書。
+- 拒否理由の診断の記録と入口の graceful drain（`docs/rejection-reasons-design.md` §9.2 の配備に当たる。env の変更なし）。
+
+**公開に出ていないもの**（code は入ったが設定・有効化が無い）: 受信レール `subetha-exact` と標準の x402 クライアント用の入口（hosted に route が無い。`docs/x402-standard-entry-requirements.md` S-7）、
+SubEtha の hosted 受信（`RAILS_ACTIVATION.subetha.inbound` は `false`）、zkTLS の秘匿購入（設定なし）。
+
+**初回の入れ替えの手順（今回だけ）**: 今の `deploy/swap-image.sh` は、古いコンテナの log の `entry run: <id>` を読めないと入れ替えない（drain の証拠を今の起動に結び付けるため）。
+`b-10dd795` の入口はこの行を出さないので、**今回だけ host に置いてあった旧版の script**（2026-10-14 の版）で入れ替えた。旧版の前提（進行中の購入が無いこと）は、
+本番の journal の最終更新が 2026-10-16 19:58Z であること（5 週間、購入なし）で満たした。入れ替えの後、host の `~/swap-image.sh` を今の版（sha256 の先頭 `5c71099b`）に置き換え、
+旧版は `~/swap-image.sh.pre-drain-20261121` として残した。**次回からは今の版を使う**（新しい入口は `entry run:` を出す。入れ替え後の log で 1 行を確かめた）。
+
+**記録**:
+- image: 手元（arm64、Colima）で `git archive origin/main` から build、`docker save`／`load`、layer の一覧の hash が手元と host で一致。
+- 入れ替え: 02:06:33Z 開始、02:06:46Z 終了、exit 0。journal の先頭 439,834 バイトは不変、`subetha-egress check` 合格、公開の `/healthz` ok、子の listening 行あり、`could not start` 0 行。
+  rollback は `subetha-router-prev-20261121T020633Z`（`b-10dd795`）。それより古い `-prev-` は owner の常設の同意で削除。
+- 公開の一覧: 入れ替えの前後で JSON が一致（route 10・プロファイル 56）。
+- 診断: `/var/lib/subetha-router/diagnostics` は 0700、`router.ndjson` は 0600、`evm-facilitator` は 0700。
+- 公開の MCP（HTTPS）から testnet の購入を 1 回: `md-mpp-eth-snapshot`（Base Sepolia USDC の x402 で払う）、quote 0.8 秒、purchase 3.0 秒で delivered（`paymentId` `61c40e56-4fec-47b1-b37f-cda948a1f77a`）。
+  同じ `requestId` の再 quote は `closed: true`・`status: delivered`・offer なしで、`nextStep` が「署名しない・status を読む」を言う。
+
+**rollback の規則**: `b-10dd795` に戻すと FR-4.5 と診断・drain が外れるだけで、journal の形は読める（新しい行の種類は `subetha-exact` と標準入口のもので、hosted では書かれていない）。
+hosted で `subetha-exact` を有効にした後は、その有効化の設計が定める image より前には戻さない。
+
 ## 3. 動作確認
 
 ```sh
