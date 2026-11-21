@@ -153,6 +153,14 @@ again or retry on your own**; report the `paymentId`, the status and the signatu
   (`closed: true`, a `status`, **no `source.offer`**): do not sign anything for it; `npm run sign` refuses it.
   Read its result with `subetha_router_status` and take a new quote with a new `requestId` (needs a new approval)
 
+### Standard x402 clients on a local `subetha-exact` route
+
+A local Router with a `subetha-exact` route also serves `GET /x402/v1/routes/{routeId}/resource` (listed as `x402Url`), which an
+unmodified x402 v2 client can pay (README: "Buying with a standard x402 client"). It is **not on the hosted Router**. There is no
+quote, `requestId` or Router-side approval on that entry: get the human's approval before the client is allowed to pay, every `GET`
+without a payment creates a facilitator order, and a new `GET` after a failure is a new purchase. A 409 from it is never proof that
+nothing was paid; report `paymentId`, the status and `mayStillSettleUntil`, and do not call again on your own.
+
 ### Reading the result
 
 `fetchedAt` is **UTC** (it ends in `Z`). Convert before judging freshness: a snapshot

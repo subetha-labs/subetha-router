@@ -12,6 +12,7 @@ import { MAX_ATTEST_BODY_BYTES_OF } from "./private-limits.js";
 import type { InboundOffer, PaymentCredential } from "../ports/inbound.js";
 import type { DrainGate } from "../shared/drain.js";
 import { authenticate, singleHeader } from "./auth.js";
+import { handleX402Entry, X402_ENTRY_PREFIX } from "./x402-entry.js";
 import { dynamicQuoteBody, paymentRequiredBody, privateQuoteBody, projectionBody, quoteBody, routeListBody } from "./projection.js";
 
 export interface AppOptions {
@@ -302,6 +303,19 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       return;
     }
     const principalId = auth.principalId;
+
+    // 標準の x402 クライアント用の入口（`docs/x402-standard-entry-design.md` §2）: GET /x402/v1/routes/{routeId}/resource。ほかの分岐には触れない。
+    if (segments[0] === X402_ENTRY_PREFIX) {
+      await handleX402Entry(request, response, {
+        core: options.core,
+        config: options.config,
+        canonicalBaseUrl: options.canonicalBaseUrl,
+        principalId,
+        segments,
+        ...(options.beforeDeliveredResponse === undefined ? {} : { beforeDeliveredResponse: options.beforeDeliveredResponse }),
+      });
+      return;
+    }
 
     // R1: GET /v1/routes
     if (segments.length === 2 && segments[0] === "v1" && segments[1] === "routes") {

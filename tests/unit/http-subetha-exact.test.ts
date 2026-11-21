@@ -79,6 +79,8 @@ async function serve(script: Script) {
     status: () => script.status,
     offerFor: () => OFFER,
     disclosureFor: () => script.status?.source.mayStillSettleUntil,
+    quoteStandard: async () => ({ ok: false, code: "unknown_route" }),
+    purchaseStandard: async () => ({ kind: "not_found" }),
     privateQuote: async () => ({ ok: false, code: "private_disabled" }),
     privateAttest: async () => ({ ok: false, code: "not_found" }),
     privateRecord: () => ({ ok: false, code: "not_found" }),

@@ -643,6 +643,15 @@ export function inboundByRoute(
      * 受信レール `subetha-exact` の任意の操作（設計 §2 の wrapper の契約）: **常に定義**し、下の rail に method が無ければ `settleWindowOf` は `undefined`、
      * `release`・`complete` は `{ outcome: "none" }`（core は「持たない」= 今までどおりと読む）。下の rail が持つなら結果をそのまま渡す。
      */
+    // 標準入口の手元の署名の検査（`docs/x402-standard-entry-design.md` §4.4 (a)）: rail が持たない・例外・`true` 以外は全て「本物でない」（fail closed）。
+    checkSignature: async (offer, credential) => {
+      try {
+        const rail = forOffer(offer);
+        return typeof rail.checkSignature === "function" && (await rail.checkSignature(offer, credential)) === true;
+      } catch {
+        return false;
+      }
+    },
     settleWindowOf: (offer) => {
       const rail = forOffer(offer);
       return typeof rail.settleWindowOf === "function" ? rail.settleWindowOf(offer) : undefined;

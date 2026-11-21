@@ -86,8 +86,8 @@ export async function startExactHarness(options: ExactHarnessOptions = {}): Prom
   const signalPath = path.join(workDir, "stop.signal");
   const configPath = path.join(workDir, "router.config.json");
   await writeFile(tokenFile, `${BEARER}\n`, { mode: 0o600 });
-  const facilitator = await startListening("tests/fixtures/subetha-exact-facilitator.ts", ["--provider-id", PROVIDER, "--bearer", BEARER, "--chain-id", String(CHAIN_ID), "--asset", ZUSDC, "--ttl-seconds", "300", ...(options.facilitatorArgs ?? [])]);
-  const upstream = await startListening("tests/fixtures/x402-upstream.ts", ["--pay", "ok", "--asset", USDC, ...(options.upstreamArgs ?? [])]);
+  const facilitator = await startListening("tests/fixtures/subetha-exact-facilitator.ts", [...(options.facilitatorArgs ?? []), "--provider-id", PROVIDER, "--bearer", BEARER, "--chain-id", String(CHAIN_ID), "--asset", ZUSDC, "--ttl-seconds", "300"]);
+  const upstream = await startListening("tests/fixtures/x402-upstream.ts", [...(options.upstreamArgs ?? []), "--pay", "ok", "--asset", USDC]);
   await writeFile(configPath, JSON.stringify(configDocument(upstream.baseUrl, options.routes), null, 2));
   const env: Record<string, string> = {
     ROUTER_CONFIG_PATH: configPath,

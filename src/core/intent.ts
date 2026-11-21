@@ -241,6 +241,11 @@ export interface Intent {
   readonly destination: IntentDestination;
   readonly quoteFingerprint: string;
   /**
+   * 標準の x402 クライアント用の入口で、この quote に結び付いた最初の credential（行 `source_credential_bound`。`docs/x402-standard-entry-design.md` §4.4）。
+   * 欄があれば結び付き済み。`digest` が無いのは行が壊れていた場合で、どの credential も一致しない（fail closed）。
+   */
+  readonly boundCredential?: { readonly digest?: string; readonly payer?: string; readonly validBefore?: number };
+  /**
    * quote 時点の **route 設定**の指紋（FR-17）。`quoteFingerprint` は上流 offer の指紋であり、
    * こちらは**設定側**。両方が必要なのは、守る対象が違うため
    * （上流の提示変化 vs 運用者による設定変更）。
