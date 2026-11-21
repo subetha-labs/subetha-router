@@ -15,11 +15,12 @@
  * `router.dynamic.denyHosts` に `zerc20-facilitator.subethalabs.com` が 1 語増えただけ（有効化に関係なく拒否する。要件 FR-3.4）。`subetha` は公開の定数で `false` なので、
  * route・区分・子の env は変わらない。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { hostPlanOf } from "../../tools/remote-mcp.js";
-import { EVM_NONE, RAILS_ACTIVATION, RAILS_NONE, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { EVM_NONE, RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION, RAILS_NONE, type RailsActivation } from "../../tools/remote-mcp-config.js";
 
 const key = "0x" + "11".repeat(32);
 const base = { SUBETHA_OUTBOUND_PRIVATE_KEY: key, SUBETHA_ROUTER_RECEIVER: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405", SUBETHA_MPP_INBOUND_SECRET: "0123456789abcdef0123456789abcdef-golden", SUBETHA_TEMPO_RPC_URL: "https://tempo.example/v1/TOKEN", SUBETHA_ARC_RECEIVER_KEY: "0x" + "22".repeat(32), SUBETHA_SOLANA_RECEIVER: "CKPKJWNdJEqa81x7CkZ14BVPiY6y16Sxs7owznqtWYp5", SUBETHA_OUTBOUND_SOLANA_KEY: "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2", SUBETHA_ARC_PROVIDER_PAYTO: "0x719eAEC2Eb4bdDf10460C01832857C86e0BA42f1", SUBETHA_SOLANA_PROVIDER_PAYTO: "GHGd4JUFAKXHd59hzZUtQpB8wYSaWuANVGWwp3sJsg4d", SUBETHA_SOLANA_MPP_PROVIDER_PAYTO: "26jZd97NcGnfszA9UuPydpeHmshGhiYurg8LuMiYBUbc" };

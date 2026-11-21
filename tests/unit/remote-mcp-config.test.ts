@@ -5,6 +5,7 @@
  * （公開の生成に 36 本のプロファイルが足され、受信の facilitator の URL の内部 env が要る。`EVM_FAC_ENV`）。
  * env からは変えられない。有効にしたときだけ route・プロファイル・予算の区分・facilitator が出て、`KNOWN_NETWORKS` の検証を通る。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,7 +20,7 @@ import {
   INBOUND,
   INBOUND_ARC,
   INBOUND_SOL,
-  RAILS_ACTIVATION,
+  RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION,
   RAILS_DISABLED,
   RAILS_NONE,
   ROUTE,

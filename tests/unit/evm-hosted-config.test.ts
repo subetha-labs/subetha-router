@@ -6,6 +6,7 @@
  * - 1 件の上限の境界は本物の予約の計算（`src/core/dynamic.ts`）で。公開の子の能力（`localCounterparties`・`evmSigningByNetwork`）、配線（composeRails）
  * 鍵は固定の合成値か乱数。外へは接続しない（loopback の相手は試験の中の HTTP の server）。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import http from "node:http";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -31,7 +32,7 @@ import {
   INBOUND_MPP,
   INBOUND_SOL,
   OUTBOUND_SOL,
-  RAILS_ACTIVATION,
+  RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION,
   RAILS_NONE,
   routerConfigOf,
   type EvmRailsActivation,

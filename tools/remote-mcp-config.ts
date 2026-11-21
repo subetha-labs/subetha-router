@@ -226,16 +226,25 @@ export const HOSTED_EXACT = Object.freeze({
 export const HOSTED_EXACT_FACILITATOR_URL_ENV = "SUBETHA_EXACT_FACILITATOR_URL";
 export const HOSTED_EXACT_TOKEN_FILE_ENV = "SUBETHA_EXACT_TOKEN_FILE";
 /**
+ * host の env（任意）: 実証の件数（offer の上限）の上書き。**運用者が image を作り直さずに新しい offer を止める・再開するための口**（`0` = 受付停止）。
+ * 無ければ `HOSTED_EXACT.maxCommitted`。0〜100000 の 10 進の整数だけ（違えば固定文で止める）。有効化の入れ替えは、まず `0` で入れてから外す（`docs/DEPLOY.md` §2i）。
+ */
+export const HOSTED_EXACT_MAX_COMMITTED_ENV = "SUBETHA_EXACT_MAX_COMMITTED";
+/**
  * 有効なときの host の env の 2 つ。無効なら env を読まずに `undefined`。欠けていれば固定文で止める（値は出さない）。形の検査は子の Router（`src/config.ts`）が行う。
  */
-export function hostedExactOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): { readonly facilitatorUrl: string; readonly tokenFile: string } | undefined {
+export function hostedExactOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): { readonly facilitatorUrl: string; readonly tokenFile: string; readonly maxCommitted: number } | undefined {
   if (!subethaExactOf(activation).inbound) return undefined;
   const facilitatorUrl = env[HOSTED_EXACT_FACILITATOR_URL_ENV];
   const tokenFile = env[HOSTED_EXACT_TOKEN_FILE_ENV];
   if (facilitatorUrl === undefined || facilitatorUrl === "" || tokenFile === undefined || tokenFile === "") {
     throw new Error(`${HOSTED_EXACT_FACILITATOR_URL_ENV} and ${HOSTED_EXACT_TOKEN_FILE_ENV} are required when the subetha-exact inbound rail is activated`);
   }
-  return { facilitatorUrl, tokenFile };
+  const rawCap = env[HOSTED_EXACT_MAX_COMMITTED_ENV];
+  if (rawCap !== undefined && rawCap !== "" && (!/^(0|[1-9][0-9]{0,5})$/.test(rawCap) || Number(rawCap) > 100_000)) {
+    throw new Error(`${HOSTED_EXACT_MAX_COMMITTED_ENV} must be an integer from 0 to 100000 when present`);
+  }
+  return { facilitatorUrl, tokenFile, maxCommitted: rawCap === undefined || rawCap === "" ? HOSTED_EXACT.maxCommitted : Number(rawCap) };
 }
 /** `subetha` の既定（無ければ `false`）。 */
 export function subethaOf(activation: RailsActivation): { readonly inbound: boolean } {
@@ -314,7 +323,21 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
     arbsep: Object.freeze({ inbound: true, outbound: true }),
     hyperevm: Object.freeze({ inbound: true, outbound: true }),
   }),
+  /**
+   * 受信レール `subetha-exact` と標準の x402 入口の、上限付きの実証: **2026-11-21 に `true`**（G-4。owner の決定「段階的に有効化まで」「A で進めて良いです」。
+   * G-2 で手元の hosted の入口から標準クライアントと MCP の両方が delivered、G-3 で無効の image を本番に入れ替え済み: `docs/DEPLOY.md` §2i の記録）。
+   * 新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に（route と facilitator の設定は残る）。完全に戻すのはこの欄を消す（§2i の rollback の規則を先に読む）。
+   */
+  subethaExact: Object.freeze({ inbound: true }),
 });
+/**
+ * `subethaExact` を足す前の公開の有効化（2026-10-14 の G-4 までの形）。既存の試験と golden はこの形を基準にして「実証の追加の前と同じ」を見続け、
+ * 実証の追加が**足すだけ**であることは `tests/unit/hosted-exact-config.test.ts` が、今の公開の定数とこの形の差で確かめる。
+ */
+export const RAILS_ACTIVATION_BEFORE_EXACT: RailsActivation = (() => {
+  const { subethaExact: _demonstration, ...before } = RAILS_ACTIVATION;
+  return Object.freeze(before);
+})();
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
 export const RAILS_NONE: RailsActivation = Object.freeze({ arc: RAIL_OFF, solana: RAIL_OFF, solanaMpp: RAIL_OFF });
 export const RAILS_DISABLED: RailsOptions = Object.freeze({ activation: RAILS_NONE, receivers: Object.freeze({}) });
@@ -832,7 +855,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                 canonicalPath: `/v1/routes/${HOSTED_EXACT.routeId}/resource`,
                 rail: "x402",
                 sourceRail: "subetha-exact",
-                offerCap: { maxCommitted: HOSTED_EXACT.maxCommitted },
+                offerCap: { maxCommitted: hostedExact.maxCommitted },
                 source: { amount: HOSTED_EXACT.source.amount, asset: HOSTED_EXACT.source.asset, decimals: HOSTED_EXACT.source.decimals, network: HOSTED_EXACT.source.network },
                 destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
               },
