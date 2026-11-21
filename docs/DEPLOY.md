@@ -794,7 +794,7 @@ SubEtha の hosted 受信（`RAILS_ACTIVATION.subetha.inbound` は `false`）、
 **rollback の規則**: `b-10dd795` に戻すと FR-4.5 と診断・drain が外れるだけで、journal の形は読める（新しい行の種類は `subetha-exact` と標準入口のもので、hosted では書かれていない）。
 hosted で `subetha-exact` を有効にした後は、その有効化の設計が定める image より前には戻さない。
 
-### 2i. 受信レール `subetha-exact` と標準の x402 入口の、上限付きの実証 — **本番では無効**（`RAILS_ACTIVATION.subethaExact` の欄なし。有効化は G-4、owner の go）
+### 2i. 受信レール `subetha-exact` と標準の x402 入口の、上限付きの実証 — **本番で有効（2026-11-21 05:43Z の G-4 から。`b-e2e2aa8`。下の記録）**
 
 要件・設計: `docs/hosted-exact-enable-requirements.md`、`docs/hosted-exact-enable-design.md`。Router は SubEtha v2 の facilitator（testnet）の Provider `router-hosted` として Base Sepolia の zUSDC を受け、
 Provider A（x402、Base Sepolia USDC）に払う。1 件で買い手は 0.012 zUSDC、Router は 0.01 USDC。**採算は問わない実証**（withdraw の手数料は 1 回 約 0.009 zUSDC。`docs/subetha-exact-inbound-acceptance.md` §3.1）。
@@ -861,7 +861,22 @@ site に `log` の指定は無く access log は出ていないが、それは�
   公開の一覧は入れ替えの前後で **byte 一致**。`GET /x402/v1/routes/md-zusdc-eth-snapshot/resource` は 404（`PAYMENT-SIGNATURE` 付きでも 404）。既存の route の購入 1 回（`md-mpp-eth-snapshot`、`3f1d1018-ab68-4c00-a65c-7e32bea30f9e`）が delivered。
   host の Caddyfile: `router.subethalabs.com` は `/evm-facilitator/*` だけを 8611 へ、それ以外を `reverse_proxy 127.0.0.1:8787`（`trusted_proxies` の設定なし = 買い手が送った `X-Forwarded-For` は信頼せず、接続元で置き換える）。
   8787 と 8611 は 127.0.0.1 だけに bind。site に `log` の指定は無い（access log は出ていない = 要求のヘッダーは Caddy の log に残らない）。
-- **G-4（有効化）**: この節の表題が「本番で有効」に変わったときが有効化の後。公開の定数 `RAILS_ACTIVATION.subethaExact` は `true`（golden `tests/fixtures/config-golden/public-exact.json`。以前の公開の生成 `public.json` に足しただけであることは `tests/unit/hosted-exact-config.test.ts`）。
+- **G-4（有効化。owner の go = PR #208 の merge、2026-11-21）**: 公開の定数 `RAILS_ACTIVATION.subethaExact` は `true`（golden `tests/fixtures/config-golden/public-exact.json`。以前の公開の生成 `public.json` に足しただけであることは `tests/unit/hosted-exact-config.test.ts`）。
+  - **host**: token のファイルを 0700 の一時の directory を通して置いた（`/var/lib/subetha-router/secrets/subetha-exact.token`、0600、uid 10001。手元との sha256 の照合は「一致」）。`/etc/subetha-router.env` に 2 行（+ 第 1 段の間だけ `SUBETHA_EXACT_MAX_COMMITTED=0`）。変更のたびに `.bak-<時刻>` を取った（4 つ）。
+  - **第 1 段（受付停止で入れ替え）**: main `e2e2aa8` の image `b-e2e2aa8`（手元で build、layer の hash 一致）。05:41:19Z〜05:41:30Z、exit 0、旧コンテナは drain 済み。一覧は route 11 本・プロファイル 56 本、既存の 10 行と動的の節は入れ替えの前と一致、
+    新しい行は `x402Url`（公開の URL）と `demonstration: { capped: true, acceptingNewOffers: false }`。公開の `GET /x402/…` は 503 `offer_cap_reached`（`Retry-After: 60`、challenge なし）。
+  - **第 2 段（受付を開く）**: env の上書きの行を消し、同じ image で作り直し。05:42:54Z〜05:43:05Z、exit 0。
+  - **受け入れ（公開の HTTPS）**: 標準の x402 クライアント（`@x402/fetch` 2.28.0、設定は signer・network・`spendControls.allowedAssets` だけ）で 2 回: 200、5.8 秒と 5.4 秒、署名は各 1 回、`resource.url` は公開の URL
+    （`paymentId` `6575a5ec-36a2-42d4-84fc-b3d1966f4815`・`368b2095-5ff7-4bfa-931c-1e1a3a4ffb51`）。MCP（list → quote → 署名 → purchase）で 1 回: delivered（`f8972b43-70b8-42b4-ad13-651c97505fd9`）、同じ `requestId` の再 quote は closed。
+    偽の `X-Forwarded-For` を付けた支払いなしの GET を 4 回: 402・402・429・429（`limit_source_rate`。直前の購入と同じ送信元として数えられた = 偽装で枠は増えない）。
+    container の中の inspect `--remote`: 予定した注文が全て観測でき、`mismatches: 0`。token の照合は log・journal・ledger・診断の記録とも 0 件。egress の検査は合格。
+  - **G-4b（止め方の実地確認）**: 公開の入口からもう 1 回購入（`2c7ddeee-7217-4d2c-a085-7095cedb537e`、200）した後、env に `SUBETHA_EXACT_MAX_COMMITTED=0` を足して同じ image で作り直し（05:57:12Z〜05:57:23Z、exit 0）。
+    止めた状態で: 新しい offer は標準入口（503 `offer_cap_reached`）でも MCP の quote（`source_offer_unavailable`）でも出ない、一覧は `acceptingNewOffers: false`、**同じ credential の再送は 200 で同じ本文**（challenge なし）、
+    前の購入の状態は MCP の status で読める、inspect は 7 件・未解決 0・不一致 0。その後、行を消して作り直し（06:01:22Z〜06:01:33Z、exit 0）、一覧は `acceptingNewOffers: true`。
+  - **終わりの状態**: 本番は `b-e2e2aa8`、実証は有効。注文は 7 件（delivered 4、払われずに期限切れ 3。うち 1 件は運用者以外の送信元からの支払いなしの GET）。実証の件数は 40 のうち 4 を使った。
+    rollback は `subetha-router-prev-20261121T060122Z`（同じ image の受付停止の container）。それより古い `-prev-` は削除（無効の image の container へは戻さない規則のため）。
+  - **確認していないこと**: 上限に達するまでの挙動（総数 300・件数 40）は本番では試していない（合成の試験だけ）。入れ替えの途中の購入も本番では試していない（購入の無い時に入れ替えた）。
+  - **finality（06:03Z、公開の Base Sepolia RPC の `finalized` と照合）**: 4 件の購入の受信の settle の tx（`0x63b7837c…68a8`・`0xa1b6bfa9…5ee9b`・`0x5900aa45…f35e`・`0x3875ee47…14ea`）は、全て status 成功・canonical・確定済み。上流への支払いの tx の finality は照合していない。
 
 ## 3. 動作確認
 
