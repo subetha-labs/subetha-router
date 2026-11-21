@@ -52,6 +52,8 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): u
     routes: Object.values(config.routes).map((route) => ({
       routeId: route.routeId,
       resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },
+      // 標準の x402 クライアント用の入口（`docs/x402-standard-entry-design.md` §8）。対象の route にだけ足す。
+      ...(route.sourceRail === "subetha-exact" ? { x402Url: `${canonicalBaseUrl}/x402/v1/routes/${encodeURIComponent(route.routeId)}/resource` } : {}),
       source: {
         amount: route.source.amount,
         asset: route.source.asset,

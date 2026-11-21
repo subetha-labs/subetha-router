@@ -93,6 +93,20 @@
 | 停止の条件に当たった回数 | |
 | `npm test` の記録（§1.1） | |
 
+### 3.3 標準の x402 クライアントからの購入（`docs/x402-standard-entry-requirements.md` S-5）
+
+段 4 の枠（総数・未解決・毎分、期間、停止の条件）の中で、標準入口 `GET /x402/v1/routes/{routeId}/resource` から 1 回以上買う。
+クライアントは `@x402/fetch` + `@x402/evm`（2.28.0）で、`spendControls.allowedAssets` に zUSDC を足す以外の設定をしない。記録するもの（秘密・署名は書かない）:
+
+| 項目 | 値 |
+|---|---|
+| 402 の requirements の `maxTimeoutSeconds`（hosted の実際の値） | （空欄） |
+| 402 → 200 の所要時間 | （空欄） |
+| `paymentId`、`source.txRef`、公開の状態 | （空欄） |
+| 払われない 402 が使った枠（数） | （空欄） |
+
+合成 facilitator での受け入れ（2026-11-21）: `tests/wire/x402-entry-client.test.ts`（6 件）、`tests/wire/x402-entry-restart.test.ts`（4 件）。
+
 ## 4. 段 5 に持ち越すもの
 
 - hosted に載せる条件（quote の入口の認証、買い手ごとの制限、全体の割り当ての予算、復旧の呼び出しが quote の負荷で妨げられないこと）は計画 §7 段 5 のまま、本スライスでは扱わない。

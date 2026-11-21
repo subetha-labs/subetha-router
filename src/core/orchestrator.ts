@@ -3,7 +3,7 @@
  * core は rail 名で分岐せず、ポート越しにのみ両レールへ触る。
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import {
@@ -46,7 +46,30 @@ export interface QuoteRequest {
   readonly upstream?: { readonly url: string; readonly method?: "GET" | "POST"; readonly body?: unknown };
   /** 送信元の識別（門の鍵）。無ければ principal。 */
   readonly source?: string;
+  /** 標準の x402 クライアント用の入口の quote（core の内部だけが付ける。`docs/x402-standard-entry-design.md` §3）。 */
+  readonly entry?: "x402";
 }
+
+/** 標準入口の credential（HTTP 層が形を確かめたもの。設計 §4.1）。 */
+export interface StandardPresented {
+  readonly accepted: Readonly<Record<string, unknown>>;
+  readonly authorization: { readonly from: string; readonly to: string; readonly value: string; readonly validAfter: string; readonly validBefore: string; readonly nonce: string };
+  readonly signature: string;
+}
+
+export type StandardQuoteOutcome =
+  | { readonly ok: true; readonly offer: InboundOffer; readonly paymentId: string; readonly quoteId: string }
+  | { readonly ok: false; readonly code: string; readonly reason?: string; readonly retryAfterMs?: number };
+
+/**
+ * 標準入口の購入の結果（設計 §4、§5）。`not_found` は存在を明かさない固定の応答、`conflict` は別の credential が結び付いている、
+ * `not_accepted` は最初の credential が手元の検査に落ちた（結び付けていない。`presentedValidBefore` は署名が本物のときだけ）。
+ */
+export type StandardPurchaseOutcome =
+  | { readonly kind: "not_found" }
+  | { readonly kind: "conflict"; readonly paymentId: string }
+  | { readonly kind: "not_accepted"; readonly paymentId: string; readonly presentedValidBefore?: number }
+  | { readonly kind: "outcome"; readonly outcome: PurchaseOutcome; readonly payer?: string };
 
 export interface QuoteDocument {
   readonly quoteId: string;
@@ -101,6 +124,8 @@ export interface PurchaseRequest {
   /** 動的 quote の持ち主の証明。静的 route では見ない。 */
   readonly ownerKey?: string;
   readonly source?: string;
+  /** 標準入口からの購入（core の内部だけが付ける）。印の無い quote には使えず、印のある quote はこれが無いと買えない（設計 §6）。 */
+  readonly entry?: "x402";
 }
 
 export interface PurchaseOutcome {
@@ -262,7 +287,7 @@ export interface RouterCoreOptions {
   readonly hooksForTest?: { readonly stop?: (point: CoreStopPoint, paymentId: string) => Promise<void> };
 }
 
-export type CoreStopPoint = "before_source_settle" | "after_source_settled" | "after_source_released" | "after_terminal";
+export type CoreStopPoint = "before_source_settle" | "after_source_settled" | "after_source_released" | "after_terminal" | "after_credential_bound";
 
 export interface RouterCore {
   quote(request: QuoteRequest): Promise<QuoteOutcome>;
@@ -278,6 +303,9 @@ export interface RouterCore {
    * 所有 principal・経路一致のときだけ。journal には何も書かない。持たない rail は `undefined`。
    */
   disclosureFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): number | undefined;
+  /** 標準の x402 クライアント用の入口（`docs/x402-standard-entry-design.md` §3、§4）。呼ぶたびに新しい注文を作る。 */
+  quoteStandard(request: { readonly principalId: string; readonly routeId: string }): Promise<StandardQuoteOutcome>;
+  purchaseStandard(request: { readonly principalId: string; readonly routeId: string; readonly presented: StandardPresented }): Promise<StandardPurchaseOutcome>;
   /** 秘匿購入（設計 §2）。設定が無ければ `private_disabled`。 */
   privateQuote(request: { readonly principalId: string; readonly requestId: string; readonly profileId: string; readonly intentB64: string; readonly source?: string }): Promise<PrivateQuoteOutcome>;
   privateAttest(paymentId: string, principalId: string, ownerKey: string | undefined, bundleB64: string): Promise<AttestOutcome>;
@@ -339,6 +367,18 @@ function projectionOf(intent: Intent): Projection {
  * 持たない rail の intent には欄が無い。
  */
 function disclosureOf(intent: Intent): { readonly mayStillSettleUntil?: number } {
+  /*
+   * 標準入口で credential が結び付いた intent（`docs/x402-standard-entry-design.md` §5）: 受信がまだ settle していない状態でだけ出し、値は結び付いた credential の
+   * `validBefore`（後の行が注文の期限を書いても変わらない）。settle 済み・配達済みには出さない。結び付きの無い intent・印の無い intent は下の今までの規則。
+   */
+  if (isStandardIntent(intent)) {
+    // settle が確定した購入には、どの値も出さない（結び付きの欄が壊れていても、行に正確な値が残っていても）。
+    if (intent.source.txRef !== undefined) return {};
+    const bound = intent.boundCredential?.validBefore;
+    if (bound !== undefined) {
+      return intent.status === "created" || intent.status === "source_pending" || intent.status === "source_failed" || intent.status === "unknown" ? { mayStillSettleUntil: bound } : {};
+    }
+  }
   if (intent.source.mayStillSettleUntil !== undefined) return { mayStillSettleUntil: intent.source.mayStillSettleUntil };
   const window = intent.source.settleWindow;
   if (window === undefined || intent.source.txRef !== undefined) return {};
@@ -491,6 +531,45 @@ function safeReason(value: unknown, fallback: string): string {
   return typeof value === "string" && SAFE_REASONS.has(value) ? value : fallback;
 }
 
+/** 標準入口の quote か（offer の印。`created` の行に残るので再起動の後も同じ）。 */
+function isStandardIntent(intent: Intent): boolean {
+  return intent.source.offer.extra["entry"] === "x402";
+}
+
+const lowerHex = (value: string): string => value.toLowerCase();
+/** 10 進の正規形（先頭の 0 なし）。形は HTTP 層が確かめている。 */
+const canonicalDecimal = (value: string): string => BigInt(value).toString(10);
+
+/**
+ * 標準入口の credential の同一性（設計 §4.3）: authorization の 6 項目と署名を正規化し、長さ付きで連結した sha256。base64 や JSON の項目の順序に依らない。
+ */
+export function standardCredentialDigest(presented: StandardPresented): string {
+  const a = presented.authorization;
+  const parts = [lowerHex(a.from), lowerHex(a.to), canonicalDecimal(a.value), canonicalDecimal(a.validAfter), canonicalDecimal(a.validBefore), lowerHex(a.nonce), lowerHex(presented.signature)];
+  const hash = createHash("sha256");
+  hash.update("x402e-cred-v1");
+  for (const part of parts) hash.update(`\u0000${part.length}:${part}`);
+  return hash.digest("hex");
+}
+
+/** 買い手が写した `accepted` の 8 項目が、保存済みの offer と一致するか（address だけ大小を無視）。 */
+function standardAcceptedMatches(accepted: Readonly<Record<string, unknown>>, offer: InboundOffer): boolean {
+  const extra = accepted["extra"];
+  if (typeof extra !== "object" || extra === null || Array.isArray(extra)) return false;
+  const e = extra as Record<string, unknown>;
+  const sameAddress = (value: unknown, expected: string): boolean => typeof value === "string" && lowerHex(value) === lowerHex(expected);
+  return (
+    accepted["scheme"] === offer.scheme &&
+    accepted["network"] === offer.network &&
+    sameAddress(accepted["asset"], offer.asset) &&
+    accepted["amount"] === offer.amount &&
+    sameAddress(accepted["payTo"], offer.payTo) &&
+    accepted["maxTimeoutSeconds"] === offer.maxTimeoutSeconds &&
+    e["name"] === offer.extra["name"] &&
+    e["version"] === offer.extra["version"]
+  );
+}
+
 function outcomeOf(status: PublicStatus | "rejected", code?: string): PurchaseOutcome {
   return code === undefined ? { status } : { status, code };
 }
@@ -611,7 +690,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         return { ok: false, code: "quote_failed" };
       }
       // 動的 quote は冪等に再取得できない（持ち主の証明が要る）。
-      if (existing.routeId !== request.routeId || existing.dynamic !== undefined || existing.dynamicInvalid === true) {
+      // 標準入口の quote は文書を返さない（2 度見せない。設計 §6）。標準入口からの要求が既存の requestId に当たった場合も作らない。
+      if (existing.routeId !== request.routeId || existing.dynamic !== undefined || existing.dynamicInvalid === true || isStandardIntent(existing) || request.entry === "x402") {
         return { ok: false, code: "request_id_conflict" };
       }
       // `created` のままなら今までどおり同じ文書。離れた後は閉じた quote（FR-4.5: 同じ注文に新しい署名を求めない）。
@@ -639,6 +719,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         nowMs: now(),
         // quote の要求の識別（`subetha-exact` が facilitator の注文の requester を決定的に導く。他の rail は読まない。設計 §4.1）。
         requester: { principalId: request.principalId, requestId: request.requestId },
+        ...(request.entry === "x402" ? { entry: "x402" as const } : {}),
       });
     } catch (error) {
       // 受信 offer の発行の失敗（資金は動いていない。要件 FR-2.1）: 固定の code・detail だけを写す。型は信用せず、閉じた集合と有限の値で照合する
@@ -712,7 +793,85 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     if (created === undefined) {
       return { ok: false, code: "quote_failed" };
     }
+    if (isStandardIntent(created)) indexStandard(created);
     return { ok: true, ...quoteDocumentOf(created) };
+  }
+
+  /**
+   * 標準入口の `payTo`（小文字）→ quoteId（`docs/x402-standard-entry-design.md` §4.2）。`created` の行の offer から作るので、再起動の後は store から作り直す。
+   * 同じ `payTo` に 2 つの quote が現れたら null（曖昧。以後どちらも引かない = fail closed）。
+   */
+  const standardByPayTo = new Map<string, string | null>();
+  function indexStandard(intent: Intent): void {
+    const key = lowerHex(intent.source.offer.payTo);
+    const known = standardByPayTo.get(key);
+    if (known === undefined) standardByPayTo.set(key, intent.quoteId);
+    else if (known !== intent.quoteId) standardByPayTo.set(key, null);
+  }
+  for (const intent of store.all()) if (isStandardIntent(intent)) indexStandard(intent);
+
+  /** 標準入口の購入（quoteId の鍵の中。設計 §4.2〜§4.5）。 */
+  async function purchaseStandardLocked(quoteId: string, input: { readonly principalId: string; readonly routeId: string; readonly presented: StandardPresented }): Promise<StandardPurchaseOutcome> {
+    // 鍵の中で読み直す（鍵の前の写しで判断しない）。
+    const intent = store.byQuoteId(quoteId);
+    if (intent === undefined || !isStandardIntent(intent) || intent.dynamic !== undefined || intent.dynamicInvalid === true || intent.principalId !== input.principalId || intent.routeId !== input.routeId) {
+      return { kind: "not_found" };
+    }
+    const offer = intent.source.offer;
+    const presented = input.presented;
+    const digest = standardCredentialDigest(presented);
+    const credential: PaymentCredential = {
+      x402Version: 2,
+      accepted: offer,
+      payload: { challengeNonce: offer.extra.challengeNonce, authorization: { ...presented.authorization }, signature: presented.signature },
+    };
+    const bound = intent.boundCredential;
+    if (bound !== undefined) {
+      // 同じ credential かどうかを、時刻の検査より先に決める（期限を過ぎた再送でも記録を読める）。違う credential は facilitator に送らない。
+      if (bound.digest === undefined || bound.digest !== digest) return { kind: "conflict", paymentId: intent.paymentId };
+    } else {
+      // (a) 署名が本物か（facilitator を呼ばない）。本物でなければ期限も示さない。
+      let genuine = false;
+      try {
+        genuine = typeof options.inbound.checkSignature === "function" && (await options.inbound.checkSignature(offer, credential)) === true;
+      } catch {
+        genuine = false;
+      }
+      if (!genuine) return { kind: "not_accepted", paymentId: intent.paymentId };
+      const validBefore = Number(canonicalDecimal(presented.authorization.validBefore));
+      const refused: StandardPurchaseOutcome = { kind: "not_accepted", paymentId: intent.paymentId, ...(Number.isSafeInteger(validBefore) && validBefore > 0 ? { presentedValidBefore: validBefore } : {}) };
+      if (!Number.isSafeInteger(validBefore) || validBefore <= 0) return refused;
+      // (b) 受け付けられるか: 写しの 8 項目、rail の同期の検査（`validBefore ≤ 注文の期限` を含む）。
+      if (!standardAcceptedMatches(presented.accepted, offer)) return refused;
+      if (typeof options.inbound.preflight !== "function" || !options.inbound.preflight(offer, credential, now()).ok) return refused;
+      // (c) 受付の期限と設定の変更（今の購入と同じ判定）。
+      const currentRoute = resolveRoute(config, intent.routeId);
+      if (currentRoute === undefined || intent.routeFingerprint !== fingerprintOf(authoritativeTermsOf(currentRoute))) return refused;
+      if (intent.approvalDeadlineMs <= 0 || now() >= intent.approvalDeadlineMs) return refused;
+      // 結び付け: 外への呼び出しの前に永続にする。鍵の中なので、同時に届いた credential のうち結び付くのは 1 つ。
+      await store.append(intent.paymentId, "source_credential_bound", { digest, payer: presented.authorization.from, validBefore });
+      if (store.byQuoteId(quoteId)?.boundCredential?.digest !== digest) throw new Error("standard entry: credential binding was not recorded");
+      await stop("after_credential_bound", intent.paymentId);
+    }
+    const payer = store.byQuoteId(quoteId)?.boundCredential?.payer;
+    const withPayer = (outcome: PurchaseOutcome): StandardPurchaseOutcome => ({ kind: "outcome", outcome, ...(payer === undefined ? {} : { payer }) });
+    const current = store.byQuoteId(quoteId);
+    if (current === undefined) return { kind: "not_found" };
+    // 既に実行が始まった購入は今の状態を返す（facilitator を呼ばない。期限も見ない）。
+    if (current.status !== "created") return withPayer(withDisclosure(currentOutcome(current)));
+    const outcome = await purchaseLocked({ principalId: input.principalId, requestId: current.requestId, quoteId, routeId: input.routeId, approval: quoteId, credential, entry: "x402" });
+    /*
+     * 結び付けた後に行を書かずに戻る拒否を残さない（設計 §4.4 の 5）: store から読み直して `created` のままなら、Router は verify も settle も送っていない
+     * （`source_pending` は verify の前に書く）。`source_failed not_sent` で終わらせ、以後の再送は記録を返す。外で払われていないことの証明ではない（開示は残る）。
+     */
+    const after = store.byQuoteId(quoteId);
+    if (after !== undefined && after.status === "created") {
+      const reason = typeof outcome.code === "string" && /^[a-z_]{1,64}$/.test(outcome.code) ? outcome.code : "not_started";
+      await store.append(after.paymentId, "source_failed", { outcome: "not_sent", reason });
+      const recorded = store.byQuoteId(quoteId);
+      return withPayer(withDisclosure(recorded === undefined ? outcome : currentOutcome(recorded)));
+    }
+    return withPayer(outcome);
   }
 
   /** rail の同期の問い合わせ（method が無い・結果が正の整数でない → 欄なし。設計 §2 の core の契約）。 */
@@ -758,6 +917,11 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
   async function purchaseStatic(intent: Intent, request: PurchaseRequest, diag: PurchaseDiagnostics): Promise<PurchaseOutcome> {
     // 動的の intent は静的の流れで実行しない（持ち主の証明・昇格の規則が違う）。
     if (intent.dynamic !== undefined || intent.dynamicInvalid === true) {
+      return outcomeOf("rejected", "unknown_quote");
+    }
+    // 入口をまたがない（`docs/x402-standard-entry-design.md` §6）: 標準入口の quote は標準入口からだけ、それ以外の quote は今までの入口からだけ。
+    // 下の「今の状態を返す」近道より前に置く（R3・MCP から標準入口の購入の状態も読ませない）。
+    if (isStandardIntent(intent) !== (request.entry === "x402")) {
       return outcomeOf("rejected", "unknown_quote");
     }
     // 所有 principal 以外は開始も参照もできない。
@@ -1418,12 +1582,34 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       }
       // 既にライフサイクルが進んだ quote は再提示しない（二重支払いを誘わない）。cap の無い動的 MPP 送信の記録も
       // 再提示しない（Router が断ると分かっている記録に向けて払わせない。`docs/dynamic-gas-fee-design.md` §3.2）。
+      // 標準入口の offer は R3 で再提示しない（1 つの注文を 2 度見せない。`docs/x402-standard-entry-design.md` §6）。
+      if (isStandardIntent(intent)) return undefined;
       return intent.status === "created" && intent.dynamicCapInvalid !== true ? intent.source.offer : undefined;
     },
     disclosureFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): number | undefined {
       const intent = readable(store.byQuoteId(quoteId) ?? dynamicCore?.ledgerIntent(quoteId), principalId, ownerKey);
       if (intent === undefined || (routeId !== undefined && intent.routeId !== routeId)) return undefined;
+      if (isStandardIntent(intent)) return undefined;
       return disclosureOf(intent).mayStillSettleUntil;
+    },
+    async quoteStandard(request): Promise<StandardQuoteOutcome> {
+      const input = snapshotInput(request);
+      const route = resolveRoute(config, input.routeId);
+      // 対象は `subetha-exact` の静的 route だけ。手元の署名の検査を持たない受信 port では使えない（設計 §4.4 (a)）。
+      if (route === undefined || route.sourceRail !== "subetha-exact" || typeof options.inbound.checkSignature !== "function") return { ok: false, code: "unknown_route" };
+      const requestId = `x402e:${randomBytes(16).toString("hex")}`;
+      const outcome = await withKey(`quote\u0000${input.principalId}\u0000${requestId}`, () => quoteLocked({ principalId: input.principalId, requestId, routeId: input.routeId, entry: "x402" }));
+      if (!outcome.ok) return outcome;
+      // rail が印を付けなかった offer は標準 offer として出さない（quote は残るが、どの入口からも買えない）。
+      if (outcome.source.offer.extra["entry"] !== "x402") return { ok: false, code: "quote_failed" };
+      return { ok: true, offer: outcome.source.offer, paymentId: outcome.paymentId, quoteId: outcome.quoteId };
+    },
+    purchaseStandard(request): Promise<StandardPurchaseOutcome> {
+      const input = snapshotInput(request);
+      // どの quote かを決めるだけ（判断は鍵の中で読み直してから。設計 §4.2）。曖昧な `payTo`（null）・知らない `payTo` は存在しないのと同じ。
+      const quoteId = standardByPayTo.get(lowerHex(input.presented.authorization.to));
+      if (typeof quoteId !== "string") return Promise.resolve({ kind: "not_found" });
+      return withKey(`purchase\u0000${quoteId}`, () => purchaseStandardLocked(quoteId, input));
     },
     async privateQuote(request): Promise<PrivateQuoteOutcome> {
       if (privateCore === undefined) return { ok: false, code: "private_disabled" };

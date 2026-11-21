@@ -448,6 +448,19 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
         source: { ...current.source, txRef: asString(patch["txRef"]), outcome: "settled", ...(typeof eventId === "string" && eventId !== "" ? { eventId } : {}) },
       };
     }
+    /*
+     * 標準入口の credential の結び付け（`docs/x402-standard-entry-design.md` §4.4、§7）。状態は変えない。最初の行が勝つ（2 つ目は上書きしない）。
+     * 形が壊れた行は全体を使わない: `digest` の無い結び付きは、以後どの credential とも一致しない（fail closed）。
+     */
+    case "source_credential_bound": {
+      if (current.boundCredential !== undefined) return base;
+      const digest = patch["digest"];
+      const payer = patch["payer"];
+      const validBefore = patch["validBefore"];
+      // 3 つの欄が全て読めるときだけ使える結び付け。1 つでも壊れていれば「結び付きあり・照合不能」（空の欄）として残す。
+      const usable = typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) && typeof payer === "string" && /^0x[0-9a-fA-F]{40}$/.test(payer) && positiveInt(validBefore);
+      return { ...base, boundCredential: usable ? { digest, payer, validBefore } : {} };
+    }
     case "source_failed": {
       const until = patch["mayStillSettleUntil"];
       return {

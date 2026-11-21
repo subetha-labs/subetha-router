@@ -643,3 +643,91 @@ describe("実装レビュー 3 の追加", () => {
     expect(text).not.toContain(fixture.baseUrl!);
   });
 });
+
+describe("標準の x402 クライアント用の入口の offer（`docs/x402-standard-entry-design.md` §3、§4.4、§5）", () => {
+  const standard = (requestId: string) => ({ ...request(requestId), entry: "x402" as const });
+  const withNonce = (credential: PaymentCredential, nonce: string): PaymentCredential => {
+    const payload = credential.payload as unknown as { authorization: Record<string, string> };
+    return { ...credential, payload: { ...credential.payload, authorization: { ...payload.authorization, nonce } } };
+  };
+  const RANDOM_NONCE = `0x${"5a".repeat(32)}`;
+
+  test("印と期限: extra.entry = x402、expiresAt は注文の期限（発行 + 120 秒で切らない）。印の無い offer は今までどおり", async () => {
+    await makeAdapter();
+    const offer = await adapter!.createOffer(standard("s-1"));
+    expect(Object.keys(offer.extra).sort()).toEqual(["challengeNonce", "entry", "expiresAt", "fundsMoveOnCredential", "name", "routeBinding", "version"]);
+    expect(offer.extra["entry"]).toBe("x402");
+    expect(offer.extra.expiresAt).toBe(Math.floor(clockMs / 1000) + 300);
+    expect(adapter!.settleWindowOf!(offer)).toBe(Math.floor(clockMs / 1000) + 300);
+    const legacy = await adapter!.createOffer(request("q-1"));
+    expect(legacy.extra).not.toHaveProperty("entry");
+    expect(legacy.extra.expiresAt).toBe(Math.floor(clockMs / 1000) + 120);
+  });
+
+  test("既にある注文（existing）は標準 offer として出さない: order_exists（unavailable）。注文と ledger の行は残る（黙って消さない）", async () => {
+    await makeAdapter();
+    const first = await adapter!.createOffer(request("same"));
+    const error = await adapter!.createOffer(standard("same")).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InboundOfferError);
+    expect([(error as InboundOfferError).code, (error as InboundOfferError).detail]).toEqual(["source_offer_unavailable", "order_exists"]);
+    const created = (await ledgerRows()).filter((r) => r.event === "created");
+    expect(created.map((r) => [r.patch["orderId"], r.patch["existing"]])).toEqual([[first.extra.challengeNonce, false], [first.extra.challengeNonce, true]]);
+  });
+
+  test("標準クライアントが今すぐ署名しても注文の期限を超える窓では出さない: order_window_short。attempt は未解決の枠に残る", async () => {
+    // maxTimeoutSeconds 150 + minLeadSeconds 200 > 注文の残り 300。
+    await makeAdapter({ timeouts: { createMs: 2_000, verifyMs: 2_000, settleMs: 2_000, statusMs: 2_000, releaseMs: 2_000, completeMs: 2_000, releaseRetryWaitMs: 30, completeRetryWaitMs: 30, releaseBudgetMs: 5_000, completeBudgetMs: 5_000, lookupBudgetMs: 5_000, minLeadSeconds: 200 } });
+    const error = await adapter!.createOffer(standard("s-short")).catch((e: unknown) => e);
+    expect([(error as InboundOfferError).code, (error as InboundOfferError).detail]).toEqual(["source_offer_unavailable", "order_window_short"]);
+    expect((await ledgerRows()).map((r) => r.event)).toEqual(["requested", "created"]);
+    // 同じ窓でも印の無い offer は今までどおり出る。
+    await expect(adapter!.createOffer(request("q-short"))).resolves.toMatchObject({ scheme: "exact" });
+  });
+
+  test("preflight: 標準 offer は買い手の nonce を受け、validBefore は注文の期限まで。印の無い offer は nonce_mismatch のまま。checkSignature は本物の署名だけ true", async () => {
+    await makeAdapter();
+    const offer = await adapter!.createOffer(standard("s-2"));
+    const credential = await credentialFor(offer);
+    expect(adapter!.preflight(offer, withNonce(credential, RANDOM_NONCE), clockMs)).toEqual({ ok: true });
+    await expect(adapter!.checkSignature!(offer, credential)).resolves.toBe(true);
+    // nonce を差し替えた credential は署名が合わない（preflight は項目だけ、署名は checkSignature）。
+    await expect(adapter!.checkSignature!(offer, withNonce(credential, RANDOM_NONCE))).resolves.toBe(false);
+    // 期限: validBefore が注文の期限を 1 秒でも超えると拒む。
+    const late = { ...credential, payload: { ...credential.payload, authorization: { ...(credential.payload as unknown as { authorization: Record<string, string> }).authorization, validBefore: String(offer.extra.expiresAt + 1) } } };
+    expect(adapter!.preflight(offer, late, clockMs).ok).toBe(false);
+    // 写しに知らない key があれば拒む（`entry` だけを足して許す）。
+    expect(adapter!.preflight(offer, { ...credential, accepted: { ...offer, extra: { ...offer.extra, more: 1 } } as InboundOffer }, clockMs)).toEqual({ ok: false, reason: "offer_mismatch" });
+    const legacy = await adapter!.createOffer(request("q-2"));
+    const legacyCredential = await credentialFor(legacy);
+    expect(adapter!.preflight(legacy, legacyCredential, clockMs)).toEqual({ ok: true });
+    expect(adapter!.preflight(legacy, withNonce(legacyCredential, RANDOM_NONCE), clockMs)).toEqual({ ok: false, reason: "nonce_mismatch" });
+    // 印の無い offer の写しに `entry` を足しても通らない。
+    expect(adapter!.preflight(legacy, { ...legacyCredential, accepted: { ...legacy, extra: { ...legacy.extra, entry: "x402" } } as InboundOffer }, clockMs)).toEqual({ ok: false, reason: "offer_mismatch" });
+  });
+
+  test("verify: 標準 offer では、答えでない応答（500・壊れた JSON・{}・isValid が null／文字列）を拒否にせず例外にする。200 の isValid:false だけが拒否。印の無い offer は全て isValid:false のまま", async () => {
+    await makeAdapter();
+    const offer = await adapter!.createOffer(standard("s-3"));
+    const credential = await credentialFor(offer);
+    const legacy = await adapter!.createOffer(request("q-3"));
+    const legacyCredential = await credentialFor(legacy);
+    const json = { "content-type": "application/json" };
+    const unanswered: { status: number; headers: Record<string, string>; body: string }[] = [
+      { status: 500, headers: json, body: "{}" },
+      { status: 200, headers: json, body: "not json" },
+      { status: 200, headers: json, body: "{}" },
+      { status: 200, headers: json, body: JSON.stringify({ isValid: null }) },
+      { status: 200, headers: json, body: JSON.stringify({ isValid: "false" }) },
+      { status: 200, headers: json, body: "[]" },
+    ];
+    for (const raw of unanswered) {
+      fixture.setMode("verify", "raw", raw);
+      await expect(adapter!.verify(offer, credential), raw.body).rejects.toThrow("verify unanswered");
+      fixture.setMode("verify", "raw", raw);
+      await expect(adapter!.verify(legacy, legacyCredential), raw.body).resolves.toMatchObject({ isValid: false });
+    }
+    fixture.setMode("verify", "raw", { status: 200, headers: json, body: JSON.stringify({ isValid: false, invalidReason: "insufficient_funds" }) });
+    await expect(adapter!.verify(offer, credential)).resolves.toMatchObject({ isValid: false, mayStillSettleUntil: expect.any(Number) });
+    await expect(adapter!.verify(offer, credential)).resolves.toMatchObject({ isValid: true });
+  });
+});

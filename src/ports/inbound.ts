@@ -35,6 +35,11 @@ export interface CreateOfferRequest {
    * 読むのは `subetha-exact`（facilitator の注文の requester を決定的に導く）だけで、ほかの rail は見ない。
    */
   readonly requester?: { readonly principalId: string; readonly requestId: string };
+  /**
+   * 標準の x402 クライアント用の入口の offer（`docs/x402-standard-entry-design.md` §3）。読むのは `subetha-exact` だけ。
+   * 印の付いた offer は `extra.entry === "x402"` を持ち、買い手が決めた nonce の署名を受ける。
+   */
+  readonly entry?: "x402";
 }
 
 /** verify の結果（`docs/subetha-exact-inbound-design.md` §2）。既存の 2 欄に `mayStillSettleUntil` を足しただけで、既存の実装はそのまま適合する。 */
@@ -97,14 +102,16 @@ export type OfferRefusalDetail =
   | "limit_rate"
   | "limit_concurrency"
   | "requester_missing"
-  | "ledger_unavailable";
+  | "ledger_unavailable"
+  | "order_exists"
+  | "order_window_short";
 
 /** `OfferRefusalDetail` の閉じた集合（core が公開の面へ写す前に照合する。これ以外の文字列は落とす）。 */
 export const OFFER_REFUSAL_DETAILS: ReadonlySet<string> = Object.freeze(
   new Set<string>([
     "facilitator_busy", "rate_limited", "response_unreadable", "amount_refused", "unauthorized", "unknown_tenant", "requirements_mismatch",
     "order_reused_expired", "order_reused_mismatch", "order_reused_other_id", "limit_total", "limit_unresolved", "limit_rate", "limit_concurrency",
-    "requester_missing", "ledger_unavailable",
+    "requester_missing", "ledger_unavailable", "order_exists", "order_window_short",
   ]),
 );
 /** `retryAfterMs` の上限（1 時間。それより長い値は目安として意味が無い）。 */
@@ -169,6 +176,11 @@ export interface InboundRail {
    * core は quote のときに 1 回呼び、`created` の行に `source.settleWindow` として写す。持たない rail は `undefined`（欄が出ない）。
    */
   settleWindowOf?(offer: InboundOffer): number | undefined;
+  /**
+   * 手元の署名の検査（`docs/x402-standard-entry-design.md` §4.4 (a)）: credential の署名が offer の domain で `from` のものか。facilitator を呼ばない。
+   * 標準入口は、最初の credential を注文に結び付ける前にこれを呼ぶ。持たない rail は標準入口を使えない。`true` だけが「本物」。
+   */
+  checkSignature?(offer: InboundOffer, credential: PaymentCredential): Promise<boolean>;
   /**
    * 同期。過去に自分が発行した offer か（route の束縛が設定から消えた後でも scheme・network・資産で判定できる rail だけ）。wrapper が束縛で
    * rail を引けないとき、`complete` に限って fallback に使う（設計 §2）。

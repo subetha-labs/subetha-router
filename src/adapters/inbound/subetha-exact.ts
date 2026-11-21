@@ -113,6 +113,9 @@ export interface SubethaExactInbound extends InboundRail {
 }
 
 export const SUBETHA_EXACT_SCHEME = "exact";
+/** 標準の x402 クライアント用の入口の offer の印（`docs/x402-standard-entry-design.md` §3）。 */
+const STANDARD_ENTRY = "x402" as const;
+const isStandardOffer = (offer: InboundOffer): boolean => offer.extra["entry"] === STANDARD_ENTRY;
 const ISSUED_EXTRA_KEYS = ["name", "version", "challengeNonce", "expiresAt", "routeBinding", "fundsMoveOnCredential"] as const;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const DIGITS = /^[0-9]{1,30}$/;
@@ -316,6 +319,12 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
       note("subetha-exact: ledger unavailable after order creation; offer withheld");
       throw new InboundOfferError("source_offer_unavailable", "ledger_unavailable");
     }
+    if (request.entry === STANDARD_ENTRY) {
+      // 標準入口（`docs/x402-standard-entry-design.md` §3）: 既にある注文を 2 度見せない。標準クライアントが今すぐ署名しても注文の期限を超えるなら出さない。
+      // 注文と attempt の行は残る（期限まで未解決の枠を使う。黙って消さない）。
+      if (view.existing === true) throw new InboundOfferError("source_offer_unavailable", "order_exists");
+      if (view.requirements.maxTimeoutSeconds + timeouts.minLeadSeconds > view.status.expiresAt - nowSec()) throw new InboundOfferError("source_offer_unavailable", "order_window_short");
+    }
     return offerOf(request, view);
   }
 
@@ -331,9 +340,11 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
         name: asset.domain.name,
         version: asset.domain.version,
         challengeNonce: view.orderId,
-        expiresAt: Math.min(view.status.expiresAt, nowSec() + timeouts.offerSeconds),
+        // 標準入口の offer は「発行 + offerSeconds」で切らない: 標準クライアントの `validBefore` は `now + maxTimeoutSeconds` で、開示の上限は注文の期限（設計 §3）。
+        expiresAt: request.entry === STANDARD_ENTRY ? view.status.expiresAt : Math.min(view.status.expiresAt, nowSec() + timeouts.offerSeconds),
         routeBinding: request.routeBinding,
         fundsMoveOnCredential: false,
+        ...(request.entry === STANDARD_ENTRY ? { entry: STANDARD_ENTRY } : {}),
       },
     };
   }
@@ -397,6 +408,9 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
     },
     createOffer,
     preflight(offer: InboundOffer, credential: PaymentCredential, nowMs: number): PreflightResult {
+      // 標準入口の offer（設計 §4.4 (b)）: `extra` の key に `entry` を許し、authorization の nonce を買い手のものとして受ける。印の無い offer の検査は変えない。
+      const standard = isStandardOffer(offer);
+      const issuedKeys: readonly string[] = standard ? [...ISSUED_EXTRA_KEYS, "entry"] : ISSUED_EXTRA_KEYS;
       if (credential.payload.challengeNonce !== offer.extra.challengeNonce) return { ok: false, reason: "nonce_mismatch" };
       if (offer.extra.expiresAt * 1000 <= nowMs) return { ok: false, reason: "offer_expired" };
       const accepted = credential.accepted as Partial<InboundOffer> | undefined;
@@ -405,13 +419,19 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
       if (accepted.network !== offer.network || accepted.asset !== offer.asset || accepted.amount !== offer.amount || accepted.payTo !== offer.payTo || accepted.maxTimeoutSeconds !== offer.maxTimeoutSeconds) return { ok: false, reason: "offer_mismatch" };
       const acceptedExtra = accepted.extra;
       if (!isRecord(acceptedExtra)) return { ok: false, reason: "offer_mismatch" };
-      for (const key of Object.keys(acceptedExtra)) if (!(ISSUED_EXTRA_KEYS as readonly string[]).includes(key)) return { ok: false, reason: "offer_mismatch" };
-      for (const key of ISSUED_EXTRA_KEYS) if (acceptedExtra[key] !== offer.extra[key]) return { ok: false, reason: "offer_mismatch" };
+      for (const key of Object.keys(acceptedExtra)) if (!issuedKeys.includes(key)) return { ok: false, reason: "offer_mismatch" };
+      for (const key of issuedKeys) if (acceptedExtra[key] !== offer.extra[key]) return { ok: false, reason: "offer_mismatch" };
       const authorization = authorizationOf({ payload: credential.payload });
       if (authorization === undefined) return { ok: false, reason: "credential_mismatch" };
-      if (lower(authorization.nonce) !== lower(offer.extra.challengeNonce)) return { ok: false, reason: "nonce_mismatch" };
+      if (!standard && lower(authorization.nonce) !== lower(offer.extra.challengeNonce)) return { ok: false, reason: "nonce_mismatch" };
       if (lower(authorization.to) !== lower(offer.payTo) || authorization.value !== offer.amount || Number(authorization.validBefore) > offer.extra.expiresAt || Number(authorization.validAfter) > Math.floor(nowMs / 1000)) return { ok: false, reason: "credential_mismatch" };
       return { ok: true };
+    },
+    async checkSignature(offer: InboundOffer, credential: PaymentCredential): Promise<boolean> {
+      // この rail の offer で、形の整った authorization の署名が `from` のものであるときだけ true（facilitator を呼ばない）。
+      if (!(offer.scheme === SUBETHA_EXACT_SCHEME && offer.network === asset.network && lower(offer.asset) === lower(asset.id))) return false;
+      const authorization = authorizationOf({ payload: credential.payload });
+      return authorization !== undefined && (await locallySigned(authorization));
     },
     settleWindowOf(offer: InboundOffer): number | undefined {
       return Number.isSafeInteger(offer.extra.expiresAt) && offer.extra.expiresAt > 0 ? offer.extra.expiresAt : undefined;
@@ -437,6 +457,11 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
         const remote = result.kind === "threw" ? "threw" : result.status !== 200 ? "http_error" : !isRecord(result.json) ? "not_json" : result.json["isValid"] === true ? "valid" : "invalid";
         if (owner !== undefined) await record(owner.attemptId, "verify", { orderId, local: "ok", remote, ...httpStatusOf(result), elapsedMs: Math.round(result.elapsedMs) });
         if (diagOn && result.kind === "response") emitInboundRoundTrip(diagnostics, { stage: "source_verify", facilitator: "x402", network: offer.network, response: verifyResponseClassOf(result.status, result.json), httpStatus: result.status, json: result.json, elapsedMs: result.elapsedMs });
+        // 標準入口（設計 §5、要件 FR-2.5 (e)）: 答えの得られなかった verify（時間切れ・切断・200 以外・壊れた応答）を「拒否」にしない。例外にして core が unknown と記録する。
+        // facilitator が 200 で拒んだ場合だけ `isValid: false`。印の無い offer は今までどおり全て `isValid: false`。
+        // 「答えた」と読むのは 200 で `isValid` が boolean のときだけ（`{}`・`null`・文字列の `isValid` は答えではない）。
+        const answered = result.kind === "response" && result.status === 200 && isRecord(result.json) && typeof result.json["isValid"] === "boolean";
+        if (isStandardOffer(offer) && !answered) throw new Error("subetha-exact: verify unanswered");
         return { isValid: remote === "valid", mayStillSettleUntil };
       });
     },

@@ -360,6 +360,46 @@ paid** (the signed authorization stays valid until `validBefore`; the response c
 `awaitingPaymentDoesNotMeanUnpaid: true`), and the operator can list every order and compare it with the facilitator
 with `npm run subetha-exact:inspect -- --remote` (read-only; `--abandon` is the only write and needs the Router stopped).
 
+### Buying with a standard x402 client (`GET /x402/v1/routes/{routeId}/resource`)
+
+A `subetha-exact` route also has an entry that an unmodified x402 v2 client can use: the first `GET` answers **402** with a
+`PAYMENT-REQUIRED` header (one `exact` requirement: zUSDC on Base Sepolia, the facilitator order's `payTo`), the client signs
+EIP-3009 and resends with `PAYMENT-SIGNATURE`, and the Router settles, pays the upstream provider and answers **200** with the
+upstream JSON and a `PAYMENT-RESPONSE` header. `GET /v1/routes` shows the URL as `x402Url`. Design and requirements:
+`docs/x402-standard-entry-design.md`, `docs/x402-standard-entry-requirements.md`. Local testnet only; not on the hosted Router.
+
+```ts
+import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
+import { ExactEvmScheme } from "@x402/evm/exact/client";
+
+const client = x402Client.fromConfig({
+  schemes: [{ network: "eip155:84532", client: new ExactEvmScheme(account) }],
+  // zUSDC is not one of the client's default assets: the buyer has to allow it explicitly (and should cap it).
+  spendControls: { allowedAssets: [{ network: "eip155:84532", asset: "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f", maxAmountPerPayment: "20000" }] },
+});
+const response = await wrapFetchWithPayment(fetch, client)(x402Url, { headers: { "x-router-principal": principalId, authorization: `Bearer ${routerToken}` } });
+```
+
+What is different from the quote-first entry, and what to know before using it:
+
+- **The Router's principal headers are still required** (`x-router-principal` and `Authorization: Bearer …`, as on every Router entry; the client resends the request headers unchanged).
+- **There is no approval step on the Router.** Whether to pay is the client's own policy (`spendControls`).
+- **Every `GET` without a payment creates a new facilitator order** and uses one unresolved slot until that order expires, and one
+  slot of the total limit for good. With the default limits (3 unresolved) three unpaid `GET`s make the entry answer
+  **503 + `Retry-After`** (never 402), and the quote-first entry shares the same limits.
+- **A response to a request that carries `PAYMENT-SIGNATURE` is never a 402** and never carries `PAYMENT-REQUIRED`. Anything other
+  than a delivery is **409** with `paymentId`, the public status and, while the payment is not settled, `mayStillSettleUntil` and
+  `awaitingPaymentDoesNotMeanUnpaid: true`. A refused or unanswered verify or settle is **not proof that nothing was paid**.
+  `paid_no_data` means the payment settled and the data was not delivered.
+- **One order takes one credential.** Sending the same `PAYMENT-SIGNATURE` again returns the recorded result (the body again when
+  delivered) and never settles twice; a different authorization for the same order is `409 credential_conflict` and is not forwarded.
+- **A new `GET` after a failure is a new purchase** (a new order and a new signature). The Router never asks for a second signature in
+  its responses, but it cannot stop an application from calling again, and it cannot stop a client that installed its own recovery hooks.
+- Sign promptly: the client sets `validBefore = now + maxTimeoutSeconds`, and an authorization that outlives the order is refused
+  locally (`409 payment_not_accepted`, not forwarded).
+- Keep the `X-Router-Payment-Id` response header (or `paymentId` in the body) to read the result later with `GET /v1/purchases/{paymentId}`.
+- x402 v1 (`X-PAYMENT`) is refused with 400. `@subetha/payer` does not list or pay this route.
+
 ## Where the detail went
 
 This file is the entry point. The working records live next to it:
