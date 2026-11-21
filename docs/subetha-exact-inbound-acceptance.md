@@ -79,7 +79,7 @@
 | 失敗と未解決の率と内訳 | journal の終端（`source_failed` の reason、`unknown` の reason、`paid_undelivered` の reason）と、ledger の `create_failed`／`refused` の detail（こちらの分母は試行） | 発行した quote／試行 | 失敗 0／7、`unknown` 0／7。試行 7 のうち `create_failed`・`refused` 0。未解決は観測の時点で 1（払わなかった 402 の注文。期限で外れる） |
 | settle の中継の手掛かり | ledger `settle`（`outcome`・`httpStatus`・`settleMs`）、`--remote` の `exact.state`／`origin`（`facilitator-relay`）をそのまま並べる（relay の拒否は Router からは確定できない） | settle を呼んだ回数 | 6 回、全て `settled`。`settleMs` 546／1538／1640／1927／2016／2303。remote は全て `exact.state: paid`、`origin: facilitator-relay` |
 | release の復元の回数 | ledger `release.reconstructed` | release を呼んだ回数 | 0／6（`releaseMs` 239〜624、`completeMs` 223〜612） |
-| withdraw の手数料 | 本 repo の外（Provider wallet の操作）。quickstart §4.3 | — | 測っていない（withdraw をしていない。受け取った 72,000 最小単位は Provider の側に残る） |
+| withdraw の手数料 | 本 repo の外（Provider wallet の操作）。quickstart §4.3 | — | 1 回（2026-11-21 01:57Z）: 2,500 最小単位の withdraw に手数料 **8,908**（0.008908 zUSDC。道具の見積りは 8,908〜9,110 の間で動いた）。受付まで約 3 秒、宛先の公開残高への着金を確認。受け取った支払いは注文ごとに別の note（12,000）で、**1 回の withdraw は 1 つの note からしか払えない**（まとめるには consolidate が要るが、Provider 用の道具には無い）。したがって 12,000 の支払い 1 件から引き出せるのは約 3,000 で、手数料が受取額の約 74% になる。受け取りは支払いの約 25 分後まで `screening` で使えなかった |
 | 監査の所要時間と不一致 | `npm run subetha-exact:inspect -- --remote` の実行時間と `summary.mismatches` | 実行 | 1 回、約 3.1 秒（7 件）、`mismatches: 0`、`discovered: 0`、`foundByLookup: 0` |
 | 詰まった箇所 | 自由記述（facilitator の Provider 向け文書・kit の改善点） | — | (a) Base Sepolia の ETH: 公開の faucet は新しい EOA に出さず、記録にある使い捨ての wallet は全て 0 だった。(b) archive RPC: 公開の endpoint は `eth_getProof` が直近 10,000 block まで。(c) 標準の x402 クライアント（`@x402/core` 2.28.0）は既定で zUSDC に払わない（`spendControls.allowedAssets` が要る）。(d) hosted の `maxTimeoutSeconds` は 150（注文の TTL 300） |
 
@@ -99,6 +99,8 @@
 | `npm test` の記録（§1.1） | 3982 pass / 4 fail（既知の macOS の flake。PR #204 の記録） |
 
 この実行が示すのは、hosted の testnet facilitator（tenant `router-local`）とローカルの Router の間で 6 件が settle・release・配達・complete まで通ったことであり、chain の finality の確認ではない。
+
+**finality の確認（2026-11-21 01:57Z、公開の Base Sepolia RPC の `finalized` の block と照合）**: probe 1 件、受信の settle 6 件、上流への支払い 6 件の計 13 件が、全て status 成功・canonical（receipt の block hash がその高さの block と一致）・`finalized` 以下の block に入っていた。確定までの遅れは約 20 分だった（01:31Z の最後の tx が 01:57Z の照合で確定済み、01:47Z の照合では未確定）。
 
 ### 3.3 標準の x402 クライアントからの購入（`docs/x402-standard-entry-requirements.md` S-5）
 
