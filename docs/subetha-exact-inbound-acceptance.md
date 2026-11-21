@@ -40,15 +40,18 @@
    - 設定の `subethaExact.limits` は既定のまま（§3）。
 4. 起動の確認: 起動ログに token・URL が無いこと。`npm run subetha-exact:inspect` が空の一覧を出すこと。
 
-記録（空欄）:
+記録（2026-11-21。秘密・招待コード・RPC の URL は書かない）:
 
 | 項目 | 値 |
 |---|---|
-| 日時（UTC） | |
-| Provider id（公開の値） | |
-| 登録の経路（§4.1 / §4.2） | |
-| wallet の公開 address（EOA / POS） | |
-| 配備の id（`registration.meta.json`） | |
+| 日時（UTC） | 2026-11-21 01:24（register、`pending`）→ 01:25（activate、`active`、`opSeq` 1） |
+| Provider id（公開の値） | `router-local`（`regId` `reg-9-4306db18`） |
+| 登録の経路（§4.1 / §4.2） | §4.1 self-service（招待コード）。招待は運用者の道具（研究 repo の `selfreg_invite.py`、台帳 `app-20261121-01`）で発行。発行の前の枠は 2/6、登録の後は 3/6 |
+| wallet の公開 address（EOA / POS） | EOA `0xD48f9CC27F012493A6544cbd55aC950C0cF0c066`。POS key の sha256 `e28223d9…4b86`（値は 0600 のファイルだけ） |
+| probe | 宛先 `0xb77265bf2f36662b04f1282823fbd565a606da92`、1 最小単位、tx `0x38b75472e78e59e5ad909fa1d1d69963967fcbbe820cbf49a46b27a214861c07`（1 回だけ） |
+| 資金 | ETH 0.00003（運用の wallet から。tx `0xf4e1dfe2102a2865132ffbd4cf6b8fc3ecb4e0f3b79a963155ad0a65df6677ce`）。zUSDC は quickstart §1 の mint → approve → wrap（100,000 最小単位） |
+| 起動の確認 | 起動ログは `listening` の 1 行と終了時の `router drain: complete` だけ。token は起動ログ・journal・inspect の出力に無い（grep 0 件）。登録直後の `GET /p/router-local/exact/orders?limit=1` は 200・注文 0 件 |
+| 配備の id（`registration.meta.json`） | 記録していない（登録の要求の digest は `9b276cfc…0c94`） |
 
 ## 3. 段 4: ローカルの Router で通す（AC-7 の上限・期間・停止の条件）
 
@@ -70,28 +73,32 @@
 
 | 数字 | 出どころ | 分母 | 値 |
 |---|---|---|---|
-| 見積りの所要時間（注文の作成を含む） | ledger `created.elapsedMs`（作成の POST の往復。inspect の `createMs`）。quote 全体は HTTP の計測 | 発行した quote（`created` の行） | |
-| 見積りから `delivered` までの時間 | journal の `created.at` → `delivered.at` | `delivered` の購入 | |
-| quote の 3 分類（(1) accepted／settled、(2) ほかの観測した state、(3) 観測できない）と割り当ての消費 | inspect `--remote` の 1 回の観測（`remote.state`）を orderId で結び付ける；割り当ては orderId の種類の数 | 発行した quote（(1)+(2)+(3) = 分母。remote だけの注文は別の行） | |
-| 失敗と未解決の率と内訳 | journal の終端（`source_failed` の reason、`unknown` の reason、`paid_undelivered` の reason）と、ledger の `create_failed`／`refused` の detail（こちらの分母は試行） | 発行した quote／試行 | |
-| settle の中継の手掛かり | ledger `settle`（`outcome`・`httpStatus`・`settleMs`）、`--remote` の `exact.state`／`origin`（`facilitator-relay`）をそのまま並べる（relay の拒否は Router からは確定できない） | settle を呼んだ回数 | |
-| release の復元の回数 | ledger `release.reconstructed` | release を呼んだ回数 | |
-| withdraw の手数料 | 本 repo の外（Provider wallet の操作）。quickstart §4.3 | — | |
-| 監査の所要時間と不一致 | `npm run subetha-exact:inspect -- --remote` の実行時間と `summary.mismatches` | 実行 | |
-| 詰まった箇所 | 自由記述（facilitator の Provider 向け文書・kit の改善点） | — | |
+| 見積りの所要時間（注文の作成を含む） | ledger `created.elapsedMs`（作成の POST の往復。inspect の `createMs`）。quote 全体は HTTP の計測 | 発行した quote（`created` の行） | 7 件。`createMs` 710〜1058（中央 744）。quote 全体（HTTP、quote の入口 3 件）1050／1212／1594 ms。標準入口の払わない 402 は 1008 ms |
+| 見積りから `delivered` までの時間 | journal の `created.at` → `delivered.at` | `delivered` の購入 | 6 件。3766／4985／5460／5764／6395／7674 ms（中央 5.6 秒）。quote の入口の値は署名の道具の起動時間を含む |
+| quote の 3 分類（(1) accepted／settled、(2) ほかの観測した state、(3) 観測できない）と割り当ての消費 | inspect `--remote` の 1 回の観測（`remote.state`）を orderId で結び付ける；割り当ては orderId の種類の数 | 発行した quote（(1)+(2)+(3) = 分母。remote だけの注文は別の行） | 7 件 = (1) `accepted` 6（release は全て `delivered`）+ (2) `open` 1（標準入口で払わなかった 402。観測の時点で期限前）+ (3) 0。割り当ては 7（全て `existing: false`）。remote だけの注文 0 |
+| 失敗と未解決の率と内訳 | journal の終端（`source_failed` の reason、`unknown` の reason、`paid_undelivered` の reason）と、ledger の `create_failed`／`refused` の detail（こちらの分母は試行） | 発行した quote／試行 | 失敗 0／7、`unknown` 0／7。試行 7 のうち `create_failed`・`refused` 0。未解決は観測の時点で 1（払わなかった 402 の注文。期限で外れる） |
+| settle の中継の手掛かり | ledger `settle`（`outcome`・`httpStatus`・`settleMs`）、`--remote` の `exact.state`／`origin`（`facilitator-relay`）をそのまま並べる（relay の拒否は Router からは確定できない） | settle を呼んだ回数 | 6 回、全て `settled`。`settleMs` 546／1538／1640／1927／2016／2303。remote は全て `exact.state: paid`、`origin: facilitator-relay` |
+| release の復元の回数 | ledger `release.reconstructed` | release を呼んだ回数 | 0／6（`releaseMs` 239〜624、`completeMs` 223〜612） |
+| withdraw の手数料 | 本 repo の外（Provider wallet の操作）。quickstart §4.3 | — | 測っていない（withdraw をしていない。受け取った 72,000 最小単位は Provider の側に残る） |
+| 監査の所要時間と不一致 | `npm run subetha-exact:inspect -- --remote` の実行時間と `summary.mismatches` | 実行 | 1 回、約 3.1 秒（7 件）、`mismatches: 0`、`discovered: 0`、`foundByLookup: 0` |
+| 詰まった箇所 | 自由記述（facilitator の Provider 向け文書・kit の改善点） | — | (a) Base Sepolia の ETH: 公開の faucet は新しい EOA に出さず、記録にある使い捨ての wallet は全て 0 だった。(b) archive RPC: 公開の endpoint は `eth_getProof` が直近 10,000 block まで。(c) 標準の x402 クライアント（`@x402/core` 2.28.0）は既定で zUSDC に払わない（`spendControls.allowedAssets` が要る）。(d) hosted の `maxTimeoutSeconds` は 150（注文の TTL 300） |
 
 計測の分け方（タスク v3.4 の分母の註）: (1) accepted／settled、(2) それ以外の観測できた状態（`pending`・`late-paid`・`rejected`・期限）、(3) 読めなかった／結び付かないもの、で尽くす。remote にだけある注文は「発行した quote」の分母の外に別の行で数える。
 
-### 3.2 実行の記録（空欄）
+### 3.2 実行の記録（2026-11-21）
 
 | 項目 | 値 |
 |---|---|
-| 期間（開始・終了、UTC） | |
-| 設定（route・limits） | |
-| 発行した quote / delivered / 失敗 / 未解決 | |
-| `--abandon` の回数と理由 | |
-| 停止の条件に当たった回数 | |
-| `npm test` の記録（§1.1） | |
+| 期間（開始・終了、UTC） | 2026-11-21 01:28〜01:31（1 回の実行。Router は終了時に `router drain: complete`） |
+| 設定（route・limits） | route `md-zusdc-eth-snapshot`: 受信 `subetha-exact`・zUSDC 12,000 最小単位、送信 x402・Base Sepolia USDC（上流 `https://provider-x402.subethalabs.com/v1/eth/snapshot`、10,000）。limits は既定（100／3／6）。Router は main `f68f10f`、`ROUTER_ADAPTER_MODE=real`、送信の署名は使い捨ての鍵 |
+| 発行した quote / delivered / 失敗 / 未解決 | 7 / 6 / 0 / 1（未解決の 1 は意図して払わなかった標準入口の 402） |
+| 入口の内訳 | quote の入口（`POST /v1/quotes` → `npm run sign` → R3）3 件、標準入口（§3.3）3 件 + 払わない 402 が 1 件 |
+| 買い手 | 使い捨ての EOA `0x50D99a29166E5ee0e0f931C8D7e67b498F86572F`（ETH なし。zUSDC 150,000 → 78,000 = 12,000 × 6） |
+| `--abandon` の回数と理由 | 0 |
+| 停止の条件に当たった回数 | 0 |
+| `npm test` の記録（§1.1） | 3982 pass / 4 fail（既知の macOS の flake。PR #204 の記録） |
+
+この実行が示すのは、hosted の testnet facilitator（tenant `router-local`）とローカルの Router の間で 6 件が settle・release・配達・complete まで通ったことであり、chain の finality の確認ではない。
 
 ### 3.3 標準の x402 クライアントからの購入（`docs/x402-standard-entry-requirements.md` S-5）
 
@@ -100,10 +107,12 @@
 
 | 項目 | 値 |
 |---|---|
-| 402 の requirements の `maxTimeoutSeconds`（hosted の実際の値） | （空欄） |
-| 402 → 200 の所要時間 | （空欄） |
-| `paymentId`、`source.txRef`、公開の状態 | （空欄） |
-| 払われない 402 が使った枠（数） | （空欄） |
+| 402 の requirements の `maxTimeoutSeconds`（hosted の実際の値） | 150 |
+| 402 → 200 の所要時間 | 3 件: 7536／5043／6288 ms（クライアントの呼び出し全体。402 → 署名 1 回 → 再送 → 200） |
+| `paymentId`、`source.txRef`、公開の状態 | `b51d68d0-310f-4066-8290-97866373e449`（`source.txRef` `0x9ba6bf6fc7491d3f407dd5069cc5159beba30949c2b2741d844eed0c1a8374f0`）、`2395a033-e9f6-419d-b356-ce788f180b31`、`ac6338ea-4721-4bfc-ab1b-3852c68a3aea`。3 件とも `delivered`、journal は `created → source_credential_bound → source_pending → … → delivered → source_completed` |
+| 払われない 402 が使った枠（数） | 1（注文 1 つ、未解決の枠 1 つ、総数の枠 1 つ。facilitator の側は `open`） |
+
+実購入（2026-11-21）: クライアントは `@x402/fetch` + `@x402/evm` 2.28.0、設定は signer・network・`spendControls.allowedAssets`（zUSDC、上限 20,000）だけ。各回とも署名は 1 回、応答は `[402, 200]`。
 
 合成 facilitator での受け入れ（2026-11-21）: `tests/wire/x402-entry-client.test.ts`（6 件）、`tests/wire/x402-entry-restart.test.ts`（4 件）。
 
