@@ -34,7 +34,12 @@ export interface CreateOfferRequest {
    * quote の要求の識別（`docs/subetha-exact-inbound-design.md` §2、要件 FR-2）。core は静的・動的・秘匿の 3 箇所で渡す。
    * 読むのは `subetha-exact`（facilitator の注文の requester を決定的に導く）だけで、ほかの rail は見ない。
    */
-  readonly requester?: { readonly principalId: string; readonly requestId: string };
+  readonly requester?: {
+    readonly principalId: string;
+    readonly requestId: string;
+    /** 送信元の tag（16 hex。`docs/hosted-exact-enable-design.md` §3）。`subetha-exact` が送信元ごとの上限に使う。生の address ではない。 */
+    readonly sourceTag?: string;
+  };
   /**
    * 標準の x402 クライアント用の入口の offer（`docs/x402-standard-entry-design.md` §3）。読むのは `subetha-exact` だけ。
    * 印の付いた offer は `extra.entry === "x402"` を持ち、買い手が決めた nonce の署名を受ける。
@@ -104,14 +109,17 @@ export type OfferRefusalDetail =
   | "requester_missing"
   | "ledger_unavailable"
   | "order_exists"
-  | "order_window_short";
+  | "order_window_short"
+  | "limit_source_unresolved"
+  | "limit_source_rate"
+  | "offer_cap_reached";
 
 /** `OfferRefusalDetail` の閉じた集合（core が公開の面へ写す前に照合する。これ以外の文字列は落とす）。 */
 export const OFFER_REFUSAL_DETAILS: ReadonlySet<string> = Object.freeze(
   new Set<string>([
     "facilitator_busy", "rate_limited", "response_unreadable", "amount_refused", "unauthorized", "unknown_tenant", "requirements_mismatch",
     "order_reused_expired", "order_reused_mismatch", "order_reused_other_id", "limit_total", "limit_unresolved", "limit_rate", "limit_concurrency",
-    "requester_missing", "ledger_unavailable", "order_exists", "order_window_short",
+    "requester_missing", "ledger_unavailable", "order_exists", "order_window_short", "limit_source_unresolved", "limit_source_rate", "offer_cap_reached",
   ]),
 );
 /** `retryAfterMs` の上限（1 時間。それより長い値は目安として意味が無い）。 */

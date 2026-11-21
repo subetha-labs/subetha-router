@@ -195,6 +195,47 @@ export interface RailsActivation {
    * 有効なら route 2 本（zUSDC → Provider A・B）と予算の区分が出て、env `SUBETHA_ZERC20_FACILITATOR_URL` が要る。
    */
   readonly subetha?: { readonly inbound: boolean };
+  /**
+   * 受信レール `subetha-exact`（SubEtha v2 の facilitator の Provider として Base Sepolia の zUSDC を受ける）と標準の x402 入口の、**上限付きの実証**
+   * （`docs/hosted-exact-enable-design.md` §6）。無ければ `false`（`subethaExactOf`）。有効なら route 1 本・予算の区分・adapter の上限が出て、
+   * host の env `SUBETHA_EXACT_FACILITATOR_URL`・`SUBETHA_EXACT_TOKEN_FILE` が要る。新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に。
+   */
+  readonly subethaExact?: { readonly inbound: boolean };
+}
+/** `subethaExact` の既定（無ければ `false`）。 */
+export function subethaExactOf(activation: RailsActivation): { readonly inbound: boolean } {
+  return activation.subethaExact ?? SUBETHA_OFF;
+}
+/**
+ * hosted の `subetha-exact` の実証の値（`docs/hosted-exact-enable-design.md` §6）。**オーナーが変える場所はここだけ。**
+ * - `maxCommitted`: 実証の件数（offer の上限）。Router の持ち出しの上限 = この数 × 上流の 0.01 USDC。**0 は新しい offer を出さない**（発行済みの注文は払える）。
+ * - `limits`: facilitator への注文の作成の枠。1 つの送信元の占有は 4 まで（作成のたびに 2 つ分の余裕を求めるので、未払いの offer は同時に 3 つまで。
+ *   応答を失って後から注文が見つかっても 4 を超えない）。全体の 8 を埋めるには 2 つの送信元が要る。
+ */
+export const HOSTED_EXACT = Object.freeze({
+  routeId: "md-zusdc-eth-snapshot",
+  source: Object.freeze({ network: "eip155:84532", asset: "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f", decimals: 6, amount: "12000" }),
+  maxCommitted: 40,
+  limits: Object.freeze({ maxRequestsTotal: 300, maxUnresolved: 8, requestsPerMinute: 12, maxUnresolvedPerSource: 4, requestsPerMinutePerSource: 3 }),
+  /** zUSDC の予算の区分は上限にしない（予約は戻らないので、作成の総数 × 受信額より大きくする。設計 §2）。 */
+  bucketMaxTotal: "10000000",
+  /** 標準入口を買い手に示す基点（公開の origin）。 */
+  publicOrigin: "https://router.subethalabs.com",
+});
+/** host の env（有効なときだけ読む）: facilitator の tenant の URL と、Provider token のファイルの path（値は読まない）。 */
+export const HOSTED_EXACT_FACILITATOR_URL_ENV = "SUBETHA_EXACT_FACILITATOR_URL";
+export const HOSTED_EXACT_TOKEN_FILE_ENV = "SUBETHA_EXACT_TOKEN_FILE";
+/**
+ * 有効なときの host の env の 2 つ。無効なら env を読まずに `undefined`。欠けていれば固定文で止める（値は出さない）。形の検査は子の Router（`src/config.ts`）が行う。
+ */
+export function hostedExactOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): { readonly facilitatorUrl: string; readonly tokenFile: string } | undefined {
+  if (!subethaExactOf(activation).inbound) return undefined;
+  const facilitatorUrl = env[HOSTED_EXACT_FACILITATOR_URL_ENV];
+  const tokenFile = env[HOSTED_EXACT_TOKEN_FILE_ENV];
+  if (facilitatorUrl === undefined || facilitatorUrl === "" || tokenFile === undefined || tokenFile === "") {
+    throw new Error(`${HOSTED_EXACT_FACILITATOR_URL_ENV} and ${HOSTED_EXACT_TOKEN_FILE_ENV} are required when the subetha-exact inbound rail is activated`);
+  }
+  return { facilitatorUrl, tokenFile };
 }
 /** `subetha` の既定（無ければ `false`）。 */
 export function subethaOf(activation: RailsActivation): { readonly inbound: boolean } {
@@ -629,6 +670,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
   const profiles = dynamicProfilesOf(env, receiver, mppInboundEnabled, rails);
   // SubEtha（zUSDC）の受信（設計 §4.1）: 有効なときだけ env を読み、URL の形を確かめる（違えば固定文で止まる）。
   const subethaUrl = subethaFacilitatorUrlOf(env, rails.activation);
+  // 受信レール `subetha-exact` の実証（`docs/hosted-exact-enable-design.md` §6）。無効なら何も足さない（生成物は今と同じ）。
+  const hostedExact = hostedExactOf(env, rails.activation);
   const zusdcBucket = { network: INBOUND_ZUSDC.network, asset: INBOUND_ZUSDC.asset, maxTotal: env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000", maxPerPurchase: INBOUND_ZUSDC.amount };
   return {
     router: {
@@ -780,6 +823,20 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                   }
                 : {}),
             }),
+        // `subetha-exact` の実証: Base Sepolia の zUSDC で払って Provider A（x402）に届く。受取先は facilitator が注文ごとに決める（`payTo` 無し）。offer の上限付き。
+        ...(hostedExact === undefined
+          ? {}
+          : {
+              [HOSTED_EXACT.routeId]: {
+                routeId: HOSTED_EXACT.routeId,
+                canonicalPath: `/v1/routes/${HOSTED_EXACT.routeId}/resource`,
+                rail: "x402",
+                sourceRail: "subetha-exact",
+                offerCap: { maxCommitted: HOSTED_EXACT.maxCommitted },
+                source: { amount: HOSTED_EXACT.source.amount, asset: HOSTED_EXACT.source.asset, decimals: HOSTED_EXACT.source.decimals, network: HOSTED_EXACT.source.network },
+                destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
+              },
+            }),
         // SubEtha（zUSDC）の受信（設計 §4.1）: zUSDC で払って Provider A（x402）・Provider B（MPP）に届く。受取先は facilitator の challenge が決める（`payTo` 無し）。
         ...(subethaUrl === undefined
           ? {}
@@ -823,6 +880,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
           ...railBuckets("10000", env["SUBETHA_INBOUND_MAX_TOTAL"] ?? "1000000000"),
           // SubEtha（zUSDC）の受信の区分（要件 FR-3.5）: 1 件の上限 = burn 総額。総額は既存の静的の受信と同じ env。
           ...(subethaUrl === undefined ? [] : [zusdcBucket]),
+          // `subetha-exact` の実証の受信の区分（Base Sepolia の zUSDC）。上限にはしない（設計 §2）。
+          ...(hostedExact === undefined ? [] : [{ network: HOSTED_EXACT.source.network, asset: HOSTED_EXACT.source.asset, maxTotal: HOSTED_EXACT.bucketMaxTotal, maxPerPurchase: "20000" }]),
         ],
       },
       /**
@@ -875,6 +934,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
         ...(solMppProvider === undefined ? {} : { [ROUTE_SOLMPP_OUT]: upstreamSolMpp, ...(mppInboundEnabled ? { [ROUTE_SOLMPP_OUT_MPP]: upstreamSolMpp } : {}) }),
         // SubEtha（zUSDC）の受信 2 本は Provider A・B の URL。
         ...(subethaUrl === undefined ? {} : { [ROUTE_ZUSDC_TO_X402]: UPSTREAM_X402, [ROUTE_ZUSDC_TO_MPP]: UPSTREAM }),
+        ...(hostedExact === undefined ? {} : { [HOSTED_EXACT.routeId]: UPSTREAM_X402 }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
       // EVM testnet 3 つの受信（hosted 設計 §5）は自前の facilitator（kind `x402`）。HTTP の期限はチェーン別に Router が決める（`evmTestnetDeadlinesOf`。ローカル版 §3.6 の 20 秒）。
@@ -888,6 +948,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
             },
           }),
     },
+    // `subetha-exact` の adapter の上限と、verify の無応答の扱い（`docs/hosted-exact-enable-design.md` §3、§3.1）。有効なときだけ節を持つ。
+    ...(hostedExact === undefined ? {} : { subethaExact: { limits: { ...HOSTED_EXACT.limits }, unansweredVerifyIsUnknown: true } }),
   };
 }
 

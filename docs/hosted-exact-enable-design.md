@@ -110,12 +110,12 @@ hosted では MCP の購入もこの rail を通るので、**無応答を拒否
     source: { network: "eip155:84532", asset: "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f", decimals: 6, amount: "12000" },
     /** 実証の件数。0 = 新しい offer を出さない（受付停止）。Router の持ち出しの上限 = 40 × 0.01 USDC = 0.4 USDC。 */
     maxCommitted: 40,
-    limits: { maxRequestsTotal: 300, maxUnresolved: 6, requestsPerMinute: 12, maxUnresolvedPerSource: 2, requestsPerMinutePerSource: 3 },
+    limits: { maxRequestsTotal: 300, maxUnresolved: 8, requestsPerMinute: 12, maxUnresolvedPerSource: 4, requestsPerMinutePerSource: 3 },
     publicOrigin: "https://router.subethalabs.com",
   } as const;
   ```
 
-  送信は既存の `OUTBOUND_X402`（Provider A、10,000）。1 つの送信元は未解決 2 つまでなので、全体の 6 を埋めるには 3 つの送信元が要る。
+  送信は既存の `OUTBOUND_X402`（Provider A、10,000）。1 つの送信元の占有は 4 まで（§13 の規則で、未払いの offer は同時に 3 つまで）なので、全体の 8 を埋めるには 2 つの送信元が要る。
 - 有効なとき生成に足すもの: route 1 本（`offerCap.maxCommitted`）、zUSDC（Base Sepolia）の予算の区分（`maxTotal` = 10,000,000、`maxPerPurchase` 20,000。§2）、`subethaExact.limits` と `unansweredVerifyIsUnknown: true`（§3.1）、
   子の env `ROUTER_SUBETHA_EXACT_FACILITATOR_URL`（host の env `SUBETHA_EXACT_FACILITATOR_URL` から）・`ROUTER_SUBETHA_EXACT_TOKEN_FILE`（`SUBETHA_EXACT_TOKEN_FILE` から）・`ROUTER_X402_ENTRY_BASE_URL`（定数）。
   host の env の 2 つが無い・空なら `HostPlanError("env")`（今の固定文。値は出さない）。
@@ -132,7 +132,7 @@ hosted では MCP の購入もこの rail を通るので、**無応答を拒否
 ### 7.1 開示（R H-7、FR-4.2、H-9）
 
 - 一覧: 対象の route に `demonstration: { capped: true, acceptingNewOffers: <maxCommitted > 0> }` を足す（有効なときだけ。無効なら欄ごと無い = byte 一致）。`x402Url` は公開の URL。
-- MCP: サーバの説明（instructions）、`list_routes` の案内、**この route の quote の `nextStep`**（`src/mcp/tools.ts:521` の静的 quote の案内。対象の route のときだけ 1 文を足す）に 1 文ずつ（有効なときだけ。無効なら案内は byte 一致）: 実証で上限があり尽きたら 503 で止まること、標準入口には承認の段が無いこと、標準クライアントは zUSDC を `spendControls.allowedAssets` に足すこと。
+- MCP（実装での変更: サーバの説明（instructions）は起動時の固定文で、route の有無を知らないので**変えない**。案内は route を見つける `list_routes` の応答の `demonstrationNote` と、この rail の quote の `nextStep` に置く）: `list_routes` の案内、**この route の quote の `nextStep`**（`src/mcp/tools.ts:521` の静的 quote の案内。対象の route のときだけ 1 文を足す）に 1 文ずつ（有効なときだけ。無効なら案内は byte 一致）: 実証で上限があり尽きたら 503 で止まること、標準入口には承認の段が無いこと、標準クライアントは zUSDC を `spendControls.allowedAssets` に足すこと。
 - `README.md`・`CLAUDE.md`・llms の記述: G-4 の後に「hosted で有効」と書き換える（G-4 の PR）。それまでは「ローカルだけ」のまま。
 - 試験: 有効・受付停止・無効の 3 状態で一覧と案内の文言を確かめる（無効は byte 一致）。
 
@@ -187,3 +187,15 @@ R §6 のとおり。加えて: ingress の頻度の守りはメモリの中（�
 | 新 3 should | 共有の USDC の区分の予約 | §2（実際の送金 0.4 USDC と、予約の最大 3 USDC を分けて記載） |
 | 新 4 should | quote の `nextStep` | §7.1 |
 | 新 5 note | `unansweredVerifyIsUnknown` の互換の条件 | §3.1 |
+
+## 13. 実装のレビューでの変更（Codex `hx-impl-review1.md`。§2・§3・§5 の該当の記述に優先する）
+
+| # | 指摘 | 変更 |
+|---|---|---|
+| 1 must | tag を渡さない呼び出しが送信元ごとの上限をすり抜ける | 送信元ごとの上限が設定にあるとき、tag の無い・形の違う呼び出しは固定の tag（`0000000000000000`）として ledger に記録し、同じ 1 つの送信元として数える |
+| 2 must | 後からの発見で送信元の占有が上限を超える | 作成の前に **2 つ分の余裕**を求める（`今の占有 + 2 ≤ maxUnresolvedPerSource`）: 応答を失って後から注文が見つかっても上限を超えない。照会（lookup sweep）で注文が見つかった後にも、もう一度確かめる。hosted の値は全体 8・送信元ごと 4 |
+| 3 must | 期限を過ぎた `created` の枠が再利用された後、進行中の購入が `unknown` になると二重に数える | 実行の途中の静的購入の quoteId を覚え、`created` のままでも進行中なら数に残す |
+| 4 must | `settleStarted: false` と `sourceTag` が他の rail の journal・引数を変える | どちらも **`subetha-exact` の route にだけ**付ける。他の rail の journal の行と rail に渡す値は今までどおり（既存の試験の期待値は main と同じに戻した） |
+| 5 must | `startHost` を通した試験が無い | `tests/wire/hosted-exact-host.test.ts` を足した（2 回目のレビューでも must のまま残ったため）: **本物の `startHost`** を process として起動し（`tests/fixtures/hosted-exact-host.ts`。子は生成した設定の実証の route をそのまま使う実 `startRouter`）、公開の ingress だけを通して、標準クライアントと MCP の両方の購入、接続元を末尾に足す proxy の後ろでの偽の `X-Forwarded-For`、購入の途中の切断 → SIGTERM → `drain: complete` → 同じ journal で再起動 → 同じ credential の再送、drain の時間切れ → 再起動 → unknown のまま、受付停止（上限 0）での再起動を確かめる。testnet の facilitator に対する確認は G-2。無効時の byte 一致は、変更前から repo にある golden（`tests/unit/config-golden.test.ts`）が通ることで確かめている |
+| 6 should | 送信元の表が満杯になると全員の数が戻る | 古い窓の分だけ捨て、まだ満杯なら新しい送信元は受けない |
+| 7 should | `docs/DEPLOY.md` §2i の重複 | 削除した |

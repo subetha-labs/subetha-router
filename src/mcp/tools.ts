@@ -225,8 +225,22 @@ function dynamicSubjectFields(quote: QuoteView): Record<string, unknown> {
  * レールの補足（multirail 設計 §7）: Solana の受信は `npm run sign` が transaction を**部分署名するだけ**で、送信と手数料は facilitator の
  * fee payer が持つ。Arc は Circle の facilitator 経由で、settle に数十秒掛かり得る。EVM の x402 は従来どおり。
  */
+/**
+ * 上限付きの実証の route（`docs/hosted-exact-enable-design.md` §7.1）の一覧に添える案内。一覧に `demonstration` を持つ route があるときだけ足す（無ければ欄ごと無い）。
+ */
+const DEMONSTRATION_NOTE =
+  "Routes that carry `demonstration` are a capped demonstration on SubEtha v2 (zUSDC on Base Sepolia): new quotes and new 402 offers stop with an error once the limits are reached " +
+  "(`acceptingNewOffers: false` means they are stopped now), and every quote creates a facilitator order. Their `x402Url` can be paid by a standard x402 v2 client without a quote: " +
+  "there is no approval step on that URL (get the human's approval before the client is allowed to pay), the client must list zUSDC in `spendControls.allowedAssets`, " +
+  "and any answer other than 200 is not proof that nothing was paid.";
+/** `subetha-exact` の quote の `nextStep` に足す 1 文（その rail の quote のときだけ）。 */
+const EXACT_QUOTE_HINT =
+  " This route is paid through a SubEtha v2 facilitator order: each quote creates one order and uses a limited slot, new quotes stop with an error once the route's limits are reached, " +
+  "and a refused, failed or unknown purchase is not proof that nothing was paid.";
+
 function railHintOf(quote: QuoteView): string {
   const source = quote.source as Record<string, unknown>;
+  if (source["rail"] === "subetha-exact") return EXACT_QUOTE_HINT;
   const network = String(source["network"] ?? "");
   const offer = source["offer"];
   const scheme = isRecord(offer) ? String(offer["scheme"] ?? "") : "";
@@ -474,7 +488,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
     async listRoutes(): Promise<Record<string, unknown>> {
       const result = await deps.client.listRoutes();
       // 動的プロファイルの一覧は落とさず返す（設計 §1.1）。無ければ欄ごと無い。
-      return withEvidence(deps, { ok: result.ok, routes: result.routes, ...(result.dynamic === undefined ? {} : { dynamic: result.dynamic }) });
+      const demonstration = result.routes.some((route) => (route as unknown as Record<string, unknown>)["demonstration"] !== undefined);
+      return withEvidence(deps, { ok: result.ok, routes: result.routes, ...(result.dynamic === undefined ? {} : { dynamic: result.dynamic }), ...(demonstration ? { demonstrationNote: DEMONSTRATION_NOTE } : {}) });
     },
 
     async quote(input): Promise<Record<string, unknown>> {

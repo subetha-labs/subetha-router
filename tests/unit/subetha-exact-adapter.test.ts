@@ -731,3 +731,141 @@ describe("標準の x402 クライアント用の入口の offer（`docs/x402-st
     await expect(adapter!.verify(offer, credential)).resolves.toMatchObject({ isValid: true });
   });
 });
+
+describe("送信元ごとの上限と verify の無応答（`docs/hosted-exact-enable-design.md` §3、§3.1）", () => {
+  const TAG_A = "aaaaaaaaaaaaaaaa";
+  const TAG_B = "bbbbbbbbbbbbbbbb";
+  const from = (tag: string, requestId: string) => ({ ...request(requestId), requester: { principalId: "judge", requestId, sourceTag: tag } });
+  // 送信元ごとの占有の上限 3: 作成のたびに 2 つ分の余裕を求めるので、未払いの offer は同時に 2 つまで（0+2 ≤ 3、1+2 ≤ 3、2+2 > 3）。
+  const PER_SOURCE = { maxRequestsTotal: 100, maxUnresolved: 6, requestsPerMinute: 60, maxUnresolvedPerSource: 3, requestsPerMinutePerSource: 30 };
+  const refusal = async (promise: Promise<unknown>) => {
+    const error = await promise.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InboundOfferError);
+    return [(error as InboundOfferError).code, (error as InboundOfferError).detail, (error as InboundOfferError).retryAfterMs];
+  };
+
+  test("1 つの送信元は未解決 2 つまで。3 つ目は facilitator を呼ばずに止まり、別の送信元は通る。ledger の requested に tag が残り、再起動の後も同じ", async () => {
+    await makeAdapter({ limits: PER_SOURCE });
+    await adapter!.createOffer(from(TAG_A, "a-1"));
+    await adapter!.createOffer(from(TAG_A, "a-2"));
+    expect(await refusal(adapter!.createOffer(from(TAG_A, "a-3")))).toEqual(["source_offer_unavailable", "limit_source_unresolved", 300_000]);
+    expect(fixture.calls.byRoute["create"]).toBe(2);
+    await expect(adapter!.createOffer(from(TAG_B, "b-1"))).resolves.toMatchObject({ scheme: "exact" });
+    expect((await ledgerRows()).filter((r) => r.event === "requested").map((r) => r.patch["sourceTag"])).toEqual([TAG_A, TAG_A, TAG_B]);
+    await adapter!.close();
+    await makeAdapter({ limits: PER_SOURCE });
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-4"))))[1]).toBe("limit_source_unresolved");
+    await expect(adapter!.createOffer(from(TAG_B, "b-2"))).resolves.toMatchObject({ scheme: "exact" });
+    // 注文の期限 + 猶予を過ぎると外れる。
+    clockMs += (300 + 61) * 1000;
+    await expect(adapter!.createOffer(from(TAG_A, "a-5"))).resolves.toMatchObject({ scheme: "exact" });
+  });
+
+  test("tag を渡さない呼び出しも 1 つの送信元として数える（上限をすり抜けない）。成功 1 + 応答の喪失 1 の後は、注文が後から見つかっても上限を超えない数で止まる", async () => {
+    await makeAdapter({ limits: PER_SOURCE });
+    // tag なし・形の違う tag は、同じ固定の tag として数える。
+    await adapter!.createOffer(request("n-1"));
+    await adapter!.createOffer({ ...request("n-2"), requester: { principalId: "alice", requestId: "n-2", sourceTag: "not-hex" } });
+    expect((await refusal(adapter!.createOffer(request("n-3"))))[1]).toBe("limit_source_unresolved");
+    expect((await ledgerRows()).filter((r) => r.event === "requested").map((r) => r.patch["sourceTag"])).toEqual(["0000000000000000", "0000000000000000"]);
+    // 別の送信元: 1 つ成功（占有 1）、2 つ目は応答を失う（占有 2。注文が見つかれば 3 = 上限ちょうど）。3 つ目は作成の前に止まる。
+    await adapter!.createOffer(from(TAG_A, "a-1"));
+    fixture.setMode("create", "lose-response");
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-2"))))[0]).toBe("source_offer_unavailable");
+    fixture.setMode("create", "ok");
+    const creates = fixture.calls.byRoute["create"];
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-3"))))[1]).toBe("limit_source_unresolved");
+    expect(fixture.calls.byRoute["create"]).toBe(creates);
+    await adapter!.close();
+    await makeAdapter({ limits: PER_SOURCE });
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-4"))))[1]).toBe("limit_source_unresolved");
+    expect((await refusal(adapter!.createOffer(request("n-4"))))[1]).toBe("limit_source_unresolved");
+  });
+
+  test("送信元ごとの毎分の数。上限の欄が無い設定では送信元ごとに数えない（今までどおり）", async () => {
+    await makeAdapter({ limits: { ...PER_SOURCE, maxUnresolved: 20, maxUnresolvedPerSource: 10, requestsPerMinutePerSource: 2 } });
+    await adapter!.createOffer(from(TAG_A, "a-1"));
+    await adapter!.createOffer(from(TAG_A, "a-2"));
+    expect(await refusal(adapter!.createOffer(from(TAG_A, "a-3")))).toEqual(["source_offer_unavailable", "limit_source_rate", 60_000]);
+    await expect(adapter!.createOffer(from(TAG_B, "b-1"))).resolves.toMatchObject({ scheme: "exact" });
+    clockMs += 61_000;
+    await expect(adapter!.createOffer(from(TAG_A, "a-4"))).resolves.toMatchObject({ scheme: "exact" });
+    await adapter!.close();
+    adapter = undefined;
+    await rm(path.join(workDir, "subetha-exact"), { recursive: true, force: true });
+    await makeAdapter({ limits: { maxRequestsTotal: 100, maxUnresolved: 20, requestsPerMinute: 60 } });
+    for (let index = 0; index < 4; index += 1) await adapter!.createOffer(from(TAG_A, `p-${index}`));
+    expect((await ledgerRows()).filter((r) => r.event === "created")).toHaveLength(4);
+  });
+
+  test("作成の応答を失った送信元は、それが片付くまで作れない（2 回続けて失えない）。別の送信元は通る。再起動の後も同じ", async () => {
+    await makeAdapter({ limits: PER_SOURCE });
+    fixture.setMode("create", "lose-response");
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-lost"))))[0]).toBe("source_offer_unavailable");
+    fixture.setMode("create", "ok");
+    const creates = fixture.calls.byRoute["create"];
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-next"))))[1]).toBe("limit_source_unresolved");
+    expect(fixture.calls.byRoute["create"]).toBe(creates);
+    await expect(adapter!.createOffer(from(TAG_B, "b-1"))).resolves.toMatchObject({ scheme: "exact" });
+    await adapter!.close();
+    await makeAdapter({ limits: PER_SOURCE });
+    expect((await refusal(adapter!.createOffer(from(TAG_A, "a-again"))))[1]).toBe("limit_source_unresolved");
+  });
+
+  test("ledger の送信元ごとの占有: `discovered` の注文は、同じ pair の tag がちょうど 1 種類のときだけその送信元に帰属し、曖昧なもの（2 種類・tag なし）は全ての送信元に数える", async () => {
+    const { openSubethaExactLedger } = await import("../../src/adapters/inbound/subetha-exact-ledger.js");
+    const ledger = await openSubethaExactLedger({ dir: path.join(workDir, "ledger-only") });
+    const nowSec = Math.floor(clockMs / 1000);
+    const digest = (byte: string) => `0x${byte.repeat(32)}`;
+    const requirements = { scheme: "exact", network: NETWORK, asset: ASSET, amount: "2000", payTo: `0x${"11".repeat(20)}`, maxTimeoutSeconds: 150, extra: { name: DOMAIN.name, version: DOMAIN.version } };
+    const requested = (id: string, requester: string, tag?: string) => ledger.append(id, "requested", { requesterDigest: digest(requester), resourceDigest: digest("ee"), routeId: ROUTE_ID, amount: "2000", atMs: clockMs, ...(tag === undefined ? {} : { sourceTag: tag }) });
+    const discovered = (key: string, requester: string, order: string) =>
+      ledger.append(key, "discovered", { pair: { requesterDigest: digest(requester), resourceDigest: digest("ee") }, orderId: digest(order), payTo: requirements.payTo, expiresAt: nowSec + 300, tenant: `/p/${PROVIDER}`, requirements });
+    const usage = (tag: string) => ledger.sourceUsage(tag, nowSec, clockMs - 60_000);
+    // pair 1: A だけが作成を試み、応答を失い、後で注文が見つかった → A の占有は attempt 1 + 注文 1 = 2。B は 0。
+    await requested("att-1", "01", TAG_A);
+    expect(usage(TAG_A)).toEqual({ unresolved: 1, unknownCreation: true, recent: 1 });
+    await discovered("pair-1", "01", "a1");
+    expect(usage(TAG_A).unresolved).toBe(2);
+    expect(usage(TAG_B).unresolved).toBe(0);
+    // pair 2: A と B の両方が同じ pair を試みた（同じ principal・requestId を別の送信元から）→ 見つかった注文は曖昧 = 両方に数える。
+    await requested("att-2", "02", TAG_A);
+    await requested("att-3", "02", TAG_B);
+    await discovered("pair-2", "02", "a2");
+    expect(usage(TAG_A).unresolved).toBe(4);
+    expect(usage(TAG_B)).toMatchObject({ unresolved: 2, unknownCreation: true });
+    // pair 3: tag の無い行（旧い行）の pair で見つかった注文も、全ての送信元に数える。行の無い pair の注文も同じ。
+    await requested("att-4", "03");
+    await discovered("pair-3", "03", "a3");
+    await discovered("pair-4", "04", "a4");
+    expect(usage(TAG_A).unresolved).toBe(6);
+    expect(usage(TAG_B).unresolved).toBe(4);
+    expect(usage("cccccccccccccccc")).toEqual({ unresolved: 3, unknownCreation: false, recent: 0 });
+    // 全体の数は今までの定義のまま（attempt 4 + 結び付かない注文 4）。再起動の後も同じ。
+    expect(ledger.unresolvedCount(nowSec)).toBe(8);
+    await ledger.close();
+    const reopened = await openSubethaExactLedger({ dir: path.join(workDir, "ledger-only") });
+    expect(reopened.sourceUsage(TAG_A, nowSec, clockMs - 60_000).unresolved).toBe(6);
+    // 注文の期限 + 猶予の後: 見つかった注文は外れ、結果の分からない attempt は残る。
+    expect(reopened.sourceUsage(TAG_B, nowSec + 361, clockMs).unresolved).toBe(1);
+    await reopened.close();
+  });
+
+  test("`unansweredVerifyIsUnknown: true`: quote の入口の offer でも、答えでない verify は例外（core が unknown と記録）。200 の isValid:false だけが拒否", async () => {
+    await makeAdapter({ unansweredVerifyIsUnknown: true });
+    const legacy = await adapter!.createOffer(request("q-1"));
+    const credential = await credentialFor(legacy);
+    const json = { "content-type": "application/json" };
+    for (const raw of [{ status: 500, headers: json, body: "{}" }, { status: 200, headers: json, body: "{}" }, { status: 200, headers: json, body: JSON.stringify({ isValid: "false" }) }]) {
+      fixture.setMode("verify", "raw", raw);
+      await expect(adapter!.verify(legacy, credential), raw.body).rejects.toThrow("verify unanswered");
+    }
+    // 時間切れ（verify の期限 2 秒を超える応答）も答えではない。
+    fixture.setMode("verify", "slow:2600");
+    await expect(adapter!.verify(legacy, credential)).rejects.toThrow("verify unanswered");
+    fixture.setMode("verify", "raw", { status: 200, headers: json, body: JSON.stringify({ isValid: false, invalidReason: "insufficient_funds" }) });
+    await expect(adapter!.verify(legacy, credential)).resolves.toMatchObject({ isValid: false });
+    fixture.setMode("verify", "ok");
+    await expect(adapter!.verify(legacy, credential)).resolves.toMatchObject({ isValid: true });
+  });
+});

@@ -48,6 +48,11 @@ export interface McpIngressOptions {
   readonly path?: string;
   /** 入口の graceful drain（`createIngressDrain`）。渡せば、要求を数え、drain の始まりの後の要求は 503 で断る。 */
   readonly drain?: IngressDrain;
+  /**
+   * 標準の x402 クライアント用の公開の経路（`src/mcp/x402-proxy.ts`。`docs/hosted-exact-enable-design.md` §5）。渡さなければ今までどおり（`path` と `/healthz` 以外は 404）。
+   * 自分の経路でなければ `false` を返し、下の今までの判定に進む。
+   */
+  readonly x402Proxy?: (request: IncomingMessage, response: ServerResponse) => Promise<boolean>;
 }
 
 /** 入口の graceful drain の数え方（`src/shared/drain.ts`。Router の子の HTTP と共有）。 */
@@ -212,6 +217,8 @@ export function createMcpIngress(options: McpIngressOptions): Server {
         response.end(text);
         return;
       }
+      // 標準の x402 入口（渡されたときだけ。生の URL の完全一致で自分の経路かを決める。違えば下の今までの 404 へ）。
+      if (options.x402Proxy !== undefined && (await options.x402Proxy(request, response))) return;
       if (url.pathname !== mcpPath) {
         finishWithoutBody(404, "not_found");
         return;

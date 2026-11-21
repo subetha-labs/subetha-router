@@ -38,11 +38,18 @@ function config(): RouterConfig {
 class Rail implements InboundRail {
   verifyCalls = 0;
   settleCalls = 0;
+  createCalls = 0;
+  sourceTags: (string | undefined)[] = [];
+  settleResult: SettleResult = { outcome: "settled", txRef: "src-tx-1", eventId: "0xnonce" };
   genuine = true;
   verifyResult: InboundVerifyResult | "throw" = { isValid: true };
   fixedPayTo: string | undefined;
   #issued = 0;
   async createOffer(request: CreateOfferRequest): Promise<InboundOffer> {
+    this.createCalls += 1;
+    this.sourceTags.push(request.requester?.sourceTag);
+    // 発行の途中に時間を空ける（同時の発行の試験で、予約が await をまたいで効くことを見る）。
+    await new Promise((resolve) => setTimeout(resolve, 5));
     this.#issued += 1;
     return {
       scheme: "exact",
@@ -70,7 +77,7 @@ class Rail implements InboundRail {
   }
   async settle(): Promise<SettleResult> {
     this.settleCalls += 1;
-    return { outcome: "settled", txRef: "src-tx-1", eventId: "0xnonce" };
+    return this.settleResult;
   }
   settleWindowOf(offer: InboundOffer): number | undefined {
     return offer.extra.expiresAt;
@@ -169,7 +176,7 @@ test("結び付けた後に行を書かずに戻る拒否は source_failed not_s
   const first = await buy(core, presented);
   expect(first).toMatchObject({ kind: "outcome", outcome: { status: "awaiting_payment", paymentId: quote.paymentId, terminalReason: "approval_expired", mayStillSettleUntil: Number(presented.authorization.validBefore) } });
   expect(await eventsOf(quote.paymentId)).toEqual(["created", "source_credential_bound", "source_failed"]);
-  expect((await rows()).at(-1)!.patch).toEqual({ outcome: "not_sent", reason: "approval_expired" });
+  expect((await rows()).at(-1)!.patch).toEqual({ settleStarted: false, outcome: "not_sent", reason: "approval_expired" });
   // 時計を戻しても（期限の中に戻っても）実行は始まらない。再起動の後も同じ。
   clockMs -= 120_000;
   expect(await buy(core, presented)).toMatchObject({ kind: "outcome", outcome: { status: "awaiting_payment", terminalReason: "approval_expired" } });
@@ -302,4 +309,152 @@ test("対象外: subetha-exact でない route、checkSignature を持たない 
   const core = await boot({ inbound: noCheck });
   expect(await core.quoteStandard({ principalId: "alice", routeId: ROUTE_ID })).toEqual({ ok: false, code: "unknown_route" });
   expect(await rows()).toEqual([]);
+});
+
+/* ------------------------------------------------------------------ offer の上限（`docs/hosted-exact-enable-design.md` §2） */
+
+function configWithCap(maxCommitted: number): RouterConfig {
+  const base = config() as unknown as { routes: Record<string, Record<string, unknown>> };
+  return { ...base, routes: { [ROUTE_ID]: { ...base.routes[ROUTE_ID]!, offerCap: { maxCommitted } } } } as unknown as RouterConfig;
+}
+const CAP_REACHED = { ok: false, code: "source_offer_unavailable", reason: "offer_cap_reached" };
+const tryChallenge = (core: RouterCore) => core.quoteStandard({ principalId: "alice", routeId: ROUTE_ID });
+
+test("offer の上限: 未払いの offer は一時的に数に入り、承認の期限を過ぎると外れる。上限 0 は何も出さない（rail を呼ばない）。上限の無い route は数えない", async () => {
+  const core = await boot({ config: configWithCap(2) });
+  expect((await tryChallenge(core)).ok).toBe(true);
+  expect((await tryChallenge(core)).ok).toBe(true);
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  // quote の入口も同じ数を共有する。既存の quote の再取得は対象外。
+  expect(await core.quote({ principalId: "alice", requestId: "req-new", routeId: ROUTE_ID })).toEqual(CAP_REACHED);
+  expect(rail.createCalls).toBe(2);
+  // 承認の期限（60 秒）を過ぎた: Router はその offer で settle を始めないので数から外れる（未払いの証明ではない）。
+  clockMs += 61_000;
+  expect((await tryChallenge(core)).ok).toBe(true);
+  await core.close();
+  const zero = await boot({ config: configWithCap(0), journalPath: path.join(workDir, "zero.ndjson") });
+  const before = rail.createCalls;
+  expect(await tryChallenge(zero)).toEqual(CAP_REACHED);
+  expect(await zero.quote({ principalId: "alice", requestId: "r", routeId: ROUTE_ID })).toEqual(CAP_REACHED);
+  expect(rail.createCalls).toBe(before);
+  await zero.close();
+  const unlimited = await boot({ journalPath: path.join(workDir, "unlimited.ndjson") });
+  for (let index = 0; index < 5; index += 1) expect((await tryChallenge(unlimited)).ok).toBe(true);
+});
+
+test("offer の上限: 残り 1 枠に、標準入口と quote の入口が同時に来ても出る offer は 1 つ。既存の quote の再取得は上限に達していても同じ文書を返す", async () => {
+  const core = await boot({ config: configWithCap(1) });
+  const results = await Promise.all([tryChallenge(core), core.quote({ principalId: "alice", requestId: "req-a", routeId: ROUTE_ID }), tryChallenge(core), core.quote({ principalId: "bob", requestId: "req-b", routeId: ROUTE_ID })]);
+  expect(results.filter((r) => r.ok)).toHaveLength(1);
+  expect(results.filter((r) => !r.ok)).toEqual([CAP_REACHED, CAP_REACHED, CAP_REACHED]);
+  expect(rail.createCalls).toBe(1);
+  // 通ったのが quote の入口なら、同じ requestId の再取得は同じ文書（新しい offer ではない）。
+  const winner = results[1]!;
+  if (winner.ok) {
+    const again = await core.quote({ principalId: "alice", requestId: "req-a", routeId: ROUTE_ID });
+    expect(again).toMatchObject({ ok: true, quoteId: winner.quoteId });
+    expect(rail.createCalls).toBe(1);
+  }
+});
+
+test("offer の上限の表: delivered・unknown・settle の後の拒否は確定して数に入る（時間が経っても外れない）。settle の前に終わったものだけ外れる。再起動の後も同じ数", async () => {
+  // (1) delivered は確定。
+  let core = await boot({ config: configWithCap(1) });
+  let quote = await challenge(core);
+  expect(await buy(core, presentedFor(quote.offer))).toMatchObject({ kind: "outcome", outcome: { status: "delivered" } });
+  clockMs += 3_600_000;
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  await core.close();
+  core = await boot({ config: configWithCap(1) });
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  await core.close();
+
+  // (2) verify が答えない → unknown は確定（分からなければ外さない）。
+  journalPath = path.join(workDir, "unknown.ndjson");
+  core = await boot({ config: configWithCap(1) });
+  rail.verifyResult = "throw";
+  quote = await challenge(core);
+  expect(await buy(core, presentedFor(quote.offer))).toMatchObject({ kind: "outcome", outcome: { status: "unknown" } });
+  clockMs += 3_600_000;
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  await core.close();
+
+  // (3) verify の明示の拒否 = settle の前に終わった（`settleStarted: false`）→ 外れる。再起動の後も外れたまま。
+  journalPath = path.join(workDir, "verify.ndjson");
+  core = await boot({ config: configWithCap(1) });
+  rail.verifyResult = { isValid: false };
+  quote = await challenge(core);
+  expect(await buy(core, presentedFor(quote.offer))).toMatchObject({ kind: "outcome", outcome: { status: "awaiting_payment", code: "verify_failed" } });
+  expect((await rows()).at(-1)!.patch).toMatchObject({ settleStarted: false, reason: "verify_failed" });
+  await core.close();
+  core = await boot({ config: configWithCap(1) });
+  rail.verifyResult = { isValid: true };
+  quote = await challenge(core);
+
+  // (4) settle を呼んだ後の拒否は、理由が「settle の前」のものと同じ文字列でも外れない（行に印が無い）。
+  rail.settleResult = { outcome: "rejected", reason: "approval_expired" };
+  const refused = await buy(core, presentedFor(quote.offer));
+  expect(refused).toMatchObject({ kind: "outcome", outcome: { status: "awaiting_payment" } });
+  expect(rail.settleCalls).toBeGreaterThan(0);
+  const last = (await rows()).at(-1)!;
+  expect([last.event, last.patch["settleStarted"]]).toEqual(["source_failed", undefined]);
+  clockMs += 3_600_000;
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  await core.close();
+  core = await boot({ config: configWithCap(1) });
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+});
+
+test("offer の上限: 発行済みの offer を全部買っても上限を超えない。印の無い旧い source_failed の行は数に残る。送信元の tag が rail に渡る", async () => {
+  const core = await boot({ config: configWithCap(3) });
+  const offers = [await challenge(core), await challenge(core), await challenge(core)];
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  const outcomes = await Promise.all(offers.map((o, index) => buy(core, presentedFor(o.offer, { nonce: `0x${String(index + 1).padStart(64, "0")}` }))));
+  expect(outcomes.map((o) => (o.kind === "outcome" ? o.outcome.status : o.kind))).toEqual(["delivered", "delivered", "delivered"]);
+  expect([rail.settleCalls, outbound.payCalls]).toEqual([3, 3]);
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  // 送信元: 標準入口は source（無ければ principal）から tag を作る。同じ送信元は同じ tag、別の送信元は別の tag。
+  expect(new Set(rail.sourceTags).size).toBe(1);
+  expect(rail.sourceTags[0]).toMatch(/^[0-9a-f]{16}$/);
+  await core.close();
+
+  journalPath = path.join(workDir, "legacy-row.ndjson");
+  const next = await boot({ config: configWithCap(1) });
+  rail.sourceTags = [];
+  const a = await next.quoteStandard({ principalId: "alice", routeId: ROUTE_ID, source: "fwd:203.0.113.7" });
+  if (!a.ok) throw new Error("quote failed");
+  await next.close();
+  // 旧い形の行（印なし）を足す: settle の前か後か分からないので、数に残る。
+  const seq = (await rows()).length + 1;
+  await appendFile(journalPath, `${JSON.stringify({ seq, at: new Date().toISOString(), paymentId: a.paymentId, event: "source_failed", patch: { outcome: "not_sent", reason: "approval_expired" } })}\n`);
+  const restarted = await boot({ config: configWithCap(1) });
+  clockMs += 3_600_000;
+  expect(await restarted.quoteStandard({ principalId: "alice", routeId: ROUTE_ID, source: "fwd:198.51.100.9" })).toEqual(CAP_REACHED);
+  expect(rail.sourceTags).toHaveLength(1);
+});
+
+test("offer の上限: 購入が実行の途中（`created` のまま上流の照合を待っている）なら、承認の期限を過ぎても枠は空かない（後で unknown になっても二重に数えない）", async () => {
+  const core = await boot({ config: configWithCap(1) });
+  const quote = await challenge(core);
+  // 上流の読み直し（購入の最初の await）を止める。quote のときの読み取りは通す。
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const original = outbound.readChallenge.bind(outbound);
+  let reads = 0;
+  outbound.readChallenge = async () => {
+    reads += 1;
+    if (reads === 1) await held;
+    return original();
+  };
+  rail.verifyResult = "throw";
+  const purchase = buy(core, presentedFor(quote.offer));
+  while (reads === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+  // 承認の期限を過ぎた。intent はまだ `created` だが、購入は進行中。
+  clockMs += 61_000;
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  release!();
+  // 購入は verify まで進み、verify が答えないので unknown（確定して数に入る）。
+  expect(await purchase).toMatchObject({ kind: "outcome", outcome: { status: "unknown" } });
+  expect(await tryChallenge(core)).toEqual(CAP_REACHED);
+  expect(rail.createCalls).toBe(1);
 });

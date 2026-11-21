@@ -794,6 +794,53 @@ SubEtha の hosted 受信（`RAILS_ACTIVATION.subetha.inbound` は `false`）、
 **rollback の規則**: `b-10dd795` に戻すと FR-4.5 と診断・drain が外れるだけで、journal の形は読める（新しい行の種類は `subetha-exact` と標準入口のもので、hosted では書かれていない）。
 hosted で `subetha-exact` を有効にした後は、その有効化の設計が定める image より前には戻さない。
 
+### 2i. 受信レール `subetha-exact` と標準の x402 入口の、上限付きの実証 — **本番では無効**（`RAILS_ACTIVATION.subethaExact` の欄なし。有効化は G-4、owner の go）
+
+要件・設計: `docs/hosted-exact-enable-requirements.md`、`docs/hosted-exact-enable-design.md`。Router は SubEtha v2 の facilitator（testnet）の Provider `router-hosted` として Base Sepolia の zUSDC を受け、
+Provider A（x402、Base Sepolia USDC）に払う。1 件で買い手は 0.012 zUSDC、Router は 0.01 USDC。**採算は問わない実証**（withdraw の手数料は 1 回 約 0.009 zUSDC。`docs/subetha-exact-inbound-acceptance.md` §3.1）。
+
+**3 つの状態**（`tools/remote-mcp-config.ts`。image を作り直して `swap-image.sh` で入れ替える）:
+
+| 状態 | 設定 | 公開の挙動 |
+|---|---|---|
+| (i) 完全に無効 | `RAILS_ACTIVATION` に `subethaExact` の欄なし（または `inbound: false`） | 今と同じ。一覧に route なし、`GET /x402/v1/routes/…` は 404。env は読まない |
+| (ii) 有効 | `subethaExact: { inbound: true }`、`HOSTED_EXACT.maxCommitted` > 0 | 一覧に `md-zusdc-eth-snapshot`（`x402Url`・`demonstration`）。MCP の quote と、公開の `GET https://router.subethalabs.com/x402/v1/routes/md-zusdc-eth-snapshot/resource` |
+| (iii) 新規の受付だけ止める | `subethaExact: { inbound: true }`、`HOSTED_EXACT.maxCommitted: 0` | 新しい offer は 503。発行済みの注文への支払い・同じ credential の再送・結果の読み取り・complete の報告・inspect はできる |
+
+**G-4 の後に止めるときは (iii)**。(i) や古い image に戻すのは、下の inspect で未報告の complete と未解決の注文が 0 と確かめた後だけ（(i) は facilitator の設定を持たないので、残った注文の後始末ができない）。
+
+**上限**（`HOSTED_EXACT`。値を変えるのはここだけ）:
+
+| 上限 | 値 | 達したとき | 戻り方 |
+|---|---|---|---|
+| 実証の件数（offer の上限 `maxCommitted`） | 40（Router の実際の送金の上限 = 40 × 0.01 = 0.4 USDC） | 新しい offer は 503 `offer_cap_reached` | 未払いの offer の分は承認の期限で戻る。settle を始めた・結果の分からない購入の分は戻らない（値を上げて入れ替える） |
+| 注文の作成の総数 | 300 | 503 `limit_total` | 戻らない（値を上げて入れ替える） |
+| 未解決の注文 | 8 | 503 `limit_unresolved` + `Retry-After` | 注文の期限（300 秒）+ 60 秒 |
+| 毎分の作成 | 12 | 503 `limit_rate` | 1 分 |
+| 送信元ごとの占有 | 4（作成のたびに 2 つ分の余裕を求めるので、未払いの offer は同時に 3 つまで） | 429 `rate_limited`（`limit_source_unresolved`） | 同上。作成の応答を失った送信元は、運用者が片付けるまで作れない |
+| 送信元ごとの毎分の作成 | 3 | 429 `rate_limited`（`limit_source_rate`） | 1 分 |
+| 入口（ingress）の外側の守り | 送信元ごとに毎分 署名なし 12・署名付き 30、同時の転送 16 | 429／503 | メモリの中（再起動で戻る） |
+
+上限は**新しい注文の作成**を止めるもので、発行済みの注文への支払いと結果の読み取りは止めない。共有の予算への影響: 予約の最大は 300 × 0.01 = 3 USDC（Base Sepolia USDC の送信の区分の 0.3%）。
+
+**host に置くもの**（G-4 の前）:
+1. Provider token（**秘密**）: `/var/lib/subetha-router/secrets/subetha-exact.token`（directory 0700、file 0600、owner は container の uid 10001）。container からは `/app/runtime/secrets/subetha-exact.token`。
+   運び方: 手元の 0600 のファイルを host の一時の path へ写す → secrets の directory を 0700・uid 10001 で作る → token を 0600・uid 10001 で置く → 一時のファイルを消す。
+   値を argv・echo・log に出さない。照合は手元と host の sha256 を比べ、**一致・不一致だけ**を表示する。
+2. `/etc/subetha-router.env` に 2 行（どちらも秘密ではない。変更の前に `.bak-<時刻>` を取る）:
+   `SUBETHA_EXACT_FACILITATOR_URL=https://facilitator-testnet.subethalabs.com/p/router-hosted`、`SUBETHA_EXACT_TOKEN_FILE=/app/runtime/secrets/subetha-exact.token`。
+   (ii)／(iii) の image でこの 2 つが無ければ、入口は起動の前に固定文で止まる（`swap-image.sh` は旧コンテナに戻す）。
+3. wallet の鍵・POS key・view key は host に置かない（受け取りの確認と withdraw は運用者の手元）。
+
+**Caddy**: `/x402/...` は今の設定で ingress（8787）に届く（`/evm-facilitator/*` だけ別）。送信元は Caddy が `X-Forwarded-For` の末尾に足す接続元から決める。G-3 の前に host の Caddyfile を読んで確かめる（要件 AC-6）。
+
+**確かめること**（container の中。token は表示しない）:
+- 注文の一覧と facilitator との突き合わせ（読み取りだけ）: container の中で `npm run --silent subetha-exact:inspect -- --remote` を、env `ROUTER_JOURNAL_PATH=/app/runtime/journal.ndjson`・
+  `ROUTER_SUBETHA_EXACT_FACILITATOR_URL=https://facilitator-testnet.subethalabs.com/p/router-hosted`・`ROUTER_SUBETHA_EXACT_TOKEN_FILE=/app/runtime/secrets/subetha-exact.token` を付けて実行する。`unavailable` 0・`mismatches` 0 を確かめる。
+- token が log・journal・adapter の ledger・診断の記録に出ていないこと: token のファイルを pattern のファイルとして渡す固定文字列の照合（`grep -c -F -f <token のファイル>`）で、**件数だけ**を出す。0 であること。
+
+**買い手への案内**（有効なときだけ一覧と MCP の案内に出る）: 実証で上限があり尽きたら止まること、`x402Url` には承認の段が無いこと、標準クライアント（`@x402/core` 2.28.0）は zUSDC を `spendControls.allowedAssets` に足す必要があること、200 以外は未払いの証明ではないこと。
+
 ## 3. 動作確認
 
 ```sh
