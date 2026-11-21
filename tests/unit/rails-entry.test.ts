@@ -2,6 +2,7 @@
  * 本番の入口の多レール（`tools/rails-entry.ts`・`tools/remote-router-process.ts` の能力・`tools/rails-acceptance-run.ts` の選択肢。
  * multirail 設計 §3・§8、タスク T8-b）。**鍵は乱数**。接続はしない（配線の組み立てと offer の発行まで）。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -25,7 +26,7 @@ import { getBase58Decoder } from "@solana/kit";
 import { createRealEvmCapability } from "../../tools/real-evm-capability.js";
 import { createRealMppCapability } from "../../tools/real-mpp-capability.js";
 import { ARC_RECEIVER_KEY_ENV } from "../../tools/real-seller-proof-capability.js";
-import { INBOUND_ARC, INBOUND_SOL, OUTBOUND_SOL, RAIL_UPSTREAMS, railActive, RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { INBOUND_ARC, INBOUND_SOL, OUTBOUND_SOL, RAIL_UPSTREAMS, railActive, RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION, RAILS_NONE, ROUTE_ARC, ROUTE_SOL, routerConfigOf, type RailsActivation } from "../../tools/remote-mcp-config.js";
 import { HostPlanError, hostPlanOf, listenMcp, publicJournalPathOf, type HostOptions,
   hasX402Outbound,
 } from "../../tools/remote-mcp.js";

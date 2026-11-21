@@ -2,6 +2,7 @@
  * EVM testnet 4 つの専用の設定生成・入口・子 process の能力（`docs/evm-testnets-x402-design.md` §3.5・§3.7、FR-E5・FR-E6、AC-E5、タスク E-4）。
  * 公開の生成・子・能力に EVM testnet のものが混ざらないこと（golden の補い。`tests/unit/config-golden.test.ts` は変えない）。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,7 +20,7 @@ import {
   evmTestnetChainsOf,
   evmTestnetsConfigOf,
   INBOUND,
-  RAILS_ACTIVATION,
+  RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION,
   RAILS_NONE,
   UPSTREAM_X402,
 } from "../../tools/remote-mcp-config.js";

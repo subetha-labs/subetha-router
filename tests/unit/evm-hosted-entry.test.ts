@@ -9,6 +9,7 @@
  * - `deploy/swap-image.sh`: 新しいコンテナの `docker run` が `-p 127.0.0.1:8611:8611` を持つ（静的と、偽の docker での実行）
  * 鍵は固定の合成値。外へは接続しない。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { hasTimeout, runSwap as runSwapIn } from "../fixtures/swap-image-harness.js";
 import { acceptanceOptionsOf } from "../../tools/rails-acceptance-run.js";
 import { activationFromEnv, activationToEnv, RAILS_ACTIVATION_ENV } from "../../tools/rails-entry.js";
-import { EVM_TESTNETS, RAILS_ACTIVATION, RAILS_NONE, type EvmRailsActivation, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { EVM_TESTNETS, RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION, RAILS_NONE, type EvmRailsActivation, type RailsActivation } from "../../tools/remote-mcp-config.js";
 import {
   EVM_FACILITATOR_PORT,
   EVM_FACILITATOR_PROCESS,

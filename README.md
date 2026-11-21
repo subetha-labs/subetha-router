@@ -340,7 +340,17 @@ and the following remain behind separate gates, **not done**.
   to start unless `delivery capabilities` declares `proxy`; **until the lab ships a proxy-capable `delivery`, list every private
   profile in `private.mpcProfiles`**.
 
-## Inbound as a Provider of the SubEtha v2 facilitator (`subetha-exact`, local testnet only)
+## Inbound as a Provider of the SubEtha v2 facilitator (`subetha-exact`, testnet)
+
+**On the hosted Router** this rail runs as a **capped demonstration** (when `subetha_router_list_routes` shows the route
+`md-zusdc-eth-snapshot` with a `demonstration` field; if it is missing, it does not exist for you). You pay 0.012 zUSDC on Base
+Sepolia and reach the x402 provider. Two ways to buy: the usual MCP steps (quote, approval, `npm run sign`, purchase), or a standard
+x402 client on the public URL in `x402Url` (no Router token, no quote; see "Buying with a standard x402 client" below). The
+demonstration has hard limits (a purchase count, a total number of orders, and per-source limits): when they are reached new quotes
+and new 402 offers stop with `503` or `429` and do not come back by themselves; `demonstration.acceptingNewOffers: false` means it is
+stopped. Orders already issued can still be paid and read. Operator procedure and the limits: `docs/DEPLOY.md` §2i.
+
+The rest of this section describes running the rail on your own **local** Router.
 
 Since 2026-11-20 a **local** Router can take **standard x402 `exact` (EIP-3009) payments in zUSDC on Base Sepolia** as a
 registered Provider (tenant) of the multi-tenant SubEtha v2 facilitator: the quote creates a facilitator order (the
@@ -349,7 +359,7 @@ sign), and the Router settles, releases and completes the order before and after
 `sourceRail: "subetha-exact"` on a route (no `payTo`, amount at most 20,000), point `ROUTER_SUBETHA_EXACT_FACILITATOR_URL`
 at your tenant and `ROUTER_SUBETHA_EXACT_TOKEN_FILE` at a 0600 file holding the Provider token. Design and
 requirements: `docs/subetha-exact-inbound-design.md`, `docs/subetha-exact-inbound-requirements.md`; the registration and
-the funded run are separate owner gates recorded in `docs/subetha-exact-inbound-acceptance.md`. **Not on the hosted Router.**
+the funded run are separate owner gates recorded in `docs/subetha-exact-inbound-acceptance.md`.
 
 Since the same change, on **every** rail, a quote that was already used for a purchase attempt is no longer re-presented
 for signing: re-quoting its `requestId` returns `closed: true` with the current `status` and without `source.offer`, and
@@ -366,7 +376,11 @@ A `subetha-exact` route also has an entry that an unmodified x402 v2 client can 
 `PAYMENT-REQUIRED` header (one `exact` requirement: zUSDC on Base Sepolia, the facilitator order's `payTo`), the client signs
 EIP-3009 and resends with `PAYMENT-SIGNATURE`, and the Router settles, pays the upstream provider and answers **200** with the
 upstream JSON and a `PAYMENT-RESPONSE` header. `GET /v1/routes` shows the URL as `x402Url`. Design and requirements:
-`docs/x402-standard-entry-design.md`, `docs/x402-standard-entry-requirements.md`. Local testnet only; not on the hosted Router.
+`docs/x402-standard-entry-design.md`, `docs/x402-standard-entry-requirements.md`. Testnet only.
+
+On the **hosted** Router the same entry is public at `https://router.subethalabs.com/x402/v1/routes/md-zusdc-eth-snapshot/resource`
+while the demonstration is listed: **no Router principal headers are needed there** (the example below shows a local Router, which
+requires them), and the hosted limits apply (`429` per source, `503` when the demonstration's limits are reached).
 
 ```ts
 import { x402Client, wrapFetchWithPayment } from "@x402/fetch";

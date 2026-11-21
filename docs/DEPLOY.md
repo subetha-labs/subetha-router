@@ -809,6 +809,13 @@ Provider A（x402、Base Sepolia USDC）に払う。1 件で買い手は 0.012 z
 
 **G-4 の後に止めるときは (iii)**。(i) や古い image に戻すのは、下の inspect で未報告の complete と未解決の注文が 0 と確かめた後だけ（(i) は facilitator の設定を持たないので、残った注文の後始末ができない）。
 
+**image を作り直さずに止める・再開する**: host の env `SUBETHA_EXACT_MAX_COMMITTED`（任意。0〜100000 の整数）が、実証の件数の定数を上書きする。`0` で (iii)（受付停止）、行を消すと定数の値に戻る。
+env を変えた後は、同じ image で container を作り直す（`swap-image.sh` に今の image の tag を渡す）。
+
+**有効化の入れ替えは 2 段で行う**（`swap-image.sh` は公開の入口を開けた後に最後の確認をするので、そこで失敗して旧 image に戻ると、開いていた数秒の間に作られた注文が、facilitator の設定を持たない image の下に残り得る）:
+1. env に `SUBETHA_EXACT_MAX_COMMITTED=0` を入れた状態で、(ii) の image に入れ替える。この段では新しい注文は 1 つも作られない（受付停止）ので、失敗して旧 image に戻っても残る注文は無い。
+2. 入れ替えを確かめた後（一覧に route・`acceptingNewOffers: false`、新しい offer は 503）、env からその行を消し、同じ image で container を作り直す。この段の rollback 先は 1 の container（受付停止・adapter あり）なので、注文が残っても後始末できる。
+
 **上限**（`HOSTED_EXACT`。値を変えるのはここだけ）:
 
 | 上限 | 値 | 達したとき | 戻り方 |
@@ -825,14 +832,17 @@ Provider A（x402、Base Sepolia USDC）に払う。1 件で買い手は 0.012 z
 
 **host に置くもの**（G-4 の前）:
 1. Provider token（**秘密**）: `/var/lib/subetha-router/secrets/subetha-exact.token`（directory 0700、file 0600、owner は container の uid 10001）。container からは `/app/runtime/secrets/subetha-exact.token`。
-   運び方: 手元の 0600 のファイルを host の一時の path へ写す → secrets の directory を 0700・uid 10001 で作る → token を 0600・uid 10001 で置く → 一時のファイルを消す。
+   運び方: 手元の 0600 のファイルを host の一時の path へ写す（**一時のファイルも、運ぶ間ずっと 0600**: 先に 0700 の一時の directory を作り、その中へ写す）→ secrets の directory を 0700・uid 10001 で作る → token を 0600・uid 10001 で置く → 一時のファイルと directory を消す。
+   token の形だけが正しくて中身が違う（別の tenant・古い token）場合、入口は起動する（起動時に facilitator へ認証の確認はしない）。その場合 quote と 402 は `source_offer_refused unauthorized`（502）になる: **入れ替えの後に、注文の一覧の読み取り（inspect）か quote を 1 回行って確かめる**。
    値を argv・echo・log に出さない。照合は手元と host の sha256 を比べ、**一致・不一致だけ**を表示する。
 2. `/etc/subetha-router.env` に 2 行（どちらも秘密ではない。変更の前に `.bak-<時刻>` を取る）:
    `SUBETHA_EXACT_FACILITATOR_URL=https://facilitator-testnet.subethalabs.com/p/router-hosted`、`SUBETHA_EXACT_TOKEN_FILE=/app/runtime/secrets/subetha-exact.token`。
    (ii)／(iii) の image でこの 2 つが無ければ、入口は起動の前に固定文で止まる（`swap-image.sh` は旧コンテナに戻す）。
 3. wallet の鍵・POS key・view key は host に置かない（受け取りの確認と withdraw は運用者の手元）。
 
-**Caddy**: `/x402/...` は今の設定で ingress（8787）に届く（`/evm-facilitator/*` だけ別）。送信元は Caddy が `X-Forwarded-For` の末尾に足す接続元から決める。G-3 の前に host の Caddyfile を読んで確かめる（要件 AC-6）。
+**Caddy**: `/x402/...` は今の設定で ingress（8787）に届く（`/evm-facilitator/*` だけ別）。送信元は ingress が `X-Forwarded-For` の**最後の値**から決める。今の Caddyfile は `trusted_proxies` を持たないので、
+Caddy は買い手が送った `X-Forwarded-For` を信頼せず、接続元の address で置き換える（最後の値 = 接続元）。`trusted_proxies` を足す・Caddy の前に別の proxy を置くときは、最後の値が買い手に決められないことを確かめ直す。
+site に `log` の指定は無く access log は出ていないが、それは「Caddy のどの log にも要求のヘッダーが出ない」ことの保証ではない: Caddy の log の設定を変えるときは `Payment-Signature` を落とす filter を入れる。
 
 **確かめること**（container の中。token は表示しない）:
 - 注文の一覧と facilitator との突き合わせ（読み取りだけ）: container の中で `npm run --silent subetha-exact:inspect -- --remote` を、env `ROUTER_JOURNAL_PATH=/app/runtime/journal.ndjson`・
@@ -840,6 +850,18 @@ Provider A（x402、Base Sepolia USDC）に払う。1 件で買い手は 0.012 z
 - token が log・journal・adapter の ledger・診断の記録に出ていないこと: token のファイルを pattern のファイルとして渡す固定文字列の照合（`grep -c -F -f <token のファイル>`）で、**件数だけ**を出す。0 であること。
 
 **買い手への案内**（有効なときだけ一覧と MCP の案内に出る）: 実証で上限があり尽きたら止まること、`x402Url` には承認の段が無いこと、標準クライアント（`@x402/core` 2.28.0）は zUSDC を `spendControls.allowedAssets` に足す必要があること、200 以外は未払いの証明ではないこと。
+
+**記録（2026-11-21）**:
+- **G-0（Provider の登録）**: hosted 用の Provider `router-hosted`（`regId` `reg-10-ad63a22a`、EOA `0x52bB2b779f170740AFC90827DC7F1C4caA2c6DD1`）を self-service で登録。最初の応答は 202 `reserving` で、同じ要求の再送（`register --resume`）で 201 `pending` になった。
+  probe は 1 回（tx `0x291c9ab7b7206d6773592e20eb5702ecf399d069156f024dfb85ede67e02864d`）、activate で `active`。facilitator の Provider の枠は 4/6。鍵・POS key・token は運用者の手元だけ（host には token のファイルだけを G-4 で置く）。
+- **G-2（手元の hosted の入口、testnet）**: 本物の `startHost`（子も本物）を実証を有効にして起動し、tenant `router-hosted` に対して、標準の x402 クライアントで 200（7.1 秒。`paymentId` `aa287f80-29c1-47ed-a7cf-8fcfee6bdbfd`）、
+  MCP の quote → 署名 → purchase で delivered（`4ace6cf7-9aaf-4b14-a314-b058c1fee006`）、同じ `requestId` の再 quote は closed。SIGTERM で `drain: complete`。inspect `--remote` は 2 件・未解決 0・不一致 0。token の照合は log・journal・ledger とも 0 件。
+- **G-3（無効のまま本番に入れ替え）**: main `4acc8fc` の image `b-4acc8fc`（手元で build、layer の hash 一致）を、**今の版の `swap-image.sh`**（drain の証拠つき）で入れ替え: 05:06:03Z 開始、05:06:14Z 終了、exit 0、`entry run id read`・`previous container drained`、
+  journal の先頭 443,744 バイトは不変、egress ok、公開の `/healthz` ok、`could not start` 0 行。rollback は `subetha-router-prev-20261121T050603Z`（`b-6aa3f20`）。
+  公開の一覧は入れ替えの前後で **byte 一致**。`GET /x402/v1/routes/md-zusdc-eth-snapshot/resource` は 404（`PAYMENT-SIGNATURE` 付きでも 404）。既存の route の購入 1 回（`md-mpp-eth-snapshot`、`3f1d1018-ab68-4c00-a65c-7e32bea30f9e`）が delivered。
+  host の Caddyfile: `router.subethalabs.com` は `/evm-facilitator/*` だけを 8611 へ、それ以外を `reverse_proxy 127.0.0.1:8787`（`trusted_proxies` の設定なし = 買い手が送った `X-Forwarded-For` は信頼せず、接続元で置き換える）。
+  8787 と 8611 は 127.0.0.1 だけに bind。site に `log` の指定は無い（access log は出ていない = 要求のヘッダーは Caddy の log に残らない）。
+- **G-4（有効化）**: この節の表題が「本番で有効」に変わったときが有効化の後。公開の定数 `RAILS_ACTIVATION.subethaExact` は `true`（golden `tests/fixtures/config-golden/public-exact.json`。以前の公開の生成 `public.json` に足しただけであることは `tests/unit/hosted-exact-config.test.ts`）。
 
 ## 3. 動作確認
 

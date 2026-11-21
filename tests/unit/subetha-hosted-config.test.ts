@@ -2,6 +2,7 @@
  * hosted の受信レグの SubEtha（zUSDC）の設定生成（設計 `docs/subetha-hosted-inbound-design.md` §4.1・§4.2・§6.1、タスク T1）。
  * 切り替えは `RailsActivation.subetha.inbound` の 1 つ。無効なら route も env も無く、facilitator のホスト名は有効化に関係なく動的上流の拒否に入る（FR-3.4）。
  */
+// 公開の定数から `subethaExact`（上限付きの実証。2026-11-21 の G-4）を除いた形を、この試験の「公開の定数」として使う: 実証の追加の前と同じことを見続ける（追加の分は hosted-exact-config.test.ts）。
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ import { SUBETHA_ZERC20_ASSETS } from "../../src/shared/networks.js";
 import {
   INBOUND,
   INBOUND_ZUSDC,
-  RAILS_ACTIVATION,
+  RAILS_ACTIVATION_BEFORE_EXACT as RAILS_ACTIVATION,
   RAILS_DISABLED,
   RAILS_NONE,
   ROUTE_ZUSDC_TO_MPP,
