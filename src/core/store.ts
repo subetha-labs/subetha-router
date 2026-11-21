@@ -466,7 +466,7 @@ function reduce(current: Intent, event: string, patch: Patch, at: string): Inten
       return {
         ...base,
         status: "source_failed",
-        source: { ...current.source, outcome: asString(patch["outcome"], "failed"), ...(positiveInt(until) ? { mayStillSettleUntil: until } : {}) },
+        source: { ...current.source, outcome: asString(patch["outcome"], "failed"), ...(positiveInt(until) ? { mayStillSettleUntil: until } : {}), ...(patch["settleStarted"] === false ? { settleStarted: false } : {}) },
         terminalReason: asString(patch["reason"], current.terminalReason ?? ""),
       };
     }

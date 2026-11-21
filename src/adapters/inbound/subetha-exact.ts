@@ -93,6 +93,8 @@ export interface SubethaExactInboundOptions {
   /** `<dirname(journalPath)>/subetha-exact`。 */
   readonly ledgerDir: string;
   readonly limits: SubethaExactLimits;
+  /** 答えの得られなかった verify を、offer の種類に関わらず例外にする（core が unknown と記録する。設計 §3.1）。無ければ標準入口の offer だけ。 */
+  readonly unansweredVerifyIsUnknown?: boolean;
   readonly offerSeconds?: number;
   readonly timeouts?: Partial<SubethaExactTimeouts>;
   /** 試験の時計（ms）。 */
@@ -116,6 +118,8 @@ export const SUBETHA_EXACT_SCHEME = "exact";
 /** 標準の x402 クライアント用の入口の offer の印（`docs/x402-standard-entry-design.md` §3）。 */
 const STANDARD_ENTRY = "x402" as const;
 const isStandardOffer = (offer: InboundOffer): boolean => offer.extra["entry"] === STANDARD_ENTRY;
+/** tag を渡さない呼び出しを 1 つの送信元として数えるための固定の tag（送信元ごとの上限が設定にあるときだけ使う）。 */
+const NO_SOURCE_TAG = "0000000000000000";
 const ISSUED_EXTRA_KEYS = ["name", "version", "challengeNonce", "expiresAt", "routeBinding", "fundsMoveOnCredential"] as const;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 const DIGITS = /^[0-9]{1,30}$/;
@@ -276,6 +280,26 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
 
   async function createOfferLocked(request: CreateOfferRequest, requester: NonNullable<CreateOfferRequest["requester"]>, ledger0: SubethaExactLedger): Promise<InboundOffer> {
     const nowMs = now();
+    /*
+     * 送信元ごとの上限（`docs/hosted-exact-enable-design.md` §3。設定に欄があるときだけ）。全体の枠より前に見る。facilitator は呼ばない。
+     * 結果の分からない作成を持つ送信元は、それが片付くまで作れない（後から注文が見つかると attempt 1 + 注文 1 を占めるため）。
+     */
+    const rawTag = requester.sourceTag;
+    const sourceTag = typeof rawTag === "string" && /^[0-9a-f]{16}$/.test(rawTag) ? rawTag : NO_SOURCE_TAG;
+    const perSourceUnresolved = options.limits.maxUnresolvedPerSource;
+    const perSourceRate = options.limits.requestsPerMinutePerSource;
+    const perSourceOn = perSourceUnresolved !== undefined || perSourceRate !== undefined;
+    /**
+     * 1 つの作成は、応答を失って後から注文が見つかると **attempt 1 + 注文 1 の 2 つ**を占め得る。だから作成の前に 2 つ分の余裕を求める
+     * （`今の占有 + 2 ≤ 上限`）。こうすると、応答を失った後に注文が見つかっても、その送信元の占有は上限を超えない。
+     */
+    const checkSource = (): void => {
+      if (!perSourceOn) return;
+      const usage = ledger0.sourceUsage(sourceTag, nowSec(), nowMs - 60_000);
+      if (perSourceUnresolved !== undefined && (usage.unknownCreation || usage.unresolved + 2 > perSourceUnresolved)) throw new InboundOfferError("source_offer_unavailable", "limit_source_unresolved", 300_000);
+      if (perSourceRate !== undefined && usage.recent >= perSourceRate) throw new InboundOfferError("source_offer_unavailable", "limit_source_rate", 60_000);
+    };
+    checkSource();
     if (ledger0.totalRequests() >= options.limits.maxRequestsTotal) {
       note("subetha-exact: total request limit reached; raise subethaExact.limits.maxRequestsTotal only as an operator decision");
       throw new InboundOfferError("source_offer_unavailable", "limit_total");
@@ -287,12 +311,14 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
         note("subetha-exact: unresolved requests at the limit; inspect with the operator tool");
         throw new InboundOfferError("source_offer_unavailable", "limit_unresolved");
       }
+      // 照会で見つかった注文は、この送信元の占有を増やし得る: 見つけた後の数でもう一度確かめる。
+      checkSource();
     }
     const resourceDigest = resourceDigestOf(request.routeBinding);
     const requesterDigest = requesterDigestOf(ledger0.salt, requester.principalId, requester.requestId);
     const attemptId = randomBytes(16).toString("hex");
     try {
-      await ledger0.append(attemptId, "requested", { requesterDigest, resourceDigest, routeId: request.routeId, amount: request.amount, atMs: nowMs });
+      await ledger0.append(attemptId, "requested", { requesterDigest, resourceDigest, routeId: request.routeId, amount: request.amount, atMs: nowMs, ...(perSourceOn || sourceTag !== NO_SOURCE_TAG ? { sourceTag } : {}) });
     } catch {
       note("subetha-exact: ledger unavailable; refusing new offers until restart");
       throw new InboundOfferError("source_offer_unavailable", "ledger_unavailable");
@@ -461,7 +487,8 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
         // facilitator が 200 で拒んだ場合だけ `isValid: false`。印の無い offer は今までどおり全て `isValid: false`。
         // 「答えた」と読むのは 200 で `isValid` が boolean のときだけ（`{}`・`null`・文字列の `isValid` は答えではない）。
         const answered = result.kind === "response" && result.status === 200 && isRecord(result.json) && typeof result.json["isValid"] === "boolean";
-        if (isStandardOffer(offer) && !answered) throw new Error("subetha-exact: verify unanswered");
+        // hosted（`unansweredVerifyIsUnknown: true`）では quote の入口の offer にも同じ規則（`docs/hosted-exact-enable-design.md` §3.1）。欄が無くても標準入口の offer は今までどおり。
+        if ((isStandardOffer(offer) || options.unansweredVerifyIsUnknown === true) && !answered) throw new Error("subetha-exact: verify unanswered");
         return { isValid: remote === "valid", mayStillSettleUntil };
       });
     },

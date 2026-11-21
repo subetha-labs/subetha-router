@@ -303,8 +303,8 @@ export interface RouterCore {
    * 所有 principal・経路一致のときだけ。journal には何も書かない。持たない rail は `undefined`。
    */
   disclosureFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): number | undefined;
-  /** 標準の x402 クライアント用の入口（`docs/x402-standard-entry-design.md` §3、§4）。呼ぶたびに新しい注文を作る。 */
-  quoteStandard(request: { readonly principalId: string; readonly routeId: string }): Promise<StandardQuoteOutcome>;
+  /** 標準の x402 クライアント用の入口（`docs/x402-standard-entry-design.md` §3、§4）。呼ぶたびに新しい注文を作る。`source` は送信元の識別（無ければ principal）。 */
+  quoteStandard(request: { readonly principalId: string; readonly routeId: string; readonly source?: string }): Promise<StandardQuoteOutcome>;
   purchaseStandard(request: { readonly principalId: string; readonly routeId: string; readonly presented: StandardPresented }): Promise<StandardPurchaseOutcome>;
   /** 秘匿購入（設計 §2）。設定が無ければ `private_disabled`。 */
   privateQuote(request: { readonly principalId: string; readonly requestId: string; readonly profileId: string; readonly intentB64: string; readonly source?: string }): Promise<PrivateQuoteOutcome>;
@@ -531,6 +531,22 @@ function safeReason(value: unknown, fallback: string): string {
   return typeof value === "string" && SAFE_REASONS.has(value) ? value : fallback;
 }
 
+/** 送信元の tag（`docs/hosted-exact-enable-design.md` §3）: 生の値を記録に残さないための短い hash。 */
+export function sourceTagOf(source: string): string {
+  return createHash("sha256").update(`x402e-src-v1\u0000${source}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * offer の上限の数に入る intent か（`docs/hosted-exact-enable-design.md` §2 の表）。入らないのは「Router はこの offer で settle を始めない」と確定したものだけ:
+ * 承認の期限を過ぎた `created`、`settleStarted: false` の印のある `source_failed`。分からないもの（印の無い `source_failed`・`unknown`）は入る。
+ * 外れることは未払いの証明ではない（Router の持ち出しが起こらないことだけを根拠にする）。
+ */
+export function countsTowardOfferCap(intent: Intent, nowMs: number): boolean {
+  if (intent.status === "created") return !(intent.approvalDeadlineMs > 0 && nowMs >= intent.approvalDeadlineMs);
+  if (intent.status === "source_failed") return intent.source.settleStarted !== false;
+  return true;
+}
+
 /** 標準入口の quote か（offer の印。`created` の行に残るので再起動の後も同じ）。 */
 function isStandardIntent(intent: Intent): boolean {
   return intent.source.offer.extra["entry"] === "x402";
@@ -701,6 +717,36 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return { ok: false, code: "request_id_conflict" };
     }
 
+    /*
+     * offer の上限（`docs/hosted-exact-enable-design.md` §2）: 新しい offer を出す前に、**await を挟まない 1 区間**で数えて予約する（両方の入口が同じ route の数を共有する）。
+     * 既存の quote の再取得（上の分岐）は対象外。予約は発行が終わるまで持ち、その時点で intent が store にあれば数に入っている。
+     */
+    const cap = route.offerCap?.maxCommitted;
+    if (cap === undefined) return issueQuote(request, route);
+    const issuingNow = issuing.get(route.routeId) ?? 0;
+    // 進行中の購入（`created` のまま上流の照合などを待っている）は、承認の期限を過ぎても数に残す: その後に `source_pending` → `unknown` と進んでも、枠が二重に使われない。
+    const committed = store.all().filter((intent) => intent.routeId === route.routeId && intent.dynamic === undefined && (countsTowardOfferCap(intent, now()) || activePurchases.has(intent.quoteId))).length;
+    if (committed + issuingNow >= cap) return { ok: false, code: "source_offer_unavailable", reason: "offer_cap_reached" };
+    issuing.set(route.routeId, issuingNow + 1);
+    try {
+      return await issueQuote(request, route);
+    } finally {
+      const left = (issuing.get(route.routeId) ?? 1) - 1;
+      if (left <= 0) issuing.delete(route.routeId);
+      else issuing.set(route.routeId, left);
+    }
+  }
+
+  /** 発行の途中の offer の数（route ごと。offer の上限の予約）。 */
+  const issuing = new Map<string, number>();
+  /** 実行の途中の静的購入の quoteId（offer の上限の数え方で、期限を過ぎた `created` を「進行中」として残すため）。 */
+  const activePurchases = new Set<string>();
+  /**
+   * settle の前に終わったことの印（`docs/hosted-exact-enable-design.md` §2）。**`subetha-exact` の route の行にだけ**付ける（ほかの rail の journal の行は今までどおり）。
+   */
+  const preSettleMark = (intent: Intent): { readonly settleStarted?: false } => (resolveRoute(config, intent.routeId)?.sourceRail === "subetha-exact" ? { settleStarted: false } : {});
+
+  async function issueQuote(request: QuoteRequest, route: NonNullable<ReturnType<typeof resolveRoute>>): Promise<QuoteOutcome> {
     // 先に上流を quote（純粋読取・無課金）してから受信 offer を発行する。
     const offers = await options.outbound.readChallenge(route.routeId);
     const selectedOffer = selectOffer(offers, route);
@@ -718,7 +764,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         routeBinding: routeBindingOf(route),
         nowMs: now(),
         // quote の要求の識別（`subetha-exact` が facilitator の注文の requester を決定的に導く。他の rail は読まない。設計 §4.1）。
-        requester: { principalId: request.principalId, requestId: request.requestId },
+        // 送信元の tag は `subetha-exact` の route にだけ渡す（ほかの rail に渡す値は今までどおり）。
+        requester: { principalId: request.principalId, requestId: request.requestId, ...(route.sourceRail === "subetha-exact" ? { sourceTag: sourceTagOf(request.source ?? request.principalId) } : {}) },
         ...(request.entry === "x402" ? { entry: "x402" as const } : {}),
       });
     } catch (error) {
@@ -867,7 +914,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     const after = store.byQuoteId(quoteId);
     if (after !== undefined && after.status === "created") {
       const reason = typeof outcome.code === "string" && /^[a-z_]{1,64}$/.test(outcome.code) ? outcome.code : "not_started";
-      await store.append(after.paymentId, "source_failed", { outcome: "not_sent", reason });
+      await store.append(after.paymentId, "source_failed", { ...preSettleMark(after), outcome: "not_sent", reason });
       const recorded = store.byQuoteId(quoteId);
       return withPayer(withDisclosure(recorded === undefined ? outcome : currentOutcome(recorded)));
     }
@@ -909,9 +956,14 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return outcomeOf("rejected", "unknown_quote");
     }
     // 購入の全体の診断の scope（§12.6）。sink が無ければ scope を作らずそのまま動かす。
-    return withPurchaseDiagnostics(options.diagnostics, { paymentId: intent.paymentId, quoteId: intent.quoteId, routeId: intent.routeId, promoted: true }, (diag) =>
-      purchaseStatic(intent, request, diag),
-    );
+    activePurchases.add(intent.quoteId);
+    try {
+      return await withPurchaseDiagnostics(options.diagnostics, { paymentId: intent.paymentId, quoteId: intent.quoteId, routeId: intent.routeId, promoted: true }, (diag) =>
+        purchaseStatic(intent, request, diag),
+      );
+    } finally {
+      activePurchases.delete(intent.quoteId);
+    }
   }
 
   async function purchaseStatic(intent: Intent, request: PurchaseRequest, diag: PurchaseDiagnostics): Promise<PurchaseOutcome> {
@@ -1025,7 +1077,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     try {
       stillOffered = await readAndMatchDestination(intent);
     } catch {
-      await store.append(intent.paymentId, "source_failed", {
+      await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent),
         outcome: "not_sent",
         reason: "offer_unavailable",
         ...windowPatch,
@@ -1037,7 +1089,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       };
     }
     if (!stillOffered) {
-      await store.append(intent.paymentId, "source_failed", {
+      await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent),
         outcome: "not_sent",
         reason: "offer_changed",
         ...windowPatch,
@@ -1057,7 +1109,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         enough = false;
       }
       if (!enough) {
-        await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "operator_funds_unavailable", ...windowPatch });
+        await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent), outcome: "not_sent", reason: "operator_funds_unavailable", ...windowPatch });
         return { paymentId: intent.paymentId, status: "awaiting_payment", code: "operator_funds_unavailable" };
       }
     }
@@ -1089,7 +1141,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     const precise = typeof preciseRaw === "number" && Number.isSafeInteger(preciseRaw) && preciseRaw > 0 ? preciseRaw : window;
     const precisePatch = precise === undefined ? {} : { mayStillSettleUntil: precise };
     if (verified === null || typeof verified !== "object" || verified.isValid !== true) {
-      await store.append(intent.paymentId, "source_failed", {
+      await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent),
         outcome: "rejected",
         reason: "verify_failed",
         ...precisePatch,
@@ -1117,7 +1169,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       beforeSettleMs >= intent.source.offer.extra.expiresAt * 1000
     ) {
       if (fundsMoved) return paidButUnsettled();
-      await store.append(intent.paymentId, "source_failed", {
+      await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent),
         outcome: "not_sent",
         reason: "approval_expired",
         ...precisePatch,
@@ -1153,7 +1205,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     });
     if (!reservation.ok) {
       if (fundsMoved) return paidButUnsettled();
-      await store.append(intent.paymentId, "source_failed", {
+      await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent),
         outcome: "not_sent",
         reason: reservation.reason,
         ...precisePatch,
@@ -1168,7 +1220,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     const settleAtMs = now();
     if (settleAtMs >= intent.approvalDeadlineMs || settleAtMs >= intent.source.offer.extra.expiresAt * 1000) {
       if (fundsMoved) return paidButUnsettled();
-      await store.append(intent.paymentId, "source_failed", { outcome: "not_sent", reason: "approval_expired", ...precisePatch });
+      await store.append(intent.paymentId, "source_failed", { ...preSettleMark(intent), outcome: "not_sent", reason: "approval_expired", ...precisePatch });
       return { paymentId: intent.paymentId, status: "awaiting_payment", code: "approval_expired" };
     }
     await stop("before_source_settle", intent.paymentId);
@@ -1598,7 +1650,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       // 対象は `subetha-exact` の静的 route だけ。手元の署名の検査を持たない受信 port では使えない（設計 §4.4 (a)）。
       if (route === undefined || route.sourceRail !== "subetha-exact" || typeof options.inbound.checkSignature !== "function") return { ok: false, code: "unknown_route" };
       const requestId = `x402e:${randomBytes(16).toString("hex")}`;
-      const outcome = await withKey(`quote\u0000${input.principalId}\u0000${requestId}`, () => quoteLocked({ principalId: input.principalId, requestId, routeId: input.routeId, entry: "x402" }));
+      const outcome = await withKey(`quote\u0000${input.principalId}\u0000${requestId}`, () =>
+        quoteLocked({ principalId: input.principalId, requestId, routeId: input.routeId, entry: "x402", ...(input.source === undefined ? {} : { source: input.source }) }),
+      );
       if (!outcome.ok) return outcome;
       // rail が印を付けなかった offer は標準 offer として出さない（quote は残るが、どの入口からも買えない）。
       if (outcome.source.offer.extra["entry"] !== "x402") return { ok: false, code: "quote_failed" };

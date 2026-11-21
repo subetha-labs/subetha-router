@@ -22,6 +22,8 @@ export interface AttemptView {
   readonly attemptId: string;
   readonly requesterDigest: string;
   readonly resourceDigest: string;
+  /** 送信元の tag（`requested` の行。無い行は旧い行か、tag を渡さない構成）。 */
+  readonly sourceTag?: string;
   readonly routeId: string;
   readonly amount: string;
   readonly atMs: number;
@@ -72,10 +74,18 @@ export interface SubethaExactLedger {
   /** 結び付かない `discovered`（どの attempt も `created` に持たない注文）で、期限 + 猶予の内のもの。 */
   unresolvedDiscovered(nowSec: number): readonly DiscoveredOrder[];
   unresolvedCount(nowSec: number): number;
+  /**
+   * 送信元ごとの占有（`docs/hosted-exact-enable-design.md` §3）。全体の未解決と同じ単位（attempt + 結び付かない `discovered`）で、その tag の分を数える。
+   * `discovered` の注文は、同じ pair の `requested` の行の tag が**ちょうど 1 種類で欠けが無い**ときだけその tag に帰属し、それ以外は全ての送信元に数える。
+   * `unknownCreation` は、結果の分からない作成（`created` の無い未解決の attempt）がその tag にあるか。`recent` は `sinceMs` 以降のその tag の要求の数。
+   */
+  sourceUsage(sourceTag: string, nowSec: number, sinceMs: number): { readonly unresolved: number; readonly unknownCreation: boolean; readonly recent: number };
   close(): Promise<void>;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
+/** 送信元の tag の形（16 hex）。 */
+const SOURCE_TAG = /^[0-9a-f]{16}$/;
 
 function readSaltOrCreate(dir: string, hasRows: boolean): string {
   const file = path.join(dir, "requester.salt");
@@ -175,7 +185,8 @@ function createLedgerIndex(): LedgerIndex {
       const requesterDigest = asString(patch["requesterDigest"]);
       const resourceDigest = asString(patch["resourceDigest"]);
       if (requesterDigest === undefined || resourceDigest === undefined || attempts.has(key)) return;
-      attempts.set(key, { attemptId: key, requesterDigest, resourceDigest, routeId: asString(patch["routeId"]) ?? "", amount: asString(patch["amount"]) ?? "", atMs: asNumber(patch["atMs"]) ?? 0, verifyCount: 0 });
+      const sourceTag = asString(patch["sourceTag"]);
+      attempts.set(key, { attemptId: key, requesterDigest, resourceDigest, routeId: asString(patch["routeId"]) ?? "", amount: asString(patch["amount"]) ?? "", atMs: asNumber(patch["atMs"]) ?? 0, verifyCount: 0, ...(sourceTag !== undefined && SOURCE_TAG.test(sourceTag) ? { sourceTag } : {}) });
       const pair = pairKeyOf(requesterDigest, resourceDigest);
       const list = byPair.get(pair) ?? [];
       list.push(key);
@@ -284,6 +295,22 @@ export async function openSubethaExactLedger(options: { readonly dir: string }):
     unresolvedAttempts,
     unresolvedDiscovered,
     unresolvedCount: (nowSec) => unresolvedAttempts(nowSec).length + unresolvedDiscovered(nowSec).length,
+    sourceUsage(sourceTag, nowSec, sinceMs) {
+      const mine = unresolvedAttempts(nowSec).filter((a) => a.sourceTag === sourceTag);
+      let unresolved = mine.length;
+      for (const order of unresolvedDiscovered(nowSec)) {
+        const pairAttempts = (byPair.get(pairKeyOf(order.requesterDigest, order.resourceDigest)) ?? []).map((id) => attempts.get(id)).filter((a): a is AttemptView => a !== undefined);
+        const tags = new Set(pairAttempts.map((a) => a.sourceTag ?? ""));
+        // ちょうど 1 種類で欠けが無いときだけ帰属。それ以外（行が無い・tag なしが混ざる・2 種類以上）は全ての送信元に数える。
+        const owner = tags.size === 1 && !tags.has("") ? [...tags][0] : undefined;
+        if (owner === undefined || owner === sourceTag) unresolved += 1;
+      }
+      return {
+        unresolved,
+        unknownCreation: mine.some((a) => a.created === undefined),
+        recent: [...attempts.values()].filter((a) => a.sourceTag === sourceTag && a.atMs >= sinceMs).length,
+      };
+    },
     close: () => journal.close(),
   };
 }

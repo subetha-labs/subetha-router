@@ -110,6 +110,11 @@ export interface IntentSource {
    * 持たない rail の intent には無い。
    */
   readonly settleWindow?: number;
+  /**
+   * `source_failed` の行が「Router は settle を呼ぶ前に終わった」と明示しているとき `false`（`docs/hosted-exact-enable-design.md` §2）。
+   * 欄が無い（旧い行・settle の後の拒否）は「分からない」で、offer の上限の数から外さない。
+   */
+  readonly settleStarted?: boolean;
   /** 手元の署名の検査の後に確定した正確な `validBefore`（`source_failed`／`unknown` の行。要件 FR-4.4 (ii)）。 */
   readonly mayStillSettleUntil?: number;
   /** facilitator の release（行 `source_released`。状態は `source_settled` のまま。設計 §4.3）。 */

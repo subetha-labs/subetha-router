@@ -41,6 +41,8 @@ export interface X402EntryContext {
   readonly config: RouterConfig;
   readonly canonicalBaseUrl: string;
   readonly principalId: string;
+  /** 送信元の識別（`x-router-source`。無ければ principal）。`subetha-exact` の送信元ごとの上限に使う。 */
+  readonly source?: string;
   readonly segments: readonly string[];
   readonly beforeDeliveredResponse?: (paymentId: string) => Promise<void>;
 }
@@ -123,9 +125,14 @@ export async function handleX402Entry(request: http.IncomingMessage, response: h
   if (legacy.length > 0 || signatures.length > 1) return send(response, 400, { error: "invalid_payment" });
 
   if (signatures.length === 0) {
-    const outcome = await context.core.quoteStandard({ principalId: context.principalId, routeId });
+    const outcome = await context.core.quoteStandard({ principalId: context.principalId, routeId, ...(context.source === undefined ? {} : { source: context.source }) });
     if (!outcome.ok) {
       if (outcome.code === "unknown_route") return notFound();
+      // 送信元ごとの上限（`docs/hosted-exact-enable-design.md` §3）: 429。注文は作られていない。
+      if (outcome.code === "source_offer_unavailable" && typeof outcome.reason === "string" && outcome.reason.startsWith("limit_source_")) {
+        const seconds = Math.max(1, Math.ceil((outcome.retryAfterMs ?? 60_000) / 1000));
+        return send(response, 429, { error: "rate_limited", reason: outcome.reason }, { "retry-after": String(seconds) });
+      }
       const body = { error: outcome.code, ...(outcome.reason === undefined ? {} : { reason: outcome.reason }) };
       // 枠・facilitator の一時的な不通・内部の requestId の衝突は 503。`Retry-After` は目安で、総数の枠が戻ることは約束しない。
       if (outcome.code === "source_offer_unavailable" || outcome.code === "request_id_conflict") {

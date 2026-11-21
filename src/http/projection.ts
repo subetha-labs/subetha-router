@@ -35,7 +35,7 @@ export function dynamicListingOf(config: RouterConfig): Record<string, unknown> 
 }
 
 /** R1: allowlist の `routeId`・canonical URL・資産メタのみ（上流 URL は返さない）。動的プロファイルの一覧は `dynamic` に（設定にあるときだけ）。 */
-export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): unknown {
+export function routeListBody(config: RouterConfig, canonicalBaseUrl: string, x402EntryBaseUrl?: string): unknown {
   const dynamic = dynamicListingOf(config);
   return {
     ...(dynamic === undefined
@@ -53,7 +53,9 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string): u
       routeId: route.routeId,
       resource: { url: canonicalUrlOf(canonicalBaseUrl, route), method: "GET" },
       // 標準の x402 クライアント用の入口（`docs/x402-standard-entry-design.md` §8）。対象の route にだけ足す。
-      ...(route.sourceRail === "subetha-exact" ? { x402Url: `${canonicalBaseUrl}/x402/v1/routes/${encodeURIComponent(route.routeId)}/resource` } : {}),
+      ...(route.sourceRail === "subetha-exact" ? { x402Url: `${x402EntryBaseUrl ?? canonicalBaseUrl}/x402/v1/routes/${encodeURIComponent(route.routeId)}/resource` } : {}),
+      // 上限付きの実証の route（`offerCap` を持つ route だけ。`docs/hosted-exact-enable-design.md` §7.1）: 上限があることと、新しい offer を受けているか。
+      ...(route.offerCap === undefined ? {} : { demonstration: { capped: true, acceptingNewOffers: route.offerCap.maxCommitted > 0 } }),
       source: {
         amount: route.source.amount,
         asset: route.source.asset,

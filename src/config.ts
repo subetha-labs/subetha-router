@@ -141,6 +141,11 @@ export interface RouteConfig {
    * core は rail 名で分岐せず、合成側（`src/main.ts`）が adapter を選ぶ。
    */
   readonly sourceRail?: string;
+  /**
+   * offer の上限（`docs/hosted-exact-enable-design.md` §2。`sourceRail: "subetha-exact"` の route だけ）。発行して、まだ「Router が settle を始めない」と
+   * 確定していない offer の数がこれに達したら、新しい offer を出さない。`0` は新しい offer を出さない（発行済みの注文は払える）。指紋には入れない。
+   */
+  readonly offerCap?: { readonly maxCommitted: number };
   /** 受信額は Router のローカル設定が権威（上流額から導出しない／U-03）。 */
   readonly source: SourceTerms;
   readonly destination: DestinationAllow;
@@ -495,6 +500,11 @@ export interface HttpConfig {
   readonly port: number;
   /** canonical URL の基点。リクエストの `Host` からは導かない。 */
   readonly canonicalBaseUrl: string;
+  /**
+   * 標準の x402 クライアント用の入口を買い手に示すときの基点（env `ROUTER_X402_ENTRY_BASE_URL`。任意。`docs/hosted-exact-enable-design.md` §4）。
+   * 一覧の `x402Url` と 402 の `resource.url` に使う。無ければ `canonicalBaseUrl`。
+   */
+  readonly x402EntryBaseUrl?: string;
 }
 
 /**
@@ -568,6 +578,8 @@ export interface SubethaExactConfig {
   /** offer の有効期間（秒。承認の時間）。既定は adapter の 120。 */
   readonly offerSeconds?: number;
   readonly limits: SubethaExactLimits;
+  /** 答えの得られなかった verify を全ての offer で unknown にする（`docs/hosted-exact-enable-design.md` §3.1）。欄が無ければ今までどおり。 */
+  readonly unansweredVerifyIsUnknown?: boolean;
 }
 
 export interface RuntimeConfig {
@@ -691,11 +703,21 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
       throw new ConfigError(`${at}.source.amount must be a positive base-unit integer not above ${SUBETHA_EXACT_MAX_AMOUNT.toString()} for sourceRail "subetha-exact"`);
     }
   }
+  const offerCapRaw = value["offerCap"];
+  let offerCap: { maxCommitted: number } | undefined;
+  if (offerCapRaw !== undefined) {
+    if (sourceRail !== SUBETHA_EXACT_RAIL) throw new ConfigError(`${at}.offerCap is only allowed when sourceRail is "subetha-exact"`);
+    if (!isRecord(offerCapRaw) || Object.keys(offerCapRaw).some((key) => key !== "maxCommitted")) throw new ConfigError(`${at}.offerCap must be { maxCommitted }`);
+    const maxCommitted = offerCapRaw["maxCommitted"];
+    if (typeof maxCommitted !== "number" || !Number.isSafeInteger(maxCommitted) || maxCommitted < 0) throw new ConfigError(`${at}.offerCap.maxCommitted must be a non-negative integer`);
+    offerCap = { maxCommitted };
+  }
   const route: RouteConfig = {
     routeId,
     canonicalPath,
     ...(rail === undefined ? {} : { rail }),
     ...(sourceRail === undefined ? {} : { sourceRail }),
+    ...(offerCap === undefined ? {} : { offerCap }),
     source: {
       amount: requireString(source, "amount", `${at}.source`),
       asset: requireString(source, "asset", `${at}.source`),
@@ -1329,27 +1351,46 @@ function parseSubethaExact(
   }
   const offerSeconds = parseOfferSeconds(env[SUBETHA_EXACT_OFFER_SECONDS_ENV], SUBETHA_EXACT_OFFER_SECONDS_ENV);
   let limits: SubethaExactLimits = SUBETHA_EXACT_DEFAULT_LIMITS;
+  let unansweredVerifyIsUnknown = false;
   if (rawSection !== undefined) {
     if (!isRecord(rawSection)) throw new ConfigError("subethaExact must be an object when present");
     const rawLimits = rawSection["limits"];
     if (rawLimits !== undefined) {
       if (!isRecord(rawLimits)) throw new ConfigError("subethaExact.limits must be an object when present");
-      const read = (key: keyof SubethaExactLimits): number => {
+      const read = (key: "maxRequestsTotal" | "maxUnresolved" | "requestsPerMinute"): number => {
         const value = rawLimits[key];
         if (value === undefined) return SUBETHA_EXACT_DEFAULT_LIMITS[key];
         if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new ConfigError(`subethaExact.limits.${key} must be a positive integer`);
         return value;
       };
-      limits = { maxRequestsTotal: read("maxRequestsTotal"), maxUnresolved: read("maxUnresolved"), requestsPerMinute: read("requestsPerMinute") };
+      // 送信元ごとの上限（任意。`docs/hosted-exact-enable-design.md` §3）。`maxUnresolvedPerSource` は 2 以上。
+      const optional = (key: "maxUnresolvedPerSource" | "requestsPerMinutePerSource", min: number): number | undefined => {
+        const value = rawLimits[key];
+        if (value === undefined) return undefined;
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min) throw new ConfigError(`subethaExact.limits.${key} must be an integer of at least ${min}`);
+        return value;
+      };
+      const perSourceUnresolved = optional("maxUnresolvedPerSource", 2);
+      const perSourceRate = optional("requestsPerMinutePerSource", 1);
+      limits = {
+        maxRequestsTotal: read("maxRequestsTotal"),
+        maxUnresolved: read("maxUnresolved"),
+        requestsPerMinute: read("requestsPerMinute"),
+        ...(perSourceUnresolved === undefined ? {} : { maxUnresolvedPerSource: perSourceUnresolved }),
+        ...(perSourceRate === undefined ? {} : { requestsPerMinutePerSource: perSourceRate }),
+      };
       for (const key of Object.keys(rawLimits)) {
-        if (!["maxRequestsTotal", "maxUnresolved", "requestsPerMinute"].includes(key)) throw new ConfigError("subethaExact.limits has an unknown field");
+        if (!["maxRequestsTotal", "maxUnresolved", "requestsPerMinute", "maxUnresolvedPerSource", "requestsPerMinutePerSource"].includes(key)) throw new ConfigError("subethaExact.limits has an unknown field");
       }
     }
+    const rawUnanswered = rawSection["unansweredVerifyIsUnknown"];
+    if (rawUnanswered !== undefined && typeof rawUnanswered !== "boolean") throw new ConfigError("subethaExact.unansweredVerifyIsUnknown must be a boolean when present");
+    unansweredVerifyIsUnknown = rawUnanswered === true;
     for (const key of Object.keys(rawSection)) {
-      if (key !== "limits") throw new ConfigError("subethaExact has an unknown field");
+      if (key !== "limits" && key !== "unansweredVerifyIsUnknown") throw new ConfigError("subethaExact has an unknown field");
     }
   }
-  return { facilitator, tokenFile, ...(offerSeconds === undefined ? {} : { offerSeconds }), limits };
+  return { facilitator, tokenFile, ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}) };
 }
 
 function parseReal(
@@ -1565,6 +1606,23 @@ export function loadRuntimeConfig(
     throw new ConfigError("ROUTER_CANONICAL_BASE_URL must be an absolute URL");
   }
 
+  // 標準入口の公開の基点（任意）: https か loopback の http の origin だけ（path・query・fragment・userinfo なし）。
+  const entryBaseRaw = env["ROUTER_X402_ENTRY_BASE_URL"];
+  let x402EntryBaseUrl: string | undefined;
+  if (entryBaseRaw !== undefined && entryBaseRaw !== "") {
+    let parsedEntry: URL;
+    try {
+      parsedEntry = new URL(entryBaseRaw);
+    } catch {
+      throw new ConfigError("ROUTER_X402_ENTRY_BASE_URL must be an absolute origin");
+    }
+    const loopbackHttp = parsedEntry.protocol === "http:" && (parsedEntry.hostname === "127.0.0.1" || parsedEntry.hostname === "localhost" || parsedEntry.hostname === "[::1]");
+    if ((parsedEntry.protocol !== "https:" && !loopbackHttp) || parsedEntry.pathname !== "/" || parsedEntry.search !== "" || parsedEntry.hash !== "" || parsedEntry.username !== "" || parsedEntry.password !== "") {
+      throw new ConfigError("ROUTER_X402_ENTRY_BASE_URL must be an https origin (or a loopback http origin) without path, query, fragment or userinfo");
+    }
+    x402EntryBaseUrl = parsedEntry.origin;
+  }
+
   const rails = mode === "synthetic"
     ? { synthetic: parseSynthetic(document["synthetic"], router) }
     : { real: parseReal(document["x402"], router, env, networks, document["subethaExact"]) };
@@ -1581,6 +1639,7 @@ export function loadRuntimeConfig(
       host: env["ROUTER_HTTP_HOST"] ?? "127.0.0.1",
       port: parsePort(env["ROUTER_HTTP_PORT"], 8500),
       canonicalBaseUrl,
+      ...(x402EntryBaseUrl === undefined ? {} : { x402EntryBaseUrl }),
     },
     journalPath: env["ROUTER_JOURNAL_PATH"] ?? "runtime/journal.ndjson",
     principals: parsePrincipals(env["ROUTER_PRINCIPAL_TOKENS"]),

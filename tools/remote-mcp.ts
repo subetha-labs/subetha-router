@@ -25,11 +25,12 @@ import { pathToFileURL } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createIngressDrain, createMcpIngress } from "../src/mcp/ingress.js";
+import { createX402Proxy } from "../src/mcp/x402-proxy.js";
 import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 import { diagnosticsChildEnvOf } from "./router-diagnostics.js";
-import { INBOUND, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
+import { HOSTED_EXACT, hostedExactOf, INBOUND, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
 function note(message: string): void {
@@ -67,6 +68,8 @@ export interface HostOptions {
    * 指定すると公開の生成は使わず `mainnetFirstRouteConfigOf` の設定と mainnet 用の env になる。公開の入口は渡さない。
    */
   readonly mainnetFirstRoute?: true;
+  /** 試験だけ: 標準の x402 入口を買い手に示す基点（既定は公開の origin `HOSTED_EXACT.publicOrigin`。loopback の入口で試すときに差し替える）。 */
+  readonly x402EntryOriginForTest?: string;
   /**
    * EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.5）: 専用の入口（`tools/evm-testnets-run.ts`）だけが渡す。loopback 限定・専用の設定生成
    * `evmTestnetsConfigOf`・専用の子 process（`tools/evm-testnets-router-process.ts`。`localCounterparties` を渡すのはこの子だけ）。公開の入口は渡さない。
@@ -125,6 +128,8 @@ export interface HostPlan {
   readonly childScript: string;
   /** EVM testnet 3 つのどれか（受信か送信）が有効なときだけ: Router の子より先に起動する facilitator の子（hosted 設計 §4）。 */
   readonly facilitator?: EvmFacilitatorPlan;
+  /** `subetha-exact` の実証が有効なときだけ: 公開の入口が標準の x402 の経路を受ける routeId（`docs/hosted-exact-enable-design.md` §5）。 */
+  readonly x402EntryRouteIds?: readonly string[];
 }
 
 export interface RunningHost {
@@ -292,6 +297,13 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
   const evmChains = evmUsedChainsOf(options.activation);
   const facilitator = evmChains.length === 0 ? undefined : evmFacilitatorPlanOf(options, env, receiver, evmChains);
   const configEnv = facilitator === undefined ? env : { ...env, [EVM_FACILITATOR_URL_ENV]: facilitator.url };
+  // `subetha-exact` の実証の host の env（有効なときだけ読む。欠けていれば固定文で止める）。
+  let hostedExact: ReturnType<typeof hostedExactOf>;
+  try {
+    hostedExact = hostedExactOf(env, options.activation);
+  } catch {
+    throw new HostPlanError("env");
+  }
   let config: Record<string, unknown>;
   try {
     config = routerConfigOf(configEnv, receiver, mppInboundEnabled, rails);
@@ -340,8 +352,19 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ...(facilitator === undefined ? {} : { [EVM_FACILITATOR_URL_ENV]: facilitator.url }),
       // 診断の記録のファイル（`docs/rejection-reasons-design.md` §2.1、タスク R-2）: journal の隣。`SUBETHA_DIAGNOSTICS=off` なら足さない。
       ...diagnosticsChildEnvOf(journalPath, env),
+      // `subetha-exact` の実証（`docs/hosted-exact-enable-design.md` §6）: tenant の URL、token のファイルの path（値ではない）、標準入口を買い手に示す基点。
+      ...(hostedExact === undefined
+        ? {}
+        : { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: hostedExact.facilitatorUrl, ROUTER_SUBETHA_EXACT_TOKEN_FILE: hostedExact.tokenFile, ROUTER_X402_ENTRY_BASE_URL: options.x402EntryOriginForTest ?? HOSTED_EXACT.publicOrigin }),
   };
-  return { config, childEnv, journalPath, childScript: PUBLIC_ROUTER_PROCESS, ...(facilitator === undefined ? {} : { facilitator }) };
+  return {
+    config,
+    childEnv,
+    journalPath,
+    childScript: PUBLIC_ROUTER_PROCESS,
+    ...(facilitator === undefined ? {} : { facilitator }),
+    ...(hostedExact === undefined ? {} : { x402EntryRouteIds: [HOSTED_EXACT.routeId] }),
+  };
 }
 
 /**
@@ -688,9 +711,15 @@ export async function startHost(
    * 入口の資源上限（本文 64 KiB・受信 10 秒・同時接続数）は `createMcpIngress` が持つ。
    * 例外の文字列は外にもログにも出さない（固定文のみ）。
    */
+  // 標準の x402 入口（`docs/hosted-exact-enable-design.md` §5）: 計画が持つときだけ。子の address と固定の principal で、対象の routeId のパスだけを渡す。
+  const x402Proxy =
+    plan.x402EntryRouteIds === undefined
+      ? undefined
+      : createX402Proxy({ routeIds: plan.x402EntryRouteIds, childBaseUrl: router.baseUrl, principalId: "judge", token: "public", sourceOf: (req) => sourceOfRequest(req.headers, req.socket.remoteAddress), note });
   const ingress = createMcpIngress({
     note,
     drain,
+    ...(x402Proxy === undefined ? {} : { x402Proxy }),
     handle: async (req: IncomingMessage, res: ServerResponse, body: unknown) => {
       // ステートレス。セッションを跨いで状態を持たない。
       // リモートはステートレス: 呼び出し側が quote を持ち回る（慣行に合わせる）。

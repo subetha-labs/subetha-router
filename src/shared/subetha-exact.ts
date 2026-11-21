@@ -30,6 +30,12 @@ export interface SubethaExactLimits {
   readonly maxUnresolved: number;
   /** 1 分あたりの要求数。 */
   readonly requestsPerMinute: number;
+  /**
+   * 送信元ごとの上限（`docs/hosted-exact-enable-design.md` §3。任意。無ければ送信元ごとには数えない = 今までどおり）。
+   * `maxUnresolvedPerSource` は 2 以上（結果の分からない作成 1 つ + 後から見つかるその注文 1 つを覆う）。
+   */
+  readonly maxUnresolvedPerSource?: number;
+  readonly requestsPerMinutePerSource?: number;
 }
 
 /** AC-7 の既定（段 4 の計画で確定する。`docs/subetha-exact-inbound-acceptance.md`）。 */

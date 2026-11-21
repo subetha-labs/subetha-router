@@ -20,6 +20,8 @@ export interface AppOptions {
   readonly config: RouterConfig;
   /** canonical URL の基点（設定値）。 */
   readonly canonicalBaseUrl: string;
+  /** 標準の x402 クライアント用の入口を買い手に示す基点（無ければ `canonicalBaseUrl`。`docs/hosted-exact-enable-design.md` §4）。 */
+  readonly x402EntryBaseUrl?: string;
   readonly principals: ReadonlyMap<string, string>;
   /**
    * 結果を durable 化した**後**、応答バイトを出す**前**に呼ばれる合成専用のシーム。
@@ -309,8 +311,9 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       await handleX402Entry(request, response, {
         core: options.core,
         config: options.config,
-        canonicalBaseUrl: options.canonicalBaseUrl,
+        canonicalBaseUrl: options.x402EntryBaseUrl ?? options.canonicalBaseUrl,
         principalId,
+        source: sourceOf(request, principalId),
         segments,
         ...(options.beforeDeliveredResponse === undefined ? {} : { beforeDeliveredResponse: options.beforeDeliveredResponse }),
       });
@@ -323,7 +326,7 @@ export function createRequestListener(options: AppOptions): http.RequestListener
         sendError(response, 405, "method_not_allowed", {}, { allow: "GET" });
         return;
       }
-      sendJson(response, 200, routeListBody(options.config, options.canonicalBaseUrl));
+      sendJson(response, 200, routeListBody(options.config, options.canonicalBaseUrl, options.x402EntryBaseUrl));
       return;
     }
 
@@ -419,8 +422,15 @@ export function createRequestListener(options: AppOptions): http.RequestListener
       return;
     }
 
-    const outcome = await options.core.quote({ principalId, requestId, routeId });
+    // 送信元（MCP 層が必ず上書きするヘッダー。無ければ principal）: `subetha-exact` の送信元ごとの上限に使う（`docs/hosted-exact-enable-design.md` §3）。他の rail は読まない。
+    const outcome = await options.core.quote({ principalId, requestId, routeId, source: sourceOf(request, principalId) });
     if (!outcome.ok) {
+      // 送信元ごとの上限は 429 `rate_limited`（MCP の client は本文の `error` をそのまま返す。それ以外の失敗は下の今までどおりの写像）。
+      if (outcome.code === "source_offer_unavailable" && typeof outcome.reason === "string" && outcome.reason.startsWith("limit_source_")) {
+        const retryMs = outcome.retryAfterMs ?? 60_000;
+        sendError(response, 429, "rate_limited", { reason: outcome.reason, retryAfterMs: retryMs }, { "retry-after": String(Math.max(1, Math.ceil(retryMs / 1000))) });
+        return;
+      }
       /*
        * 受信 offer の発行の失敗（`docs/subetha-exact-inbound-design.md` §4.1、要件 FR-2.1）: `source_offer_unavailable` は 503 + `Retry-After`（quote の取り直しの目安。
        * 既定 30 秒）、`source_offer_refused` は 502。本文に固定の `reason`。ほかの code は今までどおり（`request_id_conflict` 409、それ以外 502）。
