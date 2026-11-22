@@ -230,6 +230,18 @@ describe("G-4 の公開の定数: 以前の公開の生成に、実証の分を�
     expect(serialise(now)).toContain(TOKEN_FILE);
   });
 
+  test("settle 用の facilitator の host の env（任意）: 無い・空なら子の env に出ない（生成は golden のまま = 子の Router の既定）。あればそのまま渡す", () => {
+    const key = "ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL";
+    expect(key in planOf(RAILS_ACTIVATION, { ...base, ...evmFacilitatorEnv, ...ENV_ON }).childEnv).toBe(false);
+    const empty = planOf(RAILS_ACTIVATION, { ...base, ...evmFacilitatorEnv, ...ENV_ON, SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "" });
+    expect(key in empty.childEnv).toBe(false);
+    expect(serialise(empty)).toBe(goldenText("public-exact"));
+    const set = planOf(RAILS_ACTIVATION, { ...base, ...evmFacilitatorEnv, ...ENV_ON, SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:9/xfac" });
+    expect(set.childEnv[key]).toBe("http://127.0.0.1:9/xfac");
+    // 実証が無効なら読まない。
+    expect(key in planOf(RAILS_ACTIVATION_BEFORE_EXACT, { ...base, ...evmFacilitatorEnv, SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:9/xfac" }).childEnv).toBe(false);
+  });
+
   test("今の公開の定数は、実証の env が無ければ計画を作らない（入れ替えの script は旧コンテナに戻す）", () => {
     expect(() => planOf(RAILS_ACTIVATION, { ...base, ...evmFacilitatorEnv })).toThrow(HostPlanError);
   });

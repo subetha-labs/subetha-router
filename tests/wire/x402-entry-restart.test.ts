@@ -65,7 +65,7 @@ async function conflictStays(h: ExactHarness, accepted: Accepted): Promise<void>
   expect([other.status, ((await other.json()) as Record<string, unknown>)["error"]]).toEqual([409, "credential_conflict"]);
   noChallenge(other);
   const after = await h.calls();
-  expect([after.byRoute["verify"], after.byRoute["settle"]]).toEqual([before.byRoute["verify"], before.byRoute["settle"]]);
+  expect([after.byRoute["verify"], after.byRoute["submit"]]).toEqual([before.byRoute["verify"], before.byRoute["submit"]]);
 }
 
 test("402 を返した後で止まる: 対応と開示が残り、その offer は次の GET で再び見せられず、後から届いた最初の credential は普通に買える", async () => {
@@ -102,13 +102,13 @@ test("結び付けた後・verify の前で止まる: 再起動の後、同じ c
   const resumed = await pay(h, credential.header);
   expect([resumed.status, resumed.headers.get("x-router-payment-id")]).toEqual([200, paymentId]);
   const calls = await h.calls();
-  expect([calls.byRoute["verify"], calls.byRoute["settle"]]).toEqual([1, 1]);
+  expect([calls.byRoute["verify"], calls.byRoute["submit"]]).toEqual([1, 1]);
   expect(await upstreamPays(h)).toBe(1);
   expect((await h.journal()).filter((r) => r.event === "source_credential_bound")).toHaveLength(1);
 });
 
-test("verify を送った後で止まる／settle の応答を失って止まる: unknown のまま。再送は記録を返し、verify・settle を呼び直さず、上流に払わない", async () => {
-  for (const point of ["verify", "settle"] as const) {
+test("verify を送った後で止まる／外部への送信の応答を失って止まる: unknown のまま。再送は記録を返し、verify・settle を呼び直さず、上流に払わない", async () => {
+  for (const point of ["verify", "submit"] as const) {
     const h = await boot();
     await h.setMode(point, point === "verify" ? "slow:60000" : "timeout");
     const accepted = await challengeOf(h);
@@ -128,7 +128,7 @@ test("verify を送った後で止まる／settle の応答を失って止まる
     expect((body["source"] as Record<string, unknown>)["mayStillSettleUntil"], point).toBe(credential.validBefore);
     await conflictStays(h, accepted);
     const after = await h.calls();
-    expect([point, after.byRoute["verify"], after.byRoute["settle"] ?? 0]).toEqual([point, before.byRoute["verify"], before.byRoute["settle"] ?? 0]);
+    expect([point, after.byRoute["verify"], after.byRoute["submit"] ?? 0]).toEqual([point, before.byRoute["verify"], before.byRoute["submit"] ?? 0]);
     expect(await upstreamPays(h), point).toBe(0);
     await h.stopAll();
     started.splice(started.indexOf(h), 1);
@@ -154,7 +154,7 @@ test("settle を記録した後で止まる: 支払いは成立・配達は未�
   expect(JSON.parse(Buffer.from(resent.headers.get("payment-response")!, "base64").toString("utf8"))).toMatchObject({ success: true, transaction: (body["source"] as { txRef: string }).txRef });
   expect(body["source"]).not.toHaveProperty("mayStillSettleUntil");
   await conflictStays(h, accepted);
-  expect((await h.calls()).byRoute["settle"]).toBe(before.byRoute["settle"]);
-  expect((await h.calls()).byRoute["settle"]).toBe(1);
+  expect((await h.calls()).byRoute["submit"]).toBe(before.byRoute["submit"]);
+  expect((await h.calls()).byRoute["submit"]).toBe(1);
   expect(await upstreamPays(h)).toBe(0);
 });

@@ -355,7 +355,7 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       // `subetha-exact` の実証（`docs/hosted-exact-enable-design.md` §6）: tenant の URL、token のファイルの path（値ではない）、標準入口を買い手に示す基点。
       ...(hostedExact === undefined
         ? {}
-        : { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: hostedExact.facilitatorUrl, ROUTER_SUBETHA_EXACT_TOKEN_FILE: hostedExact.tokenFile, ROUTER_X402_ENTRY_BASE_URL: options.x402EntryOriginForTest ?? HOSTED_EXACT.publicOrigin }),
+        : { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: hostedExact.facilitatorUrl, ...(hostedExact.settleFacilitatorUrl === undefined ? {} : { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: hostedExact.settleFacilitatorUrl }), ROUTER_SUBETHA_EXACT_TOKEN_FILE: hostedExact.tokenFile, ROUTER_X402_ENTRY_BASE_URL: options.x402EntryOriginForTest ?? HOSTED_EXACT.publicOrigin }),
   };
   return {
     config,

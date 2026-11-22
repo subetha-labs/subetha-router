@@ -98,6 +98,7 @@ export async function startExactHarness(options: ExactHarnessOptions = {}): Prom
     ROUTER_ADAPTER_MODE: "real",
     ROUTER_SUBETHA_FACILITATOR_URL: "http://127.0.0.1:1",
     ROUTER_SUBETHA_EXACT_FACILITATOR_URL: `${facilitator.baseUrl}/p/${PROVIDER}`,
+    ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: `${facilitator.baseUrl}/xfac`,
     ROUTER_SUBETHA_EXACT_TOKEN_FILE: tokenFile,
     SUBETHA_EXACT_STOP_SIGNAL: signalPath,
     ...options.env,

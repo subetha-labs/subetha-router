@@ -15,6 +15,12 @@ export const SUBETHA_EXACT_MAX_AMOUNT = 20_000n;
 export const SUBETHA_EXACT_FACILITATOR_URL_ENV = "ROUTER_SUBETHA_EXACT_FACILITATOR_URL";
 export const SUBETHA_EXACT_TOKEN_FILE_ENV = "ROUTER_SUBETHA_EXACT_TOKEN_FILE";
 export const SUBETHA_EXACT_OFFER_SECONDS_ENV = "ROUTER_SUBETHA_EXACT_OFFER_SECONDS";
+/** Router が買い手の authorization を送る先の x402 facilitator（`docs/subetha-exact-provider-settle-design.md` §3.7）。任意。 */
+export const SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV = "ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL";
+/** 既定（オーナーの決定、2026-11-22: 第三者の無料のサービス、認証情報なし）。 */
+export const SUBETHA_EXACT_SETTLE_FACILITATOR_DEFAULT_URL = "https://www.x402.org/facilitator";
+/** 送る先の host の allowlist（loopback は fixture だけ）。 */
+export const SUBETHA_EXACT_SETTLE_FACILITATOR_HOSTS: ReadonlySet<string> = Object.freeze(new Set(["www.x402.org", "x402.org"]));
 
 /** facilitator の host の allowlist（hosted のテストネット）と、試験の fixture だけに許す loopback。 */
 export const SUBETHA_EXACT_FACILITATOR_HOSTS: ReadonlySet<string> = Object.freeze(new Set(["facilitator-testnet.subethalabs.com"]));
@@ -69,4 +75,30 @@ export function parseSubethaExactFacilitatorUrl(raw: string): SubethaExactFacili
   const path = url.pathname.replace(/\/$/, "");
   if (!TENANT_PATH.test(path)) return undefined;
   return { url: `${url.protocol}//${url.host}${path}`, host: url.hostname, tenant: path, loopback };
+}
+
+/** 検査済みの settle 用の facilitator の URL（末尾の `/` 無し）。 */
+export interface SubethaExactSettleFacilitatorUrl {
+  readonly url: string;
+  readonly host: string;
+  readonly loopback: boolean;
+}
+
+/**
+ * `ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL` の検査（`docs/subetha-exact-provider-settle-design.md` §3.7）: 絶対 URL、https（loopback だけ http も可）、
+ * host は allowlist か loopback、query・userinfo・fragment・port（loopback 以外）は不可。違えば `undefined`（値はメッセージに出さない）。
+ */
+export function parseSubethaExactSettleFacilitatorUrl(raw: string): SubethaExactSettleFacilitatorUrl | undefined {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  const loopback = LOOPBACK_HOSTS.has(url.hostname);
+  if (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) return undefined;
+  if (!loopback && !SUBETHA_EXACT_SETTLE_FACILITATOR_HOSTS.has(url.hostname)) return undefined;
+  if (!loopback && url.port !== "") return undefined;
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return undefined;
+  return { url: `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`, host: url.hostname, loopback };
 }

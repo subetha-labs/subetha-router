@@ -69,6 +69,7 @@ async function boot(extraEnv: Record<string, string> = {}): Promise<World> {
     SUBETHA_OUTBOUND_PRIVATE_KEY: generatePrivateKey(),
     SUBETHA_ROUTER_RECEIVER: "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405",
     SUBETHA_EXACT_FACILITATOR_URL: `${facilitator.baseUrl}/p/${PROVIDER}`,
+    SUBETHA_EXACT_SETTLE_FACILITATOR_URL: `${facilitator.baseUrl}/xfac`,
     SUBETHA_EXACT_TOKEN_FILE: tokenFile,
     SUBETHA_DIAGNOSTICS: "off",
     HX_JOURNAL: journalPath,
@@ -163,7 +164,7 @@ test("本物の入口: 標準の x402 クライアントが公開の URL だけ�
   const purchased = await mcp(w.host.baseUrl, "subetha_router_purchase", { quoteId: quote.quoteId, requestId: "mcp-1", approval: quote.quoteId, quote, credential });
   expect(purchased).toMatchObject({ ok: true, outcome: "delivered" });
   const calls = await w.calls();
-  expect([calls.byRoute["create"], calls.byRoute["settle"], await w.upstreamPays()]).toEqual([2, 2, 2]);
+  expect([calls.byRoute["create"], calls.byRoute["submit"], await w.upstreamPays()]).toEqual([2, 2, 2]);
   // 標準入口の購入は結び付けの行を持つ。MCP の購入は持たない（入口が違う）。
   const events = (await w.journal()).map((r) => r.event);
   expect(events.filter((e) => e === "source_credential_bound")).toHaveLength(1);
@@ -210,14 +211,14 @@ test("購入の途中で買い手が切れる → SIGTERM → drain の完了 �
   expect(again.status).toBe(200);
   expect(((await again.json()) as { data: { price: string } }).data.price).toBe("3000.12");
   const calls = await w.calls();
-  expect([calls.byRoute["verify"], calls.byRoute["settle"], await w.upstreamPays()]).toEqual([1, 1, 1]);
+  expect([calls.byRoute["verify"], calls.byRoute["submit"], await w.upstreamPays()]).toEqual([1, 1, 1]);
   // 受付停止（上限 0）で起動し直しても、同じ credential の再送は結果を返し、新しい offer は 503。
   await w.host.kill("SIGTERM");
   await w.restart({ HX_MAX_COMMITTED: "0" });
   expect((await fetch(`${w.host.baseUrl}${PATH}`, { headers: { "PAYMENT-SIGNATURE": header } })).status).toBe(200);
   const stopped = await fetch(`${w.host.baseUrl}${PATH}`);
   expect([stopped.status, ((await stopped.json()) as { reason: string }).reason, stopped.headers.get("payment-required")]).toEqual([503, "offer_cap_reached", null]);
-  expect((await w.calls()).byRoute["settle"]).toBe(1);
+  expect((await w.calls()).byRoute["submit"]).toBe(1);
 });
 
 test("drain の上限を過ぎる → `drain: timeout`。再起動の後、結果は unknown のまま: 同じ credential の再送は 409（402 ではない）、verify・settle をやり直さない", async () => {
@@ -236,5 +237,5 @@ test("drain の上限を過ぎる → `drain: timeout`。再起動の後、結�
   expect([again.status, body["error"], body["status"], again.headers.get("payment-required")]).toEqual([409, "payment_unresolved", "unknown", null]);
   expect((body["source"] as Record<string, unknown>)["awaitingPaymentDoesNotMeanUnpaid"]).toBe(true);
   const after = await w.calls();
-  expect([after.byRoute["verify"], after.byRoute["settle"] ?? 0, await w.upstreamPays()]).toEqual([before.byRoute["verify"], 0, 0]);
+  expect([after.byRoute["verify"], after.byRoute["submit"] ?? 0, await w.upstreamPays()]).toEqual([before.byRoute["verify"], 0, 0]);
 });

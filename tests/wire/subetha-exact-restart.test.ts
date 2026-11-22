@@ -70,7 +70,7 @@ test("§6: after_source_settled → paid_undelivered（interrupted_at_restart）
   const h = await boot({ skipRouter: true });
   const { paymentId, orderId } = await crashAt(h, "after_source_settled", "req-2");
   expect((await statusOf(h, paymentId)).body).toMatchObject({ status: "paid_data_unavailable", terminalReason: "interrupted_at_restart" });
-  expect((await h.calls()).byOrder[orderId]).toEqual({ create: 1, verify: 1, settle: 1 });
+  expect((await h.calls()).byOrder[orderId]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1 });
   expect(await upstreamPays(h)).toBe(0);
   expect((await h.order(orderId))["release"]).toBeUndefined();
 });
@@ -80,7 +80,7 @@ test("§6: after_release_remote（facilitator に authorized が残り journal �
   const { paymentId, orderId } = await crashAt(h, "after_release_remote", "req-3");
   expect((await statusOf(h, paymentId)).body).toMatchObject({ status: "paid_data_unavailable", terminalReason: "interrupted_at_restart" });
   expect((await h.journal()).filter((r) => r.paymentId === paymentId).map((r) => r.event)).toEqual(["created", "source_pending", "budget_reserved", "source_settled", "paid_undelivered"]);
-  expect((await h.calls()).byOrder[orderId]).toEqual({ create: 1, verify: 1, settle: 1, release: 1 });
+  expect((await h.calls()).byOrder[orderId]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1, release: 1 });
   expect((await h.order(orderId))["release"]).toMatchObject({ deliveryKey: orderId });
   expect((await h.order(orderId))["release"]).not.toHaveProperty("completed");
   expect(await upstreamPays(h)).toBe(0);
@@ -108,7 +108,7 @@ test("§6: 送出の途中（upstream の stall）で落ちる → unknown、com
   await purchase;
   await h.restartRouter();
   expect((await statusOf(h, quote.body.paymentId)).body).toMatchObject({ status: "unknown", terminalReason: "interrupted_at_restart" });
-  expect((await h.calls()).byOrder[quote.body.source.offer.extra.challengeNonce]).toEqual({ create: 1, verify: 1, settle: 1, release: 1 });
+  expect((await h.calls()).byOrder[quote.body.source.offer.extra.challengeNonce]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1, release: 1 });
   expect(await upstreamPays(h)).toBe(1);
   expect((await h.order(quote.body.source.offer.extra.challengeNonce))["release"]).not.toHaveProperty("completed");
 });
@@ -173,10 +173,10 @@ test("quote → 再起動 → 最初の purchase: 作成の POST は増えず、
   await h.restartRouter();
   const delivered = await purchaseOf(h, quote.body, "req-10", await credentialOf(h, quote.body.source.offer));
   expect(delivered.status).toBe(200);
-  expect((await h.calls()).byOrder[quote.body.source.offer.extra.challengeNonce]).toEqual({ create: 1, verify: 1, settle: 1, release: 1, complete: 1 });
+  expect((await h.calls()).byOrder[quote.body.source.offer.extra.challengeNonce]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1, release: 1, complete: 1 });
   const rows = await h.ledger();
   expect(rows.filter((r) => r.event === "requested")).toHaveLength(1);
-  for (const event of ["verify", "settle", "release", "complete"]) expect(rows.find((r) => r.event === event)?.paymentId, event).toBe(attemptBefore[0]!.paymentId);
+  for (const event of ["verify", "bind", "submit", "settle", "release", "complete"]) expect(rows.find((r) => r.event === event)?.paymentId, event).toBe(attemptBefore[0]!.paymentId);
 });
 
 test("起動の途中の失敗の片付け: adapter の startup の後で listen に失敗しても ledger の lock が解放され、次の起動が通る（起動ログに token は無い）", async () => {

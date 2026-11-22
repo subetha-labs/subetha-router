@@ -60,7 +60,7 @@ import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
 import { currentDiagnosticScopeFrame, NOOP_DIAGNOSTICS, safeEmit, type DiagnosticsSink } from "./shared/diagnostics.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import { createSubethaExactInbound, type SubethaExactInbound, type SubethaExactInboundOptions } from "./adapters/inbound/subetha-exact.js";
-import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
+import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
 import type {
   EvmSigningCapability,
   MppTempoCapability,
@@ -829,6 +829,7 @@ export function composeRails(
       : denyHostsOf(dynamicConfig.denyHosts, [
           real.subethaFacilitatorUrl,
           real.subethaExact?.facilitator.url,
+          real.subethaExact?.settleFacilitator.url,
           real.x402InboundFacilitatorUrl,
           ...Object.values(real.x402InboundFacilitators ?? {}).map((facilitator) => facilitator.url),
           solanaRpcUrl,
@@ -1029,10 +1030,18 @@ export function composeRails(
     if (section.facilitator.loopback && capabilities.fixtureFacilitators !== true) {
       throw new ConfigError(`${SUBETHA_EXACT_FACILITATOR_URL_ENV}: a loopback facilitator is only allowed with fixture capabilities`);
     }
+    if (section.settleFacilitator.loopback && capabilities.fixtureFacilitators !== true) {
+      throw new ConfigError(`${SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV}: a loopback facilitator is only allowed with fixture capabilities`);
+    }
+    // fixture の SubEtha（loopback）と本物の外部の facilitator を混ぜない: 試験が設定を忘れて第三者のサービスへ送るのを起動時に止める。
+    if (section.facilitator.loopback && !section.settleFacilitator.loopback) {
+      throw new ConfigError(`${SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV} must be a loopback URL when the SubEtha facilitator is a loopback fixture`);
+    }
     // token は閉包の中だけ（読む値は adapter にしか渡さない。0600 の通常のファイル。§5.3）。
     const token = readSecretFile(section.tokenFile, SUBETHA_EXACT_TOKEN_FILE_ENV);
     subethaExactAdapter = createSubethaExactInbound({
       facilitatorUrl: section.facilitator.url,
+      settleFacilitatorUrl: section.settleFacilitator.url,
       token: () => token,
       transport: createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }),
       asset: { network, id: row.id, decimals: row.decimals, domain: row.domain },

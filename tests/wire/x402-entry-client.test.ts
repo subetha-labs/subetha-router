@@ -143,7 +143,7 @@ test("AC-1／AC-2: 標準クライアントが URL と Bearer だけで 402 → 
   expect(offer.extra["expiresAt"]).toBe(order["expiresAt"]);
   expect(order["release"]).toMatchObject({ completed: { outcome: "delivered" } });
   const calls = await h.calls();
-  expect(calls.byOrder[orderId]).toEqual({ create: 1, verify: 1, settle: 1, release: 1, complete: 1 });
+  expect(calls.byOrder[orderId]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1, release: 1, complete: 1 });
   const bound = journal.find((r) => r.paymentId === paymentId && r.event === "source_credential_bound")!;
   expect(bound.patch).toMatchObject({ payer: c.account.address, validBefore: Number(auth["validBefore"]) });
   // 同じ credential の再送（そのままと、JSON の順序・大小を変えたもの）: 同じ本文、facilitator の呼び出しは増えない。
@@ -173,7 +173,7 @@ test("AC-3: 買えなかった場合の応答は 402 でなく、PAYMENT-REQUIRE
     { name: "verify refused", arrange: (h) => h.setMode("verify", "invalid"), error: "payment_not_completed" },
     { name: "verify 500", arrange: (h) => h.setMode("verify", "raw", { status: 500, body: "{}" }), error: "payment_unresolved" },
     { name: "verify unreadable", arrange: (h) => h.setMode("verify", "unreadable"), error: "payment_unresolved" },
-    { name: "settle error", arrange: (h) => h.setMode("settle", "error"), error: "payment_unresolved" },
+    { name: "settle error", arrange: (h) => h.setMode("submit", "error"), error: "payment_unresolved" },
     { name: "upstream paid no data", arrange: async () => undefined, error: "paid_no_data", settled: true, boot: { upstreamArgs: ["--pay", "html"] } },
   ];
   for (const item of cases) {
@@ -209,7 +209,7 @@ test("AC-3: 買えなかった場合の応答は 402 でなく、PAYMENT-REQUIRE
     expect([item.name, resent.status]).toEqual([item.name, 409]);
     noChallenge(resent);
     const callsAfter = await h.calls();
-    expect([callsAfter.byRoute["verify"], callsAfter.byRoute["settle"]], item.name).toEqual([callsBefore.byRoute["verify"], callsBefore.byRoute["settle"]]);
+    expect([callsAfter.byRoute["verify"], callsAfter.byRoute["submit"]], item.name).toEqual([callsBefore.byRoute["verify"], callsBefore.byRoute["submit"]]);
     await h.stopAll();
     started.splice(started.indexOf(h), 1);
   }
@@ -267,7 +267,7 @@ test("AC-2／AC-5／AC-7: 遅れた本物の署名と偽の署名は手元で拒
   expect(typeof conflict["paymentId"]).toBe("string");
   noChallenge(b);
   const calls = await h.calls();
-  expect([calls.byRoute["verify"], calls.byRoute["settle"]]).toEqual([1, 1]);
+  expect([calls.byRoute["verify"], calls.byRoute["submit"]]).toEqual([1, 1]);
   expect((await h.journal()).filter((r) => r.event === "source_credential_bound")).toHaveLength(1);
   // 引けない: 知らない payTo、別の route、別の principal（存在しない token は 401 が先）。どれも同じ固定の 404。
   const unknownPayTo = await handSigned(account, { ...accepted, payTo: "0x00000000000000000000000000000000000000ff" });
@@ -369,7 +369,7 @@ test("AC-6／AC-7（HTTP）: 別の認証済み principal と、quote 入口の�
     expect(r.headers.get("x-router-payment-id")).toBeNull();
   }
   const calls = await h.calls();
-  expect([calls.byRoute["verify"] ?? 0, calls.byRoute["settle"] ?? 0]).toEqual([0, 0]);
+  expect([calls.byRoute["verify"] ?? 0, calls.byRoute["submit"] ?? 0]).toEqual([0, 0]);
   expect((await h.journal()).map((r) => r.event)).toEqual(["created", "created"]);
   // bob は自分の標準 offer を普通に取れ、alice の credential はそのまま買える（bob の試みで結び付いていない）。
   expect((await challengeOf(h, ROUTE_ID, bobHeaders)).response.status).toBe(402);
