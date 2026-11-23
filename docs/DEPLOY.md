@@ -878,7 +878,7 @@ site に `log` の指定は無く access log は出ていないが、それは�
   - **確認していないこと**: 上限に達するまでの挙動（総数 300・件数 40）は本番では試していない（合成の試験だけ）。入れ替えの途中の購入も本番では試していない（購入の無い時に入れ替えた）。
   - **finality（06:03Z、公開の Base Sepolia RPC の `finalized` と照合）**: 4 件の購入の受信の settle の tx（`0x63b7837c…68a8`・`0xa1b6bfa9…5ee9b`・`0x5900aa45…f35e`・`0x3875ee47…14ea`）は、全て status 成功・canonical・確定済み。上流への支払いの tx の finality は照合していない。
 
-**SubEtha の relay の廃止への対応（2026-11-22。`docs/subetha-exact-provider-settle-design.md`。本番はまだ入れ替えていない）**:
+**SubEtha の relay の廃止への対応（2026-11-22。`docs/subetha-exact-provider-settle-design.md`。**本番は 2026-11-23 06:46Z に `b-ef7cc6a` へ入れ替えた。下の記録**）**:
 
 - SubEtha の facilitator は支払いを送らなくなる。新しい Router は、注文を bind し、買い手の authorization を **Router の選んだ x402 facilitator に最大 1 回**送り、
   結果を SubEtha の reconcile で決める。送る先の既定は `https://www.x402.org/facilitator`（第三者の無料の testnet のサービス。認証情報なし）。
@@ -895,6 +895,24 @@ site に `log` の指定は無く access log は出ていないが、それは�
   relay の無い SubEtha はそれを送らない。relay を持つ途中の版（上の 2）に対しては、**bind 済みの注文を SubEtha が relay に回さないこと**が二重の送信を防ぐ（SubEtha 側の性質。protocol の試験で確認済みと担当から回答）。
   relay の無い SubEtha に対しては、古い版は売れない。
 - **結果の読み方は変わらない**: `unknown` は未払いの証明ではない。外部の facilitator が断っても、同じ authorization は `validBefore` まで誰かが載せ得る。買い手に同じ注文への署名をやり直させない。
+- **記録（2026-11-23。本番は `b-ef7cc6a`）**: 実際の順番は上の 1・2 のどちらでもなかった。hosted の SubEtha の relay 先が 503 を返していて（SubEtha 側の担当の報告、2026-11-22 16:36Z）、
+  relay を残す途中の版は ready になれないので、担当が `mp-e972064` から `mp-f30e4bb`（bind あり、relay なし）へ直接上げた（03:32Z。owner の承認は担当のセッション）。その後に Router を入れ替えた（owner の go、2026-11-23）。
+  - **入れ替えの前（手元の Router、tenant `router-local`）**: PR #210 の branch を本物の adapter で起動し、購入 1 件が 200（03:35:44Z〜03:35:50Z、`paymentId` `f30f6f31-2d05-46d1-9a0d-9323e9b652cf`）。
+    ledger は `bind`（`bound`、identity 一致、307 ms）→ `submit`（`started` → `answered` 200・`success: true`、708 ms）→ `settle`（`settled`、`path: provider`、`reconcile: accepted`、照合 1 回、計 1,709 ms）。
+    受信の tx は `0x0a8fa21e1c1cdf642392eac777017bcf75d40f7346c74a563c7531f4f437ecbc`。inspect `--remote` は 1 件・未解決 0・不一致 0（SubEtha の側は `accepted`／`paid`、origin `external-broadcast`）。
+    外からの確認: `/exact/supported` の `signers` は空、token なしの bind は 401。
+  - **image**: main `ef7cc6a`（PR #210 の merge）を手元で build、layer の一覧の hash が手元と host で一致。host への転送は 1 本の `scp`・`rsync` が約 7 MB で止まったので、4 MiB に分けて 41 個を送り、結合した file の sha256 を照合した。
+  - **入れ替え**: 06:46:12Z 開始、06:46:24Z 終了、exit 0、`entry run id read`・`previous container drained`、journal の先頭 468,144 バイトは不変、egress ok、公開の `/healthz` ok、`could not start` 0 行。
+    入れ替えの前の inspect は 7 件・未解決 0・不一致 0。rollback は `subetha-router-prev-20261123T064612Z`（`b-e2e2aa8`）。それより古い `-prev-` は削除。env は変えていない（送る先は既定の `https://www.x402.org/facilitator`）。
+  - **公開の MCP（HTTPS）からの購入 2 件**:
+    1. `1f1e753e-39f1-418e-b943-07974173e20b`（06:47:18Z）: **`unknown`**。`bind` は `bound`・identity 一致、`submit` は 200・`success: false`（230 ms。理由は ledger に残らない）、reconcile は 1 回で `pending`。
+       再送・再署名はしていない。authorization の `validBefore`（06:48:29Z）の後に zUSDC の `authorizationState(from, nonce)` を読むと `false`（= この authorization は使われていない。支払いは動いていない）。
+       断られた原因は分かっていない。同じ形の別の署名を x402.org の `/verify` に送ると、手元からも本番の container の中からも、期限の 39 秒前でも `isValid: true` だった（verify は送信しない）。
+    2. `5a94e053-134e-4950-a998-807af787ba9c`（06:51:07Z）: **`delivered`**。`bind`（`bound`、一致）→ `submit`（200・`success: true`、471 ms）→ `settle`（`settled`、`reconcile: accepted`、照合 1 回、計 725 ms）→ release → complete。
+       受信の tx は `0x702c39c0a193e156814880b72f70920a31facc65166b2bc98b4c548dd36f9c27`。
+    ほかに、原因を調べるための払わない注文が 1 件（`d82b6cf1-d9e2-47a5-a15b-63807f6eb6de`。quote と署名だけで、Router には出していない）。
+  - **終わりの状態**: inspect `--remote` は 10 件・不一致 0・未解決 2（上の `unknown` の 1 件と払わない 1 件。06:52Z の時点で SubEtha の側はどちらも `open`）。token の照合は log・journal・ledger・診断の記録とも 0 件。実証の件数は 40 のうち 6 を使った見込み（数えていない）。
+  - **確認していないこと**: x402.org が 1 件目を断った理由。SubEtha の注文の一覧の `settlePath`／`settleRoute` の欄（inspect の出力には `origin: external-broadcast` として出る）。上限に達するまでの挙動と、入れ替えの途中の購入は今回も本番では試していない。
 
 ## 3. 動作確認
 
