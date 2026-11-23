@@ -878,6 +878,24 @@ site に `log` の指定は無く access log は出ていないが、それは�
   - **確認していないこと**: 上限に達するまでの挙動（総数 300・件数 40）は本番では試していない（合成の試験だけ）。入れ替えの途中の購入も本番では試していない（購入の無い時に入れ替えた）。
   - **finality（06:03Z、公開の Base Sepolia RPC の `finalized` と照合）**: 4 件の購入の受信の settle の tx（`0x63b7837c…68a8`・`0xa1b6bfa9…5ee9b`・`0x5900aa45…f35e`・`0x3875ee47…14ea`）は、全て status 成功・canonical・確定済み。上流への支払いの tx の finality は照合していない。
 
+**SubEtha の relay の廃止への対応（2026-11-22。`docs/subetha-exact-provider-settle-design.md`。本番はまだ入れ替えていない）**:
+
+- SubEtha の facilitator は支払いを送らなくなる。新しい Router は、注文を bind し、買い手の authorization を **Router の選んだ x402 facilitator に最大 1 回**送り、
+  結果を SubEtha の reconcile で決める。送る先の既定は `https://www.x402.org/facilitator`（第三者の無料の testnet のサービス。認証情報なし）。
+  hosted は env を足さない。egress はすでに x402.org を許している（既存の x402 の受信と同じ宛先）。料金や gas が発生する場合は Router の運用者の負担。
+- **入れ替えの順番（どちらかをオーナーが選ぶ）**。今の hosted の SubEtha は bind の route を持たない見込み（protocol `b02b249` で入った。確認は Provider token での読み取りが要る）。
+  bind の無い SubEtha に対して、新しい Router は何も送らず `unknown` を返す（売れない）。古い Router は、relay の無い SubEtha に対して `broadcast-not-permitted` で売れない。
+  1. **同じ作業の窓で両方を入れ替える**: 先に実証の受付を止め（`SUBETHA_EXACT_MAX_COMMITTED=0`）、未解決の注文が無いことを inspect で確かめ、SubEtha と Router を入れ替える。
+     確認の購入は、受付が 0 のままでは offer が出ないので、**確認の 1 件分だけ開けて**行う（`SUBETHA_EXACT_MAX_COMMITTED` を「今までの発行済みの件数 + 1」にして入口を起動し直す）。
+     購入が `delivered` になったら、env の行を消して通常の上限に戻す。失敗したら `0` に戻して調べる。
+  2. **SubEtha を 2 段階で上げる**: まず relay と bind の両方を持つ版（`b02b249`）に上げる（古い Router はそのまま売れる）。次に新しい Router を入れて購入 1 件で確かめる。最後に relay の無い版（`f30e4bb`）に上げる。停止の窓は無いが、SubEtha の入れ替えが 2 回になる。
+- **確かめること**（入れ替えのあと、購入 1 件）: Router の status が `delivered`。adapter の ledger に `bind`（`ack: bound`）→ `submit`（`started`、`answered`）→ `settle`（`path: provider`、`reconcile: accepted`）。
+  SubEtha の注文の一覧に `settlePath: "provider"` と `settleRoute: "external"`。`npm run subetha-exact:inspect -- --remote` で `mismatches` 0。
+- **戻し方**: 前の image に戻す。ledger の新しい行（`bind`・`submit`）は古い版が無視する（古い版は送信の印を見ない）。古い版の Router は自分では送らず、SubEtha の settle を呼ぶだけ。
+  relay の無い SubEtha はそれを送らない。relay を持つ途中の版（上の 2）に対しては、**bind 済みの注文を SubEtha が relay に回さないこと**が二重の送信を防ぐ（SubEtha 側の性質。protocol の試験で確認済みと担当から回答）。
+  relay の無い SubEtha に対しては、古い版は売れない。
+- **結果の読み方は変わらない**: `unknown` は未払いの証明ではない。外部の facilitator が断っても、同じ authorization は `validBefore` まで誰かが載せ得る。買い手に同じ注文への署名をやり直させない。
+
 ## 3. 動作確認
 
 ```sh

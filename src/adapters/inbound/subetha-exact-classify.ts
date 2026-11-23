@@ -171,21 +171,102 @@ export function classifyCreate(call: CallOutcome, expected: CreateExpectation): 
   return mismatch === undefined ? { kind: "created", view } : { kind: "refused", detail: mismatch };
 }
 
-// ---- 表 B: settle ----------------------------------------------------------------------------------------------------
+// ---- 表 B: settle（bind → 外部の facilitator → reconcile。`docs/subetha-exact-provider-settle-design.md` §3） ----------------
 
-export type SettleClassification = { readonly result: SettleResult; readonly response: "ok" | "success_false" | "network_mismatch" | "tx_malformed" | "not_json" | "http_error" };
+/** 手元の authorization の同一性（署名そのものは持たない）。`sigSha256` は署名の文字列を小文字にしたものの SHA-256（hex）。 */
+export interface LocalIdentity {
+  readonly from: string;
+  readonly nonce: string;
+  readonly sigSha256: string;
+}
+export function sigSha256Of(signature: string): string {
+  return sha256Hex(lower(signature));
+}
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-export function classifySettle(call: CallOutcome, offer: { readonly network: string }, nonce: string | undefined, mayStillSettleUntil: number | undefined): SettleClassification {
-  // 表 B: `unknown` には正確な上限を添える（core は verify で得た値を使うが、adapter の契約としても返す）。
-  const unknown: SettleResult = { outcome: "unknown", reason: "source_settle_unknown", ...(mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil }) };
-  if (call.kind === "threw" || call.status !== 200) return { result: unknown, response: "http_error" };
-  const json = call.json;
-  if (!isRecord(json)) return { result: unknown, response: "not_json" };
-  if (json["success"] !== true || json["outcome"] !== "accepted") return { result: unknown, response: "success_false" };
-  if (json["network"] !== offer.network) return { result: unknown, response: "network_mismatch" };
+/** bind の 409 の code（固定の一覧だけを記録に残す。相手の文字列はそのまま写さない）。 */
+export const BIND_REFUSAL_CODES: readonly string[] = Object.freeze([
+  "conflicting-authorization",
+  "order-on-other-path",
+  "order-not-open",
+  "order-expired",
+  "valid-before-after-order-expiry",
+  "authorization-consumed-before-order",
+  "invalid-signature",
+  "too-many-unresolved-bindings",
+  "payload pays another order",
+]);
+
+export type BindClassification =
+  /** 送ってよいのはこれだけ: `ack: "bound"` で、ledger から読み直された identity が手元の authorization と一致する。 */
+  | { readonly action: "submit" }
+  /** 送らない。reconcile を 1 回（`already-used`、409 の拒否）。 */
+  | { readonly action: "reconcile"; readonly ack: "already-used" | "refused"; readonly code?: string }
+  /** 送らない。reconcile も呼ばない（bind されていない・分からない・identity が違う）。 */
+  | { readonly action: "stop"; readonly ack: "bound" | "unknown" };
+
+export function classifyBind(call: CallOutcome, local: LocalIdentity): BindClassification {
+  if (call.kind === "threw") return { action: "stop", ack: "unknown" };
+  const { status, json } = call;
+  if (status === 409) {
+    const error = isRecord(json) ? json["error"] : undefined;
+    return { action: "reconcile", ack: "refused", code: typeof error === "string" && BIND_REFUSAL_CODES.includes(error) ? error : "other" };
+  }
+  if (status !== 200 || !isRecord(json)) return { action: "stop", ack: "unknown" };
+  if (json["ack"] === "already-used" && typeof json["recorded"] === "boolean") return { action: "reconcile", ack: "already-used" };
+  if (json["ack"] !== "bound") return { action: "stop", ack: "unknown" };
+  const identity = json["identity"];
+  if (!isRecord(identity)) return { action: "stop", ack: "unknown" };
+  const { from, nonce, sigSha256 } = identity;
+  if (typeof from !== "string" || !ADDRESS.test(from) || typeof nonce !== "string" || !HEX32.test(nonce) || typeof sigSha256 !== "string" || !SHA256_HEX.test(sigSha256)) return { action: "stop", ack: "unknown" };
+  const same = lower(from) === lower(local.from) && lower(nonce) === lower(local.nonce) && sigSha256 === local.sigSha256;
+  return same ? { action: "submit" } : { action: "stop", ack: "bound" };
+}
+
+/**
+ * 外部の facilitator の答え。**結果は決めない**: reconcile を待つ長さだけを決める（設計 §3.4）。
+ * `refused` は「はっきり断った」（200 で `success === false`、または 4xx）。それ以外は `wait`（成功と言った・答えと読めない）。
+ */
+export interface SubmitClassification {
+  readonly wait: boolean;
+  readonly success?: boolean;
+  readonly transaction?: string;
+}
+export function classifySubmit(call: CallOutcome): SubmitClassification {
+  if (call.kind === "threw") return { wait: true };
+  const { status, json } = call;
+  if (status >= 400 && status < 500) return { wait: false };
+  if (status !== 200 || !isRecord(json) || typeof json["success"] !== "boolean") return { wait: true };
   const transaction = json["transaction"];
-  if (typeof transaction !== "string" || !HEX32.test(transaction) || nonce === undefined) return { result: unknown, response: "tx_malformed" };
-  return { result: { outcome: "settled", txRef: lower(transaction), eventId: lower(nonce) }, response: "ok" };
+  return { wait: json["success"], success: json["success"], ...(typeof transaction === "string" && HEX32.test(transaction) ? { transaction: lower(transaction) } : {}) };
+}
+
+/** reconcile の読み（記録に残す固定の語）。`unanswered` は 200 以外・読めない・例外。 */
+export type ReconcileReading = "accepted" | "pending" | "late-paid" | "rejected" | "mismatch" | "other" | "unanswered";
+export type ReconcileClassification = { readonly result: SettleResult; readonly reading: ReconcileReading; readonly response: "ok" | "success_false" | "tx_malformed" | "not_json" | "http_error" };
+
+/**
+ * `settled` と答えるのは、reconcile が 200 の object で `outcome === "accepted"`、`txHash` が 32 バイトの hex、`order.status.exact` の `from`・`nonce`
+ * （あれば `sigSha256` も）が手元の authorization と一致するときだけ（設計 §3.2）。それ以外は全て `unknown`（`rejected` にしない）。
+ */
+export function classifyReconcile(call: CallOutcome, local: LocalIdentity | undefined, mayStillSettleUntil: number | undefined): ReconcileClassification {
+  const unknown: SettleResult = { outcome: "unknown", reason: "source_settle_unknown", ...(mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil }) };
+  if (call.kind === "threw" || call.status !== 200) return { result: unknown, reading: "unanswered", response: "http_error" };
+  const json = call.json;
+  if (!isRecord(json)) return { result: unknown, reading: "unanswered", response: "not_json" };
+  const outcome = json["outcome"];
+  if (outcome === "pending" || outcome === "late-paid" || outcome === "rejected") return { result: unknown, reading: outcome, response: "success_false" };
+  if (outcome !== "accepted") return { result: unknown, reading: "other", response: "success_false" };
+  const txHash = json["txHash"];
+  if (typeof txHash !== "string" || !HEX32.test(txHash)) return { result: unknown, reading: "mismatch", response: "tx_malformed" };
+  const order = json["order"];
+  const status = isRecord(order) ? order["status"] : undefined;
+  const exact = isRecord(status) ? status["exact"] : undefined;
+  if (local === undefined || !isRecord(exact)) return { result: unknown, reading: "mismatch", response: "tx_malformed" };
+  const { from, nonce, sigSha256 } = exact;
+  const same = typeof from === "string" && lower(from) === lower(local.from) && typeof nonce === "string" && lower(nonce) === lower(local.nonce) && (sigSha256 === undefined || sigSha256 === local.sigSha256);
+  if (!same) return { result: unknown, reading: "mismatch", response: "tx_malformed" };
+  return { result: { outcome: "settled", txRef: lower(txHash), eventId: lower(local.nonce) }, reading: "accepted", response: "ok" };
 }
 
 // ---- 表 C・D・D′: release --------------------------------------------------------------------------------------------

@@ -35,6 +35,7 @@ const clockMs = 1_800_000_000_000;
 async function makeAdapter(): Promise<SubethaExactInbound> {
   const created = createSubethaExactInbound({
     facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`,
+    settleFacilitatorUrl: `${fixture.baseUrl}/xfac`,
     token: () => TOKEN,
     transport: createGuardedTransport({ allowLoopback: true, report: () => undefined }),
     asset: { network: NETWORK, id: ASSET, decimals: 6, domain: DOMAIN },
@@ -55,7 +56,7 @@ async function journalRow(paymentId: string, event: string, patch: Record<string
   seq += 1;
   await writeFile(journalPath, `${JSON.stringify({ seq, at: new Date(clockMs).toISOString(), paymentId, event, patch })}\n`, { flag: "a" });
 }
-const remoteOptions = () => ({ facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`, token: () => TOKEN, allowLoopback: true });
+const remoteOptions = () => ({ facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`, settleFacilitatorUrl: `${fixture.baseUrl}/xfac`, token: () => TOKEN, allowLoopback: true });
 const attemptLines = (lines: InspectLine[]) => lines.filter((l) => l.kind === "attempt");
 
 beforeEach(async () => {
@@ -158,7 +159,7 @@ describe("一覧（読取だけ）", () => {
     const byOrder = (id: string) => attempts.find((l) => l["orderId"] === id)!;
     // 1 つ目の GET（a）は sentinel の応答 → other に写る。注文 a はもう一度読まないので remote は other。
     expect(byOrder(a.extra.challengeNonce)["remote"]).toEqual({ state: "other", release: { state: "other", afterRelease: "other" }, exact: { state: "other", origin: "other" } });
-    expect(byOrder(b.extra.challengeNonce)).toMatchObject({ terminal: "paid_undelivered", remote: { state: "accepted", release: { state: "authorized" }, exact: { state: "paid", origin: "facilitator" } }, mismatch: true });
+    expect(byOrder(b.extra.challengeNonce)).toMatchObject({ terminal: "paid_undelivered", remote: { state: "accepted", release: { state: "authorized" }, exact: { state: "paid", origin: "external-broadcast" } }, mismatch: true });
     expect(attempts.find((l) => l["attemptId"] === cAttempt.attemptId)).toMatchObject({ foundByLookup: true, mismatch: true, unresolved: true });
     expect(byOrder(d.extra.challengeNonce)).toMatchObject({ remote: { state: "accepted", release: { state: "none" } }, mismatch: false });
     // (1) は sentinel で読めなかったので、もう一度（status を戻して）: Router が source_failed で remote が accepted → mismatch。

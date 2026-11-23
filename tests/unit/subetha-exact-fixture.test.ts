@@ -4,6 +4,7 @@
  * `packages/zerc20-v2-adapter/src/{burn-sale-backend,exact-settle,tenant-runtime}.ts`。
  * 使い捨ての鍵で実 EIP-3009 の署名を作り、署名優先の経路を実際に通す（鍵は試験の中だけ。資金は無い）。
  */
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { generatePrivateKey } from "viem/accounts";
 
@@ -78,13 +79,24 @@ async function payloadFor(view: Record<string, unknown>, options: { patch?: (off
   return { x402Version: 2, accepted: (options.accepted ?? ((r) => r))({ ...requirements }), payload: credential["payload"] };
 }
 const settleOf = (id: string, paymentPayload: unknown, requesterDigest = REQUESTER, extra: Record<string, unknown> = {}) => call(`/exact/orders/${id}/settle`, { method: "POST", body: { paymentPayload, requesterDigest, resourceDigest: RESOURCE, ...extra } });
+const bindOf = (id: string, paymentPayload: unknown, requesterDigest = REQUESTER) => call(`/exact/orders/${id}/bind`, { method: "POST", body: { paymentPayload, requesterDigest, resourceDigest: RESOURCE } });
+const reconcileOf = (id: string) => call(`/exact/orders/${id}/reconcile`, { method: "POST", body: {} });
+/** 外部の x402 facilitator の模型（tenant の外、Bearer なし）。 */
+const submitOf = (paymentPayload: unknown, view: Record<string, unknown>, headers: Record<string, string> = {}) => call("/xfac/settle", { method: "POST", root: true, rawHeaders: { "content-type": "application/json", ...headers }, body: { x402Version: 2, paymentPayload, paymentRequirements: view["requirements"] } });
+/** 新しい形の支払い: bind → 外部へ送る → reconcile。返すのは reconcile の応答（`transaction` に chain の hash を写す）。 */
+async function payOf(id: string, paymentPayload: unknown, view: Record<string, unknown>, requesterDigest = REQUESTER) {
+  const bound = await bindOf(id, paymentPayload, requesterDigest);
+  if (bound.json["ack"] === "bound") await submitOf(paymentPayload, view);
+  const reconciled = await reconcileOf(id);
+  return { status: reconciled.status, json: { ...reconciled.json, transaction: reconciled.json["txHash"] } as Record<string, unknown> };
+}
 const releaseOf = (id: string, requesterDigest = REQUESTER) => call(`/exact/orders/${id}/release`, { method: "POST", body: { requesterDigest } });
 const completeOf = (id: string, deliveryKey: string, outcome: string) => call(`/exact/orders/${id}/complete`, { method: "POST", body: { deliveryKey, outcome } });
 const statusOf = async (id: string) => (await call(`/exact/orders/${id}`)).json["status"] as Record<string, unknown>;
 async function paidOrder(requester = REQUESTER): Promise<{ id: string; view: Record<string, unknown>; tx: string }> {
   const view = (await createOrder("2000", requester)).json;
   const id = view["orderId"] as string;
-  const settled = await settleOf(id, await payloadFor(view), requester);
+  const settled = await payOf(id, await payloadFor(view), view, requester);
   expect(settled.json["outcome"]).toBe("accepted");
   return { id, view, tx: settled.json["transaction"] as string };
 }
@@ -225,7 +237,7 @@ describe("公開 verify（署名が先。multi-routes.ts:310）", () => {
     const soon = await payloadFor(view, { patch: (o) => ({ ...o, extra: { ...(o["extra"] as object), expiresAt: clock + 5 } }) });
     expect((await call("/exact/verify", { method: "POST", body: { paymentPayload: soon } })).json).toEqual({ isValid: false, invalidReason: "invalid_exact_evm_payload_authorization_valid_before", payer: payer.address });
     const good = await payloadFor(view);
-    expect((await settleOf(view["orderId"] as string, good)).json["outcome"]).toBe("accepted");
+    expect((await payOf(view["orderId"] as string, good, view)).json["outcome"]).toBe("accepted");
     expect((await call("/exact/verify", { method: "POST", body: { paymentPayload: good } })).json).toEqual({ isValid: true, payer: payer.address });
     fixture.setMode("verify", "invalid");
     expect((await call("/exact/verify", { method: "POST", body: { paymentPayload: good } })).json).toEqual({ isValid: false, invalidReason: "insufficient_funds", payer: payer.address });
@@ -259,10 +271,6 @@ describe("settle（exact-routes.ts の route + exact-settle.ts の #settleOnce +
     broken.payload.signature = `0x${"00".repeat(65)}`;
     expect((await settleOf(id, broken)).json).toMatchObject({ success: false, errorReason: "invalid-signature", outcome: "rejected", orderId: id, payer: payer.address });
     expect(fixture.orders.get(id)?.exact).toBeUndefined();
-    // reserveExact: validBefore が注文の期限より後 → valid-before-after-order-expiry（記録無し）。
-    const beyond = await payloadFor(view, { patch: (o) => ({ ...o, extra: { ...(o["extra"] as object), expiresAt: clock + 400 } }) });
-    expect((await settleOf(id, beyond)).json).toMatchObject({ errorReason: "valid-before-after-order-expiry", outcome: "rejected", orderId: id });
-    expect(fixture.orders.get(id)?.exact).toBeUndefined();
     // 期限の後の注文（署名は SDK の検査に通る）→ order-expired。
     clock += 301;
     const late = await payloadFor(view, { patch: (o) => ({ ...o, extra: { ...(o["extra"] as object), expiresAt: clock + 400 } }) });
@@ -274,53 +282,125 @@ describe("settle（exact-routes.ts の route + exact-settle.ts の #settleOnce +
     expect(fixture.orders.get(id)?.exact).toMatchObject({ state: "observed" });
     expect(fixture.orders.get(id)?.state).toBe("open");
   });
-  test("accepted: success・transaction（64 hex）・payer・outcome・orderId・order（state accepted、exact paid/facilitator、gate ready）、eventId 無し。同じ authorization の再提示は同じ transaction、別の authorization は conflicting-authorization", async () => {
+  test("送らない（relay の廃止）: 未払いの正しい payload は broadcast-not-permitted／pending で、記録も chain も変わらない。払われた後の同じ authorization は accepted（同じ transaction）、別の authorization は conflicting-authorization", async () => {
     const view = (await createOrder()).json;
     const id = view["orderId"] as string;
     const good = await payloadFor(view);
-    const settled = await settleOf(id, good);
-    expect(settled.status).toBe(200);
-    expect(settled.json).toMatchObject({ success: true, outcome: "accepted", orderId: id, payer: payer.address, network: `eip155:${CHAIN_ID}` });
-    expect(settled.json["transaction"]).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(settled.json).not.toHaveProperty("eventId");
-    expect((settled.json["order"] as Record<string, unknown>)["status"]).toMatchObject({ state: "accepted", gate: "ready", exact: { state: "paid", origin: "facilitator", from: payer.address, nonce: id }, receipt: { level: "final" } });
-    const replay = await settleOf(id, good);
-    expect(replay.json).toMatchObject({ success: true, outcome: "accepted", transaction: settled.json["transaction"] });
+    const unpaid = await settleOf(id, good);
+    expect(unpaid.json).toMatchObject({ success: false, errorReason: "broadcast-not-permitted", outcome: "pending", transaction: "", orderId: id, payer: payer.address });
+    expect(fixture.orders.get(id)).toMatchObject({ state: "open" });
+    expect(fixture.orders.get(id)?.exact).toBeUndefined();
+    const paid = await payOf(id, good, view);
+    expect(paid.json).toMatchObject({ outcome: "accepted" });
+    expect(paid.json["transaction"]).toMatch(/^0x[0-9a-f]{64}$/);
+    expect((paid.json["order"] as Record<string, unknown>)["status"]).toMatchObject({ state: "accepted", gate: "ready", exact: { state: "paid", origin: "external-broadcast", path: "provider", from: payer.address, nonce: id }, receipt: { level: "final" } });
+    expect((await settleOf(id, good)).json).toMatchObject({ success: true, outcome: "accepted", transaction: paid.json["transaction"] });
     const other = await payloadFor(view, { signer: otherPayer });
     expect((await settleOf(id, other)).json).toMatchObject({ success: false, errorReason: "conflicting-authorization", outcome: "rejected", orderId: id });
-    expect(fixture.orders.get(id)?.exact?.from).toBe(payer.address);
-    expect(fixture.orders.get(id)?.exact?.txHash).toBe(settled.json["transaction"]);
-    expect(fixture.calls.byOrder[id]).toMatchObject({ settle: 3 });
-  });
-  test("モード: pending（同じ authorization の再提示も pending）、late-paid、rejected:<code>（orderId 付き）、error、unreadable、timeout、lose-response（記録してから切る）", async () => {
-    const view = (await createOrder()).json;
-    const id = view["orderId"] as string;
-    const good = await payloadFor(view);
+    expect(fixture.calls.byOrder[id]).toMatchObject({ settle: 3, bind: 1, submit: 1, reconcile: 1 });
     fixture.setMode("settle", "rejected:send-limit-reached");
     expect((await settleOf(id, good)).json).toMatchObject({ success: false, errorReason: "send-limit-reached", outcome: "rejected", orderId: id, payer: payer.address });
     fixture.setMode("settle", "error");
     expect((await settleOf(id, good)).status).toBe(500);
-    fixture.setMode("settle", "unreadable");
-    expect((await settleOf(id, good)).json).toBeUndefined();
-    fixture.setMode("settle", "timeout");
-    const controller = new AbortController();
-    const hanging = fetch(`${base}/exact/orders/${id}/settle`, { method: "POST", headers: auth, body: JSON.stringify({ paymentPayload: good, requesterDigest: REQUESTER, resourceDigest: RESOURCE }), signal: controller.signal });
-    setTimeout(() => controller.abort(), 150);
-    await expect(hanging).rejects.toBeTruthy();
-    fixture.setMode("settle", "pending");
-    expect((await settleOf(id, good)).json).toMatchObject({ success: false, errorReason: "settlement_pending", outcome: "pending", orderId: id });
-    fixture.setMode("settle", "accepted");
-    expect((await settleOf(id, good)).json).toMatchObject({ outcome: "pending" });
+  });
+});
+
+describe("bind・reconcile・外部の facilitator の模型（protocol f30e4bb: exact-routes.ts の bind、bindProviderSettled、reconcileOrder）", () => {
+  test("bind: route の検査（400・403・409）、bound は ledger の identity（from・nonce・sigSha256）を返し、繰り返しても同じ。別の authorization は conflicting-authorization。壊れた署名・期限・validBefore の拒否", async () => {
+    const view = (await createOrder()).json;
+    const id = view["orderId"] as string;
+    const good = await payloadFor(view);
+    expect(await bindOf(id, good, "nope")).toMatchObject({ status: 400 });
+    expect(await bindOf(id, good, OTHER_REQUESTER)).toMatchObject({ status: 403, json: { error: "order is bound to another requester or resource" } });
+    const otherPay = JSON.parse(JSON.stringify(good)) as { payload: { authorization: { to: string } } };
+    otherPay.payload.authorization.to = `0x${"dd".repeat(20)}`;
+    expect(await bindOf(id, otherPay)).toMatchObject({ status: 409, json: { error: "payload pays another order" } });
+    const broken = JSON.parse(JSON.stringify(good)) as { payload: { signature: string } };
+    broken.payload.signature = `0x${"00".repeat(65)}`;
+    expect(await bindOf(id, broken)).toMatchObject({ status: 409, json: { error: "invalid-signature" } });
+    const beyond = await payloadFor(view, { patch: (o) => ({ ...o, extra: { ...(o["extra"] as object), expiresAt: clock + 400 } }) });
+    expect(await bindOf(id, beyond)).toMatchObject({ status: 409, json: { error: "valid-before-after-order-expiry" } });
+    expect(fixture.orders.get(id)?.exact).toBeUndefined();
+    const bound = await bindOf(id, good);
+    const signature = (good as unknown as { payload: { signature: string } }).payload.signature;
+    expect(bound).toMatchObject({ status: 200, json: { ack: "bound", identity: { from: payer.address, nonce: id, sigSha256: createHash("sha256").update(signature.toLowerCase()).digest("hex") } } });
+    expect(fixture.orders.get(id)).toMatchObject({ state: "open", exact: { state: "observed", path: "provider" } });
+    expect((await bindOf(id, good)).json).toEqual(bound.json);
+    expect(await bindOf(id, await payloadFor(view, { signer: otherPayer }))).toMatchObject({ status: 409, json: { error: "conflicting-authorization" } });
+    // bind だけでは払われない: reconcile は pending、release は 425。
+    expect((await reconcileOf(id)).json).toMatchObject({ outcome: "pending" });
+    expect(await releaseOf(id)).toMatchObject({ status: 425 });
+    clock += 301;
+    const expired = (await createOrder("2000", OTHER_REQUESTER)).json;
+    clock += 301;
+    expect(await bindOf(expired["orderId"] as string, await signedWith(expired, clock - 700, clock + 5), OTHER_REQUESTER)).toMatchObject({ status: 409 });
+    clock -= 602;
+  });
+  test("外部の模型: Bearer を見ない。有効な署名なら chain に載せ success と hash。同じ nonce の 2 回目は断る。bind されていない注文は chain に載っても reconcile は no-intent。bind の後なら accepted（hash は chain のもの）", async () => {
+    const view = (await createOrder()).json;
+    const id = view["orderId"] as string;
+    const good = await payloadFor(view);
+    // bind の前に送ってしまった場合: chain には載るが、注文は intent を持たない。
+    const sent = await submitOf(good, view);
+    expect(sent).toMatchObject({ status: 200, json: { success: true, network: `eip155:${CHAIN_ID}`, payer: payer.address } });
+    expect((await reconcileOf(id)).json).toMatchObject({ outcome: "rejected", reason: "no-intent" });
+    expect((await submitOf(good, view)).json).toMatchObject({ success: false, errorReason: "invalid_exact_evm_payload_authorization_nonce_used" });
+    // bind すると、chain の使用が見つかる（already-used、recorded）。
+    expect((await bindOf(id, good)).json).toMatchObject({ ack: "already-used", recorded: true, outcome: "accepted", txHash: sent.json["transaction"], identity: { from: payer.address, nonce: id } });
+    expect((await reconcileOf(id)).json).toMatchObject({ outcome: "accepted", txHash: sent.json["transaction"] });
+    expect(fixture.calls.submitWithAuthorization).toBe(0);
+    await submitOf(good, view, { authorization: "Bearer leaked" });
+    expect(fixture.calls.submitWithAuthorization).toBe(1);
     const second = (await createOrder("2000", OTHER_REQUESTER)).json;
-    const sid = second["orderId"] as string;
-    fixture.setMode("settle", "lose-response");
-    await expect(settleOf(sid, await payloadFor(second), OTHER_REQUESTER)).rejects.toBeTruthy();
-    expect(fixture.orders.get(sid)?.state).toBe("accepted");
-    fixture.setMode("settle", "late-paid");
-    const third = (await createOrder("2000", `0x${"04".repeat(32)}`)).json;
-    const r = await settleOf(third["orderId"] as string, await payloadFor(third), `0x${"04".repeat(32)}`);
-    expect(r.json).toMatchObject({ success: false, errorReason: "late-paid", outcome: "late-paid" });
-    expect((r.json["order"] as Record<string, unknown>)["status"]).toMatchObject({ state: "late-paid", gate: "late-paid" });
+    const broken = JSON.parse(JSON.stringify(await payloadFor(second))) as { payload: { signature: string } };
+    broken.payload.signature = `0x${"00".repeat(65)}`;
+    expect((await submitOf(broken, second)).json).toMatchObject({ success: false, errorReason: "invalid_exact_evm_payload_signature" });
+    expect((await submitOf(await payloadFor(second), { requirements: { ...(second["requirements"] as object), amount: "1" } })).json).toMatchObject({ success: false, errorReason: "invalid_payment_requirements" });
+  });
+  test("モード: bind（already-used・refused:<code>・busy・error・identity-mismatch・no-identity）、submit（refused・claims-success・other-hash・error・bad-request・late-paid）、reconcile（pending-first:<n>・wrong-identity・bad-tx・no-order・error）", async () => {
+    const view = (await createOrder()).json;
+    const id = view["orderId"] as string;
+    const good = await payloadFor(view);
+    fixture.setMode("bind", "already-used");
+    expect(await bindOf(id, good)).toMatchObject({ status: 200, json: { ack: "already-used", recorded: false, outcome: "pending" } });
+    fixture.setMode("bind", "refused:order-on-other-path");
+    expect(await bindOf(id, good)).toMatchObject({ status: 409, json: { error: "order-on-other-path" } });
+    fixture.setMode("bind", "busy");
+    expect((await bindOf(id, good)).status).toBe(503);
+    fixture.setMode("bind", "error");
+    expect((await bindOf(id, good)).status).toBe(500);
+    expect(fixture.orders.get(id)?.exact).toBeUndefined();
+    fixture.setMode("bind", "no-identity");
+    expect((await bindOf(id, good)).json).toEqual({ ack: "bound" });
+    fixture.setMode("bind", "identity-mismatch");
+    expect(((await bindOf(id, good)).json["identity"] as Record<string, unknown>)["nonce"]).not.toBe(id);
+    fixture.setMode("bind", "ok");
+    for (const [mode, status, body] of [["refused", 200, { success: false, errorReason: "insufficient_funds" }], ["claims-success", 200, { success: true }], ["error", 500, {}], ["bad-request", 400, {}]] as const) {
+      fixture.setMode("submit", mode);
+      expect(await submitOf(good, view), mode).toMatchObject({ status, json: body });
+      expect((await reconcileOf(id)).json, mode).toMatchObject({ outcome: "pending" });
+    }
+    fixture.setMode("submit", "other-hash");
+    const answered = await submitOf(good, view);
+    fixture.setMode("reconcile", "pending-first:6");
+    expect((await reconcileOf(id)).json).toMatchObject({ outcome: "pending" });
+    fixture.setMode("reconcile", "bad-tx");
+    expect((await reconcileOf(id)).json).toMatchObject({ outcome: "accepted", txHash: "0x1234" });
+    fixture.setMode("reconcile", "no-order");
+    expect((await reconcileOf(id)).json).not.toHaveProperty("order");
+    fixture.setMode("reconcile", "wrong-identity");
+    expect((((await reconcileOf(id)).json["order"] as Record<string, unknown>)["status"] as { exact: { nonce: string } }).exact.nonce).not.toBe(id);
+    fixture.setMode("reconcile", "error");
+    expect((await reconcileOf(id)).status).toBe(500);
+    fixture.setMode("reconcile", "ok");
+    const final = await reconcileOf(id);
+    expect(final.json).toMatchObject({ outcome: "accepted", txHash: fixture.orders.get(id)!.exact!.txHash });
+    expect(final.json["txHash"]).not.toBe(answered.json["transaction"]);
+    fixture.setMode("submit", "late-paid");
+    const late = (await createOrder("2000", OTHER_REQUESTER)).json;
+    const paid = await payOf(late["orderId"] as string, await payloadFor(late), late, OTHER_REQUESTER);
+    expect(paid.json).toMatchObject({ outcome: "late-paid" });
+    expect((paid.json["order"] as Record<string, unknown>)["status"]).toMatchObject({ state: "late-paid", gate: "late-paid" });
   });
 });
 
@@ -479,16 +559,15 @@ describe("実装レビュー 3 の #3: reconcile と Express の JSON の上限"
     expect((await settleOf(id, near)).json).toMatchObject({ outcome: "pending", errorReason: "settlement_pending" });
     const other = await payloadFor(view, { signer: otherPayer });
     expect((await settleOf(id, other)).json).toMatchObject({ errorReason: "conflicting-authorization", outcome: "rejected" });
-    // 昇格の成功: validAfter が未来の有効な署名 → observed + pending。時間が経って fresh verify が通れば送られて accepted（同じ注文・同じ authorization）。
+    // 送らない: validAfter が未来の有効な署名は observed + pending。時間が経って fresh verify が通っても、settle は送らない（同じ authorization の reconcile = pending）。
     const v2 = (await createOrder("2000", OTHER_REQUESTER)).json;
     const v2id = v2["orderId"] as string;
     const future = await signedWith(v2, clock + 100, clock + 290);
     expect((await settleOf(v2id, future, OTHER_REQUESTER)).json).toMatchObject({ errorReason: "settlement_pending", outcome: "pending", orderId: v2id });
     expect(fixture.orders.get(v2id)?.exact).toMatchObject({ state: "observed", validAfter: String(clock + 100) });
     clock += 150;
-    const promoted = await settleOf(v2id, future, OTHER_REQUESTER);
-    expect(promoted.json).toMatchObject({ success: true, outcome: "accepted", orderId: v2id, payer: payer.address });
-    expect(fixture.orders.get(v2id)?.exact).toMatchObject({ state: "paid", origin: "facilitator", validAfter: String(clock - 50) });
+    expect((await settleOf(v2id, future, OTHER_REQUESTER)).json).toMatchObject({ success: false, outcome: "pending", orderId: v2id });
+    expect(fixture.orders.get(v2id)?.exact).toMatchObject({ state: "observed" });
     clock -= 150;
     // 昇格の拒否: observed のまま注文の期限を過ぎると、fresh verify が通っても送らず reconcile（pending）。証拠は残る。
     const v4 = (await createOrder("2000", `0x${"07".repeat(32)}`)).json;
@@ -509,7 +588,7 @@ describe("実装レビュー 3 の #3: reconcile と Express の JSON の上限"
     // 払われた注文に、同じ署名を期限の後（SDK の validBefore の検査に落ちる時刻）に再提示 → accepted（reconcile）。
     const v3 = (await createOrder("2000", `0x${"06".repeat(32)}`)).json;
     const good = await payloadFor(v3);
-    const settled = await settleOf(v3["orderId"] as string, good, `0x${"06".repeat(32)}`);
+    const settled = await payOf(v3["orderId"] as string, good, v3, `0x${"06".repeat(32)}`);
     expect(settled.json["outcome"]).toBe("accepted");
     clock += 299;
     expect((await settleOf(v3["orderId"] as string, good, `0x${"06".repeat(32)}`)).json).toMatchObject({ outcome: "accepted", transaction: settled.json["transaction"] });

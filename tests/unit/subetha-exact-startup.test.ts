@@ -59,6 +59,7 @@ test("listen の失敗の後、journal と ledger の lock が解放されてい
     ROUTER_HTTP_HOST: "127.0.0.1",
     ROUTER_CANONICAL_BASE_URL: "http://127.0.0.1:8500",
     ROUTER_SUBETHA_EXACT_FACILITATOR_URL: "http://127.0.0.1:1/p/router-test",
+    ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:1/xfac",
     ROUTER_SUBETHA_EXACT_TOKEN_FILE: tokenFile,
   });
   try {

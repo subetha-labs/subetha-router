@@ -36,6 +36,7 @@ async function makeAdapter(overrides: Partial<Parameters<typeof createSubethaExa
   const transport = createGuardedTransport({ allowLoopback: true, report: (event) => events.push(event) });
   const created = createSubethaExactInbound({
     facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`,
+    settleFacilitatorUrl: `${fixture.baseUrl}/xfac`,
     token: () => TOKEN,
     transport,
     asset: { network: NETWORK, id: ASSET, decimals: 6, domain: DOMAIN },
@@ -285,25 +286,263 @@ describe("preflight・verify（§3.5）", () => {
   });
 });
 
-describe("settle（表 B）", () => {
-  test("accepted → settled（txRef・eventId は小文字）。pending・rejected・5xx・読めない・timeout・lose-response → unknown（throw しない、再試行しない）。ledger の settle の行", async () => {
-    await makeAdapter({ timeouts: { settleMs: 300 }, limits: { maxRequestsTotal: 100, maxUnresolved: 20, requestsPerMinute: 60 } });
-    const offer = await adapter!.createOffer(request());
-    const good = await credentialFor(offer);
-    for (const mode of ["pending", "rejected:send-limit-reached", "error", "unreadable", "timeout", "lose-response"]) {
-      const fresh = await adapter!.createOffer(request(mode));
-      const credential = await credentialFor(fresh);
-      fixture.setMode("settle", mode);
-      const result = await adapter!.settle(fresh, credential, { routeId: ROUTE_ID });
-      expect(result, mode).toEqual({ outcome: "unknown", reason: "source_settle_unknown", mayStillSettleUntil: fresh.extra.expiresAt });
-      expect((await ledgerRows()).at(-1), mode).toMatchObject({ event: "settle", patch: { outcome: "unknown", mayStillSettleUntil: fresh.extra.expiresAt } });
-    }
-    fixture.setMode("settle", "accepted");
-    const settled = await adapter!.settle(offer, good, { routeId: ROUTE_ID });
-    expect(settled).toEqual({ outcome: "settled", txRef: fixture.orders.get(offer.extra.challengeNonce)!.exact!.txHash, eventId: offer.extra.challengeNonce });
-    expect((await ledgerRows()).at(-1)).toMatchObject({ event: "settle", patch: { outcome: "settled", txRef: settled.outcome === "settled" ? settled.txRef : "" } });
-    expect(fixture.calls.byOrder[offer.extra.challengeNonce]).toMatchObject({ settle: 1 });
+describe("settle（表 B: bind → 外部の facilitator → reconcile）", () => {
+  const SETTLE_LIMITS = { maxRequestsTotal: 100, maxUnresolved: 40, requestsPerMinute: 100 };
+  const FAST = { settleMs: 1_500, bindMs: 300, submitMs: 300, reconcileMs: 300, reconcileRetryWaitMs: 20 };
+  const callsOf = (offer: InboundOffer): Record<string, number> => fixture.calls.byOrder[offer.extra.challengeNonce] ?? {};
+  const unknownOf = (offer: InboundOffer) => ({ outcome: "unknown", reason: "source_settle_unknown", mayStillSettleUntil: offer.extra.expiresAt });
+  async function fresh(requestId: string): Promise<{ offer: InboundOffer; credential: PaymentCredential }> {
+    const offer = await adapter!.createOffer(request(requestId));
+    return { offer, credential: await credentialFor(offer) };
+  }
+
+  test("AC-1: 正しい購入は bind 1・送信 1・reconcile 1、SubEtha の settle は 0。txRef は chain の hash、eventId は nonce（小文字）。ledger は bind → submit(started) → submit(answered) → settle", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("ok");
+    const settled = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+    const order = fixture.orders.get(offer.extra.challengeNonce)!;
+    expect(settled).toEqual({ outcome: "settled", txRef: order.exact!.txHash, eventId: offer.extra.challengeNonce });
+    expect(order.exact).toMatchObject({ path: "provider", origin: "external-broadcast", state: "paid" });
+    expect(callsOf(offer)).toMatchObject({ bind: 1, submit: 1, reconcile: 1 });
+    expect(callsOf(offer)["settle"]).toBeUndefined();
+    const rows = (await ledgerRows()).slice(-4);
+    expect(rows.map((r) => [r.event, r.patch["phase"] ?? r.patch["ack"] ?? r.patch["outcome"]])).toEqual([["bind", "bound"], ["submit", "started"], ["submit", "answered"], ["settle", "settled"]]);
+    expect(rows[0]!.patch).toMatchObject({ identity: "match", httpStatus: 200 });
+    expect(rows[2]!.patch).toMatchObject({ success: true, transaction: order.exact!.txHash, httpStatus: 200 });
+    expect(rows[3]!.patch).toMatchObject({ path: "provider", reconcile: "accepted", reconcileAttempts: 1, txRef: order.exact!.txHash });
+    expect(adapter!.ledger!.submitStarted(offer.extra.challengeNonce.toUpperCase().replace("0X", "0x"))).toBe(true);
   });
+
+  test("AC-2: bind が bound 以外なら外部へは 1 回も送らない（結果は unknown）", async () => {
+    await makeAdapter({ timeouts: FAST, limits: SETTLE_LIMITS });
+    const modes: [string, string, number][] = [
+      ["already-used", "already-used", 1],
+      ["refused:conflicting-authorization", "refused", 1],
+      ["refused:order-on-other-path", "refused", 1],
+      ["refused:order-expired", "refused", 1],
+      ["refused:too-many-unresolved-bindings", "refused", 1],
+      ["error", "unknown", 0],
+      ["busy", "unknown", 0],
+      ["missing", "unknown", 0],
+      ["unreadable", "unknown", 0],
+      ["timeout", "unknown", 0],
+      ["lose-response", "unknown", 0],
+      ["no-identity", "unknown", 0],
+      ["identity-mismatch", "bound", 0],
+    ];
+    for (const [mode, ack, reconciles] of modes) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode("bind", mode);
+      expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID }), mode).toEqual(unknownOf(offer));
+      expect([callsOf(offer)["bind"], callsOf(offer)["submit"] ?? 0, callsOf(offer)["reconcile"] ?? 0], mode).toEqual([1, 0, reconciles]);
+      const rows = await ledgerRows();
+      expect(rows.filter((r) => r.patch["orderId"] === offer.extra.challengeNonce && r.event === "bind").at(-1)!.patch, mode).toMatchObject({ ack });
+      expect(rows.at(-1), mode).toMatchObject({ event: "settle", patch: { outcome: "unknown", path: "provider", mayStillSettleUntil: offer.extra.expiresAt } });
+      expect(adapter!.ledger!.submitStarted(offer.extra.challengeNonce), mode).toBe(false);
+    }
+    expect(fixture.calls.byRoute["submit"]).toBeUndefined();
+    // 403（digest の不一致）と 401（token 違い）も送らない。
+    fixture.setMode("bind", "raw", { status: 403, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: "order is bound to another requester or resource" }) });
+    const forbidden = await fresh("403");
+    expect(await adapter!.settle(forbidden.offer, forbidden.credential, { routeId: ROUTE_ID })).toEqual(unknownOf(forbidden.offer));
+    expect(fixture.calls.byRoute["submit"]).toBeUndefined();
+  });
+
+  test("AC-2: bind の 409 の code は固定の一覧だけを記録する（相手の文字列・token は ledger に入らない）", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("echo");
+    fixture.setMode("bind", "raw", { status: 409, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: `leak ${TOKEN}` }) });
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    const text = await readFile(path.join(workDir, "subetha-exact", "orders.ndjson"), "utf8");
+    expect(text).not.toContain(TOKEN);
+    expect((await ledgerRows()).filter((r) => r.event === "bind").at(-1)!.patch).toMatchObject({ ack: "refused", code: "other", httpStatus: 409 });
+  });
+
+  test("AC-7: 同じ authorization が先に chain に載っていた（already-used）: 送らず、reconcile の accepted で settled", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("front-run");
+    fixture.setMode("bind", "already-used-paid");
+    const settled = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+    expect(settled).toEqual({ outcome: "settled", txRef: fixture.orders.get(offer.extra.challengeNonce)!.exact!.txHash, eventId: offer.extra.challengeNonce });
+    expect([callsOf(offer)["submit"] ?? 0, callsOf(offer)["reconcile"]]).toEqual([0, 1]);
+  });
+
+  test("AC-3: 送信の印が書けなければ送らない（unknown、note）。印は握りつぶさない", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("mark");
+    const ledger = adapter!.ledger!;
+    const append = ledger.append.bind(ledger);
+    vi.spyOn(ledger, "append").mockImplementation(async (key, event, patch) => {
+      if (event === "submit" && patch["phase"] === "started") throw new Error("disk full");
+      return append(key, event, patch);
+    });
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    expect(callsOf(offer)["submit"]).toBeUndefined();
+    expect(notes).toContain("subetha-exact: the submission mark could not be written; nothing was sent");
+  });
+
+  test("AC-4: 同じ注文の 2 回目・同時・再起動のあとの settle でも、外部への送信は合計 1 回", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("twice");
+    // 同時の 2 つ: 送るのは 1 つだけ。
+    const both = await Promise.all([adapter!.settle(offer, credential, { routeId: ROUTE_ID }), adapter!.settle(offer, credential, { routeId: ROUTE_ID })]);
+    expect(callsOf(offer)["submit"]).toBe(1);
+    expect(both.some((r) => r.outcome === "settled")).toBe(true);
+    // 3 回目: 印があるので送らず、reconcile の結果（同じ tx）。
+    const again = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+    expect(again).toEqual({ outcome: "settled", txRef: fixture.orders.get(offer.extra.challengeNonce)!.exact!.txHash, eventId: offer.extra.challengeNonce });
+    // 再起動（ledger の読み戻し）のあとも送らない。
+    await adapter!.close();
+    await makeAdapter({ timeouts: FAST });
+    expect(adapter!.ledger!.submitStarted(offer.extra.challengeNonce)).toBe(true);
+    await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+    expect(callsOf(offer)["submit"]).toBe(1);
+  });
+
+  test("AC-4: 送ったあと reconcile が pending のままでも、次の settle は送らない（bind はまた bound と答える）。同じ注文を持つ別の attempt からでも、再起動のあとでも、送信は合計 1 回", async () => {
+    await makeAdapter({ timeouts: { ...FAST, settleMs: 300 } });
+    const { offer, credential } = await fresh("fence");
+    fixture.setMode("submit", "claims-success");
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    expect(callsOf(offer)["submit"]).toBe(1);
+    fixture.setMode("submit", "accepted");
+    // 2 回目: bind は bound（ledger だけで答える）。印があるので送らない。
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    expect((await ledgerRows()).filter((r) => r.event === "bind").at(-1)!.patch).toMatchObject({ ack: "bound", identity: "match" });
+    expect(callsOf(offer)["submit"]).toBe(1);
+    // 同じ注文を再利用した別の attempt（同じ requester・同じ resource の作成 = existing）: 行の持ち主は変わるが、印は注文に付いている。
+    const reused = await adapter!.createOffer(request("fence"));
+    expect(reused.extra.challengeNonce).toBe(offer.extra.challengeNonce);
+    expect(adapter!.ledger!.attemptsForOrder(offer.extra.challengeNonce).length).toBeGreaterThan(1);
+    expect(await adapter!.settle(reused, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(reused));
+    expect(callsOf(offer)["submit"]).toBe(1);
+    await adapter!.close();
+    await makeAdapter({ timeouts: { ...FAST, settleMs: 300 } });
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    expect([callsOf(offer)["submit"], callsOf(offer)["bind"]]).toEqual([1, 4]);
+  });
+
+  test("AC-7: 断られても未払いの証明ではない。外部の拒否・bind の 409・already-used（未記録）のあとでも、同じ authorization が chain に載っていれば reconcile の accepted で settled。identity が違えば unknown", async () => {
+    await makeAdapter({ timeouts: FAST, limits: SETTLE_LIMITS });
+    for (const [route, mode, submits] of [["submit", "refused-but-on-chain", 1], ["bind", "refused-then-paid", 0], ["bind", "already-used-then-paid", 0]] as const) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode(route, mode);
+      const settled = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+      expect(settled, mode).toEqual({ outcome: "settled", txRef: fixture.orders.get(offer.extra.challengeNonce)!.exact!.txHash, eventId: offer.extra.challengeNonce });
+      expect([callsOf(offer)["submit"] ?? 0, callsOf(offer)["reconcile"]], mode).toEqual([submits, 1]);
+      fixture.setMode(route, route === "submit" ? "accepted" : "ok");
+    }
+    const { offer, credential } = await fresh("other-identity");
+    fixture.setMode("bind", "refused-then-paid");
+    fixture.setMode("reconcile", "wrong-identity");
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    expect((await ledgerRows()).at(-1)).toMatchObject({ event: "settle", patch: { reconcile: "mismatch" } });
+  });
+
+  test("予算: 送信の印の書き込みが長引いて予算が尽きたら送らない（印は残る）。応答の本文が途中で止まっても予算の中で終わる", async () => {
+    await makeAdapter({ timeouts: { settleMs: 400, bindMs: 200, submitMs: 200, reconcileMs: 200, reconcileRetryWaitMs: 50 }, limits: SETTLE_LIMITS });
+    const slow = await fresh("slow-mark");
+    const ledger = adapter!.ledger!;
+    const append = ledger.append.bind(ledger);
+    vi.spyOn(ledger, "append").mockImplementation(async (key, event, patch) => {
+      if (event === "submit" && patch["phase"] === "started") await new Promise((resolve) => setTimeout(resolve, 500));
+      return append(key, event, patch);
+    });
+    expect(await adapter!.settle(slow.offer, slow.credential, { routeId: ROUTE_ID })).toEqual(unknownOf(slow.offer));
+    expect(callsOf(slow.offer)["submit"]).toBeUndefined();
+    expect(ledger.submitStarted(slow.offer.extra.challengeNonce)).toBe(true);
+    vi.restoreAllMocks();
+    for (const route of ["bind", "submit", "reconcile"] as const) {
+      const { offer, credential } = await fresh(`stall-${route}`);
+      fixture.setMode(route, "stall-body");
+      const startedAt = performance.now();
+      expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID }), route).toEqual(unknownOf(offer));
+      expect(performance.now() - startedAt, route).toBeLessThan(700);
+      if (route === "bind") expect(callsOf(offer)["submit"], route).toBeUndefined();
+      fixture.setMode(route, route === "submit" ? "accepted" : "ok");
+    }
+  });
+
+  test("AC-4: 印のあと・送る前に落ちた注文（started の行だけ）は、再起動のあとも送らない（送信は合計 0、結果は unknown）", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("crash");
+    const owner = adapter!.ledger!.attemptsForOrder(offer.extra.challengeNonce).at(-1)!;
+    await adapter!.ledger!.append(owner.attemptId, "submit", { orderId: offer.extra.challengeNonce, phase: "started" });
+    await adapter!.close();
+    await makeAdapter({ timeouts: FAST });
+    expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).toEqual(unknownOf(offer));
+    expect([callsOf(offer)["bind"], callsOf(offer)["submit"] ?? 0, callsOf(offer)["reconcile"]]).toEqual([1, 0, 1]);
+  });
+
+  test("AC-5・AC-6: 外部が成功と言っても chain に無ければ unknown。断った・答えない・読めないも unknown（rejected にしない）。断ったときの reconcile は 1 回だけ", async () => {
+    await makeAdapter({ timeouts: { ...FAST, settleMs: 400 }, limits: SETTLE_LIMITS });
+    for (const [mode, polls] of [["claims-success", true], ["refused", false], ["bad-request", false], ["error", true], ["unreadable", true], ["timeout", true]] as const) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode("submit", mode);
+      expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID }), mode).toEqual(unknownOf(offer));
+      expect(callsOf(offer)["submit"], mode).toBe(1);
+      if (polls) expect(callsOf(offer)["reconcile"], mode).toBeGreaterThan(1);
+      else expect(callsOf(offer)["reconcile"], mode).toBe(1);
+      expect((await ledgerRows()).at(-1), mode).toMatchObject({ event: "settle", patch: { outcome: "unknown", reconcile: "pending" } });
+    }
+  });
+
+  test("AC-7: 外部の答えが失われても・hash が違っても、chain の支払いを reconcile が拾う（txRef は chain の hash）。chain の遅れは待つ", async () => {
+    await makeAdapter({ timeouts: FAST, limits: SETTLE_LIMITS });
+    for (const mode of ["lose-response", "other-hash"]) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode("submit", mode);
+      const settled = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+      const paid = fixture.orders.get(offer.extra.challengeNonce)!.exact!.txHash;
+      expect(settled, mode).toEqual({ outcome: "settled", txRef: paid, eventId: offer.extra.challengeNonce });
+      if (mode === "other-hash") expect((await ledgerRows()).filter((r) => r.event === "submit").at(-1)!.patch["transaction"]).not.toBe(paid);
+    }
+    fixture.setMode("submit", "accepted");
+    fixture.setMode("reconcile", "pending-first:2");
+    const slow = await fresh("lag");
+    expect((await adapter!.settle(slow.offer, slow.credential, { routeId: ROUTE_ID })).outcome).toBe("settled");
+    expect(callsOf(slow.offer)["reconcile"]).toBe(3);
+    expect((await ledgerRows()).at(-1)!.patch).toMatchObject({ reconcile: "accepted", reconcileAttempts: 3 });
+  });
+
+  test("AC-8: reconcile の accepted でも、identity・txHash・order が合わなければ unknown。late-paid・5xx・timeout も unknown", async () => {
+    await makeAdapter({ timeouts: { ...FAST, settleMs: 500 }, limits: SETTLE_LIMITS });
+    for (const [mode, reading] of [["wrong-identity", "mismatch"], ["bad-tx", "mismatch"], ["no-order", "mismatch"], ["error", "unanswered"], ["unreadable", "unanswered"], ["timeout", "unanswered"]] as const) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode("reconcile", mode);
+      expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID }), mode).toEqual(unknownOf(offer));
+      expect((await ledgerRows()).at(-1), mode).toMatchObject({ event: "settle", patch: { outcome: "unknown", reconcile: reading } });
+    }
+    fixture.setMode("reconcile", "ok");
+    fixture.setMode("submit", "late-paid");
+    const late = await fresh("late");
+    expect(await adapter!.settle(late.offer, late.credential, { routeId: ROUTE_ID })).toEqual(unknownOf(late.offer));
+    expect((await ledgerRows()).at(-1)).toMatchObject({ event: "settle", patch: { reconcile: "late-paid" } });
+  });
+
+  test("AC-9: Provider token は SubEtha への要求だけに付く（外部への送信には Authorization が無い）。ledger に署名・token・外部の URL が無い", async () => {
+    await makeAdapter({ timeouts: FAST });
+    const { offer, credential } = await fresh("secret");
+    expect((await adapter!.settle(offer, credential, { routeId: ROUTE_ID })).outcome).toBe("settled");
+    expect(fixture.calls.byRoute["submit"]).toBe(1);
+    expect(fixture.calls.submitWithAuthorization).toBe(0);
+    const text = await readFile(path.join(workDir, "subetha-exact", "orders.ndjson"), "utf8");
+    const signature = (credential.payload as unknown as { signature: string }).signature;
+    for (const secret of [TOKEN, signature, signature.slice(2), "/xfac", fixture.baseUrl!]) expect(text).not.toContain(secret);
+  });
+
+  test("AC-12: settle 全体は予算を越えない（答えない bind・答えない外部・pending の続く reconcile）", async () => {
+    await makeAdapter({ timeouts: { settleMs: 600, bindMs: 200, submitMs: 200, reconcileMs: 200, reconcileRetryWaitMs: 50 }, limits: SETTLE_LIMITS });
+    for (const [route, mode] of [["bind", "timeout"], ["submit", "timeout"], ["submit", "claims-success"], ["reconcile", "timeout"]] as const) {
+      const { offer, credential } = await fresh(`${route}-${mode}`);
+      fixture.setMode(route, mode);
+      const startedAt = performance.now();
+      expect(await adapter!.settle(offer, credential, { routeId: ROUTE_ID }), `${route}-${mode}`).toEqual(unknownOf(offer));
+      expect(performance.now() - startedAt, `${route}-${mode}`).toBeLessThan(900);
+      fixture.setMode(route, route === "submit" ? "accepted" : "ok");
+    }
+  });
+
   test("ledger に attempt の無い注文（消失）: settle は要求を出す前に rejected、release は unknown、note", async () => {
     await makeAdapter();
     const offer = await adapter!.createOffer(request());
@@ -462,10 +701,24 @@ describe("ledger の失敗・salt・秘密の不在（§3.2・§3.9、NFR-3）",
     await makeAdapter();
     const offer = await adapter!.createOffer(request("a"));
     const credential = await credentialFor(offer);
-    await failNextAppend();
+    // 最後の settle の行だけを落とす: 結果（settled）は保つ。
+    const ledger = adapter!.ledger!;
+    const append = ledger.append.bind(ledger);
+    vi.spyOn(ledger, "append").mockImplementation(async (key, event, patch) => {
+      if (event === "settle") throw new Error("EIO");
+      return append(key, event, patch);
+    });
     const settled = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
     expect(settled.outcome).toBe("settled");
     expect(notes).toContain("subetha-exact: ledger row could not be written (event=settle)");
+    vi.restoreAllMocks();
+    // bind の行で journal が壊れたら、そのあとの送信の印も書けない: 何も送らず unknown（fail closed）。
+    const second = await adapter!.createOffer(request("a2"));
+    const secondCredential = await credentialFor(second);
+    await failNextAppend();
+    expect((await adapter!.settle(second, secondCredential, { routeId: ROUTE_ID })).outcome).toBe("unknown");
+    expect(fixture.calls.byOrder[second.extra.challengeNonce]!["submit"]).toBeUndefined();
+    expect(notes).toContain("subetha-exact: the submission mark could not be written; nothing was sent");
     await adapter!.close();
     await makeAdapter();
     // created だけを落とす: requested は通し、2 回目の append を落とす（前の spy は戻してから本物を捕まえる）。
@@ -480,7 +733,7 @@ describe("ledger の失敗・salt・秘密の不在（§3.2・§3.9、NFR-3）",
       return calls === 2 ? Promise.reject(new Error("EIO")) : original.apply(this, args);
     });
     expect(await failQuote(() => adapter!.createOffer(request("b")))).toMatchObject({ detail: "ledger_unavailable" });
-    expect(fixture.orders.size).toBe(2);
+    expect(fixture.orders.size).toBe(3);
     expect(notes).toContain("subetha-exact: ledger unavailable after order creation; offer withheld");
   });
   test("salt: 行があるのに salt が無ければ ConfigError で startup が失敗し、lock は解放される。salt が壊れていても ConfigError", async () => {
@@ -488,9 +741,9 @@ describe("ledger の失敗・salt・秘密の不在（§3.2・§3.9、NFR-3）",
     await adapter!.createOffer(request("a"));
     await adapter!.close();
     await unlink(path.join(workDir, "subetha-exact", "requester.salt"));
-    await expect(createSubethaExactInbound({ facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`, token: () => TOKEN, transport: createGuardedTransport({ allowLoopback: true, report: () => {} }), asset: { network: NETWORK, id: ASSET, decimals: 6, domain: DOMAIN }, ledgerDir: path.join(workDir, "subetha-exact"), limits: { maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 60 } }).startup()).rejects.toBeInstanceOf(ConfigError);
+    await expect(createSubethaExactInbound({ facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`, settleFacilitatorUrl: `${fixture.baseUrl}/xfac`, token: () => TOKEN, transport: createGuardedTransport({ allowLoopback: true, report: () => {} }), asset: { network: NETWORK, id: ASSET, decimals: 6, domain: DOMAIN }, ledgerDir: path.join(workDir, "subetha-exact"), limits: { maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 60 } }).startup()).rejects.toBeInstanceOf(ConfigError);
     await writeFile(path.join(workDir, "subetha-exact", "requester.salt"), "not-hex\n");
-    await expect(createSubethaExactInbound({ facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`, token: () => TOKEN, transport: createGuardedTransport({ allowLoopback: true, report: () => {} }), asset: { network: NETWORK, id: ASSET, decimals: 6, domain: DOMAIN }, ledgerDir: path.join(workDir, "subetha-exact"), limits: { maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 60 } }).startup()).rejects.toBeInstanceOf(ConfigError);
+    await expect(createSubethaExactInbound({ facilitatorUrl: `${fixture.baseUrl}/p/${PROVIDER}`, settleFacilitatorUrl: `${fixture.baseUrl}/xfac`, token: () => TOKEN, transport: createGuardedTransport({ allowLoopback: true, report: () => {} }), asset: { network: NETWORK, id: ASSET, decimals: 6, domain: DOMAIN }, ledgerDir: path.join(workDir, "subetha-exact"), limits: { maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 60 } }).startup()).rejects.toBeInstanceOf(ConfigError);
     // lock が解けているので、salt を戻せば開ける。
     await writeFile(path.join(workDir, "subetha-exact", "requester.salt"), `${"ab".repeat(32)}\n`);
     await makeAdapter();

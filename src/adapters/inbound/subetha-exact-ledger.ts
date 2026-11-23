@@ -16,7 +16,7 @@ import { openJournal, type Journal, type JournalRecord } from "../../core/journa
 import type { ParsedRequirements } from "./subetha-exact-classify.js";
 import { pairKeyOf } from "./subetha-exact-classify.js";
 
-export type LedgerEvent = "requested" | "create_failed" | "created" | "lookup" | "discovered" | "refused" | "verify" | "settle" | "release" | "complete" | "abandoned";
+export type LedgerEvent = "requested" | "create_failed" | "created" | "lookup" | "discovered" | "refused" | "verify" | "bind" | "submit" | "settle" | "release" | "complete" | "abandoned";
 
 export interface AttemptView {
   readonly attemptId: string;
@@ -66,6 +66,8 @@ export interface SubethaExactLedger {
   attemptsForOrder(orderId: string): readonly AttemptView[];
   discoveredForPair(requesterDigest: string, resourceDigest: string): readonly DiscoveredOrder[];
   hasOrder(orderId: string): boolean;
+  /** その注文に `submit` の行があるか（どの attempt の行でも。外部の facilitator へ送り始めた印。消えない。`docs/subetha-exact-provider-settle-design.md` §3.3）。 */
+  submitStarted(orderId: string): boolean;
   /** 累積の要求数（`requested` の行の数）。 */
   totalRequests(): number;
   requestsSince(sinceMs: number): number;
@@ -145,6 +147,8 @@ export interface LedgerIndex {
   readonly byOrderId: Map<string, string[]>;
   readonly discoveredByPair: Map<string, DiscoveredOrder[]>;
   readonly knownDiscovered: Set<string>;
+  /** `submit` の行を持つ注文 id（小文字）。 */
+  readonly submitted: Set<string>;
   apply(record: Pick<JournalRecord, "paymentId" | "event" | "patch">): void;
   unresolvedAttempts(nowSec: number): AttemptView[];
   unresolvedDiscovered(nowSec: number): DiscoveredOrder[];
@@ -163,6 +167,7 @@ function createLedgerIndex(): LedgerIndex {
   const byOrderId = new Map<string, string[]>();
   const discoveredByPair = new Map<string, DiscoveredOrder[]>();
   const knownDiscovered = new Set<string>();
+  const submitted = new Set<string>();
 
   const apply = (record: Pick<JournalRecord, "paymentId" | "event" | "patch">): void => {
     const key = record.paymentId;
@@ -179,6 +184,12 @@ function createLedgerIndex(): LedgerIndex {
       const list = discoveredByPair.get(key) ?? [];
       list.push({ pair: key, orderId: orderId.toLowerCase(), payTo: asString(patch["payTo"]) ?? "", expiresAt: asNumber(patch["expiresAt"]) ?? 0, tenant: asString(patch["tenant"]) ?? "", requirements, requesterDigest, resourceDigest });
       discoveredByPair.set(key, list);
+      return;
+    }
+    if (record.event === "submit") {
+      // attempt が索引に無くても印は立てる（弱い側に落とさない）。
+      const orderId = asString(patch["orderId"]);
+      if (orderId !== undefined) submitted.add(orderId.toLowerCase());
       return;
     }
     if (record.event === "requested") {
@@ -248,14 +259,14 @@ function createLedgerIndex(): LedgerIndex {
     });
   const unresolvedDiscovered = (nowSec: number): DiscoveredOrder[] =>
     [...discoveredByPair.values()].flat().filter((order) => !byOrderId.has(order.orderId) && nowSec <= order.expiresAt + UNRESOLVED_GRACE_SECONDS);
-  return { attempts, byPair, byOrderId, discoveredByPair, knownDiscovered, apply, unresolvedAttempts, unresolvedDiscovered };
+  return { attempts, byPair, byOrderId, discoveredByPair, knownDiscovered, submitted, apply, unresolvedAttempts, unresolvedDiscovered };
 }
 
 export async function openSubethaExactLedger(options: { readonly dir: string }): Promise<SubethaExactLedger> {
   mkdirSync(options.dir, { recursive: true, mode: 0o700 });
   const journal: Journal = await openJournal({ journalPath: path.join(options.dir, "orders.ndjson") });
   const index = replayLedgerRecords(journal.records);
-  const { attempts, byPair, byOrderId, discoveredByPair, knownDiscovered, apply, unresolvedAttempts, unresolvedDiscovered } = index;
+  const { attempts, byPair, byOrderId, discoveredByPair, knownDiscovered, submitted, apply, unresolvedAttempts, unresolvedDiscovered } = index;
   let broken = false;
   let salt: string;
   try {
@@ -290,6 +301,7 @@ export async function openSubethaExactLedger(options: { readonly dir: string }):
     attemptsForOrder: (orderId) => (byOrderId.get(orderId.toLowerCase()) ?? []).map((id) => attempts.get(id)!).filter((a) => a !== undefined),
     discoveredForPair: (requesterDigest, resourceDigest) => discoveredByPair.get(pairKeyOf(requesterDigest, resourceDigest)) ?? [],
     hasOrder: (orderId) => byOrderId.has(orderId.toLowerCase()) || knownDiscovered.has(orderId.toLowerCase()),
+    submitStarted: (orderId) => submitted.has(orderId.toLowerCase()),
     totalRequests: () => attempts.size,
     requestsSince: (sinceMs) => [...attempts.values()].filter((a) => a.atMs >= sinceMs).length,
     unresolvedAttempts,

@@ -3,7 +3,9 @@
  * （EIP-3009）の支払いを受ける（`docs/subetha-exact-inbound-design.md` §3、要件 FR-2〜FR-9）。
  *
  * - 鍵・署名の能力は持たない（受信側）。手元の署名の検査は viem の `recoverTypedDataAddress`（純粋、RPC 無し）。
- * - facilitator への呼び出しは `createOffer`（作成）・`verify`（公開）・`settle`・`release`・`complete` と、読み取りの GET（復元・requester の照会）だけ。
+ * - facilitator への呼び出しは `createOffer`（作成）・`verify`（公開）・`settle`（bind と reconcile）・`release`・`complete` と、読み取りの GET（復元・requester の照会）だけ。
+ * - `settle` は SubEtha に送信を頼まない（`docs/subetha-exact-provider-settle-design.md`）: 注文を bind し、`bound` のときだけ Router の選んだ x402 facilitator に
+ *   authorization を**最大 1 回**送り（Provider token は付けない）、結果は SubEtha の reconcile だけで決める。
  * - 例外の契約（§3.9）: `createOffer` は `InboundOfferError` だけを投げる。`verify`・`settle`・`release`・`complete` は投げない。
  * - token は閉包の中だけ。ledger・note・診断・例外の message に token・URL・credential・facilitator の自由な文を写さない。
  */
@@ -32,19 +34,25 @@ import {
   classifyComplete,
   classifyCreate,
   classifyReconstruct,
+  classifyBind,
+  classifyReconcile,
   classifyReleasePost,
-  classifySettle,
+  classifySubmit,
   isRecord,
   parseOrderView,
   requesterDigestOf,
   resourceDigestOf,
   retryAfterMsOf,
+  sigSha256Of,
   SUBETHA_EXACT_RESPONSE_MAX_BYTES,
   tryDeadlineOf,
   viewMismatchOf,
   waitFits,
   type CallOutcome,
+  type LocalIdentity,
   type ParsedOrderView,
+  type ReconcileClassification,
+  type ReconcileReading,
   type ReleaseContext,
 } from "./subetha-exact-classify.js";
 import { openSubethaExactLedger, type AttemptView, type SubethaExactLedger } from "./subetha-exact-ledger.js";
@@ -52,7 +60,14 @@ import { openSubethaExactLedger, type AttemptView, type SubethaExactLedger } fro
 export interface SubethaExactTimeouts {
   readonly createMs: number;
   readonly verifyMs: number;
+  /** `settle` 全体の予算（bind + 外部への送信 + reconcile。本文の読み取りと待ちを含む）。 */
   readonly settleMs: number;
+  /** その中の 1 回ずつの上限（`docs/subetha-exact-provider-settle-design.md` §3.5）。 */
+  readonly bindMs: number;
+  readonly submitMs: number;
+  readonly reconcileMs: number;
+  /** reconcile が `pending` の間の待ち。 */
+  readonly reconcileRetryWaitMs: number;
   readonly statusMs: number;
   readonly releaseMs: number;
   readonly completeMs: number;
@@ -70,6 +85,10 @@ export const SUBETHA_EXACT_DEFAULT_TIMEOUTS: SubethaExactTimeouts = Object.freez
   createMs: 40_000,
   verifyMs: 15_000,
   settleMs: 60_000,
+  bindMs: 10_000,
+  submitMs: 30_000,
+  reconcileMs: 10_000,
+  reconcileRetryWaitMs: 2_000,
   statusMs: 15_000,
   releaseMs: 20_000,
   completeMs: 15_000,
@@ -88,6 +107,11 @@ export interface SubethaExactInboundOptions {
   /** token は閉包の中だけ（options に文字列で持たせない = 誤って JSON 化しない）。 */
   readonly token: () => string;
   readonly transport: GuardedTransport;
+  /**
+   * Router が買い手の authorization を送る先の x402 facilitator の base URL（末尾 / 無し。`…/settle` に POST する）。
+   * この要求に Provider token は付けない。transport は `transport` と同じ（SSRF 防御 A）。
+   */
+  readonly settleFacilitatorUrl: string;
   /** 表の行（`subetha-exact` の受信を許す資産）。 */
   readonly asset: { readonly network: string; readonly id: string; readonly decimals: number; readonly domain: { readonly name: string; readonly version: string } };
   /** `<dirname(journalPath)>/subetha-exact`。 */
@@ -139,6 +163,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 export function createSubethaExactInbound(options: SubethaExactInboundOptions): SubethaExactInbound {
   const base = options.facilitatorUrl.replace(/\/$/, "");
+  const settleBase = options.settleFacilitatorUrl.replace(/\/+$/, "");
   const tenant = new URL(base).pathname;
   const transport = options.transport;
   const asset = options.asset;
@@ -151,17 +176,26 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
   const diagOn = inboundDiagnosticsOn(diagnostics);
   let ledger: SubethaExactLedger | undefined;
   let inflight = false;
+  /** 外部の facilitator へ送っている最中の注文（小文字の id）。同じ process の 2 つ目の `settle` は送らない（設計 §3.3）。 */
+  const submitting = new Set<string>();
 
   // ---- HTTP の共通（§3.9）。例外を投げない。 ----
-  async function call(method: "GET" | "POST", path: string, body: unknown, options2: { readonly op: string; readonly deadlineMs: number; readonly auth: boolean; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
+  function call(method: "GET" | "POST", path: string, body: unknown, options2: { readonly op: string; readonly deadlineMs: number; readonly auth: boolean; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
+    return exchange(method, `${base}${path}`, { "content-type": "application/json", ...(options2.auth ? { authorization: `Bearer ${options.token()}` } : {}) }, body, options2);
+  }
+  /** 外部の x402 facilitator への 1 回の送信。**Provider token を付けない**（header はここで固定。`call` を通さない）。 */
+  function submitExternal(body: unknown, options2: { readonly deadlineMs: number; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
+    return exchange("POST", `${settleBase}/settle`, { "content-type": "application/json" }, body, { op: "settle_facilitator_settle", deadlineMs: options2.deadlineMs, routeId: options2.routeId });
+  }
+  async function exchange(method: "GET" | "POST", url: string, headers: Record<string, string>, body: unknown, options2: { readonly op: string; readonly deadlineMs: number; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
     const context: TransportContext = { routeId: options2.routeId, operation: options2.op };
     const startedAt = performance.now();
     const signal = AbortSignal.timeout(options2.deadlineMs);
     let response: Response;
     try {
-      response = await transport.fetch(`${base}${path}`, {
+      response = await transport.fetch(url, {
         method,
-        headers: { "content-type": "application/json", ...(options2.auth ? { authorization: `Bearer ${options.token()}` } : {}) },
+        headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: "error",
         signal,
@@ -502,15 +536,92 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
         // 要求を**出す前**: 注文の requester の digest が分からない（ledger に attempt が無い）。資金は動いていない。
         return { outcome: "rejected", reason: "source_rejected" };
       }
+      const routeId = routeIdOf(context);
       const mayStillSettleUntil = authorization === undefined ? undefined : Number(authorization.validBefore);
+      const unknown: SettleResult = { outcome: "unknown", reason: "source_settle_unknown", ...(mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil }) };
+      // 予算は単調な時計で（bind・送信・reconcile の要求・本文の読み取り・待ちは `settleMs` の中。設計 §3.5）。ledger の書き込み（fsync）そのものには期限を付けない:
+      // 書き込みの後に残りを測り直し、尽きていれば次の要求を出さない。
+      const startedAt = performance.now();
+      const left = (): number => timeouts.settleMs - (performance.now() - startedAt);
+      const deadlineOf = (perTryMs: number): number | undefined => {
+        const remaining = Math.floor(left());
+        return remaining < 1 ? undefined : Math.min(perTryMs, remaining);
+      };
+      let last: (CallOutcome & { readonly elapsedMs: number }) | undefined;
+      let classified: ReconcileClassification | undefined;
+      let reconcileAttempts = 0;
+      const finish = async (result: SettleResult, reading: ReconcileReading | "none"): Promise<SettleResult> => {
+        const settled = result.outcome === "settled" ? result : undefined;
+        await record(owner.attemptId, "settle", {
+          orderId,
+          outcome: settled === undefined ? "unknown" : "settled",
+          ...(settled === undefined ? {} : { txRef: settled.txRef }),
+          path: "provider",
+          reconcile: reading,
+          reconcileAttempts,
+          ...(last === undefined ? {} : httpStatusOf(last)),
+          elapsedMs: Math.round(performance.now() - startedAt),
+          ...(mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil }),
+        });
+        if (diagOn && last !== undefined && last.kind === "response" && classified !== undefined) emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: "x402", network: offer.network, response: classified.response, httpStatus: last.status, json: last.json, elapsedMs: last.elapsedMs });
+        return result;
+      };
+      // 形の崩れた authorization は bind に出さない（preflight が先に落とす。ここは念のため）。何も送らない。
+      if (authorization === undefined) return finish(unknown, "none");
+      const local: LocalIdentity = { from: authorization.from, nonce: authorization.nonce, sigSha256: sigSha256Of(authorization.signature) };
       const requestText = JSON.stringify({ paymentPayload: sent, requesterDigest: owner.requesterDigest, resourceDigest: owner.resourceDigest });
       return withInboundDiagScope(diagnostics, diagOn ? requestText : undefined, async () => {
-        const result = await call("POST", `/exact/orders/${orderId}/settle`, JSON.parse(requestText), { op: "facilitator_settle", deadlineMs: timeouts.settleMs, auth: true, routeId: routeIdOf(context) });
-        const classified = classifySettle(result, offer, authorization?.nonce, mayStillSettleUntil);
-        const settled = classified.result.outcome === "settled" ? classified.result : undefined;
-        await record(owner.attemptId, "settle", { orderId, outcome: settled === undefined ? "unknown" : "settled", ...(settled === undefined ? {} : { txRef: settled.txRef }), ...httpStatusOf(result), elapsedMs: Math.round(result.elapsedMs), ...(mayStillSettleUntil === undefined ? {} : { mayStillSettleUntil }) });
-        if (diagOn && result.kind === "response") emitInboundRoundTrip(diagnostics, { stage: "source_settle", facilitator: "x402", network: offer.network, response: classified.response, httpStatus: result.status, json: result.json, elapsedMs: result.elapsedMs });
-        return classified.result;
+        // 1. bind（送信なし）。`bound` で identity が一致したときだけ、先へ送ってよい。
+        const bindDeadline = deadlineOf(timeouts.bindMs);
+        if (bindDeadline === undefined) return finish(unknown, "none");
+        const bound = await call("POST", `/exact/orders/${orderId}/bind`, JSON.parse(requestText), { op: "facilitator_bind", deadlineMs: bindDeadline, auth: true, routeId });
+        const bind = classifyBind(bound, local);
+        await record(owner.attemptId, "bind", {
+          orderId,
+          ack: bind.action === "submit" ? "bound" : bind.ack,
+          ...(bind.action === "submit" ? { identity: "match" } : bind.action === "stop" && bind.ack === "bound" ? { identity: "mismatch" } : {}),
+          ...(bind.action === "reconcile" && bind.code !== undefined ? { code: bind.code } : {}),
+          ...httpStatusOf(bound),
+          elapsedMs: Math.round(bound.elapsedMs),
+        });
+        if (bind.action === "stop") return finish(unknown, "none");
+        // 2. 外部の facilitator へ最大 1 回。順番: in-flight（await を挟まない）→ 耐久の印の有無 → 印を書く → 送る。印は消さない。
+        let wait = false;
+        if (bind.action === "submit" && ledger !== undefined && !submitting.has(orderId) && !ledger.submitStarted(orderId)) {
+          submitting.add(orderId);
+          try {
+            if (deadlineOf(timeouts.submitMs) === undefined) return finish(unknown, "none");
+            try {
+              // この行だけは握りつぶさない: 書けなければ送らない。
+              await ledger.append(owner.attemptId, "submit", { orderId, phase: "started" });
+            } catch {
+              note("subetha-exact: the submission mark could not be written; nothing was sent");
+              return finish(unknown, "none");
+            }
+            // 印の書き込み（fsync）が長引いたら、残りの予算で測り直す。尽きていれば送らない（印は残す: この注文はもう送らない）。
+            const submitDeadline = deadlineOf(timeouts.submitMs);
+            if (submitDeadline === undefined) return finish(unknown, "none");
+            const answer = await submitExternal({ x402Version: 2, paymentPayload: sent, paymentRequirements: ledgerRequirementsOf(offer) }, { deadlineMs: submitDeadline, routeId });
+            const submitted = classifySubmit(answer);
+            // 外部の答えは結果を決めない。reconcile を待つ長さだけ。
+            wait = submitted.wait;
+            await record(owner.attemptId, "submit", { orderId, phase: "answered", ...httpStatusOf(answer), ...(submitted.success === undefined ? {} : { success: submitted.success }), ...(submitted.transaction === undefined ? {} : { transaction: submitted.transaction }), elapsedMs: Math.round(answer.elapsedMs) });
+          } finally {
+            submitting.delete(orderId);
+          }
+        }
+        // 3. 結果は SubEtha の reconcile（chain の照合）だけ。
+        for (;;) {
+          const reconcileDeadline = deadlineOf(timeouts.reconcileMs);
+          if (reconcileDeadline === undefined) break;
+          reconcileAttempts += 1;
+          last = await call("POST", `/exact/orders/${orderId}/reconcile`, {}, { op: "facilitator_reconcile", deadlineMs: reconcileDeadline, auth: true, routeId });
+          classified = classifyReconcile(last, local, mayStillSettleUntil);
+          if (!wait || (classified.reading !== "pending" && classified.reading !== "unanswered")) break;
+          if (left() <= timeouts.reconcileRetryWaitMs) break;
+          await sleep(timeouts.reconcileRetryWaitMs);
+        }
+        return classified === undefined ? finish(unknown, "none") : finish(classified.result, classified.reading);
       });
     },
 

@@ -50,7 +50,7 @@ test("AC-1: R1 の一覧 → quote（facilitator の注文）→ 署名 → purc
   expect((delivered.body as { data: { price: string } }).data.price).toBe("3000.12");
   expect(delivered.raw.headers.get("x-router-payment-id")).toBe(quote.body.paymentId);
   const calls = await h.calls();
-  expect(calls.byOrder[orderId]).toEqual({ create: 1, verify: 1, settle: 1, release: 1, complete: 1 });
+  expect(calls.byOrder[orderId]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1, release: 1, complete: 1 });
   expect((await h.order(orderId))["release"]).toMatchObject({ deliveryKey: orderId, completed: { outcome: "delivered" } });
   expect(((await (await fetch(`${h.upstream.baseUrl}/calls`)).json()) as { payCalls: number }).payCalls).toBe(1);
   // journal の行の順序と ledger の行。
@@ -59,7 +59,7 @@ test("AC-1: R1 の一覧 → quote（facilitator の注文）→ 署名 → purc
   const created = (await h.journal()).find((r) => r.event === "created")!;
   expect((created.patch["source"] as Record<string, unknown>)["settleWindow"]).toBe(offer.extra.expiresAt);
   // 同じ requestId の再 quote は core が文書を返す（createOffer を呼ばない）ので ledger の attempt は 1 つ。
-  expect((await h.ledger()).map((r) => r.event)).toEqual(["requested", "created", "verify", "settle", "release", "complete"]);
+  expect((await h.ledger()).map((r) => r.event)).toEqual(["requested", "created", "verify", "bind", "submit", "submit", "settle", "release", "complete"]);
   // status: delivered、release の欄は射影に無い、開示の欄も無い（settle 済み）。
   const status = await statusOf(h, quote.body.paymentId);
   expect(status.body).toMatchObject({ status: "delivered", source: { txRef: expect.stringMatching(/^0x[0-9a-f]{64}$/) } });
@@ -96,7 +96,7 @@ test("(a) 署名の無い購入は 402 + offer の再提示 + 開示（上限）
   expect(refused.status).toBe(402);
   expect(refused.body).toMatchObject({ error: "verify_failed", status: "awaiting_payment", mayStillSettleUntil: quote.body.source.offer.extra.expiresAt, awaitingPaymentDoesNotMeanUnpaid: true });
   expect((await h.calls()).byRoute).toMatchObject({ verify: 1 });
-  expect((await h.calls()).byRoute["settle"]).toBeUndefined();
+  expect((await h.calls()).byRoute["submit"]).toBeUndefined();
   expect((await h.journal()).at(-1)).toMatchObject({ event: "source_failed", patch: { reason: "verify_failed", mayStillSettleUntil: quote.body.source.offer.extra.expiresAt } });
   const status = await statusOf(h, quote.body.paymentId);
   expect(status.body["source"]).toMatchObject({ mayStillSettleUntil: quote.body.source.offer.extra.expiresAt, awaitingPaymentDoesNotMeanUnpaid: true });
@@ -121,7 +121,7 @@ test("(a) 署名の無い購入は 402 + offer の再提示 + 開示（上限）
   expect(once.body["error"]).toBe("verify_failed");
   expect(once.body["accepts"]).toEqual([]);
   expect((await h.calls()).byRoute).toMatchObject({ verify: 1 });
-  expect((await h.calls()).byRoute["settle"]).toBeUndefined();
+  expect((await h.calls()).byRoute["submit"]).toBeUndefined();
 });
 
 test("source_offer_unavailable: facilitator が busy なら 503 + Retry-After 30、本文に reason、journal に行なし。注文が無いので quote を取り直せる", async () => {
@@ -157,7 +157,7 @@ test("(l′) 外部の支払い: Router の経路の外で accepted になった
   expect(outcome.body).toMatchObject({ status: "paid_data_unavailable", terminalReason: "source_release_refused" });
   expect(outcome.body).not.toHaveProperty("mayStillSettleUntil");
   const calls = await h.calls();
-  expect(calls.byOrder[q2.body.source.offer.extra.challengeNonce]).toEqual({ create: 1, verify: 1, settle: 1, release: 1 });
+  expect(calls.byOrder[q2.body.source.offer.extra.challengeNonce]).toEqual({ create: 1, verify: 1, bind: 1, submit: 1, reconcile: 1, release: 1 });
   expect(((await (await fetch(`${h.upstream.baseUrl}/calls`)).json()) as { payCalls: number }).payCalls).toBe(0);
   expect((await h.journal()).filter((r) => r.paymentId === q2.body.paymentId).map((r) => r.event)).toEqual(["created", "source_pending", "budget_reserved", "source_settled", "paid_undelivered"]);
 });
@@ -223,7 +223,7 @@ test("AC-5: inspect の読み取りは fixture を呼ばず（--remote は GET �
   expect(remote.find((l) => l.kind === "attempt" && l["orderId"] === good.body.source.offer.extra.challengeNonce)).toMatchObject({ terminal: "delivered", remote: { release: { state: "delivered" } }, mismatch: false });
   const after = await h.calls();
   expect(after.byRoute["status"]).toBe((before.calls.byRoute["status"] ?? 0) + 2);
-  for (const route of ["create", "verify", "settle", "release", "complete", "requesters"]) expect(after.byRoute[route] ?? 0, route).toBe(before.calls.byRoute[route] ?? 0);
+  for (const route of ["create", "verify", "settle", "bind", "submit", "reconcile", "release", "complete", "requesters"]) expect(after.byRoute[route] ?? 0, route).toBe(before.calls.byRoute[route] ?? 0);
   expect(await readFile(h.journalPath, "utf8")).toBe(before.journal);
   expect(await readFile(h.ledgerPath, "utf8")).toBe(before.ledger);
   expect(JSON.stringify(remote)).not.toContain(BEARER);

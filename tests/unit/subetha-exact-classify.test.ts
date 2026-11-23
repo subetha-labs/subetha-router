@@ -8,7 +8,10 @@ import {
   classifyCreate,
   classifyReconstruct,
   classifyReleasePost,
-  classifySettle,
+  classifyBind,
+  classifyReconcile,
+  classifySubmit,
+  sigSha256Of,
   pairKeyOf,
   parseOrderView,
   requesterDigestOf,
@@ -120,29 +123,66 @@ describe("表 A: 作成", () => {
   });
 });
 
-describe("表 B: settle", () => {
-  const offer = { network: "eip155:84532" };
-  const nonce = ORDER;
-  test("settled は 200・success・accepted・64 hex・network 一致のときだけ。txRef と eventId は小文字", () => {
-    const ok = classifySettle(response(200, { success: true, outcome: "accepted", transaction: TX.toUpperCase().replace("0X", "0x"), network: "eip155:84532" }), offer, nonce.toUpperCase().replace("0X", "0x"), NOW);
-    expect(ok).toEqual({ result: { outcome: "settled", txRef: TX, eventId: nonce }, response: "ok" });
+describe("表 B: settle（bind・外部の答え・reconcile）", () => {
+  const TX = `0x${"c3".repeat(32)}`;
+  const FROM = "0x1111111111111111111111111111111111111111";
+  const SIG = `0x${"Ab".repeat(65)}`;
+  const local = { from: FROM, nonce: ORDER, sigSha256: sigSha256Of(SIG) };
+  const identity = { from: FROM, nonce: ORDER, sigSha256: local.sigSha256 };
+  const unknown = { outcome: "unknown", reason: "source_settle_unknown", mayStillSettleUntil: NOW };
+
+  test("sigSha256 は署名の文字列を小文字にしたものの SHA-256（大文字・小文字で変わらない）", () => {
+    expect(sigSha256Of(SIG)).toBe(sigSha256Of(SIG.toLowerCase()));
+    expect(sigSha256Of(SIG)).toMatch(/^[0-9a-f]{64}$/);
   });
-  test.each<[string, CallOutcome, string]>([
-    ["transport", threw, "http_error"],
-    ["500", response(500, {}), "http_error"],
-    ["403", response(403, { error: "order is bound to another requester or resource" }), "http_error"],
-    ["200 読めない", response(200, undefined), "not_json"],
-    ["pending", response(200, { success: false, outcome: "pending", transaction: TX, network: "eip155:84532", errorReason: "settlement_pending" }), "success_false"],
-    ["late-paid", response(200, { success: false, outcome: "late-paid", transaction: TX, network: "eip155:84532" }), "success_false"],
-    ["rejected", response(200, { success: false, outcome: "rejected", transaction: "", network: "eip155:84532", errorReason: "conflicting-authorization" }), "success_false"],
-    ["success だが outcome 無し", response(200, { success: true, transaction: TX, network: "eip155:84532" }), "success_false"],
-    ["network 違い", response(200, { success: true, outcome: "accepted", transaction: TX, network: "eip155:1" }), "network_mismatch"],
-    ["tx の形", response(200, { success: true, outcome: "accepted", transaction: "synthetic-1", network: "eip155:84532" }), "tx_malformed"],
-  ])("%s → unknown", (_name, call, responseClass) => {
-    expect(classifySettle(call, offer, nonce, NOW)).toEqual({ result: { outcome: "unknown", reason: "source_settle_unknown", mayStillSettleUntil: NOW }, response: responseClass });
+  test("bind: 送ってよいのは 200・ack bound・identity の 3 欄が一致するときだけ", () => {
+    expect(classifyBind(response(200, { ack: "bound", identity: { ...identity, from: FROM.toUpperCase().replace("0X", "0x"), nonce: ORDER.toUpperCase().replace("0X", "0x") } }), local)).toEqual({ action: "submit" });
+    for (const patch of [{ from: "0x2222222222222222222222222222222222222222" }, { nonce: `0x${"77".repeat(32)}` }, { sigSha256: "0".repeat(64) }]) {
+      expect(classifyBind(response(200, { ack: "bound", identity: { ...identity, ...patch } }), local)).toEqual({ action: "stop", ack: "bound" });
+    }
+    for (const body of [{ ack: "bound" }, { ack: "bound", identity: null }, { ack: "bound", identity: { from: FROM, nonce: ORDER } }, { ack: "bound", identity: { ...identity, sigSha256: 1 } }, { ack: "ok", identity }, { identity }, null, [], "bound"]) {
+      expect(classifyBind(response(200, body), local), JSON.stringify(body)).toEqual({ action: "stop", ack: "unknown" });
+    }
+    for (const status of [201, 400, 401, 403, 404, 425, 429, 500, 503]) expect(classifyBind(response(status, { ack: "bound", identity }), local), String(status)).toEqual({ action: "stop", ack: "unknown" });
+    expect(classifyBind(threw, local)).toEqual({ action: "stop", ack: "unknown" });
   });
-  test("nonce が無ければ settled にしない（eventId を作れない）", () => {
-    expect(classifySettle(response(200, { success: true, outcome: "accepted", transaction: TX, network: "eip155:84532" }), offer, undefined, NOW).result.outcome).toBe("unknown");
+  test("bind: already-used と 409 は送らず reconcile。409 の code は一覧の値だけ（それ以外は other）", () => {
+    expect(classifyBind(response(200, { ack: "already-used", recorded: false, outcome: "pending" }), local)).toEqual({ action: "reconcile", ack: "already-used" });
+    expect(classifyBind(response(200, { ack: "already-used", recorded: true, outcome: "accepted", txHash: TX, identity }), local)).toEqual({ action: "reconcile", ack: "already-used" });
+    expect(classifyBind(response(200, { ack: "already-used" }), local)).toEqual({ action: "stop", ack: "unknown" });
+    expect(classifyBind(response(409, { error: "order-on-other-path" }), local)).toEqual({ action: "reconcile", ack: "refused", code: "order-on-other-path" });
+    for (const body of [{ error: "Bearer secret-token-value" }, { error: 7 }, {}, null]) expect(classifyBind(response(409, body), local)).toEqual({ action: "reconcile", ack: "refused", code: "other" });
+  });
+  test("外部の答え: 待つかどうかだけを決める。はっきり断った（200 success false・4xx）ときだけ待たない", () => {
+    expect(classifySubmit(response(200, { success: true, transaction: TX.toUpperCase().replace("0X", "0x") }))).toEqual({ wait: true, success: true, transaction: TX });
+    expect(classifySubmit(response(200, { success: true, transaction: "Bearer secret" }))).toEqual({ wait: true, success: true });
+    expect(classifySubmit(response(200, { success: false, errorReason: "insufficient_funds", transaction: "" }))).toEqual({ wait: false, success: false });
+    for (const status of [400, 402, 404, 429]) expect(classifySubmit(response(status, { success: true }))).toEqual({ wait: false });
+    for (const call of [threw, response(500, {}), response(503, { success: false }), response(200, {}), response(200, { success: "true" }), response(200, null), response(200, undefined, null, true), response(302, {})]) expect(classifySubmit(call)).toEqual({ wait: true });
+  });
+  test("reconcile: settled は accepted・32 バイトの txHash・order.status.exact の一致がそろったときだけ（txRef・eventId は小文字）", () => {
+    const order = { status: { exact: { from: FROM.toUpperCase().replace("0X", "0x"), nonce: ORDER, sigSha256: local.sigSha256 } } };
+    expect(classifyReconcile(response(200, { outcome: "accepted", txHash: TX.toUpperCase().replace("0X", "0x"), order }), { ...local, nonce: ORDER.toUpperCase().replace("0X", "0x") }, NOW)).toEqual({ result: { outcome: "settled", txRef: TX, eventId: ORDER }, reading: "accepted", response: "ok" });
+    // sigSha256 が無い応答は from・nonce だけで照合する（protocol の参考実装と同じ）。
+    expect(classifyReconcile(response(200, { outcome: "accepted", txHash: TX, order: { status: { exact: { from: FROM, nonce: ORDER } } } }), local, NOW).result.outcome).toBe("settled");
+    const mismatches: unknown[] = [
+      { outcome: "accepted", order },
+      { outcome: "accepted", txHash: "0x1234", order },
+      { outcome: "accepted", txHash: TX },
+      { outcome: "accepted", txHash: TX, order: { status: {} } },
+      { outcome: "accepted", txHash: TX, order: { status: { exact: { ...order.status.exact, nonce: `0x${"77".repeat(32)}` } } } },
+      { outcome: "accepted", txHash: TX, order: { status: { exact: { ...order.status.exact, from: "0x2222222222222222222222222222222222222222" } } } },
+      { outcome: "accepted", txHash: TX, order: { status: { exact: { ...order.status.exact, sigSha256: "0".repeat(64) } } } },
+    ];
+    for (const body of mismatches) expect(classifyReconcile(response(200, body), local, NOW), JSON.stringify(body)).toMatchObject({ result: unknown, reading: "mismatch" });
+    expect(classifyReconcile(response(200, { outcome: "accepted", txHash: TX, order }), undefined, NOW)).toMatchObject({ result: unknown, reading: "mismatch" });
+  });
+  test("reconcile: accepted 以外は全て unknown（rejected にしない）。記録の語は固定", () => {
+    for (const outcome of ["pending", "late-paid", "rejected"] as const) expect(classifyReconcile(response(200, { outcome, reason: "closed-expired-unused", txHash: TX }), local, NOW)).toEqual({ result: unknown, reading: outcome, response: "success_false" });
+    for (const body of [{ outcome: "Bearer secret" }, { success: true }, {}]) expect(classifyReconcile(response(200, body), local, NOW)).toEqual({ result: unknown, reading: "other", response: "success_false" });
+    for (const call of [threw, response(500, { outcome: "accepted" }), response(404, {}), response(503, {})]) expect(classifyReconcile(call, local, NOW)).toEqual({ result: unknown, reading: "unanswered", response: "http_error" });
+    for (const body of [null, [], "accepted"]) expect(classifyReconcile(response(200, body), local, NOW)).toEqual({ result: unknown, reading: "unanswered", response: "not_json" });
+    expect(classifyReconcile(response(200, { outcome: "pending" }), local, undefined).result).toEqual({ outcome: "unknown", reason: "source_settle_unknown" });
   });
 });
 
@@ -249,8 +289,5 @@ describe("実装レビュー 3 の #1: afterRelease の有無は型を問わな�
     expect(parseOrderView(v)?.status.release?.afterRelease).toBe("malformed");
     expect(classifyReconstruct(response(200, v), context, "claimed")).toEqual({ action: "refused" });
     expect(classifyReconstruct(response(200, v), context, "transport")).toEqual({ action: "unknown" });
-  });
-  test("settle の unknown は正確な上限を添える", () => {
-    expect(classifySettle(response(500, {}), { network: "eip155:84532" }, ORDER, 1_800_000_119).result).toEqual({ outcome: "unknown", reason: "source_settle_unknown", mayStillSettleUntil: 1_800_000_119 });
   });
 });

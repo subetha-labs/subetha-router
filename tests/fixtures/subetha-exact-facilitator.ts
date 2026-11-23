@@ -11,6 +11,11 @@
  * 2 つの使い方: 同一 process（`createSubethaExactFacilitator` → `listen()`）と子 process（CLI 引数、`{"event":"listening",…}` の 1 行）。
  * モードは起動時の `--mode <route>=<mode>` と、試験中の `POST /_fixture/mode { route, mode, status?, headers?, body? }`。
  * 署名の検査は viem の `verifyTypedData`（offline。EOA の署名の復元だけ）。
+ *
+ * 2026-11-22（protocol `f30e4bb`、relay の廃止。`docs/subetha-exact-provider-settle-design.md`）: tenant の settle は**送らない**（未払いの正しい payload には
+ * `broadcast-not-permitted`／`pending`）。`bind`（`exact-routes.ts` の bind、`exact-settle.ts` の `bindProviderSettled`）と `reconcile`（`reconcileOrder`）を足した。
+ * 同じ server の `/xfac/settle` は **Provider が自分で選ぶ外部の x402 facilitator** の模型（Bearer なし）: 有効な署名なら合成の「chain」に載せる。
+ * chain に載った authorization が注文に bind されたものと同じなら、その注文は `accepted` になる（bind されていなければ、reconcile は `no-intent`）。
  */
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
@@ -18,8 +23,11 @@ import type { AddressInfo } from "node:net";
 import { pathToFileURL } from "node:url";
 import { getAddress, verifyTypedData, type Hex } from "viem";
 
-export type FixtureRoute = "create" | "status" | "requesters" | "verify" | "settle" | "release" | "complete";
-export const FIXTURE_ROUTES: readonly FixtureRoute[] = ["create", "status", "requesters", "verify", "settle", "release", "complete"];
+export type FixtureRoute = "create" | "status" | "requesters" | "verify" | "settle" | "bind" | "submit" | "reconcile" | "release" | "complete";
+export const FIXTURE_ROUTES: readonly FixtureRoute[] = ["create", "status", "requesters", "verify", "settle", "bind", "submit", "reconcile", "release", "complete"];
+/** 外部の x402 facilitator の模型の path（tenant の外。Bearer なし）。 */
+export const FIXTURE_EXTERNAL_FACILITATOR_PATH = "/xfac";
+const defaultModeOf = (route: FixtureRoute): string => (route === "settle" || route === "submit" ? "accepted" : "ok");
 
 export interface FacilitatorFixtureOptions {
   readonly providerId: string;
@@ -47,6 +55,8 @@ interface ExactIntentView {
   state: "reserved" | "signed" | "observed" | "paid" | "canceled" | "failed" | "relaying" | "relayed";
   origin: "facilitator" | "external-broadcast" | "facilitator-relay";
   txHash?: string;
+  /** bind された注文の印（`exact.path`。消えない）。 */
+  path?: "provider";
 }
 
 export interface FixtureOrder {
@@ -76,7 +86,7 @@ export interface FacilitatorFixture {
   close(): Promise<void>;
   /** 内部の状態（試験の断言用）。 */
   readonly orders: Map<string, FixtureOrder>;
-  readonly calls: { readonly byRoute: Record<string, number>; readonly byOrder: Record<string, Record<string, number>> };
+  readonly calls: { readonly byRoute: Record<string, number>; readonly byOrder: Record<string, Record<string, number>>; /** `Authorization` の付いた外部への送信の数（0 でなければ token が漏れている）。 */ submitWithAuthorization: number };
   setMode(route: FixtureRoute, mode: string, raw?: Omit<RawInjection, never>): void;
   /** 遅れた割当の完了（`busy-then-create` の後）。`createdAt`・`expiresAt` は試験が与える（adapter の時計に合わせる）。 */
   allocate(input: { requesterDigest: string; resourceDigest: string; amount?: string; createdAt?: number; expiresAt?: number }): FixtureOrder;
@@ -110,13 +120,16 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
   const network = `eip155:${options.chainId}`;
   const asset = getAddress(options.asset);
   const domain = { name: options.domainName, version: options.domainVersion, chainId: options.chainId, verifyingContract: asset };
-  const modes: Record<FixtureRoute, string> = { create: "ok", status: "ok", requesters: "ok", verify: "ok", settle: "accepted", release: "ok", complete: "ok", ...options.modes };
+  const modes: Record<FixtureRoute, string> = { create: "ok", status: "ok", requesters: "ok", verify: "ok", settle: "accepted", bind: "ok", submit: "accepted", reconcile: "ok", release: "ok", complete: "ok", ...options.modes };
   const raw: Partial<Record<FixtureRoute, RawInjection>> = {};
   /** `-once` のモードの消費と `claimed-before`／`preset` の適用済みの印。 */
   const onceSpent = new Set<string>();
   const orders = new Map<string, FixtureOrder>();
   const pendingAllocations = new Map<string, { requesterDigest: string; resourceDigest: string; amount: string }>();
-  const calls: { byRoute: Record<string, number>; byOrder: Record<string, Record<string, number>> } = { byRoute: {}, byOrder: {} };
+  const calls: { byRoute: Record<string, number>; byOrder: Record<string, Record<string, number>>; submitWithAuthorization: number } = { byRoute: {}, byOrder: {}, submitWithAuthorization: 0 };
+  /** 合成の chain: 使われた authorization（`from|nonce` の小文字）→ 載せた transaction。 */
+  const chainUsed = new Map<string, string>();
+  const reconcileCalls = new Map<string, number>();
   let baseUrl: string | undefined;
 
   /** 経路ごとの回数（要求 1 つにつき 1 回）。注文が分かればその注文の回数も。 */
@@ -291,7 +304,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     const mode = modes[route];
     const injection = raw[route];
     if (mode === "raw" && injection !== undefined) {
-      modes[route] = route === "settle" ? "accepted" : "ok";
+      modes[route] = defaultModeOf(route);
       delete raw[route];
       res.writeHead(injection.status, injection.headers);
       res.end(injection.body);
@@ -322,7 +335,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
   /** `-once` のモード: 1 回だけ当たる。 */
   const once = (route: FixtureRoute, mode: string): boolean => {
     if (modes[route] !== mode) return false;
-    modes[route] = route === "settle" ? "accepted" : "ok";
+    modes[route] = defaultModeOf(route);
     return true;
   };
   const bearerOk = (req: http.IncomingMessage): boolean => req.headers.authorization === `Bearer ${options.bearer}`;
@@ -366,6 +379,14 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
       return sendJson(res, 404, { error: "unknown-route" });
     }
     // ---- tenant の面 ----
+    if (url.pathname.startsWith(`${FIXTURE_EXTERNAL_FACILITATOR_PATH}/`)) {
+      const body = await readBody(req);
+      if (!body.ok) return sendJson(res, body.status, body.body);
+      const parsed = parseJson(body.text, req.headers["content-type"]);
+      if (!parsed.ok) return sendJson(res, 400, { error: "invalid_json" });
+      if (method === "POST" && url.pathname === `${FIXTURE_EXTERNAL_FACILITATOR_PATH}/settle`) return submit(req, (parsed.value ?? {}) as Record<string, unknown>, res);
+      return sendJson(res, 404, { error: "unknown-route" });
+    }
     const tenant = /^\/p\/([a-z0-9-]+)(\/.*)?$/.exec(url.pathname);
     if (tenant === null) return sendJson(res, 404, { error: "unknown-route" });
     const knownTenant = tenant[1] === options.providerId;
@@ -406,14 +427,14 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     // tenant の層（`multi-routes.ts`）: この tenant に無い hex64 の注文 id は、`/orders/<id>` のどの route でも 1 つの固定の答え。
     const guarded = /^\/exact\/orders\/(0x[0-9a-fA-F]{64})(?:[/?]|$)/.exec(rest);
     if (guarded !== null && !orders.has(guarded[1]!)) return sendJson(res, 404, { error: "unknown-order" });
-    const orderRoute = /^\/exact\/orders\/([^/]+)(\/(settle|release|complete|reconcile))?$/.exec(rest);
+    const orderRoute = /^\/exact\/orders\/([^/]+)(\/(settle|bind|release|complete|reconcile))?$/.exec(rest);
     if (orderRoute !== null) {
       const id = orderRoute[1]!;
       const op = orderRoute[3];
       // 壊れた id は handler の 400（`exact-routes.ts` の `hex32` の検査）。
       if (!hex32(id)) {
         if (op === undefined && method === "GET") return sendJson(res, 400, { error: "malformed order id" });
-        if (op === "settle" && method === "POST") return sendJson(res, 400, { error: "expect { paymentPayload, requesterDigest, resourceDigest }" });
+        if ((op === "settle" || op === "bind") && method === "POST") return sendJson(res, 400, { error: "expect { paymentPayload, requesterDigest, resourceDigest }" });
         if (op === "release" && method === "POST") return sendJson(res, 400, { error: "expect { requesterDigest }" });
         if (op === "complete" && method === "POST") return sendJson(res, 400, { error: "expect { deliveryKey, outcome: 'delivered' | 'failed' }" });
         if (op === "reconcile" && method === "POST") return sendJson(res, 400, { error: "malformed order id" });
@@ -422,6 +443,8 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
       const order = orders.get(id)!;
       if (op === undefined && method === "GET") return status(order, res);
       if (op === "settle" && method === "POST") return settle(order, input, res);
+      if (op === "bind" && method === "POST") return bind(order, input, res);
+      if (op === "reconcile" && method === "POST") return reconcileRoute(order, res);
       if (op === "release" && method === "POST") return release(order, input, res);
       if (op === "complete" && method === "POST") return complete(order, input, res);
       return sendJson(res, 404, { error: "unknown-route" });
@@ -441,9 +464,10 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     return sendJson(res, 404, { error: "unknown-route" });
   }
 
-  function markAccepted(order: FixtureOrder, input: { from: string; origin: ExactIntentView["origin"]; authorization?: Record<string, string>; signature?: string; state?: FixtureOrder["state"] }): void {
-    const txHash = `0x${randomBytes(32).toString("hex")}`;
+  function markAccepted(order: FixtureOrder, input: { from: string; origin: ExactIntentView["origin"]; authorization?: Record<string, string>; signature?: string; state?: FixtureOrder["state"]; txHash?: string }): void {
+    const txHash = input.txHash ?? `0x${randomBytes(32).toString("hex")}`;
     const a = input.authorization;
+    const path = order.exact?.path;
     order.state = input.state ?? "accepted";
     order.exact = {
       from: getAddress(input.from),
@@ -456,6 +480,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
       state: "paid",
       origin: input.origin,
       txHash,
+      ...(path === undefined ? {} : { path }),
     };
     order.evidence = { txHash, blockNumber: 1000 + orders.size, logIndex: 0, level: "final" };
   }
@@ -567,31 +592,159 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
       void sdkReason;
       return sendJson(res, 200, fail("settlement_pending", "pending", located));
     }
-    // `reserveExact`: 1 つの注文が持つ authorization は 1 つ。同じものの再提示は reconcile（同じ tx）、違うものは `conflicting-authorization`。
-    if (order.exact !== undefined) {
-      if (!sameAuth()) return sendJson(res, 200, fail("conflicting-authorization", "rejected", { orderId: order.orderId }));
-      // observed の昇格（`reserveExact` の `promoteObserved`）: fresh verify が通り、注文が open・期限内・validBefore ≤ 期限なら送る。満たさなければ証拠は残して reconcile（`acquired: false`）。
-      const promotable = order.exact.state === "observed" && order.state === "open" && t <= order.expiresAt && lower(order.exact.to) === lower(order.saleId) && order.exact.value === order.amount && BigInt(order.exact.validBefore) <= BigInt(order.expiresAt);
-      if (!promotable) return sendJson(res, 200, reconcile());
-      // 昇格: ここから先は最初の予約と同じ検査を通って送る。
-      delete order.exact;
-    }
+    // 送らない（`canBroadcast` は false）: 記録のある同じ authorization は reconcile、違うものは `conflicting-authorization`、未払いの正しい payload は
+    // `broadcast-not-permitted`／`pending`（`exact-settle.ts:286`）。
+    if (order.exact !== undefined) return sendJson(res, 200, sameAuth() ? reconcile() : fail("conflicting-authorization", "rejected", { orderId: order.orderId }));
     if (order.state !== "open") return sendJson(res, 200, fail("order-not-open", "rejected", { orderId: order.orderId }));
     if (t > order.expiresAt) return sendJson(res, 200, fail("order-expired", "rejected", { orderId: order.orderId }));
     if (lower(auth.to) !== lower(order.saleId)) return sendJson(res, 200, fail("recipient-mismatch", "rejected", { orderId: order.orderId }));
     if (auth.value !== order.amount) return sendJson(res, 200, fail("amount-mismatch", "rejected", { orderId: order.orderId }));
-    if (BigInt(auth.validBefore) > BigInt(order.expiresAt)) return sendJson(res, 200, fail("valid-before-after-order-expiry", "rejected", { orderId: order.orderId }));
-    if (mode === "pending") {
-      order.exact = { ...auth, state: "signed", origin: "facilitator", txHash: `0x${randomBytes(32).toString("hex")}` };
-      return sendJson(res, 200, withOrder({ success: false, errorReason: "settlement_pending", transaction: order.exact.txHash, network, payer: from, outcome: "pending", orderId: order.orderId }));
+    return sendJson(res, 200, fail("broadcast-not-permitted", "pending", located));
+  }
+
+  const usedKey = (from: string, nonce: string): string => `${lower(from)}|${lower(nonce)}`;
+  /** chain に載った使用を、bind された同じ authorization の注文に反映する（`reconcileOrder` の `admitExact`）。 */
+  const admitFromChain = (order: FixtureOrder): void => {
+    const exact = order.exact;
+    if (exact === undefined || exact.state === "paid") return;
+    const txHash = chainUsed.get(usedKey(exact.from, exact.nonce));
+    if (txHash === undefined) return;
+    const late = now() > order.expiresAt || modes["submit"] === "late-paid";
+    order.state = late ? "late-paid" : "accepted";
+    order.exact = { ...exact, state: "paid", origin: "external-broadcast", txHash };
+    order.evidence = { txHash, blockNumber: 1000 + orders.size, logIndex: 0, level: "final" };
+  };
+
+  /** `POST /exact/orders/:id/bind`（`exact-routes.ts` の bind、`bindProviderSettled`）。送らない。 */
+  async function bind(order: FixtureOrder, input: Record<string, unknown>, res: http.ServerResponse): Promise<void> {
+    count("bind", order.orderId);
+    if (injected("bind", res)) return;
+    await sleep(delayOf("bind"));
+    const payload = input["paymentPayload"];
+    if (!hex32(input["requesterDigest"]) || !hex32(input["resourceDigest"]) || typeof payload !== "object" || payload === null) return sendJson(res, 400, { error: "expect { paymentPayload, requesterDigest, resourceDigest }" });
+    if (lower(order.binding.requesterDigest) !== lower(input["requesterDigest"]) || lower(order.binding.resourceDigest) !== lower(input["resourceDigest"])) return sendJson(res, 403, { error: "order is bound to another requester or resource" });
+    const payTo = lower(String((payload as { payload?: { authorization?: { to?: string } } }).payload?.authorization?.to ?? ""));
+    if (payTo !== lower(order.saleId)) return sendJson(res, 409, { error: "payload pays another order" });
+    const mode = modes["bind"];
+    if (mode === "timeout") return;
+    if (mode === "error") return sendJson(res, 500, { error: "internal" });
+    if (mode === "busy") return sendJson(res, 503, { error: "upstream-busy" }, { "retry-after": "1" });
+    if (mode === "missing") return sendJson(res, 404, { error: "unknown-route" });
+    if (mode.startsWith("refused:")) return sendJson(res, 409, { error: mode.slice("refused:".length) });
+    const signed = await validlySigned(payload);
+    if (!signed.ok) return sendJson(res, 409, { error: "invalid-signature" });
+    const a = signed.authorization;
+    const auth = { from: getAddress(a["from"]!), to: getAddress(a["to"]!), value: a["value"]!, validAfter: a["validAfter"]!, validBefore: a["validBefore"]!, nonce: a["nonce"]!.toLowerCase(), sigSha256: sha256(signed.signature.toLowerCase()) };
+    const identityOf = (): Record<string, unknown> => ({ from: order.exact!.from, nonce: order.exact!.nonce, sigSha256: order.exact!.sigSha256 });
+    // 試験の準備: bind の前に、同じ authorization が chain に載っていた（先回りした第三者の送信）。
+    if (mode === "already-used-paid" && order.exact === undefined) chainUsed.set(usedKey(auth.from, auth.nonce), `0x${randomBytes(32).toString("hex")}`);
+    if (mode === "already-used") return sendJson(res, 200, { ack: "already-used", recorded: false, outcome: "pending" });
+    // 試験の準備: 同じ authorization を別の送信者が chain に載せていた。bind の答えは「まだ記録していない」か拒否で、reconcile が後から受け入れる。
+    if ((mode === "already-used-then-paid" || mode === "refused-then-paid") && order.exact === undefined) {
+      order.exact = { ...auth, state: "observed", origin: "external-broadcast", path: "provider" };
+      chainUsed.set(usedKey(auth.from, auth.nonce), `0x${randomBytes(32).toString("hex")}`);
+      return mode === "refused-then-paid" ? sendJson(res, 409, { error: "order-not-open" }) : sendJson(res, 200, { ack: "already-used", recorded: false, outcome: "pending" });
     }
-    markAccepted(order, { from, origin: "facilitator", authorization: signed.authorization, signature: signed.signature, ...(mode === "late-paid" ? { state: "late-paid" as const } : {}) });
-    if (mode === "late-paid") return sendJson(res, 200, withOrder({ success: false, errorReason: "late-paid", transaction: order.exact!.txHash, network, payer: from, outcome: "late-paid", orderId: order.orderId }));
+    if (order.exact !== undefined) {
+      const same = ["from", "to", "value", "validAfter", "validBefore", "nonce"].every((k) => lower(String((order.exact as unknown as Record<string, unknown>)[k])) === lower(String((auth as unknown as Record<string, unknown>)[k]))) && order.exact.sigSha256 === auth.sigSha256;
+      if (!same) return sendJson(res, 409, { error: "conflicting-authorization" });
+      if (order.exact.path !== "provider") return sendJson(res, 409, { error: "order-on-other-path" });
+      // 同じ authorization の bind の繰り返しは ledger だけで答える（chain を読まない。`exact-settle.ts:590`）。
+      if (order.exact.state === "paid") return sendJson(res, 200, { ack: "already-used", recorded: true, outcome: order.state === "late-paid" ? "late-paid" : "accepted", txHash: order.exact.txHash, identity: identityOf() });
+    } else {
+      if (order.state !== "open") return sendJson(res, 409, { error: "order-not-open" });
+      if (now() > order.expiresAt) return sendJson(res, 409, { error: "order-expired" });
+      if (auth.value !== order.amount) return sendJson(res, 409, { error: "amount-mismatch" });
+      if (BigInt(auth.validBefore) > BigInt(order.expiresAt)) return sendJson(res, 409, { error: "valid-before-after-order-expiry" });
+      order.exact = { ...auth, state: "observed", origin: "external-broadcast", path: "provider" };
+      admitFromChain(order);
+      if (order.exact.state === "paid") return sendJson(res, 200, { ack: "already-used", recorded: true, outcome: "accepted", txHash: order.exact.txHash, identity: identityOf() });
+    }
+    if (mode === "no-identity") return sendJson(res, 200, { ack: "bound" });
+    if (mode === "identity-mismatch") return sendJson(res, 200, { ack: "bound", identity: { ...identityOf(), nonce: `0x${"77".repeat(32)}` } });
     if (mode === "lose-response") {
       res.destroy();
       return;
     }
-    return sendJson(res, 200, withOrder({ success: true, transaction: order.exact!.txHash, network, payer: from, outcome: "accepted", orderId: order.orderId }));
+    return sendJson(res, 200, { ack: "bound", identity: identityOf() });
+  }
+
+  /** `POST /exact/orders/:id/reconcile`（`reconcileOrder`）。送らない。 */
+  async function reconcileRoute(order: FixtureOrder, res: http.ServerResponse): Promise<void> {
+    count("reconcile", order.orderId);
+    if (injected("reconcile", res)) return;
+    await sleep(delayOf("reconcile"));
+    const mode = modes["reconcile"];
+    if (mode === "timeout") return;
+    if (mode === "error") return sendJson(res, 500, { error: "internal" });
+    const seen = (reconcileCalls.get(order.orderId) ?? 0) + 1;
+    reconcileCalls.set(order.orderId, seen);
+    const view = (): Record<string, unknown> => orderView(order);
+    if (order.exact === undefined) return sendJson(res, 200, { outcome: "rejected", reason: "no-intent", order: view() });
+    // chain の遅れ: 最初の n 回は、載っていてもまだ見えない。
+    if (mode.startsWith("pending-first:") && seen <= Number(mode.slice("pending-first:".length))) return sendJson(res, 200, { outcome: "pending", order: view() });
+    admitFromChain(order);
+    const txHash = order.exact.txHash;
+    if (order.state === "accepted" || order.state === "settled") {
+      if (mode === "bad-tx") return sendJson(res, 200, { outcome: "accepted", txHash: "0x1234", order: view() });
+      if (mode === "no-order") return sendJson(res, 200, { outcome: "accepted", txHash });
+      if (mode === "wrong-identity") {
+        const altered = JSON.parse(JSON.stringify(view())) as { status: { exact: { nonce: string } } };
+        altered.status.exact.nonce = `0x${"77".repeat(32)}`;
+        return sendJson(res, 200, { outcome: "accepted", txHash, order: altered });
+      }
+      return sendJson(res, 200, { outcome: "accepted", txHash, order: view() });
+    }
+    if (order.state === "late-paid") return sendJson(res, 200, { outcome: "late-paid", txHash, order: view() });
+    if (order.state === "rejected" || order.state === "settled-unknown") return sendJson(res, 200, { outcome: "rejected", reason: order.closedReason ?? order.state, order: view() });
+    return sendJson(res, 200, { outcome: "pending", order: view() });
+  }
+
+  /**
+   * 外部の x402 facilitator の模型（`POST /xfac/settle`、本文 `{ x402Version, paymentPayload, paymentRequirements }`）。SubEtha の注文も bind も知らない:
+   * 署名と期間が正しく、nonce が未使用なら chain に載せる。答えは x402 の `SettleResponse` の形。
+   */
+  async function submit(req: http.IncomingMessage, input: Record<string, unknown>, res: http.ServerResponse): Promise<void> {
+    if (req.headers.authorization !== undefined) calls.submitWithAuthorization += 1;
+    const payload = input["paymentPayload"];
+    const to = lower(String((payload as { payload?: { authorization?: { to?: string } } } | undefined)?.payload?.authorization?.to ?? ""));
+    const order = [...orders.values()].find((o) => lower(o.saleId) === to);
+    count("submit", order?.orderId);
+    if (injected("submit", res)) return;
+    await sleep(delayOf("submit"));
+    const mode = modes["submit"];
+    if (mode === "timeout") return;
+    if (mode === "error") return sendJson(res, 500, { error: "internal" });
+    if (mode === "bad-request") return sendJson(res, 400, { error: "invalid_request" });
+    const failed = (errorReason: string): void => sendJson(res, 200, { success: false, errorReason, transaction: "", network });
+    if (mode === "refused") return failed("insufficient_funds");
+    // 外部は断ったが、同じ authorization を別の送信者が chain に載せた。
+    if (mode === "refused-but-on-chain") {
+      const a0 = (payload as { payload?: { authorization?: Record<string, string> } } | undefined)?.payload?.authorization;
+      if (a0 !== undefined) chainUsed.set(usedKey(String(a0["from"]), String(a0["nonce"])), `0x${randomBytes(32).toString("hex")}`);
+      return failed("invalid_exact_evm_payload_authorization_nonce_used");
+    }
+    if (mode === "claims-success") return sendJson(res, 200, { success: true, transaction: `0x${randomBytes(32).toString("hex")}`, network });
+    if (input["x402Version"] !== 2 || typeof payload !== "object" || payload === null) return sendJson(res, 400, { error: "invalid_request" });
+    const signed = await validlySigned(payload);
+    if (!signed.ok) return failed("invalid_exact_evm_payload_signature");
+    const a = signed.authorization;
+    const requirements = input["paymentRequirements"];
+    const r = (typeof requirements === "object" && requirements !== null ? requirements : {}) as Record<string, unknown>;
+    if (r["scheme"] !== "exact" || r["network"] !== network || lower(String(r["asset"])) !== lower(asset) || lower(String(r["payTo"])) !== lower(a["to"]!) || String(r["amount"]) !== a["value"]) return failed("invalid_payment_requirements");
+    const t = now();
+    if (BigInt(a["validBefore"]!) < BigInt(t + 6)) return failed("invalid_exact_evm_payload_authorization_valid_before");
+    if (BigInt(a["validAfter"]!) > BigInt(t)) return failed("invalid_exact_evm_payload_authorization_valid_after");
+    const key = usedKey(a["from"]!, a["nonce"]!);
+    if (chainUsed.has(key)) return failed("invalid_exact_evm_payload_authorization_nonce_used");
+    const txHash = `0x${randomBytes(32).toString("hex")}`;
+    chainUsed.set(key, txHash);
+    if (mode === "lose-response") {
+      res.destroy();
+      return;
+    }
+    // 外部の答えの hash が chain の hash と違う場合（証拠にしてはいけない）。
+    return sendJson(res, 200, { success: true, transaction: mode === "other-hash" ? `0x${randomBytes(32).toString("hex")}` : txHash, network, payer: getAddress(a["from"]!) });
   }
 
   /** `#beginReceiptRelease`: 注文の `state` は変えない（`accepted` のまま）。release の mode は `exact-receipt`。 */

@@ -168,7 +168,7 @@ test("AC-3／H-9: offer の上限に達したら 503（402 ではない・注文
   const listing = (await (await fetch(`${h.router.baseUrl}/v1/routes`, { headers: principalHeaders() })).json()) as { routes: Record<string, unknown>[] };
   expect(listing.routes[0]).toMatchObject({ demonstration: { capped: true, acceptingNewOffers: false } });
   const calls = await h.calls();
-  expect([calls.byRoute["create"], calls.byRoute["settle"]]).toEqual([2, 1]);
+  expect([calls.byRoute["create"], calls.byRoute["submit"]]).toEqual([2, 1]);
 });
 
 test("AC-4: 購入の途中で買い手の接続が切れても（入れ替えで Caddy が先に止まる場合に当たる）、購入は Router の中で終わりまで進み、同じ credential の再送が結果を返す。settle は 1 回", async () => {
@@ -199,5 +199,5 @@ test("AC-4: 購入の途中で買い手の接続が切れても（入れ替え�
   expect(again.status).toBe(200);
   expect(((await again.json()) as { data: { price: string } }).data.price).toBe("3000.12");
   const calls = await h.calls();
-  expect([calls.byRoute["verify"], calls.byRoute["settle"]]).toEqual([1, 1]);
+  expect([calls.byRoute["verify"], calls.byRoute["submit"]]).toEqual([1, 1]);
 });

@@ -361,6 +361,14 @@ at your tenant and `ROUTER_SUBETHA_EXACT_TOKEN_FILE` at a 0600 file holding the 
 requirements: `docs/subetha-exact-inbound-design.md`, `docs/subetha-exact-inbound-requirements.md`; the registration and
 the funded run are separate owner gates recorded in `docs/subetha-exact-inbound-acceptance.md`.
 
+Since 2026-11-22 the SubEtha facilitator no longer sends payments, so **the Router submits the buyer's authorization
+itself**: it binds the order at SubEtha, sends the authorization **at most once** to an x402 facilitator of the operator's
+choice (never with the Provider token), and takes the result only from SubEtha's chain reconciliation. The default is
+`https://www.x402.org/facilitator` (a free third-party testnet service; its fees and gas, if it ever charges, are the
+operator's). `ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL` overrides it within an allowlist of hosts. The SubEtha
+facilitator must serve the `bind` route (protocol `b02b249` or later); against an older one nothing is sent and every
+purchase ends `unknown`. Design: `docs/subetha-exact-provider-settle-design.md`.
+
 Since the same change, on **every** rail, a quote that was already used for a purchase attempt is no longer re-presented
 for signing: re-quoting its `requestId` returns `closed: true` with the current `status` and without `source.offer`, and
 `npm run sign` refuses such a document (take a new quote with a new `requestId`).

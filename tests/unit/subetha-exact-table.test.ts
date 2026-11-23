@@ -198,7 +198,7 @@ describe("env と設定の section（real モード）", () => {
   }
   test("route あり・env あり → subethaExact が読め、limits は既定、offerSeconds は env", () => {
     const loaded = load({ env: { ROUTER_SUBETHA_EXACT_OFFER_SECONDS: "90" } });
-    expect(loaded.real?.subethaExact).toEqual({ facilitator: { url: URL_OK, host: "facilitator-testnet.subethalabs.com", tenant: "/p/router-test", loopback: false }, tokenFile: expect.stringMatching(/provider\.token$/), offerSeconds: 90, limits: SUBETHA_EXACT_DEFAULT_LIMITS });
+    expect(loaded.real?.subethaExact).toEqual({ facilitator: { url: URL_OK, host: "facilitator-testnet.subethalabs.com", tenant: "/p/router-test", loopback: false }, settleFacilitator: { url: "https://www.x402.org/facilitator", host: "www.x402.org", loopback: false }, tokenFile: expect.stringMatching(/provider\.token$/), offerSeconds: 90, limits: SUBETHA_EXACT_DEFAULT_LIMITS });
     expect(SUBETHA_EXACT_DEFAULT_LIMITS).toEqual({ maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 6 });
   });
   test("route あり・URL 無し／token 無し → ConfigError（値は出さない）", () => {
@@ -214,6 +214,22 @@ describe("env と設定の section（real モード）", () => {
     }
     expect(message).toMatch(/must be https:\/\/facilitator-testnet\.subethalabs\.com\/p\/<id>/);
     expect(message).not.toContain("evil.example");
+  });
+  test("settle 用の facilitator（AC-10）: env が無ければ既定、allowlist の host だけ、query・userinfo・port・http は拒む。値はメッセージに出さない", () => {
+    expect(load({}).real?.subethaExact?.settleFacilitator).toEqual({ url: "https://www.x402.org/facilitator", host: "www.x402.org", loopback: false });
+    expect(load({ env: { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "" } }).real?.subethaExact?.settleFacilitator.url).toBe("https://www.x402.org/facilitator");
+    expect(load({ env: { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://x402.org/facilitator/" } }).real?.subethaExact?.settleFacilitator).toEqual({ url: "https://x402.org/facilitator", host: "x402.org", loopback: false });
+    expect(load({ env: { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:9/xfac" } }).real?.subethaExact?.settleFacilitator).toEqual({ url: "http://127.0.0.1:9/xfac", host: "127.0.0.1", loopback: true });
+    for (const bad of ["https://evil.example/facilitator", "http://www.x402.org/facilitator", "https://www.x402.org:8443/facilitator", "https://www.x402.org/facilitator?leak=1", "https://user:pw@www.x402.org/facilitator", "https://www.x402.org/facilitator#x", "not a url", "https://www.x402.org.evil.example/"]) {
+      let message = "";
+      try {
+        load({ env: { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: bad } });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, bad).toMatch(/ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL must be an https URL on an allowed x402 facilitator host/);
+      expect(message, bad).not.toContain("evil");
+    }
   });
   test("limits の上書き（部分でもよい）、unknown の欄、正の整数以外は拒む", () => {
     expect(load({ section: { limits: { maxUnresolved: 5 } } }).real?.subethaExact?.limits).toEqual({ maxRequestsTotal: 100, maxUnresolved: 5, requestsPerMinute: 6 });
@@ -234,7 +250,7 @@ describe("env と設定の section（real モード）", () => {
   });
   test("合成（T-5）: token ファイルが無ければ ConfigError（facilitator は呼ばない）。0600 の token があれば adapter が登録され、wrapper は release を転送する", async () => {
     // 署名 spy（非署名 fixture）は上流も loopback を要求する（既存の compose-rails の試験と同じ）。
-    const loaded = load({ upstream: "http://127.0.0.1:1/v1/eth/snapshot", env: { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: "http://127.0.0.1:1/p/router-test" } });
+    const loaded = load({ upstream: "http://127.0.0.1:1/v1/eth/snapshot", env: { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: "http://127.0.0.1:1/p/router-test", ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:1/xfac" } });
     expectInvalid(
       () => composeRails(loaded, { evmSigning: createSignerSpy().capability(BASE), fixtureFacilitators: true, knownNetworksForTest: TEST_NETWORKS }),
       /ROUTER_SUBETHA_EXACT_TOKEN_FILE: the secret file cannot be read/,
@@ -245,6 +261,12 @@ describe("env と設定の section（real モード）", () => {
     expectInvalid(
       () => composeRails(loaded, { evmSigning: createSignerSpy().capability(BASE), knownNetworksForTest: TEST_NETWORKS }),
       /ROUTER_SUBETHA_EXACT_FACILITATOR_URL: a loopback facilitator is only allowed with fixture capabilities/,
+    );
+    // fixture の SubEtha（loopback）に、本物の外部の facilitator（既定）を混ぜると起動を止める（試験が第三者のサービスへ送らないように）。
+    const mixed = { ...loaded, real: { ...loaded.real!, subethaExact: { ...loaded.real!.subethaExact!, settleFacilitator: { url: "https://www.x402.org/facilitator", host: "www.x402.org", loopback: false } } } };
+    expectInvalid(
+      () => composeRails(mixed, { evmSigning: createSignerSpy().capability(BASE), fixtureFacilitators: true, knownNetworksForTest: TEST_NETWORKS }),
+      /ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL must be a loopback URL when the SubEtha facilitator is a loopback fixture/,
     );
     const rails = composeRails(loaded, { evmSigning: createSignerSpy().capability(BASE), fixtureFacilitators: true, knownNetworksForTest: TEST_NETWORKS });
     expect(typeof rails.inbound.release).toBe("function");
