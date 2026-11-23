@@ -103,7 +103,7 @@ ledger の書き込み（fsync）そのものには期限を付けません。�
 | event | patch |
 |---|---|
 | `bind` | `orderId`、`ack`（`bound`／`already-used`／`refused`／`unknown`）、`identity`（`match`／`mismatch`、bound のときだけ）、`code`（409 のとき。下の固定の一覧にある値だけ。無ければ `other`）、`httpStatus`、`elapsedMs` |
-| `submit` | `orderId`、`phase`（`started`／`answered`）、answered では `httpStatus`、`success`、`transaction`、`elapsedMs` |
+| `submit` | `orderId`、`phase`（`started`／`answered`）、answered では `httpStatus`、`success`、`transaction`、`reason`（断った答えのときだけ。§3.12）、`elapsedMs` |
 | `settle` | 今の欄に加えて `path: "provider"`、`reconcile`（`accepted`／`pending`／`late-paid`／`rejected`／`mismatch`／`other`／`unanswered`／`none`）、`reconcileAttempts` |
 
 bind の code の一覧：`conflicting-authorization`、`order-on-other-path`、`order-not-open`、`order-expired`、`valid-before-after-order-expiry`、
@@ -148,6 +148,21 @@ SubEtha の facilitator が loopback（fixture）なのに、送る先が loopba
 
 host の env `SUBETHA_EXACT_SETTLE_FACILITATOR_URL`（任意）を、子の Router の `ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL` に渡します。
 本番では設定しません（既定を使う）。試験の fixture が loopback の facilitator を渡すための口です。
+
+### 3.12 外部の facilitator が断った理由の記録（2026-11-23 の追加）
+
+きっかけ：本番への入れ替えの直後、x402.org が 1 件の送信を `200`・`success: false` で断りました（`docs/DEPLOY.md` §2i の記録）。
+支払いは動いていませんでしたが、理由の欄を記録していなかったので、原因が分かりませんでした。
+
+- **残すもの**：`submit` の `answered` の行に `reason` を 1 つ。外部の答えが「はっきり断った」もの（200 で `success === false`、または 4xx）で、本文が JSON の object のときだけ付けます。
+- **値**：本文の `errorReason` を、既存の理由の表（`src/shared/payment-reasons.ts`、`r1/x402-2.28.0`）で分類した固定の語です。表に完全一致すればその token、
+  欄が無い・値が `null` なら `absent`、それ以外で文字列でない・空なら `malformed`、表に無い文字列なら `unrecognized`。前方一致や読み替えはしません（`docs/rejection-reasons-design.md` と同じ規則）。
+- **残さないもの**：相手の生の文字列。表に無い理由は `unrecognized` としか分かりません。そのときは、表を足すか、verify で再現して調べます。
+- **変えないもの**：結果の決め方（§3.2）と待ち方（§3.4）。`reason` は記録のためだけで、どの判断にも使いません。買い手への答えにも出しません。
+  200 で成功と言った答え、答えと読めないもの（5xx・JSON でない・例外）には付けません。4xx は本文が何を言っていても断った答えとして扱うので、本文が object なら付きます（`success: true` と書いてあっても）。
+- **診断の記録（§3.8）は変えません**。`source_settle` の行は今までどおり reconcile の最後の 1 回分です。
+- **受け入れ**：表の語・表に無い語・文字列でない値・欄なし・4xx の各場合に、行の `reason` が上の値になること。生の文字列が ledger の file に出ないこと。
+  成功と言った答えと 5xx の行に `reason` が無いこと。どの場合も `settle` の結果が変わらないこと（`tests/unit/subetha-exact-classify.test.ts`・`tests/unit/subetha-exact-adapter.test.ts`）。
 
 ## 4. 受け入れ
 

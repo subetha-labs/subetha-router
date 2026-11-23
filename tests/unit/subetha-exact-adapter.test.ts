@@ -483,8 +483,38 @@ describe("settle（表 B: bind → 外部の facilitator → reconcile）", () =
       expect(callsOf(offer)["submit"], mode).toBe(1);
       if (polls) expect(callsOf(offer)["reconcile"], mode).toBeGreaterThan(1);
       else expect(callsOf(offer)["reconcile"], mode).toBe(1);
-      expect((await ledgerRows()).at(-1), mode).toMatchObject({ event: "settle", patch: { outcome: "unknown", reconcile: "pending" } });
+      const last = (await ledgerRows()).at(-1)!;
+      expect(last, mode).toMatchObject({ event: "settle", patch: { outcome: "unknown" } });
+      // 待つ mode では、最後の照合が全体の期限で切れることがある（その読みは unanswered）。断った mode は 1 回で必ず pending。
+      if (polls) expect(["pending", "unanswered"], mode).toContain(last.patch["reconcile"]);
+      else expect(last.patch["reconcile"], mode).toBe("pending");
     }
+  });
+
+  test("§3.12: 断った答えの理由は、表で分類した固定の語だけを submit の行に残す（生の文字列は残さない）。結果は変えない", async () => {
+    await makeAdapter({ timeouts: { ...FAST, settleMs: 400 }, limits: SETTLE_LIMITS });
+    const answered = async (): Promise<Record<string, unknown>> => (await ledgerRows()).filter((r) => r.event === "submit" && r.patch["phase"] === "answered").at(-1)!.patch;
+    for (const [mode, reason] of [["refused", "unrecognized"], ["refused-known", "invalid_exact_evm_transaction_failed"], ["refused-malformed", "malformed"], ["bad-request", "absent"], ["refused-but-on-chain", "unrecognized"]] as const) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode("submit", mode);
+      const result = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+      if (mode === "refused-but-on-chain") expect(result.outcome, mode).toBe("settled");
+      else expect(result, mode).toEqual(unknownOf(offer));
+      expect((await answered())["reason"], mode).toBe(reason);
+    }
+    // 成功と言った答え・答えと読めないものには理由の欄を付けない。
+    for (const mode of ["accepted", "claims-success", "error"]) {
+      const { offer, credential } = await fresh(mode);
+      fixture.setMode("submit", mode);
+      const result = await adapter!.settle(offer, credential, { routeId: ROUTE_ID });
+      if (mode === "accepted") expect(result.outcome, mode).toBe("settled");
+      else expect(result, mode).toEqual(unknownOf(offer));
+      expect("reason" in (await answered()), mode).toBe(false);
+    }
+    const text = await readFile(path.join(workDir, "subetha-exact", "orders.ndjson"), "utf8");
+    expect(text).not.toContain("insufficient_funds");
+    expect(text).not.toContain("leak-me");
+    fixture.setMode("submit", "accepted");
   });
 
   test("AC-7: 外部の答えが失われても・hash が違っても、chain の支払いを reconcile が拾う（txRef は chain の hash）。chain の遅れは待つ", async () => {

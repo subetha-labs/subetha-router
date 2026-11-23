@@ -156,8 +156,23 @@ describe("表 B: settle（bind・外部の答え・reconcile）", () => {
   test("外部の答え: 待つかどうかだけを決める。はっきり断った（200 success false・4xx）ときだけ待たない", () => {
     expect(classifySubmit(response(200, { success: true, transaction: TX.toUpperCase().replace("0X", "0x") }))).toEqual({ wait: true, success: true, transaction: TX });
     expect(classifySubmit(response(200, { success: true, transaction: "Bearer secret" }))).toEqual({ wait: true, success: true });
-    expect(classifySubmit(response(200, { success: false, errorReason: "insufficient_funds", transaction: "" }))).toEqual({ wait: false, success: false });
-    for (const status of [400, 402, 404, 429]) expect(classifySubmit(response(status, { success: true }))).toEqual({ wait: false });
+    expect(classifySubmit(response(200, { success: false, errorReason: "insufficient_funds", transaction: "" }))).toEqual({ wait: false, success: false, reason: "unrecognized" });
+    // 理由は表の完全一致だけ（§3.12）。欄なし → absent、文字列でない・空 → malformed。成功と言った答えには付けない。
+    expect(classifySubmit(response(200, { success: false, errorReason: "invalid_exact_evm_transaction_failed" }))).toEqual({ wait: false, success: false, reason: "invalid_exact_evm_transaction_failed" });
+    expect(classifySubmit(response(200, { success: false, errorReason: " invalid_exact_evm_transaction_failed" }))).toEqual({ wait: false, success: false, reason: "unrecognized" });
+    expect(classifySubmit(response(200, { success: false }))).toEqual({ wait: false, success: false, reason: "absent" });
+    expect(classifySubmit(response(200, { success: false, errorReason: 7 }))).toEqual({ wait: false, success: false, reason: "malformed" });
+    expect(classifySubmit(response(200, { success: true, errorReason: "invalid_exact_evm_transaction_failed" }))).toEqual({ wait: true, success: true });
+    expect(classifySubmit(response(402, { errorReason: "invalid_exact_evm_transaction_failed" }))).toEqual({ wait: false, reason: "invalid_exact_evm_transaction_failed" });
+    expect(classifySubmit(response(400, "nope"))).toEqual({ wait: false });
+    // 境界: null は absent。空文字列・配列は malformed。読めない 4xx には付けない。
+    expect(classifySubmit(response(200, { success: false, errorReason: null }))).toEqual({ wait: false, success: false, reason: "absent" });
+    for (const bad of ["", [], ["invalid_exact_evm_transaction_failed"], {}, true]) expect(classifySubmit(response(200, { success: false, errorReason: bad }))).toEqual({ wait: false, success: false, reason: "malformed" });
+    expect(classifySubmit(response(400, undefined, null, true))).toEqual({ wait: false });
+    // 継承した欄や、object の組み込みの名前の鍵は理由として読まない。
+    expect(classifySubmit(response(200, JSON.parse('{"success":false,"__proto__":{"errorReason":"invalid_exact_evm_transaction_failed"}}')))).toEqual({ wait: false, success: false, reason: "absent" });
+    expect(classifySubmit(response(200, JSON.parse('{"success":false,"hasOwnProperty":"x","errorReason":"invalid_exact_evm_transaction_failed"}')))).toEqual({ wait: false, success: false, reason: "invalid_exact_evm_transaction_failed" });
+    for (const status of [400, 402, 404, 429]) expect(classifySubmit(response(status, { success: true }))).toEqual({ wait: false, reason: "absent" });
     for (const call of [threw, response(500, {}), response(503, { success: false }), response(200, {}), response(200, { success: "true" }), response(200, null), response(200, undefined, null, true), response(302, {})]) expect(classifySubmit(call)).toEqual({ wait: true });
   });
   test("reconcile: settled は accepted・32 バイトの txHash・order.status.exact の一致がそろったときだけ（txRef・eventId は小文字）", () => {

@@ -718,6 +718,10 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     if (mode === "bad-request") return sendJson(res, 400, { error: "invalid_request" });
     const failed = (errorReason: string): void => sendJson(res, 200, { success: false, errorReason, transaction: "", network });
     if (mode === "refused") return failed("insufficient_funds");
+    // 理由の表にある語で断る（記録の分類の試験用）。
+    if (mode === "refused-known") return failed("invalid_exact_evm_transaction_failed");
+    // 理由の欄が文字列でない。
+    if (mode === "refused-malformed") return sendJson(res, 200, { success: false, errorReason: { secret: "Bearer leak-me" }, transaction: "", network });
     // 外部は断ったが、同じ authorization を別の送信者が chain に載せた。
     if (mode === "refused-but-on-chain") {
       const a0 = (payload as { payload?: { authorization?: Record<string, string> } } | undefined)?.payload?.authorization;
