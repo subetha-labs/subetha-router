@@ -878,7 +878,7 @@ site に `log` の指定は無く access log は出ていないが、それは�
   - **確認していないこと**: 上限に達するまでの挙動（総数 300・件数 40）は本番では試していない（合成の試験だけ）。入れ替えの途中の購入も本番では試していない（購入の無い時に入れ替えた）。
   - **finality（06:03Z、公開の Base Sepolia RPC の `finalized` と照合）**: 4 件の購入の受信の settle の tx（`0x63b7837c…68a8`・`0xa1b6bfa9…5ee9b`・`0x5900aa45…f35e`・`0x3875ee47…14ea`）は、全て status 成功・canonical・確定済み。上流への支払いの tx の finality は照合していない。
 
-**SubEtha の relay の廃止への対応（2026-11-22。`docs/subetha-exact-provider-settle-design.md`。**本番は 2026-11-23 06:46Z に `b-ef7cc6a` へ入れ替えた。下の記録**）**:
+**SubEtha の relay の廃止への対応（2026-11-22。`docs/subetha-exact-provider-settle-design.md`。**本番は 2026-11-23 06:46Z に `b-ef7cc6a`、07:20Z に `b-1418426` へ入れ替えた。下の記録**）**:
 
 - SubEtha の facilitator は支払いを送らなくなる。新しい Router は、注文を bind し、買い手の authorization を **Router の選んだ x402 facilitator に最大 1 回**送り、
   結果を SubEtha の reconcile で決める。送る先の既定は `https://www.x402.org/facilitator`（第三者の無料の testnet のサービス。認証情報なし）。
@@ -913,6 +913,17 @@ site に `log` の指定は無く access log は出ていないが、それは�
     ほかに、原因を調べるための払わない注文が 1 件（`d82b6cf1-d9e2-47a5-a15b-63807f6eb6de`。quote と署名だけで、Router には出していない）。
   - **終わりの状態**: inspect `--remote` は 10 件・不一致 0・未解決 2（上の `unknown` の 1 件と払わない 1 件。06:52Z の時点で SubEtha の側はどちらも `open`）。token の照合は log・journal・ledger・診断の記録とも 0 件。実証の件数は 40 のうち 6 を使った見込み（数えていない）。
   - **確認していないこと**: x402.org が 1 件目を断った理由。SubEtha の注文の一覧の `settlePath`／`settleRoute` の欄（inspect の出力には `origin: external-broadcast` として出る）。上限に達するまでの挙動と、入れ替えの途中の購入は今回も本番では試していない。
+- **記録（2026-11-23 07:20Z。本番は `b-1418426`）**: 外部の facilitator が断った理由の分類を `submit` の行に残す変更（PR #212、設計 `docs/subetha-exact-provider-settle-design.md` §3.12）を入れた（owner の go）。
+  - **1 件目の `unknown` のその後**: SubEtha が自分で閉じた（07:08Z の inspect で注文は `rejected`、exact は `failed`。期限切れ・未使用）。Router の側の未解決は 0。原因は分からないまま。
+  - **image**: main `1418426` を手元で build、layer の一覧の hash が手元と host で一致。転送は 4 MiB × 41 個（368 秒）、結合した file の sha256 が一致。
+  - **入れ替え**: 直前の inspect は 10 件・未解決 0・不一致 0。07:20:51Z 開始、07:21:02Z 終了、exit 0、旧コンテナは drain 済み、journal の先頭 475,542 バイトは不変、egress ok、公開の `/healthz` ok、`could not start` 0 行。
+    rollback は `subetha-router-prev-20261123T072051Z`（`b-ef7cc6a`）。それより古い `-prev-` は削除。env は変えていない。
+  - **公開の MCP（HTTPS）からの購入**:
+    1. `d288a08f-2cf2-4447-af32-7c7bbf07d4e9`: 署名のあと purchase の呼び出しが quote の期限（120 秒）を過ぎ、Router が `approval_expired`（409）で断った。ledger は `requested`・`created` だけ（verify・bind・送信なし）。運用者の手順の遅れで、Router の欠陥ではない。
+    2. `c508d149-990c-478a-a8ef-5edd817e5216`（07:30:05Z。quote → 署名 → purchase を 1 つの script で）: **`delivered`**、purchase 3.7 秒。`bind`（`bound`、一致、137 ms）→ `submit`（200・`success: true`、498 ms。成功なので `reason` の欄は無い）→
+       `settle`（`settled`、`reconcile: accepted`、照合 1 回、計 798 ms）。受信の tx は `0xa7dfbe34fceb6e81c28398d54b6790f9df849de3a28369a58afe9aee7f16a060`。同じ `requestId` の再 quote は `closed: true`・`status: delivered`・offer なし。
+  - **終わりの状態**: inspect `--remote` は 12 件・未解決 0・不一致 0。token の照合は log・journal・ledger・診断の記録とも 0 件。
+  - **確認していないこと**: 本番で `reason` の欄が実際に書かれるところ（入れ替えの後、外部の facilitator が断った購入が起きていない。合成の試験だけ）。
 
 ## 3. 動作確認
 
