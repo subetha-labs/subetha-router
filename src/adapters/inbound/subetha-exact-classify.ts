@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { getAddress } from "viem";
 
 import type { OfferRefusalDetail, SettleResult } from "../../ports/inbound.js";
+import { classifyReason, type ReasonClass } from "../../shared/payment-reasons.js";
 
 export const SUBETHA_EXACT_RESPONSE_MAX_BYTES = 64 * 1024;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
@@ -226,19 +227,27 @@ export function classifyBind(call: CallOutcome, local: LocalIdentity): BindClass
 /**
  * 外部の facilitator の答え。**結果は決めない**: reconcile を待つ長さだけを決める（設計 §3.4）。
  * `refused` は「はっきり断った」（200 で `success === false`、または 4xx）。それ以外は `wait`（成功と言った・答えと読めない）。
+ * `reason` は、断った答え（上の 2 つ）の本文が JSON の object のときだけ: `errorReason` の欄を理由の表（`shared/payment-reasons.ts`）で分類した固定の語
+ * （表の token・`absent`・`malformed`・`unrecognized`）。生の文字列は残さない。記録のためだけで、結果も待ち方も変えない（設計 §3.12）。
  */
 export interface SubmitClassification {
   readonly wait: boolean;
   readonly success?: boolean;
   readonly transaction?: string;
+  readonly reason?: ReasonClass;
+}
+
+function refusalReasonOf(json: unknown): { readonly reason?: ReasonClass } {
+  if (!isRecord(json)) return {};
+  return { reason: classifyReason(Object.prototype.hasOwnProperty.call(json, "errorReason") ? json["errorReason"] : undefined) };
 }
 export function classifySubmit(call: CallOutcome): SubmitClassification {
   if (call.kind === "threw") return { wait: true };
   const { status, json } = call;
-  if (status >= 400 && status < 500) return { wait: false };
+  if (status >= 400 && status < 500) return { wait: false, ...refusalReasonOf(json) };
   if (status !== 200 || !isRecord(json) || typeof json["success"] !== "boolean") return { wait: true };
   const transaction = json["transaction"];
-  return { wait: json["success"], success: json["success"], ...(typeof transaction === "string" && HEX32.test(transaction) ? { transaction: lower(transaction) } : {}) };
+  return { wait: json["success"], success: json["success"], ...(typeof transaction === "string" && HEX32.test(transaction) ? { transaction: lower(transaction) } : {}), ...(json["success"] ? {} : refusalReasonOf(json)) };
 }
 
 /** reconcile の読み（記録に残す固定の語）。`unanswered` は 200 以外・読めない・例外。 */

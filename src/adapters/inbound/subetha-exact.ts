@@ -605,7 +605,7 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
             const submitted = classifySubmit(answer);
             // 外部の答えは結果を決めない。reconcile を待つ長さだけ。
             wait = submitted.wait;
-            await record(owner.attemptId, "submit", { orderId, phase: "answered", ...httpStatusOf(answer), ...(submitted.success === undefined ? {} : { success: submitted.success }), ...(submitted.transaction === undefined ? {} : { transaction: submitted.transaction }), elapsedMs: Math.round(answer.elapsedMs) });
+            await record(owner.attemptId, "submit", { orderId, phase: "answered", ...httpStatusOf(answer), ...(submitted.success === undefined ? {} : { success: submitted.success }), ...(submitted.transaction === undefined ? {} : { transaction: submitted.transaction }), ...(submitted.reason === undefined ? {} : { reason: submitted.reason }), elapsedMs: Math.round(answer.elapsedMs) });
           } finally {
             submitting.delete(orderId);
           }
