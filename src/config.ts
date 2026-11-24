@@ -41,6 +41,8 @@ import {
   SUBETHA_EXACT_RAIL,
   SUBETHA_EXACT_SETTLE_FACILITATOR_DEFAULT_URL,
   SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV,
+  SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV,
+  SUBETHA_EXACT_OWN_SETTLE_HOSTS,
   SUBETHA_EXACT_TOKEN_FILE_ENV,
   type SubethaExactFacilitatorUrl,
   type SubethaExactSettleFacilitatorUrl,
@@ -581,6 +583,8 @@ export interface SubethaExactConfig {
   readonly settleFacilitator: SubethaExactSettleFacilitatorUrl;
   /** token ファイルのパス（値は起動時に合成が読む。0600 の通常のファイル）。 */
   readonly tokenFile: string;
+  /** settle 先の token ファイルのパス（`docs/exact-settle-facilitator-design.md` §2.1。あれば settle 先は SubEtha の settle facilitator）。 */
+  readonly settleTokenFile?: string;
   /** offer の有効期間（秒。承認の時間）。既定は adapter の 120。 */
   readonly offerSeconds?: number;
   readonly limits: SubethaExactLimits;
@@ -1360,6 +1364,14 @@ function parseSubethaExact(
   if (settleFacilitator === undefined) {
     throw new ConfigError(`${SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV} must be an https URL on an allowed x402 facilitator host (or a loopback URL for fixtures), without query, userinfo or fragment`);
   }
+  // settle 先の token と host の組（`docs/exact-settle-facilitator-design.md` §1）。loopback（fixture）は任意。値は出さない。
+  const settleTokenRaw = env[SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV];
+  const settleTokenFile = settleTokenRaw === undefined || settleTokenRaw === "" ? undefined : settleTokenRaw;
+  if (SUBETHA_EXACT_OWN_SETTLE_HOSTS.has(settleFacilitator.host)) {
+    if (settleTokenFile === undefined) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} is required when ${SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV} is the SubEtha settle facilitator`);
+  } else if (!settleFacilitator.loopback && settleTokenFile !== undefined) {
+    throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} is only allowed when ${SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV} is the SubEtha settle facilitator`);
+  }
   const offerSeconds = parseOfferSeconds(env[SUBETHA_EXACT_OFFER_SECONDS_ENV], SUBETHA_EXACT_OFFER_SECONDS_ENV);
   let limits: SubethaExactLimits = SUBETHA_EXACT_DEFAULT_LIMITS;
   let unansweredVerifyIsUnknown = false;
@@ -1401,7 +1413,7 @@ function parseSubethaExact(
       if (key !== "limits" && key !== "unansweredVerifyIsUnknown") throw new ConfigError("subethaExact has an unknown field");
     }
   }
-  return { facilitator, settleFacilitator, tokenFile, ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}) };
+  return { facilitator, settleFacilitator, tokenFile, ...(settleTokenFile === undefined ? {} : { settleTokenFile }), ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}) };
 }
 
 function parseReal(

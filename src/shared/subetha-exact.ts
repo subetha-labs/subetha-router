@@ -21,6 +21,11 @@ export const SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV = "ROUTER_SUBETHA_EXACT_SE
 export const SUBETHA_EXACT_SETTLE_FACILITATOR_DEFAULT_URL = "https://www.x402.org/facilitator";
 /** 送る先の host の allowlist（loopback は fixture だけ）。 */
 export const SUBETHA_EXACT_SETTLE_FACILITATOR_HOSTS: ReadonlySet<string> = Object.freeze(new Set(["www.x402.org", "x402.org"]));
+/** SubEtha 自前の settle facilitator の host（`docs/exact-settle-facilitator-design.md` §1）。この host だけは settle 先の token が要り、URL は origin だけ。 */
+export const SUBETHA_EXACT_OWN_SETTLE_HOSTS: ReadonlySet<string> = Object.freeze(new Set(["settle-testnet.subethalabs.com"]));
+/** settle 先の token のファイル（`docs/exact-settle-facilitator-design.md` §2.1）。値は小文字の hex 64 桁。 */
+export const SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV = "ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE";
+export const SUBETHA_EXACT_SETTLE_TOKEN_FORM = /^[0-9a-f]{64}$/;
 
 /** facilitator の host の allowlist（hosted のテストネット）と、試験の fixture だけに許す loopback。 */
 export const SUBETHA_EXACT_FACILITATOR_HOSTS: ReadonlySet<string> = Object.freeze(new Set(["facilitator-testnet.subethalabs.com"]));
@@ -97,7 +102,9 @@ export function parseSubethaExactSettleFacilitatorUrl(raw: string): SubethaExact
   }
   const loopback = LOOPBACK_HOSTS.has(url.hostname);
   if (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) return undefined;
-  if (!loopback && !SUBETHA_EXACT_SETTLE_FACILITATOR_HOSTS.has(url.hostname)) return undefined;
+  const own = SUBETHA_EXACT_OWN_SETTLE_HOSTS.has(url.hostname);
+  if (!loopback && !own && !SUBETHA_EXACT_SETTLE_FACILITATOR_HOSTS.has(url.hostname)) return undefined;
+  if (own && url.pathname !== "/") return undefined;
   if (!loopback && url.port !== "") return undefined;
   if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return undefined;
   return { url: `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`, host: url.hostname, loopback };

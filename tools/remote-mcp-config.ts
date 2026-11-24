@@ -230,6 +230,8 @@ export const HOSTED_EXACT_TOKEN_FILE_ENV = "SUBETHA_EXACT_TOKEN_FILE";
  * 本番では設定しない（子の Router の既定を使う）。試験の fixture が loopback の facilitator を渡すための口。形の検査は子の Router。
  */
 export const HOSTED_EXACT_SETTLE_FACILITATOR_URL_ENV = "SUBETHA_EXACT_SETTLE_FACILITATOR_URL";
+/** host の env（任意）: settle 先の token のファイルの path（値は読まない。`docs/exact-settle-facilitator-design.md` §2.6）。URL との組み合わせの検査は子の Router。 */
+export const HOSTED_EXACT_SETTLE_TOKEN_FILE_ENV = "SUBETHA_EXACT_SETTLE_TOKEN_FILE";
 /**
  * host の env（任意）: 実証の件数（offer の上限）の上書き。**運用者が image を作り直さずに新しい offer を止める・再開するための口**（`0` = 受付停止）。
  * 無ければ `HOSTED_EXACT.maxCommitted`。0〜100000 の 10 進の整数だけ（違えば固定文で止める）。有効化の入れ替えは、まず `0` で入れてから外す（`docs/DEPLOY.md` §2i）。
@@ -238,7 +240,7 @@ export const HOSTED_EXACT_MAX_COMMITTED_ENV = "SUBETHA_EXACT_MAX_COMMITTED";
 /**
  * 有効なときの host の env の 2 つ。無効なら env を読まずに `undefined`。欠けていれば固定文で止める（値は出さない）。形の検査は子の Router（`src/config.ts`）が行う。
  */
-export function hostedExactOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): { readonly facilitatorUrl: string; readonly settleFacilitatorUrl?: string; readonly tokenFile: string; readonly maxCommitted: number } | undefined {
+export function hostedExactOf(env: Readonly<Record<string, string | undefined>>, activation: RailsActivation): { readonly facilitatorUrl: string; readonly settleFacilitatorUrl?: string; readonly settleTokenFile?: string; readonly tokenFile: string; readonly maxCommitted: number } | undefined {
   if (!subethaExactOf(activation).inbound) return undefined;
   const facilitatorUrl = env[HOSTED_EXACT_FACILITATOR_URL_ENV];
   const tokenFile = env[HOSTED_EXACT_TOKEN_FILE_ENV];
@@ -250,7 +252,8 @@ export function hostedExactOf(env: Readonly<Record<string, string | undefined>>,
     throw new Error(`${HOSTED_EXACT_MAX_COMMITTED_ENV} must be an integer from 0 to 100000 when present`);
   }
   const settleFacilitatorUrl = env[HOSTED_EXACT_SETTLE_FACILITATOR_URL_ENV];
-  return { facilitatorUrl, ...(settleFacilitatorUrl === undefined || settleFacilitatorUrl === "" ? {} : { settleFacilitatorUrl }), tokenFile, maxCommitted: rawCap === undefined || rawCap === "" ? HOSTED_EXACT.maxCommitted : Number(rawCap) };
+  const settleTokenFile = env[HOSTED_EXACT_SETTLE_TOKEN_FILE_ENV];
+  return { facilitatorUrl, ...(settleFacilitatorUrl === undefined || settleFacilitatorUrl === "" ? {} : { settleFacilitatorUrl }), ...(settleTokenFile === undefined || settleTokenFile === "" ? {} : { settleTokenFile }), tokenFile, maxCommitted: rawCap === undefined || rawCap === "" ? HOSTED_EXACT.maxCommitted : Number(rawCap) };
 }
 /** `subetha` の既定（無ければ `false`）。 */
 export function subethaOf(activation: RailsActivation): { readonly inbound: boolean } {

@@ -369,6 +369,14 @@ operator's). `ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL` overrides it within a
 facilitator must serve the `bind` route (protocol `b02b249` or later); against an older one nothing is sent and every
 purchase ends `unknown`. Design: `docs/subetha-exact-provider-settle-design.md`.
 
+The Router can also be pointed at **SubEtha's own settle facilitator** (testnet): set
+`ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL=https://settle-testnet.subethalabs.com` together with
+`ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE` (a 0600 file holding 64 lowercase hex characters; a token of its own, never the
+Provider token; the facilitator's operator receives only its sha256). The Router refuses to start on any other pairing of
+host and token. Still at most one submission per order and the result only from SubEtha's reconciliation; `settle_pending`
+and `settle_failed:*` only make the Router keep reconciling within the same 60 seconds. Not the default and not enabled on
+the hosted Router. Design: `docs/exact-settle-facilitator-design.md`.
+
 Since the same change, on **every** rail, a quote that was already used for a purchase attempt is no longer re-presented
 for signing: re-quoting its `requestId` returns `closed: true` with the current `status` and without `source.offer`, and
 `npm run sign` refuses such a document (take a new quote with a new `requestId`).

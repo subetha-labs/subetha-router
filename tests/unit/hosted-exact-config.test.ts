@@ -242,6 +242,25 @@ describe("G-4 の公開の定数: 以前の公開の生成に、実証の分を�
     expect(key in planOf(RAILS_ACTIVATION_BEFORE_EXACT, { ...base, ...evmFacilitatorEnv, SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:9/xfac" }).childEnv).toBe(false);
   });
 
+  test("settle 先の token のファイル（AC-10）: 無い・空なら子の env も生成も今のまま（golden）。あれば path だけが渡る。URL だけでも計画は作れる（組み合わせの検査は子の Router）", () => {
+    const key = "ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE";
+    const on = { ...base, ...evmFacilitatorEnv, ...ENV_ON };
+    for (const env of [on, { ...on, SUBETHA_EXACT_SETTLE_TOKEN_FILE: "" }]) {
+      const plan = planOf(RAILS_ACTIVATION, env);
+      expect(key in plan.childEnv).toBe(false);
+      expect(serialise(plan)).toBe(goldenText("public-exact"));
+    }
+    const own = { SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://settle-testnet.subethalabs.com", SUBETHA_EXACT_SETTLE_TOKEN_FILE: "/app/runtime/secrets/settle.token" };
+    const before = planOf(RAILS_ACTIVATION, on);
+    const set = planOf(RAILS_ACTIVATION, { ...on, ...own });
+    expect([set.childEnv["ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL"], set.childEnv[key]]).toEqual([own.SUBETHA_EXACT_SETTLE_FACILITATOR_URL, own.SUBETHA_EXACT_SETTLE_TOKEN_FILE]);
+    expect(Object.keys(set.childEnv).filter((k) => !(k in before.childEnv)).sort()).toEqual(["ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL", key]);
+    expect(JSON.stringify(set.config)).toBe(JSON.stringify(before.config));
+    expect(planOf(RAILS_ACTIVATION, { ...on, SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://x402.org/facilitator" }).childEnv[key]).toBeUndefined();
+    // 実証が無効なら読まない。
+    expect(key in planOf(RAILS_ACTIVATION_BEFORE_EXACT, { ...base, ...evmFacilitatorEnv, ...own }).childEnv).toBe(false);
+  });
+
   test("今の公開の定数は、実証の env が無ければ計画を作らない（入れ替えの script は旧コンテナに戻す）", () => {
     expect(() => planOf(RAILS_ACTIVATION, { ...base, ...evmFacilitatorEnv })).toThrow(HostPlanError);
   });
