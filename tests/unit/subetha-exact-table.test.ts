@@ -26,6 +26,7 @@ import { composeRails } from "../../src/main.js";
 import { parseSubethaExactFacilitatorUrl, SUBETHA_EXACT_DEFAULT_LIMITS } from "../../src/shared/subetha-exact.js";
 import { TEST_NETWORKS } from "../fixtures/known-networks.js";
 import { createSignerSpy } from "../fixtures/x402-signer-spy.js";
+import { denyHostsOf } from "../../src/net/upstream-url.js";
 
 const BASE = "eip155:84532";
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
@@ -230,6 +231,68 @@ describe("env と設定の section（real モード）", () => {
       expect(message, bad).toMatch(/ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL must be an https URL on an allowed x402 facilitator host/);
       expect(message, bad).not.toContain("evil");
     }
+  });
+  test("自前の settle facilitator（AC-8）: origin だけの URL と token の組を要り、ほかの組は起動を止める。値はメッセージに出さない", () => {
+    const URL_ENV = "ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL";
+    const TOKEN_ENV = "ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE";
+    const OWN = "https://settle-testnet.subethalabs.com";
+    const FILE = "/nonexistent/leak-settle.token";
+    for (const url of [OWN, `${OWN}/`, `${OWN}:443`]) {
+      const section = load({ env: { [URL_ENV]: url, [TOKEN_ENV]: FILE } }).real!.subethaExact!;
+      expect([section.settleFacilitator, section.settleTokenFile]).toEqual([{ url: OWN, host: "settle-testnet.subethalabs.com", loopback: false }, FILE]);
+    }
+    // token の無い構成には欄が無い。loopback は任意。
+    expect("settleTokenFile" in load({}).real!.subethaExact!).toBe(false);
+    expect("settleTokenFile" in load({ env: { [TOKEN_ENV]: "" } }).real!.subethaExact!).toBe(false);
+    expect("settleTokenFile" in load({ env: { [URL_ENV]: "http://127.0.0.1:9/xfac" } }).real!.subethaExact!).toBe(false);
+    expect(load({ env: { [URL_ENV]: "http://127.0.0.1:9/xfac", [TOKEN_ENV]: FILE } }).real!.subethaExact!.settleTokenFile).toBe(FILE);
+    const messageOf = (env: Record<string, string | undefined>): string => {
+      try {
+        load({ env });
+      } catch (error) {
+        return (error as Error).message;
+      }
+      return "";
+    };
+    for (const env of [{ [URL_ENV]: OWN }, { [URL_ENV]: OWN, [TOKEN_ENV]: "" }]) expect(messageOf(env)).toMatch(/ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE is required when/);
+    for (const env of [{ [TOKEN_ENV]: FILE }, { [URL_ENV]: "https://x402.org/facilitator", [TOKEN_ENV]: FILE }, { [URL_ENV]: "https://www.x402.org/facilitator", [TOKEN_ENV]: FILE }]) {
+      expect(messageOf(env)).toMatch(/ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE is only allowed when/);
+      expect(messageOf(env)).not.toContain("leak-settle");
+    }
+    for (const bad of [`${OWN}/settle`, `${OWN}/facilitator`, `${OWN}:8443`, `${OWN}/?leak=1`, `${OWN}/#x`, "https://u:p@settle-testnet.subethalabs.com", "http://settle-testnet.subethalabs.com", "https://settle-testnet.subethalabs.com.evil.example", "https://x.settle-testnet.subethalabs.com"]) {
+      expect(messageOf({ [URL_ENV]: bad, [TOKEN_ENV]: FILE }), bad).toMatch(/must be an https URL on an allowed x402 facilitator host/);
+      expect(messageOf({ [URL_ENV]: bad, [TOKEN_ENV]: FILE }), bad).not.toContain("evil");
+    }
+  });
+  test("自前の settle facilitator の host は、動的 URL の拒否ホストの作り方に渡すと拒まれる（R11）", () => {
+    const url = load({ env: { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://settle-testnet.subethalabs.com", ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE: "/nonexistent/settle.token" } }).real!.subethaExact!.settleFacilitator.url;
+    expect(denyHostsOf([], [url])).toEqual(["settle-testnet.subethalabs.com"]);
+  });
+  test("自前の settle facilitator の token（AC-8、合成）: 読めない・形が違う・Provider token と同じなら ConfigError。値も path も出さない。正しければ adapter に渡る", () => {
+    const loaded = load({ upstream: "http://127.0.0.1:1/v1/eth/snapshot", env: { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: "http://127.0.0.1:1/p/router-test", ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "http://127.0.0.1:1/xfac" } });
+    const providerFile = loaded.real!.subethaExact!.tokenFile;
+    const settleFile = `${providerFile}.settle`;
+    const withToken = { ...loaded, real: { ...loaded.real!, subethaExact: { ...loaded.real!.subethaExact!, settleTokenFile: settleFile } } };
+    const compose = () => composeRails(withToken, { evmSigning: createSignerSpy().capability(BASE), fixtureFacilitators: true, knownNetworksForTest: TEST_NETWORKS });
+    const messageOf = (): string => {
+      try {
+        compose();
+      } catch (error) {
+        return (error as Error).message;
+      }
+      return "";
+    };
+    const hex = "5e".repeat(32);
+    writeFileSync(providerFile, `${hex}\n`, { mode: 0o600 });
+    expect(messageOf()).toBe("router config invalid: ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE: the secret file cannot be read");
+    for (const bad of ["AB".repeat(32), "5e".repeat(31), `${hex}00`, "x".repeat(64)]) {
+      writeFileSync(settleFile, bad, { mode: 0o600 });
+      expect(messageOf()).toBe("router config invalid: ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE: the token must be 64 lowercase hex characters");
+    }
+    writeFileSync(settleFile, hex, { mode: 0o600 });
+    expect(messageOf()).toBe("router config invalid: ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE must not be the same token as ROUTER_SUBETHA_EXACT_TOKEN_FILE");
+    writeFileSync(settleFile, "6f".repeat(32), { mode: 0o600 });
+    expect(messageOf()).toBe("");
   });
   test("limits の上書き（部分でもよい）、unknown の欄、正の整数以外は拒む", () => {
     expect(load({ section: { limits: { maxUnresolved: 5 } } }).real?.subethaExact?.limits).toEqual({ maxRequestsTotal: 100, maxUnresolved: 5, requestsPerMinute: 6 });

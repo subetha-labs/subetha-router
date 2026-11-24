@@ -1,6 +1,7 @@
 # `subetha-exact`：Router が自分の x402 facilitator で settle する（要件・設計・タスク）
 
 2026-11-22。対象は受信レール `subetha-exact`（Router = SubEtha v2 facilitator の Provider）の `settle` だけです。
+2026-11-24 の追加：送り先を SubEtha 自前の settle facilitator に向ける場合（token あり）の R6・R7・§3.4・§3.7・§3.12 の違いは [exact-settle-facilitator-design.md](exact-settle-facilitator-design.md)。token の無い構成は、この文書のまま。
 もとの設計は [subetha-exact-inbound-design.md](subetha-exact-inbound-design.md) §3.8（表 B）で、この文書はその表 B を置き換えます。
 
 ## 1. 背景

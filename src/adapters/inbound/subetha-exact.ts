@@ -38,6 +38,7 @@ import {
   classifyReconcile,
   classifyReleasePost,
   classifySubmit,
+  classifySubethaSettle,
   isRecord,
   parseOrderView,
   requesterDigestOf,
@@ -112,6 +113,11 @@ export interface SubethaExactInboundOptions {
    * この要求に Provider token は付けない。transport は `transport` と同じ（SSRF 防御 A）。
    */
   readonly settleFacilitatorUrl: string;
+  /**
+   * settle 先の token（`docs/exact-settle-facilitator-design.md` §1）。**あれば送り先は SubEtha の settle facilitator**: `POST …/settle` にだけ `Authorization` を付け、
+   * 答えを `classifySubethaSettle` で読む。無ければ今までどおり（header なし、`classifySubmit`）。host との組み合わせは合成が検査する。
+   */
+  readonly settleToken?: () => string;
   /** 表の行（`subetha-exact` の受信を許す資産）。 */
   readonly asset: { readonly network: string; readonly id: string; readonly decimals: number; readonly domain: { readonly name: string; readonly version: string } };
   /** `<dirname(journalPath)>/subetha-exact`。 */
@@ -183,9 +189,10 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
   function call(method: "GET" | "POST", path: string, body: unknown, options2: { readonly op: string; readonly deadlineMs: number; readonly auth: boolean; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
     return exchange(method, `${base}${path}`, { "content-type": "application/json", ...(options2.auth ? { authorization: `Bearer ${options.token()}` } : {}) }, body, options2);
   }
-  /** 外部の x402 facilitator への 1 回の送信。**Provider token を付けない**（header はここで固定。`call` を通さない）。 */
+  const settleToken = options.settleToken;
+  /** 外部の x402 facilitator への 1 回の送信。**Provider token を付けない**（header はここで固定。`call` を通さない）。settle 先の token を読むのはここだけ。 */
   function submitExternal(body: unknown, options2: { readonly deadlineMs: number; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
-    return exchange("POST", `${settleBase}/settle`, { "content-type": "application/json" }, body, { op: "settle_facilitator_settle", deadlineMs: options2.deadlineMs, routeId: options2.routeId });
+    return exchange("POST", `${settleBase}/settle`, { "content-type": "application/json", ...(settleToken === undefined ? {} : { authorization: `Bearer ${settleToken()}` }) }, body, { op: "settle_facilitator_settle", deadlineMs: options2.deadlineMs, routeId: options2.routeId });
   }
   async function exchange(method: "GET" | "POST", url: string, headers: Record<string, string>, body: unknown, options2: { readonly op: string; readonly deadlineMs: number; readonly routeId: string }): Promise<CallOutcome & { readonly elapsedMs: number }> {
     const context: TransportContext = { routeId: options2.routeId, operation: options2.op };
@@ -602,7 +609,7 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
             const submitDeadline = deadlineOf(timeouts.submitMs);
             if (submitDeadline === undefined) return finish(unknown, "none");
             const answer = await submitExternal({ x402Version: 2, paymentPayload: sent, paymentRequirements: ledgerRequirementsOf(offer) }, { deadlineMs: submitDeadline, routeId });
-            const submitted = classifySubmit(answer);
+            const submitted = settleToken === undefined ? classifySubmit(answer) : classifySubethaSettle(answer);
             // 外部の答えは結果を決めない。reconcile を待つ長さだけ。
             wait = submitted.wait;
             await record(owner.attemptId, "submit", { orderId, phase: "answered", ...httpStatusOf(answer), ...(submitted.success === undefined ? {} : { success: submitted.success }), ...(submitted.transaction === undefined ? {} : { transaction: submitted.transaction }), ...(submitted.reason === undefined ? {} : { reason: submitted.reason }), elapsedMs: Math.round(answer.elapsedMs) });

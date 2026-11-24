@@ -7,6 +7,7 @@ import { getAddress } from "viem";
 
 import type { OfferRefusalDetail, SettleResult } from "../../ports/inbound.js";
 import { classifyReason, type ReasonClass } from "../../shared/payment-reasons.js";
+import { classifySettleReason, settleReasonWaits, type SettleReasonClass } from "../../shared/settle-reasons.js";
 
 export const SUBETHA_EXACT_RESPONSE_MAX_BYTES = 64 * 1024;
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
@@ -234,7 +235,7 @@ export interface SubmitClassification {
   readonly wait: boolean;
   readonly success?: boolean;
   readonly transaction?: string;
-  readonly reason?: ReasonClass;
+  readonly reason?: ReasonClass | SettleReasonClass;
 }
 
 function refusalReasonOf(json: unknown): { readonly reason?: ReasonClass } {
@@ -248,6 +249,24 @@ export function classifySubmit(call: CallOutcome): SubmitClassification {
   if (status !== 200 || !isRecord(json) || typeof json["success"] !== "boolean") return { wait: true };
   const transaction = json["transaction"];
   return { wait: json["success"], success: json["success"], ...(typeof transaction === "string" && HEX32.test(transaction) ? { transaction: lower(transaction) } : {}), ...(json["success"] ? {} : refusalReasonOf(json)) };
+}
+
+/**
+ * SubEtha の settle facilitator の答え（`docs/exact-settle-facilitator-design.md` §2.4）。**結果は決めない**: reconcile を待つ長さと記録だけ。
+ * - 4xx: 受け付けていない（401・429 は認証と回数の段、Cloudflare の答えを含む）。待たない。本文は使わない。
+ * - 200 でない・読めない・`success` が boolean でない: 届いたかもしれないので待つ。
+ * - `success: false`: `settle_pending` と `settle_failed:*` の一覧だけ待つ（完全一致）。ほかは待たない。
+ */
+export function classifySubethaSettle(call: CallOutcome): SubmitClassification {
+  if (call.kind === "threw") return { wait: true };
+  const { status, json } = call;
+  if (status >= 400 && status < 500) return { wait: false };
+  if (status !== 200 || !isRecord(json) || typeof json["success"] !== "boolean") return { wait: true };
+  const raw = json["transaction"];
+  const transaction = typeof raw === "string" && HEX32.test(raw) ? { transaction: lower(raw) } : {};
+  if (json["success"]) return { wait: true, success: true, ...transaction };
+  const reason = classifySettleReason(Object.prototype.hasOwnProperty.call(json, "errorReason") ? json["errorReason"] : undefined);
+  return { wait: settleReasonWaits(reason), success: false, ...transaction, reason };
 }
 
 /** reconcile の読み（記録に残す固定の語）。`unanswered` は 200 以外・読めない・例外。 */

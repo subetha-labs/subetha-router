@@ -13,6 +13,7 @@ import { writeFileSync } from "node:fs";
 
 import { reportStartupFailure, startRouter, type RouterCapabilities } from "../../src/main.js";
 import { TEST_NETWORKS } from "./known-networks.js";
+import { routerDiagnosticsSinkOf } from "../../tools/router-diagnostics.js";
 import { createSignerSpy } from "./x402-signer-spy.js";
 
 const stopAt = process.env["SUBETHA_EXACT_STOP_AT"] ?? "";
@@ -33,4 +34,6 @@ const capabilities: RouterCapabilities = {
   subethaExactHooksForTest: { stop: (point, orderId) => stop(point, orderId) },
 };
 
-startRouter(capabilities).catch(reportStartupFailure);
+// 診断の記録（`SUBETHA_DIAGNOSTICS_PATH` があるときだけ。本番の process と同じ sink）。
+const diagnostics = routerDiagnosticsSinkOf(process.env);
+startRouter(diagnostics === undefined ? capabilities : { ...capabilities, diagnostics }).catch(reportStartupFailure);

@@ -32,6 +32,8 @@ const defaultModeOf = (route: FixtureRoute): string => (route === "settle" || ro
 export interface FacilitatorFixtureOptions {
   readonly providerId: string;
   readonly bearer: string;
+  /** SubEtha の settle facilitator の模型にするときの token（`/xfac/settle` はこの Bearer だけを受ける。無ければ認証なしの外部の facilitator の模型）。 */
+  readonly settleBearer?: string;
   readonly chainId: number;
   readonly asset: string;
   readonly domainName: string;
@@ -86,7 +88,7 @@ export interface FacilitatorFixture {
   close(): Promise<void>;
   /** 内部の状態（試験の断言用）。 */
   readonly orders: Map<string, FixtureOrder>;
-  readonly calls: { readonly byRoute: Record<string, number>; readonly byOrder: Record<string, Record<string, number>>; /** `Authorization` の付いた外部への送信の数（0 でなければ token が漏れている）。 */ submitWithAuthorization: number };
+  readonly calls: { readonly byRoute: Record<string, number>; readonly byOrder: Record<string, Record<string, number>>; /** `Authorization` の付いた外部への送信の数（`settleBearer` が無ければ 0 のはず）。 */ submitWithAuthorization: number; /** Provider token の付いた外部への送信の数。 */ submitWithProviderToken: number; /** settle 先の token の付いた tenant への要求の数。 */ tenantWithSettleToken: number };
   setMode(route: FixtureRoute, mode: string, raw?: Omit<RawInjection, never>): void;
   /** 遅れた割当の完了（`busy-then-create` の後）。`createdAt`・`expiresAt` は試験が与える（adapter の時計に合わせる）。 */
   allocate(input: { requesterDigest: string; resourceDigest: string; amount?: string; createdAt?: number; expiresAt?: number }): FixtureOrder;
@@ -126,7 +128,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
   const onceSpent = new Set<string>();
   const orders = new Map<string, FixtureOrder>();
   const pendingAllocations = new Map<string, { requesterDigest: string; resourceDigest: string; amount: string }>();
-  const calls: { byRoute: Record<string, number>; byOrder: Record<string, Record<string, number>>; submitWithAuthorization: number } = { byRoute: {}, byOrder: {}, submitWithAuthorization: 0 };
+  const calls: { byRoute: Record<string, number>; byOrder: Record<string, Record<string, number>>; submitWithAuthorization: number; submitWithProviderToken: number; tenantWithSettleToken: number } = { byRoute: {}, byOrder: {}, submitWithAuthorization: 0, submitWithProviderToken: 0, tenantWithSettleToken: 0 };
   /** 合成の chain: 使われた authorization（`from|nonce` の小文字）→ 載せた transaction。 */
   const chainUsed = new Map<string, string>();
   const reconcileCalls = new Map<string, number>();
@@ -390,6 +392,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     const tenant = /^\/p\/([a-z0-9-]+)(\/.*)?$/.exec(url.pathname);
     if (tenant === null) return sendJson(res, 404, { error: "unknown-route" });
     const knownTenant = tenant[1] === options.providerId;
+    if (options.settleBearer !== undefined && (req.headers.authorization ?? "").includes(options.settleBearer)) calls.tenantWithSettleToken += 1;
     const rest = tenant[2] ?? "";
     const body = await readBody(req);
     if (!body.ok) return sendJson(res, body.status, body.body);
@@ -706,13 +709,27 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
    */
   async function submit(req: http.IncomingMessage, input: Record<string, unknown>, res: http.ServerResponse): Promise<void> {
     if (req.headers.authorization !== undefined) calls.submitWithAuthorization += 1;
+    if ((req.headers.authorization ?? "").includes(options.bearer)) calls.submitWithProviderToken += 1;
     const payload = input["paymentPayload"];
     const to = lower(String((payload as { payload?: { authorization?: { to?: string } } } | undefined)?.payload?.authorization?.to ?? ""));
     const order = [...orders.values()].find((o) => lower(o.saleId) === to);
     count("submit", order?.orderId);
+    // SubEtha の settle facilitator の模型（`http.ts`）: token が先。違えば何も見ずに 401。
+    if (options.settleBearer !== undefined && req.headers.authorization !== `Bearer ${options.settleBearer}`) return sendJson(res, 401, { error: "unauthorized" });
     if (injected("submit", res)) return;
     await sleep(delayOf("submit"));
     const mode = modes["submit"];
+    // `own:<理由>` は断るだけ、`own-paid:<理由>` は断るが同じ authorization は chain に載る（この facilitator が後で送った・ほかの送信者が載せた）。
+    // `own-slow:<ms>:<理由>` は、遅れて断る。
+    const slow = /^own-slow:([0-9]+):(.*)$/s.exec(mode);
+    if (slow !== null) await sleep(Number(slow[1]));
+    const own = /^own(-paid)?:(.*)$/s.exec(slow === null ? mode : `own:${slow[2]!}`);
+    if (own !== null) {
+      const a0 = (payload as { payload?: { authorization?: Record<string, string> } } | undefined)?.payload?.authorization;
+      const claimed = `0x${randomBytes(32).toString("hex")}`;
+      if (own[1] !== undefined && a0 !== undefined) chainUsed.set(usedKey(String(a0["from"]), String(a0["nonce"])), `0x${randomBytes(32).toString("hex")}`);
+      return sendJson(res, 200, { success: false, errorReason: own[2], transaction: claimed, network, payer: a0?.["from"] });
+    }
     if (mode === "timeout") return;
     if (mode === "error") return sendJson(res, 500, { error: "internal" });
     if (mode === "bad-request") return sendJson(res, 400, { error: "invalid_request" });
@@ -856,6 +873,7 @@ async function main(): Promise<void> {
   const fixture = createSubethaExactFacilitator({
     providerId: arg("provider-id", "router-test"),
     bearer: arg("bearer", "fixture-provider-token"),
+    ...(arg("settle-bearer", "") === "" ? {} : { settleBearer: arg("settle-bearer", "") }),
     chainId: Number(arg("chain-id", "84532")),
     asset: arg("asset", "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f"),
     domainName: arg("domain-name", "zERC20 USD Coin"),

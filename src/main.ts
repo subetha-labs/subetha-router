@@ -60,7 +60,7 @@ import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
 import { currentDiagnosticScopeFrame, NOOP_DIAGNOSTICS, safeEmit, type DiagnosticsSink } from "./shared/diagnostics.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import { createSubethaExactInbound, type SubethaExactInbound, type SubethaExactInboundOptions } from "./adapters/inbound/subetha-exact.js";
-import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
+import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FORM, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
 import type {
   EvmSigningCapability,
   MppTempoCapability,
@@ -1039,10 +1039,19 @@ export function composeRails(
     }
     // token は閉包の中だけ（読む値は adapter にしか渡さない。0600 の通常のファイル。§5.3）。
     const token = readSecretFile(section.tokenFile, SUBETHA_EXACT_TOKEN_FILE_ENV);
+    // settle 先の token（あるときだけ）。Provider token の使い回しは止める（`docs/exact-settle-facilitator-design.md` §2.2）。
+    let settleToken: string | undefined;
+    if (section.settleTokenFile !== undefined) {
+      settleToken = readSecretFile(section.settleTokenFile, SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV);
+      if (!SUBETHA_EXACT_SETTLE_TOKEN_FORM.test(settleToken)) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV}: the token must be 64 lowercase hex characters`);
+      if (settleToken === token) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} must not be the same token as ${SUBETHA_EXACT_TOKEN_FILE_ENV}`);
+    }
+    const settleTokenValue = settleToken;
     subethaExactAdapter = createSubethaExactInbound({
       facilitatorUrl: section.facilitator.url,
       settleFacilitatorUrl: section.settleFacilitator.url,
       token: () => token,
+      ...(settleTokenValue === undefined ? {} : { settleToken: () => settleTokenValue }),
       transport: createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }),
       asset: { network, id: row.id, decimals: row.decimals, domain: row.domain },
       ledgerDir: subethaExactLedgerDir,

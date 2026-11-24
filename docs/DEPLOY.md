@@ -925,6 +925,24 @@ site に `log` の指定は無く access log は出ていないが、それは�
   - **終わりの状態**: inspect `--remote` は 12 件・未解決 0・不一致 0。token の照合は log・journal・ledger・診断の記録とも 0 件。
   - **確認していないこと**: 本番で `reason` の欄が実際に書かれるところ（入れ替えの後、外部の facilitator が断った購入が起きていない。合成の試験だけ）。
 
+**SubEtha 自前の settle facilitator に向ける準備（2026-11-24。`docs/exact-settle-facilitator-design.md`）— 本番では未設定・未切り替え**:
+
+- 送り先の既定は今も `https://www.x402.org/facilitator`。**切り替えは、相手の稼働の知らせとオーナーの別の go のあと**。本物への購入・公開の名前への到達・本番の egress は、まだ確かめていない。
+- **host の env（2 行とも要る。どちらも秘密ではない）**: `SUBETHA_EXACT_SETTLE_FACILITATOR_URL=https://settle-testnet.subethalabs.com`、`SUBETHA_EXACT_SETTLE_TOKEN_FILE=/app/runtime/secrets/settle.token`。
+  組み合わせが違えば（token なしの自前の host、x402.org と token、Provider token と同じ値、hex 64 桁でない、0600 でない）、子の Router が起動せず、`swap-image.sh` が旧コンテナに戻す。
+- **token（秘密）**: 呼び出し側専用。Provider token とは別。**Router の host で**作り、SubEtha の担当に渡すのは **sha256 だけ**。値を端末・argv・log・chat に出さない。
+  0700・uid 10001 の secrets の directory に、**owner も uid 10001**・0600 の**改行の無い**ファイルとして作る（`umask 077` の下で `openssl rand -hex 32` の出力から改行を除いてファイルへ。
+  root で作ると root の所有になり、directory の owner は引き継がれないので、owner を uid 10001 に変える）。切り替えの前に、container の uid で読めることを、値を出さずに確かめる（byte 数が 64）。
+  渡す sha256 は、そのファイルの `sha256sum`（改行が入ると、相手が照合する値と合わない。Router は前後の空白を除いて読むので、起動では気づけない）。
+- **切り替えの順番**: (1) 相手の呼び出し側の登録（id `router`、tenants `["router-hosted"]`）と公開の名前の稼働、(2) container の中から、token なしの `GET /supported` が 401 になること、
+  (3) inspect `--remote` で未解決 0・不一致 0、(4) 受付を止めた状態（`SUBETHA_EXACT_MAX_COMMITTED=0`）で env を足して入れ替え、(5) 確認の 1 件分だけ開けて購入 1 件（上の「同じ作業の窓で」の手順）、(6) 受付を戻す。
+- **確かめること**: Router の status が `delivered`。ledger が `bind`（`bound`）→ `submit`（`started` → `answered`、200）→ `settle`（`reconcile: accepted`）。受信の tx の送信者が settle facilitator の `signers` のアドレス。
+  2 つの token の照合（`grep -c -F -f <token のファイル>`）が log・journal・ledger・診断の記録とも 0 件。
+- **答えの読み方**（結果ではなく、待つ長さだけ）: `settle_pending` と既知の `settle_failed:*` は、60 秒の枠の中で reconcile を繰り返す。`settle_not_accepted:*`・401・429 は reconcile 1 回で終わり、**その注文はもう送らない**（最大 1 回）。
+  ledger の `submit` の行に `httpStatus` と `reason`（固定の一覧だけ）が残る。401 が続くなら token・登録、429 が続くなら相手か Cloudflare の回数の上限を疑い、受付を止めて調べる。
+- **60 秒を越えて成立した支払い**は `unknown` のまま（オーナーの決定、2026-11-24: 件数を見てから決める）。買い手は払い、データは届かず、Router は上流に払わない。inspect `--remote` で `accepted` として見つける。
+- **戻し方**: env の 2 行を消して同じ image で作り直す（x402.org に戻る）。1 行だけ消すと起動しない。送信の印のある注文は、どちらの構成でも送り直さない。
+
 ## 3. 動作確認
 
 ```sh
