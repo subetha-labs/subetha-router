@@ -374,8 +374,8 @@ The Router can also be pointed at **SubEtha's own settle facilitator** (testnet)
 `ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE` (a 0600 file holding 64 lowercase hex characters; a token of its own, never the
 Provider token; the facilitator's operator receives only its sha256). The Router refuses to start on any other pairing of
 host and token. Still at most one submission per order and the result only from SubEtha's reconciliation; `settle_pending`
-and `settle_failed:*` only make the Router keep reconciling within the same 60 seconds. Not the default and not enabled on
-the hosted Router. Design: `docs/exact-settle-facilitator-design.md`.
+and `settle_failed:*` only make the Router keep reconciling within the same 60 seconds. Not the default; the
+hosted Router uses it since 2026-11-24 (`docs/DEPLOY.md` §2i). Design: `docs/exact-settle-facilitator-design.md`.
 
 Since the same change, on **every** rail, a quote that was already used for a purchase attempt is no longer re-presented
 for signing: re-quoting its `requestId` returns `closed: true` with the current `status` and without `source.offer`, and

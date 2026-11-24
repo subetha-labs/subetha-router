@@ -803,7 +803,7 @@ Provider A（x402、Base Sepolia USDC）に払う。1 件で買い手は 0.012 z
 
 | 状態 | 設定 | 公開の挙動 |
 |---|---|---|
-| (i) 完全に無効 | `RAILS_ACTIVATION` に `subethaExact` の欄なし（または `inbound: false`） | 今と同じ。一覧に route なし、`GET /x402/v1/routes/…` は 404。env は読まない |
+| (i) 完全に無効 | `RAILS_ACTIVATION` に `subethaExact` の欄なし（または `inbound: false`） | 一覧に route なし、`GET /x402/v1/routes/…` は 404。env は読まない |
 | (ii) 有効 | `subethaExact: { inbound: true }`、`HOSTED_EXACT.maxCommitted` > 0 | 一覧に `md-zusdc-eth-snapshot`（`x402Url`・`demonstration`）。MCP の quote と、公開の `GET https://router.subethalabs.com/x402/v1/routes/md-zusdc-eth-snapshot/resource` |
 | (iii) 新規の受付だけ止める | `subethaExact: { inbound: true }`、`HOSTED_EXACT.maxCommitted: 0` | 新しい offer は 503。発行済みの注文への支払い・同じ credential の再送・結果の読み取り・complete の報告・inspect はできる |
 
@@ -882,7 +882,7 @@ site に `log` の指定は無く access log は出ていないが、それは�
 
 - SubEtha の facilitator は支払いを送らなくなる。新しい Router は、注文を bind し、買い手の authorization を **Router の選んだ x402 facilitator に最大 1 回**送り、
   結果を SubEtha の reconcile で決める。送る先の既定は `https://www.x402.org/facilitator`（第三者の無料の testnet のサービス。認証情報なし）。
-  hosted は env を足さない。egress はすでに x402.org を許している（既存の x402 の受信と同じ宛先）。料金や gas が発生する場合は Router の運用者の負担。
+  hosted は、2026-11-23 の入れ替えでは env を足さなかった（2026-11-24 から settle 先の 2 行を足している。下の「SubEtha 自前の settle facilitator に向ける」）。egress はすでに x402.org を許している（既存の x402 の受信と同じ宛先）。料金や gas が発生する場合は Router の運用者の負担。
 - **入れ替えの順番（どちらかをオーナーが選ぶ）**。今の hosted の SubEtha は bind の route を持たない見込み（protocol `b02b249` で入った。確認は Provider token での読み取りが要る）。
   bind の無い SubEtha に対して、新しい Router は何も送らず `unknown` を返す（売れない）。古い Router は、relay の無い SubEtha に対して `broadcast-not-permitted` で売れない。
   1. **同じ作業の窓で両方を入れ替える**: 先に実証の受付を止め（`SUBETHA_EXACT_MAX_COMMITTED=0`）、未解決の注文が無いことを inspect で確かめ、SubEtha と Router を入れ替える。
@@ -925,9 +925,9 @@ site に `log` の指定は無く access log は出ていないが、それは�
   - **終わりの状態**: inspect `--remote` は 12 件・未解決 0・不一致 0。token の照合は log・journal・ledger・診断の記録とも 0 件。
   - **確認していないこと**: 本番で `reason` の欄が実際に書かれるところ（入れ替えの後、外部の facilitator が断った購入が起きていない。合成の試験だけ）。
 
-**SubEtha 自前の settle facilitator に向ける準備（2026-11-24。`docs/exact-settle-facilitator-design.md`）— 本番では未設定・未切り替え**:
+**SubEtha 自前の settle facilitator に向ける（2026-11-24。`docs/exact-settle-facilitator-design.md`）— 本番は 13:35Z に切り替え、13:51Z に通常の上限で再開（下の記録）**:
 
-- 送り先の既定は今も `https://www.x402.org/facilitator`。**切り替えは、相手の稼働の知らせとオーナーの別の go のあと**。本物への購入・公開の名前への到達・本番の egress は、まだ確かめていない。
+- コードの既定は今も `https://www.x402.org/facilitator`。**本番だけ、host の env で settle facilitator に向けている**。
 - **host の env（2 行とも要る。どちらも秘密ではない）**: `SUBETHA_EXACT_SETTLE_FACILITATOR_URL=https://settle-testnet.subethalabs.com`、`SUBETHA_EXACT_SETTLE_TOKEN_FILE=/app/runtime/secrets/settle.token`。
   組み合わせが違えば（token なしの自前の host、x402.org と token、Provider token と同じ値、hex 64 桁でない、0600 でない）、子の Router が起動せず、`swap-image.sh` が旧コンテナに戻す。
 - **token（秘密）**: 呼び出し側専用。Provider token とは別。**Router の host で**作り、SubEtha の担当に渡すのは **sha256 だけ**。値を端末・argv・log・chat に出さない。
@@ -942,6 +942,28 @@ site に `log` の指定は無く access log は出ていないが、それは�
   ledger の `submit` の行に `httpStatus` と `reason`（固定の一覧だけ）が残る。401 が続くなら token・登録、429 が続くなら相手か Cloudflare の回数の上限を疑い、受付を止めて調べる。
 - **60 秒を越えて成立した支払い**は `unknown` のまま（オーナーの決定、2026-11-24: 件数を見てから決める）。買い手は払い、データは届かず、Router は上流に払わない。inspect `--remote` で `accepted` として見つける。
 - **戻し方**: env の 2 行を消して同じ image で作り直す（x402.org に戻る）。1 行だけ消すと起動しない。送信の印のある注文は、どちらの構成でも送り直さない。
+  **`b-1418426`（切り替えの前の image）に `swap-image.sh` で戻すときは、先に `SUBETHA_EXACT_SETTLE_FACILITATOR_URL` と `SUBETHA_EXACT_SETTLE_TOKEN_FILE` の 2 行だけを消す**（ほかの env は消さない。古い image は settle 先の host を知らないので起動しない）。
+  その前に、この節の戻しの条件（inspect で未報告の complete と未解決の注文が 0）を満たすこと。それより前の image（実証の無いもの）には戻さない。
+  入れ替えが失敗すると script は旧コンテナを動かし直すが、**編集した env のファイルは戻さない**: 動いているコンテナの env と `/etc/subetha-router.env` が合っているかを確かめ、合わなければ `.bak-<時刻>` から直す。
+- **記録（2026-11-24。本番は `b-b51d325`）**: オーナーの承認は同日のセッション（PR #214 の merge、切り替え、確認の購入のやり直し）。
+    保存した証跡は、入れ替えの log 5 本、切り替えの前・停止中・後の一覧、直前の inspect、購入 2 件の応答、Linux の全体の試験の log（どれも手元だけ）。ほかの値（host と container の出力、chain の読み取り、基点の試験・再実行・15 回の比較の結果、image の照合、最後の inspect と token の照合）は、その場の出力から写したもので、log は保存していない。
+  - **試験**: merge の前の Linux の全体の試験（`node:22-bookworm`、Colima の VM）は 4030 成功・3 失敗（`private-mpp-mutation`・`entry-drain`・`router-drain-diagnostics` の各 1）。同じ環境の基点 `94bb0f1` は 4014 成功・1 失敗（別の試験）。
+    単独の再実行 3 回では `router-drain-diagnostics` だけが 1 回失敗。`router-drain-diagnostics` と `private-mpp-mutation` を両方の版で 15 回ずつ交互に走らせると、どちらも失敗 0。原因は分かっていない。今回の変更が原因だという証拠は見つかっていない。
+  - **token**: Router の host で作成（0600、uid 10001、改行なし 64 byte）。相手に渡したのは sha256 だけ。登録（id `router`、tenants `["router-hosted"]`、毎分 120）は 13:27Z（相手の報告）。
+    container の中から、token 付きの `GET /supported` が 200、token なしが 401。
+  - **image**: main `b51d325`（PR #214 の merge）を手元で build、layer の一覧の hash と転送した file の sha256 が手元と host で一致（4 MiB × 41 個）。
+  - **入れ替え**: 直前の inspect は 12 件・未解決 0・不一致 0。13:35:33Z〜13:35:45Z、受付停止（`SUBETHA_EXACT_MAX_COMMITTED=0`）と settle 先の 2 行を足して入れ替え（exit 0、drain 済み、journal の先頭は不変、egress ok、`could not start` 0 行）。
+    一覧は `acceptingNewOffers` だけが変わり、新しい offer は 503。以後の 4 回の作り直し（13:36Z に 8、13:38Z に 0、13:50Z に 9、13:51Z に行を消す）も全て exit 0。変更のたびに env の `.bak-<時刻>` を取った。
+  - **購入 1 件目**（`722fb5c5-258e-47c4-b35e-ab597222eb1b`、13:36Z）: **`paid_data_unavailable`**。settle は成立: `bind`（`bound`、一致、438 ms）→ `submit`（200・`success: true`、1,564 ms）→ `settle`（`settled`、`reconcile: accepted`、照合 1 回、計 2,281 ms）→ release。
+    受信の tx は `0xa39db8b03f89919d670fc2f342ddaa17ed9cb1735146380ce3ea78724764e842`。そのあと Provider A が上流への x402 の支払いを 402・`invalid_exact_evm_transaction_failed` で断った。前後の block（63027580〜63027699）に Provider A の受取先への USDC の移動は 0 件。
+    断られた原因は分かっていない（Provider A は x402.org で settle する。x402.org の署名者に ETH の不足や pending の詰まりは見えなかった）。再試行・再署名はしていない。手順どおり受付を 0 に戻した。注文の complete は `failed` で報告済み。
+  - **購入 2 件目**（`b91293fb-c323-4750-9117-f556eab5f4f1`、13:51Z。オーナーの指示。買い手の残高は、オーナーの承認で router-local の Provider の EOA から 12,000 最小単位（0.012 zUSDC、Base Sepolia）を送って足した: tx `0x999fddadd34153bfc36b427c7a9e2e4c33696735f81a6d5c0e571a0bf0d6943f`）: **`delivered`**、purchase 7.3 秒。
+    `bind`（`bound`、一致、221 ms）→ `submit`（200・`success: true`、1,913 ms）→ `settle`（`settled`、`reconcile: accepted`、照合 1 回、計 2,348 ms）→ release → complete `delivered`。
+    受信の tx は `0x33e37c7b1808974cc7b32545e81732b320ae9d5c700d4b02f7792523c01df323`、上流の tx は `0x2921e217785db2d0391a50cb8adba71bc0402ae25ae8b684320fb803108759ef`。同じ `requestId` の再 quote は `closed: true`。
+  - **chain**: 受信の 2 件は status 1、送信者は settle facilitator の `signers` の `0x3a8f4Cb5C4876116BEd894d8B4DeAb6f15604219`、gasUsed は各 156,633。上流の 1 件は status 1。記録の時点では、どれも `finalized` の前（finality は確かめていない）。
+  - **終わりの状態**: 実証の受付は通常の上限（40 件。使った分は 9）。inspect `--remote` は 14 件・未解決 0・不一致 0。一覧は切り替えの前と byte 一致。2 つの token の照合は journal・ledger・診断の記録と動いている container の log で 0 件（settle の token は、その日の停止した 4 つの container の log でも 0 件）。
+    戻し用は `subetha-router-prev-20261124T133533Z`（`b-1418426`、env は切り替えの前のもの）と、直前の `subetha-router-prev-20261124T135148Z`（同じ image）。ほかの `-prev-` は削除。
+  - **確認していないこと**: `settle_pending`・`settle_failed`・429 が本物で返る場合（合成の試験だけ）、まとめて送られた支払い、標準の x402 入口からの購入（切り替えのあと）、入れ替えの途中の購入。
 
 ## 3. 動作確認
 
