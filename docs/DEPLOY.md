@@ -965,6 +965,11 @@ site に `log` の指定は無く access log は出ていないが、それは�
     戻し用は `subetha-router-prev-20261124T133533Z`（`b-1418426`、env は切り替えの前のもの）と、直前の `subetha-router-prev-20261124T135148Z`（同じ image）。ほかの `-prev-` は削除。
   - **確認していないこと**: `settle_pending`・`settle_failed`・429 が本物で返る場合（合成の試験だけ）、まとめて送られた支払い、標準の x402 入口からの購入（切り替えのあと）、入れ替えの途中の購入。
 
+  - **記録（2026-11-25、SubEtha の P3 の deploy の窓）**: オーナーの承認のもと、`SUBETHA_EXACT_MAX_COMMITTED=0` を足して同じ image（`b-b51d325`）で作り直し、新しい offer を止めた（14:18:57Z〜14:19:08Z、exit 0）。止めている間の inspect `--remote` は 14 件・未解決 0・不一致 0（保存）。止める前・戻す直前・戻した後も同じ値（その場の出力。保存していない）。
+    相手の作業の後、行を消して作り直した（14:35:21Z〜14:35:32Z、exit 0。env は止める前の控えと一致（保存した log）。一覧は止める前と byte 一致（その場で hash を比べた。保存していない）。`GET /costs` は 1 回（container の中から。回数と場所はその場の確認）：200、`summary.l1FeeMaxWei` は文字列、`budget` は自分の tenant の `accepting: true` だけ。
+    確認の購入（`a6adafb2-ff52-4c1c-a3e8-02a41fb29883`、16:05Z）：**受信は全て成立**（bind → submit 200 → `reconcile: accepted` → release → complete。tx `0xff3095bd64f3925360a512d06849918b22a3a20cfeda0750a7d40f4b4d7021da`、gasUsed 156,633）が、**`paid_data_unavailable`**。
+    Provider A が上流への x402 の支払いを 402・`invalid_exact_evm_transaction_failed` で断った（2026-11-24 の 1 件目と同じ理由）。16:16:50Z の head までに Provider A の受取先への USDC の移動は 0 件。再試行・再署名はしていない。本番の成立した受信 9 件のうち 2 件がこの形で終わった。原因は分かっていない。
+
 **費用の式による価格（2026-11-24。`docs/exact-pricing-design.md`）— コードだけ。本番では無効（`RAILS_ACTIVATION.subethaExact.formulaPricing` なし = 受け取りは 12,000 の固定）**:
 
 - **有効化**（オーナーの別の go。買い手に見える値上げになる）: `formulaPricing: true` の image を作り、settle 先の 2 行（上）がある host の env に `SUBETHA_EXACT_ETH_PRICE`（1 ETH あたりの base units。3,000 USD なら `3000000000`）と
