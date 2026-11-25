@@ -356,7 +356,7 @@ describe("AC-R5: RPC の失敗の分類（§5.3）", () => {
   test("rpc の記録の op は DIAG_OPS の集合にある（ソースの literal）", () => {
     const text = readFileSync(path.resolve(import.meta.dirname, "../../tools/evm-facilitator.ts"), "utf8");
     const ops = new Set([...text.matchAll(/(?:observeRpc\([^,]+, [^,]+|noteRpcFailure\([^,]+, [^,]+), "([a-z_]+)"/g)].map((m) => m[1]!));
-    expect(ops.size).toBe(14);
+    expect(ops.size).toBe(16);
     for (const op of ops) expect((DIAG_OPS as readonly string[]).includes(op), op).toBe(true);
   });
 });

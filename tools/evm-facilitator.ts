@@ -1,7 +1,8 @@
 /**
- * 自前の x402 v2 facilitator（EVM testnet 4 つ。設計 `docs/evm-testnets-x402-design.md` §3.3）。**製品コードではない**（運用者の道具）。
+ * 自前の x402 v2 facilitator（EVM testnet 4 つと Base Sepolia。設計 `docs/evm-testnets-x402-design.md` §3.3、`docs/base-sepolia-facilitator-design.md` §2）。
+ * **製品コードではない**（運用者の道具）。
  *
- * - `GET /<token>/supported`・`POST /<token>/verify`・`POST /<token>/settle`。bind は env `EVM_FACILITATOR_BIND`（`127.0.0.1` 既定か `0.0.0.0`。
+ * - `GET /<token>/supported`・`GET /<token>/ready`・`POST /<token>/verify`・`POST /<token>/settle`。bind は env `EVM_FACILITATOR_BIND`（`127.0.0.1` 既定か `0.0.0.0`。
  *   hosted 設計 `docs/evm-testnets-hosted-design.md` §2.1）。`Origin` つき・`Host` 違い（`127.0.0.1:<port>` の完全一致でない）は拒む。
  * - verify は SDK（`@x402/evm/exact/facilitator` の `ExactEvmScheme`）の **verify だけ** を使う。settle は SDK に任せない
  *   （固定版 2.28.0 の settle は receipt の失敗を `success: false` で返し、Router が `rejected` に写す。設計 §1.2）。
@@ -55,7 +56,8 @@ import {
 } from "../src/shared/diagnostics.js";
 import { createFileDiagnosticsSink, type FileDiagnosticsSink } from "../src/shared/diagnostics-file.js";
 import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
-import { assetKeyOf, EVM_TESTNET_NETWORKS, evmChainIdOf, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, type KnownNetwork } from "../src/shared/networks.js";
+import { assetKeyOf, evmChainIdOf, inboundRailsOf, KNOWN_NETWORKS, knownAssetOf, knownNetworkOf, type KnownNetwork } from "../src/shared/networks.js";
+import { BASE_SEPOLIA_NETWORK, SELF_FACILITATOR_NETWORKS } from "../src/shared/self-facilitator.js";
 
 /* ──────────────────────────────────────────────────────────────────────────────
  * 定数（設計 §3.3・§3.6・§3.8）
@@ -78,7 +80,40 @@ export const DEFAULT_MAX_SETTLE_GAS: Readonly<Record<string, bigint>> = Object.f
   "eip155:421614": 200_000n,
   "eip155:998": 200_000n,
   "eip155:11155111": 400_000n,
+  [BASE_SEPOLIA_NETWORK]: 200_000n,
 });
+
+/**
+ * L1 の data fee の予約（wei。OP Stack の network だけ。`docs/base-sepolia-facilitator-design.md` §2.2）。**保守的な見積りで、上限ではない**
+ * （L1 の手数料は送出の後に決まり、tx では上限を付けられない）。無い network は 0。
+ */
+export const L1_FEE_RESERVE_WEI: Readonly<Record<string, bigint>> = Object.freeze({ [BASE_SEPOLIA_NETWORK]: 2_000_000_000_000n });
+
+/** この network の L1 の手数料の予約（無ければ 0）。 */
+export function l1ReserveOf(network: string): bigint {
+  return L1_FEE_RESERVE_WEI[network] ?? 0n;
+}
+
+/**
+ * Base Sepolia だけの振る舞い（設計 §2.3〜§2.5）: 残高の検査・準備の条件・保留からの復帰・chain id の遅い確認。
+ * ほかの network の振る舞いは変えない。
+ */
+export function isGuardedNetwork(network: string): boolean {
+  return network === BASE_SEPOLIA_NETWORK;
+}
+
+/** 準備の条件で余裕を見る settle の件数。 */
+export const READY_RESERVE_SETTLES = 20n;
+/** 準備の読み取り（残高・手数料）の控えの寿命と期限（ms）。 */
+export const READY_CACHE_MS = 5_000;
+export const READY_READ_MS = 2_000;
+/** 保留からの復帰: 回の間隔・回数の上限・1 回の照合の期限（ms）。 */
+export const RECOVERY_INTERVAL_MS = 15_000;
+export const RECOVERY_MAX_ROUNDS = 40;
+export const RECOVERY_DEADLINE_MS = 8_000;
+/** chain id の遅い確認: 1 回の期限と再試行の間隔（ms）。 */
+export const CHAIN_CHECK_MS = 5_000;
+export const CHAIN_CHECK_INTERVAL_MS = 15_000;
 
 /** 送出の gas = 見積り × 1.25 の切り上げ。 */
 export function settleGasLimitOf(estimate: bigint): bigint {
@@ -103,6 +138,8 @@ export const DEFAULT_RPC_URLS: Readonly<Record<string, string>> = Object.freeze(
   "eip155:421614": "https://sepolia-rollup.arbitrum.io/rpc",
   "eip155:998": "https://rpc.hyperliquid-testnet.xyz/evm",
   "eip155:11155111": "https://ethereum-sepolia-rpc.publicnode.com",
+  // `https://sepolia.base.org` は `eth_getLogs` が 200 block まで（照合が締め切りに入らない）。
+  [BASE_SEPOLIA_NETWORK]: "https://base-sepolia-rpc.publicnode.com",
 });
 
 /**
@@ -114,6 +151,7 @@ export const DEFAULT_LOG_RANGES: Readonly<Record<string, bigint>> = Object.freez
   "eip155:421614": 5_000n,
   "eip155:998": 500n,
   "eip155:11155111": 1_000n,
+  [BASE_SEPOLIA_NETWORK]: 5_000n,
 });
 
 /** `maxFeePerGas` の network ごとの上限（wei。`EVM_FACILITATOR_MAX_FEE_PER_GAS_<chainId>` で上書き）。見積りがこれを超えれば送出しない。 */
@@ -122,6 +160,7 @@ export const DEFAULT_MAX_FEE_PER_GAS: Readonly<Record<string, bigint>> = Object.
   "eip155:421614": 1_000_000_000n,
   "eip155:998": 10_000_000_000n,
   "eip155:11155111": 20_000_000_000n,
+  [BASE_SEPOLIA_NETWORK]: 1_000_000_000n,
 });
 
 /** 期限（ms。設計 §3.6）。 */
@@ -179,6 +218,8 @@ export interface ReceiptView {
   readonly blockNumber: bigint;
   readonly gasUsed: bigint;
   readonly effectiveGasPrice: bigint;
+  /** OP Stack の L1 の data fee（receipt の `l1Fee`。欄が無い・形が違えば無い）。 */
+  readonly l1FeeWei?: bigint;
   readonly logs: readonly LogView[];
 }
 
@@ -202,6 +243,8 @@ export interface ChainReader {
   feesPerGas(): Promise<{ readonly maxFeePerGas: bigint; readonly maxPriorityFeePerGas: bigint }>;
   /** 送出と同じ `transferWithAuthorization` の呼び出し（facilitator のアドレスから）の gas の見積り。再試行しない。 */
   estimateTransferGas(args: TransferAuthorizationCall): Promise<bigint>;
+  /** ネイティブ残高（wei）。`isGuardedNetwork` の network では必須（無ければ「読めない」と同じ扱い）。 */
+  nativeBalance?(address: Hex): Promise<bigint>;
 }
 
 /** `transferWithAuthorization` の引数（gas・手数料を除く）。 */
@@ -252,6 +295,11 @@ export interface ChainIo {
   readonly gasCap: bigint;
   /** 1 回の settle の gas 上限（見積り × 1.25 がこれを超えれば送出しない）。 */
   readonly maxSettleGas: bigint;
+  /**
+   * RPC の chain id の遅い確認（設計 §2.5。Base だけ）。一致なら true、別の chain なら false、読めなければ reject。
+   * あれば listen の後に裏で呼び、true になるまでその network を使わない（settle 503・verify と ready は準備なし・復帰もしない）。
+   */
+  readonly chainCheck?: () => Promise<boolean>;
 }
 
 export type JournalRecord =
@@ -298,15 +346,19 @@ export interface Clock {
 export type Logger = (event: Readonly<Record<string, unknown>>) => void;
 
 export interface EvmFacilitatorOptions {
-  /** 有効な network（`EVM_TESTNET_NETWORKS` の部分集合）。 */
+  /** 有効な network（`SELF_FACILITATOR_NETWORKS` の部分集合）。 */
   readonly networks: readonly string[];
   readonly chains: ReadonlyMap<string, ChainIo>;
   readonly journal: FacilitatorJournal;
   /** 受取先の allowlist（EVM アドレス。小文字化で比較）。 */
   readonly payToAllowlist: readonly string[];
+  /** network ごとの allowlist。ある network は**これだけ**を使う（共通のものとの和ではない。設計 §2.5）。 */
+  readonly payToAllowlistByNetwork?: ReadonlyMap<string, readonly string[]>;
   readonly clock?: Clock;
   /** 期限の timer（既定は `setTimeout`）。試験は偽の時計と組で渡す。 */
   readonly timer?: SetTimer;
+  /** 裏の仕事（復帰・chain id の確認）の timer。既定は `timer` があればそれ、無ければ process を生かさない `setTimeout`。 */
+  readonly backgroundTimer?: SetTimer;
   readonly deadlinesOf?: (network: string) => NetworkDeadlines;
   readonly log?: Logger;
   /** 表（試験は自分の表を渡せる）。既定は `KNOWN_NETWORKS`。 */
@@ -391,7 +443,10 @@ function identify(bodyJson: unknown, enabled: ReadonlySet<string>, table: readon
   if (typeof network !== "string" || !enabled.has(network)) return fail("network_not_enabled");
   const entry = knownNetworkOf(table, network);
   const asset = requirements["asset"];
-  if (entry === undefined || typeof asset !== "string" || !ADDRESS.test(asset) || knownAssetOf(entry, asset) === undefined) return fail("asset_not_in_table");
+  const known = entry === undefined || typeof asset !== "string" || !ADDRESS.test(asset) ? undefined : knownAssetOf(entry, asset);
+  // 資産ごとの rail の上書き（zUSDC は `subetha-exact` だけ）: x402 で受けない資産は扱わない。
+  const accepts = entry !== undefined && known !== undefined && inboundRailsOf(entry, known).includes("x402");
+  if (typeof asset !== "string" || !accepts) return fail("asset_not_in_table");
   const inner = paymentPayload["payload"];
   if (!isRecord(inner)) return fail("malformed_payload");
   const authorization = inner["authorization"];
@@ -465,6 +520,13 @@ export type SetTimer = (fn: () => void, ms: number) => () => void;
 
 export const realTimer: SetTimer = (fn, ms) => {
   const handle = setTimeout(fn, ms);
+  return () => clearTimeout(handle);
+};
+
+/** 裏の仕事の timer（process を生かさない）。 */
+export const backgroundTimer: SetTimer = (fn, ms) => {
+  const handle = setTimeout(fn, ms);
+  handle.unref();
   return () => clearTimeout(handle);
 };
 
@@ -564,6 +626,8 @@ export type FacilitatorRpcOp =
   | "wait_for_receipt"
   | "fees_per_gas"
   | "estimate_transfer_gas"
+  | "native_balance"
+  | "chain_id"
   | "transfer_with_authorization"
   | "reconcile"
   | "sdk_verify"
@@ -678,12 +742,14 @@ export function observedChainIo(network: string, io: ChainIo, sink: DiagnosticsS
     waitForReceipt: (hash, timeoutMs) => observeRpc(sink, network, "wait_for_receipt", () => r.waitForReceipt(hash, timeoutMs)),
     feesPerGas: () => observeRpc(sink, network, "fees_per_gas", () => r.feesPerGas()),
     estimateTransferGas: (call) => observeRpc(sink, network, "estimate_transfer_gas", () => r.estimateTransferGas(call)),
+    ...(r.nativeBalance === undefined ? {} : { nativeBalance: (address: Hex) => observeRpc(sink, network, "native_balance", () => r.nativeBalance!(address)) }),
   };
   const writer: ChainWriter = {
     address: w.address,
     transferWithAuthorization: (args) => observeRpc(sink, network, "transfer_with_authorization", () => w.transferWithAuthorization(args)),
   };
-  return { ...io, reader, writer };
+  const chainCheck = io.chainCheck;
+  return { ...io, reader, writer, ...(chainCheck === undefined ? {} : { chainCheck: () => observeRpc(sink, network, "chain_id", () => chainCheck()) }) };
 }
 
 /** 応答の本文から理由の欄（`invalidReason`・`errorReason`・`error` の順）。 */
@@ -790,6 +856,9 @@ export interface EvmFacilitator {
   readonly drain: { close(): void; outstanding(): number; idle(timeoutMs: number): Promise<boolean> };
 }
 
+/** 復帰の対象にしない保留の理由: 確定した不一致と、journal の書き込みの失敗（途中の行が残り得る）。 */
+const NOT_RECOVERABLE: ReadonlySet<string> = new Set(["transfer_mismatch", "journal_write_failed"]);
+
 export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilitator {
   const clock = options.clock ?? { now: () => Date.now() };
   const timer = options.timer ?? realTimer;
@@ -800,12 +869,20 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   const diagnostics = options.diagnostics ?? NOOP_DIAGNOSTICS;
   const enabled = new Set(options.networks);
   for (const network of enabled) {
-    if (!EVM_TESTNET_NETWORKS.has(network)) throw new Error(`network ${network} is not one of the EVM testnets`);
+    if (!SELF_FACILITATOR_NETWORKS.has(network)) throw new Error(`network ${network} is not one of the EVM testnets`);
     if (!options.chains.has(network)) throw new Error(`no chain I/O for ${network}`);
   }
   const allowlist = new Set(options.payToAllowlist.map((a) => a.toLowerCase()));
   if (allowlist.size === 0) throw new Error("payTo allowlist is empty");
   for (const a of allowlist) if (!ADDRESS.test(a)) throw new Error("payTo allowlist has a malformed address");
+  const allowlistByNetwork = new Map<string, ReadonlySet<string>>();
+  for (const [network, list] of options.payToAllowlistByNetwork ?? []) {
+    if (!enabled.has(network)) throw new Error("payTo allowlist names a network that is not enabled");
+    if (list.length === 0 || list.some((a) => !ADDRESS.test(a))) throw new Error("payTo allowlist has a malformed address");
+    allowlistByNetwork.set(network, new Set(list.map((a) => a.toLowerCase())));
+  }
+  const allowlistOf = (network: string): ReadonlySet<string> => allowlistByNetwork.get(network) ?? allowlist;
+  const later = options.backgroundTimer ?? options.timer ?? backgroundTimer;
 
   const queues = new Map<string, SerialQueue>();
   for (const network of enabled) queues.set(network, new SerialQueue(MAX_WAITING_PER_NETWORK, timer));
@@ -839,6 +916,164 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     set.add(key);
     log({ event: "network_held", network, key, reason });
+    if (isGuardedNetwork(network) && !NOT_RECOVERABLE.has(reason)) scheduleRecovery(network, key);
+  }
+
+  /* ── Base だけ（設計 §2.3〜§2.5）: 使えるか・終わっていない仕事・復帰 ── */
+
+  /** chain id の遅い確認がある network の状態。無い network はここに載らない（= 使える）。 */
+  const chainState = new Map<string, "unchecked" | "ok" | "mismatch">();
+  /** 鍵 → 終わっていない仕事（応答の後に続く送出・journal の追記）の数。応答までの送出は `inFlight` が表す。 */
+  const pendingWork = new Map<string, number>();
+  /** 裏の timer の取り消し（drain で止める）。 */
+  const backgroundCancels = new Set<() => void>();
+  const recovering = new Set<string>();
+  /** journal の追記が 1 度でも失敗したか。 */
+  let journalFailed = false;
+
+  function isAvailable(network: string): boolean {
+    const state = chainState.get(network);
+    return state === undefined || state === "ok";
+  }
+
+  /** 鍵の仕事を数える（結果・例外は元の promise の側で扱う）。 */
+  function trackWork(key: string, work: Promise<unknown>): void {
+    pendingWork.set(key, (pendingWork.get(key) ?? 0) + 1);
+    const done = (): void => {
+      const left = (pendingWork.get(key) ?? 1) - 1;
+      if (left <= 0) pendingWork.delete(key);
+      else pendingWork.set(key, left);
+    };
+    work.then(done, done);
+  }
+
+  function schedule(fn: () => void, ms: number): void {
+    if (draining) return;
+    let cancel: () => void = () => {};
+    const entry = (): void => cancel();
+    cancel = later(() => {
+      backgroundCancels.delete(entry);
+      if (!draining) fn();
+    }, ms);
+    backgroundCancels.add(entry);
+  }
+
+  /** 保留の鍵の復帰（設計 §2.4）。新しい tx は送らない。 */
+  function scheduleRecovery(network: string, key: string): void {
+    if (recovering.has(key)) return;
+    recovering.add(key);
+    let rounds = 0;
+    const next = (): void =>
+      schedule(() => {
+        // 使えない間（chain id が未確認・不一致）は RPC も追記も release もしない。回数にも数えない。
+        if (!isAvailable(network)) {
+          next();
+          return;
+        }
+        rounds += 1;
+        void track(recoverOnce(network, key)).then(
+          () => {
+            if (held.get(network)?.has(key) !== true || rounds >= RECOVERY_MAX_ROUNDS) recovering.delete(key);
+            else next();
+          },
+          () => {
+            recovering.delete(key);
+          },
+        );
+      }, RECOVERY_INTERVAL_MS);
+    next();
+  }
+
+  async function recoverOnce(network: string, key: string): Promise<void> {
+    const queue = queues.get(network);
+    const io = options.chains.get(network);
+    if (queue === undefined || io === undefined) return;
+    const deadlineAt = clock.now() + RECOVERY_DEADLINE_MS;
+    const entering = queue.enter(RECOVERY_DEADLINE_MS);
+    if (entering === undefined || !(await entering)) return;
+    try {
+      // 待ち行列に入った後に読み直す（期限を過ぎた送出・追記は待ち行列を出た後も続く）。
+      if (draining || journalFailed || !isAvailable(network) || held.get(network)?.has(key) !== true || inFlight.has(key) || pendingWork.has(key)) return;
+      const state = keys.get(key);
+      if (state === undefined || state.status === "operator") return;
+      if (state.status !== "unresolved") {
+        // 終端の記録が fsync 済み（追記が応答の後に成功した）。再起動の後と同じく保留を解くだけ。
+        release(network, key);
+        log({ event: "recovered", network, key, via: "journal" });
+        return;
+      }
+      if (await resolveUnresolved(key, state, io, deadlineAt, true).catch(() => false)) {
+        release(network, key);
+        log({ event: "recovered", network, key, via: "chain" });
+      }
+    } finally {
+      queue.leave();
+    }
+  }
+
+  /** chain id の確認を裏で続ける（一致・不一致が決まるまで）。 */
+  function checkChain(network: string): void {
+    const check = chainOf(network).chainCheck;
+    if (check === undefined) return;
+    void track(
+      within(check(), clock.now() + CHAIN_CHECK_MS).then(
+        (matches) => {
+          chainState.set(network, matches ? "ok" : "mismatch");
+          log({ event: matches ? "chain_confirmed" : "chain_mismatch", network });
+        },
+        (error: unknown) => {
+          noteRpcFailure(diagnostics, network, "chain_id", error);
+          log({ event: "chain_unconfirmed", network });
+          schedule(() => checkChain(network), CHAIN_CHECK_INTERVAL_MS);
+        },
+      ),
+    );
+  }
+
+  /** 準備の読み取り（残高・手数料の見積り）の控え。成功だけを控える。 */
+  const readyCache = new Map<string, { readonly at: number; readonly balance: bigint; readonly maxFeePerGas: bigint }>();
+  const readyInFlight = new Map<string, Promise<{ readonly balance: bigint; readonly maxFeePerGas: bigint } | undefined>>();
+
+  function readyInputs(network: string): Promise<{ readonly balance: bigint; readonly maxFeePerGas: bigint } | undefined> {
+    const cached = readyCache.get(network);
+    if (cached !== undefined && clock.now() - cached.at < READY_CACHE_MS && clock.now() >= cached.at) return Promise.resolve(cached);
+    const running = readyInFlight.get(network);
+    if (running !== undefined) return running;
+    const io = chainOf(network);
+    const read = io.reader.nativeBalance;
+    const work = (async () => {
+      if (read === undefined) return undefined;
+      try {
+        const deadlineAt = clock.now() + READY_READ_MS;
+        const [balance, fees] = await within(Promise.all([read(io.writer.address), io.reader.feesPerGas()]), deadlineAt);
+        const value = { at: clock.now(), balance, maxFeePerGas: fees.maxFeePerGas };
+        readyCache.set(network, value);
+        return value;
+      } catch (error) {
+        noteRpcFailure(diagnostics, network, "native_balance", error);
+        return undefined;
+      }
+    })().finally(() => readyInFlight.delete(network));
+    readyInFlight.set(network, work);
+    return work;
+  }
+
+  /** 今 settle できる見込みか（設計 §2.3。`/ready` と `/verify` が同じ条件を使う）。読み取りだけ。 */
+  async function isReady(network: string): Promise<boolean> {
+    if (!isAvailable(network) || isHeld(network)) return false;
+    const inputs = await readyInputs(network);
+    if (inputs === undefined || !isAvailable(network) || isHeld(network)) return false;
+    const io = chainOf(network);
+    if (inputs.maxFeePerGas > io.maxFeePerGas) return false;
+    const reserve = READY_RESERVE_SETTLES * (io.maxSettleGas * inputs.maxFeePerGas + l1ReserveOf(network));
+    const cap = effectiveCap(network);
+    return cap !== undefined && (spent.get(network) ?? 0n) + reserve <= cap && inputs.balance >= reserve;
+  }
+
+  /** 数える gas の実費（receipt）。L1 の手数料のある network は receipt の `l1Fee`、欄が無ければ予約の値を足す。 */
+  function actualGasOf(network: string, receipt: ReceiptView): bigint {
+    const reserve = l1ReserveOf(network);
+    return receipt.gasUsed * receipt.effectiveGasPrice + (reserve === 0n ? 0n : (receipt.l1FeeWei ?? reserve));
   }
 
   function release(network: string, key: string): void {
@@ -891,7 +1126,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     if (state === undefined) return;
     switch (record.type) {
       case "submitted":
-        state.hash = record.hash;
+        // 終端の記録の後に遅れて載った `submitted` は hash を変えない（設計 §2.4。再生でも同じ）。
+        if (state.status !== "settled" && state.status !== "reverted") state.hash = record.hash;
         return;
       case "settled":
         state.status = "settled";
@@ -936,12 +1172,20 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   };
 
   function append(record: JournalRecord): Promise<void> {
-    return track(
+    const work = track(
       (async () => {
-        await options.journal.append(record);
+        try {
+          await options.journal.append(record);
+        } catch (error) {
+          // 途中の行が残り得る: 以後この process では復帰の追記をしない（再起動の照合に任せる）。
+          journalFailed = true;
+          throw error;
+        }
         applyRecord(record);
       })(),
     );
+    if ("key" in record) trackWork(record.key, work);
+    return work;
   }
 
   /**
@@ -1068,7 +1312,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     if (used !== undefined) return used;
 
     // 手順 5。
-    const binding = checkBinding(id, table, allowlist, clock.now(), deadlines.validBeforeMarginMs);
+    const binding = checkBinding(id, table, allowlistOf(id.network), clock.now(), deadlines.validBeforeMarginMs);
     if (!binding.ok) return failure(400, binding.reason, network);
 
     // 手順 6: 直列の待ち行列。
@@ -1167,12 +1411,27 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       return await refuseIfStillUnused("fee_estimate_unavailable");
     }
     if (fees.maxFeePerGas > io.maxFeePerGas) return await refuseIfStillUnused("fee_too_high");
-    const worst = gasLimit * fees.maxFeePerGas;
+    const worst = gasLimit * fees.maxFeePerGas + l1ReserveOf(network);
     // 累計は journal から復元した値から始まり、上限は journal の記録の有効な上限（hosted 設計 §2.2。env の値は使わない）。
     const cap = effectiveCap(network);
     if (cap === undefined || (spent.get(network) ?? 0n) + worst > cap) {
       log({ event: "gas_cap_reached", network, key: id.key, sent: false });
       return await refuseIfStillUnused("gas_cap_reached");
+    }
+    // Base だけ: 残高が予約に届かなければ送出しない（今は送出の RPC が失敗して保留になる。設計 §2.3）。
+    if (isGuardedNetwork(network)) {
+      const read = io.reader.nativeBalance;
+      let balance: bigint | undefined;
+      try {
+        balance = read === undefined ? undefined : await within(read(io.writer.address), deadlineAt);
+      } catch (error) {
+        noteRpcFailure(diagnostics, network, "native_balance", error);
+      }
+      if (balance === undefined) return await refuseIfStillUnused("gas_balance_unavailable");
+      if (balance < worst) {
+        log({ event: "gas_balance_low", network, key: id.key, sent: false });
+        return await refuseIfStillUnused("gas_balance_low");
+      }
     }
 
     // 手順 9: 送出の直前の残り時間・validBefore・取り消し。
@@ -1243,12 +1502,13 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
       hold(network, id.key, "send_outcome_unknown");
       // 期限の後に hash が返れば journal に残す（運用者の照合のため）。
       // 遅れた続きも drain の数に入れる（hash を journal に書き終えるまで）。
-      void track(
+      const lateWork = track(
         sending.then(
           (late) => append({ type: "submitted", key: id.key, hash: late, at: clock.now() }).catch(() => {}),
           () => {},
         ),
       );
+      trackWork(id.key, lateWork);
       return failure(500, "send_outcome_unknown", network);
     }
     log({ event: "submitted", network, key: id.key, transaction: hash, gasEstimate: gasEstimate.toString(), gasLimit: gasLimit.toString() });
@@ -1278,7 +1538,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     // 実費は確定・revert の記録（`gasUsedWei`）が載ったときに予約と置き換わる。記録が載らなければ予約のまま（安全側。再生と同じ）。
     // Transfer の不一致は未解決のまま（予約のまま）。
-    const gasUsedWei = (receipt.gasUsed * receipt.effectiveGasPrice).toString();
+    const gasUsedWei = actualGasOf(network, receipt).toString();
     if (receipt.status === "reverted") {
       try {
         await within(append({ type: "reverted", key: id.key, hash, via: "receipt", gasUsedWei, at: clock.now() }), deadlineAt);
@@ -1334,6 +1594,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     const identified = identify(bodyJson, enabled, table);
     if (!identified.ok) return failure(400, identified.reason);
     const id = identified.value;
+    if (!isAvailable(id.network)) return failure(503, "network_unavailable", id.network);
     if (isHeld(id.network)) return failure(503, "network_held", id.network);
     // 手順 2（処理中のものは 3 で扱う）。
     const recorded = journalAnswer(id);
@@ -1359,8 +1620,12 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     if (!identified.ok) return { status: 400, body: { isValid: false, invalidReason: identified.reason } };
     const id = identified.value;
     const deadlines = deadlinesOf(id.network);
-    const binding = checkBinding(id, table, allowlist, clock.now(), deadlines.validBeforeMarginMs);
+    const binding = checkBinding(id, table, allowlistOf(id.network), clock.now(), deadlines.validBeforeMarginMs);
     if (!binding.ok) return { status: 400, body: { isValid: false, invalidReason: binding.reason } };
+    // Base だけ: settle できる見込みが無ければ、支払いの前に断る（設計 §2.3）。
+    if (isGuardedNetwork(id.network) && !(await isReady(id.network))) {
+      return { status: 200, body: { isValid: false, invalidReason: "facilitator_not_ready", payer: id.authorization.from } };
+    }
     try {
       const result = await within(chainOf(id.network).verify(id.paymentPayload, id.requirements), receivedAt + deadlines.facilitatorMs);
       // 判定と固定の理由だけ返す（SDK の `invalidMessage` は RPC の生の文言を含み得るので出さない）。
@@ -1380,6 +1645,13 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     return { status: 200, body: { kinds, extensions: [], signers: { "eip155:*": signers } } };
   }
 
+  /** `GET /<token>/ready`（設計 §2.3）: Base だけを載せる。理由・残高・累計は返さない。 */
+  async function ready(): Promise<FacilitatorResponse> {
+    const networks: Record<string, { ready: boolean }> = {};
+    for (const network of enabled) if (isGuardedNetwork(network)) networks[network] = { ready: await isReady(network) };
+    return { status: 200, body: { networks } };
+  }
+
   /**
    * 起動時: journal を読み、gas の累計と上限を復元し、未解決を chain で照合する。解けないものは保留。
    * 旧形式の journal・env の上限と journal の `gas_cap_init` の違いは `StartupError`（起動しない。hosted 設計 §2.2）。
@@ -1387,6 +1659,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   async function start(): Promise<void> {
     if (started) throw new Error("already started");
     started = true;
+    for (const network of enabled) if (chainOf(network).chainCheck !== undefined) chainState.set(network, "unchecked");
     const records = await options.journal.load();
     checkGasJournal(records);
     for (const record of records) applyRecord(record);
@@ -1408,20 +1681,27 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
         log({ event: "unresolved_on_disabled_network", network, key });
         continue;
       }
-      const resolved = await resolveAtStartup(key, state, io).catch(() => false);
+      // chain id を遅れて確かめる network（Base）は、起動時に RPC を読まずに保留にし、復帰に任せる（listen を遅らせない。設計 §2.5）。
+      if (io.chainCheck !== undefined) {
+        hold(network, key, "unresolved_at_startup");
+        continue;
+      }
+      const resolved = await resolveUnresolved(key, state, io, clock.now() + 60_000, false).catch(() => false);
       if (!resolved) hold(network, key, "unresolved_at_startup");
     }
     // 値は wei だけ（鍵・token は出さない）。
     for (const network of enabled) log({ event: "gas_budget", network, capWei: (effectiveCap(network) ?? 0n).toString(), spentWei: (spent.get(network) ?? 0n).toString() });
     log({ event: "started", held: [...held.keys()] });
+    for (const network of chainState.keys()) checkChain(network);
   }
 
-  async function resolveAtStartup(key: string, state: KeyState, io: ChainIo): Promise<boolean> {
+  /** 未解決の鍵の照合（起動時と、Base の復帰）。解けたら終端を追記して true。`boundAppend`: 追記も期限で打ち切る（復帰。追記は裏で続き、次の回で解ける）。 */
+  async function resolveUnresolved(key: string, state: KeyState, io: ChainIo, startupDeadline: number, boundAppend: boolean): Promise<boolean> {
+    const record = (r: JournalRecord): Promise<void> => (boundAppend ? within(append(r), startupDeadline) : append(r));
     const intent = state.intent;
     const asset = intent.asset as Hex;
     const from = intent.from as Hex;
     const value = BigInt(intent.value);
-    const startupDeadline = clock.now() + 60_000;
     let hash = state.hash as Hex | undefined;
     /**
      * 数える gas: hash が journal にある（自分の送出の tx）なら receipt の実費。hash が無く `AuthorizationUsed` から tx を見つけたときは
@@ -1446,14 +1726,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     }
     const receipt = await within(io.reader.receipt(hash), startupDeadline);
     if (receipt === undefined) return false;
-    const gasUsedWei = ours ? (receipt.gasUsed * receipt.effectiveGasPrice).toString() : intent.gasReservedWei;
+    const gasUsedWei = ours ? actualGasOf(intent.network, receipt).toString() : intent.gasReservedWei;
     if (receipt.status === "reverted") {
-      await append({ type: "reverted", key, hash, via: "startup", gasUsedWei, at: clock.now() });
+      await record({ type: "reverted", key, hash, via: "startup", gasUsedWei, at: clock.now() });
       log({ event: "resolved_at_startup", key, outcome: "reverted", transaction: hash });
       return true;
     }
     if (matchingTransfers(receipt, asset, from, intent.to, value) !== 1) return false;
-    await append({ type: "settled", key, hash, blockNumber: receipt.blockNumber.toString(), via: "startup", gasUsedWei, at: clock.now() });
+    await record({ type: "settled", key, hash, blockNumber: receipt.blockNumber.toString(), via: "startup", gasUsedWei, at: clock.now() });
     log({ event: "resolved_at_startup", key, outcome: "settled", transaction: hash });
     return true;
   }
@@ -1477,6 +1757,10 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     if (op === "supported") {
       if (request.method !== "GET") return { status: 405, body: { error: "method_not_allowed" } };
       return supported();
+    }
+    if (op === "ready") {
+      if (request.method !== "GET") return { status: 405, body: { error: "method_not_allowed" } };
+      return await ready();
     }
     if (op !== "verify" && op !== "settle") return { status: 404, body: { error: "not_found" } };
     return await handleOperation(op, request, receivedAt, diagnostics === NOOP_DIAGNOSTICS ? undefined : performance.now());
@@ -1522,6 +1806,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     drain: {
       close: () => {
         draining = true;
+        for (const cancel of backgroundCancels) cancel();
+        backgroundCancels.clear();
       },
       outstanding: () => outstanding,
       // 上限の時計は実時間（試験の偽の timer ではない。drain は process の終わりの判断）。
@@ -1655,7 +1941,7 @@ export function parseJournalLine(line: string, lineNo: number): JournalRecord {
     // 上限の記録: 欄はちょうど決まったものだけ。
     const init = value["type"] === "gas_cap_init";
     if (!exactKeys(value, init ? ["type", "network", "capWei", "at"] : ["type", "network", "addWei", "reason", "at"])) throw new Error(`journal line ${lineNo}: malformed ${value["type"]}`);
-    if (typeof value["network"] !== "string" || !EVM_TESTNET_NETWORKS.has(value["network"])) throw new Error(`journal line ${lineNo}: unknown network`);
+    if (typeof value["network"] !== "string" || !SELF_FACILITATOR_NETWORKS.has(value["network"])) throw new Error(`journal line ${lineNo}: unknown network`);
     const amount = value[init ? "capWei" : "addWei"];
     if (typeof amount !== "string" || !POSITIVE_WEI.test(amount)) throw new Error(`journal line ${lineNo}: malformed wei amount`);
     if (!init && !isValidReason(value["reason"])) throw new Error(`journal line ${lineNo}: gas_cap_raise needs a reason`);
@@ -1846,6 +2132,8 @@ export interface CliConfig {
   readonly bind: string;
   readonly networks: readonly string[];
   readonly payToAllowlist: readonly string[];
+  /** env `EVM_FACILITATOR_PAYTO_ALLOWLIST_<chainId>` がある network だけ（その network は共通のものを使わない）。 */
+  readonly payToAllowlistByNetwork: ReadonlyMap<string, readonly string[]>;
   readonly rpcUrls: ReadonlyMap<string, string>;
   readonly gasCaps: ReadonlyMap<string, bigint>;
   readonly maxFees: ReadonlyMap<string, bigint>;
@@ -1890,8 +2178,10 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
   if (!BIND_ADDRESSES.has(bind)) throw new StartupError("EVM_FACILITATOR_BIND must be 127.0.0.1 or 0.0.0.0");
   const networks = (env["EVM_FACILITATOR_NETWORKS"] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
   if (networks.length === 0) throw new StartupError("EVM_FACILITATOR_NETWORKS must list at least one of the EVM testnets");
-  for (const n of networks) if (!EVM_TESTNET_NETWORKS.has(n)) throw new StartupError(`EVM_FACILITATOR_NETWORKS must list only ${[...EVM_TESTNET_NETWORKS].join(", ")}`);
-  const payToAllowlist = (env["EVM_FACILITATOR_PAYTO_ALLOWLIST"] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
+  for (const n of networks) if (!SELF_FACILITATOR_NETWORKS.has(n)) throw new StartupError(`EVM_FACILITATOR_NETWORKS must list only ${[...SELF_FACILITATOR_NETWORKS].join(", ")}`);
+  const listOf = (raw: string): string[] => raw.split(",").map((s) => s.trim()).filter((s) => s !== "");
+  const payToAllowlist = listOf(env["EVM_FACILITATOR_PAYTO_ALLOWLIST"] ?? "");
+  const payToAllowlistByNetwork = new Map<string, readonly string[]>();
   if (payToAllowlist.length === 0 || payToAllowlist.some((a) => !ADDRESS.test(a))) throw new StartupError("EVM_FACILITATOR_PAYTO_ALLOWLIST must list EVM addresses");
   const journal = env["EVM_FACILITATOR_JOURNAL"];
   if (journal === undefined || journal === "") throw new StartupError("EVM_FACILITATOR_JOURNAL must be set");
@@ -1906,6 +2196,12 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
     const rpc = env[`EVM_FACILITATOR_RPC_${chainId}`] ?? DEFAULT_RPC_URLS[network];
     if (rpc === undefined || !/^https:\/\//.test(rpc)) throw new StartupError(`EVM_FACILITATOR_RPC_${chainId} must be an https URL`);
     rpcUrls.set(network, rpc);
+    const ownRaw = env[`EVM_FACILITATOR_PAYTO_ALLOWLIST_${chainId}`];
+    if (ownRaw !== undefined && ownRaw !== "") {
+      const own = listOf(ownRaw);
+      if (own.length === 0 || own.some((a) => !ADDRESS.test(a))) throw new StartupError(`EVM_FACILITATOR_PAYTO_ALLOWLIST_${chainId} must list EVM addresses`);
+      payToAllowlistByNetwork.set(network, own);
+    }
     const cap = env[`EVM_FACILITATOR_GAS_CAP_${chainId}`];
     if (cap === undefined || !/^[1-9][0-9]{0,30}$/.test(cap)) throw new StartupError(`EVM_FACILITATOR_GAS_CAP_${chainId} must be a positive wei amount`);
     gasCaps.set(network, BigInt(cap));
@@ -1928,6 +2224,7 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
     bind,
     networks,
     payToAllowlist,
+    payToAllowlistByNetwork,
     rpcUrls,
     gasCaps,
     maxFees,
@@ -1937,6 +2234,13 @@ export function cliConfigOf(env: NodeJS.ProcessEnv): CliConfig {
     ...(logFile === undefined || logFile === "" ? {} : { logFile }),
     ...(diagnostics === undefined || diagnostics === "" ? {} : { diagnostics }),
   };
+}
+
+/** receipt の `l1Fee`（OP Stack。viem は知らない欄を生のまま残す）。hex の文字列（か bigint）でなければ `undefined`。 */
+export function l1FeeWeiOf(receipt: unknown): bigint | undefined {
+  const raw = isRecord(receipt) ? receipt["l1Fee"] : undefined;
+  if (typeof raw === "bigint") return raw >= 0n ? raw : undefined;
+  return typeof raw === "string" && /^0x[0-9a-fA-F]{1,64}$/.test(raw) ? BigInt(raw) : undefined;
 }
 
 /**
@@ -1963,13 +2267,17 @@ async function viemChainIo(network: string, config: CliConfig, diagnostics: Diag
     "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)",
   ]);
   const authorizationUsed = viem.parseAbiItem("event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)");
-  const toReceipt = (r: { status: "success" | "reverted"; blockNumber: bigint; gasUsed: bigint; effectiveGasPrice: bigint; logs: readonly { address: string; topics: readonly string[]; data: string }[] }): ReceiptView => ({
-    status: r.status,
-    blockNumber: r.blockNumber,
-    gasUsed: r.gasUsed,
-    effectiveGasPrice: r.effectiveGasPrice,
-    logs: r.logs.map((l) => ({ address: l.address, topics: [...l.topics], data: l.data })),
-  });
+  const toReceipt = (r: { status: "success" | "reverted"; blockNumber: bigint; gasUsed: bigint; effectiveGasPrice: bigint; logs: readonly { address: string; topics: readonly string[]; data: string }[] }): ReceiptView => {
+    const l1FeeWei = l1ReserveOf(network) === 0n ? undefined : l1FeeWeiOf(r);
+    return {
+      status: r.status,
+      blockNumber: r.blockNumber,
+      gasUsed: r.gasUsed,
+      effectiveGasPrice: r.effectiveGasPrice,
+      ...(l1FeeWei === undefined ? {} : { l1FeeWei }),
+      logs: r.logs.map((l) => ({ address: l.address, topics: [...l.topics], data: l.data })),
+    };
+  };
   // 見積りと送出で同じ引数（v・r・s に分けた 65 バイトの署名）。
   const transferArgsOf = (call: TransferAuthorizationCall) => {
     const sig = viem.parseSignature(call.signature);
@@ -2014,6 +2322,9 @@ async function viemChainIo(network: string, config: CliConfig, diagnostics: Diag
       // 送出と同じ abi・引数・送出元（transport は retryCount 0）。
       return await publicClient.estimateContractGas({ address: call.asset, abi: eip3009Abi, functionName: "transferWithAuthorization", args: transferArgsOf(call), account });
     },
+    async nativeBalance(address) {
+      return await publicClient.getBalance({ address });
+    },
   };
   const writer: ChainWriter = {
     address: account.address,
@@ -2054,6 +2365,10 @@ async function viemChainIo(network: string, config: CliConfig, diagnostics: Diag
   const maxLogRange = config.logRanges.get(network);
   const maxSettleGas = config.maxGas.get(network);
   if (maxFeePerGas === undefined || gasCap === undefined || maxLogRange === undefined || maxSettleGas === undefined) throw new Error(`incomplete config for ${network}`);
+  // Base は listen の後に裏で確かめる（RPC の不達で新 3 と入口を止めない。設計 §2.5）。確かめるまで使わない。
+  if (isGuardedNetwork(network)) {
+    return { reader, writer, verify, maxLogRange, maxFeePerGas, gasCap, maxSettleGas, chainCheck: async () => (await publicClient.getChainId()) === chainId };
+  }
   // 起動時に chainId を確かめる（別の chain の RPC に送出しない）。
   const actual = await publicClient.getChainId();
   if (actual !== chainId) throw new Error(`RPC for ${network} reports chain id ${actual}`);
@@ -2206,6 +2521,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       chains,
       journal,
       payToAllowlist: config.payToAllowlist,
+      payToAllowlistByNetwork: config.payToAllowlistByNetwork,
       log,
       diagnostics,
     });
@@ -2320,7 +2636,7 @@ export function raiseCapArgsOf(args: readonly string[]): RaiseCapArgs {
   const network = seen.get("--network");
   const addWei = seen.get("--add-wei");
   const reason = seen.get("--reason");
-  if (network === undefined || !EVM_TESTNET_NETWORKS.has(network)) return usage();
+  if (network === undefined || !SELF_FACILITATOR_NETWORKS.has(network)) return usage();
   if (addWei === undefined || !POSITIVE_WEI.test(addWei)) return usage();
   if (!isValidReason(reason)) return usage();
   return { network, addWei: BigInt(addWei), reason };

@@ -872,7 +872,7 @@ describe("定数", () => {
 
   test("EVM testnet 以外の network は受けない", () => {
     const c = fakeChain(USDG);
-    expect(() => createEvmFacilitator({ networks: ["eip155:84532"], chains: new Map([["eip155:84532", c.io]]), journal: fakeJournal(), payToAllowlist: [PAYTO] })).toThrow(/EVM testnets/);
+    expect(() => createEvmFacilitator({ networks: ["eip155:8453"], chains: new Map([["eip155:8453", c.io]]), journal: fakeJournal(), payToAllowlist: [PAYTO] })).toThrow(/EVM testnets/);
   });
 
   test("start の前の要求は 503", async () => {
@@ -1594,7 +1594,7 @@ describe("H-1 §2.2 gas の累計の永続", () => {
       ["capWei 数値", { ...init, capWei: 1000 }],
       ["capWei 負", { ...init, capWei: "-1" }],
       ["capWei 79 桁", { ...init, capWei: "1".repeat(79) }],
-      ["未知の network", { ...init, network: "eip155:84532" }],
+      ["未知の network", { ...init, network: "eip155:8453" }],
       ["network が無い", { type: "gas_cap_init", capWei: "1", at: 1 }],
       ["余分な欄", { ...init, key: "k" }],
       ["at が無い", { type: "gas_cap_init", network: RH, capWei: "1" }],
@@ -1719,7 +1719,7 @@ describe("H-1 §2.2 raise-cap（運用者の補充）", () => {
     ["add-wei 先頭 0", args(RH, "05")],
     ["add-wei 負", args(RH, "-5")],
     ["add-wei 数でない", args(RH, "abc")],
-    ["未知の network", args("eip155:84532")],
+    ["未知の network", args("eip155:8453")],
     ["同じ flag を 2 回", ["--network", RH, "--network", RH, "--reason", "r"]],
     ["未知の flag", ["--network", RH, "--add-wei", "5", "--why", "r"]],
     ["余分な引数", [...args(), "--force"]],
