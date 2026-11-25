@@ -777,8 +777,8 @@ sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
 
 **戻す**: 1 の image（かそれ以降の Base を知る image）に入れ替える。**それより前の image には戻さない**（facilitator が `gas_cap_init` の Base の行で起動せず、Router の入口ごと起動しない）。`swap-image.sh` の自動の復旧は前のコンテナの再起動なので、入れ替えの前に、動いているコンテナが 1 以降の image であることを確かめる。
 
-**見るもの**: 残高（E-FAC-H の Base Sepolia の ETH。20 件分の予約 = `20 × (200,000 × 見積りの maxFeePerGas + 2e12 wei)` を下回ると `/ready` が `false` になり、Provider は 503、Base の受信は verify で止まる）、`SUBETHA_EVM_FACILITATOR_LOG` の `gas_budget`（累計と上限）・`network_held`・`recovered`・`gas_balance_low`・`chain_unconfirmed`・`chain_mismatch`。
-保留は 15 秒ごとに最大 40 回まで自動で照合する（新しい tx は送らない）。解けなければ再起動（起動の後に同じ照合）か、運用者の `resolved_by_operator`。
+**見るもの**: 残高（E-FAC-H の Base Sepolia の ETH。20 件分の予約 = `20 × (200,000 × 見積りの maxFeePerGas + 2e12 wei)` を下回ると `/ready` が `false` になり、Provider は 503、Base の受信は verify で止まる。facilitator の控え 5 秒と Worker の控え 2 秒の分、最大約 7 秒遅れ、確認の直後に止まる競争は残る）、`SUBETHA_EVM_FACILITATOR_LOG` の `gas_budget`（累計と上限）・`network_held`・`recovered`・`gas_balance_low`・`chain_unconfirmed`・`chain_mismatch`。
+保留は 15 秒ごとに最大 40 回まで自動で照合する（新しい tx は送らない。chain id を確かめる前は照合せず回数にも数えない）。`Transfer` の不一致・journal の書き込みの失敗・hash が無く未使用の保留は自動では解けない。解けなければ再起動（起動の後に同じ照合）か、運用者の `resolved_by_operator`。
 
 ### 2h. main の image への入れ替え（2026-11-21 02:06Z。`b-10dd795` → `b-6aa3f20`。rail の有効・無効は変えていない）
 

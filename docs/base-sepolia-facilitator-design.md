@@ -150,3 +150,8 @@
 - **receipt の `l1Fee`** は viem が生のまま残す欄から読む（追加の RPC なし）。
 - **既存の試験の変更**: 「未知の network」の例に `eip155:84532` を使っていた 3 か所を `eip155:8453` に、Worker の「知らない network」の例の `base` を別の語に替えた。有効化の語の一覧の固定文に 2 語が増えた（`base-provider`・`base-in`）。ほかの既存の試験は変えていない。
 - **未確認**: 実際の Base Sepolia の RPC・workerd・Cloudflare での動作（G-B3〜G-B5 で確かめる）。
+
+### 実装のレビューの記録
+- **I-1（Codex `gpt-6-astra`、CLI read-only）: REVISE**（MUST 3・SHOULD 4）。反映: 1 `close`・起動の失敗でも裏の仕事を止めて待ってから journal と lock を放す、2 期限切れの `aborted_before_send`・`reverted` の追記も復帰の対象に（保留の理由を分けた。log の文字列だけ全 network で変わる）、
+  3 復帰の追記と解除の直前に journal の失敗を見直す、4 準備の読み取りは下の RPC が終わるまで 1 本、6 無効の byte 一致を変更前の golden とも照合・実際の Worker と facilitator の核をつないだ wire 試験、7 DEPLOY の遅れと対象外の記述。
+  5（不正なヘッダの要求にも準備の確認）は採らない: 手元で断った支払いつきの要求を 503 にすると、送出していないのに Router が `unknown` にする。要件 FR-B5 の文言を「支払いヘッダの無い要求」に明確にした。

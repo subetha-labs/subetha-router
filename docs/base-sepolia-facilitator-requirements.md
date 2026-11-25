@@ -33,7 +33,7 @@
 - **FR-B2 L1 の手数料**: Base は OP Stack で、送信者は L2 の gas のほかに L1 の data fee を払う（実測 1 件 約 0.000000011 ETH、L2 の 1〜2%）。gas の累計・予約・上限は L1 の手数料を含めて数える。L1 の手数料は送出の前に確定せず、tx で上限を付けられないので、予約は**保守的な見積り**であって最悪値の保証ではない（§8）。
 - **FR-B3 残高の検査**: 送出の前に、署名者のネイティブ残高が費用の予約（L2 の最悪値 + L1 の見積り）を下回れば**送出せず**断る（保留しない）。残高を読めないときも送出しない。
 - **FR-B4 準備の表示**: facilitator は network ごとに「今 settle できるか」（保留でない・見積りの手数料が `maxFeePerGas` の上限以下・累計が上限まで余裕・残高に余裕）を答える。読み取りだけで、token が要る。
-- **FR-B5 売る前に止まる**: Base Sepolia 版の Provider は、facilitator が準備できていないとき、**未払いの 402 を出さず 503 を返す**。Router は受信の settle の前に上流の 402 を読み直すので、
+- **FR-B5 売る前に止まる**: Base Sepolia 版の Provider は、facilitator が準備できていないとき、**支払いヘッダの無い要求に 402 を出さず 503 を返す**（ヘッダのある要求を手元の検査で断るときは今と同じ 402。送出していないと分かっているので、Router の `rejected` を `unknown` にしない）。Router は受信の settle の前に上流の 402 を読み直すので、
   停止中は **Router が受信の settle を始めない**。買い手の署名・送金そのものを取り消す保証ではない（§8）。確認の後に停止する競争も残る。
 - **FR-B6 保留からの復帰**: 送出の結果が分からずに保留した Base を、再起動なしで復帰できるようにする。復帰の根拠は起動時の照合と同じ（chain の receipt と `Transfer` の一致）だけ。新しい tx は送らない。根拠が無ければ保留のまま。
 - **FR-B7 Provider**: `providers/x402-workers` に Base Sepolia の行と env を足す。402 の offer（network・資産・金額 10,000・payTo・`maxTimeoutSeconds` 60・`extra` `{name, version}`）は今の Provider A と**同じ値**、本文は記録済みの契約（`docs/provider-x402-workers.md` §2.3）で `payment.network` は `eip155:84532`。

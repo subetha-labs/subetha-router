@@ -3,6 +3,8 @@
  * chain の I/O・journal・時計・timer は注入の fake（網には出ない）。
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -467,10 +469,30 @@ describe("準備（/ready・/verify。§2.3）", () => {
     expect(await isReady(h)).toBe(true);
     await h.advance(5_000);
     h.base.balance = () => new Promise(() => {});
+    const before = h.base.calls.filter((c) => c === "balance").length;
+    for (let i = 0; i < 3; i += 1) {
+      const slow = isReady(h);
+      await flush();
+      await h.advance(2_000);
+      expect(await slow).toBe(false);
+    }
+    // 止まった読み取りの間、次の要求は読み取りを重ねない。
+    expect(h.base.calls.filter((c) => c === "balance").length).toBe(before + 1);
+  });
+
+  test("遅れて返った読み取りは新しい値として使わない（寿命は読み始めから）", async () => {
+    const h = await harness();
+    let give!: (v: bigint) => void;
+    h.base.balance = () => new Promise<bigint>((r) => (give = r));
     const slow = isReady(h);
     await flush();
     await h.advance(2_000);
     expect(await slow).toBe(false);
+    await h.advance(4_000);
+    give(10n ** 18n);
+    await flush();
+    h.base.balance = async () => 0n;
+    expect(await isReady(h)).toBe(false);
   });
 
   test("控えがあっても、保留になれば直ちに準備なし", async () => {
@@ -735,6 +757,67 @@ describe("保留からの復帰（§2.4）", () => {
     expect(types(h.journal)).toEqual(["submit_intent", "submitted", "settled"]);
   });
 
+  test.each([
+    ["reverted", (h: Harness): void => void (h.base.wait = async () => receiptOf({ status: "reverted" }))],
+    ["aborted_before_send", (): void => {}],
+  ] as const)("遅れた fsync: %s の追記が期限の後に成功した鍵も、次の回で RPC なしに復帰する", async (type, arrange) => {
+    const h = await harness();
+    arrange(h);
+    let finish!: () => void;
+    h.journal.before = async (r) => {
+      // aborted の試験: 意図の fsync に 5 秒かかり、送出の直前の残りが足りなくなる。
+      if (type === "aborted_before_send" && r.type === "submit_intent") h.clock.t += 5_000;
+      if (r.type === type) await new Promise<void>((res) => (finish = res));
+    };
+    const pending = h.settle(body());
+    await flush();
+    await h.advance(10_000);
+    expect((await pending).status).toBeGreaterThanOrEqual(500);
+    expect(h.f.heldNetworks()).toEqual([BASE]);
+    expect(h.base.writes).toHaveLength(type === "reverted" ? 1 : 0);
+    const calls = h.base.calls.length;
+    await h.advance(RECOVERY_INTERVAL_MS);
+    expect(h.f.heldNetworks()).toEqual([BASE]);
+    finish();
+    await flush();
+    await h.advance(RECOVERY_INTERVAL_MS);
+    expect(h.f.heldNetworks()).toEqual([]);
+    expect(h.base.calls.length).toBe(calls);
+    expect(types(h.journal).at(-1)).toBe(type);
+  });
+
+  test("照合の receipt を待つ間に、ほかの network の追記が失敗: 復帰の追記も解除もしない", async () => {
+    const h = await heldByTimeout();
+    let give!: () => void;
+    h.base.io.reader.receipt = () => new Promise((r) => (give = () => r(receiptOf())));
+    await h.advance(RECOVERY_INTERVAL_MS);
+    h.journal.before = () => {
+      throw new Error("ENOSPC");
+    };
+    await h.settle(body({ network: RH, nonce: nonceOf(5) }));
+    delete h.journal.before;
+    give();
+    await flush();
+    expect(h.f.heldNetworks()).toContain(BASE);
+    expect(types(h.journal)).toEqual(["submit_intent", "submitted"]);
+  });
+
+  test("復帰の追記を待つ間に、ほかの network の追記が失敗: 解除しない", async () => {
+    const h = await heldByTimeout();
+    h.base.receipts.set(hashOf(1), receiptOf());
+    let finish!: () => void;
+    h.journal.before = (r) => {
+      if (r.type === "settled") return new Promise<void>((res) => (finish = res));
+      throw new Error("ENOSPC");
+    };
+    await h.advance(RECOVERY_INTERVAL_MS);
+    await h.settle(body({ network: RH, nonce: nonceOf(5) }));
+    finish();
+    await flush();
+    await h.advance(RECOVERY_INTERVAL_MS * 3);
+    expect(h.f.heldNetworks()).toContain(BASE);
+  });
+
   test("journal の追記が 1 度でも失敗したら、以後は復帰の追記をしない", async () => {
     const h = await heldByTimeout();
     h.journal.before = () => {
@@ -808,6 +891,51 @@ describe("保留からの復帰（§2.4）", () => {
     expect(h.f.heldNetworks()).toEqual([]);
     expect(await h.settle(body())).toMatchObject({ status: 200, body: { transaction: hashOf(1) } });
     expect(h.base.writes).toEqual([]);
+  });
+});
+
+describe("終了と起動の失敗: journal と lock を放す前に裏の仕事を止めて待つ", () => {
+  const envOf = (dir: string, port: string): NodeJS.ProcessEnv => ({
+    EVM_FACILITATOR_KEY: `0x${"11".repeat(32)}`, EVM_FACILITATOR_TOKEN: TOKEN, EVM_FACILITATOR_NETWORKS: BASE, EVM_FACILITATOR_PAYTO_ALLOWLIST: ROUTER,
+    EVM_FACILITATOR_GAS_CAP_84532: "1000", EVM_FACILITATOR_JOURNAL: path.join(dir, "journal.ndjson"), EVM_FACILITATOR_LOG: path.join(dir, "log.ndjson"), EVM_FACILITATOR_PORT: port,
+  });
+
+  test.each([["close()", false], ["listen の失敗", true]] as const)("%s: 始まった chain id の確認が終わってから journal を閉じ、lock を放す。その後に追記は無い", async (_n, failListen) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "evm-fac-base-"));
+    const order: string[] = [];
+    let finishCheck!: () => void;
+    const base = chain(BASE, { lazy: true });
+    base.check = () => new Promise<boolean>((r) => (finishCheck = () => (order.push("check done"), r(true))));
+    const journal = fakeJournal();
+    const deps = {
+      chainIoOf: async () => base.io,
+      lock: () => ({ release: () => void order.push("lock released") }),
+      journalOf: () => Object.assign(journal, { close: async () => void order.push("journal closed") }),
+    };
+    const blocker = http.createServer();
+    await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", () => r()));
+    const port = String((blocker.address() as AddressInfo).port);
+    try {
+      if (failListen) {
+        const failed = expect(main(envOf(dir, port), { stdout: () => {}, stderr: () => {} }, deps)).rejects.toThrow("listen_failed");
+        await new Promise((r) => setTimeout(r, 100));
+        expect(order).toEqual([]);
+        finishCheck();
+        await failed;
+      } else {
+        await new Promise<void>((r) => blocker.close(() => r()));
+        const running = await main(envOf(dir, port), { stdout: () => {}, stderr: () => {} }, deps);
+        const closing = running.close();
+        await new Promise((r) => setTimeout(r, 100));
+        expect(order).toEqual([]);
+        finishCheck();
+        await closing;
+      }
+      expect(order).toEqual(["check done", "journal closed", "lock released"]);
+    } finally {
+      if (blocker.listening) await new Promise<void>((r) => blocker.close(() => r()));
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

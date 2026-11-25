@@ -1002,7 +1002,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
         log({ event: "recovered", network, key, via: "journal" });
         return;
       }
-      if (await resolveUnresolved(key, state, io, deadlineAt, true).catch(() => false)) {
+      // 照合を待つ間に、ほかの network の追記が失敗したかもしれない（下の追記の直前と、ここで見直す）。
+      if ((await resolveUnresolved(key, state, io, deadlineAt, true).catch(() => false)) && !journalFailed) {
         release(network, key);
         log({ event: "recovered", network, key, via: "chain" });
       }
@@ -1037,25 +1038,30 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
   function readyInputs(network: string): Promise<{ readonly balance: bigint; readonly maxFeePerGas: bigint } | undefined> {
     const cached = readyCache.get(network);
     if (cached !== undefined && clock.now() - cached.at < READY_CACHE_MS && clock.now() >= cached.at) return Promise.resolve(cached);
-    const running = readyInFlight.get(network);
-    if (running !== undefined) return running;
-    const io = chainOf(network);
-    const read = io.reader.nativeBalance;
-    const work = (async () => {
-      if (read === undefined) return undefined;
-      try {
-        const deadlineAt = clock.now() + READY_READ_MS;
-        const [balance, fees] = await within(Promise.all([read(io.writer.address), io.reader.feesPerGas()]), deadlineAt);
-        const value = { at: clock.now(), balance, maxFeePerGas: fees.maxFeePerGas };
+    // 読み取りは下の RPC が終わるまで 1 本（待つ側は 2 秒で諦めるが、次の読み取りを重ねない）。
+    let running = readyInFlight.get(network);
+    if (running === undefined) {
+      const io = chainOf(network);
+      const read = io.reader.nativeBalance;
+      const startedAt = clock.now();
+      running = (async () => {
+        if (read === undefined) return undefined;
+        const [balance, fees] = await Promise.allSettled([read(io.writer.address), io.reader.feesPerGas()]);
+        for (const r of [balance, fees]) if (r.status === "rejected") noteRpcFailure(diagnostics, network, "native_balance", r.reason);
+        if (balance.status === "rejected" || fees.status === "rejected") return undefined;
+        // 寿命は読み始めから数える（遅れて返った値を新しいものとして使わない）。
+        const value = { at: startedAt, balance: balance.value, maxFeePerGas: fees.value.maxFeePerGas };
         readyCache.set(network, value);
         return value;
-      } catch (error) {
-        noteRpcFailure(diagnostics, network, "native_balance", error);
-        return undefined;
-      }
-    })().finally(() => readyInFlight.delete(network));
-    readyInFlight.set(network, work);
-    return work;
+      })()
+        .catch(() => undefined)
+        .finally(() => readyInFlight.delete(network));
+      readyInFlight.set(network, running);
+    }
+    return within(running, clock.now() + READY_READ_MS).catch((error: unknown) => {
+      noteRpcFailure(diagnostics, network, "native_balance", error);
+      return undefined;
+    });
   }
 
   /** 今 settle できる見込みか（設計 §2.3。`/ready` と `/verify` が同じ条件を使う）。読み取りだけ。 */
@@ -1479,8 +1485,9 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     if (after !== undefined) {
       try {
         await within(append({ type: "aborted_before_send", key: id.key, reason: after, at: clock.now() }), deadlineAt);
-      } catch {
-        hold(network, id.key, "journal_write_failed");
+      } catch (error) {
+        // 期限切れの追記は裏で続く（遅れて成功すれば、Base は復帰の回で解ける）。
+        hold(network, id.key, error instanceof DeadlineExceeded ? "journal_aborted_timeout" : "journal_write_failed");
         return failure(500, "journal_unavailable", network);
       }
       log({ event: "aborted_before_send", network, key: id.key, reason: after });
@@ -1542,8 +1549,8 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
     if (receipt.status === "reverted") {
       try {
         await within(append({ type: "reverted", key: id.key, hash, via: "receipt", gasUsedWei, at: clock.now() }), deadlineAt);
-      } catch {
-        hold(network, id.key, "journal_write_failed");
+      } catch (error) {
+        hold(network, id.key, error instanceof DeadlineExceeded ? "journal_reverted_timeout" : "journal_write_failed");
       }
       log({ event: "reverted", network, key: id.key, transaction: hash });
       return failure(502, "transaction_reverted", network);
@@ -1697,7 +1704,11 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
 
   /** 未解決の鍵の照合（起動時と、Base の復帰）。解けたら終端を追記して true。`boundAppend`: 追記も期限で打ち切る（復帰。追記は裏で続き、次の回で解ける）。 */
   async function resolveUnresolved(key: string, state: KeyState, io: ChainIo, startupDeadline: number, boundAppend: boolean): Promise<boolean> {
-    const record = (r: JournalRecord): Promise<void> => (boundAppend ? within(append(r), startupDeadline) : append(r));
+    const record = async (r: JournalRecord): Promise<void> => {
+      if (!boundAppend) return append(r);
+      if (journalFailed) throw new Error("journal failed");
+      return within(append(r), startupDeadline);
+    };
     const intent = state.intent;
     const asset = intent.asset as Hex;
     const from = intent.from as Hex;
@@ -2510,6 +2521,13 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
     }
   }
   const diagnostics: DiagnosticsSink = diagnosticsSink ?? NOOP_DIAGNOSTICS;
+  let created: EvmFacilitator | undefined;
+  /** journal を閉じて lock を放す前に、裏の仕事（復帰・chain id の確認）を止め、始まったものを待つ。 */
+  const quiesce = async (): Promise<void> => {
+    if (created === undefined) return;
+    created.drain.close();
+    await created.drain.idle(RECOVERY_DEADLINE_MS + 2_000);
+  };
   try {
     const chains = new Map<string, ChainIo>();
     const chainIoOf = deps.chainIoOf ?? viemChainIo;
@@ -2525,6 +2543,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       log,
       diagnostics,
     });
+    created = facilitator;
     await orStartupError("journal_unavailable", () => facilitator.start());
     const { server, port, host } = await orStartupError("listen_failed", () => listenFacilitator(facilitator, config.token, config.port, config.bind));
     const signer = chains.values().next().value?.writer.address;
@@ -2536,6 +2555,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       host,
       async close() {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        await quiesce();
         await closeDiagnostics(diagnosticsSink, DIAGNOSTICS_CLOSE_MS);
         await journal.close().catch(() => {});
         lock.release();
@@ -2567,6 +2587,7 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       },
     };
   } catch (error) {
+    await quiesce();
     await closeDiagnostics(diagnosticsSink, DIAGNOSTICS_CLOSE_MS);
     await journal.close().catch(() => {});
     lock.release();
