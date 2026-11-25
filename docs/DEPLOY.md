@@ -965,6 +965,16 @@ site に `log` の指定は無く access log は出ていないが、それは�
     戻し用は `subetha-router-prev-20261124T133533Z`（`b-1418426`、env は切り替えの前のもの）と、直前の `subetha-router-prev-20261124T135148Z`（同じ image）。ほかの `-prev-` は削除。
   - **確認していないこと**: `settle_pending`・`settle_failed`・429 が本物で返る場合（合成の試験だけ）、まとめて送られた支払い、標準の x402 入口からの購入（切り替えのあと）、入れ替えの途中の購入。
 
+**費用の式による価格（2026-11-24。`docs/exact-pricing-design.md`）— コードだけ。本番では無効（`RAILS_ACTIVATION.subethaExact.formulaPricing` なし = 受け取りは 12,000 の固定）**:
+
+- **有効化**（オーナーの別の go。買い手に見える値上げになる）: `formulaPricing: true` の image を作り、settle 先の 2 行（上）がある host の env に `SUBETHA_EXACT_ETH_PRICE`（1 ETH あたりの base units。3,000 USD なら `3000000000`）と
+  `SUBETHA_EXACT_ETH_PRICE_AT`（その値を決めた時刻、UTC の `YYYY-MM-DDTHH:MM:SSZ`）を足す。settle 先の token が無ければ子の Router は起動しない。値の表は `HOSTED_EXACT_PRICING`（`tools/remote-mcp-config.ts`）。
+- **ETH の価格は 7 日で切れる**。切れる・無い・形が違う・5 分を越えて未来なら、Router は動き続け、zUSDC の新しい offer だけを 503 `pricing_unavailable` で断る（ほかの route は売れる）。更新は env の 2 行を変えて同じ image で作り直す（env は起動時に読む）。
+- **断られる理由**: `pricing_unavailable`（費用を読めない、成功した記録が無い、ETH の価格）、`pricing_over_limit`（settle の見積もりが 8,000、または受け取り額が 20,000 を越える）、`offer_daily_cap_reached`（1 日 20 件、UTC）、`offer_cap_reached`（総数）。どれも注文を作る前で、発行済みの offer は払える。
+- **見積もりであって黒字の保証ではない**。件数の上限 × `maxSettle` も損失の保証ではない。実費との照合は自動では行わない（`/costs` に注文の識別が無い）。
+- **設定値を変えると、変更の前の quote では払えない**（指紋）。`maxPerDay`・`ethPriceMaxAgeDays`・ETH の価格の変更では変わらない。固定の額に戻すのは欄を消した image（発行済みの式の quote は払えなくなる: 先に受付を止めて未解決 0 を確かめる）。
+  **式の記録（`source.pricing`）を持つ journal を、この変更より前の image に戻すときも同じ**（古い image は欄を無視し、指紋の違いで支払いを断る）。
+
 ## 3. 動作確認
 
 ```sh

@@ -25,6 +25,9 @@ export const SUBETHA_EXACT_SETTLE_FACILITATOR_HOSTS: ReadonlySet<string> = Objec
 export const SUBETHA_EXACT_OWN_SETTLE_HOSTS: ReadonlySet<string> = Object.freeze(new Set(["settle-testnet.subethalabs.com"]));
 /** settle 先の token のファイル（`docs/exact-settle-facilitator-design.md` §2.1）。値は小文字の hex 64 桁。 */
 export const SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV = "ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE";
+/** 運用者が設定する ETH の価格（1 ETH あたりの base units）と、その時刻（ISO 8601、UTC）。`docs/exact-pricing-design.md` §2。 */
+export const SUBETHA_EXACT_ETH_PRICE_ENV = "ROUTER_SUBETHA_EXACT_ETH_PRICE";
+export const SUBETHA_EXACT_ETH_PRICE_AT_ENV = "ROUTER_SUBETHA_EXACT_ETH_PRICE_AT";
 export const SUBETHA_EXACT_SETTLE_TOKEN_FORM = /^[0-9a-f]{64}$/;
 
 /** facilitator の host の allowlist（hosted のテストネット）と、試験の fixture だけに許す loopback。 */

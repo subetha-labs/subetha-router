@@ -3,6 +3,8 @@
  * core は rail 名で分岐せず、ポート越しにのみ両レールへ触る。
  */
 
+import type { ExactPricing } from "../ports/exact-pricing.js";
+import { PRICING_ISSUE_WINDOW_MS, priceConsistent, utcDayOf, type ExactPrice, type ExactPriceFailure, type ExactPriceRecord, type ExactPricingConfig } from "../shared/exact-pricing.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
@@ -21,6 +23,7 @@ import { DynamicGate } from "./dynamic-gate.js";
 import { QuoteLedger } from "./quote-ledger.js";
 import {
   fingerprintOf,
+  pricingFingerprintOf,
   isTerminal,
   stableJson,
   toPublicStatus,
@@ -80,6 +83,8 @@ export interface QuoteDocument {
     readonly asset: string;
     readonly network: string;
     readonly offer: InboundOffer;
+    /** 式の価格の内訳（式の route だけ。`docs/exact-pricing-design.md` §8）。 */
+    readonly pricing?: ExactPriceRecord;
   };
   readonly destination: {
     readonly quoted: string;
@@ -230,6 +235,8 @@ export function privateProjectionOf(intent: Intent): PrivateProjection | undefin
 }
 
 export interface RouterCoreOptions {
+  /** 式の価格の供給（`docs/exact-pricing-design.md`）。無ければ式の route は新しい offer を出さない。 */
+  readonly exactPricing?: ExactPricing;
   readonly journalPath: string;
   readonly config: RouterConfig;
   readonly inbound: InboundRail;
@@ -395,6 +402,7 @@ function quoteDocumentOf(intent: Intent): QuoteDocument {
       asset: intent.source.asset,
       network: intent.source.network,
       offer: intent.source.offer,
+      ...(intent.source.pricing === undefined ? {} : { pricing: intent.source.pricing }),
     },
     destination: {
       quoted: intent.destination.quoted,
@@ -545,6 +553,20 @@ export function countsTowardOfferCap(intent: Intent, nowMs: number): boolean {
   if (intent.status === "created") return !(intent.approvalDeadlineMs > 0 && nowMs >= intent.approvalDeadlineMs);
   if (intent.status === "source_failed") return intent.source.settleStarted !== false;
   return true;
+}
+
+/** 式の価格の route の、ある日（UTC）の件数に入る記録か（設計 §5。`countsTowardOfferCap` と合わせて使う）。時刻の信用できない記録はどの日にも入れる。 */
+function countsTowardDay(intent: Intent, day: number): boolean {
+  if (intent.pricingInvalid === true) return true;
+  return intent.source.pricing !== undefined && utcDayOf(intent.source.pricing.issuedAtMs) === day;
+}
+
+/** 記録の価格と今の route の設定が合わず、支払いに使えないか（設計 §6）。 */
+function pricingBlocks(intent: Intent, route: RouteConfig): boolean {
+  if (intent.pricingInvalid === true) return true;
+  const recorded = intent.source.pricing;
+  if (route.pricing === undefined || recorded === undefined) return (route.pricing === undefined) !== (recorded === undefined);
+  return BigInt(recorded.total) > BigInt(route.pricing.maxAmount);
 }
 
 /** 標準入口の quote か（offer の印。`created` の行に残るので再起動の後も同じ）。 */
@@ -710,6 +732,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       if (existing.routeId !== request.routeId || existing.dynamic !== undefined || existing.dynamicInvalid === true || isStandardIntent(existing) || request.entry === "x402") {
         return { ok: false, code: "request_id_conflict" };
       }
+      // 価格の記録が合わない `created` は再提示しない（設計 §6）。
+      if (existing.status === "created" && pricingBlocks(existing, route)) return { ok: false, code: "quote_failed" };
       // `created` のままなら今までどおり同じ文書。離れた後は閉じた quote（FR-4.5: 同じ注文に新しい署名を求めない）。
       return existing.status === "created" ? { ok: true, ...quoteDocumentOf(existing) } : { ok: true, ...quoteDocumentOf(existing), closed: true, status: toPublicStatus(existing.status) };
     }
@@ -722,23 +746,58 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
      * 既存の quote の再取得（上の分岐）は対象外。予約は発行が終わるまで持ち、その時点で intent が store にあれば数に入っている。
      */
     const cap = route.offerCap?.maxCommitted;
-    if (cap === undefined) return issueQuote(request, route);
+    const pricing = route.pricing;
+    if (cap === undefined) {
+      // 式の route は offer の上限が必須（設定の検査と同じ。core でも閉じる）。
+      return pricing === undefined ? issueQuote(request, route) : { ok: false, code: "source_offer_unavailable", reason: "pricing_unavailable" };
+    }
+    // 予約の時刻（1 回だけ読む）。式の route では、この時刻の UTC の日に数え、記録にも残す（発行の途中で日が変わっても同じ日の 1 件。設計 §5）。
+    const reservedAtMs = now();
     const issuingNow = issuing.get(route.routeId) ?? 0;
     // 進行中の購入（`created` のまま上流の照合などを待っている）は、承認の期限を過ぎても数に残す: その後に `source_pending` → `unknown` と進んでも、枠が二重に使われない。
     const committed = store.all().filter((intent) => intent.routeId === route.routeId && intent.dynamic === undefined && (countsTowardOfferCap(intent, now()) || activePurchases.has(intent.quoteId))).length;
     if (committed + issuingNow >= cap) return { ok: false, code: "source_offer_unavailable", reason: "offer_cap_reached" };
+    const day = utcDayOf(reservedAtMs);
+    const dayKey = `${route.routeId}\u0000${String(day)}`;
+    if (pricing !== undefined) {
+      const today = store.all().filter((intent) => intent.routeId === route.routeId && intent.dynamic === undefined && countsTowardDay(intent, day) && (countsTowardOfferCap(intent, reservedAtMs) || activePurchases.has(intent.quoteId))).length;
+      const issuingToday = issuingByDay.get(dayKey) ?? 0;
+      if (today + issuingToday >= pricing.maxPerDay) return { ok: false, code: "source_offer_unavailable", reason: "offer_daily_cap_reached" };
+      issuingByDay.set(dayKey, issuingToday + 1);
+    }
     issuing.set(route.routeId, issuingNow + 1);
     try {
-      return await issueQuote(request, route);
+      return await issueQuote(request, route, reservedAtMs);
     } finally {
+      if (pricing !== undefined) {
+        const leftToday = (issuingByDay.get(dayKey) ?? 1) - 1;
+        if (leftToday <= 0) issuingByDay.delete(dayKey);
+        else issuingByDay.set(dayKey, leftToday);
+      }
       const left = (issuing.get(route.routeId) ?? 1) - 1;
       if (left <= 0) issuing.delete(route.routeId);
       else issuing.set(route.routeId, left);
     }
   }
 
+  /** 式の価格を 1 回求め、core でも検査し直す（port の型を信用しない。設計 §4）。 */
+  async function priceOf(routeId: string, pricing: ExactPricingConfig, upstreamAmount: string): Promise<{ readonly ok: true; readonly price: ExactPrice } | { readonly ok: false; readonly reason: ExactPriceFailure }> {
+    if (options.exactPricing === undefined) return { ok: false, reason: "pricing_unavailable" };
+    try {
+      const answer = await options.exactPricing.price(routeId, pricing, upstreamAmount);
+      if (answer.ok !== true) return { ok: false, reason: answer.reason === "pricing_over_limit" ? "pricing_over_limit" : "pricing_unavailable" };
+      const { kind, upstream, settle, withdraw, take, share, total, costsAtMs } = answer.price;
+      const price: ExactPrice = { kind, upstream, settle, withdraw, take, share, total, costsAtMs };
+      return priceConsistent(price, upstreamAmount, pricing) ? { ok: true, price } : { ok: false, reason: "pricing_unavailable" };
+    } catch {
+      return { ok: false, reason: "pricing_unavailable" };
+    }
+  }
+
   /** 発行の途中の offer の数（route ごと。offer の上限の予約）。 */
   const issuing = new Map<string, number>();
+  /** 発行の途中の offer の数（式の route・予約した UTC の日ごと。設計 §5）。 */
+  const issuingByDay = new Map<string, number>();
   /** 実行の途中の静的購入の quoteId（offer の上限の数え方で、期限を過ぎた `created` を「進行中」として残すため）。 */
   const activePurchases = new Set<string>();
   /**
@@ -746,7 +805,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
    */
   const preSettleMark = (intent: Intent): { readonly settleStarted?: false } => (resolveRoute(config, intent.routeId)?.sourceRail === "subetha-exact" ? { settleStarted: false } : {});
 
-  async function issueQuote(request: QuoteRequest, route: NonNullable<ReturnType<typeof resolveRoute>>): Promise<QuoteOutcome> {
+  async function issueQuote(request: QuoteRequest, route: NonNullable<ReturnType<typeof resolveRoute>>, reservedAtMs?: number): Promise<QuoteOutcome> {
     // 先に上流を quote（純粋読取・無課金）してから受信 offer を発行する。
     const offers = await options.outbound.readChallenge(route.routeId);
     const selectedOffer = selectOffer(offers, route);
@@ -754,11 +813,20 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       return { ok: false, code: "quote_failed", reason: "no_matching_offer" };
     }
 
+    // 式の価格（`docs/exact-pricing-design.md` §4）: 注文を作る前に 1 回だけ決める。固定の route は設定の額のまま。
+    let price: ExactPrice | undefined;
+    if (route.pricing !== undefined) {
+      const priced = await priceOf(route.routeId, route.pricing, selectedOffer.amount);
+      if (!priced.ok || reservedAtMs === undefined) return { ok: false, code: "source_offer_unavailable", reason: priced.ok ? "pricing_unavailable" : priced.reason };
+      price = priced.price;
+    }
+    const sourceAmount = price?.total ?? route.source.amount;
+
     let sourceOffer: InboundOffer;
     try {
       sourceOffer = await options.inbound.createOffer({
         routeId: route.routeId,
-        amount: route.source.amount,
+        amount: sourceAmount,
         asset: route.source.asset,
         network: route.source.network,
         routeBinding: routeBindingOf(route),
@@ -789,7 +857,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // （adapter の型シグネチャを信用せず、実際の値を照合する）。
     const expectedBinding = routeBindingOf(route);
     if (
-      sourceOffer.amount !== route.source.amount ||
+      sourceOffer.amount !== sourceAmount ||
       sourceOffer.asset !== route.source.asset ||
       sourceOffer.network !== route.source.network ||
       sourceOffer.extra.routeBinding !== expectedBinding
@@ -800,10 +868,12 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // 承認期限は絶対時刻。TTL と発行 offer の失効の早い方で切る。
     const issuedAtMs = now();
     const offerExpiryMs = sourceOffer.extra.expiresAt * 1000;
-    const approvalDeadlineMs = Math.min(issuedAtMs + config.approvalTtlMs, offerExpiryMs);
+    // 式の route では、予約の時刻から記録の検査の幅（§5）を越えない。
+    const approvalDeadlineMs = Math.min(issuedAtMs + config.approvalTtlMs, offerExpiryMs, ...(price === undefined || reservedAtMs === undefined ? [] : [reservedAtMs + PRICING_ISSUE_WINDOW_MS]));
 
     // 「この offer への標準の署名が実行可能でいられる上限」（設計 §4.2。rail が持つときだけ `created` の行に写し、以後の開示は journal から出す）。
     const settleWindow = settleWindowOf(sourceOffer);
+    const pricingRecord: ExactPriceRecord | undefined = price === undefined || reservedAtMs === undefined ? undefined : { ...price, issuedAtMs: reservedAtMs };
     const paymentId = nextPaymentId();
     try {
       await store.append(paymentId, "created", {
@@ -812,10 +882,11 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         principalId: request.principalId,
         requestId: request.requestId,
         source: {
-          amount: route.source.amount,
+          amount: sourceAmount,
           asset: route.source.asset,
           network: route.source.network,
           offer: sourceOffer,
+          ...(pricingRecord === undefined ? {} : { pricing: pricingRecord }),
           ...(settleWindow === undefined ? {} : { settleWindow }),
         },
         destination: {
@@ -827,6 +898,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         quoteFingerprint: fingerprintOf(selectedOffer),
         // 設定側の指紋（FR-17）。purchase 時に再計算して照合する。
         routeFingerprint: fingerprintOf(authoritativeTermsOf(route)),
+        ...(pricingRecord === undefined ? {} : { pricingFingerprint: pricingFingerprintOf(sourceOffer.extra.challengeNonce, pricingRecord) }),
         approvalDeadlineMs,
       });
     } catch (error) {
@@ -837,7 +909,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     }
 
     const created = store.byPaymentId(paymentId);
-    if (created === undefined) {
+    if (created === undefined || pricingBlocks(created, route)) {
       return { ok: false, code: "quote_failed" };
     }
     if (isStandardIntent(created)) indexStandard(created);
@@ -893,7 +965,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       if (typeof options.inbound.preflight !== "function" || !options.inbound.preflight(offer, credential, now()).ok) return refused;
       // (c) 受付の期限と設定の変更（今の購入と同じ判定）。
       const currentRoute = resolveRoute(config, intent.routeId);
-      if (currentRoute === undefined || intent.routeFingerprint !== fingerprintOf(authoritativeTermsOf(currentRoute))) return refused;
+      if (currentRoute === undefined || intent.routeFingerprint !== fingerprintOf(authoritativeTermsOf(currentRoute)) || pricingBlocks(intent, currentRoute)) return refused;
       if (intent.approvalDeadlineMs <= 0 || now() >= intent.approvalDeadlineMs) return refused;
       // 結び付け: 外への呼び出しの前に永続にする。鍵の中なので、同時に届いた credential のうち結び付くのは 1 つ。
       await store.append(intent.paymentId, "source_credential_bound", { digest, payer: presented.authorization.from, validBefore });
@@ -1018,7 +1090,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
      */
     const routeMismatch =
       currentRoute === undefined ||
-      intent.routeFingerprint !== fingerprintOf(authoritativeTermsOf(currentRoute));
+      intent.routeFingerprint !== fingerprintOf(authoritativeTermsOf(currentRoute)) ||
+      pricingBlocks(intent, currentRoute);
     if (routeMismatch) {
       const why =
         currentRoute === undefined
@@ -1027,7 +1100,9 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
             ? "unreadable quote fingerprint"
             : intent.routeFingerprint === undefined
               ? "quote predates this check"
-              : "route configuration changed";
+              : pricingBlocks(intent, currentRoute)
+                ? "recorded price does not match the route"
+                : "route configuration changed";
       // 固定文のみ。値・URL・ホスト名は出さない（`docs/DEPLOY.md` の方針）。
       options.note?.(`route configuration mismatch (routeId=${intent.routeId}, why=${why})`);
       return {
@@ -1322,7 +1397,7 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
     // ので終了状態は `paid_undelivered`（理由 `quote_changed`）で、再課金も再購入もしない。
     // 動的の intent で上流が読めない形なら、送信しない（読めない値で払わない）。秘匿購入の intent は静的・動的の送信レグに**決して**流さない
     // （dispatch は privateCore へ渡す。ここに届くのは到達し得ない経路。未発行なので `paid_undelivered`）。
-    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true || intent.private !== undefined || intent.privateInvalid === true) {
+    if (intent.dynamicInvalid === true || intent.dynamicCapInvalid === true || intent.private !== undefined || intent.privateInvalid === true || intent.pricingInvalid === true) {
       await store.append(paymentId, "paid_undelivered", { outcome: "not_sent", reason: "quote_changed" });
       destNote("not_sent", "quote_changed");
       return { paymentId, status: "paid_data_unavailable", terminalReason: "quote_changed" };
@@ -1636,6 +1711,8 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       // 再提示しない（Router が断ると分かっている記録に向けて払わせない。`docs/dynamic-gas-fee-design.md` §3.2）。
       // 標準入口の offer は R3 で再提示しない（1 つの注文を 2 度見せない。`docs/x402-standard-entry-design.md` §6）。
       if (isStandardIntent(intent)) return undefined;
+      const currentRoute = resolveRoute(config, intent.routeId);
+      if (intent.pricingInvalid === true || (currentRoute !== undefined && intent.dynamic === undefined && pricingBlocks(intent, currentRoute))) return undefined;
       return intent.status === "created" && intent.dynamicCapInvalid !== true ? intent.source.offer : undefined;
     },
     disclosureFor(quoteId: string, principalId: string, routeId?: string, ownerKey?: string): number | undefined {

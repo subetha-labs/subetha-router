@@ -234,6 +234,10 @@ const DEMONSTRATION_NOTE =
   "there is no approval step on that URL (get the human's approval before the client is allowed to pay), the client must list zUSDC in `spendControls.allowedAssets`, " +
   "and any answer other than 200 is not proof that nothing was paid.";
 /** `subetha-exact` の quote の `nextStep` に足す 1 文（その rail の quote のときだけ）。 */
+/** 一覧に式の価格の route があるときだけ `demonstrationNote` に足す（`docs/exact-pricing-design.md` §8）。 */
+const PRICING_NOTE =
+  " Routes that carry `pricing` are priced per quote (or per 402): the listed `source.amount` is the maximum, the exact amount is in the quote's `subject` and never exceeds it, " +
+  "and new quotes stop with an error while the settlement cost cannot be read, the price would exceed the maximum, or the daily limit is reached.";
 const EXACT_QUOTE_HINT =
   " This route is paid through a SubEtha v2 facilitator order: each quote creates one order and uses a limited slot, new quotes stop with an error once the route's limits are reached, " +
   "and a refused, failed or unknown purchase is not proof that nothing was paid.";
@@ -351,6 +355,8 @@ function approvalSubject(quote: QuoteView): Record<string, unknown> {
      */
     fundsMoveOnCredential: fundsMoveBeforePurchase(quote),
     ...dynamicSubjectFields(quote),
+    // 式の価格の静的 route（`docs/exact-pricing-design.md` §8）: 内訳も承認の対象として見せる。
+    ...(quote.upstream === undefined && quote.pricing !== undefined ? { pricing: quote.pricing } : {}),
   };
 }
 
@@ -489,7 +495,8 @@ export function createToolHandlers(deps: ToolDeps): ToolHandlers {
       const result = await deps.client.listRoutes();
       // 動的プロファイルの一覧は落とさず返す（設計 §1.1）。無ければ欄ごと無い。
       const demonstration = result.routes.some((route) => (route as unknown as Record<string, unknown>)["demonstration"] !== undefined);
-      return withEvidence(deps, { ok: result.ok, routes: result.routes, ...(result.dynamic === undefined ? {} : { dynamic: result.dynamic }), ...(demonstration ? { demonstrationNote: DEMONSTRATION_NOTE } : {}) });
+      const priced = result.routes.some((route) => isRecord(route) && route["pricing"] !== undefined);
+      return withEvidence(deps, { ok: result.ok, routes: result.routes, ...(result.dynamic === undefined ? {} : { dynamic: result.dynamic }), ...(demonstration ? { demonstrationNote: `${DEMONSTRATION_NOTE}${priced ? PRICING_NOTE : ""}` } : {}) });
     },
 
     async quote(input): Promise<Record<string, unknown>> {

@@ -377,6 +377,16 @@ host and token. Still at most one submission per order and the result only from 
 and `settle_failed:*` only make the Router keep reconciling within the same 60 seconds. Not the default; the
 hosted Router uses it since 2026-11-24 (`docs/DEPLOY.md` §2i). Design: `docs/exact-settle-facilitator-design.md`.
 
+A `subetha-exact` route can also be **priced by cost** instead of a fixed amount (`pricing` on the route; off by default and off
+on the hosted Router). The received amount is then decided once per quote (or per 402) from the settle facilitator's recorded
+costs, an operator-set ETH price with an expiry, a withdrawal share, a take and the 0.35% protocol share. The listing's
+`source.amount` becomes the **maximum**; the quote's `subject` shows the exact amount and its breakdown, and the amount never
+changes after that. New offers stop (503 `pricing_unavailable`, `pricing_over_limit` or `offer_daily_cap_reached`) while the
+costs cannot be read, the ETH price is missing or expired, a ceiling is exceeded, or the daily count is used up; offers already
+issued stay payable. It needs the settle facilitator token, `offerCap`, and `ROUTER_SUBETHA_EXACT_ETH_PRICE` (base units per
+ETH) with `ROUTER_SUBETHA_EXACT_ETH_PRICE_AT` (UTC). It is an estimate, not a guarantee of profit. Design:
+`docs/exact-pricing-design.md`.
+
 Since the same change, on **every** rail, a quote that was already used for a purchase attempt is no longer re-presented
 for signing: re-quoting its `requestId` returns `closed: true` with the current `status` and without `source.offer`, and
 `npm run sign` refuses such a document (take a new quote with a new `requestId`).
@@ -412,6 +422,7 @@ const response = await wrapFetchWithPayment(fetch, client)(x402Url, { headers: {
 
 What is different from the quote-first entry, and what to know before using it:
 
+- **On a route with `pricing`, the amount is decided when the 402 is created** and differs from one 402 to the next; cap it with `maxAmountPerPayment` (it never exceeds the listed `source.amount`).
 - **The Router's principal headers are still required** (`x-router-principal` and `Authorization: Bearer …`, as on every Router entry; the client resends the request headers unchanged).
 - **There is no approval step on the Router.** Whether to pay is the client's own policy (`spendControls`).
 - **Every `GET` without a payment creates a new facilitator order** and uses one unresolved slot until that order expires, and one

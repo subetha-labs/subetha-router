@@ -2,6 +2,7 @@
  * intent の状態と公開値への写像（設計 §5 / §7）。rail 名で分岐しない。
  */
 
+import type { ExactPriceRecord } from "../shared/exact-pricing.js";
 import { createHash } from "node:crypto";
 
 import type { DestinationOffer } from "../ports/outbound.js";
@@ -110,6 +111,8 @@ export interface IntentSource {
    * 持たない rail の intent には無い。
    */
   readonly settleWindow?: number;
+  /** 式の価格の内訳（`docs/exact-pricing-design.md` §6。式の route の、検査を通った記録だけ）。 */
+  readonly pricing?: ExactPriceRecord;
   /**
    * `source_failed` の行が「Router は settle を呼ぶ前に終わった」と明示しているとき `false`（`docs/hosted-exact-enable-design.md` §2）。
    * 欄が無い（旧い行・settle の後の拒否）は「分からない」で、offer の上限の数から外さない。
@@ -258,6 +261,8 @@ export interface Intent {
   readonly routeFingerprint?: string;
   /** 指紋欄が存在するが読めない形だった。legacy と区別する（設計 §11.3）。 */
   readonly routeFingerprintInvalid?: boolean;
+  /** `source.pricing` の欄があるのに、形が違う・額や上流や承認の期限に合わない。**この intent は支払いに使わない**（状態の照会はできる）。 */
+  readonly pricingInvalid?: boolean;
   /** 動的購入の上流。静的 route の intent には無い。 */
   readonly upstream?: IntentUpstream;
   /** 動的購入の条件。静的 route の intent には無い。 */
@@ -296,6 +301,11 @@ export function stableJson(value: unknown): string {
 }
 
 /** canonical（キー順非依存）な JSON の sha256。生の offer 内容は持ち回らない。 */
+/** 式の価格の内訳の指紋（`docs/exact-pricing-design.md` §6）。quote に結び付ける。 */
+export function pricingFingerprintOf(quoteId: unknown, pricing: unknown): string {
+  return fingerprintOf({ pricing, quoteId });
+}
+
 export function fingerprintOf(value: unknown): string {
   return `sha256:${createHash("sha256").update(stableJson(value), "utf8").digest("hex")}`;
 }

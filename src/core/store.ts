@@ -3,6 +3,7 @@
  * 所有 principal と `(principal, requestId)` → `quoteId` の不変性もここで保持する。
  */
 
+import { pricingMatches, type ExactPriceRecord } from "../shared/exact-pricing.js";
 import type { InboundOffer } from "../ports/inbound.js";
 import { networkFamilyOf } from "../config.js";
 import type { MessageReservation } from "../ports/outbound.js";
@@ -10,6 +11,7 @@ import type { DestinationOffer } from "../ports/outbound.js";
 import { createHash } from "node:crypto";
 import {
   isInterrupted,
+  pricingFingerprintOf,
   type DestinationOutcome,
   type Intent,
   type IntentDynamic,
@@ -399,6 +401,21 @@ export function intentFromCreated(paymentId: string, at: string, patch: Patch, o
   const destination = asObject(patch["destination"]);
   // quote のときの開示の上限（`docs/subetha-exact-inbound-design.md` §4.3）。正の安全な整数のときだけ復元する（この関数は欄を列挙するので、ここで拾わないと append の直後に消える）。
   const settleWindow = source["settleWindow"];
+  // 式の価格の内訳（`docs/exact-pricing-design.md` §6・§7 (b)）。欄が無ければ何も足さない。あるのに合わなければ実行しない印。
+  const rawPricing = source["pricing"];
+  const approvalDeadlineMs = asNumber(patch["approvalDeadlineMs"]);
+  // 内訳の指紋（行の別の欄）: 内訳の書き換え・片方だけの削除を見つける（設計 §6）。両方とも無い行は固定の額の記録。
+  const rawPricingFingerprint = patch["pricingFingerprint"];
+  const pricingOk =
+    rawPricing !== undefined &&
+    rawPricingFingerprint === pricingFingerprintOf(patch["quoteId"], rawPricing) &&
+    pricingMatches(rawPricing, {
+      upstreamOfferAmount: asObject(destination["selectedOffer"])["amount"],
+      quoted: destination["quoted"],
+      sourceAmount: source["amount"],
+      offerAmount: asObject(source["offer"])["amount"],
+      approvalDeadlineMs,
+    });
   return {
     paymentId,
     quoteId: asString(patch["quoteId"]),
@@ -412,6 +429,7 @@ export function intentFromCreated(paymentId: string, at: string, patch: Patch, o
       network: asString(source["network"]),
       offer: source["offer"] as InboundOffer,
       ...(positiveInt(settleWindow) ? { settleWindow } : {}),
+      ...(pricingOk ? { pricing: rawPricing as ExactPriceRecord } : {}),
     },
     destination: {
       quoted: asString(destination["quoted"]),
@@ -425,11 +443,12 @@ export function intentFromCreated(paymentId: string, at: string, patch: Patch, o
     // **spread ではなく明示的に復元する。** この関数はフィールドを列挙するので、
     // 足し忘れると append 直後に欄が消え、照合が一切効かなくなる（設計 §8.1）。
     ...routeFingerprintOf(patch),
+    ...((rawPricing !== undefined || rawPricingFingerprint !== undefined) && !pricingOk ? { pricingInvalid: true } : {}),
     // 動的購入の欄も明示的に復元する（足し忘れると、上流 URL と条件が消えた intent になる）。
     ...dynamicFieldsOf(patch, { requireReservation: options.requireReservation !== false }),
     // 秘匿購入の欄も明示的に復元する（読めない形は `privateInvalid`: 実行しない）。
     ...privateFieldsOf(patch),
-    approvalDeadlineMs: asNumber(patch["approvalDeadlineMs"]),
+    approvalDeadlineMs,
     updatedAt: at,
   };
 }

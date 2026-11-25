@@ -116,6 +116,8 @@ export const DIAG_OPS = [
   "facilitator_requester_orders",
   "facilitator_release",
   "facilitator_complete",
+  // settle facilitator の費用の読み取り（`docs/exact-pricing-design.md` §3）
+  "settle_facilitator_costs",
   "other",
 ] as const;
 export type DiagOp = (typeof DIAG_OPS)[number];
