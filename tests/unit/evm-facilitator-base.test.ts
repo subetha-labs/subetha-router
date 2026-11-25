@@ -250,6 +250,15 @@ const types = (j: FakeJournal): string[] => j.records.filter((r) => r.type !== "
 const gasUsed = (j: FakeJournal): string[] => j.records.flatMap((r) => ("gasUsedWei" in r ? [r.gasUsedWei] : []));
 const isReady = async (h: Harness): Promise<boolean> => (((await h.ready()).body as { networks: Record<string, { ready: boolean }> }).networks[BASE]!).ready;
 
+/** 空いている loopback の port。 */
+async function freePort(): Promise<number> {
+  const server = http.createServer();
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((r) => server.close(() => r()));
+  return port;
+}
+
 /** 未解決の意図の行（既定は hash 付き）。 */
 function unresolved(i: number, hash?: Hex): JournalRecord[] {
   const key = keyOf(BASE, USDC, nonceOf(i));
@@ -624,7 +633,7 @@ describe("起動の隔離（§2.5）", () => {
     const running = await main(
       {
         EVM_FACILITATOR_KEY: `0x${"11".repeat(32)}`, EVM_FACILITATOR_TOKEN: TOKEN, EVM_FACILITATOR_NETWORKS: `${RH},${BASE}`, EVM_FACILITATOR_PAYTO_ALLOWLIST: PAYTO, EVM_FACILITATOR_PAYTO_ALLOWLIST_84532: ROUTER,
-        EVM_FACILITATOR_GAS_CAP_46630: "1000", EVM_FACILITATOR_GAS_CAP_84532: "1000", EVM_FACILITATOR_JOURNAL: path.join(dir, "journal.ndjson"), EVM_FACILITATOR_LOG: path.join(dir, "log.ndjson"), EVM_FACILITATOR_PORT: "48611",
+        EVM_FACILITATOR_GAS_CAP_46630: "1000", EVM_FACILITATOR_GAS_CAP_84532: "1000", EVM_FACILITATOR_JOURNAL: path.join(dir, "journal.ndjson"), EVM_FACILITATOR_LOG: path.join(dir, "log.ndjson"), EVM_FACILITATOR_PORT: String(await freePort()),
       },
       { stdout: (t) => void out.push(t), stderr: () => {} },
       { chainIoOf: async (network) => (network === BASE ? base.io : chain(RH).io) },

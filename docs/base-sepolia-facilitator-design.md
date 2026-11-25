@@ -157,3 +157,4 @@
   5（不正なヘッダの要求にも準備の確認）は採らない: 手元で断った支払いつきの要求を 503 にすると、送出していないのに Router が `unknown` にする。要件 FR-B5 の文言を「支払いヘッダの無い要求」に明確にした。
 - **I-2（readback）: REVISE**（5 件解決、2 件が一部、新しい 1 件。5 の不採用の理由は妥当と判定）。反映: 裏の仕事が上限（10 秒）までに終わらなければ journal も lock も閉じない、寿命の過ぎた読み取りを待っていた要求もその値を使わない、
   無効のときの計画の全部（設定・子の env・facilitator の計画）と一覧を、変更前の code（`e24bd6f`）が書いた fixture と照合（`tests/fixtures/config-golden/pre-base-facilitator.json`）。
+- **I-3（readback）: APPROVE**（新しい指摘なし。レビューは静的な照合だけ）。

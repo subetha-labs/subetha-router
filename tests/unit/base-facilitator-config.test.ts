@@ -77,7 +77,7 @@ describe("AC-B1: 無効なら今と完全に一致", () => {
     const before = golden[activation === RAILS_NONE ? "none" : "public"];
     for (const variant of [none, withBase(false, false, none)]) {
       for (const e of [golden.env, { ...golden.env, SUBETHA_EVM_FACILITATOR_GAS_CAP_84532: "4" }]) {
-        expect(JSON.stringify(planOf(variant, e)).replaceAll(process.cwd(), "<cwd>")).toBe(JSON.stringify(before.plan));
+        expect(JSON.stringify(planOf(variant, e)).replaceAll(`"${process.cwd()}/runtime/`, '"<cwd>/runtime/')).toBe(JSON.stringify(before.plan));
         expect(listed(variant, e)).toBe(JSON.stringify(before.listing));
       }
     }
