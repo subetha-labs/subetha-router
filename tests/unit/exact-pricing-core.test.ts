@@ -377,7 +377,7 @@ test("AC-5: 100 件の同時の quote で `/costs` の呼び出しは 1 回（�
   const fixture = createSubethaExactFacilitator({ providerId: "p", bearer: "fixture-provider-token-0123", settleBearer: "5e".repeat(32), chainId: 84532, asset: ASSET, domainName: "zERC20 USD Coin", domainVersion: "1" });
   await fixture.listen();
   try {
-    const costs = createSettleCosts({ baseUrl: `${fixture.baseUrl!}/xfac`, token: () => "5e".repeat(32), transport: createGuardedTransport({ allowLoopback: true, report: () => undefined }), chainId: 84532, asset: ASSET, now: () => clockMs });
+    const costs = createSettleCosts({ baseUrl: `${fixture.baseUrl!}/xfac`, token: () => "5e".repeat(32), transport: createGuardedTransport({ allowLoopback: true, report: () => undefined }), chainId: 84532, asset: ASSET, tenant: "p", now: () => clockMs });
     const core = await boot({ config: config({ maxPerDay: 1000 }, 200), exactPricing: createExactPricing({ costs, ethPrice: { price: 3_000_000_000n, atMs: clockMs }, now: () => clockMs }) });
     const results = await Promise.all(Array.from({ length: 100 }, (_, i) => quote(core, `c-${String(i)}`)));
     expect(results.filter((r) => r.ok)).toHaveLength(100);

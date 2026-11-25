@@ -49,6 +49,8 @@ export interface ExactHarnessOptions {
   /** `router.routes` を差し替える（route を消す試験）。 */
   readonly routes?: Record<string, unknown>;
   readonly skipRouter?: boolean;
+  /** 設定の `subethaExact` の節（無ければ節を持たない）。 */
+  readonly section?: Record<string, unknown>;
 }
 
 export function configDocument(upstreamBaseUrl: string, routes?: Record<string, unknown>): Record<string, unknown> {
@@ -88,7 +90,7 @@ export async function startExactHarness(options: ExactHarnessOptions = {}): Prom
   await writeFile(tokenFile, `${BEARER}\n`, { mode: 0o600 });
   const facilitator = await startListening("tests/fixtures/subetha-exact-facilitator.ts", [...(options.facilitatorArgs ?? []), "--provider-id", PROVIDER, "--bearer", BEARER, "--chain-id", String(CHAIN_ID), "--asset", ZUSDC, "--ttl-seconds", "300"]);
   const upstream = await startListening("tests/fixtures/x402-upstream.ts", [...(options.upstreamArgs ?? []), "--pay", "ok", "--asset", USDC]);
-  await writeFile(configPath, JSON.stringify(configDocument(upstream.baseUrl, options.routes), null, 2));
+  await writeFile(configPath, JSON.stringify({ ...configDocument(upstream.baseUrl, options.routes), ...(options.section === undefined ? {} : { subethaExact: options.section }) }, null, 2));
   const env: Record<string, string> = {
     ROUTER_CONFIG_PATH: configPath,
     ROUTER_JOURNAL_PATH: journalPath,

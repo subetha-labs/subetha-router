@@ -106,7 +106,7 @@ export function ethPriceUsable(price: EthPrice | undefined, nowMs: number, maxAg
 export interface SettleCosts {
   readonly p90Wei: bigint;
   readonly baseFeePerGas: bigint;
-  /** 応答の item の `l1Fee` の最大（無ければ 0）。 */
+  /** service 全体の 1 tx の L1 費用の最大（`summary.l1FeeMaxWei`）。 */
   readonly l1FeeMax: bigint;
   /** `overheadRate` × 10^6 を切り上げた整数 + 1（相手が小数 6 桁で切り捨てるため）。 */
   readonly overheadPpm: bigint;

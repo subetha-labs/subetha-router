@@ -125,6 +125,11 @@ export interface SubethaExactInboundOptions {
   readonly limits: SubethaExactLimits;
   /** 答えの得られなかった verify を、offer の種類に関わらず例外にする（core が unknown と記録する。設計 §3.1）。無ければ標準入口の offer だけ。 */
   readonly unansweredVerifyIsUnknown?: boolean;
+  /**
+   * settle 先が自分の tenant を受け付けるか（`docs/exact-costs-reader-design.md` C7）。**`false` だけ**新しい注文を断る（不明・例外は今までどおり）。
+   * 無ければ何も読まない。
+   */
+  readonly settleAccepting?: (routeId: string) => Promise<boolean | undefined>;
   readonly offerSeconds?: number;
   readonly timeouts?: Partial<SubethaExactTimeouts>;
   /** 試験の時計（ms）。 */
@@ -346,6 +351,10 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
       throw new InboundOfferError("source_offer_unavailable", "limit_total");
     }
     if (ledger0.requestsSince(nowMs - 60_000) >= options.limits.requestsPerMinute) throw new InboundOfferError("source_offer_unavailable", "limit_rate", 60_000);
+    // 照会（`lookupSweep`）と ledger の行より前: 断る時に facilitator を呼ばず、何も書かない（`GET /costs` を除く）。
+    if (options.settleAccepting !== undefined && (await options.settleAccepting(request.routeId).catch(() => undefined)) === false) {
+      throw new InboundOfferError("source_offer_unavailable", "settle_budget", 60_000);
+    }
     if (ledger0.unresolvedCount(nowSec()) >= options.limits.maxUnresolved) {
       await lookupSweep(request.routeId);
       if (ledger0.unresolvedCount(nowSec()) >= options.limits.maxUnresolved) {
