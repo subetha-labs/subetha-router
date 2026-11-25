@@ -972,6 +972,9 @@ site に `log` の指定は無く access log は出ていないが、それは�
 - **ETH の価格は 7 日で切れる**。切れる・無い・形が違う・5 分を越えて未来なら、Router は動き続け、zUSDC の新しい offer だけを 503 `pricing_unavailable` で断る（ほかの route は売れる）。更新は env の 2 行を変えて同じ image で作り直す（env は起動時に読む）。
 - **断られる理由**: `pricing_unavailable`（費用を読めない、成功した記録が無い、ETH の価格）、`pricing_over_limit`（settle の見積もりが 8,000、または受け取り額が 20,000 を越える）、`offer_daily_cap_reached`（1 日 20 件、UTC）、`offer_cap_reached`（総数）。どれも注文を作る前で、発行済みの offer は払える。
 - **見積もりであって黒字の保証ではない**。件数の上限 × `maxSettle` も損失の保証ではない。実費との照合は自動では行わない（`/costs` に注文の識別が無い）。
+- **受付の確認（2026-11-25。`docs/exact-costs-reader-design.md`）— コードだけ。本番では無効**: 式の route は、settle 先の `/costs` の `budget` が自分の tenant を受け付けると 60 秒以内に答えた時だけ売る（前の release の応答では売らない）。
+  固定の額の route は `RAILS_ACTIVATION.subethaExact.budgetGate: true` の時だけ読み、明確に断られている間は新しい offer を 503 `settle_budget` で断る。読めない時は売るが、**断りの答えを読んでから 10 分以内なら、その後に読めなくても断り続ける**。settle 先の token が無い `true` では子の Router は起動しない。
+  戻し方は欄を消した image。**settle 先が次の release になる前に、式を有効にしない**。
 - **設定値を変えると、変更の前の quote では払えない**（指紋）。`maxPerDay`・`ethPriceMaxAgeDays`・ETH の価格の変更では変わらない。固定の額に戻すのは欄を消した image（発行済みの式の quote は払えなくなる: 先に受付を止めて未解決 0 を確かめる）。
   **式の記録（`source.pricing`）を持つ journal を、この変更より前の image に戻すときも同じ**（古い image は欄を無視し、指紋の違いで支払いを断る）。
 

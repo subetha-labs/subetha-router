@@ -25,6 +25,9 @@ export const SETTLE_NOT_ACCEPTED_REASONS = [
   "settle_not_accepted:not_bound",
   "settle_not_accepted:blocked",
   "settle_not_accepted:unavailable",
+  // 次の release の 2 つ（`docs/exact-costs-reader-design.md` C8）。
+  "settle_not_accepted:tenant_budget",
+  "settle_not_accepted:tenant_capacity",
 ] as const;
 
 /** この facilitator の最後の答え。支払いが成立しないことの証拠ではない（ほかの送信者・reorg。要件 §1.1）。 */

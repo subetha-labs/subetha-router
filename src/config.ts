@@ -599,6 +599,8 @@ export interface SubethaExactConfig {
   readonly limits: SubethaExactLimits;
   /** 答えの得られなかった verify を全ての offer で unknown にする（`docs/hosted-exact-enable-design.md` §3.1）。欄が無ければ今までどおり。 */
   readonly unansweredVerifyIsUnknown?: boolean;
+  /** 固定の額の route でも settle 先の受付を読み、明確に断っている間は新しい注文を作らない（`docs/exact-costs-reader-design.md` C7）。欄が無ければ読まない。 */
+  readonly budgetGate?: boolean;
 }
 
 export interface RuntimeConfig {
@@ -1425,6 +1427,7 @@ function parseSubethaExact(
   const offerSeconds = parseOfferSeconds(env[SUBETHA_EXACT_OFFER_SECONDS_ENV], SUBETHA_EXACT_OFFER_SECONDS_ENV);
   let limits: SubethaExactLimits = SUBETHA_EXACT_DEFAULT_LIMITS;
   let unansweredVerifyIsUnknown = false;
+  let budgetGate = false;
   if (rawSection !== undefined) {
     if (!isRecord(rawSection)) throw new ConfigError("subethaExact must be an object when present");
     const rawLimits = rawSection["limits"];
@@ -1459,14 +1462,18 @@ function parseSubethaExact(
     const rawUnanswered = rawSection["unansweredVerifyIsUnknown"];
     if (rawUnanswered !== undefined && typeof rawUnanswered !== "boolean") throw new ConfigError("subethaExact.unansweredVerifyIsUnknown must be a boolean when present");
     unansweredVerifyIsUnknown = rawUnanswered === true;
+    const rawGate = rawSection["budgetGate"];
+    if (rawGate !== undefined && typeof rawGate !== "boolean") throw new ConfigError("subethaExact.budgetGate must be a boolean when present");
+    budgetGate = rawGate === true;
     for (const key of Object.keys(rawSection)) {
-      if (key !== "limits" && key !== "unansweredVerifyIsUnknown") throw new ConfigError("subethaExact has an unknown field");
+      if (key !== "limits" && key !== "unansweredVerifyIsUnknown" && key !== "budgetGate") throw new ConfigError("subethaExact has an unknown field");
     }
   }
   const formulaRoute = Object.values(router.routes).some((route) => route.pricing !== undefined);
   if (formulaRoute && settleTokenFile === undefined) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} is required when a route uses pricing`);
+  if (budgetGate && settleTokenFile === undefined) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} is required when subethaExact.budgetGate is true`);
   const ethPrice = formulaRoute ? parseEthPrice(env[SUBETHA_EXACT_ETH_PRICE_ENV], env[SUBETHA_EXACT_ETH_PRICE_AT_ENV]) : undefined;
-  return { facilitator, settleFacilitator, tokenFile, ...(ethPrice === undefined ? {} : { ethPrice }), ...(settleTokenFile === undefined ? {} : { settleTokenFile }), ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}) };
+  return { facilitator, settleFacilitator, tokenFile, ...(ethPrice === undefined ? {} : { ethPrice }), ...(settleTokenFile === undefined ? {} : { settleTokenFile }), ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}), ...(budgetGate ? { budgetGate: true } : {}) };
 }
 
 function parseReal(

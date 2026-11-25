@@ -60,7 +60,7 @@ import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
 import { currentDiagnosticScopeFrame, NOOP_DIAGNOSTICS, safeEmit, type DiagnosticsSink } from "./shared/diagnostics.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import { createSubethaExactInbound, type SubethaExactInbound, type SubethaExactInboundOptions } from "./adapters/inbound/subetha-exact.js";
-import { createExactPricing } from "./adapters/inbound/exact-pricing.js";
+import { createExactPricing, settleAcceptingOf } from "./adapters/inbound/exact-pricing.js";
 import { createSettleCosts } from "./adapters/inbound/settle-costs.js";
 import type { ExactPricing } from "./ports/exact-pricing.js";
 import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FORM, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
@@ -1053,6 +1053,19 @@ export function composeRails(
       if (settleToken === token) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} must not be the same token as ${SUBETHA_EXACT_TOKEN_FILE_ENV}`);
     }
     const settleTokenValue = settleToken;
+    // settle 先の `/costs`（`docs/exact-costs-reader-design.md`）: 式の route か `budgetGate` があるときだけ、同じ形の transport と settle 先の token で読む。読み取りは 1 つを共有する。
+    const budgetGate = section.budgetGate === true;
+    const settleCosts =
+      settleTokenValue !== undefined && (budgetGate || subethaExactRoutes.some((route) => route.pricing !== undefined))
+        ? createSettleCosts({
+            baseUrl: section.settleFacilitator.url,
+            token: () => settleTokenValue,
+            transport: createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }),
+            chainId: Number(network.slice("eip155:".length)),
+            asset: row.id,
+            tenant: section.facilitator.tenant.slice("/p/".length),
+          })
+        : undefined;
     subethaExactAdapter = createSubethaExactInbound({
       facilitatorUrl: section.facilitator.url,
       settleFacilitatorUrl: section.settleFacilitator.url,
@@ -1064,20 +1077,14 @@ export function composeRails(
       limits: section.limits,
       ...(section.unansweredVerifyIsUnknown === true ? { unansweredVerifyIsUnknown: true } : {}),
       ...(section.offerSeconds === undefined ? {} : { offerSeconds: section.offerSeconds }),
+      ...(budgetGate && settleCosts !== undefined ? { settleAccepting: settleAcceptingOf(settleCosts, subethaExactRoutes) } : {}),
       note,
       ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       ...(capabilities.subethaExactHooksForTest === undefined ? {} : { hooksForTest: capabilities.subethaExactHooksForTest }),
     });
-    // 式の価格（`docs/exact-pricing-design.md`）: 式の route があるときだけ、settle 先の `/costs` を同じ形の transport と settle 先の token で読む。
-    if (settleTokenValue !== undefined && subethaExactRoutes.some((route) => route.pricing !== undefined)) {
-      const costs = createSettleCosts({
-        baseUrl: section.settleFacilitator.url,
-        token: () => settleTokenValue,
-        transport: createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }),
-        chainId: Number(network.slice("eip155:".length)),
-        asset: row.id,
-      });
-      exactPricing = createExactPricing({ costs, ...(section.ethPrice === undefined ? {} : { ethPrice: section.ethPrice }) });
+    // 式の価格（`docs/exact-pricing-design.md`）: 式の route があるときだけ。
+    if (settleCosts !== undefined && subethaExactRoutes.some((route) => route.pricing !== undefined)) {
+      exactPricing = createExactPricing({ costs: settleCosts, ...(section.ethPrice === undefined ? {} : { ethPrice: section.ethPrice }) });
     }
     inboundRails["subetha-exact"] = subethaExactAdapter;
   } else if (real.subethaExact !== undefined) {

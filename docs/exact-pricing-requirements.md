@@ -75,6 +75,7 @@ settle 4,230、withdraw 2,250、take 500、C 16,980、amount **17,040**、markup
 
 - **R1（対象）** 式の価格は、設定で式を選んだ `subetha-exact` の静的 route だけ。選ばない route は、一覧・指紋・journal・計算が今と同じ。
 - **R2（前提）** 式の route があるのに、settle 先の token（PR #214）が無い、`offerCap` が無い、上流が §2 の対象でない、§3.1 の範囲の外、予算の区分の 1 件の上限が `maxAmount` 未満、のどれかなら起動しない（固定文）。
+- **R3・R4 の読み取りは [exact-costs-reader-design.md](exact-costs-reader-design.md)（2026-11-25）が置き換えた**：`l1` は `summary.l1FeeMaxWei` だけ、`?n=100`、`budget` の受付が true でなければ売らない（60 秒まで）。
 - **R3（読み取り）** `GET /costs` を settle 先の origin から読む。token は `POST /settle` と `GET /costs` にだけ付ける（settle 設計 R3 の拡張）。redirect は拒否、本文は 256 KiB まで、1 回 3 秒まで【案】、再試行なし。
   注文のたびには呼ばず、短時間（案：60 秒）使い回す。同時の呼び出しは 1 つにまとめる。失敗した時に前の値を使ってよいのは、読んだ時刻から 10 分まで【案】。429 のあとは待つ。
 - **R4（検査）** 応答は信用しない。200 の object で、chain id と token が route と一致し、使う値が 10 進の非負の整数の文字列で 30 桁まで、`overheadRate` が 0 以上 0.5 未満の数、`successfulItems` が 1 以上、`p90` が null でなく、`baseFeePerGas` と `asOfBlock` が null でないこと。

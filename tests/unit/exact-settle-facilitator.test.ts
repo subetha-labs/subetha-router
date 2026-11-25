@@ -31,14 +31,14 @@ const TX = `0x${"c3".repeat(32)}`;
 
 /** 要件 R8 の一覧（実装の配列とは別に書き下す）。 */
 const PENDING = ["settle_pending"];
-const NOT_ACCEPTED = ["out_of_scope", "stopping", "conflict", "verify_unavailable", "invalid_payment", "bound_unreachable", "not_bound", "blocked", "unavailable"].map((r) => `settle_not_accepted:${r}`);
+const NOT_ACCEPTED = ["out_of_scope", "stopping", "conflict", "verify_unavailable", "invalid_payment", "bound_unreachable", "not_bound", "blocked", "unavailable", "tenant_budget", "tenant_capacity"].map((r) => `settle_not_accepted:${r}`);
 const FAILED = ["already-used", "simulation-failed", "no-transfer-in-settlement-transaction", "transaction-failed-twice", "cancelled", "expired-in-queue", "order-expired-in-queue", "not-bound", "oversized", "cancelled-by-operator"].map((r) => `settle_failed:${r}`);
 const NEAR_MISSES = ["settle_pending ", " settle_pending", "SETTLE_PENDING", "settle_pending:x", "settle_failed", "settle_failed:", "settle_failed:already-used:x", "settle_failed:already_used", "settle_not_accepted", "settle_not_accepted:secret-text"];
 
 describe("理由の一覧と分類", () => {
   const response = (status: number, json: unknown, unreadable = false): CallOutcome => ({ kind: "response", status, json, retryAfter: null, unreadable });
 
-  test("一覧は要件 R8 の 20 個。完全一致だけ。待つのは settle_pending と settle_failed の 10 個", () => {
+  test("一覧は要件 R8 の 20 個と `exact-costs-reader-design.md` C8 の 2 個。完全一致だけ。待つのは settle_pending と settle_failed の 10 個", () => {
     expect([SETTLE_PENDING_REASON, ...SETTLE_NOT_ACCEPTED_REASONS, ...SETTLE_FAILED_REASONS].sort()).toEqual([...PENDING, ...NOT_ACCEPTED, ...FAILED].sort());
     for (const reason of [...PENDING, ...FAILED]) expect([classifySettleReason(reason), settleReasonWaits(classifySettleReason(reason))], reason).toEqual([reason, true]);
     for (const reason of NOT_ACCEPTED) expect([classifySettleReason(reason), settleReasonWaits(classifySettleReason(reason))], reason).toEqual([reason, false]);

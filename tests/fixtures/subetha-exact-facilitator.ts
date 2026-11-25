@@ -120,10 +120,10 @@ export interface CostsAnswer {
   readonly body?: string;
   readonly delayMs?: number;
 }
-/** 既定の `/costs`（本番の 1 件と同じくらい: 156,633 gas × 0.006 gwei + L1 1,041）。 */
-export function defaultCosts(chainId: number, token: string): Record<string, unknown> {
+/** 既定の `/costs`（本番の 1 件と同じくらい: 156,633 gas × 0.006 gwei + L1 1,041。次の release の形: `l1FeeMaxWei` と自分の tenant の `budget`）。 */
+export function defaultCosts(chainId: number, token: string, tenant = "p"): Record<string, unknown> {
   const item = { txHash: `0x${"54".repeat(32)}`, blockNumber: 1, batchSize: 1, gasUsed: "156633", effectiveGasPrice: "6000000", l1Fee: "1041", shareWei: "939798001041", canonicalFeeWei: "939798001041", ok: true, incomplete: false, final: true };
-  return { chainId, token, asOfBlock: 1, baseFeePerGas: "5000000", items: [item], summary: { transactions: 1, successfulItems: 1, allocatedMedianWei: "939798001041", allocatedP90Wei: "939798001041", incompleteCount: 0, byBatchSize: {}, overheadRate: 0 } };
+  return { chainId, token, asOfBlock: 1, baseFeePerGas: "5000000", items: [item], summary: { transactions: 1, successfulItems: 1, allocatedMedianWei: "939798001041", allocatedP90Wei: "939798001041", incompleteCount: 0, byBatchSize: {}, overheadRate: 0, l1FeeMaxWei: "1041" }, budget: [{ tenant, accepting: true }] };
 }
 
 function pairKey(requesterDigest: string, resourceDigest: string): string {
@@ -407,7 +407,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
       if (options.settleBearer !== undefined && req.headers.authorization !== `Bearer ${options.settleBearer}`) return sendJson(res, 401, { error: "unauthorized" });
       if (costsAnswer.delayMs !== undefined) await sleep(costsAnswer.delayMs);
       res.writeHead(costsAnswer.status, { "content-type": "application/json", ...costsAnswer.headers });
-      res.end(costsAnswer.body ?? JSON.stringify(defaultCosts(options.chainId, asset)));
+      res.end(costsAnswer.body ?? JSON.stringify(defaultCosts(options.chainId, asset, options.providerId)));
       return;
     }
     if (url.pathname.startsWith(`${FIXTURE_EXTERNAL_FACILITATOR_PATH}/`)) {

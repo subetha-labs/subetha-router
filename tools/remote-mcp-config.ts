@@ -201,10 +201,11 @@ export interface RailsActivation {
    * host の env `SUBETHA_EXACT_FACILITATOR_URL`・`SUBETHA_EXACT_TOKEN_FILE` が要る。新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に。
    */
   /** `formulaPricing: true` で受け取り額を費用の式で決める（`docs/exact-pricing-design.md` §9。無ければ固定の額のまま）。settle 先の token と ETH の価格の env が要る。 */
-  readonly subethaExact?: { readonly inbound: boolean; readonly formulaPricing?: boolean };
+  /** `budgetGate: true` で、settle 先が受け付けないと明示している間は新しい offer を出さない（`docs/exact-costs-reader-design.md` C7。無ければ読まない）。settle 先の token の env が要る。 */
+  readonly subethaExact?: { readonly inbound: boolean; readonly formulaPricing?: boolean; readonly budgetGate?: boolean };
 }
 /** `subethaExact` の既定（無ければ `false`）。 */
-export function subethaExactOf(activation: RailsActivation): { readonly inbound: boolean; readonly formulaPricing?: boolean } {
+export function subethaExactOf(activation: RailsActivation): { readonly inbound: boolean; readonly formulaPricing?: boolean; readonly budgetGate?: boolean } {
   return activation.subethaExact ?? SUBETHA_OFF;
 }
 /**
@@ -1000,7 +1001,7 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
           }),
     },
     // `subetha-exact` の adapter の上限と、verify の無応答の扱い（`docs/hosted-exact-enable-design.md` §3、§3.1）。有効なときだけ節を持つ。
-    ...(hostedExact === undefined ? {} : { subethaExact: { limits: { ...HOSTED_EXACT.limits }, unansweredVerifyIsUnknown: true } }),
+    ...(hostedExact === undefined ? {} : { subethaExact: { limits: { ...HOSTED_EXACT.limits }, unansweredVerifyIsUnknown: true, ...(subethaExactOf(rails.activation).budgetGate === true ? { budgetGate: true } : {}) } }),
   };
 }
 

@@ -142,18 +142,19 @@ describe("AC-12: 設定の範囲と ETH の価格", () => {
 describe("AC-2・AC-5・AC-10: 費用の読み取り", () => {
   const expected = { chainId: 84532, asset: ASSET };
   const good = (): Record<string, unknown> => structuredClone(defaultCosts(84532, ASSET.toLowerCase()));
-  test("応答の検査: 使う値の形が 1 つでも違えば使えない。l1Fee が null の item は除く", () => {
+  test("応答の検査: 使う値の形が 1 つでも違えば使えない。l1 は summary.l1FeeMaxWei だけ（行は読まない）", () => {
     expect(parseSettleCosts(good(), expected, 5)).toEqual({ p90Wei: 939_798_001_041n, baseFeePerGas: 5_000_000n, l1FeeMax: 1_041n, overheadPpm: 1n, readAtMs: 5 });
     const bad = (patch: Record<string, unknown>, summary: Record<string, unknown> = {}): unknown => ({ ...good(), ...patch, summary: { ...(good()["summary"] as object), ...summary } });
     for (const json of [
       null, [], "x", {},
       bad({ chainId: 1 }), bad({ chainId: "84532" }), bad({ token: USDC }), bad({ token: undefined }), bad({ asOfBlock: null }), bad({ asOfBlock: -1 }),
       bad({ baseFeePerGas: null }), bad({ baseFeePerGas: 5 }), bad({ baseFeePerGas: "-5" }), bad({ baseFeePerGas: "9".repeat(31) }),
-      bad({ items: undefined }), bad({ items: Array.from({ length: 501 }, () => ({ l1Fee: "1" })) }), bad({ items: [{ l1Fee: 5 }] }), bad({ items: [null] }),
+      bad({ items: undefined }), bad({ items: Array.from({ length: 501 }, () => ({ l1Fee: "1" })) }), bad({ items: {} }),
+      bad({}, { l1FeeMaxWei: undefined }), bad({}, { l1FeeMaxWei: null }), bad({}, { l1FeeMaxWei: 5 }), bad({}, { l1FeeMaxWei: "01" }), bad({}, { l1FeeMaxWei: "-1" }), bad({}, { l1FeeMaxWei: "9".repeat(31) }),
       bad({}, { successfulItems: 0 }), bad({}, { successfulItems: undefined }), bad({}, { allocatedP90Wei: null }), bad({}, { allocatedP90Wei: 5 }),
       bad({}, { overheadRate: null }), bad({}, { overheadRate: 0.5 }), bad({}, { overheadRate: -0.1 }), bad({}, { overheadRate: "0" }), bad({}, { overheadRate: Number.NaN }),
     ]) expect(parseSettleCosts(json, expected, 5), JSON.stringify(json)?.slice(0, 80)).toBeUndefined();
-    expect(parseSettleCosts(bad({ items: [{ l1Fee: null }, { l1Fee: "7" }] }), expected, 5)?.l1FeeMax).toBe(7n);
+    for (const items of [[], [{ l1Fee: "999999999999" }], [null], Array.from({ length: 500 }, () => ({ l1Fee: "7" }))]) expect(parseSettleCosts(bad({ items }), expected, 5)?.l1FeeMax).toBe(1_041n);
     expect(parseSettleCosts(bad({}, { overheadRate: 0.2 }), expected, 5)?.overheadPpm).toBe(200_001n);
     expect(parseSettleCosts(bad({}, { overheadRate: 0.499999 }), expected, 5)?.overheadPpm).toBe(500_000n);
   });
@@ -171,14 +172,14 @@ describe("AC-2・AC-5・AC-10: 費用の読み取り", () => {
     clock = 1_800_000_000_000;
     fixture = createSubethaExactFacilitator({ providerId: "p", bearer: "fixture-provider-token-0123", settleBearer, chainId: 84532, asset: ASSET, domainName: "zERC20 USD Coin", domainVersion: "1" });
     await fixture.listen();
-    return createSettleCosts({ baseUrl: `${fixture.baseUrl!}/xfac`, token: () => TOKEN, transport: createGuardedTransport({ allowLoopback: true, report: (e) => reports.push(e) }), chainId: 84532, asset: ASSET, now: () => clock, timeoutMs });
+    return createSettleCosts({ baseUrl: `${fixture.baseUrl!}/xfac`, token: () => TOKEN, transport: createGuardedTransport({ allowLoopback: true, report: (e) => reports.push(e) }), chainId: 84532, asset: ASSET, tenant: "p", now: () => clock, monotonicNow: () => clock, timeoutMs });
   }
   const calls = () => fixture!.calls.byRoute["costs"] ?? 0;
 
   test("100 件の同時の読みで呼び出しは 1 回。60 秒の中は 0 回、過ぎたら 1 回", async () => {
     const costs = await reader();
     const all = await Promise.all(Array.from({ length: 100 }, () => costs.read()));
-    expect(all.every((c) => c?.p90Wei === 939_798_001_041n)).toBe(true);
+    expect(all.every((c) => c.costs?.p90Wei === 939_798_001_041n && c.accepting === true)).toBe(true);
     expect(calls()).toBe(1);
     clock += 59_999;
     await costs.read();
@@ -188,12 +189,12 @@ describe("AC-2・AC-5・AC-10: 費用の読み取り", () => {
     expect(calls()).toBe(2);
   });
 
-  test("失敗: 10 分以内は前の値、過ぎたら使えない。失敗のあと 10 秒は読みに行かない。429 は Retry-After を待つ。時計が戻った値は使わない", async () => {
+  test("失敗: 費用は 10 分以内は前の値、過ぎたら使えない。失敗のあと 10 秒は読みに行かない。429 は Retry-After を待つ。時計が戻った値は使わない", async () => {
     const costs = await reader();
-    expect(await costs.read()).toBeDefined();
+    expect((await costs.read()).costs).toBeDefined();
     fixture!.setCosts({ status: 500 });
     clock += 60_000;
-    expect(await costs.read()).toBeDefined();
+    expect((await costs.read()).costs).toBeDefined();
     expect(calls()).toBe(2);
     clock += 9_999;
     await costs.read();
@@ -206,19 +207,19 @@ describe("AC-2・AC-5・AC-10: 費用の読み取り", () => {
     await costs.read();
     expect(calls()).toBe(4);
     clock += 119_999;
-    expect(await costs.read()).toBeDefined();
+    expect((await costs.read()).costs).toBeDefined();
     expect(calls()).toBe(4);
     fixture!.setCosts({ status: 500 });
     clock = 1_800_000_000_000 + 599_999;
-    expect(await costs.read()).toBeDefined();
+    expect((await costs.read()).costs).toBeDefined();
     clock += 1;
-    expect(await costs.read()).toBeUndefined();
+    expect((await costs.read()).costs).toBeUndefined();
     fixture!.setCosts({ status: 200 });
     clock += 60_000;
-    expect(await costs.read()).toBeDefined();
+    expect((await costs.read()).costs).toBeDefined();
     clock -= 1_000_000;
     fixture!.setCosts({ status: 500 });
-    expect(await costs.read()).toBeUndefined();
+    expect((await costs.read()).costs).toBeUndefined();
   });
 
   test("使えない応答: 別の chain・JSON でない・本文の超過・timeout・redirect・401。どれも undefined で投げない。token は記録に出ない", async () => {
@@ -232,11 +233,11 @@ describe("AC-2・AC-5・AC-10: 費用の読み取り", () => {
     ]) {
       const costs = await reader();
       fixture!.setCosts(answer);
-      expect(await costs.read(), JSON.stringify(answer).slice(0, 60)).toBeUndefined();
+      expect(await costs.read(), JSON.stringify(answer).slice(0, 60)).toEqual({});
       await fixture!.close();
     }
     const wrong = await reader("ab".repeat(32));
-    expect(await wrong.read()).toBeUndefined();
+    expect(await wrong.read()).toEqual({});
     expect(JSON.stringify(reports)).not.toContain(TOKEN);
   });
 

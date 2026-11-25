@@ -32,6 +32,8 @@ pricing: { kind: "settle-cost-v1", factorBps, take, withdrawCost, withdrawBatch,
 
 ## 3. 費用の読み取り
 
+**2026-11-25 に [exact-costs-reader-design.md](exact-costs-reader-design.md) が置き換えた**（`l1` の元、`n`、受付の確認、覚え方）。下は置き換える前の記録。
+
 - transport は adapter と同じ guarded transport。header は `Authorization` だけ。redirect 拒否、256 KiB、3 秒（`n` は tx の数で、まとめ送りは 1 tx に 20 件まで。20 tx なら 400 item・約 130 KB）。再試行なし。
 - 応答の検査は要件 R4。`l1` は、`l1Fee` が 10 進の文字列の item の最大（item の数は 500 まで。越えたら使えない）。
 - 読めた値は 60 秒使い回す。進行中の読み取りは共有する。失敗したら 10 秒は読みに行かない（429 は `Retry-After` の秒数、1〜300 の範囲、無ければ 10 秒）。失敗の間は、読んだ時刻から 10 分までの前の値を使う。

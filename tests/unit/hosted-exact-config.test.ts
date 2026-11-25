@@ -96,6 +96,11 @@ describe("スイッチと定数", () => {
       destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
     });
     expect(on.subethaExact).toEqual({ limits: HOSTED_EXACT.limits, unansweredVerifyIsUnknown: true });
+    // 受付の確認（`docs/exact-costs-reader-design.md` C9）: 有効にした時だけ 1 欄増え、公開の定数は無効のまま。
+    const gated = routerConfigOf(ENV_ON, RECEIVER, true, { ...ON, activation: { ...ON.activation, subethaExact: { inbound: true, budgetGate: true } } }) as typeof on;
+    expect(gated).toEqual({ ...on, subethaExact: { ...(on.subethaExact as object), budgetGate: true } });
+    expect(JSON.stringify(routerConfigOf(ENV_ON, RECEIVER, true, { ...ON, activation: { ...ON.activation, subethaExact: { inbound: true, budgetGate: false } } }))).toBe(JSON.stringify(on));
+    expect(RAILS_ACTIVATION.subethaExact).not.toHaveProperty("budgetGate");
     expect(on.x402.upstreams[HOSTED_EXACT.routeId]).toBe(UPSTREAM_X402);
     expect(on.router.budget.buckets).toContainEqual({ network: "eip155:84532", asset: HOSTED_EXACT.source.asset, maxTotal: "10000000", maxPerPurchase: "20000" });
     // 足したものを除けば、無効の生成と同じ。
@@ -148,6 +153,10 @@ describe("スイッチと定数", () => {
     };
     expect(bad((d) => void ((d["subethaExact"] as { limits: Record<string, number> }).limits["maxUnresolvedPerSource"] = 1))).toThrow("maxUnresolvedPerSource");
     expect(bad((d) => void ((d["subethaExact"] as Record<string, unknown>)["unansweredVerifyIsUnknown"] = "yes"))).toThrow("unansweredVerifyIsUnknown");
+    expect(bad((d) => void ((d["subethaExact"] as Record<string, unknown>)["budgetGate"] = "yes"))).toThrow("budgetGate must be a boolean");
+    // settle 先の token が無ければ起動しない。
+    expect(bad((d) => void ((d["subethaExact"] as Record<string, unknown>)["budgetGate"] = true))).toThrow("is required when subethaExact.budgetGate is true");
+    expect(bad((d) => void ((d["subethaExact"] as Record<string, unknown>)["budgetGate"] = false))()).toMatchObject({ real: { subethaExact: { unansweredVerifyIsUnknown: true } } });
     expect(bad((d) => void ((d["subethaExact"] as Record<string, unknown>)["extra"] = 1))).toThrow("unknown field");
     expect(bad((d) => void (((d["router"] as { routes: Record<string, Record<string, unknown>> }).routes[HOSTED_EXACT.routeId]!)["offerCap"] = { maxCommitted: -1 }))).toThrow("offerCap");
     expect(bad((d) => void (((d["router"] as { routes: Record<string, Record<string, unknown>> }).routes["md-mpp-eth-snapshot"]!)["offerCap"] = { maxCommitted: 1 }))).toThrow("offerCap is only allowed");
