@@ -7,7 +7,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   cliConfigOf,
@@ -495,6 +495,22 @@ describe("準備（/ready・/verify。§2.3）", () => {
     expect(await isReady(h)).toBe(false);
   });
 
+  test("寿命の過ぎた読み取りを待っていた要求も、その値を使わない", async () => {
+    const h = await harness();
+    let give!: (v: bigint) => void;
+    h.base.balance = () => new Promise<bigint>((r) => (give = r));
+    const first = isReady(h);
+    await flush();
+    await h.advance(2_000);
+    expect(await first).toBe(false);
+    await h.advance(3_000);
+    const joined = isReady(h);
+    await flush();
+    await h.advance(1_000);
+    give(10n ** 18n);
+    expect(await joined).toBe(false);
+  });
+
   test("控えがあっても、保留になれば直ちに準備なし", async () => {
     const h = await harness();
     expect(await isReady(h)).toBe(true);
@@ -933,6 +949,67 @@ describe("終了と起動の失敗: journal と lock を放す前に裏の仕事
       }
       expect(order).toEqual(["check done", "journal closed", "lock released"]);
     } finally {
+      if (blocker.listening) await new Promise<void>((r) => blocker.close(() => r()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("終わらない裏の仕事があれば、journal も lock も閉じない", () => {
+  test.each([["close()", false], ["listen の失敗", true]] as const)("%s: 復帰の照合が終わらない → 上限で戻るが journal・lock は開いたまま。遅れた追記は届く", async (_n, failListen) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const dir = mkdtempSync(path.join(tmpdir(), "evm-fac-base-"));
+    const order: string[] = [];
+    const base = chain(BASE, { lazy: true });
+    let give!: () => void;
+    let began!: () => void;
+    const started = new Promise<void>((r) => (began = r));
+    // 復帰の照合の receipt が返らない（照合の期限 8 秒より先に閉じる）。
+    base.io.reader.receipt = () => new Promise((r) => {
+      give = () => r(receiptOf());
+      began();
+    });
+    const journal = fakeJournal([...INIT.filter((r) => r.type === "gas_cap_init" && r.network === BASE), ...unresolved(1, hashOf(1))]);
+    const env: NodeJS.ProcessEnv = {
+      EVM_FACILITATOR_KEY: `0x${"11".repeat(32)}`, EVM_FACILITATOR_TOKEN: TOKEN, EVM_FACILITATOR_NETWORKS: BASE, EVM_FACILITATOR_PAYTO_ALLOWLIST: ROUTER,
+      EVM_FACILITATOR_GAS_CAP_84532: (10n ** 16n).toString(), EVM_FACILITATOR_JOURNAL: path.join(dir, "journal.ndjson"), EVM_FACILITATOR_LOG: path.join(dir, "log.ndjson"), EVM_FACILITATOR_PORT: "1",
+    };
+    const blocker = http.createServer();
+    await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", () => r()));
+    env["EVM_FACILITATOR_PORT"] = String((blocker.address() as AddressInfo).port);
+    if (!failListen) await new Promise<void>((r) => blocker.close(() => r()));
+    let closed!: Promise<unknown>;
+    const deps = {
+      chainIoOf: async () => base.io, quiesceMsForTest: 500,
+      lock: () => ({ release: () => void order.push("lock released") }),
+      journalOf: () => Object.assign(journal, { close: async () => void order.push("journal closed") }),
+    };
+    try {
+      if (failListen) {
+        // chain id の確認（終わらない）が裏の仕事。
+        base.check = () => new Promise<boolean>(() => {});
+        closed = expect(main(env, { stdout: () => {}, stderr: () => {} }, deps)).rejects.toThrow("listen_failed");
+        for (let i = 0; i < 20; i += 1) await flush();
+        await vi.advanceTimersByTimeAsync(600);
+        await closed;
+        expect(order).toEqual([]);
+      } else {
+        const running = await main(env, { stdout: () => {}, stderr: () => {} }, deps);
+        await flush();
+        await vi.advanceTimersByTimeAsync(RECOVERY_INTERVAL_MS);
+        await started;
+        closed = running.close();
+        for (let i = 0; i < 20; i += 1) await flush();
+        await vi.advanceTimersByTimeAsync(600);
+        await closed;
+        expect(order).toEqual([]);
+        // 遅れて返った receipt の追記は、開いたままの journal に届く。
+        give();
+        await flush();
+        expect(types(journal)).toEqual(["submit_intent", "submitted", "settled"]);
+      }
+    } finally {
+      vi.useRealTimers();
       if (blocker.listening) await new Promise<void>((r) => blocker.close(() => r()));
       rmSync(dir, { recursive: true, force: true });
     }

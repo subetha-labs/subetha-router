@@ -155,3 +155,5 @@
 - **I-1（Codex `gpt-6-astra`、CLI read-only）: REVISE**（MUST 3・SHOULD 4）。反映: 1 `close`・起動の失敗でも裏の仕事を止めて待ってから journal と lock を放す、2 期限切れの `aborted_before_send`・`reverted` の追記も復帰の対象に（保留の理由を分けた。log の文字列だけ全 network で変わる）、
   3 復帰の追記と解除の直前に journal の失敗を見直す、4 準備の読み取りは下の RPC が終わるまで 1 本、6 無効の byte 一致を変更前の golden とも照合・実際の Worker と facilitator の核をつないだ wire 試験、7 DEPLOY の遅れと対象外の記述。
   5（不正なヘッダの要求にも準備の確認）は採らない: 手元で断った支払いつきの要求を 503 にすると、送出していないのに Router が `unknown` にする。要件 FR-B5 の文言を「支払いヘッダの無い要求」に明確にした。
+- **I-2（readback）: REVISE**（5 件解決、2 件が一部、新しい 1 件。5 の不採用の理由は妥当と判定）。反映: 裏の仕事が上限（10 秒）までに終わらなければ journal も lock も閉じない、寿命の過ぎた読み取りを待っていた要求もその値を使わない、
+  無効のときの計画の全部（設定・子の env・facilitator の計画）と一覧を、変更前の code（`e24bd6f`）が書いた fixture と照合（`tests/fixtures/config-golden/pre-base-facilitator.json`）。

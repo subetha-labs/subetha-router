@@ -1033,7 +1033,7 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
 
   /** 準備の読み取り（残高・手数料の見積り）の控え。成功だけを控える。 */
   const readyCache = new Map<string, { readonly at: number; readonly balance: bigint; readonly maxFeePerGas: bigint }>();
-  const readyInFlight = new Map<string, Promise<{ readonly balance: bigint; readonly maxFeePerGas: bigint } | undefined>>();
+  const readyInFlight = new Map<string, Promise<{ readonly at: number; readonly balance: bigint; readonly maxFeePerGas: bigint } | undefined>>();
 
   function readyInputs(network: string): Promise<{ readonly balance: bigint; readonly maxFeePerGas: bigint } | undefined> {
     const cached = readyCache.get(network);
@@ -1058,10 +1058,14 @@ export function createEvmFacilitator(options: EvmFacilitatorOptions): EvmFacilit
         .finally(() => readyInFlight.delete(network));
       readyInFlight.set(network, running);
     }
-    return within(running, clock.now() + READY_READ_MS).catch((error: unknown) => {
-      noteRpcFailure(diagnostics, network, "native_balance", error);
-      return undefined;
-    });
+    return within(running, clock.now() + READY_READ_MS).then(
+      // 待っている間に寿命の過ぎた読み取り（先の要求が始めたもの）は使わない。
+      (value) => (value !== undefined && clock.now() - value.at < READY_CACHE_MS ? value : undefined),
+      (error: unknown) => {
+        noteRpcFailure(diagnostics, network, "native_balance", error);
+        return undefined;
+      },
+    );
   }
 
   /** 今 settle できる見込みか（設計 §2.3。`/ready` と `/verify` が同じ条件を使う）。読み取りだけ。 */
@@ -2469,6 +2473,8 @@ export interface MainDeps {
   readonly journalOf?: (file: string) => FacilitatorJournal & { close(): Promise<void> };
   /** 診断の sink の作り方（試験）。既定は `createFileDiagnosticsSink`（component `facilitator`、16 MiB）。 */
   readonly diagnosticsOf?: (file: string) => FileDiagnosticsSink;
+  /** 終了・起動の失敗で裏の仕事を待つ上限（試験）。 */
+  readonly quiesceMsForTest?: number;
 }
 
 /** drain の中で診断の記録を書き出して閉じる時間の上限（best effort。drain の成否には入れない）。 */
@@ -2522,11 +2528,14 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
   }
   const diagnostics: DiagnosticsSink = diagnosticsSink ?? NOOP_DIAGNOSTICS;
   let created: EvmFacilitator | undefined;
-  /** journal を閉じて lock を放す前に、裏の仕事（復帰・chain id の確認）を止め、始まったものを待つ。 */
-  const quiesce = async (): Promise<void> => {
-    if (created === undefined) return;
+  /**
+   * journal を閉じて lock を放す前に、裏の仕事（復帰・chain id の確認・遅れた送出の続き）を止め、始まったものを待つ。
+   * 上限までに終わらなければ false: journal も lock も閉じない（遅れた追記が journal に届き、lock は process の終了で kernel が解く）。
+   */
+  const quiesce = async (): Promise<boolean> => {
+    if (created === undefined) return true;
     created.drain.close();
-    await created.drain.idle(RECOVERY_DEADLINE_MS + 2_000);
+    return created.drain.idle(deps.quiesceMsForTest ?? RECOVERY_DEADLINE_MS + 2_000);
   };
   try {
     const chains = new Map<string, ChainIo>();
@@ -2555,8 +2564,9 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       host,
       async close() {
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        await quiesce();
+        const quiet = await quiesce();
         await closeDiagnostics(diagnosticsSink, DIAGNOSTICS_CLOSE_MS);
+        if (!quiet) return;
         await journal.close().catch(() => {});
         lock.release();
       },
@@ -2587,10 +2597,12 @@ export async function main(env: NodeJS.ProcessEnv, out: CliOutput, deps: MainDep
       },
     };
   } catch (error) {
-    await quiesce();
+    const quiet = await quiesce();
     await closeDiagnostics(diagnosticsSink, DIAGNOSTICS_CLOSE_MS);
-    await journal.close().catch(() => {});
-    lock.release();
+    if (quiet) {
+      await journal.close().catch(() => {});
+      lock.release();
+    }
     throw error;
   }
 }

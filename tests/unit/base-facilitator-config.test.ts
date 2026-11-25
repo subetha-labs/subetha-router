@@ -72,15 +72,13 @@ describe("AC-B1: 無効なら今と完全に一致", () => {
       expect(listed(variant, e)).toBe(listed(none, env));
     }
     expect(expected.childEnv["ROUTER_X402_INBOUND_FACILITATOR_URL"]).toBe(INBOUND.facilitator);
-    // 変更前の code が書いた golden（`tests/unit/config-golden.test.ts`。この変更では書き直していない）とも一致する。
-    if (activation !== RAILS_NONE) {
-      const golden = JSON.parse(readFileSync(path.join(import.meta.dirname, "../fixtures/config-golden/public.json"), "utf8"));
-      const { subethaExact: _exact, ...before } = none;
-      const e = { ...env, SUBETHA_EVM_FACILITATOR_TOKEN: "config-golden-token_0123456789abcdefABCDEF", SUBETHA_OUTBOUND_SOLANA_KEY: "2Lo8Y9kVf2iN4z3e5ZQ9k3nQJc7wq6yQx8k2mF9sP4tHc5uW1bX7aN3dR6gT9jK2" };
-      for (const variant of [before, withBase(false, false, before)]) {
-        const plan = hostPlanOf({ activation: variant, bind: "127.0.0.1", port: 0, journalPath: "/tmp/golden.ndjson" }, e);
-        expect(JSON.stringify(plan.config)).toBe(JSON.stringify(golden.config));
-        expect(JSON.stringify(plan.childEnv)).toBe(JSON.stringify(golden.childEnv));
+    // 変更前の code（origin/main e24bd6f）が書いた計画の全部（設定・子の env・facilitator の計画）と一覧（`pre-base-facilitator.json`。作り方はその env と同じ入力）。
+    const golden = JSON.parse(readFileSync(path.join(import.meta.dirname, "../fixtures/config-golden/pre-base-facilitator.json"), "utf8"));
+    const before = golden[activation === RAILS_NONE ? "none" : "public"];
+    for (const variant of [none, withBase(false, false, none)]) {
+      for (const e of [golden.env, { ...golden.env, SUBETHA_EVM_FACILITATOR_GAS_CAP_84532: "4" }]) {
+        expect(JSON.stringify(planOf(variant, e)).replaceAll(process.cwd(), "<cwd>")).toBe(JSON.stringify(before.plan));
+        expect(listed(variant, e)).toBe(JSON.stringify(before.listing));
       }
     }
     expect(JSON.stringify(expected)).not.toMatch(/provider-x402-base|_84532/);
