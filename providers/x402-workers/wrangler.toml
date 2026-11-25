@@ -65,3 +65,13 @@ name = "provider-x402-sepolia"
 [env.sepolia.vars]
 PROVIDER_NETWORK = "sepolia"
 PAY_TO = "0xf8243d93F339807CA9846Aa31155A2B2262D08db"
+
+# Base Sepolia（`docs/base-sepolia-facilitator-design.md` §5）。402 は Provider A（provider-x402.subethalabs.com）と同じ値で、facilitator は自前。
+# `FACILITATOR_URL` は secret（rh と同じ値）: npx wrangler secret put FACILITATOR_URL --env base。facilitator が Base を扱うまで、未払いの要求にも 503 を返す。
+[env.base]
+workers_dev = false
+name = "provider-x402-base"
+routes = [{ pattern = "provider-x402-base.subethalabs.com", custom_domain = true }]
+[env.base.vars]
+PROVIDER_NETWORK = "base"
+PAY_TO = "0x901404CCf8A4e61050fc3CAe4A26b05fDc136fE1"

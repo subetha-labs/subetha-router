@@ -14,7 +14,7 @@ import { createRealEvmCapability } from "./real-evm-capability.js";
 import { KNOWN_NETWORKS, knownNetworkOf } from "../src/shared/networks.js";
 import { createRealMppCapability, defaultTempoRpcUrl, TEMPO_MODERATO_CHAIN_ID } from "./real-mpp-capability.js";
 import { createRealSvmCapability } from "./real-svm-capability.js";
-import { EVM_FACILITATOR_URL_ENV, EVM_TESTNETS, evmOf, HOSTED_EVM_CHAINS, INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, subethaOf, type EvmRailsActivation, type HostedEvmChain, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
+import { baseFacilitatorOf, EVM_FACILITATOR_URL_ENV, EVM_TESTNETS, evmOf, HOSTED_EVM_CHAINS, INBOUND_ARC, OUTBOUND_ARC, OUTBOUND_SOL, pairsOf, RAIL_UPSTREAMS, subethaOf, type EvmRailsActivation, type HostedEvmChain, type PairsActivation, type RailProviders, type RailReceivers, type RailsActivation, type RailsOptions, type RailUpstreams } from "./remote-mcp-config.js";
 import { ARC_RECEIVER_KEY_ENV, createRealSellerProofCapability } from "./real-seller-proof-capability.js";
 
 /** ホスト → Router の process に渡す内部の env。値は `activationToEnv` の形（`ACTIVATION_TOKENS` の部分集合。空 = すべて無効）。 */
@@ -50,7 +50,9 @@ const EVM_TOKENS = HOSTED_EVM_CHAINS.flatMap((chain) => [`${chain}-in`, `${chain
 /** 内部 env の token（方向別。送信の設計 §6.1。組の 2 語は §13.1、EVM testnet 3 つの 6 語は hosted 設計 §5）。旧い `arc`・`solana` は受け付けない。 */
 /** SubEtha（zUSDC）の受信の token（`docs/subetha-hosted-inbound-design.md` §4.1）。EVM の後ろに付ける（無効なら 1 語も出ないので、既存の値は変わらない）。送信の語は無い。 */
 const SUBETHA_TOKEN = "subetha-in";
-const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc", ...EVM_TOKENS, SUBETHA_TOKEN] as const;
+/** Base Sepolia の自前の facilitator の token（`docs/base-sepolia-facilitator-design.md` §4）。最後に付ける（無効なら 1 語も出ない）。 */
+const BASE_FACILITATOR_TOKENS = { provider: "base-provider", inbound: "base-in" } as const;
+const ACTIVATION_TOKENS = ["arc-in", "arc-out", "solana-in", "solana-out", "solana-mpp-in", "solana-mpp-out", "arc-to-sol", "sol-to-arc", ...EVM_TOKENS, SUBETHA_TOKEN, BASE_FACILITATOR_TOKENS.provider, BASE_FACILITATOR_TOKENS.inbound] as const;
 const ACTIVATION_TOKENS_TEXT = ACTIVATION_TOKENS.join(",");
 
 export function activationToEnv(activation: RailsActivation): string {
@@ -67,6 +69,9 @@ export function activationToEnv(activation: RailsActivation): string {
     if (evm[chain].outbound) tokens.push(`${chain}-out`);
   }
   if (subethaOf(activation).inbound) tokens.push(SUBETHA_TOKEN);
+  const base = baseFacilitatorOf(activation);
+  if (base.provider) tokens.push(BASE_FACILITATOR_TOKENS.provider);
+  if (base.inbound) tokens.push(BASE_FACILITATOR_TOKENS.inbound);
   return tokens.join(",");
 }
 
@@ -94,6 +99,10 @@ export function activationFromEnv(value: string | undefined): RailsActivation {
     ...(EVM_TOKENS.some((token) => seen.has(token)) ? { evm: evm as EvmRailsActivation } : {}),
     // SubEtha の受信も token があるときだけ欄を持つ（無い = false。`subethaOf`）。
     ...(seen.has(SUBETHA_TOKEN) ? { subetha: { inbound: true } } : {}),
+    // Base Sepolia の自前の facilitator も token があるときだけ欄を持つ（無い = 両方 false。`baseFacilitatorOf`）。
+    ...(seen.has(BASE_FACILITATOR_TOKENS.provider) || seen.has(BASE_FACILITATOR_TOKENS.inbound)
+      ? { baseFacilitator: { provider: seen.has(BASE_FACILITATOR_TOKENS.provider), inbound: seen.has(BASE_FACILITATOR_TOKENS.inbound) } }
+      : {}),
   };
 }
 
@@ -294,7 +303,7 @@ export function routerProcessCapabilitiesOf(env: Readonly<Record<string, string 
       : {}),
     ...(svm === undefined ? {} : { svmSigning: { [OUTBOUND_SOL.network]: svm.capability(OUTBOUND_SOL.network) } }),
     ...(mppKey === undefined || mppKey === "" ? {} : { mppTempo: createRealMppCapability(mppKey, { chainId: tempoChainId, rpcUrl: tempoRpcUrl }).capability() }),
-    ...(facilitatorOrigin === undefined ? {} : { localCounterparties: { origins: [facilitatorOrigin] } }),
+    ...(facilitatorOrigin === undefined ? {} : { localCounterparties: { origins: [facilitatorOrigin], ...(baseFacilitatorOf(activation).inbound ? { baseSepoliaInbound: true } : {}) } }),
   };
 }
 

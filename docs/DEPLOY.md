@@ -763,6 +763,23 @@ sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
     - G-4 `dyn-hyperevm-to-arc`: 0.011 HyperEVM USDC（受信 `0x84aa842d…`）。宛先（Router → Arc の Provider）は送出されず、authorization は期限切れで未使用。
   - **資金が動かなかったもの**: G-3 `dyn-x402-to-hyperevm`（受信の settle を x402.org が拒否、authorization は期限切れで未使用）と、quote の `rate_limited` の 7 件。
 
+### 2g-2. Base Sepolia の決済を自前の facilitator に移す — **コードだけ（無効。未配備）**
+
+要件・設計: `docs/base-sepolia-facilitator-requirements.md`、`docs/base-sepolia-facilitator-design.md`。有効化は `RAILS_ACTIVATION.baseFacilitator`（`provider`・`inbound`。今は欄が無い = 両方無効）。
+
+**順序（各段に owner の go が要る）**
+1. **G-B3 無効の image**: 欄の無い image を入れ替える。公開の一覧は byte 一致。**この image が、以後の戻す先**（Base の行を含む facilitator の journal を読める）。tag を記録する。
+2. **G-B2 入金と env**: E-FAC-H に Base Sepolia の ETH。`/etc/subetha-router.env` に `SUBETHA_EVM_FACILITATOR_GAS_CAP_84532`（**最初の値を後から変えない**: journal の `gas_cap_init` と違うと起動しない。補充は下の `raise-cap` を `--network eip155:84532` で）。RPC を替えるときだけ `SUBETHA_EVM_FACILITATOR_RPC_84532`
+   （`eth_getLogs` の幅 5,000 block を受ける https。`https://sepolia.base.org` は 200 block までなので使わない）。
+3. **G-B4 Provider**: `cd providers/x402-workers && npx wrangler secret put FACILITATOR_URL --env base`（rh と同じ値。標準入力）、`npx wrangler deploy --env base`。未払いの GET が **503** であること（facilitator がまだ Base を扱わない）。
+   `provider: true` の image を入れ替える → `GET https://router.subethalabs.com/evm-facilitator/<token>/ready` の `networks["eip155:84532"].ready` が `true`（token をログ・画面に出さない）、Worker の未払いの GET が 402 で、offer が今の Provider A と同じ値 → 購入 1 回、上流の tx の送信者が E-FAC-H。
+4. **G-B5 受信**: `inbound: true` の image を入れ替える → Base Sepolia USDC の購入 1 回、受信の tx の送信者が E-FAC-H。
+
+**戻す**: 1 の image（かそれ以降の Base を知る image）に入れ替える。**それより前の image には戻さない**（facilitator が `gas_cap_init` の Base の行で起動せず、Router の入口ごと起動しない）。`swap-image.sh` の自動の復旧は前のコンテナの再起動なので、入れ替えの前に、動いているコンテナが 1 以降の image であることを確かめる。
+
+**見るもの**: 残高（E-FAC-H の Base Sepolia の ETH。20 件分の予約 = `20 × (200,000 × 見積りの maxFeePerGas + 2e12 wei)` を下回ると `/ready` が `false` になり、Provider は 503、Base の受信は verify で止まる）、`SUBETHA_EVM_FACILITATOR_LOG` の `gas_budget`（累計と上限）・`network_held`・`recovered`・`gas_balance_low`・`chain_unconfirmed`・`chain_mismatch`。
+保留は 15 秒ごとに最大 40 回まで自動で照合する（新しい tx は送らない）。解けなければ再起動（起動の後に同じ照合）か、運用者の `resolved_by_operator`。
+
 ### 2h. main の image への入れ替え（2026-11-21 02:06Z。`b-10dd795` → `b-6aa3f20`。rail の有効・無効は変えていない）
 
 owner の決定（2026-11-21）: 「段階的に有効化まで」の第 1 段として、main（`6aa3f20`）の image を **rail の設定を変えずに**入れ替える。

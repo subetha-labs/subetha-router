@@ -8,7 +8,7 @@ import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from "@x402
 import type { PaymentPayload } from "@x402/core/types";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, requestDeadlineMsOf, resourceOf, type NetworkDeadlines, type ProviderConfig, type ProviderEnv, type Resource } from "./config.js";
+import { configOf, isEvmKey, MAX_PAYMENT_HEADER_CHARS, READY_CACHE_MS, READY_TIMEOUT_MS, requestDeadlineMsOf, resourceOf, type NetworkDeadlines, type ProviderConfig, type ProviderEnv, type Resource } from "./config.js";
 import { DeadlineError, RequestDeadline, type Stage } from "./deadline.js";
 import { BoundedFacilitatorClient, FacilitatorUnavailableError, SettleCalledTwiceError, type FacilitatorClientOptions } from "./facilitator-client.js";
 import { checkReceipt } from "./receipt.js";
@@ -40,6 +40,8 @@ export interface Runtime {
   readonly config: ProviderConfig;
   readonly builder: RequirementsBuilder;
   readonly facilitatorFor: (fetchImpl: typeof fetch, stageFor: FacilitatorClientOptions["stageFor"]) => BoundedFacilitatorClient;
+  /** 準備の確認の控え（値だけ。workerd は要求をまたぐ I/O を許さないので、promise は共有しない。読み取りの集約は facilitator の側）。 */
+  readonly readiness: { at: number | undefined; ready: boolean };
 }
 
 export interface Hooks {
@@ -70,7 +72,19 @@ export function runtimeOf(env: ProviderEnv, hooks: Hooks = {}): Runtime {
   const defaultFetch = hooks.fetch ?? fetch;
   const facilitatorFor: Runtime["facilitatorFor"] = (f, stageFor) => new BoundedFacilitatorClient({ url: config.facilitatorUrl, ...(signer === undefined ? {} : { signer }), fetch: f, stageFor });
   const builder = createRequirementsBuilder(config, (stageFor) => facilitatorFor(defaultFetch, stageFor));
-  return { config, builder, facilitatorFor };
+  return { config, builder, facilitatorFor, readiness: { at: undefined, ready: false } };
+}
+
+/** `readiness` の行だけ: facilitator が今 settle できるか（控え 2 秒。期限 2 秒）。ほかの行は確認しない（true、要求 0）。 */
+async function facilitatorReady(runtime: Runtime, fetchImpl: typeof fetch, deadline: RequestDeadline, now: () => number): Promise<boolean> {
+  if (runtime.config.table.readiness !== true) return true;
+  const cache = runtime.readiness;
+  const at = now();
+  if (cache.at !== undefined && at >= cache.at && at - cache.at < READY_CACHE_MS) return cache.ready;
+  const ready = await runtime.facilitatorFor(fetchImpl, stageFor(deadline, runtime.config.table.deadlines)).isReady(runtime.config.table.network);
+  cache.at = now();
+  cache.ready = ready;
+  return ready;
 }
 
 async function paymentRequired(runtime: Runtime, canonical: string, resource: Resource, error?: string): Promise<Response> {
@@ -102,8 +116,8 @@ export async function handle(request: Request, runtime: Runtime, hooks: Hooks = 
   }
 }
 
-function stageFor(deadline: RequestDeadline, limits: NetworkDeadlines): (stage: "verify" | "settle" | "supported") => Stage {
-  return (stage) => deadline.stage(stage === "verify" ? limits.verifyMs : stage === "settle" ? limits.settleMs : limits.initMs);
+function stageFor(deadline: RequestDeadline, limits: NetworkDeadlines): (stage: "verify" | "settle" | "supported" | "ready") => Stage {
+  return (stage) => deadline.stage(stage === "verify" ? limits.verifyMs : stage === "settle" ? limits.settleMs : stage === "ready" ? READY_TIMEOUT_MS : limits.initMs);
 }
 
 async function handleWithin(request: Request, url: URL, resource: Resource, runtime: Runtime, hooks: Hooks, deadline: RequestDeadline): Promise<Response> {
@@ -125,7 +139,11 @@ async function handleWithin(request: Request, url: URL, resource: Resource, runt
   }
 
   const header = request.headers.get("payment-signature");
-  if (header === null || header === "") return paymentRequired(runtime, canonical, resource);
+  if (header === null || header === "") {
+    // 未払いの要求だけ: settle できないときは 402 を出さない（買い手が払う前に止まる。`docs/base-sepolia-facilitator-design.md` §5）。
+    if (!(await facilitatorReady(runtime, fetchImpl, deadline, hooks.now ?? Date.now))) return json(503, { error: "facilitator_unavailable" });
+    return paymentRequired(runtime, canonical, resource);
+  }
   if (header.length > MAX_PAYMENT_HEADER_CHARS) return paymentRequired(runtime, canonical, resource, "payment_invalid");
 
   // 0. decode、形の検査、`accepted` の完全一致（どれも固定の 402。facilitator もデータ源も呼ばない）。

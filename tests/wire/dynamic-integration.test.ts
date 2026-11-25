@@ -798,6 +798,22 @@ describe("AC-12: 各接続点に loopback・内部に解決する公開名を当
     expect(journalEvents(router)).toEqual([]);
   });
 
+  test("再読取: quote の後に上流が 503 になった（決済の準備ができていない Provider。docs/base-sepolia-facilitator-design.md §5）→ offer_unavailable。受信の verify・settle も journal の行も 0。先に送金した MPP の支払いは戻らない", async () => {
+    const fixtures = await startFixtures();
+    const router = await startRouter(fixtures);
+    const quote = await quoteOf(router, X402_PROFILE, X402_URL, "r1");
+    const credential = await credentialFor(fixtures, quote);
+    // 買い手の送金（Tempo の push）は署名の時点で済んでいる。
+    const sent = fixtures.rpc.sentRaw.length;
+    expect(sent).toBe(1);
+    fixtures.x402.state.challengeStatus = 503;
+    expect(await purchase(router, quote, credential, "r1")).toMatchObject({ outcome: "unknown", reason: "offer_unavailable" });
+    expect(fixtures.facilitator.calls).toMatchObject({ verify: 0, settle: 0 });
+    expect(router.signatures()).toEqual({ x402: 0, mpp: 0 });
+    expect(outboundCalls(fixtures)).toEqual({ x402Payments: 0, mppSends: sent, mppCredentials: 0 });
+    expect(journalEvents(router)).toEqual([]);
+  });
+
   test("有料要求: 読み直しまで通った後、有料要求の時点で上流が内部に解決するようになったら、接続 0 で unknown（署名は 1 回、送信 0）", async () => {
     const fixtures = await startFixtures();
     const router = await startRouter(fixtures);

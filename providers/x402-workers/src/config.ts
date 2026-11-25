@@ -1,11 +1,11 @@
 /**
  * Provider（x402 v2 `exact` の資源サーバ。Cloudflare Workers）の固定値と env の検査（`docs/provider-x402-workers.md` §2.1・§2.4）。
- * network ごとの表はここだけ（arc・solana と EVM testnet 4 つ: `docs/evm-testnets-x402-design.md` §3.4）。env から変えられるのは受取先・鍵・facilitator の URL。**鍵の値は config に入れない**（`index.ts` が
+ * network ごとの表はここだけ（arc・solana と EVM testnet 4 つ: `docs/evm-testnets-x402-design.md` §3.4、Base Sepolia: `docs/base-sepolia-facilitator-design.md` §5）。env から変えられるのは受取先・鍵・facilitator の URL。**鍵の値は config に入れない**（`index.ts` が
  * 署名の closure を作るときに env から 1 度だけ読む）。例外の文言に値を出さない。
  */
 import { getBase58Encoder } from "@solana/kit";
 
-export type ProviderNetwork = "arc" | "solana" | "rh" | "arbsep" | "hyperevm" | "sepolia";
+export type ProviderNetwork = "arc" | "solana" | "rh" | "arbsep" | "hyperevm" | "sepolia" | "base";
 
 /**
  * 要求ごとの期限と authorization の窓（ms・秒。`docs/evm-testnets-x402-design.md` §3.6）。既存の `arc`・`solana` は E-3 の前の
@@ -27,7 +27,7 @@ export interface NetworkTable {
   readonly amount: string;
   /** EVM: EIP-712 domain と `assetTransferMethod`。Solana: 無し（`feePayer` は facilitator の `/supported` から SDK が足す）。 */
   readonly extra: Readonly<Record<string, string>>;
-  /** 既定の facilitator。空なら `FACILITATOR_URL` が必須（EVM testnet 4 つ: 自前の facilitator。設計 §3.4）。 */
+  /** 既定の facilitator。空なら `FACILITATOR_URL` が必須（EVM testnet 4 つと Base Sepolia: 自前の facilitator。設計 §3.4）。 */
   readonly facilitatorUrl: string;
   /** `circle` のときだけ売り手証明（`SELLER_PROOF_KEY` が必須）。`x402` は鍵を置かない。 */
   readonly facilitatorKind: "circle" | "x402";
@@ -36,6 +36,11 @@ export interface NetworkTable {
   readonly deadlines: NetworkDeadlines;
   /** 402 の `maxTimeoutSeconds`（authorization の窓）。 */
   readonly maxTimeoutSeconds: number;
+  /**
+   * 未払いの 402 を出す前に、facilitator の `/ready` を見るか（`docs/base-sepolia-facilitator-design.md` §5）。準備ができていなければ 503。
+   * Base の行だけ（ほかの facilitator に `/ready` は無い）。
+   */
+  readonly readiness?: true;
 }
 
 /** 既存の値（E-3 の前の `deadline.ts` の定数と同じ）。速い EVM testnet も同じ（窓だけ 60 秒）。 */
@@ -94,6 +99,21 @@ export const TABLE: Readonly<Record<ProviderNetwork, NetworkTable>> = Object.fre
   hyperevm: evmTestnetRow(998, "0x2B3370eE501B4a559b57D449569354196457D8Ab", "USDC", "2", false),
   // Ethereum Sepolia の Circle USDC（遅いチェーン: 期限と窓は §3.6 の右の列）。
   sepolia: evmTestnetRow(11155111, "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", "USDC", "2", true),
+  // Base Sepolia の USDC（`docs/base-sepolia-facilitator-design.md` §5）。402 は今の Provider A と同じ値（`extra` は domain だけ）。facilitator は自前。
+  base: Object.freeze({
+    network: "eip155:84532",
+    asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    decimals: 6,
+    amount: "10000",
+    extra: Object.freeze({ name: "USDC", version: "2" }),
+    facilitatorUrl: "",
+    facilitatorKind: "x402" as const,
+    family: "evm" as const,
+    chainId: 84532,
+    deadlines: STANDARD_DEADLINES,
+    maxTimeoutSeconds: 60,
+    readiness: true as const,
+  }),
 });
 
 export function isProviderNetwork(value: unknown): value is ProviderNetwork {
@@ -124,6 +144,9 @@ export const RESOURCE_PATH = RESOURCES[0]!.path;
 export const DESCRIPTION = RESOURCES[0]!.description;
 /** wire の窓の既存の値（arc・solana: Circle の窓と同じ 30 秒。設計 §2.1）。network ごとの値は `TABLE[*].maxTimeoutSeconds`。 */
 export const MAX_TIMEOUT_SECONDS = 30;
+/** 準備の確認（`readiness` の行だけ）の期限と、isolate の控えの寿命（ms）。 */
+export const READY_TIMEOUT_MS = 2_000;
+export const READY_CACHE_MS = 2_000;
 /** `PAYMENT-SIGNATURE` の長さの上限（Workers のヘッダの上限の内側。正しい payload は数 KiB）。 */
 export const MAX_PAYMENT_HEADER_CHARS = 16 * 1024;
 
@@ -164,7 +187,7 @@ export const DEFAULT_DATA_URL = "https://api.hyperliquid.xyz/info";
 /** env の検査。鍵は**形だけ**見て値は返さない。失敗は固定文（値を含めない）。 */
 export function configOf(env: ProviderEnv): ProviderConfig {
   const network = env.PROVIDER_NETWORK;
-  if (!isProviderNetwork(network)) throw new Error("PROVIDER_NETWORK must be one of arc, solana, rh, arbsep, hyperevm, sepolia");
+  if (!isProviderNetwork(network)) throw new Error("PROVIDER_NETWORK must be one of arc, solana, rh, arbsep, hyperevm, sepolia, base");
   const table = TABLE[network];
   const payTo = env.PAY_TO ?? "";
   if (table.family === "evm" ? !EVM_ADDRESS.test(payTo) : !isBase58PublicKey(payTo)) throw new Error("PAY_TO is missing or malformed for the network");
