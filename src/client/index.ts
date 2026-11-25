@@ -77,7 +77,8 @@ function bindingOf(quote: QuoteView): string {
     source: quote.source,
     destination: quote.destination,
     approval: quote.approval,
-    ...(quote.upstream === undefined ? {} : { upstream: quote.upstream, pricing: quote.pricing, ownerKey: quote.ownerKey }),
+    // 静的の式の価格の内訳（あるときだけ）も束縛する。無ければ今までと同じ文字列。
+    ...(quote.upstream === undefined ? (quote.pricing === undefined ? {} : { pricing: quote.pricing }) : { upstream: quote.upstream, pricing: quote.pricing, ownerKey: quote.ownerKey }),
   });
 }
 
@@ -129,6 +130,9 @@ function quoteViewOf(body: unknown): QuoteView | undefined {
       ...(isRecord(body["disclosures"]) ? { disclosures: body["disclosures"] } : {}),
       ownerKey,
     });
+  } else if (isRecord(body["pricing"])) {
+    // 静的の route の式の価格の内訳（`docs/exact-pricing-design.md` §8）。
+    Object.assign(dynamic, { pricing: body["pricing"] });
   }
   return {
     quoteId,

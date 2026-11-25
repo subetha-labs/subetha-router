@@ -30,7 +30,7 @@ import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 import { diagnosticsChildEnvOf } from "./router-diagnostics.js";
-import { HOSTED_EXACT, hostedExactOf, INBOUND, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
+import { HOSTED_EXACT, HOSTED_EXACT_ETH_PRICE_AT_ENV, HOSTED_EXACT_ETH_PRICE_ENV, subethaExactOf, hostedExactOf, INBOUND, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
 function note(message: string): void {
@@ -225,6 +225,17 @@ function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string,
  * 起動の計画を作る（純粋関数。試験で確かめる）。**1 つの値 `options.activation`** が、設定生成（`routerConfigOf`）と子プロセスの
  * 能力の env（`railsChildEnvOf` → `SUBETHA_RAILS_ACTIVATION`）の両方を決める。無効なら受取鍵・受取 owner・RPC の env は読まない。
  */
+/** 式の価格が有効なときだけ、ETH の価格の env を子に渡す（空・無しは渡さない。形と期限の判定は子の Router。`docs/exact-pricing-design.md` §9）。 */
+function exactPricingChildEnvOf(activation: RailsActivation, env: Readonly<Record<string, string | undefined>>): Record<string, string> {
+  if (subethaExactOf(activation).formulaPricing !== true) return {};
+  const out: Record<string, string> = {};
+  for (const [from, to] of [[HOSTED_EXACT_ETH_PRICE_ENV, "ROUTER_SUBETHA_EXACT_ETH_PRICE"], [HOSTED_EXACT_ETH_PRICE_AT_ENV, "ROUTER_SUBETHA_EXACT_ETH_PRICE_AT"]] as const) {
+    const value = env[from];
+    if (value !== undefined && value !== "") out[to] = value;
+  }
+  return out;
+}
+
 export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, string | undefined>>): HostPlan {
   // 送信レグ（Provider への支払い）は運営の資金。受信レグの鍵はここには無い。
   const outboundKey = required(env, "SUBETHA_OUTBOUND_PRIVATE_KEY");
@@ -355,7 +366,7 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       // `subetha-exact` の実証（`docs/hosted-exact-enable-design.md` §6）: tenant の URL、token のファイルの path（値ではない）、標準入口を買い手に示す基点。
       ...(hostedExact === undefined
         ? {}
-        : { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: hostedExact.facilitatorUrl, ...(hostedExact.settleFacilitatorUrl === undefined ? {} : { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: hostedExact.settleFacilitatorUrl }), ...(hostedExact.settleTokenFile === undefined ? {} : { ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE: hostedExact.settleTokenFile }), ROUTER_SUBETHA_EXACT_TOKEN_FILE: hostedExact.tokenFile, ROUTER_X402_ENTRY_BASE_URL: options.x402EntryOriginForTest ?? HOSTED_EXACT.publicOrigin }),
+        : { ROUTER_SUBETHA_EXACT_FACILITATOR_URL: hostedExact.facilitatorUrl, ...(hostedExact.settleFacilitatorUrl === undefined ? {} : { ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: hostedExact.settleFacilitatorUrl }), ...(hostedExact.settleTokenFile === undefined ? {} : { ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE: hostedExact.settleTokenFile }), ROUTER_SUBETHA_EXACT_TOKEN_FILE: hostedExact.tokenFile, ...exactPricingChildEnvOf(options.activation, env), ROUTER_X402_ENTRY_BASE_URL: options.x402EntryOriginForTest ?? HOSTED_EXACT.publicOrigin }),
   };
   return {
     config,

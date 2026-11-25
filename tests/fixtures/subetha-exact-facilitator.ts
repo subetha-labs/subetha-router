@@ -90,6 +90,8 @@ export interface FacilitatorFixture {
   readonly orders: Map<string, FixtureOrder>;
   readonly calls: { readonly byRoute: Record<string, number>; readonly byOrder: Record<string, Record<string, number>>; /** `Authorization` の付いた外部への送信の数（`settleBearer` が無ければ 0 のはず）。 */ submitWithAuthorization: number; /** Provider token の付いた外部への送信の数。 */ submitWithProviderToken: number; /** settle 先の token の付いた tenant への要求の数。 */ tenantWithSettleToken: number };
   setMode(route: FixtureRoute, mode: string, raw?: Omit<RawInjection, never>): void;
+  /** settle facilitator の `GET /costs` の答え（以後ずっと）。 */
+  setCosts(answer: CostsAnswer): void;
   /** 遅れた割当の完了（`busy-then-create` の後）。`createdAt`・`expiresAt` は試験が与える（adapter の時計に合わせる）。 */
   allocate(input: { requesterDigest: string; resourceDigest: string; amount?: string; createdAt?: number; expiresAt?: number }): FixtureOrder;
   readonly baseUrl: string | undefined;
@@ -110,6 +112,19 @@ const AUTHORIZATION_TYPES = {
   ],
 } as const;
 const MAX_BODY = 64 * 1024;
+
+export interface CostsAnswer {
+  readonly status: number;
+  readonly headers?: Record<string, string>;
+  /** 無ければ既定の費用。 */
+  readonly body?: string;
+  readonly delayMs?: number;
+}
+/** 既定の `/costs`（本番の 1 件と同じくらい: 156,633 gas × 0.006 gwei + L1 1,041）。 */
+export function defaultCosts(chainId: number, token: string): Record<string, unknown> {
+  const item = { txHash: `0x${"54".repeat(32)}`, blockNumber: 1, batchSize: 1, gasUsed: "156633", effectiveGasPrice: "6000000", l1Fee: "1041", shareWei: "939798001041", canonicalFeeWei: "939798001041", ok: true, incomplete: false, final: true };
+  return { chainId, token, asOfBlock: 1, baseFeePerGas: "5000000", items: [item], summary: { transactions: 1, successfulItems: 1, allocatedMedianWei: "939798001041", allocatedP90Wei: "939798001041", incompleteCount: 0, byBatchSize: {}, overheadRate: 0 } };
+}
 
 function pairKey(requesterDigest: string, resourceDigest: string): string {
   return `${lower(requesterDigest)}|${lower(resourceDigest)}`;
@@ -132,6 +147,7 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
   /** 合成の chain: 使われた authorization（`from|nonce` の小文字）→ 載せた transaction。 */
   const chainUsed = new Map<string, string>();
   const reconcileCalls = new Map<string, number>();
+  let costsAnswer: CostsAnswer = { status: 200 };
   let baseUrl: string | undefined;
 
   /** 経路ごとの回数（要求 1 つにつき 1 回）。注文が分かればその注文の回数も。 */
@@ -366,6 +382,10 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
         fixture.setMode(route as FixtureRoute, mode, mode === "raw" ? { status: Number(input["status"] ?? 200), headers: (input["headers"] as Record<string, string> | undefined) ?? {}, body: typeof input["body"] === "string" ? input["body"] : JSON.stringify(input["body"] ?? {}) } : undefined);
         return sendJson(res, 200, { ok: true });
       }
+      if (method === "POST" && url.pathname === "/_fixture/costs") {
+        fixture.setCosts({ status: Number(input["status"] ?? 200), ...(input["body"] === undefined ? {} : { body: typeof input["body"] === "string" ? input["body"] : JSON.stringify(input["body"]) }) });
+        return sendJson(res, 200, { ok: true });
+      }
       if (method === "POST" && url.pathname === "/_fixture/allocate") {
         if (!hex32(input["requesterDigest"]) || !hex32(input["resourceDigest"])) return sendJson(res, 400, { error: "expect digests" });
         const order = fixture.allocate({ requesterDigest: input["requesterDigest"], resourceDigest: input["resourceDigest"], ...(typeof input["amount"] === "string" ? { amount: input["amount"] } : {}), ...(typeof input["createdAt"] === "number" ? { createdAt: input["createdAt"] } : {}), ...(typeof input["expiresAt"] === "number" ? { expiresAt: input["expiresAt"] } : {}) });
@@ -381,6 +401,15 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
       return sendJson(res, 404, { error: "unknown-route" });
     }
     // ---- tenant の面 ----
+    // SubEtha の settle facilitator の `GET /costs` の模型（token が先。`setCosts` の値を返す。既定は本番の 1 件と同じくらい）。
+    if (url.pathname === `${FIXTURE_EXTERNAL_FACILITATOR_PATH}/costs` && method === "GET") {
+      calls.byRoute["costs"] = (calls.byRoute["costs"] ?? 0) + 1;
+      if (options.settleBearer !== undefined && req.headers.authorization !== `Bearer ${options.settleBearer}`) return sendJson(res, 401, { error: "unauthorized" });
+      if (costsAnswer.delayMs !== undefined) await sleep(costsAnswer.delayMs);
+      res.writeHead(costsAnswer.status, { "content-type": "application/json", ...costsAnswer.headers });
+      res.end(costsAnswer.body ?? JSON.stringify(defaultCosts(options.chainId, asset)));
+      return;
+    }
     if (url.pathname.startsWith(`${FIXTURE_EXTERNAL_FACILITATOR_PATH}/`)) {
       const body = await readBody(req);
       if (!body.ok) return sendJson(res, body.status, body.body);
@@ -841,6 +870,9 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     async close(): Promise<void> {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+    setCosts(answer) {
+      costsAnswer = answer;
     },
     setMode(route, mode, rawInjection) {
       modes[route] = mode;

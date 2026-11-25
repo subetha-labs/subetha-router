@@ -200,10 +200,11 @@ export interface RailsActivation {
    * （`docs/hosted-exact-enable-design.md` §6）。無ければ `false`（`subethaExactOf`）。有効なら route 1 本・予算の区分・adapter の上限が出て、
    * host の env `SUBETHA_EXACT_FACILITATOR_URL`・`SUBETHA_EXACT_TOKEN_FILE` が要る。新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に。
    */
-  readonly subethaExact?: { readonly inbound: boolean };
+  /** `formulaPricing: true` で受け取り額を費用の式で決める（`docs/exact-pricing-design.md` §9。無ければ固定の額のまま）。settle 先の token と ETH の価格の env が要る。 */
+  readonly subethaExact?: { readonly inbound: boolean; readonly formulaPricing?: boolean };
 }
 /** `subethaExact` の既定（無ければ `false`）。 */
-export function subethaExactOf(activation: RailsActivation): { readonly inbound: boolean } {
+export function subethaExactOf(activation: RailsActivation): { readonly inbound: boolean; readonly formulaPricing?: boolean } {
   return activation.subethaExact ?? SUBETHA_OFF;
 }
 /**
@@ -222,6 +223,23 @@ export const HOSTED_EXACT = Object.freeze({
   /** 標準入口を買い手に示す基点（公開の origin）。 */
   publicOrigin: "https://router.subethalabs.com",
 });
+/** 式の価格の値（`docs/exact-pricing-requirements.md` §3.1。オーナーの確認 2026-11-24）。`RAILS_ACTIVATION.subethaExact.formulaPricing` が無ければ使わない。 */
+export const HOSTED_EXACT_PRICING = Object.freeze({
+  kind: "settle-cost-v1",
+  factorBps: 15_000,
+  take: "500",
+  withdrawCost: "18000",
+  withdrawBatch: 8,
+  tipWei: "1000000",
+  l1FloorWei: "2000",
+  maxSettle: "8000",
+  maxAmount: "20000",
+  maxPerDay: 20,
+  ethPriceMaxAgeDays: 7,
+});
+/** host の env（任意。式の価格が有効なときだけ渡す）: 1 ETH あたりの base units と、その時刻（ISO 8601、UTC）。無い・期限切れなら zUSDC の新しい offer だけ断る。 */
+export const HOSTED_EXACT_ETH_PRICE_ENV = "SUBETHA_EXACT_ETH_PRICE";
+export const HOSTED_EXACT_ETH_PRICE_AT_ENV = "SUBETHA_EXACT_ETH_PRICE_AT";
 /** host の env（有効なときだけ読む）: facilitator の tenant の URL と、Provider token のファイルの path（値は読まない）。 */
 export const HOSTED_EXACT_FACILITATOR_URL_ENV = "SUBETHA_EXACT_FACILITATOR_URL";
 export const HOSTED_EXACT_TOKEN_FILE_ENV = "SUBETHA_EXACT_TOKEN_FILE";
@@ -865,7 +883,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
                 rail: "x402",
                 sourceRail: "subetha-exact",
                 offerCap: { maxCommitted: hostedExact.maxCommitted },
-                source: { amount: HOSTED_EXACT.source.amount, asset: HOSTED_EXACT.source.asset, decimals: HOSTED_EXACT.source.decimals, network: HOSTED_EXACT.source.network },
+                ...(subethaExactOf(rails.activation).formulaPricing === true ? { pricing: { ...HOSTED_EXACT_PRICING } } : {}),
+                source: { amount: subethaExactOf(rails.activation).formulaPricing === true ? HOSTED_EXACT_PRICING.maxAmount : HOSTED_EXACT.source.amount, asset: HOSTED_EXACT.source.asset, decimals: HOSTED_EXACT.source.decimals, network: HOSTED_EXACT.source.network },
                 destination: { scheme: "exact", network: OUTBOUND_X402.network, asset: OUTBOUND_X402.asset, payTo: OUTBOUND_X402.payTo },
               },
             }),

@@ -6,6 +6,7 @@
 import { canonicalPathOf, type DynamicProfile, type RouteConfig, type RouterConfig, usesGasIndexedFee } from "../config.js";
 import type { PrivateQuoteDocument, Projection, QuoteDocument } from "../core/orchestrator.js";
 import type { InboundOffer } from "../ports/inbound.js";
+import { roundingOf, type ExactPriceRecord } from "../shared/exact-pricing.js";
 import { networkFamilyOf } from "../shared/networks.js";
 
 export function canonicalUrlOf(canonicalBaseUrl: string, route: RouteConfig): string {
@@ -56,6 +57,8 @@ export function routeListBody(config: RouterConfig, canonicalBaseUrl: string, x4
       ...(route.sourceRail === "subetha-exact" ? { x402Url: `${x402EntryBaseUrl ?? canonicalBaseUrl}/x402/v1/routes/${encodeURIComponent(route.routeId)}/resource` } : {}),
       // 上限付きの実証の route（`offerCap` を持つ route だけ。`docs/hosted-exact-enable-design.md` §7.1）: 上限があることと、新しい offer を受けているか。
       ...(route.offerCap === undefined ? {} : { demonstration: { capped: true, acceptingNewOffers: route.offerCap.maxCommitted > 0 } }),
+      // 式の価格の route（`docs/exact-pricing-design.md` §8）: `source.amount` は上限で、実際の額は quote か 402 で決まる。費用の値は出さない。
+      ...(route.pricing === undefined ? {} : { pricing: { kind: route.pricing.kind, maxAmount: route.pricing.maxAmount, amountIs: "per_quote" } }),
       source: {
         amount: route.source.amount,
         asset: route.source.asset,
@@ -89,6 +92,11 @@ export function sourceRailListingOf(route: RouteConfig): { rail: "x402" | "mpp" 
   return {};
 }
 
+/** 式の価格の内訳（承認対象。額は受け取りの資産の base units）。`issuedAtMs` は内部の記録なので出さない。 */
+function pricingBody(price: ExactPriceRecord): Record<string, unknown> {
+  return { kind: price.kind, upstream: price.upstream, settle: price.settle, withdraw: price.withdraw, take: price.take, share: price.share, rounding: roundingOf(price), total: price.total, costsAtMs: price.costsAtMs };
+}
+
 /** R2: quote 文書（`quoteId` は受信 offer の idempotency key）。 */
 export function quoteBody(
   quote: QuoteDocument,
@@ -112,6 +120,7 @@ export function quoteBody(
       network: quote.source.network,
       ...(closed ? {} : { payTo: quote.source.offer.payTo, expiresAt: quote.source.offer.extra.expiresAt, offer: quote.source.offer }),
     },
+    ...(quote.source.pricing === undefined ? {} : { pricing: pricingBody(quote.source.pricing) }),
     destination: {
       rail: route.rail ?? route.destination.scheme,
       quoted: quote.destination.quoted,

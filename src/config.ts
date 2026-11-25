@@ -42,12 +42,15 @@ import {
   SUBETHA_EXACT_SETTLE_FACILITATOR_DEFAULT_URL,
   SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV,
   SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV,
+  SUBETHA_EXACT_ETH_PRICE_ENV,
+  SUBETHA_EXACT_ETH_PRICE_AT_ENV,
   SUBETHA_EXACT_OWN_SETTLE_HOSTS,
   SUBETHA_EXACT_TOKEN_FILE_ENV,
   type SubethaExactFacilitatorUrl,
   type SubethaExactSettleFacilitatorUrl,
   type SubethaExactLimits,
 } from "./shared/subetha-exact.js";
+import { parseEthPrice, parseExactPricing, pricingTermsOf, type EthPrice, type ExactPricingConfig } from "./shared/exact-pricing.js";
 
 interface TermsToValidate {
   readonly direction: "inbound" | "outbound";
@@ -152,6 +155,8 @@ export interface RouteConfig {
    * 確定していない offer の数がこれに達したら、新しい offer を出さない。`0` は新しい offer を出さない（発行済みの注文は払える）。指紋には入れない。
    */
   readonly offerCap?: { readonly maxCommitted: number };
+  /** 受け取り額を費用の式で決める（`docs/exact-pricing-design.md` §2。`subetha-exact` だけ）。あれば `source.amount` は上限（`maxAmount`）で、実際の額は offer ごと。 */
+  readonly pricing?: ExactPricingConfig;
   /** 受信額は Router のローカル設定が権威（上流額から導出しない／U-03）。 */
   readonly source: SourceTerms;
   readonly destination: DestinationAllow;
@@ -475,6 +480,8 @@ export function authoritativeTermsOf(route: RouteConfig): unknown {
     },
     rail: route.rail,
     sourceRail: route.sourceRail,
+    // 式の価格の条件（`docs/exact-pricing-design.md` §2）。式の route だけ（欄が無ければ直列化は今までと同じ）。
+    ...(route.pricing === undefined ? {} : { pricing: pricingTermsOf(route.pricing) }),
   };
 }
 
@@ -585,6 +592,8 @@ export interface SubethaExactConfig {
   readonly tokenFile: string;
   /** settle 先の token ファイルのパス（`docs/exact-settle-facilitator-design.md` §2.1。あれば settle 先は SubEtha の settle facilitator）。 */
   readonly settleTokenFile?: string;
+  /** 運用者が設定した ETH の価格（`docs/exact-pricing-design.md` §2）。式の route があるときだけ読む。使えるかは価格を求める時に判定する。 */
+  readonly ethPrice?: EthPrice;
   /** offer の有効期間（秒。承認の時間）。既定は adapter の 120。 */
   readonly offerSeconds?: number;
   readonly limits: SubethaExactLimits;
@@ -658,6 +667,41 @@ export function assertLoopbackUrl(raw: string, at: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
+/** 式の価格の対象（`docs/exact-pricing-requirements.md` §2）: Base Sepolia の zUSDC を受け、Base Sepolia の USDC に x402 で払う route だけ（どちらも 6 桁、1:1）。 */
+const EXACT_PRICING_NETWORK = "eip155:84532";
+const EXACT_PRICING_SOURCE_ASSET = "0x32c83780bc6ac14e8a2938d4fd192d3721ef3d9f";
+const EXACT_PRICING_DESTINATION_ASSET = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+
+function parseRoutePricing(
+  raw: unknown,
+  at: string,
+  route: { readonly rail: unknown; readonly sourceRail: string | undefined; readonly offerCap: unknown; readonly source: Record<string, unknown>; readonly destination: Record<string, unknown> },
+): ExactPricingConfig {
+  if (route.sourceRail !== SUBETHA_EXACT_RAIL) throw new ConfigError(`${at}.pricing is only allowed when sourceRail is "subetha-exact"`);
+  const parsed = parseExactPricing(raw);
+  if (!parsed.ok) throw new ConfigError(`${at}.pricing ${parsed.problem}`);
+  if (route.offerCap === undefined) throw new ConfigError(`${at}.pricing requires offerCap`);
+  const { source, destination } = route;
+  const lowerOf = (value: unknown): string => (typeof value === "string" ? value.toLowerCase() : "");
+  if (source["network"] !== EXACT_PRICING_NETWORK || source["decimals"] !== 6 || lowerOf(source["asset"]) !== EXACT_PRICING_SOURCE_ASSET) throw new ConfigError(`${at}.pricing requires a Base Sepolia zUSDC source with 6 decimals`);
+  if (source["amount"] !== parsed.pricing.maxAmount) throw new ConfigError(`${at}.source.amount must equal pricing.maxAmount`);
+  if (route.rail !== "x402" || destination["scheme"] !== "exact" || destination["network"] !== EXACT_PRICING_NETWORK || lowerOf(destination["asset"]) !== EXACT_PRICING_DESTINATION_ASSET) {
+    throw new ConfigError(`${at}.pricing requires an x402 destination in Base Sepolia USDC`);
+  }
+  return parsed.pricing;
+}
+
+/** 式の route の予算の区分（要件 R2・R10）: 受け取りの資産の区分があり、1 件の上限が `maxAmount` 以上。 */
+function assertPricingBudget(routes: Readonly<Record<string, RouteConfig>>, budget: BudgetLimits): void {
+  for (const route of Object.values(routes)) {
+    if (route.pricing === undefined) continue;
+    const bucket = budget.buckets.find((entry) => entry.network === route.source.network && entry.asset.toLowerCase() === route.source.asset.toLowerCase());
+    if (bucket === undefined || !AMOUNT_PATTERN.test(bucket.maxPerPurchase) || BigInt(bucket.maxPerPurchase) < BigInt(route.pricing.maxAmount)) {
+      throw new ConfigError(`routes.${route.routeId}.pricing requires a source budget bucket with maxPerPurchase of at least pricing.maxAmount`);
+    }
+  }
+}
+
 function parseRoute(value: unknown, routeId: string): RouteConfig {
   if (!isRecord(value)) {
     throw new ConfigError(`routes.${routeId} must be an object`);
@@ -722,12 +766,14 @@ function parseRoute(value: unknown, routeId: string): RouteConfig {
     if (typeof maxCommitted !== "number" || !Number.isSafeInteger(maxCommitted) || maxCommitted < 0) throw new ConfigError(`${at}.offerCap.maxCommitted must be a non-negative integer`);
     offerCap = { maxCommitted };
   }
+  const pricing = value["pricing"] === undefined ? undefined : parseRoutePricing(value["pricing"], at, { rail, sourceRail, offerCap, source, destination });
   const route: RouteConfig = {
     routeId,
     canonicalPath,
     ...(rail === undefined ? {} : { rail }),
     ...(sourceRail === undefined ? {} : { sourceRail }),
     ...(offerCap === undefined ? {} : { offerCap }),
+    ...(pricing === undefined ? {} : { pricing }),
     source: {
       amount: requireString(source, "amount", `${at}.source`),
       asset: requireString(source, "asset", `${at}.source`),
@@ -1089,10 +1135,14 @@ function parseRouterConfigUnchecked(raw: unknown): RouterConfig {
       }
     }
   }
+  const approvalTtlMs = requireNumber(raw, "approvalTtlMs", "router");
+  const parsedRoutes = Object.fromEntries(entries.map(([routeId, route]) => [routeId, parseRoute(route, routeId)]));
+  const budget = parseBudget(requireRecord(raw, "budget", "router"));
+  assertPricingBudget(parsedRoutes, budget);
   return {
-    approvalTtlMs: requireNumber(raw, "approvalTtlMs", "router"),
-    routes: Object.fromEntries(entries.map(([routeId, route]) => [routeId, parseRoute(route, routeId)])),
-    budget: parseBudget(requireRecord(raw, "budget", "router")),
+    approvalTtlMs,
+    routes: parsedRoutes,
+    budget,
     ...(dynamic === undefined ? {} : { dynamic }),
     ...(raw["private"] === undefined ? {} : { private: parsePrivate(raw["private"], dynamic) }),
   };
@@ -1413,7 +1463,10 @@ function parseSubethaExact(
       if (key !== "limits" && key !== "unansweredVerifyIsUnknown") throw new ConfigError("subethaExact has an unknown field");
     }
   }
-  return { facilitator, settleFacilitator, tokenFile, ...(settleTokenFile === undefined ? {} : { settleTokenFile }), ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}) };
+  const formulaRoute = Object.values(router.routes).some((route) => route.pricing !== undefined);
+  if (formulaRoute && settleTokenFile === undefined) throw new ConfigError(`${SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV} is required when a route uses pricing`);
+  const ethPrice = formulaRoute ? parseEthPrice(env[SUBETHA_EXACT_ETH_PRICE_ENV], env[SUBETHA_EXACT_ETH_PRICE_AT_ENV]) : undefined;
+  return { facilitator, settleFacilitator, tokenFile, ...(ethPrice === undefined ? {} : { ethPrice }), ...(settleTokenFile === undefined ? {} : { settleTokenFile }), ...(offerSeconds === undefined ? {} : { offerSeconds }), limits, ...(unansweredVerifyIsUnknown ? { unansweredVerifyIsUnknown: true } : {}) };
 }
 
 function parseReal(

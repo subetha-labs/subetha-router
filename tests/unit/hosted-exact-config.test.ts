@@ -13,6 +13,7 @@ import { routeListBody } from "../../src/http/projection.js";
 import {
   HOSTED_EXACT,
   HOSTED_EXACT_FACILITATOR_URL_ENV,
+  HOSTED_EXACT_PRICING,
   HOSTED_EXACT_TOKEN_FILE_ENV,
   hostedExactOf,
   OUTBOUND_X402,
@@ -259,6 +260,38 @@ describe("G-4 の公開の定数: 以前の公開の生成に、実証の分を�
     expect(planOf(RAILS_ACTIVATION, { ...on, SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://x402.org/facilitator" }).childEnv[key]).toBeUndefined();
     // 実証が無効なら読まない。
     expect(key in planOf(RAILS_ACTIVATION_BEFORE_EXACT, { ...base, ...evmFacilitatorEnv, ...own }).childEnv).toBe(false);
+  });
+
+  test("式の価格（AC-11）: 公開の定数は無効で、ETH の価格の env があっても生成は golden のまま。有効なら route に pricing・上限の額、ETH の価格だけ子に渡す（値が無ければ渡さない）", () => {
+    expect(subethaExactOf(RAILS_ACTIVATION).formulaPricing).toBeUndefined();
+    const on = { ...base, ...evmFacilitatorEnv, ...ENV_ON };
+    const eth = { SUBETHA_EXACT_ETH_PRICE: "3000000000", SUBETHA_EXACT_ETH_PRICE_AT: "2026-11-24T00:00:00Z" };
+    const own = { SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://settle-testnet.subethalabs.com", SUBETHA_EXACT_SETTLE_TOKEN_FILE: "/app/runtime/secrets/settle.token" };
+    expect(serialise(planOf(RAILS_ACTIVATION, { ...on, ...eth }))).toBe(goldenText("public-exact"));
+    const formula = { ...RAILS_ACTIVATION, subethaExact: { inbound: true, formulaPricing: true } };
+    const before = planOf(RAILS_ACTIVATION, { ...on, ...own });
+    const plan = planOf(formula, { ...on, ...own, ...eth });
+    type Routes = { router: { routes: Record<string, { pricing?: unknown; source: { amount: string } }> } };
+    const route = (plan.config as unknown as Routes).router.routes[HOSTED_EXACT.routeId]!;
+    expect([route.pricing, route.source.amount]).toEqual([{ ...HOSTED_EXACT_PRICING }, "20000"]);
+    const rest = structuredClone(plan.config) as unknown as Routes;
+    delete rest.router.routes[HOSTED_EXACT.routeId]!.pricing;
+    rest.router.routes[HOSTED_EXACT.routeId]!.source.amount = HOSTED_EXACT.source.amount;
+    expect(rest).toEqual(before.config);
+    expect(Object.keys(plan.childEnv).filter((k) => !(k in before.childEnv)).sort()).toEqual(["ROUTER_SUBETHA_EXACT_ETH_PRICE", "ROUTER_SUBETHA_EXACT_ETH_PRICE_AT"]);
+    for (const missing of [{}, { SUBETHA_EXACT_ETH_PRICE: "", SUBETHA_EXACT_ETH_PRICE_AT: "" }]) expect(Object.keys(planOf(formula, { ...on, ...own, ...missing }).childEnv).sort()).toEqual(Object.keys(before.childEnv).sort());
+    expect(BigInt(HOSTED_EXACT.bucketMaxTotal)).toBeGreaterThan(BigInt(HOSTED_EXACT.limits.maxRequestsTotal) * BigInt(HOSTED_EXACT_PRICING.maxAmount));
+    // 子と同じ読み方: settle 先の token があれば読め、無ければ起動しない。
+    const dir = mkdtempSync(path.join(tmpdir(), "ep-hosted-"));
+    dirs.push(dir);
+    const file = path.join(dir, "c.json");
+    writeFileSync(file, JSON.stringify(plan.config));
+    const loadWith = (env: Record<string, string>) => loadRuntimeConfig({ ...env, ROUTER_CONFIG_PATH: file, ROUTER_PRINCIPAL_TOKENS: "judge:t" }, (p) => readFileSync(p, "utf8"));
+    const loaded = loadWith({ ...plan.childEnv } as Record<string, string>);
+    expect(loaded.router.routes[HOSTED_EXACT.routeId]!.pricing).toEqual({ ...HOSTED_EXACT_PRICING });
+    expect(loaded.real?.subethaExact?.ethPrice).toEqual({ price: 3_000_000_000n, atMs: Date.parse("2026-11-24T00:00:00Z") });
+    const { ROUTER_SUBETHA_EXACT_SETTLE_TOKEN_FILE: _t, ROUTER_SUBETHA_EXACT_SETTLE_FACILITATOR_URL: _u, ...noToken } = plan.childEnv as Record<string, string>;
+    expect(() => loadWith(noToken)).toThrow(/SETTLE_TOKEN_FILE is required when a route uses pricing/);
   });
 
   test("今の公開の定数は、実証の env が無ければ計画を作らない（入れ替えの script は旧コンテナに戻す）", () => {

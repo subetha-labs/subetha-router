@@ -60,6 +60,9 @@ import { createDrainGate, DRAIN_TIMEOUT_MS } from "./shared/drain.js";
 import { currentDiagnosticScopeFrame, NOOP_DIAGNOSTICS, safeEmit, type DiagnosticsSink } from "./shared/diagnostics.js";
 import type { InboundOffer, InboundRail, SellerProofCapability } from "./ports/inbound.js";
 import { createSubethaExactInbound, type SubethaExactInbound, type SubethaExactInboundOptions } from "./adapters/inbound/subetha-exact.js";
+import { createExactPricing } from "./adapters/inbound/exact-pricing.js";
+import { createSettleCosts } from "./adapters/inbound/settle-costs.js";
+import type { ExactPricing } from "./ports/exact-pricing.js";
 import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FORM, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
 import type {
   EvmSigningCapability,
@@ -722,6 +725,8 @@ export interface ComposedRails {
   readonly outbound: OutboundRail;
   /** 秘匿購入（設定 `router.private` があるときだけ）。 */
   readonly private?: PrivateWiring;
+  /** 式の価格の供給（式の route があるときだけ。`docs/exact-pricing-design.md`）。 */
+  readonly exactPricing?: ExactPricing;
   readonly balanceOf?: (id: string, asset: string) => Promise<bigint | undefined>;
   readonly dynamic?: DynamicWiring;
   readonly startup?: () => Promise<void>;
@@ -1012,6 +1017,7 @@ export function composeRails(
   const subethaExactRoutes = Object.values(config.router.routes).filter((route) => route.sourceRail === "subetha-exact");
   const subethaExactLedgerDir = path.join(path.dirname(path.resolve(config.journalPath)), "subetha-exact");
   let subethaExactAdapter: SubethaExactInbound | undefined;
+  let exactPricing: ExactPricing | undefined;
   if (real.subethaExact !== undefined && (subethaExactRoutes.length > 0 || existsSync(path.join(subethaExactLedgerDir, "orders.ndjson")))) {
     const section = real.subethaExact;
     const first = subethaExactRoutes[0];
@@ -1062,6 +1068,17 @@ export function composeRails(
       ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       ...(capabilities.subethaExactHooksForTest === undefined ? {} : { hooksForTest: capabilities.subethaExactHooksForTest }),
     });
+    // 式の価格（`docs/exact-pricing-design.md`）: 式の route があるときだけ、settle 先の `/costs` を同じ形の transport と settle 先の token で読む。
+    if (settleTokenValue !== undefined && subethaExactRoutes.some((route) => route.pricing !== undefined)) {
+      const costs = createSettleCosts({
+        baseUrl: section.settleFacilitator.url,
+        token: () => settleTokenValue,
+        transport: createGuardedTransport({ ...staticHooks, allowLoopback: inboundLoopback, report, dns: { timeoutMs: 3_000, maxInFlight: 16 } }),
+        chainId: Number(network.slice("eip155:".length)),
+        asset: row.id,
+      });
+      exactPricing = createExactPricing({ costs, ...(section.ethPrice === undefined ? {} : { ethPrice: section.ethPrice }) });
+    }
     inboundRails["subetha-exact"] = subethaExactAdapter;
   } else if (real.subethaExact !== undefined) {
     note("subetha-exact: facilitator env is set but no route uses the rail and no ledger exists; the adapter is not created");
@@ -1472,6 +1489,7 @@ export function composeRails(
     ...(privateWiring === undefined ? {} : { private: privateWiring }),
     ...(startupChecks.length === 0 ? {} : { startup: async () => { for (const check of startupChecks) await check(); } }),
     ...(subethaExactAdapter === undefined ? {} : { shutdown: () => subethaExactAdapter!.close() }),
+    ...(exactPricing === undefined ? {} : { exactPricing }),
     inbound: inboundByRoute(config.router.routes, inboundRails, profiles),
     outbound: railByRoute(config.router.routes, rails, profiles),
     // 残高の hook は動的の設定の有無と独立に渡す（静的だけの構成でも静的 route の残高を見る。送信の設計 §2.6）。
@@ -1603,6 +1621,7 @@ async function startRouterComposed(config: RuntimeConfig, capabilities: RouterCa
     // 拒否の理由を運用者に伝える（固定文のみ。値は渡さない）。
     note: (message) => process.stderr.write(`${message}\n`),
     ...(rails.balanceOf === undefined ? {} : { balanceOf: rails.balanceOf }),
+    ...(rails.exactPricing === undefined ? {} : { exactPricing: rails.exactPricing }),
     ...(rails.dynamic === undefined ? {} : { dynamic: dynamicCoreOptionsOf(rails.dynamic, capabilities, config) }),
     // journal の消費済み署名を MPP Solana 受信に見せる（`docs/mpp-solana-design.md` §2.3）。load の直後、core が公開される前。
     onStoreLoaded: rails.bindConsumed,

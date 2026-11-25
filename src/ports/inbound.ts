@@ -112,7 +112,11 @@ export type OfferRefusalDetail =
   | "order_window_short"
   | "limit_source_unresolved"
   | "limit_source_rate"
-  | "offer_cap_reached";
+  | "offer_cap_reached"
+  /** 式の価格の route（`docs/exact-pricing-design.md` §4・§5）。どれも注文を作る前。 */
+  | "offer_daily_cap_reached"
+  | "pricing_unavailable"
+  | "pricing_over_limit";
 
 /** `OfferRefusalDetail` の閉じた集合（core が公開の面へ写す前に照合する。これ以外の文字列は落とす）。 */
 export const OFFER_REFUSAL_DETAILS: ReadonlySet<string> = Object.freeze(
@@ -120,6 +124,7 @@ export const OFFER_REFUSAL_DETAILS: ReadonlySet<string> = Object.freeze(
     "facilitator_busy", "rate_limited", "response_unreadable", "amount_refused", "unauthorized", "unknown_tenant", "requirements_mismatch",
     "order_reused_expired", "order_reused_mismatch", "order_reused_other_id", "limit_total", "limit_unresolved", "limit_rate", "limit_concurrency",
     "requester_missing", "ledger_unavailable", "order_exists", "order_window_short", "limit_source_unresolved", "limit_source_rate", "offer_cap_reached",
+    "offer_daily_cap_reached", "pricing_unavailable", "pricing_over_limit",
   ]),
 );
 /** `retryAfterMs` の上限（1 時間。それより長い値は目安として意味が無い）。 */
