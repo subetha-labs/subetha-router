@@ -244,6 +244,21 @@ describe("静的 route（組み直しの署名器）", () => {
     expect(short.upstream.seen.payments).toHaveLength(1);
   }, 20_000);
 
+  test("402 で断られたら rejected に送った authorization の公開の値が付く（docs/outbound-rejected-unused-check.md U-1・AC-1。組み直しの経路）", async () => {
+    const h = await harness();
+    h.upstream.state.pay = () => ({ ...paidOk(h.address, { price: 1 }, ARC), status: 402, receipt: undefined });
+    const offer = (await h.rail.readChallenge(ROUTE))[0]!;
+    const result = await pay(h, ROUTE, offer);
+    const sent = (h.upstream.seen.payments[0] as { payload: { authorization: Record<string, unknown>; signature: string } }).payload;
+    expect(result).toEqual({
+      outcome: "rejected",
+      reason: "destination_rejected",
+      authorization: { network: ARC, asset: offer.asset, from: sent.authorization["from"], nonce: sent.authorization["nonce"], validBefore: String(sent.authorization["validBefore"]) },
+    });
+    expect(JSON.stringify(result)).not.toContain(sent.signature);
+    expect(h.upstream.seen.payments).toHaveLength(1);
+  });
+
   test("領収は共有の表: network が Base の領収は Arc の送信では unknown", async () => {
     const h = await harness();
     h.upstream.state.pay = () => paidOk(h.address, { price: 1 }, FIXTURE_NETWORK);

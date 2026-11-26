@@ -198,10 +198,19 @@ describe("x402 outbound over the installed official SDK", () => {
 
     const result = await rail.pay({ routeId: ROUTE_ID, offer, paymentId: "p5", attempt: 1, deadlineMs: Date.now() + 600_000 });
 
-    expect(result).toEqual({ outcome: "rejected", reason: "destination_rejected" });
+    // 送った authorization の公開の値が付く（docs/outbound-rejected-unused-check.md AC-1）。上流が受け取ったヘッダの値と一致し、署名は含まない。
+    const calls = await upstreamCalls(fixture);
+    const sent = (calls.seenPayments[0]!["payload"] as { authorization: Record<string, unknown> }).authorization;
+    expect(result).toEqual({
+      outcome: "rejected",
+      reason: "destination_rejected",
+      authorization: { network: NETWORK, asset: offer.asset, from: sent["from"], nonce: sent["nonce"], validBefore: String(sent["validBefore"]) },
+    });
+    expect(sent["nonce"]).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(JSON.stringify(result)).not.toContain(String((calls.seenPayments[0]!["payload"] as { signature: string }).signature));
     // 署名は 1 回だけ。402 を受けて自動で再支払いしない。
     expect(spy.calls).toHaveLength(1);
-    expect((await upstreamCalls(fixture)).payCalls).toBe(1);
+    expect(calls.payCalls).toBe(1);
   });
 
   it("HTTP 200 でもレシートが無ければ paid と扱わない", async () => {

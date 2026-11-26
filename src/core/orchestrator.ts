@@ -1543,9 +1543,12 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
         const reason = safeReason(result["reason"], "destination_rejected");
         // journal に書く outcome は今までどおり append の引数を作る時点の 1 回の読み取り。診断はその local だけを読む（await の後に読み直さない）。
         const failedOutcome = result["outcome"];
+        // 断られた時は、送った authorization の公開の値を残す（形どおりの時だけ。`docs/outbound-rejected-unused-check.md` U-1）。
+        const authorization = failedOutcome === "rejected" ? sentAuthorizationRecordOf(result["authorization"]) : undefined;
         await store.append(paymentId, "dest_failed", {
           outcome: failedOutcome,
           reason,
+          ...(authorization === undefined ? {} : { authorization }),
         });
         destNote(failedOutcome as "not_sent" | "rejected", reason, { attempt, elapsedMs: payElapsedMs });
         await reportComplete(paymentId);
@@ -1770,4 +1773,18 @@ export async function createRouterCore(options: RouterCoreOptions): Promise<Rout
       await journal.close();
     },
   };
+}
+
+const SENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const SENT_NONCE = /^0x[0-9a-fA-F]{64}$/;
+const SENT_SECONDS = /^[1-9][0-9]{0,15}$/;
+const SENT_NETWORK = /^eip155:[1-9][0-9]{0,15}$/;
+/** `rejected` の `authorization` を、形どおりの時だけ記録の形にする（値は adapter が送ったもの。知らない欄は落とす）。 */
+function sentAuthorizationRecordOf(value: unknown): { network: string; asset: string; from: string; nonce: string; validBefore: string } | undefined {
+  if (!isRecord(value)) return undefined;
+  const { network, asset, from, nonce, validBefore } = value;
+  if (typeof network !== "string" || !SENT_NETWORK.test(network)) return undefined;
+  if (typeof asset !== "string" || !SENT_ADDRESS.test(asset) || typeof from !== "string" || !SENT_ADDRESS.test(from)) return undefined;
+  if (typeof nonce !== "string" || !SENT_NONCE.test(nonce) || typeof validBefore !== "string" || !SENT_SECONDS.test(validBefore)) return undefined;
+  return { network, asset, from, nonce, validBefore };
 }

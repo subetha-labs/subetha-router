@@ -134,6 +134,15 @@ export interface FeeEstimate {
   readonly viaFillTransaction: boolean;
 }
 
+/** 送った EIP-3009 の `authorization` の公開の値（署名は含めない）。`validBefore` は 10 進の秒。 */
+export interface SentAuthorization {
+  readonly network: string;
+  readonly asset: string;
+  readonly from: string;
+  readonly nonce: string;
+  readonly validBefore: string;
+}
+
 export type PayResult =
   /** 上流が課金し、データも返した。 */
   | {
@@ -147,7 +156,8 @@ export type PayResult =
   | { readonly outcome: "paid_no_data"; readonly reason: string; readonly receiptRef?: string }
   /** 送信していない（送金前ガードで中止）。 */
   | { readonly outcome: "not_sent"; readonly reason: string }
-  | { readonly outcome: "rejected"; readonly reason: string }
+  /** 上流が断った。`authorization` は署名して送った EIP-3009 の公開の値（静的な x402 の上流だけ。`docs/outbound-rejected-unused-check.md` U-1）。 */
+  | { readonly outcome: "rejected"; readonly reason: string; readonly authorization?: SentAuthorization }
   /** 送金有無が不明。自動再送しない。 */
   | { readonly outcome: "unknown"; readonly reason: string };
 

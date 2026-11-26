@@ -19,7 +19,7 @@ import { getAddress } from "viem";
 import { assertLoopbackUrl } from "../../config.js";
 import { stableJson } from "../../core/intent.js";
 import { discardBody, type GuardedTransport } from "../../net/guarded-fetch.js";
-import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult, UpstreamTarget } from "../../ports/outbound.js";
+import type { DestinationOffer, EvmSigningCapability, OutboundRail, PayRequest, PayResult, SentAuthorization, UpstreamTarget } from "../../ports/outbound.js";
 import { DynamicTargetUnsupportedError } from "../../ports/outbound.js";
 import { readX402Challenge, type X402Challenge } from "./x402-challenge.js";
 import { createRebuildingSigner, createX402DynamicPath, EVM_RECEIPT_FORM, isSigningRefusal, paidOutcomeOf, type X402DynamicOptions } from "./x402-dynamic.js";
@@ -423,7 +423,11 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
       return { outcome: "unknown", reason: "destination_pay_unknown" };
     }
     void approvedJson;
-    return paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx, diagnostics: payDiagnostics });
+    const outcome = await paidOutcomeOf(response, approved, receiptForm, { maxBodyBytes: DYNAMIC_RESPONSE_LIMITS.maxPaidBodyBytes, report: (error, ctx) => transport.report(error, ctx), ctx: payCtx, diagnostics: payDiagnostics });
+    // 断られた時だけ、送った authorization の公開の値を付ける（`docs/outbound-rejected-unused-check.md` U-1。署名器は asset の token の EIP-3009 だけに署名する）。
+    if (outcome.outcome !== "rejected") return outcome;
+    const sent = sentAuthorizationOf(payload, approved);
+    return sent === undefined ? outcome : { ...outcome, authorization: sent };
   }
 
   const rail: OutboundRail = {
@@ -606,7 +610,10 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         recordPayTransportFailure(payDiagnostics, error, approved.network);
         return { outcome: "unknown", reason: "destination_pay_unknown" };
       }
-      if (payDiagnostics === undefined) return baseOutcomeOf(httpClient, response, approved, payCtx, undefined);
+      // 断られた時だけ、送った authorization の公開の値を付ける（`docs/outbound-rejected-unused-check.md` U-1）。
+      const sent = sentAuthorizationOf(payload, approved);
+      const withSent = (outcome: PayResult): PayResult => (outcome.outcome === "rejected" && sent !== undefined ? { ...outcome, authorization: sent } : outcome);
+      if (payDiagnostics === undefined) return withSent(await baseOutcomeOf(httpClient, response, approved, payCtx, undefined));
       let processError: unknown;
       let processFailed = false;
       let readBody: unknown;
@@ -630,7 +637,7 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
         ...(processFailed ? { bodyReadError: { error: processError } } : {}),
         ...(readBody === undefined ? {} : { readBody }),
       });
-      return result;
+      return withSent(result);
     },
   };
 
@@ -732,4 +739,20 @@ export function createX402Outbound(options: X402OutboundOptions): OutboundRail {
   }
 
   return rail;
+}
+
+/**
+ * 送った payload の EIP-3009 の `authorization` から、公開の値だけを取り出す（署名は取らない）。形が違えば `undefined`（結果は変えない）。
+ * `network`・`asset` は承認した offer の値（署名器の検査で `verifyingContract == asset` の EIP-3009 だけに署名している。`docs/outbound-rejected-unused-check.md` U-4b）。
+ */
+function sentAuthorizationOf(payload: unknown, approved: DestinationOffer): SentAuthorization | undefined {
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const inner = (payload as Record<string, unknown>)["payload"];
+  if (typeof inner !== "object" || inner === null) return undefined;
+  const authorization = (inner as Record<string, unknown>)["authorization"];
+  if (typeof authorization !== "object" || authorization === null) return undefined;
+  const { from, nonce, validBefore } = authorization as Record<string, unknown>;
+  const before = typeof validBefore === "number" && Number.isSafeInteger(validBefore) ? String(validBefore) : validBefore;
+  if (typeof from !== "string" || typeof nonce !== "string" || typeof before !== "string") return undefined;
+  return { network: approved.network, asset: approved.asset, from, nonce, validBefore: before };
 }
