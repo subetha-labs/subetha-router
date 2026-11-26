@@ -19,7 +19,9 @@ import {
   OUTBOUND_X402,
   // 公開の定数から `baseFacilitator`（2026-11-26 の G-B4）を除いた形を、この試験の「公開の定数」として使う（Base の差は base-facilitator-config.test.ts）。
   RAILS_ACTIVATION_BEFORE_BASE as RAILS_ACTIVATION,
+  RAILS_ACTIVATION as RAILS_ACTIVATION_PUBLIC,
   RAILS_ACTIVATION_BEFORE_EXACT,
+  RAILS_ACTIVATION_BEFORE_FORMULA,
   RAILS_NONE,
   routerConfigOf,
   subethaExactOf,
@@ -279,6 +281,11 @@ describe("G-4 の公開の定数: 以前の公開の生成に、実証の分を�
     const own = { SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://settle-testnet.subethalabs.com", SUBETHA_EXACT_SETTLE_TOKEN_FILE: "/app/runtime/secrets/settle.token" };
     expect(serialise(planOf(RAILS_ACTIVATION, { ...on, ...eth }))).toBe(goldenText("public-exact"));
     const formula = { ...RAILS_ACTIVATION, subethaExact: { inbound: true, formulaPricing: true } };
+    // 2026-11-26 に有効化: 今の公開の定数は、式の前の形に `formulaPricing: true` を足しただけ（Base の差は base-facilitator-config.test.ts）。
+    expect(RAILS_ACTIVATION_PUBLIC).toEqual({ ...RAILS_ACTIVATION_BEFORE_FORMULA, subethaExact: { inbound: true, formulaPricing: true } });
+    expect(subethaExactOf(RAILS_ACTIVATION_BEFORE_FORMULA).formulaPricing).toBeUndefined();
+    const { baseFacilitator: _publicBase, ...publicWithoutBase } = RAILS_ACTIVATION_PUBLIC;
+    expect(publicWithoutBase).toEqual(formula);
     const before = planOf(RAILS_ACTIVATION, { ...on, ...own });
     const plan = planOf(formula, { ...on, ...own, ...eth });
     type Routes = { router: { routes: Record<string, { pricing?: unknown; source: { amount: string } }> } };
@@ -289,6 +296,9 @@ describe("G-4 の公開の定数: 以前の公開の生成に、実証の分を�
     rest.router.routes[HOSTED_EXACT.routeId]!.source.amount = HOSTED_EXACT.source.amount;
     expect(rest).toEqual(before.config);
     expect(Object.keys(plan.childEnv).filter((k) => !(k in before.childEnv)).sort()).toEqual(["ROUTER_SUBETHA_EXACT_ETH_PRICE", "ROUTER_SUBETHA_EXACT_ETH_PRICE_AT"]);
+    // 残りの子の env は値まで同じ。
+    const { ROUTER_SUBETHA_EXACT_ETH_PRICE: _price, ROUTER_SUBETHA_EXACT_ETH_PRICE_AT: _at, ...restEnv } = plan.childEnv as Record<string, string>;
+    expect(restEnv).toEqual(before.childEnv);
     for (const missing of [{}, { SUBETHA_EXACT_ETH_PRICE: "", SUBETHA_EXACT_ETH_PRICE_AT: "" }]) expect(Object.keys(planOf(formula, { ...on, ...own, ...missing }).childEnv).sort()).toEqual(Object.keys(before.childEnv).sort());
     expect(BigInt(HOSTED_EXACT.bucketMaxTotal)).toBeGreaterThan(BigInt(HOSTED_EXACT.limits.maxRequestsTotal) * BigInt(HOSTED_EXACT_PRICING.maxAmount));
     // 子と同じ読み方: settle 先の token があれば読め、無ければ起動しない。
@@ -351,5 +361,19 @@ describe("運用者の口: 実証の件数の上書き（`SUBETHA_EXACT_MAX_COMM
       demonstration: { capped: true, acceptingNewOffers: true },
       source: { rail: "subetha-exact", scheme: "exact", fundsMoveOnCredential: false, amount: "12000", network: "eip155:84532" },
     });
+    // 式の価格の有効化（2026-11-26）: 一覧で変わるのは zUSDC の行の額（上限 20,000）と `pricing` だけ。
+    const own = { SUBETHA_EXACT_SETTLE_FACILITATOR_URL: "https://settle-testnet.subethalabs.com", SUBETHA_EXACT_SETTLE_TOKEN_FILE: "/app/runtime/secrets/settle.token", SUBETHA_EXACT_ETH_PRICE: "1700000000", SUBETHA_EXACT_ETH_PRICE_AT: "2026-11-26T00:00:00Z" };
+    const formula = listingOf(planOf({ ...RAILS_ACTIVATION, subethaExact: { inbound: true, formulaPricing: true } }, { ...base, ...evm, ...ENV_ON, ...own }));
+    expect(formula.routes.filter((r) => r["routeId"] !== HOSTED_EXACT.routeId)).toEqual(before.routes);
+    expect(JSON.stringify(formula.dynamic)).toBe(JSON.stringify(before.dynamic));
+    const zusdc = formula.routes.find((r) => r["routeId"] === HOSTED_EXACT.routeId)!;
+    expect(zusdc).toMatchObject({ source: { amount: "20000" } });
+    expect(zusdc).toHaveProperty("pricing");
+    const strip = (r: Record<string, unknown>) => {
+      const { pricing: _p, source, ...rest } = r as { pricing?: unknown; source: Record<string, unknown> };
+      return { ...rest, source: { ...source, amount: "x" } };
+    };
+    expect(strip(zusdc)).toEqual(strip(now.routes.find((r) => r["routeId"] === HOSTED_EXACT.routeId)!));
+    expect(zusdc["pricing"]).toEqual({ kind: "settle-cost-v1", maxAmount: "20000", amountIs: "per_quote" });
   });
 });

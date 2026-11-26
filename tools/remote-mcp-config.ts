@@ -377,8 +377,10 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
    * 受信レール `subetha-exact` と標準の x402 入口の、上限付きの実証: **2026-11-21 に `true`**（G-4。owner の決定「段階的に有効化まで」「A で進めて良いです」。
    * G-2 で手元の hosted の入口から標準クライアントと MCP の両方が delivered、G-3 で無効の image を本番に入れ替え済み: `docs/DEPLOY.md` §2i の記録）。
    * 新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に（route と facilitator の設定は残る）。完全に戻すのはこの欄を消す（§2i の rollback の規則を先に読む）。
+   * `formulaPricing`: **2026-11-26 に `true`**（owner の決定「有効にして良いです」。値は `HOSTED_EXACT_PRICING`、`docs/exact-pricing-l1-cap.md`）。受け取り額が注文ごとの式の額（上限 20,000）になる。
+   * host の env に ETH の価格が無い・期限切れなら zUSDC の新しい offer だけ断る。固定の 12,000 に戻すのは `formulaPricing` を消す（`docs/DEPLOY.md` §2i の式の価格の注意を先に読む）。
    */
-  subethaExact: Object.freeze({ inbound: true }),
+  subethaExact: Object.freeze({ inbound: true, formulaPricing: true }),
   /**
    * Base Sepolia の決済を自前の facilitator に（`docs/base-sepolia-facilitator-design.md`、`docs/DEPLOY.md` §2g-2）。
    * `provider`: **2026-11-26 に `true`**（G-B4。owner の決定「おすすめで」。G-B3 で無効の image `b-fa3fe93` を本番に入れ替え済み、G-B2 で入金と env の上限）。
@@ -396,11 +398,16 @@ export const RAILS_ACTIVATION_BEFORE_EXACT: RailsActivation = (() => {
   return Object.freeze(before);
 })();
 /**
+ * `subethaExact.formulaPricing` を足す前の公開の有効化（2026-11-26 の G-B5 から式の価格の有効化までの形）。既存の試験と golden はこの形を基準にし、
+ * 式の価格の有効化が**その差だけ**（zUSDC の route の `pricing` と上限の額、ETH の価格の子の env）であることは `tests/unit/hosted-exact-config.test.ts` が確かめる。
+ */
+export const RAILS_ACTIVATION_BEFORE_FORMULA: RailsActivation = Object.freeze({ ...RAILS_ACTIVATION, subethaExact: Object.freeze({ inbound: true }) });
+/**
  * `baseFacilitator` を足す前の公開の有効化（2026-11-21 の G-4 から 2026-11-26 の G-B3 までの形）。既存の試験と golden（public-exact・pre-base-facilitator）はこの形を基準にし、
  * Base の切り替えが**その差だけ**であることは `tests/unit/base-facilitator-config.test.ts` が、今の公開の定数とこの形の差で確かめる。
  */
 export const RAILS_ACTIVATION_BEFORE_BASE: RailsActivation = (() => {
-  const { baseFacilitator: _base, ...before } = RAILS_ACTIVATION;
+  const { baseFacilitator: _base, ...before } = RAILS_ACTIVATION_BEFORE_FORMULA;
   return Object.freeze(before);
 })();
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
