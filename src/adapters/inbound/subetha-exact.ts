@@ -78,8 +78,14 @@ export interface SubethaExactTimeouts {
   readonly releaseBudgetMs: number;
   readonly completeBudgetMs: number;
   readonly lookupBudgetMs: number;
-  /** `Retry-After` が無いときの待ち。 */
+  /** `Retry-After` が無いときの待ち。release では数列の初項（2 倍ずつ、`releaseWaitCapMs` まで。`docs/exact-release-retry-design.md` §2）。 */
   readonly releaseRetryWaitMs: number;
+  /** release の 1 回の待ちの上限（`Retry-After` もここで切る）。 */
+  readonly releaseWaitCapMs: number;
+  /** release の POST の回数の上限。 */
+  readonly releaseMaxPosts: number;
+  /** release の `claimed` の経路（409 `already-claimed` の後）の GET の回数の上限。 */
+  readonly releaseMaxClaimedProbes: number;
   readonly completeRetryWaitMs: number;
 }
 export const SUBETHA_EXACT_DEFAULT_TIMEOUTS: SubethaExactTimeouts = Object.freeze({
@@ -99,6 +105,9 @@ export const SUBETHA_EXACT_DEFAULT_TIMEOUTS: SubethaExactTimeouts = Object.freez
   completeBudgetMs: 35_000,
   lookupBudgetMs: 20_000,
   releaseRetryWaitMs: 2_000,
+  releaseWaitCapMs: 10_000,
+  releaseMaxPosts: 8,
+  releaseMaxClaimedProbes: 6,
   completeRetryWaitMs: 1_000,
 });
 
@@ -134,6 +143,8 @@ export interface SubethaExactInboundOptions {
   readonly timeouts?: Partial<SubethaExactTimeouts>;
   /** 試験の時計（ms）。 */
   readonly now?: () => number;
+  /** 試験だけ: 待ち（既定は `setTimeout`）。時計を進める sleep を渡すと、既定の待ちの値のまま時系列を確かめられる。 */
+  readonly sleepForTest?: (ms: number) => Promise<void>;
   /** 固定文だけ。 */
   readonly note?: (message: string) => void;
   readonly diagnostics?: DiagnosticsSink;
@@ -170,7 +181,7 @@ const AUTHORIZATION_TYPES = {
 } as const;
 
 const lower = (value: string): string => value.toLowerCase();
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function createSubethaExactInbound(options: SubethaExactInboundOptions): SubethaExactInbound {
   const base = options.facilitatorUrl.replace(/\/$/, "");
@@ -181,6 +192,7 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
   const chainId = Number(asset.network.slice("eip155:".length));
   const timeouts: SubethaExactTimeouts = { ...SUBETHA_EXACT_DEFAULT_TIMEOUTS, ...options.timeouts, ...(options.offerSeconds === undefined ? {} : { offerSeconds: options.offerSeconds }) };
   const now = options.now ?? (() => Date.now());
+  const sleep = options.sleepForTest ?? defaultSleep;
   const nowSec = (): number => Math.floor(now() / 1000);
   const note = options.note ?? (() => undefined);
   const diagnostics = options.diagnostics;
@@ -650,44 +662,60 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
       const startMs = now();
       const budgetEnd = Math.min(context.deadlineMs === undefined ? Number.POSITIVE_INFINITY : context.deadlineMs - 5_000, startMs + timeouts.releaseBudgetMs);
       let attempts = 0;
+      let probes = 0;
       let lastStatus: { httpStatus?: number } = {};
+      let lastThrew = false;
       let totalElapsed = 0;
       const finish = async (outcome: ReleaseResult, reconstructed = false): Promise<ReleaseResult> => {
-        await record(owner.attemptId, "release", { orderId, outcome: outcome.outcome, attempts, ...lastStatus, elapsedMs: Math.round(totalElapsed), ...(reconstructed ? { reconstructed: true } : {}) });
+        await record(owner.attemptId, "release", {
+          orderId,
+          outcome: outcome.outcome,
+          attempts,
+          probes,
+          ...lastStatus,
+          ...(lastThrew ? { lastFailure: "transport" } : {}),
+          elapsedMs: Math.round(totalElapsed),
+          wallMs: Math.max(0, Math.round(now() - startMs)),
+          ...(reconstructed ? { reconstructed: true } : {}),
+        });
         if (outcome.outcome === "released") await options.hooksForTest?.stop?.("after_release_remote", orderId);
         return outcome;
       };
       const unknown: ReleaseResult = { outcome: "unknown", reason: "source_release_unknown" };
       const refused: ReleaseResult = { outcome: "refused", reason: "source_release_refused" };
-      /** GET（復元・状態の確認）: 1 回の機会につき最大 2 試行、同じ予算の内。表 D（`claimed`）／D′（`transport`）。 */
-      type Probe = { readonly kind: "released"; readonly result: ReleaseResult } | { readonly kind: "refused" | "retry" | "unknown" };
-      const probe = async (after: "claimed" | "transport"): Promise<Probe> => {
-        for (let tryNo = 1; tryNo <= 2; tryNo += 1) {
-          const deadline = tryDeadlineOf(timeouts.statusMs, budgetEnd, now());
-          if (deadline === undefined) return { kind: "unknown" };
-          const got = await call("GET", `/exact/orders/${orderId}`, undefined, { op: "facilitator_order_status", deadlineMs: deadline, auth: true, routeId: context.routeId });
-          totalElapsed += got.elapsedMs;
-          lastStatus = httpStatusOf(got);
-          const classified = classifyReconstruct(got, releaseContext, after);
-          if (classified.action === "released") return { kind: "released", result: { outcome: "released", ...classified.ticket } };
-          if (classified.action === "refused") return { kind: "refused" };
-          if (classified.action === "retry") return { kind: "retry" };
-          const retryable = got.kind === "threw" || got.status === 429 || got.status >= 500;
-          if (!retryable || tryNo === 2) return { kind: "unknown" };
-          const wait = got.kind === "response" ? retryAfterMsOf(got.retryAfter, 1000) : 1000;
-          if (!waitFits(wait, budgetEnd, now())) return { kind: "unknown" };
-          await sleep(wait);
-        }
-        return { kind: "unknown" };
+      /** 試行の後の記録の状態: 最後に受けた HTTP 応答の状態は、例外の試行で消さない（FR-7）。 */
+      const observe = (got: CallOutcome & { readonly elapsedMs: number }): void => {
+        totalElapsed += got.elapsedMs;
+        lastThrew = got.kind === "threw";
+        if (got.kind === "response") lastStatus = { httpStatus: got.status };
+      };
+      /** 一時的な失敗（例外・429・5xx）。決まった答え（401・その他の 4xx・読めない本文）は含まない。 */
+      const transient = (got: CallOutcome): boolean => got.kind === "threw" || got.status === 429 || got.status >= 500;
+      /** 待ちの数列（1 回の release に 1 本。§2）。直前の試行の `Retry-After` を上限で切る。収まらなければ false（試さない）。 */
+      let waitStep = 0;
+      const waitAfter = async (got: CallOutcome): Promise<boolean> => {
+        const step = Math.min(timeouts.releaseRetryWaitMs * 2 ** waitStep, timeouts.releaseWaitCapMs);
+        waitStep += 1;
+        const wait = Math.min(got.kind === "response" ? retryAfterMsOf(got.retryAfter, step) : step, timeouts.releaseWaitCapMs);
+        if (!waitFits(wait, budgetEnd, now())) return false;
+        await sleep(wait);
+        return true;
+      };
+      const getOrder = async (): Promise<(CallOutcome & { readonly elapsedMs: number }) | undefined> => {
+        const deadline = tryDeadlineOf(timeouts.statusMs, budgetEnd, now());
+        if (deadline === undefined) return undefined;
+        probes += 1;
+        const got = await call("GET", `/exact/orders/${orderId}`, undefined, { op: "facilitator_order_status", deadlineMs: deadline, auth: true, routeId: context.routeId });
+        observe(got);
+        return got;
       };
       for (;;) {
-        if (attempts >= 3) return finish(unknown);
+        if (attempts >= timeouts.releaseMaxPosts) return finish(unknown);
         const deadline = tryDeadlineOf(timeouts.releaseMs, budgetEnd, now());
         if (deadline === undefined) return finish(unknown);
         attempts += 1;
         const posted = await call("POST", `/exact/orders/${orderId}/release`, { requesterDigest: owner.requesterDigest }, { op: "facilitator_release", deadlineMs: deadline, auth: true, routeId: context.routeId });
-        totalElapsed += posted.elapsedMs;
-        lastStatus = httpStatusOf(posted);
+        observe(posted);
         const classified = classifyReleasePost(posted, releaseContext);
         if (classified.action === "released") return finish({ outcome: "released", ...classified.ticket });
         if (classified.action === "refused") return finish(refused);
@@ -696,19 +724,34 @@ export function createSubethaExactInbound(options: SubethaExactInboundOptions): 
           return finish(unknown);
         }
         if (classified.action === "reconstruct") {
-          const probed = await probe("claimed");
-          if (probed.kind === "released") return finish(probed.result, true);
-          return finish(probed.kind === "refused" ? refused : unknown);
+          // claimed の経路（表 D）: POST は何度でも 409 になるので、一時的な失敗の間は GET を繰り返す。
+          for (let tryNo = 1; ; tryNo += 1) {
+            const got = await getOrder();
+            if (got === undefined) return finish(unknown);
+            if (transient(got)) {
+              if (tryNo >= timeouts.releaseMaxClaimedProbes || !(await waitAfter(got))) return finish(unknown);
+              continue;
+            }
+            const reconstructed = classifyReconstruct(got, releaseContext, "claimed");
+            if (reconstructed.action === "released") return finish({ outcome: "released", ...reconstructed.ticket }, true);
+            return finish(reconstructed.action === "refused" ? refused : unknown);
+          }
         }
         if (classified.action === "probe") {
-          const probed = await probe("transport");
-          if (probed.kind === "released") return finish(probed.result, true);
-          if (probed.kind !== "retry") return finish(unknown);
+          // transport の経路（表 D′）: GET は 1 試行。分からなければ待って POST へ戻る。
+          const got = await getOrder();
+          if (got === undefined) return finish(unknown);
+          if (!transient(got)) {
+            const reconstructed = classifyReconstruct(got, releaseContext, "transport");
+            if (reconstructed.action === "released") return finish({ outcome: "released", ...reconstructed.ticket }, true);
+            if (reconstructed.action !== "retry") return finish(unknown);
+          }
+          // 次の POST が許されないなら待たずに終える（FR-4）。
+          if (attempts >= timeouts.releaseMaxPosts || !(await waitAfter(got))) return finish(unknown);
+          continue;
         }
-        // 425 または「記録されていない」: 予算の内で待って再試行。
-        const wait = posted.kind === "response" ? retryAfterMsOf(posted.retryAfter, timeouts.releaseRetryWaitMs) : timeouts.releaseRetryWaitMs;
-        if (!waitFits(wait, budgetEnd, now())) return finish(unknown);
-        await sleep(wait);
+        // 425: 予算の内で待って再試行（次の POST が許されないなら待たない）。
+        if (attempts >= timeouts.releaseMaxPosts || !(await waitAfter(posted))) return finish(unknown);
       }
     },
 

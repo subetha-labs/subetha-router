@@ -245,7 +245,7 @@ export const SUBETHA_EXACT_DEFAULT_LIMITS = { maxRequestsTotal: 100, maxUnresolv
 | 作成 | `createMs` | なし |
 | 公開 verify | `verifyMs` | なし |
 | settle | `settleMs` | **なし**（1 回だけ） |
-| release（GET の復元を含む） | `min(deadlineMs - now - 5 s, 60 s)` | POST: 425・429・5xx・timeout・transport で予算の内に再試行、最大 3 試行。待ちは `Retry-After` があればその値（**切り詰めない**。残りの予算を超えるなら試行せず `unknown`）、無ければ 2 秒。**GET（復元・状態の確認）は POST とは別に数え、1 回の機会につき最大 2 試行**（429・5xx・timeout・transport で再試行）、同じ予算の内 |
+| release（GET の復元を含む） | `min(deadlineMs - now - 5 s, 60 s)` | **2026-11-26 に改めた（`docs/exact-release-retry-design.md`）**: POST は最大 8 回（425 と、GET が一時的な失敗・`none` のとき再試行）。POST の一時的な失敗の後の GET は 1 試行、409 `already-claimed` の後の GET は一時的な失敗の間だけ最大 6 回。待ちは 1 本の数列（2・4・8・10・10 … 秒）、直前の応答の `Retry-After` を 10 秒で切って使う。待った後に 1 秒以上残らなければ試行せず `unknown`。決まった答えは今までどおりその場で終える |
 | complete | 35 s | 429・5xx・timeout・transport: 予算の内で最大 2 試行、待ちは `Retry-After` かそれが無ければ 1 秒 |
 | requester の照会 | 20 s（1 件につき） | 429・5xx・timeout・transport で最大 2 試行（`Retry-After` を守る） |
 

@@ -357,6 +357,25 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
     return true;
   };
   const bearerOk = (req: http.IncomingMessage): boolean => req.headers.authorization === `Bearer ${options.bearer}`;
+  /**
+   * 停止の注入（release と status）: `down-until:<Unix 秒>` はその時刻まで 502、`busy-until:<Unix 秒>` は 503 + `Retry-After: 30`（`now() < 期限` の間）。
+   * `error-n:<N>` は注文ごとに最初の N 回だけ 502。当たれば応答して true（count の後に呼ぶ）。
+   */
+  const outage = (route: FixtureRoute, orderId: string, res: http.ServerResponse): boolean => {
+    const mode = modes[route];
+    const until = /^(down|busy)-until:([0-9]+)$/.exec(mode);
+    if (until !== null && now() < Number(until[2])) {
+      if (until[1] === "down") sendJson(res, 502, { error: "bad-gateway" });
+      else sendJson(res, 503, { error: "unavailable" }, { "retry-after": "30" });
+      return true;
+    }
+    const first = /^error-n:([0-9]+)$/.exec(mode);
+    if (first !== null && (calls.byOrder[orderId]?.[route] ?? 0) <= Number(first[1])) {
+      sendJson(res, 502, { error: "bad-gateway" });
+      return true;
+    }
+    return false;
+  };
   const delayOf = (route: FixtureRoute): number => (modes[route].startsWith("slow:") ? Number(modes[route].slice(5)) : 0);
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -559,6 +578,8 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
   function status(order: FixtureOrder, res: http.ServerResponse): void {
     count("status", order.orderId);
     if (injected("status", res)) return;
+    if (outage("status", order.orderId, res)) return;
+    if (modes["status"] === "timeout") return; // 答えない（呼び出し側の期限で終わる）
     const mode = modes["status"];
     if (mode === "error") return sendJson(res, 500, { error: "internal" });
     if (mode === "rate-limited") return sendJson(res, 429, { error: "rate-limited" }, { "retry-after": "1" });
@@ -808,6 +829,8 @@ export function createSubethaExactFacilitator(options: FacilitatorFixtureOptions
   function release(order: FixtureOrder, input: Record<string, unknown>, res: http.ServerResponse): void {
     count("release", order.orderId);
     if (injected("release", res)) return;
+    if (outage("release", order.orderId, res)) return;
+    if (modes["release"] === "timeout") return; // 答えない（呼び出し側の期限で終わる）
     if (!hex32(input["requesterDigest"])) return sendJson(res, 400, { error: "expect { requesterDigest }" });
     const mode = modes["release"];
     if (once("release", "error-once")) return sendJson(res, 500, { error: "internal" });

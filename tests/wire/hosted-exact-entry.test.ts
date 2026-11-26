@@ -84,6 +84,8 @@ function standardClient() {
   };
   return { account, exchanges, signatures: () => signatures, fetchWithPayment: wrapFetchWithPayment(recording, client) };
 }
+/** 上流（x402 の合成 Provider）が受けた支払いつきの要求の数。 */
+const upstreamPays = async (h: ExactHarness): Promise<number> => ((await (await fetch(`${h.upstream.baseUrl}/calls`)).json()) as { payCalls: number }).payCalls;
 const unpaid = (publicUrl: string, forwardedFor?: string, extra: Record<string, string> = {}) => fetch(`${publicUrl}${PATH}`, { headers: { ...(forwardedFor === undefined ? {} : { "x-forwarded-for": forwardedFor }), ...extra } });
 
 test("AC-2: 実物の標準クライアントが公開の入口の URL だけで買える（principal を知らない）。`resource.url` と一覧の `x402Url` は公開の origin。記録に生の送信元は残らない", async () => {
@@ -200,4 +202,57 @@ test("AC-4: 購入の途中で買い手の接続が切れても（入れ替え�
   expect(((await again.json()) as { data: { price: string } }).data.price).toBe("3000.12");
   const calls = await h.calls();
   expect([calls.byRoute["verify"], calls.byRoute["submit"]]).toEqual([1, 1]);
+});
+
+test("release の再試行 AC-8: facilitator の release と照会が 3 秒間 502（daemon の再起動）でも、公開の入口から買った標準クライアントに delivered が届く（proxy の期限の内）。settle は 1 回、上流への支払いは 1 回", async () => {
+  const { h, publicUrl } = await boot();
+  const c = standardClient();
+  const until = Math.floor(Date.now() / 1000) + 3;
+  await h.setMode("release", `down-until:${until}`);
+  await h.setMode("status", `down-until:${until}`);
+  const startedAt = performance.now();
+  const response = await c.fetchWithPayment(`${publicUrl}${PATH}`);
+  const elapsed = performance.now() - startedAt;
+  expect(response.status).toBe(200);
+  expect(elapsed).toBeLessThan(170_000);
+  const calls = await h.calls();
+  expect(calls.byRoute["submit"]).toBe(1);
+  expect(calls.byRoute["release"]).toBeGreaterThanOrEqual(2);
+  const journal = await h.journal();
+  expect(journal.filter((r) => r.event === "delivered")).toHaveLength(1);
+  expect(journal.filter((r) => r.event === "source_released")).toHaveLength(1);
+  expect(journal.filter((r) => r.event === "paid_undelivered")).toHaveLength(0);
+  const release = (await h.ledger()).filter((r) => r.event === "release").at(-1)!.patch;
+  expect(release).toMatchObject({ outcome: "released" });
+  expect(Number(release["attempts"])).toBeGreaterThanOrEqual(2);
+  expect(Number(release["wallMs"])).toBeGreaterThanOrEqual(1_000);
+  expect(await upstreamPays(h)).toBe(1);
+});
+
+test("release の再試行 AC-4: 1 回目の release が facilitator で通って応答を失い、照会も 1 回 502 → 2 回目の release が 409 already-claimed → 復元で delivered。settle も上流への支払いも 1 回", async () => {
+  const { h, publicUrl } = await boot();
+  const c = standardClient();
+  await h.setMode("release", "lose-response");
+  await h.setMode("status", "error-n:1");
+  const response = await c.fetchWithPayment(`${publicUrl}${PATH}`);
+  expect(response.status).toBe(200);
+  const calls = await h.calls();
+  expect([calls.byRoute["submit"], calls.byRoute["release"], calls.byRoute["status"]]).toEqual([1, 2, 2]);
+  expect((await h.ledger()).filter((r) => r.event === "release").at(-1)!.patch).toMatchObject({ outcome: "released", reconstructed: true, attempts: 2, probes: 2 });
+  expect(await upstreamPays(h)).toBe(1);
+});
+
+test("release の再試行 AC-6: 照会が決まった答え（401）なら続けず、上流へは送らない（paid_undelivered・source_release_unknown）。settle は 1 回", async () => {
+  const { h, publicUrl } = await boot();
+  const c = standardClient();
+  await h.setMode("release", "raw", { status: 502, body: {} });
+  await h.setMode("status", "raw", { status: 401, body: { error: "unauthorized" } });
+  const response = await c.fetchWithPayment(`${publicUrl}${PATH}`);
+  expect(response.status).not.toBe(200);
+  const calls = await h.calls();
+  expect([calls.byRoute["submit"], calls.byRoute["release"], calls.byRoute["status"]]).toEqual([1, 1, 1]);
+  const journal = await h.journal();
+  expect(journal.filter((r) => r.event === "delivered")).toHaveLength(0);
+  expect(journal.find((r) => r.event === "paid_undelivered")?.patch).toMatchObject({ outcome: "not_sent", reason: "source_release_unknown" });
+  expect(await upstreamPays(h)).toBe(0);
 });
