@@ -17,6 +17,7 @@
     "wallet:new": "tsx tools/wallet-new.ts",
     "wallet:balance": "tsx tools/wallet-balance.ts",
     "sign": "tsx tools/sign-payment.ts",
+    "outbound:unused": "tsx tools/outbound-unused.ts",
     "wallet:new:solana": "tsx tools/wallet-new-solana.ts",
     "subetha-exact:inspect": "tsx tools/subetha-exact-inspect.ts"
   },

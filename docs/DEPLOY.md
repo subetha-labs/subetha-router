@@ -995,6 +995,13 @@ site に `log` の指定は無く access log は出ていないが、それは�
     確認の購入（`a6adafb2-ff52-4c1c-a3e8-02a41fb29883`、16:05Z）：**受信は全て成立**（bind → submit 200 → `reconcile: accepted` → release → complete。tx `0xff3095bd64f3925360a512d06849918b22a3a20cfeda0750a7d40f4b4d7021da`、gasUsed 156,633）が、**`paid_data_unavailable`**。
     Provider A が上流への x402 の支払いを 402・`invalid_exact_evm_transaction_failed` で断った（2026-11-24 の 1 件目と同じ理由）。16:16:50Z の head までに Provider A の受取先への USDC の移動は 0 件。再試行・再署名はしていない。本番の成立した受信 9 件のうち 2 件がこの形で終わった。原因は分かっていない。
 
+**上流が 402 で断った支払いの確かめ（2026-11-26。`docs/outbound-rejected-unused-check.md`）**:
+- 静的な x402 の上流が署名を受けた後に 402 などで断ると、`dest_failed` の行に送った `authorization` の公開の値（`network`・`asset`・`from`・nonce・`validBefore`）が残る（この変更を入れた image から）。
+- 上流で使われていないことを確かめる（読むだけ）: `npm run outbound:unused -- --journal <journal のコピー> --payment <paymentId> --rpc <https の RPC>`。
+  `unused_after_expiry` なら、時刻が `validBefore` 以上の確定したブロックで未使用 = **上流は受け取っておらず、今後も受け取れない**。`used_or_canceled` なら使われたか取り消された（`Transfer` で確かめる）。`too_early` は確定したブロックがまだ期限に届いていない（Base Sepolia では数分〜十数分待つ）。
+- **過去の 2 件（`722fb5c5`・`a6adafb2`）**は記録の前なので、送信鍵の `AuthorizationUsed` と `Transfer` を窓で調べた: どちらも 0 件で、上流への支払いは起きていない（詳細は設計 §5）。買い手（testnet の zUSDC、自分たちの鍵）への返金はしない。
+- 再送はまだ作らない（オーナーの選択、2026-11-26）。Provider A は 01:37Z から自前の facilitator に替わった。同じ形で断られる購入が出たら、この道具で確かめてから再送の要否を決める。
+
 **release の再試行（2026-11-26。`docs/exact-release-retry-design.md`。本番は 03:34Z に `b-50749f9`）**:
 - **記録（2026-11-26。オーナーの「マージを進めて良い」）**: main `50749f9`（PR #224）の image `b-50749f9`（手元 arm64 で build、layer の hash 一致）を `swap-image.sh` で入れ替え: 03:33:52Z 開始、03:34:04Z 終了、exit 0、journal の接頭辞は不変、egress ok。公開の一覧は入れ替えの前と byte 一致（保存）。inspect `--remote` は 15 件・未解決 0・不一致 0。
   公開の購入 1 件（`850d9719-17e4-4834-a59c-15292c791cf3`）: delivered。release の行に `probes`・`wallMs` が入った。rollback は `subetha-router-prev-20261126T033352Z`（`b-f3f32f0`）。§2g-2 のとおり `b-fa3fe93` より前には戻さない。

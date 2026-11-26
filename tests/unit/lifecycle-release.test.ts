@@ -812,3 +812,35 @@ describe("閉じた quote の再 quote（FR-4.5、全 rail。設計 §4.1）", (
     expect(await restarted.quote({ principalId: "alice", requestId: "r2", routeId: ROUTE_ID })).toMatchObject({ closed: true, status: "unknown" });
   });
 });
+
+describe("断られた支払いの authorization の記録（docs/outbound-rejected-unused-check.md U-1・AC-2・AC-2b）", () => {
+  const SENT = { network: "eip155:84532", asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", from: "0x5d78CBD6fFA81a5dBe435ccfC79271a0F6a42274", nonce: `0x${"ab".repeat(32)}`, validBefore: "1795676232" };
+  test("rejected の形どおりの authorization は dest_failed の行に写る。形違い・知らない欄・not_sent では写らない。再起動しても状態は同じ", async () => {
+    const core = await boot();
+    const cases: [string, unknown, unknown][] = [
+      ["r1", { outcome: "rejected", reason: "destination_rejected", authorization: { ...SENT, signature: "0xdead" } }, SENT],
+      ["r2", { outcome: "rejected", reason: "destination_rejected", authorization: { ...SENT, nonce: "0x12" } }, undefined],
+      ["r3", { outcome: "rejected", reason: "destination_rejected", authorization: { ...SENT, validBefore: 1795676232 } }, undefined],
+      ["r4", { outcome: "rejected", reason: "destination_rejected", authorization: { ...SENT, network: "solana:devnet" } }, undefined],
+      ["r5", { outcome: "not_sent", reason: "destination_deadline", authorization: SENT }, undefined],
+      ["r6", { outcome: "rejected", reason: "destination_rejected" }, undefined],
+    ];
+    const ids: string[] = [];
+    for (const [requestId, payResult] of cases) {
+      outbound.payResult = payResult as typeof outbound.payResult;
+      const q = await quoteOf(core, requestId);
+      ids.push(q.paymentId);
+      expect(await core.purchase(purchaseArgs(q, requestId))).toMatchObject({ status: "paid_data_unavailable" });
+    }
+    const rows = await events();
+    for (const [i, [, , expected]] of cases.entries()) {
+      const row = rows.find((r) => r.paymentId === ids[i] && r.event === "dest_failed")!;
+      expect(row.patch["authorization"], String(i)).toEqual(expected);
+    }
+    expect(JSON.stringify(rows)).not.toContain("0xdead");
+    const before = ids.map((id) => core.status(id, "alice"));
+    await core.close();
+    const restarted = await boot();
+    expect(ids.map((id) => restarted.status(id, "alice"))).toEqual(before);
+  });
+});

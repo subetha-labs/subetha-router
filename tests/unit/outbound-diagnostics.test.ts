@@ -276,7 +276,8 @@ function normalizedPayment(payment: unknown): unknown {
 async function runOn(env: RailEnv, act: (env: RailEnv) => Promise<PayResult>): Promise<Run> {
   const result = await act(env);
   await new Promise((resolve) => setImmediate(resolve));
-  return { result, requests: [...env.upstream.requests], body: { ...env.upstream.body }, signatures: env.signatures(), reports: [...env.upstream.reports], payments: env.upstream.payments.map(normalizedPayment) };
+  // 送った authorization の nonce・期限は毎回違うので、比べる時は伏せる（値の一致は x402-outbound の試験が見る）。
+  return { result: normalizedPayment(result) as PayResult, requests: [...env.upstream.requests], body: { ...env.upstream.body }, signatures: env.signatures(), reports: [...env.upstream.reports], payments: env.upstream.payments.map(normalizedPayment) };
 }
 
 /** §8.2 の 3 通り。記録する sink の記録と、(a) の環境を返す。 */
@@ -326,7 +327,7 @@ describe.each(ADAPTERS)("%s: dest_sign・dest_pay_request", (_label, make, netwo
     const { run, records } = await threeWay(make, (env) => {
       env.upstream.pay = () => ({ status: 402, paymentRequired: required("invalid_exact_evm_insufficient_balance"), body: "{}" });
     });
-    expect(run.result).toEqual({ outcome: "rejected", reason: "destination_rejected" });
+    expect(run.result).toMatchObject({ outcome: "rejected", reason: "destination_rejected" });
     expect(view(records)[1]).toMatchObject({ httpStatus: 402, receipt: "absent", reasonSource: "payment_required_header", reason: "invalid_exact_evm_insufficient_balance" });
   });
 
@@ -334,7 +335,7 @@ describe.each(ADAPTERS)("%s: dest_sign・dest_pay_request", (_label, make, netwo
     const { run, records } = await threeWay(make, (env) => {
       env.upstream.pay = () => ({ status: 412, paymentRequired: required("permit2_allowance_required") });
     });
-    expect(run.result).toEqual({ outcome: "rejected", reason: "destination_rejected" });
+    expect(run.result).toMatchObject({ outcome: "rejected", reason: "destination_rejected" });
     expect(view(records)[1]).toMatchObject({ httpStatus: 412, reasonSource: "payment_required_header", reason: "permit2_allowance_required" });
   });
 
@@ -482,7 +483,7 @@ describe("静的 Base: SDK が既に読んだ本文の理由と processResponse 
     const { run, records } = await threeWay(baseRail, (env) => {
       env.upstream.pay = () => ({ status: 402, paymentRequired: required(), body: JSON.stringify({ error: "payment_invalid" }) });
     });
-    expect(run.result).toEqual({ outcome: "rejected", reason: "destination_rejected" });
+    expect(run.result).toMatchObject({ outcome: "rejected", reason: "destination_rejected" });
     expect(view(records)[1]).toMatchObject({ httpStatus: 402, receipt: "absent", reasonField: "error", reasonSource: "response_body", reason: "payment_invalid" });
   });
 
