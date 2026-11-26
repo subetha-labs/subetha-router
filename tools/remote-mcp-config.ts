@@ -380,9 +380,10 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
   /**
    * Base Sepolia の決済を自前の facilitator に（`docs/base-sepolia-facilitator-design.md`、`docs/DEPLOY.md` §2g-2）。
    * `provider`: **2026-11-26 に `true`**（G-B4。owner の決定「おすすめで」。G-B3 で無効の image `b-fa3fe93` を本番に入れ替え済み、G-B2 で入金と env の上限）。
-   * 静的 route の Provider A の上流が `UPSTREAM_X402_BASE` になる。`inbound` は G-B5 まで `false`。戻すのはこの欄を消す（G-B3 以降の image に限る）。
+   * `inbound`: **同日に `true`**（G-B5。G-B4 で Provider A への支払い 1 件が E-FAC-H の送信で delivered）。Base Sepolia USDC の受信の verify・settle が自前の facilitator になる。
+   * 静的 route の Provider A の上流が `UPSTREAM_X402_BASE` になる。戻すのは `inbound: false` にする・この欄を消す（G-B3 以降の image に限る）。
    */
-  baseFacilitator: Object.freeze({ provider: true, inbound: false }),
+  baseFacilitator: Object.freeze({ provider: true, inbound: true }),
 });
 /**
  * `subethaExact` を足す前の公開の有効化（2026-10-14 の G-4 までの形）。既存の試験と golden はこの形を基準にして「実証の追加の前と同じ」を見続け、

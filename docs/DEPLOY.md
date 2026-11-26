@@ -763,12 +763,15 @@ sudo docker run --rm --network none -v /var/lib/subetha-router:/app/runtime \
     - G-4 `dyn-hyperevm-to-arc`: 0.011 HyperEVM USDC（受信 `0x84aa842d…`）。宛先（Router → Arc の Provider）は送出されず、authorization は期限切れで未使用。
   - **資金が動かなかったもの**: G-3 `dyn-x402-to-hyperevm`（受信の settle を x402.org が拒否、authorization は期限切れで未使用）と、quote の `rate_limited` の 7 件。
 
-### 2g-2. Base Sepolia の決済を自前の facilitator に移す — **G-B3・G-B2 済み、G-B4（provider）を配備中**
+### 2g-2. Base Sepolia の決済を自前の facilitator に移す — **G-B3・G-B2・G-B4 済み、G-B5（inbound）を配備・確認中**
 
 **記録（2026-11-26。owner の決定「マージして良い」「無効のまま本番に入れて良い」「おすすめで」）**
 - **G-B3**: main `fa3fe93`（PR #221）の image `b-fa3fe93`（手元 arm64 で build、layer の hash 一致）を `swap-image.sh` で入れ替え: 01:19:33Z 開始、01:19:46Z 終了、exit 0、journal の接頭辞は不変、egress ok、公開の一覧は入れ替えの前と byte 一致、`subetha-exact:inspect` は 15 件・未解決 0・不一致 0。rollback は `b-b51d325`（Base の `gas_cap_init` が journal に入った後は戻さない）。
 - **G-B2**: owner が E-FAC-H に Base Sepolia の 0.05 ETH を入金（01:17Z に残高 0.05 ETH を確認）。env に `SUBETHA_EVM_FACILITATOR_GAS_CAP_84532=10000000000000000`（0.01 ETH）を 1 行（backup `/etc/subetha-router.env.bak-20261126T012212Z`）。
 - **G-B4 の前半**: Worker `provider-x402-base`（`provider-x402-base.subethalabs.com`）を配備し `FACILITATOR_URL` を設定（値は host の env から標準入力で。画面に出していない）。未払いの GET は 503 `facilitator_unavailable`（facilitator がまだ Base を扱わない）。後半は `RAILS_ACTIVATION.baseFacilitator = { provider: true, inbound: false }` の image。
+- **G-B4 の後半**: branch `task/base-provider-on` の head `1047281`（PR #222）の image `b-1047281` を入れ替え: 01:37:25Z 開始、01:37:36Z 終了、exit 0。公開の一覧は byte 一致。facilitator の `/ready` は `{"networks":{"eip155:84532":{"ready":true}}}`、journal に `gas_cap_init`（84532、`10000000000000000`）。Worker の未払いの GET は 402 で、offer（`accepts[0]`）は Provider A と同じ値（resource の URL だけ違う）。
+  公開の購入 1 件（`md-x402-eth-snapshot-sol`、T6 の Solana devnet USDC）: delivered（01:38:43〜48Z）。上流の tx `0x319f9ab295d21587d5126aa8d7c14fb6e250bb411747ba27751c8c5a6cb9eae0`（block 63676295、status 1）の送信者は E-FAC-H、`Transfer` は Router の送信鍵 `0x5d78…2274` → `0x9014…6fE1` に 10,000。gas 約 5.2e11 wei。
+- **G-B5**: `inbound: true` の image（branch `task/base-inbound-on`）。
 
 要件・設計: `docs/base-sepolia-facilitator-requirements.md`、`docs/base-sepolia-facilitator-design.md`。有効化は `RAILS_ACTIVATION.baseFacilitator`（`provider`・`inbound`。欄が無い = 両方無効で、G-B3 の image `b-fa3fe93` はこの形。G-B4 から `provider` だけ `true`、`inbound` は G-B5 まで `false`）。
 
