@@ -253,3 +253,8 @@ handler の「SOL の行が無い応答」の試験を ETH だけの契約どお
 path の検査（405・`?` だけの URL）の既存の振る舞いを上に明記。`accepted` の一致は `payload.resource.url` を見ない（ETH 向けに作った支払いは SOL でも
 通る）: 条件が同一で facilitator が検証するのは送金なので設計どおりだが、資源への束縛ではない（従来からの性質。資源ごとの価格を分けるなら要変更）。
 
+
+## Base Sepolia 版（`--env base`。未配備）
+
+`docs/base-sepolia-facilitator-design.md` §5。402 の値（network・資産・金額・受取先・`maxTimeoutSeconds`・`extra`・説明）は今の Provider A（`provider-x402.subethalabs.com`）と同じで、facilitator は自前（secret `FACILITATOR_URL`）。
+ほかの env との違いは 1 つ: 支払いヘッダの無い要求で、402 の前に facilitator の `GET /ready` を見る（期限 2 秒、控え 2 秒）。この network が `ready: true` と明示されたときだけ 402、ほかは 503 `facilitator_unavailable`。

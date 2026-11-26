@@ -104,6 +104,8 @@ export const DIAG_OPS = [
   "wait_for_receipt",
   "fees_per_gas",
   "estimate_transfer_gas",
+  "native_balance",
+  "chain_id",
   "transfer_with_authorization",
   "reconcile",
   "sdk_verify",

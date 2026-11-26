@@ -124,6 +124,22 @@ test("(a) 署名の無い購入は 402 + offer の再提示 + 開示（上限）
   expect((await h.calls()).byRoute["submit"]).toBeUndefined();
 });
 
+test("上流が quote の後に 503（決済の準備ができていない Provider。docs/base-sepolia-facilitator-design.md §5）: source_failed（not_sent）・awaiting_payment／offer_unavailable、受信の verify・settle 0。quote の前からなら注文も作らない", async () => {
+  const h = await boot({ upstreamArgs: ["--challenge-status", "503", "--challenge-status-after", "1"] });
+  const quote = await quoteOf(h, "req-ready");
+  expect(quote.status).toBe(200);
+  const refused = await purchaseOf(h, quote.body, "req-ready", await credentialOf(h, quote.body.source.offer));
+  expect(refused.body).toMatchObject({ error: "offer_unavailable", status: "awaiting_payment", awaitingPaymentDoesNotMeanUnpaid: true });
+  expect((await h.journal()).at(-1)).toMatchObject({ event: "source_failed", patch: { outcome: "not_sent", reason: "offer_unavailable", settleStarted: false } });
+  const calls = (await h.calls()).byRoute;
+  for (const route of ["verify", "bind", "submit", "release"]) expect(calls[route], route).toBeUndefined();
+  expect(((await (await fetch(`${h.upstream.baseUrl}/calls`)).json()) as { payCalls: number }).payCalls).toBe(0);
+  // 2 回目の quote は注文を作る前に断る。
+  const again = await quoteOf(h, "req-ready-2");
+  expect(again.status).toBeGreaterThanOrEqual(500);
+  expect((await h.calls()).byRoute["create"]).toBe(1);
+});
+
 test("source_offer_unavailable: facilitator が busy なら 503 + Retry-After 30、本文に reason、journal に行なし。注文が無いので quote を取り直せる", async () => {
   const h = await boot();
   await h.setMode("create", "busy");

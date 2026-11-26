@@ -19,6 +19,8 @@ export const UPSTREAM = "https://provider-mpp.subethalabs.com/v1/eth/snapshot";
  */
 export const ROUTE_MPP_IN = "md-x402-eth-snapshot";
 export const UPSTREAM_X402 = "https://provider-x402.subethalabs.com/v1/eth/snapshot";
+/** Base Sepolia 版の Provider（自前の facilitator で決済。`docs/base-sepolia-facilitator-design.md` §4・§5）。受取先・資産・金額は `UPSTREAM_X402` と同じ。 */
+export const UPSTREAM_X402_BASE = "https://provider-x402-base.subethalabs.com/v1/eth/snapshot";
 
 /** x402 受信（Base Sepolia USDC）。 */
 export const INBOUND = {
@@ -196,6 +198,14 @@ export interface RailsActivation {
    */
   readonly subetha?: { readonly inbound: boolean };
   /**
+   * Base Sepolia の決済を自前の facilitator に移す（`docs/base-sepolia-facilitator-design.md` §4）。無ければ両方 `false`（`baseFacilitatorOf`）。
+   * - `provider`: 静的 route の Provider A の上流を `UPSTREAM_X402_BASE` に
+   * - `inbound`: Router の Base Sepolia USDC の受信の facilitator を自前に
+   * どちらかが `true` なら facilitator が `eip155:84532` を扱う（env `SUBETHA_EVM_FACILITATOR_GAS_CAP_84532` が要る）。
+   * 戻す先は、この欄を知る image だけ（facilitator の journal に Base の行が残る。設計 §6）。
+   */
+  readonly baseFacilitator?: BaseFacilitatorActivation;
+  /**
    * 受信レール `subetha-exact`（SubEtha v2 の facilitator の Provider として Base Sepolia の zUSDC を受ける）と標準の x402 入口の、**上限付きの実証**
    * （`docs/hosted-exact-enable-design.md` §6）。無ければ `false`（`subethaExactOf`）。有効なら route 1 本・予算の区分・adapter の上限が出て、
    * host の env `SUBETHA_EXACT_FACILITATOR_URL`・`SUBETHA_EXACT_TOKEN_FILE` が要る。新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に。
@@ -203,6 +213,16 @@ export interface RailsActivation {
   /** `formulaPricing: true` で受け取り額を費用の式で決める（`docs/exact-pricing-design.md` §9。無ければ固定の額のまま）。settle 先の token と ETH の価格の env が要る。 */
   /** `budgetGate: true` で、settle 先が受け付けないと明示している間は新しい offer を出さない（`docs/exact-costs-reader-design.md` C7。無ければ読まない）。settle 先の token の env が要る。 */
   readonly subethaExact?: { readonly inbound: boolean; readonly formulaPricing?: boolean; readonly budgetGate?: boolean };
+}
+/** Base Sepolia の自前の facilitator の有効化（別々に切り替える）。 */
+export interface BaseFacilitatorActivation {
+  readonly provider: boolean;
+  readonly inbound: boolean;
+}
+const BASE_FACILITATOR_OFF: BaseFacilitatorActivation = Object.freeze({ provider: false, inbound: false });
+/** `baseFacilitator` の既定（無ければ両方 `false`）。 */
+export function baseFacilitatorOf(activation: RailsActivation): BaseFacilitatorActivation {
+  return activation.baseFacilitator ?? BASE_FACILITATOR_OFF;
 }
 /** `subethaExact` の既定（無ければ `false`）。 */
 export function subethaExactOf(activation: RailsActivation): { readonly inbound: boolean; readonly formulaPricing?: boolean; readonly budgetGate?: boolean } {
@@ -702,6 +722,8 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
   const evm = evmOf(rails.activation);
   const evmInbound = HOSTED_EVM_CHAINS.filter((chain) => evm[chain].inbound);
   const evmUsed = HOSTED_EVM_CHAINS.filter((chain) => evm[chain].inbound || evm[chain].outbound);
+  // Provider A の上流（Base Sepolia の Provider を自前の facilitator に移すとき）。destination の値（資産・金額・受取先）は同じ。
+  const upstreamX402 = baseFacilitatorOf(rails.activation).provider ? UPSTREAM_X402_BASE : UPSTREAM_X402;
   const evmFacilitatorUrl = env[EVM_FACILITATOR_URL_ENV];
   if (evmInbound.length > 0 && (evmFacilitatorUrl === undefined || evmFacilitatorUrl === "")) {
     throw new Error(`${EVM_FACILITATOR_URL_ENV} is required when an EVM testnet inbound rail is activated`);
@@ -976,17 +998,17 @@ export function routerConfigOf(env: Readonly<Record<string, string | undefined>>
     x402: {
       upstreams: {
         [ROUTE]: UPSTREAM,
-        ...(mppInboundEnabled ? { [ROUTE_MPP_IN]: UPSTREAM_X402 } : {}),
+        ...(mppInboundEnabled ? { [ROUTE_MPP_IN]: upstreamX402 } : {}),
         ...(arcReceiver === undefined ? {} : { [ROUTE_ARC]: UPSTREAM }),
-        ...(solReceiver === undefined ? {} : { [ROUTE_SOL]: UPSTREAM_X402 }),
+        ...(solReceiver === undefined ? {} : { [ROUTE_SOL]: upstreamX402 }),
         ...(arcProvider === undefined ? {} : { [ROUTE_ARC_OUT]: upstreamArc }),
         ...(solProvider === undefined ? {} : { [ROUTE_SOL_OUT]: upstreamSol }),
         // Solana の MPP（設計 §6.3）: 受信 2 本は Provider A・B の URL、送信 2 本は Provider D の URL。
-        ...(solMppReceiver === undefined ? {} : { [ROUTE_SOLMPP_TO_X402]: UPSTREAM_X402, [ROUTE_SOLMPP_TO_MPP]: UPSTREAM }),
+        ...(solMppReceiver === undefined ? {} : { [ROUTE_SOLMPP_TO_X402]: upstreamX402, [ROUTE_SOLMPP_TO_MPP]: UPSTREAM }),
         ...(solMppProvider === undefined ? {} : { [ROUTE_SOLMPP_OUT]: upstreamSolMpp, ...(mppInboundEnabled ? { [ROUTE_SOLMPP_OUT_MPP]: upstreamSolMpp } : {}) }),
         // SubEtha（zUSDC）の受信 2 本は Provider A・B の URL。
-        ...(subethaUrl === undefined ? {} : { [ROUTE_ZUSDC_TO_X402]: UPSTREAM_X402, [ROUTE_ZUSDC_TO_MPP]: UPSTREAM }),
-        ...(hostedExact === undefined ? {} : { [HOSTED_EXACT.routeId]: UPSTREAM_X402 }),
+        ...(subethaUrl === undefined ? {} : { [ROUTE_ZUSDC_TO_X402]: upstreamX402, [ROUTE_ZUSDC_TO_MPP]: UPSTREAM }),
+        ...(hostedExact === undefined ? {} : { [HOSTED_EXACT.routeId]: upstreamX402 }),
       },
       // network ごとの受信の facilitator（設計 §2）。Base Sepolia は env（`ROUTER_X402_INBOUND_FACILITATOR_URL`）のまま。有効なレールの分だけ。
       // EVM testnet 3 つの受信（hosted 設計 §5）は自前の facilitator（kind `x402`）。HTTP の期限はチェーン別に Router が決める（`evmTestnetDeadlinesOf`。ローカル版 §3.6 の 20 秒）。

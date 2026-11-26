@@ -140,7 +140,7 @@ describe("env（§3.4）", () => {
       // runtime（入口）も同じ検査で止まる: 鍵があれば closure を作る前に拒む。
       expect(errorOf(() => runtimeOf({ PROVIDER_NETWORK: name, PAY_TO, FACILITATOR_URL: FACILITATOR, SELLER_PROOF_KEY: key }))?.message).toMatch(/must not be set/);
     }
-    for (const network of ["base", "eip155:46630", "RH", "__proto__", "toString", "hasOwnProperty"]) {
+    for (const network of ["basesepolia", "eip155:46630", "RH", "__proto__", "toString", "hasOwnProperty"]) {
       expect(errorOf(() => configOf({ PROVIDER_NETWORK: network, PAY_TO, FACILITATOR_URL: FACILITATOR }))?.message, network).toMatch(/PROVIDER_NETWORK must be one of/);
     }
   });

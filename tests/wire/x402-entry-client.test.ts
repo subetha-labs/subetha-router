@@ -168,6 +168,26 @@ test("AC-1／AC-2: 標準クライアントが URL と Bearer だけで 402 → 
   for (const text of [h.router.stdout(), h.router.stderr()]) expect(text).not.toContain(p.payload.signature);
 });
 
+test("上流が 402 の後に 503（決済の準備ができていない Provider。docs/base-sepolia-facilitator-design.md §5）: 409 payment_not_completed、受信の verify・settle 0、mayStillSettleUntil の開示は残る", async () => {
+  const h = await boot({ upstreamArgs: ["--challenge-status", "503", "--challenge-status-after", "1"] });
+  const c = standardClient();
+  const response = await c.fetchWithPayment(entryUrl(h), { headers: principalHeaders() });
+  const body = (await response.json()) as Record<string, unknown>;
+  expect([response.status, body["error"]]).toEqual([409, "payment_not_completed"]);
+  noChallenge(response);
+  expect(c.signed).toHaveLength(1);
+  const auth = (decodePaymentSignatureHeader(c.exchanges[1]!.sent["payment-signature"]!) as unknown as { payload: { authorization: Record<string, string> } }).payload.authorization;
+  expect((body["source"] as Record<string, unknown>)["mayStillSettleUntil"]).toBe(Number(auth["validBefore"]));
+  expect(String(body["note"])).toContain("not proof that nothing was paid");
+  const calls = (await h.calls()).byRoute;
+  for (const route of ["bind", "submit", "release"]) expect(calls[route], route).toBeUndefined();
+  expect((await h.journal()).at(-1)).toMatchObject({ event: "source_failed", patch: { outcome: "not_sent", reason: "offer_unavailable" } });
+  // 次の買い手は 402（注文）の前に断られる。
+  const next = await challengeOf(h);
+  expect(next.response.status).not.toBe(402);
+  expect((await h.calls()).byRoute["create"]).toBe(1);
+});
+
 test("AC-3: 買えなかった場合の応答は 402 でなく、PAYMENT-REQUIRED を持たず、実物のクライアントは 2 つ目の署名を作らない。開示は結び付いた credential の validBefore", async () => {
   const cases: { name: string; arrange: (h: ExactHarness) => Promise<void>; error: string; settled?: boolean; boot?: Parameters<typeof startExactHarness>[0] }[] = [
     { name: "verify refused", arrange: (h) => h.setMode("verify", "invalid"), error: "payment_not_completed" },

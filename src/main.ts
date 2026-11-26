@@ -63,6 +63,7 @@ import { createSubethaExactInbound, type SubethaExactInbound, type SubethaExactI
 import { createExactPricing, settleAcceptingOf } from "./adapters/inbound/exact-pricing.js";
 import { createSettleCosts } from "./adapters/inbound/settle-costs.js";
 import type { ExactPricing } from "./ports/exact-pricing.js";
+import { BASE_SELF_FACILITATOR_TIMEOUT_MS, SELF_FACILITATOR_NETWORKS } from "./shared/self-facilitator.js";
 import { SUBETHA_EXACT_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_FACILITATOR_URL_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FILE_ENV, SUBETHA_EXACT_SETTLE_TOKEN_FORM, SUBETHA_EXACT_TOKEN_FILE_ENV } from "./shared/subetha-exact.js";
 import type {
   EvmSigningCapability,
@@ -155,7 +156,14 @@ export interface RouterCapabilities {
    * その transport は要求ごとに origin の完全一致を確かめる（不一致は送出前に拒否）。動的上流・Base Sepolia・ほかの network には効かない。
    * 渡されたときは、該当の URL のうち host が loopback のものが allowlist に無ければ起動しない（fetch 時の拒否に任せない）。
    */
-  readonly localCounterparties?: { readonly origins: readonly string[] };
+  readonly localCounterparties?: {
+    readonly origins: readonly string[];
+    /**
+     * Base Sepolia の**受信**（静的・動的）の facilitator も対象に含める（`docs/base-sepolia-facilitator-design.md` §3）。公開の子は有効化
+     * `baseFacilitator.inbound` のときだけ渡す。送信・動的上流には効かない。無ければ今と同じ（Base Sepolia には効かない）。
+     */
+    readonly baseSepoliaInbound?: boolean;
+  };
   /**
    * 診断の記録（`docs/rejection-reasons-design.md` §2.1・§2.3、タスク R-2）。本番では公開の子（`tools/remote-router-process.ts`）だけが、
    * `SUBETHA_DIAGNOSTICS_PATH` があるときにファイルの sink を渡す。無ければ `NOOP`（何も記録しない。結果・journal・stderr は同じ）。
@@ -319,6 +327,8 @@ export function localCounterpartyPlanOf(
   facilitatorUrlOf: (network: string) => string | undefined,
   origins: ReadonlySet<string> | undefined,
   profiles: Readonly<Record<string, DynamicProfile>> = {},
+  /** 受信の例外の対象の network（既定は EVM testnet 4 つ。Base Sepolia の受信を含めるときだけ `SELF_FACILITATOR_NETWORKS`）。送信の組には使わない。 */
+  inboundNetworks: ReadonlySet<string> = EVM_TESTNET_NETWORKS,
 ): { readonly inbound: ReadonlyMap<string, string>; readonly inboundDynamic: ReadonlyMap<string, string>; readonly outbound: ReadonlyMap<string, ReadonlySet<string>> } {
   const inbound = new Map<string, string>();
   const inboundDynamic = new Map<string, string>();
@@ -334,7 +344,7 @@ export function localCounterpartyPlanOf(
   };
   const groups = new Map<string, { loopback: number; total: number }>();
   for (const route of Object.values(routes)) {
-    if (route.sourceRail === "x402" && EVM_TESTNET_NETWORKS.has(route.source.network)) {
+    if (route.sourceRail === "x402" && inboundNetworks.has(route.source.network)) {
       const url = facilitatorUrlOf(route.source.network);
       if (url !== undefined && isLoopbackUrl(url)) {
         const origin = listed(url);
@@ -368,7 +378,7 @@ export function localCounterpartyPlanOf(
     }
   }
   for (const profile of Object.values(profiles)) {
-    if (profile.sourceRail !== "x402" || !EVM_TESTNET_NETWORKS.has(profile.source.network)) continue;
+    if (profile.sourceRail !== "x402" || !inboundNetworks.has(profile.source.network)) continue;
     const url = facilitatorUrlOf(profile.source.network);
     if (url === undefined || !isLoopbackUrl(url)) continue;
     const origin = listed(url);
@@ -780,6 +790,7 @@ export function composeRails(
     (network) => (network === LEGACY_X402_INBOUND_NETWORK ? real.x402InboundFacilitatorUrl : real.x402InboundFacilitators?.[network]?.url),
     localOrigins,
     config.router.dynamic?.profiles ?? {},
+    capabilities.localCounterparties?.baseSepoliaInbound === true ? SELF_FACILITATOR_NETWORKS : EVM_TESTNET_NETWORKS,
   );
 
   /**
@@ -1171,7 +1182,7 @@ export function composeRails(
         ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       });
     };
-    const evmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitator: { url: string; kind: X402FacilitatorKind }, offerSeconds: number | undefined, bindAuthorizationNonce: boolean): InboundRail => {
+    const evmRail = (network: string, asset: string, payTo: string, at: string, transport: GuardedTransport, facilitator: { url: string; kind: X402FacilitatorKind }, offerSeconds: number | undefined, bindAuthorizationNonce: boolean, selfFacilitator: boolean): InboundRail => {
       const { known } = knownAssetFor(network, asset, at);
       if (facilitator.kind === "circle") {
         return createX402Inbound({
@@ -1190,12 +1201,15 @@ export function composeRails(
       // kind `x402`（Base Sepolia、既存）: 今までどおり（`maxTimeoutSeconds` が有効期間を兼ねる）。
       // EVM testnet 4 つ（`docs/evm-testnets-x402-design.md` §3.2）だけ: 表の EIP-712 domain と、チェーン別の facilitator の期限（§3.6）。ほかの network は変えない。
       const testnet = evmTestnetDeadlinesOf(network);
+      // Base Sepolia を自前の facilitator（allowlist の loopback）で受けるときだけ 20 秒（facilitator の締め切り 10 秒の外側。設計 base-sepolia §3）。domain は既定のまま表と同じ。
+      const baseTimeout = selfFacilitator && network === LEGACY_X402_INBOUND_NETWORK ? { timeoutMs: BASE_SELF_FACILITATOR_TIMEOUT_MS } : {};
       return createX402Inbound({
         facilitatorUrl: facilitator.url,
         payTo,
         transport,
         ...(bindAuthorizationNonce ? { bindAuthorizationNonce: true } : {}),
         ...(offerSeconds === undefined ? {} : { maxTimeoutSeconds: offerSeconds }),
+        ...baseTimeout,
         ...(testnet === undefined ? {} : { timeoutMs: testnet.inboundFacilitatorMs, ...(known.domain === undefined ? {} : { assetDomain: known.domain }) }),
         ...(capabilities.diagnostics === undefined ? {} : { diagnostics: capabilities.diagnostics }),
       });
@@ -1224,7 +1238,7 @@ export function composeRails(
       inboundRails[`x402:${route.routeId}`] =
         networkFamilyOf(route.source.network) === "svm"
           ? svmRail(route.source.network, route.source.asset, payTo, at, transport, facilitator.url, real.x402InboundOfferSeconds)
-          : evmRail(route.source.network, route.source.asset, payTo, at, transport, facilitator, real.x402InboundOfferSeconds, false);
+          : evmRail(route.source.network, route.source.asset, payTo, at, transport, facilitator, real.x402InboundOfferSeconds, false, localOrigin !== undefined);
     }
     // 動的プロファイルの受信（x402）: 署名を quote に束縛し、transport は動的用（loopback 不可）。
     // EVM testnet の受信で facilitator が allowlist の loopback なら、静的と同じく loopback を許しその origin だけを通す transport（hosted 設計 §3）。
@@ -1240,7 +1254,7 @@ export function composeRails(
       inboundRails[`x402:${profile.profileId}`] =
         networkFamilyOf(profile.source.network) === "svm"
           ? svmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, transport, facilitator.url, real.x402InboundOfferSeconds)
-          : evmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, transport, facilitator, real.x402InboundOfferSeconds, true);
+          : evmRail(profile.source.network, profile.source.asset, profile.source.payTo, at, transport, facilitator, real.x402InboundOfferSeconds, true, localOrigin !== undefined);
     }
   }
 

@@ -30,7 +30,7 @@ import { DRAIN_TIMEOUT_MS } from "../src/shared/drain.js";
 import { buildServer, sourceOfRequest } from "../src/mcp/server.js";
 import { startListening, type Listening } from "../tests/fixtures/loopback.js";
 import { diagnosticsChildEnvOf } from "./router-diagnostics.js";
-import { HOSTED_EXACT, HOSTED_EXACT_ETH_PRICE_AT_ENV, HOSTED_EXACT_ETH_PRICE_ENV, subethaExactOf, hostedExactOf, INBOUND, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
+import { HOSTED_EXACT, HOSTED_EXACT_ETH_PRICE_AT_ENV, HOSTED_EXACT_ETH_PRICE_ENV, baseFacilitatorOf, subethaExactOf, hostedExactOf, INBOUND, OUTBOUND_X402, RAILS_ACTIVATION, routerConfigOf, subethaFacilitatorUrlOf, type RailsActivation, MAINNET_FIRST_ROUTE, mainnetFirstRouteConfigOf, RAILS_NONE, EVM_CHAINS_ENV, EVM_FACILITATOR_URL_ENV, EVM_PROVIDER_PAYTO_ENV, EVM_TESTNET_CHAINS, EVM_TESTNETS, evmOf, evmProviderUrlEnvOf, evmTestnetsConfigOf, HOSTED_EVM_CHAINS, type EvmTestnetChain, type HostedEvmChain, EVM_MATRIX_ACTIVATION } from "./remote-mcp-config.js";
 import { railsChildEnvOf, railsOptionsOf, railsProvidersOf, railsReceiversOf } from "./rails-entry.js";
 
 function note(message: string): void {
@@ -173,13 +173,19 @@ function evmUsedChainsOf(activation: RailsActivation): readonly HostedEvmChain[]
   return HOSTED_EVM_CHAINS.filter((chain) => evm[chain].inbound || evm[chain].outbound);
 }
 
+/** Base Sepolia を facilitator が扱うか（`docs/base-sepolia-facilitator-design.md` §4）。 */
+function baseFacilitatorUsed(activation: RailsActivation): boolean {
+  const base = baseFacilitatorOf(activation);
+  return base.provider || base.inbound;
+}
+
 /**
  * facilitator の子の計画（hosted 設計 §4）。子の env は allowlist: 本番の env の `SUBETHA_EVM_FACILITATOR_*` を `EVM_FACILITATOR_*` に写したものと、
  * 計画が決める bind・port・network・payTo の allowlist（Router の受取先と新 3 の Provider の受取先）・journal だけ。
  * 必須の env（gas 鍵・token・有効な chain ごとの gas の上限・Provider の受取先）が無い・token の形が違えば `HostPlanError("evm_facilitator")`（値は出さない）。
  * bind は入口と同じ（公開の入口は `0.0.0.0` = コンテナの中で publish に届く。受け入れの起動はその bind: コンテナの外の既定 `127.0.0.1` では facilitator も loopback だけ）。
  */
-function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string, string | undefined>>, receiver: string, chains: readonly HostedEvmChain[]): EvmFacilitatorPlan {
+function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string, string | undefined>>, receiver: string, chains: readonly HostedEvmChain[], base: boolean): EvmFacilitatorPlan {
   const present = (name: string): string => {
     const value = env[name];
     if (value === undefined || value === "") throw new HostPlanError("evm_facilitator");
@@ -188,16 +194,19 @@ function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string,
   const key = present(EVM_FACILITATOR_HOST_ENV.key);
   const token = present(EVM_FACILITATOR_HOST_ENV.token);
   if (!EVM_FACILITATOR_TOKEN_PATTERN.test(token)) throw new HostPlanError("evm_facilitator");
-  const providerPayTo = present(EVM_PROVIDER_PAYTO_ENV);
+  // 共通の allowlist（新 3）: Router の受取先と新 3 の Provider の受取先。Base だけのときは Router の受取先だけ。
+  const commonPayTo = chains.length === 0 ? [receiver] : [receiver, present(EVM_PROVIDER_PAYTO_ENV)];
   const port = options.evmFacilitatorPortForTest ?? EVM_FACILITATOR_PORT;
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new HostPlanError("evm_facilitator");
-  const networks = chains.map((chain) => EVM_TESTNETS[chain].network);
+  const networks: string[] = [...chains.map((chain) => EVM_TESTNETS[chain].network as string), ...(base ? [INBOUND.network] : [])];
   const perChain: Record<string, string> = {};
   for (const network of networks) {
     const chainId = network.slice("eip155:".length);
     perChain[`EVM_FACILITATOR_GAS_CAP_${chainId}`] = present(`${EVM_FACILITATOR_HOST_ENV.gasCapPrefix}${chainId}`);
     const rpc = env[`${EVM_FACILITATOR_HOST_ENV.rpcPrefix}${chainId}`];
     if (rpc !== undefined && rpc !== "") perChain[`EVM_FACILITATOR_RPC_${chainId}`] = rpc;
+    // Base だけの allowlist（共通のものは広げない。設計 base-sepolia §2.5）。
+    if (network === INBOUND.network) perChain[`EVM_FACILITATOR_PAYTO_ALLOWLIST_${chainId}`] = [receiver, OUTBOUND_X402.payTo].join(",");
   }
   const log = env[EVM_FACILITATOR_HOST_ENV.log];
   const diagnostics = evmFacilitatorDiagnosticsPathOf(env);
@@ -212,7 +221,7 @@ function evmFacilitatorPlanOf(options: HostOptions, env: Readonly<Record<string,
       EVM_FACILITATOR_BIND: options.bind,
       EVM_FACILITATOR_PORT: String(port),
       EVM_FACILITATOR_NETWORKS: networks.join(","),
-      EVM_FACILITATOR_PAYTO_ALLOWLIST: [receiver, providerPayTo].join(","),
+      EVM_FACILITATOR_PAYTO_ALLOWLIST: commonPayTo.join(","),
       ...perChain,
       EVM_FACILITATOR_JOURNAL: evmFacilitatorJournalPathOf(env),
       ...(log === undefined || log === "" ? {} : { EVM_FACILITATOR_LOG: log }),
@@ -306,7 +315,8 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
    * 親の env の `SUBETHA_EVM_FACILITATOR_URL` は使わない（URL は計画が token と port から作る）。全部無効なら env も計画も今と同じ。
    */
   const evmChains = evmUsedChainsOf(options.activation);
-  const facilitator = evmChains.length === 0 ? undefined : evmFacilitatorPlanOf(options, env, receiver, evmChains);
+  const baseFacilitator = baseFacilitatorUsed(options.activation);
+  const facilitator = evmChains.length === 0 && !baseFacilitator ? undefined : evmFacilitatorPlanOf(options, env, receiver, evmChains, baseFacilitator);
   const configEnv = facilitator === undefined ? env : { ...env, [EVM_FACILITATOR_URL_ENV]: facilitator.url };
   // `subetha-exact` の実証の host の env（有効なときだけ読む。欠けていれば固定文で止める）。
   let hostedExact: ReturnType<typeof hostedExactOf>;
@@ -338,7 +348,8 @@ export function hostPlanOf(options: HostOptions, env: Readonly<Record<string, st
       ROUTER_ADAPTER_MODE: "real",
       // SubEtha（zUSDC）の受信が有効なら、その facilitator（設定生成が形を確かめ済み。設計 §4.1）。無効なら今までどおりの埋め草（subetha の route が無いので使われない）。
       ROUTER_SUBETHA_FACILITATOR_URL: subethaFacilitatorUrlOf(env, options.activation) ?? INBOUND.facilitator,
-      ROUTER_X402_INBOUND_FACILITATOR_URL: INBOUND.facilitator,
+      // Base Sepolia の受信: 既定は x402.org、`baseFacilitator.inbound` なら自前の facilitator（設計 base-sepolia §4）。
+      ROUTER_X402_INBOUND_FACILITATOR_URL: baseFacilitatorOf(options.activation).inbound && facilitator !== undefined ? facilitator.url : INBOUND.facilitator,
       // 受信 offer の有効期間。承認期限は min(approvalTtlMs, offerExpiry) で切られるので、
       // 既定の 120 秒だと**人間が承認する運用では先に切れる**（実測で指摘された）。
       ROUTER_X402_INBOUND_OFFER_SECONDS: env["SUBETHA_OFFER_SECONDS"] ?? "600",

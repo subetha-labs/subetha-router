@@ -35,7 +35,7 @@ export interface FacilitatorClientOptions {
   readonly signer?: SellerProofSigner;
   readonly fetch?: typeof fetch;
   /** 呼び出しごとの段を返す（signal は段の予算と要求全体の abort。`expired` は時計で見た経過。終わりに `dispose`）。 */
-  readonly stageFor: (stage: "verify" | "settle" | "supported") => Stage;
+  readonly stageFor: (stage: "verify" | "settle" | "supported" | "ready") => Stage;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -173,6 +173,27 @@ export class BoundedFacilitatorClient implements FacilitatorClient {
     if (status === 403 && isRecord(json) && json["errorReason"] === "registration_required") throw new FacilitatorUnavailableError("facilitator_registration_required", status);
     if (status !== 200 || !isRecord(json) || typeof json["success"] !== "boolean") throw new FacilitatorUnavailableError("facilitator_unavailable", status);
     return json as unknown as SettleResponse;
+  }
+
+  /**
+   * 自前の facilitator の `GET /ready`（`docs/base-sepolia-facilitator-design.md` §2.3・§5）。この network が `ready: true` と**明示されたときだけ** true。
+   * 不達・期限・3xx・200 以外・形違い・欠けはすべて false（例外を投げない）。
+   */
+  async isReady(network: string): Promise<boolean> {
+    const stage = this.#stageFor("ready");
+    try {
+      if (stage.expired()) return false;
+      const response = await this.#fetch(`${this.#url}/ready`, { method: "GET", redirect: "manual", signal: stage.signal });
+      const json = await readBoundedJson(response, MAX_RESPONSE_BYTES, stage.signal);
+      if (response.status !== 200 || !isRecord(json) || !isRecord(json["networks"])) return false;
+      const networks = json["networks"];
+      const entry = Object.prototype.hasOwnProperty.call(networks, network) ? networks[network] : undefined;
+      return isRecord(entry) && entry["ready"] === true;
+    } catch {
+      return false;
+    } finally {
+      stage.dispose();
+    }
   }
 
   async getSupported(): Promise<SupportedResponse> {

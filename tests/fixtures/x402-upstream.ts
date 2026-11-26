@@ -33,6 +33,8 @@ const afterHeaders = arg("after-headers", "none");
 const afterHeadersOn = arg("after-headers-on", "all");
 /** challenge GET の status（既定 402。T-A17 (h): 402 以外を返して adapter の早期 return を踏ませる）。 */
 const challengeStatus = Number(arg("challenge-status", "402"));
+/** `challenge-status` を効かせ始める回（この回数の 402 を返した後から。既定 0 = 最初から）。 */
+const challengeStatusAfter = Number(arg("challenge-status-after", "0"));
 /** 種類別の閉じた接続数（`challenge` = 402 / `other` = それ以外 / `calls` = 観測用）。 */
 const closedByKind: Record<string, number> = { challenge: 0, other: 0, calls: 0, none: 0 };
 function stallThis(status: number): boolean {
@@ -206,7 +208,7 @@ const server = http.createServer((request, response) => {
     challengeCalls += 1;
     send(
       response,
-      challengeStatus,
+      challengeCalls > challengeStatusAfter ? challengeStatus : 402,
       { error: "payment_required" },
       { "PAYMENT-REQUIRED": paymentRequiredHeader(canonicalUrl, "payment_required") },
     );

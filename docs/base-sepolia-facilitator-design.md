@@ -1,4 +1,4 @@
-# 設計: Base Sepolia の決済を自前の facilitator に移す（第 2 版、2026-11-26）
+# 設計: Base Sepolia の決済を自前の facilitator に移す（第 2.1 版、2026-11-26。実装との差を §10 に）
 
 > 要件 `docs/base-sepolia-facilitator-requirements.md`。下敷き `docs/evm-testnets-hosted-design.md`。行番号は main `81db1b3`。**実装はまだしない**（G-B1）。
 
@@ -138,3 +138,23 @@
 - **R2（第 2 版の設計の編集が保存されていない状態を読んだ。要件だけが第 2 版）: REVISE**。設計の編集をやり直した。
 - **R3（第 2 版の両方）: REVISE**（R1 の 9 件は解決、1 件が一部、新しい MUST 1 件）。反映: 遅れて終端になった鍵の復帰の経路、chain id の確認前の復帰の遮断（§2.4・AC-B4）。
 - **R4（readback）: APPROVE**。新しい指摘なし（静的な照合だけ。実装・試験の承認ではない）。
+
+## 10. 実装で決めたこと・設計との差（2026-11-26、B-1〜B-4）
+
+- **受信の例外の旗**: `localCounterparties` に任意の `baseSepoliaInbound` を足し、公開の子は `baseFacilitator.inbound` のときだけ渡す。旗が無ければ Base には効かない
+  （設計 §3 では Base を常に対象にしていた。狭めた）。`SELF_FACILITATOR_NETWORKS` は `src/shared/self-facilitator.ts`（`networks.ts` は payer のパッケージが写すので触らない）。
+- **`/ready` に載るのは Base だけ**: ほかの network は残高・手数料を見ないので、準備の値を返さない。
+- **Worker の並行**: 準備の確認の promise は要求をまたいで共有しない（workerd は別の要求の I/O を待てない）。控えは値だけで、読み取りの集約は facilitator の側（1 本）。`true` も `false` も 2 秒控える。
+- **復帰の対象外**: `transfer_mismatch` のほかに、journal の書き込みの失敗（`journal_write_failed`）。この process で追記が 1 度でも失敗したら、以後は復帰の追記をしない（途中の行が残り得る。再起動の照合に任せる）。
+  使えない間（chain id が未確認）は 40 回の回数に数えない。
+- **receipt の `l1Fee`** は viem が生のまま残す欄から読む（追加の RPC なし）。
+- **既存の試験の変更**: 「未知の network」の例に `eip155:84532` を使っていた 3 か所を `eip155:8453` に、Worker の「知らない network」の例の `base` を別の語に替えた。有効化の語の一覧の固定文に 2 語が増えた（`base-provider`・`base-in`）。ほかの既存の試験は変えていない。
+- **未確認**: 実際の Base Sepolia の RPC・workerd・Cloudflare での動作（G-B3〜G-B5 で確かめる）。
+
+### 実装のレビューの記録
+- **I-1（Codex `gpt-6-astra`、CLI read-only）: REVISE**（MUST 3・SHOULD 4）。反映: 1 `close`・起動の失敗でも裏の仕事を止めて待ってから journal と lock を放す、2 期限切れの `aborted_before_send`・`reverted` の追記も復帰の対象に（保留の理由を分けた。log の文字列だけ全 network で変わる）、
+  3 復帰の追記と解除の直前に journal の失敗を見直す、4 準備の読み取りは下の RPC が終わるまで 1 本、6 無効の byte 一致を変更前の golden とも照合・実際の Worker と facilitator の核をつないだ wire 試験、7 DEPLOY の遅れと対象外の記述。
+  5（不正なヘッダの要求にも準備の確認）は採らない: 手元で断った支払いつきの要求を 503 にすると、送出していないのに Router が `unknown` にする。要件 FR-B5 の文言を「支払いヘッダの無い要求」に明確にした。
+- **I-2（readback）: REVISE**（5 件解決、2 件が一部、新しい 1 件。5 の不採用の理由は妥当と判定）。反映: 裏の仕事が上限（10 秒）までに終わらなければ journal も lock も閉じない、寿命の過ぎた読み取りを待っていた要求もその値を使わない、
+  無効のときの計画の全部（設定・子の env・facilitator の計画）と一覧を、変更前の code（`e24bd6f`）が書いた fixture と照合（`tests/fixtures/config-golden/pre-base-facilitator.json`）。
+- **I-3（readback）: APPROVE**（新しい指摘なし。レビューは静的な照合だけ）。
