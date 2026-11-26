@@ -343,8 +343,10 @@ and the following remain behind separate gates, **not done**.
 ## Inbound as a Provider of the SubEtha v2 facilitator (`subetha-exact`, testnet)
 
 **On the hosted Router** this rail runs as a **capped demonstration** (when `subetha_router_list_routes` shows the route
-`md-zusdc-eth-snapshot` with a `demonstration` field; if it is missing, it does not exist for you). You pay 0.012 zUSDC on Base
-Sepolia and reach the x402 provider. Two ways to buy: the usual MCP steps (quote, approval, `npm run sign`, purchase), or a standard
+`md-zusdc-eth-snapshot` with a `demonstration` field; if it is missing, it does not exist for you). You pay zUSDC on Base
+Sepolia and reach the x402 provider. Since 2026-11-26 the route carries `pricing`: **the amount is set per quote (or per 402)** from the
+settlement cost, at most the listed `source.amount` (0.02 zUSDC), and is fixed once quoted. New quotes stop with an error while the cost
+or the operator's ETH price cannot be used, or when the price would exceed the maximum. Two ways to buy: the usual MCP steps (quote, approval, `npm run sign`, purchase), or a standard
 x402 client on the public URL in `x402Url` (no Router token, no quote; see "Buying with a standard x402 client" below). The
 demonstration has hard limits (a purchase count, a total number of orders, and per-source limits): when they are reached new quotes
 and new 402 offers stop with `503` or `429` and do not come back by themselves; `demonstration.acceptingNewOffers: false` means it is

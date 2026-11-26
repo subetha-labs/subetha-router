@@ -22,7 +22,7 @@ import { createEvmFacilitator, defaultDeadlinesOf, listenFacilitator, TRANSFER_T
 import { createX402Payer } from "../../tools/x402-payer.js";
 import { acceptanceOptionsOf } from "../../tools/rails-acceptance-run.js";
 import { activationFromEnv, activationToEnv, RAILS_ACTIVATION_ENV, routerProcessCapabilitiesOf } from "../../tools/rails-entry.js";
-import { baseFacilitatorOf, HOSTED_EXACT, INBOUND, OUTBOUND_X402, RAILS_ACTIVATION as RAILS_ACTIVATION_PUBLIC, RAILS_ACTIVATION_BEFORE_BASE as RAILS_ACTIVATION, RAILS_NONE, UPSTREAM_X402, UPSTREAM_X402_BASE, type RailsActivation } from "../../tools/remote-mcp-config.js";
+import { baseFacilitatorOf, HOSTED_EXACT, INBOUND, OUTBOUND_X402, RAILS_ACTIVATION_BEFORE_FORMULA as RAILS_ACTIVATION_PUBLIC, RAILS_ACTIVATION_BEFORE_BASE as RAILS_ACTIVATION, RAILS_NONE, UPSTREAM_X402, UPSTREAM_X402_BASE, type RailsActivation } from "../../tools/remote-mcp-config.js";
 import { HostPlanError, hostPlanOf } from "../../tools/remote-mcp.js";
 
 const RECEIVER = "0xF88b0f34B0d76a9f55cec6D015eC1dE849De6405";

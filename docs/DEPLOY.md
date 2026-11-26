@@ -999,7 +999,13 @@ site に `log` の指定は無く access log は出ていないが、それは�
 - **記録（2026-11-26。オーナーの「マージを進めて良い」）**: main `50749f9`（PR #224）の image `b-50749f9`（手元 arm64 で build、layer の hash 一致）を `swap-image.sh` で入れ替え: 03:33:52Z 開始、03:34:04Z 終了、exit 0、journal の接頭辞は不変、egress ok。公開の一覧は入れ替えの前と byte 一致（保存）。inspect `--remote` は 15 件・未解決 0・不一致 0。
   公開の購入 1 件（`850d9719-17e4-4834-a59c-15292c791cf3`）: delivered。release の行に `probes`・`wallMs` が入った。rollback は `subetha-router-prev-20261126T033352Z`（`b-f3f32f0`）。§2g-2 のとおり `b-fa3fe93` より前には戻さない。
 
-**費用の式による価格（2026-11-24。`docs/exact-pricing-design.md`）— コードだけ。本番では無効（`RAILS_ACTIVATION.subethaExact.formulaPricing` なし = 受け取りは 12,000 の固定）**:
+**費用の式による価格（2026-11-24。`docs/exact-pricing-design.md`）— 本番で有効（2026-11-26 06:18Z から。`b-a61dc39`。下の記録）**:
+
+- **記録（2026-11-26。オーナーの「有効にして良いです」）**: branch `task/exact-formula-on` の head `a61dc39`（`formulaPricing: true`）の image `b-a61dc39`（手元 arm64 で build、layer の hash 一致）。
+  host の env に `SUBETHA_EXACT_ETH_PRICE=1700000000`・`SUBETHA_EXACT_ETH_PRICE_AT=2026-11-26T06:17:54Z` を足した（backup `/etc/subetha-router.env.bak-20261126T061754Z`。**期限は 7 日 = 2026-12-03T06:17:54Z**。それまでに env の 2 行を更新して同じ image で作り直す）。
+  `swap-image.sh`: exit 0、journal の接頭辞は不変、egress ok。rollback は `subetha-router-prev-20261126T061807Z`（`b-50749f9`）。一覧は前と比べて zUSDC の行（`source.amount` 20,000、`pricing: { kind, maxAmount: "20000", amountIs: "per_quote" }`）と `demonstrationNote`（式の価格の 1 文）だけが変わった（保存）。inspect `--remote` は 16 件・未解決 0・不一致 0。
+  公開の購入 1 件（`d8893619-9291-4c6d-afac-66b2ca62a11a`、MCP の quote → `npm run sign` → purchase）: quote の額 **16,606**（`docs/exact-pricing-l1-cap.md` §3 の計算と同じ）、delivered。
+  **戻す**: 式の quote が未解決の間は戻さない（下の注意）。固定の額に戻すのは `formulaPricing` を消した image。
 
 - **有効化**（オーナーの別の go。買い手に見える値上げになる）: `formulaPricing: true` の image を作り、settle 先の 2 行（上）がある host の env に `SUBETHA_EXACT_ETH_PRICE`（1 ETH あたりの base units。3,000 USD なら `3000000000`）と
   `SUBETHA_EXACT_ETH_PRICE_AT`（その値を決めた時刻、UTC の `YYYY-MM-DDTHH:MM:SSZ`）を足す。settle 先の token が無ければ子の Router は起動しない。値の表は `HOSTED_EXACT_PRICING`（`tools/remote-mcp-config.ts`）。
