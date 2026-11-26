@@ -44,7 +44,7 @@ async function makeAdapter(overrides: Partial<Parameters<typeof createSubethaExa
     limits: { maxRequestsTotal: 100, maxUnresolved: 3, requestsPerMinute: 60 },
     now: () => clockMs,
     note: (m) => notes.push(m),
-    timeouts: { createMs: 2_000, verifyMs: 2_000, settleMs: 2_000, statusMs: 2_000, releaseMs: 2_000, completeMs: 2_000, releaseRetryWaitMs: 30, completeRetryWaitMs: 30, releaseBudgetMs: 5_000, completeBudgetMs: 5_000, lookupBudgetMs: 5_000 },
+    timeouts: { createMs: 2_000, verifyMs: 2_000, settleMs: 2_000, statusMs: 2_000, releaseMs: 2_000, completeMs: 2_000, releaseRetryWaitMs: 30, releaseWaitCapMs: 60, completeRetryWaitMs: 30, releaseBudgetMs: 5_000, completeBudgetMs: 5_000, lookupBudgetMs: 5_000 },
     ...overrides,
   });
   await created.startup();
@@ -603,7 +603,7 @@ describe("release（表 C・D・D′）", () => {
     fixture.setMode("release", "incident");
     expect(await adapter!.release!(b.offer, { ...context, sourceTxRef: b.txRef })).toEqual({ outcome: "refused", reason: "source_release_refused" });
   });
-  test("425 は予算の内で再試行（not-ready-once → released、not-ready-always → 3 試行で unknown）。Retry-After が予算を超えれば試行せず unknown", async () => {
+  test("425 は予算の内で再試行（not-ready-once → released、not-ready-always → POST 8 回で unknown）。長い Retry-After は待ちの上限で切って続ける", async () => {
     await makeAdapter();
     const a = await settledOffer("a");
     fixture.setMode("release", "not-ready-once");
@@ -612,14 +612,16 @@ describe("release（表 C・D・D′）", () => {
     const b = await settledOffer("b");
     fixture.setMode("release", "not-ready-always");
     expect(await adapter!.release!(b.offer, { routeId: ROUTE_ID, deadlineMs: clockMs + 60_000, sourceTxRef: b.txRef })).toEqual({ outcome: "unknown", reason: "source_release_unknown" });
-    expect(fixture.calls.byOrder[b.offer.extra.challengeNonce]).toMatchObject({ release: 3 });
-    expect((await ledgerRows()).at(-1)).toMatchObject({ event: "release", patch: { outcome: "unknown", attempts: 3, httpStatus: 425 } });
+    expect(fixture.calls.byOrder[b.offer.extra.challengeNonce]).toMatchObject({ release: 8 });
+    expect(fixture.calls.byOrder[b.offer.extra.challengeNonce]?.["status"]).toBeUndefined();
+    expect((await ledgerRows()).at(-1)).toMatchObject({ event: "release", patch: { outcome: "unknown", attempts: 8, probes: 0, httpStatus: 425 } });
     const c = await settledOffer("c");
     fixture.setMode("release", "raw", { status: 425, headers: { "retry-after": "30" }, body: JSON.stringify({ error: "not-ready" }) });
-    expect((await adapter!.release!(c.offer, { routeId: ROUTE_ID, deadlineMs: clockMs + 60_000, sourceTxRef: c.txRef })).outcome).toBe("unknown");
-    expect(fixture.calls.byOrder[c.offer.extra.challengeNonce]).toMatchObject({ release: 1 });
+    // 1 回目だけ 425 + Retry-After 30（raw は 1 回）: 待ちは上限（試験では 60 ms）で切られ、2 回目で released。
+    expect((await adapter!.release!(c.offer, { routeId: ROUTE_ID, deadlineMs: clockMs + 60_000, sourceTxRef: c.txRef })).outcome).toBe("released");
+    expect(fixture.calls.byOrder[c.offer.extra.challengeNonce]).toMatchObject({ release: 2 });
   });
-  test("D: claimed-before → GET で復元して released（reconstructed）。corrupt の 7 欄と after-release:reorged → refused。GET の 5xx → unknown", async () => {
+  test("D: claimed-before → GET で復元して released（reconstructed）。corrupt の 7 欄と after-release:reorged → refused。GET の 5xx が続く → GET 6 回で unknown（POST は 1 回）", async () => {
     await makeAdapter();
     const context = (txRef: string) => ({ routeId: ROUTE_ID, deadlineMs: clockMs + 60_000, sourceTxRef: txRef });
     const a = await settledOffer("a");
@@ -638,7 +640,7 @@ describe("release（表 C・D・D′）", () => {
     fixture.setMode("release", "claimed-before");
     fixture.setMode("status", "error");
     expect(await adapter!.release!(y.offer, context(y.txRef))).toEqual({ outcome: "unknown", reason: "source_release_unknown" });
-    expect(fixture.calls.byOrder[y.offer.extra.challengeNonce]).toMatchObject({ status: 2 });
+    expect(fixture.calls.byOrder[y.offer.extra.challengeNonce]).toMatchObject({ status: 6, release: 1 });
   });
   test("D′: lose-response → GET → released。lose-response + corrupt → unknown（refused にしない）。error-once → GET が none → 再試行 → released。rate-limited-once（Retry-After 1）→ 待って released", async () => {
     await makeAdapter();
@@ -667,6 +669,234 @@ describe("release（表 C・D・D′）", () => {
     const a = await settledOffer("a");
     await adapter!.release!(a.offer, { routeId: ROUTE_ID, deadlineMs: clockMs + 60_000, sourceTxRef: a.txRef });
     expect(points).toEqual([`after_release_remote:${a.offer.extra.challengeNonce}`]);
+  });
+});
+
+describe("release の再試行（docs/exact-release-retry-design.md。既定の値、待ちで進む時計）", () => {
+  // 待つと clockMs が進む sleep: adapter の予算と fixture の停止の期限が同じ時計で進む（設計 §5）。
+  let waits: number[];
+  const advancing = async (ms: number): Promise<void> => {
+    waits.push(ms);
+    clockMs += ms;
+  };
+  const defaults = { releaseRetryWaitMs: 2_000, releaseWaitCapMs: 10_000, releaseBudgetMs: 60_000, releaseMaxPosts: 8, releaseMaxClaimedProbes: 6, releaseMs: 2_000, statusMs: 2_000 };
+  const makeReleaseAdapter = async (timeouts: Record<string, number> = {}) => {
+    await adapter?.close();
+    adapter = undefined;
+    waits = [];
+    await makeAdapter({ sleepForTest: advancing, timeouts: { createMs: 2_000, verifyMs: 2_000, settleMs: 2_000, completeMs: 2_000, completeRetryWaitMs: 30, completeBudgetMs: 5_000, lookupBudgetMs: 5_000, ...defaults, ...timeouts } });
+  };
+  const ready = async (name: string) => {
+    const x = await settledOffer(name);
+    waits = [];
+    return { ...x, order: x.offer.extra.challengeNonce, context: { routeId: ROUTE_ID, deadlineMs: clockMs + 115_000, sourceTxRef: x.txRef } };
+  };
+  const nowSecOf = (): number => Math.floor(clockMs / 1000);
+  const outage = (mode: string): void => {
+    fixture.setMode("release", mode);
+    fixture.setMode("status", mode);
+  };
+  const lastRelease = async () => (await ledgerRows()).filter((r) => r.event === "release").at(-1)!.patch;
+
+  test("AC-1: 502 が 20 秒続いた後に回復 → released。待ちは 2・4・8・10 秒、POST は 5 回目で通る。行に attempts・probes・wallMs", async () => {
+    await makeReleaseAdapter();
+    const x = await ready("ac1");
+    outage(`down-until:${nowSecOf() + 20}`);
+    const started = clockMs;
+    expect(await adapter!.release!(x.offer, x.context)).toEqual({ outcome: "released", deliveryKey: x.order, txRef: x.txRef, eventId: `${CHAIN_ID}:${x.txRef}:0` });
+    expect(waits).toEqual([2_000, 4_000, 8_000, 10_000]);
+    expect(fixture.calls.byOrder[x.order]).toMatchObject({ release: 5, status: 4 });
+    const row = await lastRelease();
+    expect(row).toMatchObject({ outcome: "released", attempts: 5, probes: 4, httpStatus: 200, wallMs: clockMs - started });
+    expect(row).not.toHaveProperty("lastFailure");
+    expect(row["wallMs"]).toBe(24_000);
+    expect(typeof row["elapsedMs"]).toBe("number");
+  });
+
+  test("502 が予算より長い: POST は 0・2・6・14・24・34・44・54 秒の 8 回、予算で unknown", async () => {
+    await makeReleaseAdapter();
+    const x = await ready("steady502");
+    outage(`down-until:${nowSecOf() + 1_000}`);
+    expect(await adapter!.release!(x.offer, x.context)).toEqual({ outcome: "unknown", reason: "source_release_unknown" });
+    expect(waits).toEqual([2_000, 4_000, 8_000, 10_000, 10_000, 10_000, 10_000]);
+    expect(fixture.calls.byOrder[x.order]).toMatchObject({ release: 8, status: 8 });
+    expect(await lastRelease()).toMatchObject({ outcome: "unknown", attempts: 8, probes: 8, httpStatus: 502, wallMs: 54_000 });
+  });
+
+  test("AC-2: 503 + Retry-After 30 が 25 秒続いた後に回復: 待ちは 10 秒で切られ、30 秒の POST で released。続くなら 6 回で unknown", async () => {
+    await makeReleaseAdapter();
+    const a = await ready("ac2");
+    outage(`busy-until:${nowSecOf() + 25}`);
+    expect((await adapter!.release!(a.offer, a.context)).outcome).toBe("released");
+    expect(waits).toEqual([10_000, 10_000, 10_000]);
+    expect(fixture.calls.byOrder[a.order]).toMatchObject({ release: 4, status: 3 });
+    const b = await ready("steady503");
+    outage(`busy-until:${nowSecOf() + 1_000}`);
+    expect((await adapter!.release!(b.offer, b.context)).outcome).toBe("unknown");
+    expect(waits).toEqual([10_000, 10_000, 10_000, 10_000, 10_000]);
+    expect(fixture.calls.byOrder[b.order]).toMatchObject({ release: 6, status: 6 });
+  });
+
+  test("AC-3: 承認期限で短い予算・残り 1 秒未満は試さない・回数が先に尽きる", async () => {
+    await makeReleaseAdapter();
+    const a = await ready("short");
+    outage(`down-until:${nowSecOf() + 1_000}`);
+    // 予算 = 期限 − 5 秒 = 15 秒: POST は 0・2・6・14 秒（14 + 10 + 1 > 15 なので 5 回目は無い）。
+    expect((await adapter!.release!(a.offer, { ...a.context, deadlineMs: clockMs + 20_000 })).outcome).toBe("unknown");
+    expect(waits).toEqual([2_000, 4_000, 8_000]);
+    expect(fixture.calls.byOrder[a.order]).toMatchObject({ release: 4 });
+    const b = await ready("no-time");
+    expect((await adapter!.release!(b.offer, { ...b.context, deadlineMs: clockMs + 5_500 })).outcome).toBe("unknown");
+    expect(fixture.calls.byOrder[b.order]?.["release"]).toBeUndefined();
+    expect(await lastRelease()).toMatchObject({ outcome: "unknown", attempts: 0, probes: 0 });
+    await makeReleaseAdapter({ releaseMaxPosts: 3 });
+    const c = await ready("count");
+    outage(`down-until:${nowSecOf() + 1_000}`);
+    expect((await adapter!.release!(c.offer, c.context)).outcome).toBe("unknown");
+    expect(fixture.calls.byOrder[c.order]).toMatchObject({ release: 3, status: 3 });
+    // 3 回目の POST の後は待たない（4 回目は許されない）。
+    expect(waits).toEqual([2_000, 4_000]);
+  });
+
+  test("AC-3: 遅い POST（答えない）は 1 回の期限で切れ、予算と回数の内で続く（本当の時計で短い値）", async () => {
+    clockMs = Date.now();
+    await makeAdapter({ now: () => Date.now(), timeouts: { releaseMs: 200, statusMs: 200, releaseRetryWaitMs: 20, releaseWaitCapMs: 40, releaseBudgetMs: 3_000, releaseMaxPosts: 3 } });
+    const x = await settledOffer("slow");
+    fixture.setMode("release", "timeout");
+    fixture.setMode("status", "timeout");
+    const startedAt = performance.now();
+    expect((await adapter!.release!(x.offer, { routeId: ROUTE_ID, deadlineMs: Date.now() + 60_000, sourceTxRef: x.txRef })).outcome).toBe("unknown");
+    expect(performance.now() - startedAt).toBeLessThan(3_000);
+    expect(fixture.calls.byOrder[x.offer.extra.challengeNonce]).toMatchObject({ release: 3, status: 3 });
+    expect(await lastRelease()).toMatchObject({ outcome: "unknown", attempts: 3, lastFailure: "transport" });
+  });
+
+  test("AC-3: 遅い試行で予算が先に尽きる（本当の時計）: 回数の上限の前に unknown、全体は予算を越えない", async () => {
+    clockMs = Date.now();
+    await makeAdapter({ now: () => Date.now(), timeouts: { releaseMs: 600, statusMs: 600, releaseRetryWaitMs: 20, releaseWaitCapMs: 40, releaseBudgetMs: 2_500, releaseMaxPosts: 8 } });
+    const x = await settledOffer("slow-budget");
+    fixture.setMode("release", "timeout");
+    fixture.setMode("status", "timeout");
+    const startedAt = performance.now();
+    expect((await adapter!.release!(x.offer, { routeId: ROUTE_ID, deadlineMs: Date.now() + 60_000, sourceTxRef: x.txRef })).outcome).toBe("unknown");
+    expect(performance.now() - startedAt).toBeLessThan(2_500 + 300);
+    const row = await lastRelease();
+    expect(Number(row["attempts"])).toBeLessThan(8);
+    expect(Number(row["attempts"])).toBeGreaterThanOrEqual(1);
+    expect(row).toMatchObject({ outcome: "unknown", lastFailure: "transport" });
+  });
+
+  test("AC-3: 1 回の期限は残りの予算で切られる（本当の時計。残り 1.5 秒 < POST の期限 3 秒 → 1.5 秒で切れて unknown）", async () => {
+    clockMs = Date.now();
+    await makeAdapter({ now: () => Date.now(), timeouts: { releaseMs: 3_000, statusMs: 3_000, releaseRetryWaitMs: 20, releaseWaitCapMs: 40, releaseBudgetMs: 1_500, releaseMaxPosts: 8 } });
+    const x = await settledOffer("clip");
+    fixture.setMode("release", "timeout");
+    const startedAt = performance.now();
+    expect((await adapter!.release!(x.offer, { routeId: ROUTE_ID, deadlineMs: Date.now() + 60_000, sourceTxRef: x.txRef })).outcome).toBe("unknown");
+    const elapsed = performance.now() - startedAt;
+    expect(elapsed).toBeGreaterThanOrEqual(1_300);
+    expect(elapsed).toBeLessThan(2_200);
+    expect(fixture.calls.byOrder[x.offer.extra.challengeNonce]).toMatchObject({ release: 1 });
+  });
+
+  test("AC-4: 1 回目の POST は通って応答を失い、GET も 502 → 待って 2 回目の POST → 409 already-claimed → GET で復元。settle は増えない", async () => {
+    await makeReleaseAdapter();
+    const x = await ready("ac4");
+    const settleBefore = { ...fixture.calls.byRoute };
+    fixture.setMode("release", "lose-response");
+    fixture.setMode("status", "error-n:1");
+    expect(await adapter!.release!(x.offer, x.context)).toMatchObject({ outcome: "released", deliveryKey: x.order, txRef: x.txRef });
+    expect(fixture.calls.byOrder[x.order]).toMatchObject({ release: 2, status: 2 });
+    expect(await lastRelease()).toMatchObject({ outcome: "released", reconstructed: true, attempts: 2, probes: 2 });
+    for (const route of ["settle", "bind", "submit", "reconcile"]) expect(fixture.calls.byRoute[route], route).toBe(settleBefore[route]);
+    // 待ちの数列は経路が変わっても続く（transport の 2 秒の後、claimed は 4 秒から。ここでは claimed の GET は 1 回で通る）。
+    expect(waits).toEqual([2_000]);
+  });
+
+  test("AC-5: claimed の経路の GET が 2 回 502 の後に回復 → released。POST は 1 回。待ちは数列の続き", async () => {
+    await makeReleaseAdapter();
+    const x = await ready("ac5");
+    fixture.setMode("release", "claimed-before");
+    fixture.setMode("status", "error-n:2");
+    expect((await adapter!.release!(x.offer, x.context)).outcome).toBe("released");
+    expect(fixture.calls.byOrder[x.order]).toMatchObject({ release: 1, status: 3 });
+    expect(waits).toEqual([2_000, 4_000]);
+  });
+
+  test("AC-6c: 経路の移り変わりでも数列は続く（transport の GET 502 → 2 秒 → POST 409 → claimed の GET 502 → 4 秒 → 復元）", async () => {
+    await makeReleaseAdapter();
+    const x = await ready("ac6c-path");
+    fixture.setMode("release", "lose-response");
+    fixture.setMode("status", "error-n:2");
+    expect((await adapter!.release!(x.offer, x.context)).outcome).toBe("released");
+    expect(waits).toEqual([2_000, 4_000]);
+    expect(fixture.calls.byOrder[x.order]).toMatchObject({ release: 2, status: 3 });
+  });
+
+  test("AC-6c: POST が timeout・GET が 503 + Retry-After 30 → 次の待ちは 10 秒。POST が 503 + Retry-After 30・GET が timeout → 数列の 2 秒。最後が例外でも最後の応答の状態は残る", async () => {
+    const busy = { status: 503, headers: { "retry-after": "30" }, body: JSON.stringify({ error: "unavailable" }) };
+    await makeReleaseAdapter({ releaseMs: 300, statusMs: 300, releaseMaxPosts: 2 });
+    const a = await ready("post-timeout");
+    fixture.setMode("release", "timeout");
+    fixture.setMode("status", "raw", busy);
+    expect((await adapter!.release!(a.offer, a.context)).outcome).toBe("unknown");
+    expect(waits[0]).toBe(10_000);
+    await makeReleaseAdapter({ releaseMs: 300, statusMs: 300 });
+    const b = await ready("get-timeout");
+    fixture.setMode("release", "raw", busy);
+    fixture.setMode("status", "timeout");
+    expect((await adapter!.release!(b.offer, b.context)).outcome).toBe("released");
+    expect(waits).toEqual([2_000]);
+    expect(fixture.calls.byOrder[b.order]).toMatchObject({ release: 2, status: 1 });
+    await makeReleaseAdapter({ releaseMs: 300, statusMs: 300, releaseMaxPosts: 1 });
+    const c = await ready("last-failure");
+    fixture.setMode("release", "raw", { status: 503, headers: {}, body: JSON.stringify({ error: "unavailable" }) });
+    fixture.setMode("status", "timeout");
+    expect((await adapter!.release!(c.offer, c.context)).outcome).toBe("unknown");
+    expect(await lastRelease()).toMatchObject({ outcome: "unknown", attempts: 1, probes: 1, httpStatus: 503, lastFailure: "transport" });
+  });
+
+  test("AC-6: 決まった答えでは続けない（transport の経路: 自分の値でない authorized・401・読めない本文、claimed の経路: 401）。上流へは何も送らない", async () => {
+    await makeReleaseAdapter();
+    const cases: [string, () => void, number][] = [
+      ["transport+authorized-mismatch", () => { fixture.setMode("release", "lose-response"); fixture.setMode("status", "corrupt:release.txRef"); }, 1],
+      ["transport+401", () => { fixture.setMode("release", "raw", { status: 502, headers: {}, body: "{}" }); fixture.setMode("status", "raw", { status: 401, headers: {}, body: JSON.stringify({ error: "unauthorized" }) }); }, 1],
+      ["transport+unreadable", () => { fixture.setMode("release", "raw", { status: 502, headers: {}, body: "{}" }); fixture.setMode("status", "unreadable"); }, 1],
+      ["claimed+401", () => { fixture.setMode("release", "claimed-before"); fixture.setMode("status", "raw", { status: 401, headers: {}, body: JSON.stringify({ error: "unauthorized" }) }); }, 1],
+      ["claimed+unreadable", () => { fixture.setMode("release", "claimed-before"); fixture.setMode("status", "unreadable"); }, 1],
+      ["transport+authorized-binding-mismatch", () => { fixture.setMode("release", "lose-response"); fixture.setMode("status", "corrupt:binding.requesterDigest"); }, 1],
+      ["transport+authorized-afterRelease", () => { fixture.setMode("release", "lose-response"); fixture.setMode("status", "after-release:reorged"); }, 1],
+    ];
+    for (const [name, arrange, statusCalls] of cases) {
+      const x = await ready(name);
+      arrange();
+      expect(await adapter!.release!(x.offer, x.context), name).toEqual({ outcome: "unknown", reason: "source_release_unknown" });
+      expect(fixture.calls.byOrder[x.order], name).toMatchObject({ release: 1, status: statusCalls });
+      expect(waits, name).toEqual([]);
+      fixture.setMode("release", "ok");
+      fixture.setMode("status", "ok");
+    }
+  });
+
+  test("AC-6b: transport の経路で読める none は、binding の不一致があっても今までどおり POST へ戻る。claimed の経路の none は refused", async () => {
+    await makeReleaseAdapter();
+    const a = await ready("none-transport");
+    fixture.setMode("release", "raw", { status: 502, headers: {}, body: "{}" });
+    fixture.setMode("status", "corrupt:binding.requesterDigest");
+    expect((await adapter!.release!(a.offer, a.context)).outcome).toBe("released");
+    expect(fixture.calls.byOrder[a.order]).toMatchObject({ release: 2, status: 1 });
+    fixture.setMode("status", "ok");
+    // none と afterRelease が同居: 今までどおり POST へ戻る（その POST が facilitator の incident で refused になる）。
+    const n = await ready("none-afterrelease");
+    fixture.setMode("release", "raw", { status: 502, headers: {}, body: "{}" });
+    fixture.setMode("status", "after-release:reorged");
+    expect(await adapter!.release!(n.offer, n.context)).toEqual({ outcome: "refused", reason: "source_release_refused" });
+    expect(fixture.calls.byOrder[n.order]).toMatchObject({ release: 2, status: 1 });
+    fixture.setMode("status", "ok");
+    const b = await ready("none-claimed");
+    fixture.setMode("release", "claimed-before");
+    fixture.setMode("status", "corrupt:release.state");
+    expect(await adapter!.release!(b.offer, b.context)).toEqual({ outcome: "refused", reason: "source_release_refused" });
   });
 });
 
