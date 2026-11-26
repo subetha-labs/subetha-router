@@ -28,6 +28,8 @@ export interface ExactPricingConfig {
   readonly withdrawBatch: number;
   readonly tipWei: string;
   readonly l1FloorWei: string;
+  /** L1 の項の上限（任意。無ければ上限なし。`docs/exact-pricing-l1-cap.md`）。`l1FloorWei` 以上。 */
+  readonly l1CapWei?: string;
   readonly maxSettle: string;
   readonly maxAmount: string;
   /** 1 日（UTC）に出せる件数。指紋に入れない。 */
@@ -50,7 +52,8 @@ const AMOUNTS: readonly (readonly [keyof ExactPricingConfig & string, bigint, bi
   ["maxSettle", 1n, 10_000n],
   ["maxAmount", 1n, 20_000n],
 ];
-const KEYS: ReadonlySet<string> = new Set<string>(["kind", ...INTEGERS.map(([key]) => key), ...AMOUNTS.map(([key]) => key)]);
+const L1_CAP_MAX = 1_000_000_000_000_000n;
+const KEYS: ReadonlySet<string> = new Set<string>(["kind", ...INTEGERS.map(([key]) => key), ...AMOUNTS.map(([key]) => key), "l1CapWei"]);
 
 /** 設定の検査。違えば欄の名前だけの文（値は出さない）。 */
 export function parseExactPricing(raw: unknown): { readonly ok: true; readonly pricing: ExactPricingConfig } | { readonly ok: false; readonly problem: string } {
@@ -65,6 +68,11 @@ export function parseExactPricing(raw: unknown): { readonly ok: true; readonly p
   for (const [key, min, max] of AMOUNTS) {
     const value = record[key];
     if (typeof value !== "string" || !DIGITS.test(value) || BigInt(value) < min || BigInt(value) > max) return { ok: false, problem: `${key} must be a decimal string from ${min.toString()} to ${max.toString()}` };
+  }
+  if ("l1CapWei" in record) {
+    const cap = record["l1CapWei"];
+    if (typeof cap !== "string" || !DIGITS.test(cap) || BigInt(cap) < 1n || BigInt(cap) > L1_CAP_MAX) return { ok: false, problem: `l1CapWei must be a decimal string from 1 to ${L1_CAP_MAX.toString()}` };
+    if (BigInt(cap) < BigInt(record["l1FloorWei"] as string)) return { ok: false, problem: "l1CapWei must not be below l1FloorWei" };
   }
   return { ok: true, pricing: { ...(record as unknown as ExactPricingConfig) } };
 }
@@ -140,7 +148,10 @@ export function computeExactPrice(pricing: ExactPricingConfig, upstreamAmount: s
   if (!UPSTREAM_AMOUNT.test(upstreamAmount) || costs.overheadPpm < 0n || costs.overheadPpm >= 1_000_000n) return { ok: false, reason: "pricing_unavailable" };
   const upstream = BigInt(upstreamAmount);
   const floor = BigInt(pricing.l1FloorWei);
-  const l1 = costs.l1FeeMax > floor ? costs.l1FeeMax : floor;
+  const raised = costs.l1FeeMax > floor ? costs.l1FeeMax : floor;
+  // 上限は L1 の項だけ（p90 は切らない。`docs/exact-pricing-l1-cap.md` L-2）。
+  const cap = pricing.l1CapWei === undefined ? undefined : BigInt(pricing.l1CapWei);
+  const l1 = cap !== undefined && raised > cap ? cap : raised;
   const single = SINGLE_SETTLE_GAS * (costs.baseFeePerGas + BigInt(pricing.tipWei)) + l1;
   const settleWei = costs.p90Wei > single ? costs.p90Wei : single;
   const settle = ceilDiv(settleWei * ethPrice * BigInt(pricing.factorBps) * 1_000_000n, 10n ** 18n * 10_000n * (1_000_000n - costs.overheadPpm));

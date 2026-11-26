@@ -443,6 +443,51 @@ test("AC-7（core）: 条件の設定・固定への切り替えの前の quote 
   expect(await purchase(core, q, "a")).toMatchObject({ status: "delivered" });
 });
 
+test("L1 の上限（docs/exact-pricing-l1-cap.md AC-3）: 上限の無い式の route の指紋と created の行は変更の前（`50749f9`）と byte 一致", async () => {
+  const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
+  // 要件 v3 §3.1 の値（上限なし）。
+  const legacy = { kind: "settle-cost-v1", factorBps: 15000, take: "500", withdrawCost: "18000", withdrawBatch: 8, tipWei: "1000000", l1FloorWei: "2000", maxSettle: "8000", maxAmount: "20000", maxPerDay: 20, ethPriceMaxAgeDays: 7 };
+  const cfg = parseRouterConfig({
+    approvalTtlMs: 60000,
+    routes: { z: { routeId: "z", canonicalPath: "/v1/routes/z/resource", rail: "x402", sourceRail: "subetha-exact", offerCap: { maxCommitted: 5 }, pricing: legacy, source: { amount: "20000", asset: ASSET, decimals: 6, network: NETWORK }, destination: { scheme: "exact", network: NETWORK, asset: USDC, payTo: "0x0000000000000000000000000000000000000a11" } } },
+    budget: { maxPurchases: 4, buckets: [{ network: NETWORK, asset: ASSET, maxTotal: "100000", maxPerPurchase: "20000" }, { network: NETWORK, asset: USDC, maxTotal: "100000", maxPerPurchase: "20000" }] },
+  });
+  clockMs = 1_800_000_000_000;
+  const core = await boot({
+    config: cfg, nextPaymentId: () => "pay-1",
+    inbound: { createOffer: async (r: CreateOfferRequest) => ({ scheme: "exact", network: r.network, asset: r.asset, amount: r.amount, payTo: "0x0000000000000000000000000000000000000001", maxTimeoutSeconds: 150, extra: { challengeNonce: `0x${"01".repeat(32)}`, expiresAt: 1_800_000_300, routeBinding: r.routeBinding, name: "zERC20 USD Coin", version: "1", fundsMoveOnCredential: false } }), preflight: () => ({ ok: true }), verify: async () => ({ isValid: true }), settle: async () => ({ outcome: "settled", txRef: "t", eventId: "e" }) } as unknown as InboundRail,
+    outbound: { readChallenge: async () => [{ scheme: "exact", network: NETWORK, asset: USDC, amount: "10000", payTo: "0x0000000000000000000000000000000000000a11" }], pay: async () => ({ outcome: "paid", body: {}, contentType: "application/json" }) } as unknown as OutboundRail,
+  });
+  const q = await core.quote({ principalId: "alice", requestId: "r", routeId: "z" });
+  if (!q.ok) throw new Error(q.code);
+  const row = (await rows())[0]!;
+  expect({ fp: fingerprintOf(authoritativeTermsOf(cfg.routes["z"]!)), row: sha(JSON.stringify(row.patch)) }).toEqual({
+    fp: "sha256:e7313b52b17c69c6e6f4486de6872cc5b549951cd80d0e6e539f75b9eb553082",
+    row: "6bedcc969c4cc32814779dfccda305dcac9e45cc9cc5781bec880f308c7cbd1b",
+  });
+});
+
+test("L1 の上限（docs/exact-pricing-l1-cap.md AC-3）: 上限を足す・変える・外すと、前の quote では払えない（settle しない）", async () => {
+  const withoutCap = (): RouterConfig => {
+    const c = config();
+    delete (c.routes[ROUTE_ID] as unknown as { pricing: Record<string, unknown> }).pricing["l1CapWei"];
+    return c;
+  };
+  expect(config().routes[ROUTE_ID]!.pricing?.l1CapWei).toBe("500000000000");
+  expect(withoutCap().routes[ROUTE_ID]!.pricing?.l1CapWei).toBeUndefined();
+  const pairs: readonly (readonly [RouterConfig, RouterConfig])[] = [[config(), config({ l1CapWei: "500000000001" })], [config(), withoutCap()], [withoutCap(), config()]];
+  for (const [i, [start, next]] of pairs.entries()) {
+    journalPath = path.join(workDir, `cap-${String(i)}.ndjson`);
+    let core = await boot({ config: start });
+    const q = await okQuote(core, "a");
+    await core.close();
+    core = await boot({ config: next });
+    expect(await purchase(core, q, "a"), String(i)).toMatchObject({ status: "awaiting_payment", code: "quote_changed" });
+    expect(rail.settleCalls).toBe(0);
+    await core.close();
+  }
+});
+
 test("R1: 固定の route は価格を求めず、記録に pricing が無い（created の欄は今までどおり）", async () => {
   const core = await boot({ config: config(null) });
   const q = await okQuote(core, "a");

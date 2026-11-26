@@ -244,15 +244,17 @@ export const HOSTED_EXACT = Object.freeze({
   /** 標準入口を買い手に示す基点（公開の origin）。 */
   publicOrigin: "https://router.subethalabs.com",
 });
-/** 式の価格の値（`docs/exact-pricing-requirements.md` §3.1。オーナーの確認 2026-11-24）。`RAILS_ACTIVATION.subethaExact.formulaPricing` が無ければ使わない。 */
+/** 式の価格の値（`docs/exact-pricing-requirements.md` §3.1。オーナーの確認 2026-11-24。2026-11-26 に `docs/exact-pricing-l1-cap.md` §3 で見直し）。`RAILS_ACTIVATION.subethaExact.formulaPricing` が無ければ使わない。 */
 export const HOSTED_EXACT_PRICING = Object.freeze({
   kind: "settle-cost-v1",
   factorBps: 15_000,
   take: "500",
-  withdrawCost: "18000",
+  withdrawCost: "19000",
   withdrawBatch: 8,
   tipWei: "1000000",
-  l1FloorWei: "2000",
+  l1FloorWei: "100000000000",
+  /** L1 の項の上限（`docs/exact-pricing-l1-cap.md`。オーナーの選択 2026-11-26）。越えた分は Router がかぶる。 */
+  l1CapWei: "500000000000",
   maxSettle: "8000",
   maxAmount: "20000",
   maxPerDay: 20,

@@ -35,11 +35,15 @@ markup    = amount − upstream
 share     = ceil( amount × 35 / 10,000 )          （0.35% 分。amount − share ≥ C）
 ```
 
+【2026-11-26】`l1` は設定の上限 `l1CapWei` で切る（`l1 = min(max(l1FeeMaxWei, l1Floor), l1CapWei)`。欄が無ければ上限なし。[exact-pricing-l1-cap.md](exact-pricing-l1-cap.md)）。
+
 - `p90`：`/costs?n=20`（20 tx）の `summary.allocatedP90Wei`（成功した件だけ）。`l1`：応答の item の `l1Fee` の最大と設定の下限の大きい方。`tip`：設定値。
 - `overheadRate` は「失敗などにかかった費用 ÷ 全費用」なので、成功 1 件あたりに直すには `1 − overheadRate` で割る。p90 に掛けた結果は見積もりで、平均の復元ではない。
 - 黒字の保証ではない。実費が見積もりを越えた分は、Router と SubEtha の運用者の持ち出しになる。
 
 ### 3.1 設定する値
+
+【2026-11-26】L1 の項に上限 `l1CapWei` を足し、hosted の `K` を 19,000、`l1Floor` を 10^11 に変えた（[exact-pricing-l1-cap.md](exact-pricing-l1-cap.md)）。下の表は v3 の時の値。
 
 | 値 | 意味・単位 | 範囲（外なら起動しない） | 案 |
 |---|---|---|---|
