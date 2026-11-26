@@ -72,7 +72,7 @@ test("AC-9・AC-10・AC-13: 一覧は上限と pricing、quote は式の額と�
   const quote = await quoteOf(h, "req-1");
   expect(quote.status).toBe(200);
   const body = quote.body as unknown as { source: { amount: string; offer: { amount: string } }; pricing: Record<string, string> };
-  expect(body.pricing).toMatchObject({ kind: "settle-cost-v1", withdraw: "2250", take: "500", total: body.source.amount });
+  expect(body.pricing).toMatchObject({ kind: "settle-cost-v1", withdraw: "2375", take: "500", total: body.source.amount });
   expect(Object.keys(body.pricing).sort()).toEqual(["costsAtMs", "kind", "rounding", "settle", "share", "take", "total", "upstream", "withdraw"]);
   expect([body.source.offer.amount, Number(body.source.amount) > Number(body.pricing["upstream"])]).toEqual([body.source.amount, true]);
   await h.restartRouter();

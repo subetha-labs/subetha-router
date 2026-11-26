@@ -26,7 +26,9 @@ import { createSubethaExactFacilitator, defaultCosts, type FacilitatorFixture } 
 const ASSET = "0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f";
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const NETWORK = "eip155:84532";
-const PRICING = { ...HOSTED_EXACT_PRICING } as unknown as ExactPricingConfig;
+/** 要件 v3 §3.1 の値（上限なし）。§3 の例と範囲の試験はこれで行う。hosted の今の値は `HOSTED`。 */
+const PRICING: ExactPricingConfig = { kind: "settle-cost-v1", factorBps: 15_000, take: "500", withdrawCost: "18000", withdrawBatch: 8, tipWei: "1000000", l1FloorWei: "2000", maxSettle: "8000", maxAmount: "20000", maxPerDay: 20, ethPriceMaxAgeDays: 7 };
+const HOSTED = { ...HOSTED_EXACT_PRICING } as unknown as ExactPricingConfig;
 const COSTS: SettleCosts = { p90Wei: 939_798_001_041n, baseFeePerGas: 5_000_000n, l1FeeMax: 1_041n, overheadPpm: 0n, readAtMs: 1_800_000_000_000 };
 const ETH = 3_000_000_000n;
 const priceOf = (pricing = PRICING, upstream = "10000", costs = COSTS, eth = ETH) => computeExactPrice(pricing, upstream, costs, eth);
@@ -99,6 +101,58 @@ describe("AC-8: 記録の検査", () => {
     expect(pricingMatches({ ...record, issuedAtMs: bound.approvalDeadlineMs - PRICING_ISSUE_WINDOW_MS }, bound)).toBe(true);
     for (const patch of [{ upstreamOfferAmount: "10001" }, { quoted: "10001" }, { sourceAmount: "1" }, { offerAmount: "1" }, { offerAmount: undefined }]) expect(pricingMatches(record, { ...bound, ...patch }), JSON.stringify(patch)).toBe(false);
     for (const bad of [null, [], "x", undefined]) expect(pricingMatches(bad, bound)).toBe(false);
+  });
+});
+
+describe("L1 の上限（docs/exact-pricing-l1-cap.md）", () => {
+  // 2026-11-26 の本番の `/costs`（block 63,711,333）。overheadRate 0 → overheadPpm 1。
+  const LIVE: SettleCosts = { p90Wei: 982_828_124_044n, baseFeePerGas: 5_000_000n, l1FeeMax: 3_495_157_411_208n, overheadPpm: 1n, readAtMs: 1_800_000_000_000 };
+  const ETH_1700 = 1_700_000_000n;
+  const CAP = "500000000000";
+  const noCap = (pricing: ExactPricingConfig): ExactPricingConfig => {
+    const { l1CapWei: _cap, ...rest } = pricing;
+    return rest;
+  };
+  test("AC-1: §1 の費用と ETH 1,700 USD で 16,606。上限を外すと 24,270、要件 v3 の値なら 24,145 で断る。ふだんの L1 なら下限が効いて 15,582", () => {
+    expect(HOSTED.l1CapWei).toBe(CAP);
+    expect(okOf(HOSTED, "10000", LIVE, ETH_1700)).toMatchObject({ settle: "3672", withdraw: "2375", take: "500", total: "16606" });
+    expect(priceOf(noCap(HOSTED), "10000", LIVE, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
+    expect(computeExactPrice({ ...noCap(HOSTED), maxSettle: "10000", maxAmount: "20000" }, "10000", LIVE, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
+    expect(priceOf(PRICING, "10000", LIVE, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
+    expect(okOf(HOSTED, "10000", { ...LIVE, l1FeeMax: 43_030_124_044n }, ETH_1700)).toMatchObject({ settle: "2652", total: "15582" });
+  });
+  test("AC-1: 上限より大きい・等しい・小さい L1、下限、欄なし", () => {
+    const capped = { ...PRICING, l1CapWei: CAP };
+    const at = (l1FeeMax: bigint, pricing: ExactPricingConfig = capped) => okOf(pricing, "10000", { ...LIVE, l1FeeMax }, ETH_1700).settle;
+    expect(at(10n ** 15n)).toBe(at(500_000_000_000n));
+    expect(at(500_000_000_001n)).toBe(at(500_000_000_000n));
+    expect(at(500_000_000_000n)).toBe(at(500_000_000_000n, PRICING));
+    expect(at(499_999_999_999n)).toBe(at(499_999_999_999n, PRICING));
+    expect(Number(at(499_000_000_000n))).toBeLessThan(Number(at(500_000_000_000n)));
+    // 下限が上限と同じなら L1 の項は常にその値。
+    const pinned = { ...PRICING, l1FloorWei: CAP, l1CapWei: CAP };
+    expect(at(0n, pinned)).toBe(at(10n ** 15n, pinned));
+    expect(at(0n, pinned)).toBe(at(500_000_000_000n, PRICING));
+    // 欄が無ければ今の式（上限なし）。
+    expect(Number(at(10n ** 12n, PRICING))).toBeGreaterThan(Number(at(10n ** 12n)));
+  });
+  test("AC-3b: p90 は切らない。p90 が上限で切った 1 件より大きければ p90、maxSettle を越えれば断る", () => {
+    // 上限で切った 1 件 = 156,633 × 6,000,000 + 5×10^11 ≈ 1.44×10^12（settle 3,672）。
+    expect(okOf(HOSTED, "10000", { ...LIVE, p90Wei: 2_000_000_000_000n }, ETH_1700).settle).toBe("5101");
+    expect(priceOf(HOSTED, "10000", { ...LIVE, p90Wei: 4_000_000_000_000n }, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
+  });
+  test("AC-2: l1CapWei の範囲と下限との関係。文に値が出ない", () => {
+    for (const good of ["2000", "500000000000", "1000000000000000"]) expect(parseExactPricing({ ...PRICING, l1CapWei: good }).ok, good).toBe(true);
+    expect(parseExactPricing({ ...PRICING, l1FloorWei: "0", l1CapWei: "1" }).ok).toBe(true);
+    expect(parseExactPricing(HOSTED).ok).toBe(true);
+    expect(parseExactPricing(PRICING).ok).toBe(true);
+    for (const bad of ["0", "1000000000000001", 500_000_000_000, "01", "-1", "", null, undefined]) {
+      const r = parseExactPricing({ ...PRICING, l1FloorWei: "0", l1CapWei: bad });
+      expect(r, String(bad)).toEqual({ ok: false, problem: "l1CapWei must be a decimal string from 1 to 1000000000000000" });
+    }
+    expect(parseExactPricing({ ...PRICING, l1CapWei: "1999" })).toEqual({ ok: false, problem: "l1CapWei must not be below l1FloorWei" });
+    expect(parseExactPricing({ ...HOSTED, l1CapWei: "99999999999" })).toEqual({ ok: false, problem: "l1CapWei must not be below l1FloorWei" });
+    expect(parseExactPricing({ ...HOSTED, l1FloorWei: "500000000001" })).toEqual({ ok: false, problem: "l1CapWei must not be below l1FloorWei" });
   });
 });
 
@@ -284,6 +338,14 @@ describe("AC-7・AC-12: route の設定と指紋", () => {
     const base = terms(parse(route()));
     for (const patch of [{ factorBps: 15_001 }, { take: "501" }, { withdrawCost: "18001" }, { withdrawBatch: 9 }, { tipWei: "1000001" }, { l1FloorWei: "2001" }, { maxSettle: "8001" }]) expect(terms(parse(route({ pricing: { ...PRICING, ...patch } }))), JSON.stringify(patch)).not.toBe(base);
     for (const patch of [{ maxPerDay: 21 }, { ethPriceMaxAgeDays: 8 }]) expect(terms(parse(route({ pricing: { ...PRICING, ...patch } })))).toBe(base);
+    // L1 の上限（docs/exact-pricing-l1-cap.md AC-3）: 足す・変える・外すと変わる。欄の無い式の route は変更前の main で取った値と同じ。
+    const withCap = terms(parse(route({ pricing: { ...PRICING, l1CapWei: "500000000000" } })));
+    expect(withCap).not.toBe(base);
+    expect(terms(parse(route({ pricing: { ...PRICING, l1CapWei: "500000000001" } })))).not.toBe(withCap);
+    expect(base).toBe(
+      '{"destination":{"scheme":"exact","network":"eip155:84532","asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e","payTo":"0x0000000000000000000000000000000000000a11"},"source":{"amount":"20000","asset":"0x32c83780bc6Ac14e8A2938d4Fd192d3721ef3D9f","network":"eip155:84532"},"rail":"x402","sourceRail":"subetha-exact","pricing":{"kind":"settle-cost-v1","factorBps":15000,"take":"500","withdrawCost":"18000","withdrawBatch":8,"tipWei":"1000000","l1FloorWei":"2000","maxSettle":"8000","maxAmount":"20000"}}',
+    );
+    expect(() => parse(route({ pricing: { ...PRICING, l1CapWei: "1999" } }))).toThrow(/l1CapWei must not be below l1FloorWei/);
     expect(terms(parse(route({ offerCap: { maxCommitted: 6 } })))).toBe(base);
     const fixed = parse(route({ pricing: undefined, source: { amount: "12000", asset: ASSET, decimals: 6, network: NETWORK } }));
     expect(Object.keys(authoritativeTermsOf(fixed) as object)).toEqual(["destination", "source", "rail", "sourceRail"]);

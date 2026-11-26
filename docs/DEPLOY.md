@@ -995,10 +995,16 @@ site に `log` の指定は無く access log は出ていないが、それは�
     確認の購入（`a6adafb2-ff52-4c1c-a3e8-02a41fb29883`、16:05Z）：**受信は全て成立**（bind → submit 200 → `reconcile: accepted` → release → complete。tx `0xff3095bd64f3925360a512d06849918b22a3a20cfeda0750a7d40f4b4d7021da`、gasUsed 156,633）が、**`paid_data_unavailable`**。
     Provider A が上流への x402 の支払いを 402・`invalid_exact_evm_transaction_failed` で断った（2026-11-24 の 1 件目と同じ理由）。16:16:50Z の head までに Provider A の受取先への USDC の移動は 0 件。再試行・再署名はしていない。本番の成立した受信 9 件のうち 2 件がこの形で終わった。原因は分かっていない。
 
+**release の再試行（2026-11-26。`docs/exact-release-retry-design.md`。本番は 03:34Z に `b-50749f9`）**:
+- **記録（2026-11-26。オーナーの「マージを進めて良い」）**: main `50749f9`（PR #224）の image `b-50749f9`（手元 arm64 で build、layer の hash 一致）を `swap-image.sh` で入れ替え: 03:33:52Z 開始、03:34:04Z 終了、exit 0、journal の接頭辞は不変、egress ok。公開の一覧は入れ替えの前と byte 一致（保存）。inspect `--remote` は 15 件・未解決 0・不一致 0。
+  公開の購入 1 件（`850d9719-17e4-4834-a59c-15292c791cf3`）: delivered。release の行に `probes`・`wallMs` が入った。rollback は `subetha-router-prev-20261126T033352Z`（`b-f3f32f0`）。§2g-2 のとおり `b-fa3fe93` より前には戻さない。
+
 **費用の式による価格（2026-11-24。`docs/exact-pricing-design.md`）— コードだけ。本番では無効（`RAILS_ACTIVATION.subethaExact.formulaPricing` なし = 受け取りは 12,000 の固定）**:
 
 - **有効化**（オーナーの別の go。買い手に見える値上げになる）: `formulaPricing: true` の image を作り、settle 先の 2 行（上）がある host の env に `SUBETHA_EXACT_ETH_PRICE`（1 ETH あたりの base units。3,000 USD なら `3000000000`）と
   `SUBETHA_EXACT_ETH_PRICE_AT`（その値を決めた時刻、UTC の `YYYY-MM-DDTHH:MM:SSZ`）を足す。settle 先の token が無ければ子の Router は起動しない。値の表は `HOSTED_EXACT_PRICING`（`tools/remote-mcp-config.ts`）。
+- **L1 の上限（2026-11-26。`docs/exact-pricing-l1-cap.md`）**: `/costs` の `l1FeeMaxWei` は 1 件の外れ値（3.5×10¹² wei）に引っぱられ、上限なしでは全ての offer が `pricing_over_limit` になる（ETH 1,700 USD で、前の値なら 24,145、新しい値から上限だけ外すと 24,270）。
+  値は `withdrawCost` 19,000、`l1FloorWei` 1×10¹¹、`l1CapWei` 5×10¹¹ に変えた（同じ条件で 16,606）。上限を越えた L1 の分は Router がかぶる。有効化はこれとは別の owner の go で、その時の記録はここに足す。
 - **ETH の価格は 7 日で切れる**。切れる・無い・形が違う・5 分を越えて未来なら、Router は動き続け、zUSDC の新しい offer だけを 503 `pricing_unavailable` で断る（ほかの route は売れる）。更新は env の 2 行を変えて同じ image で作り直す（env は起動時に読む）。
 - **断られる理由**: `pricing_unavailable`（費用を読めない、成功した記録が無い、ETH の価格）、`pricing_over_limit`（settle の見積もりが 8,000、または受け取り額が 20,000 を越える）、`offer_daily_cap_reached`（1 日 20 件、UTC）、`offer_cap_reached`（総数）。どれも注文を作る前で、発行済みの offer は払える。
 - **見積もりであって黒字の保証ではない**。件数の上限 × `maxSettle` も損失の保証ではない。実費との照合は自動では行わない（`/costs` に注文の識別が無い）。
