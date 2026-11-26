@@ -57,11 +57,11 @@ function loadPlan(plan: { config: Record<string, unknown>; childEnv: Record<stri
 const listed = (activation: RailsActivation, e: Record<string, string | undefined>) => JSON.stringify(routeListBody(loadPlan(planOf(activation, e)).router, "https://router.test"));
 
 describe("AC-B1: 無効なら今と完全に一致", () => {
-  test("G-B4 の前の公開の定数（RAILS_ACTIVATION_BEFORE_BASE）に欄は無い（baseFacilitatorOf は両方 false）。今の公開の定数はそれに provider だけ true を足した形（2026-11-26 の G-B4）", () => {
+  test("G-B4 の前の公開の定数（RAILS_ACTIVATION_BEFORE_BASE）に欄は無い（baseFacilitatorOf は両方 false）。今の公開の定数はそれに provider（G-B4）・inbound（G-B5）とも true を足した形（2026-11-26）", () => {
     expect(RAILS_ACTIVATION).not.toHaveProperty("baseFacilitator");
     expect(baseFacilitatorOf(RAILS_ACTIVATION)).toEqual({ provider: false, inbound: false });
-    expect(RAILS_ACTIVATION_PUBLIC).toEqual(withBase(true, false));
-    expect(JSON.stringify(planOf(RAILS_ACTIVATION_PUBLIC, envBase))).toBe(JSON.stringify(planOf(withBase(true, false), envBase)));
+    expect(RAILS_ACTIVATION_PUBLIC).toEqual(withBase(true, true));
+    expect(JSON.stringify(planOf(RAILS_ACTIVATION_PUBLIC, envBase))).toBe(JSON.stringify(planOf(withBase(true, true), envBase)));
   });
 
   test.each([["公開の定数", RAILS_ACTIVATION], ["全部無効", RAILS_NONE]] as const)("%s: 欄なしと両方 false で、設定・子の env・facilitator の計画・一覧が文字列で一致（Base の env があっても読まない）", (_n, activation) => {
