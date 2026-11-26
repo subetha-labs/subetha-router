@@ -256,8 +256,9 @@ describe("受け入れ用の起動（tools/rails-acceptance-run.ts）", () => {
     // 公開の定数（G-4″ の後の形）: arc・solana・solanaMpp すべて両方 true。組 O-5・O-6（pairs）は G-4⁗ で両方 true。
     // EVM testnet 3 つ（evm）は H-3〜G-3 の間は EVM_NONE、G-4（hosted 設計 §8.2、2026-10-14）で rh・arbsep・hyperevm とも両方 true。
     // `subetha-exact` の上限付きの実証（subethaExact）は G-4（`docs/hosted-exact-enable-design.md` §8、2026-11-21）で `true`。
+    // Base Sepolia の自前の facilitator（baseFacilitator）は G-B4（`docs/DEPLOY.md` §2g-2、2026-11-26）で provider が `true`、G-B5（同日）で inbound も `true`。
     const source = readFileSync("tools/remote-mcp-config.ts", "utf8");
-    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?pairs: Object\.freeze\(\{ arcToSol: true, solToArc: true \}\),[\s\S]*?evm: Object\.freeze\(\{\s*rh: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*arbsep: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*hyperevm: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*\}\),[\s\S]*?subethaExact: Object\.freeze\(\{ inbound: true \}\),\s*\}\)/);
+    expect(source).toMatch(/RAILS_ACTIVATION: RailsActivation = Object\.freeze\(\{\s*arc: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*solana: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?solanaMpp: Object\.freeze\(\{ inbound: true, outbound: true \}\),[\s\S]*?pairs: Object\.freeze\(\{ arcToSol: true, solToArc: true \}\),[\s\S]*?evm: Object\.freeze\(\{\s*rh: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*arbsep: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*hyperevm: Object\.freeze\(\{ inbound: true, outbound: true \}\),\s*\}\),[\s\S]*?subethaExact: Object\.freeze\(\{ inbound: true \}\),[\s\S]*?baseFacilitator: Object\.freeze\(\{ provider: true, inbound: true \}\),\s*\}\)/);
   }, 40_000);
 });
 

@@ -17,7 +17,8 @@ import {
   HOSTED_EXACT_TOKEN_FILE_ENV,
   hostedExactOf,
   OUTBOUND_X402,
-  RAILS_ACTIVATION,
+  // 公開の定数から `baseFacilitator`（2026-11-26 の G-B4）を除いた形を、この試験の「公開の定数」として使う（Base の差は base-facilitator-config.test.ts）。
+  RAILS_ACTIVATION_BEFORE_BASE as RAILS_ACTIVATION,
   RAILS_ACTIVATION_BEFORE_EXACT,
   RAILS_NONE,
   routerConfigOf,

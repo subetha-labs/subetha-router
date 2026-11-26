@@ -377,13 +377,28 @@ export const RAILS_ACTIVATION: RailsActivation = Object.freeze({
    * 新しい offer だけ止めるのは `HOSTED_EXACT.maxCommitted` を 0 に（route と facilitator の設定は残る）。完全に戻すのはこの欄を消す（§2i の rollback の規則を先に読む）。
    */
   subethaExact: Object.freeze({ inbound: true }),
+  /**
+   * Base Sepolia の決済を自前の facilitator に（`docs/base-sepolia-facilitator-design.md`、`docs/DEPLOY.md` §2g-2）。
+   * `provider`: **2026-11-26 に `true`**（G-B4。owner の決定「おすすめで」。G-B3 で無効の image `b-fa3fe93` を本番に入れ替え済み、G-B2 で入金と env の上限）。
+   * `inbound`: **同日に `true`**（G-B5。G-B4 で Provider A への支払い 1 件が E-FAC-H の送信で delivered）。Base Sepolia USDC の受信の verify・settle が自前の facilitator になる。
+   * 静的 route の Provider A の上流が `UPSTREAM_X402_BASE` になる。戻すのは `inbound: false` にする・この欄を消す（G-B3 以降の image に限る）。
+   */
+  baseFacilitator: Object.freeze({ provider: true, inbound: true }),
 });
 /**
  * `subethaExact` を足す前の公開の有効化（2026-10-14 の G-4 までの形）。既存の試験と golden はこの形を基準にして「実証の追加の前と同じ」を見続け、
  * 実証の追加が**足すだけ**であることは `tests/unit/hosted-exact-config.test.ts` が、今の公開の定数とこの形の差で確かめる。
  */
 export const RAILS_ACTIVATION_BEFORE_EXACT: RailsActivation = (() => {
-  const { subethaExact: _demonstration, ...before } = RAILS_ACTIVATION;
+  const { subethaExact: _demonstration, baseFacilitator: _base, ...before } = RAILS_ACTIVATION;
+  return Object.freeze(before);
+})();
+/**
+ * `baseFacilitator` を足す前の公開の有効化（2026-11-21 の G-4 から 2026-11-26 の G-B3 までの形）。既存の試験と golden（public-exact・pre-base-facilitator）はこの形を基準にし、
+ * Base の切り替えが**その差だけ**であることは `tests/unit/base-facilitator-config.test.ts` が、今の公開の定数とこの形の差で確かめる。
+ */
+export const RAILS_ACTIVATION_BEFORE_BASE: RailsActivation = (() => {
+  const { baseFacilitator: _base, ...before } = RAILS_ACTIVATION;
   return Object.freeze(before);
 })();
 /** すべて無効（設定生成の既定の引数。有効化は呼び出し側が明示する）。 */
