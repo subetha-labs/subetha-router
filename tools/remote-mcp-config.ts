@@ -251,7 +251,8 @@ export const HOSTED_EXACT_PRICING = Object.freeze({
   take: "500",
   withdrawCost: "19000",
   withdrawBatch: 8,
-  tipWei: "1000000",
+  /** settle の facilitator の tip（0.0001 gwei。2026-11-27 に facilitator の設定と合わせた。`docs/DEPLOY.md` の式の価格の節）。 */
+  tipWei: "100000",
   l1FloorWei: "100000000000",
   /** L1 の項の上限（`docs/exact-pricing-l1-cap.md`。オーナーの選択 2026-11-26）。越えた分は Router がかぶる。 */
   l1CapWei: "500000000000",
