@@ -113,13 +113,19 @@ describe("L1 の上限（docs/exact-pricing-l1-cap.md）", () => {
     const { l1CapWei: _cap, ...rest } = pricing;
     return rest;
   };
-  test("AC-1: §1 の費用と ETH 1,700 USD で 16,606。上限を外すと 24,270、要件 v3 の値なら 24,145 で断る。ふだんの L1 なら下限が効いて 15,582", () => {
+  test("AC-1: §1 の費用と ETH 1,700 USD で 16,245（tip 0.001 gwei の時は 16,606）。上限を外すと断る、要件 v3 の値でも断る。ふだんの L1 なら p90 が効く", () => {
     expect(HOSTED.l1CapWei).toBe(CAP);
-    expect(okOf(HOSTED, "10000", LIVE, ETH_1700)).toMatchObject({ settle: "3672", withdraw: "2375", take: "500", total: "16606" });
+    // tip 0.0001 gwei（2026-11-27）: 156,633 × 5,100,000 + 上限 5×10¹¹ = 1,298,828,300,000 wei → settle 3,313。
+    expect(HOSTED.tipWei).toBe("100000");
+    expect(okOf(HOSTED, "10000", LIVE, ETH_1700)).toMatchObject({ settle: "3313", withdraw: "2375", take: "500", total: "16245" });
+    // 2026-11-26 に有効にした時の値（tip 0.001 gwei）は変わらない。
+    expect(okOf({ ...HOSTED, tipWei: "1000000" }, "10000", LIVE, ETH_1700)).toMatchObject({ settle: "3672", withdraw: "2375", take: "500", total: "16606" });
     expect(priceOf(noCap(HOSTED), "10000", LIVE, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
     expect(computeExactPrice({ ...noCap(HOSTED), maxSettle: "10000", maxAmount: "20000" }, "10000", LIVE, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
     expect(priceOf(PRICING, "10000", LIVE, ETH_1700)).toEqual({ ok: false, reason: "pricing_over_limit" });
-    expect(okOf(HOSTED, "10000", { ...LIVE, l1FeeMax: 43_030_124_044n }, ETH_1700)).toMatchObject({ settle: "2652", total: "15582" });
+    // ふだんの L1（4.3×10¹⁰）: 1 件の見積もり（下限 1×10¹¹ 込みで 898,828,300,000）より p90（982,828,124,044）が大きいので p90 を使う。tip 0.001 gwei の時は 1 件の見積もりが勝って 15,582。
+    expect(okOf(HOSTED, "10000", { ...LIVE, l1FeeMax: 43_030_124_044n }, ETH_1700)).toMatchObject({ settle: "2507", total: "15437" });
+    expect(okOf({ ...HOSTED, tipWei: "1000000" }, "10000", { ...LIVE, l1FeeMax: 43_030_124_044n }, ETH_1700)).toMatchObject({ settle: "2652", total: "15582" });
   });
   test("AC-1: 上限より大きい・等しい・小さい L1、下限、欄なし", () => {
     const capped = { ...PRICING, l1CapWei: CAP };
