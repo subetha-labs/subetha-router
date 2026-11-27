@@ -1029,6 +1029,10 @@ site に `log` の指定は無く access log は出ていないが、それは�
   - 相手の変更で Router に関わる点: 呼び出し元を確かめられない時の `/settle` の答えが 401 から 503 `{"error":"auth_unavailable"}`（`Retry-After: 5`）になった。Router は 1 つの注文に 1 回しか送らないので再送しない。結果を決めるのは reconcile だけ: 5xx の後は、読みが `pending` か答えなしの間、残りの予算の中で reconcile を繰り返す（それ以外の読みはそこで止まる）。401 の後は reconcile を 1 回だけ。
     どちらも、reconcile が成立（`accepted`、手元の `authorization` と一致）を返せば `settled`、そうでなければ `unknown`。送った後に `rejected` にはならない。
   - 相手の測定（Base Sepolia、1 件ずつの settle）: tip 1,000,000 の 10 件と tip 100,000 の 9 件のどちらも、送った直後のブロックに入った（差は −0.5〜+0.4 秒で、測定の誤差約 2 秒の中）。手数料を上げた出し直しは 0 件。L2 の手数料は 939,798,000,000 wei から約 798,800,000,000 wei（15.0% 減）。testnet のブロックは 5% も埋まっていないので、混んだ時や mainnet の証拠ではない。
+- **記録（2026-11-27 04:48Z。`b-0f4c617`。オーナーの「マージと本番への反映を進めて良いです」）**: main `0f4c617`（PR #228。`tipWei` 100,000）の image（手元 arm64 で build、layer の一覧の hash が手元と host で一致）に入れ替えた。
+  直前の inspect `--remote` は 18 件・未解決 0・不一致 0（`tipWei` は指紋に入るので、未解決が 0 の時に入れ替える）。`swap-image.sh`: 04:48:16Z〜04:48:27Z、exit 0。rollback は `subetha-router-prev-20261127T044816Z`（`b-2a3e138`）。入れ替えの後の inspect も未解決 0。
+  公開の購入 1 件（`08095e5f-6755-4d35-a6f4-729ca093a8d3`）: quote の額 19,404、delivered。この時の `/costs` は p90 2,533,657,109,097 wei で、1 件の見積もりより大きいので p90 が額を決めた（`tipWei` はこの額に効いていない）。
+  前日（2026-11-26）の午後から zUSDC の offer は `pricing_over_limit` で断られていた（p90 4,434,955,411,208 wei、`l1FeeMaxWei` 6,193,296,116,385。settle の見積もりが `maxSettle` を越えた）。相手の測定の 9 件（L1 は約 2×10¹¹ wei）が入って p90 が下がり、売れる状態に戻った。
 - **ETH の価格は 7 日で切れる**。切れる・無い・形が違う・5 分を越えて未来なら、Router は動き続け、zUSDC の新しい offer だけを 503 `pricing_unavailable` で断る（ほかの route は売れる）。更新は env の 2 行を変えて同じ image で作り直す（env は起動時に読む）。
 - **断られる理由**: `pricing_unavailable`（費用を読めない、成功した記録が無い、ETH の価格）、`pricing_over_limit`（settle の見積もりが 8,000、または受け取り額が 20,000 を越える）、`offer_daily_cap_reached`（1 日 20 件、UTC）、`offer_cap_reached`（総数）。どれも注文を作る前で、発行済みの offer は払える。
 - **見積もりであって黒字の保証ではない**。件数の上限 × `maxSettle` も損失の保証ではない。実費との照合は自動では行わない（`/costs` に注文の識別が無い）。
